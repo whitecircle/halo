@@ -35,8 +35,8 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
+from src.distributed.mesh import model_tp_mesh
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.state_dict import get_tp_mesh
 from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded, world_spread
 from tests.common.ep_reference import (
@@ -125,7 +125,7 @@ def run(ctx):
     # Attention must actually be TP-sharded — otherwise this is an EP test wearing an EP+TP label
     # and every check below would still pass. A sharded projection is a DTensor whose local shape
     # is a slice of its global one; a silently un-sharded TP leaves both equal.
-    tp_mesh = get_tp_mesh(model)
+    tp_mesh = model_tp_mesh(model)
     sharded_attn = [
         name
         for name, param in model.named_parameters()

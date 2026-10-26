@@ -2,7 +2,7 @@
 """Context Parallelism must reach its architecture's own FlashAttention kernel.
 
 CP does not call attention through the model's module, so ``_attn_implementation`` decides nothing
-here: :func:`get_flash_attn_func` is the whole decision. Both training images ship ``flash_attn``
+here: :func:`_flash_attn_func` is the whole decision. Both training images ship ``flash_attn``
 (FA2), so a probe order that tries FA2 before the architecture-specific kernel resolves to FA2 on
 every device and makes the branch below it unreachable — a CP run would then execute a different,
 slower kernel than every other code path on the same GPU, with nothing logged.
@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 import pytest
 
-import src.distributed.context_parallel.base_layer as base_layer
+import src.distributed.context_parallel.ulysses_attention as base_layer
 
 
 def _importable(name: str) -> bool:
@@ -44,15 +44,15 @@ HAS_FA4 = _importable("flash_attn.cute")
 
 def _resolve(*, blackwell: bool, hopper: bool, allow_fa4: bool = True):
     """Resolve the CP attention callable under a mocked architecture, bypassing the lru_cache."""
-    base_layer.get_flash_attn_func.cache_clear()
+    base_layer._flash_attn_func.cache_clear()
     try:
         with (
             patch.object(base_layer, "is_blackwell_gpu", return_value=blackwell),
             patch.object(base_layer, "is_hopper_gpu", return_value=hopper),
         ):
-            return base_layer.get_flash_attn_func(allow_fa4)
+            return base_layer._flash_attn_func(allow_fa4)
     finally:
-        base_layer.get_flash_attn_func.cache_clear()
+        base_layer._flash_attn_func.cache_clear()
 
 
 def _module_of(func) -> str:

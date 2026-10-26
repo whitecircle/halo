@@ -25,12 +25,11 @@ from transformers.models.cohere2_moe.modeling_cohere2_moe import (
     eager_attention_forward,
 )
 
-from src.distributed.context_parallel.layers.cohere2_moe import Cohere2MoeUlyssesAttention
-from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
+from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, Cohere2MoeUlyssesAttention
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
-from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
+from src.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.models.moe_balancing import (
     accepts_native_balancing_bias,
@@ -63,7 +62,7 @@ def _wrapped_block(**config_overrides) -> tuple[Cohere2MoeSparseMoeBlock, EPCohe
 
 def test_registrations():
     assert MOE_LAYER_MAP["Cohere2MoeSparseMoeBlock"] is EPCohere2MoELayer
-    assert WRAPPER_CLASS_MAP["Cohere2MoeAttention"] is Cohere2MoeUlyssesAttention
+    assert ULYSSES_ATTENTION_MAP["Cohere2MoeAttention"] is Cohere2MoeUlyssesAttention
     assert "Cohere2MoeAttention" in TP_SHARDABLE_ATTENTION_CLASSES
 
     assert EPCohere2MoELayer._PER_EXPERT_UNFUSED_KEYS is None  # base gather emits the fused pair
@@ -166,7 +165,7 @@ def test_cp_rotary_matches_hf_interleaved_rope():
 
     wrapper = object.__new__(Cohere2MoeUlyssesAttention)
     wrapper._use_rope = True
-    got_q, got_k = wrapper._apply_rotary_core(q, k, cos.unsqueeze(2), sin.unsqueeze(2))
+    got_q, got_k = wrapper._apply_rotary(q, k, cos.unsqueeze(2), sin.unsqueeze(2))
 
     hf_q, hf_k = apply_rotary_pos_emb(q.transpose(1, 2), k.transpose(1, 2), cos, sin)
     assert torch.equal(got_q.transpose(1, 2), hf_q)
@@ -178,7 +177,7 @@ def test_cp_rotary_identity_on_nope_layers():
     wrapper._use_rope = False
     q = torch.randn(1, 4, 2, 8)
     k = torch.randn(1, 4, 2, 8)
-    got_q, got_k = wrapper._apply_rotary_core(q, k, torch.ones(1), torch.zeros(1))
+    got_q, got_k = wrapper._apply_rotary(q, k, torch.ones(1), torch.zeros(1))
     assert got_q is q and got_k is k
 
 

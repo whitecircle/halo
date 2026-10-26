@@ -29,6 +29,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.hub_layout import reversed_export_transforms, revert_conversions
 from src.checkpoint.model_card import tag_model_card
+from src.checkpoint.parallel.writing import gather_hand_sliced_params
 from src.checkpoint.writing import (
     StreamingShardWriter,
     cast_to_save_dtype,
@@ -37,8 +38,7 @@ from src.checkpoint.writing import (
     write_merged_index,
 )
 from src.distributed.checkpoint.write import exchange_shard_index
-from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
-from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
+from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from src.distributed.expert_parallel.expert_weights import (
     gather_ep_layer_weights,
     gather_ep_lora_adapters,
@@ -49,11 +49,15 @@ from src.distributed.expert_parallel.expert_weights import (
 )
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.tensor_parallel.state_dict import gather_tp_sharded_non_dtensor_params
 from src.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from src.models.param_roles import persistent_buffers
 from src.models.peft_adapters import LoraFolds, lora_folded_data
-from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_toolkit_wrappers
+from src.models.unwrapping import (
+    base_transformers_model,
+    plain_peft_param_name,
+    strip_cp_attention_level,
+    unwrap_toolkit_wrappers,
+)
 from src.runtime.collectives import barrier_on_exit
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.dtensor import full_cpu_tensor, materialize_dtensor, resolve_retained
@@ -80,7 +84,7 @@ def _save_key_remap(*, cp_key_remap: bool, peft_prefix: str | None) -> Callable[
             if normalized is None:
                 return None
             key = normalized
-        return strip_cp_attention_prefix(key) if cp_key_remap else key
+        return strip_cp_attention_level(key) if cp_key_remap else key
 
     return remap
 
@@ -128,7 +132,7 @@ def save_ep_model(
 ):
     """Save an EP model to a HuggingFace-compatible safetensors checkpoint.
 
-    ``model`` must be unwrapped (a :class:`UlyssesCPModelWrapper` is unwrapped here: its
+    ``model`` must be unwrapped (a :class:`UlyssesModel` is unwrapped here: its
     ``named_modules()`` walk yields wrapper-prefixed EP-layer paths that misclassify every expert
     param as non-EP). ``sharded=True`` writes one shard per rank, requiring merge_ep_shards.py before
     reload; ``max_shard_size`` then bounds the shards that merge writes, not these. ``sharded=False``
@@ -242,7 +246,7 @@ def _save_ep_gathered(
 
     # EP+TP: attention sinks are TP-sharded as plain tensors, needing this explicit mesh gather.
     # A no-op without TP (nothing to iterate), so it is unconditional.
-    gather_tp_sharded_non_dtensor_params(model, state_dict, retain=is_save_rank, keep_live_dtype=keep_live_dtype)
+    gather_hand_sliced_params(model, state_dict, retain=is_save_rank, keep_live_dtype=keep_live_dtype)
 
     # Live names → checkpoint names, once per chunk: the LoRA/CP normalization (``remap``) first,
     # then the family's hub-namespace revert. A ``None`` from ``remap`` is a tensor the checkpoint
@@ -364,7 +368,7 @@ def _check_ep_sharded_save_supported(
     if not ep_layers:
         return
 
-    if any(isinstance(m, UlyssesAttentionBase) for m in model.modules()):
+    if any(isinstance(m, UlyssesAttention) for m in model.modules()):
         raise ValueError(
             "Sharded EP save (save_sharded_ep=True) is not supported with Context Parallelism: "
             "the per-rank shards would carry CP-patched '.original_attention.' keys that "
@@ -555,7 +559,7 @@ def _save_ep_sharded(
 
     # The loop above wrote TP-sharded plain tensors (GptOss sinks) as rank 0's head slice under the
     # full-tensor key, a truncated sinks the merge cannot complete.
-    gather_tp_sharded_non_dtensor_params(model, shard, retain=(rank == 0), keep_live_dtype=keep_live_dtype)
+    gather_hand_sliced_params(model, shard, retain=(rank == 0), keep_live_dtype=keep_live_dtype)
 
     # Anchored prefixes so a sibling can't over-match; persistent-only so rotary caches stay out.
     if rank == 0:

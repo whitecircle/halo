@@ -55,7 +55,6 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules | the loader, the preprocessing pipeline and the scripts — without a boto3 import |
 | `src/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected | the S3 dataset cache and the per-shard cache of a sharded pre-processed dataset, so their crash and staleness semantics cannot drift |
 | `src/data/sources/s3_client.py` | the boto3 `S3Client`, the s3fs control-file reads and the default-bucket helpers | the loader, the preprocessing pipeline, `ShardedDatasetLoader`, the inference scripts and the `scripts/before_training/s3_datasets.py` CLI |
-| `src/distributed/context_parallel/key_mapping.py` | the one CP→HF attention key mapping | the EP gathered save and the PEFT adapter save — without pulling the CP wrapper stack |
 | `src/distributed/checkpoint/write.py` | the collective half of a write: retain-gated DTensor resolve of params AND buffers (with the neutralized GptOss sinks), the streamed part writer, the shard-index exchange | the FSDP2/EP gathered save, the TP state dict and the CP save — the leg every gathered writer must run symmetrically or hang |
 | `src/distributed/checkpoint/coordination.py` | the rank consensus a resume shares: the pick of the checkpoint (and the move of incomplete ones out of rotation's sight), then the reads its two halves agree on | resume detection (`src/training/environment.py`, the trainer's `train(resume_from_checkpoint=True)`), `checkpoint/loader.py` (weights) and `checkpoint/optimizer.py` (optimizer shards) |
 | `src/data/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use | written by the preprocessing pipeline, read by `ShardedDatasetLoader` |
@@ -114,7 +113,7 @@ its data-parallel size: [Supported combinations](../parallelism/README.md#suppor
 
 Four subpackages own the mechanics: `expert_parallel/` (DeepEP dispatch/combine, per-family MoE
 wrappers, grouped-GEMM expert compute, gradient-sync hooks, expert gather), `context_parallel/`
-(`UlyssesCPModelWrapper`, sequence splitting), `tensor_parallel/` (DTensor weight sharding), and
+(`UlyssesModel`, sequence splitting), `tensor_parallel/` (DTensor weight sharding), and
 `pipeline_parallel/` (layer split, stage module, stage-aware loading, P2P groups, the
 `torch.distributed.pipelining` seam). Inside `expert_parallel/`, `moe_layer/` composes `EPMoELayerBase` from
 one mixin per concern; its `compute`, `routing`, `grad_sync` and `balancing_bias` modules are imported only
@@ -164,7 +163,7 @@ ParallelismConfig  ── validate mode, build process groups
 load_distributed_model            src/model_loading/parallel/loader.py
    │  • resolve_attn_implementation → FA4 (SM100+) / FA3 (SM90) / FA2; per-model SDPA/eager overrides
    │  • patch_moe_model_for_ep → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
-   │  • UlyssesCPModelWrapper (when cp_size > 1)
+   │  • UlyssesModel (when cp_size > 1)
    ▼
 DistributedTrainerMixin._setup_distributed_modes
    │  • FSDP2 fully_shard (EP modules in ignored_params, except at ep_group_size == 1)

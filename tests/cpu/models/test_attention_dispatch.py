@@ -21,7 +21,7 @@ from transformers import PretrainedConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src import hardware
-from src.distributed.context_parallel import base_layer as cp_base_layer
+from src.distributed.context_parallel import ulysses_attention as cp_base_layer
 from src.model_loading.parallel import loader as model_loading
 from src.models.attention import selection as attention_mod
 from src.models.attention.gpt_oss_sinks import SinksPolicy
@@ -133,24 +133,24 @@ def test_fa4_dispatch_reaches_every_sm100_plus_capability(capability):
 def test_context_parallelism_resolves_fa4_over_the_same_capability_range(capability):
     """CP resolves its own ``flash_attn_func`` and must not carry a second SM-major test.
 
-    ``get_flash_attn_func`` probes FA3 (Hopper) → FA4 (Blackwell) → FA2 → the hub kernel; an equality
+    ``_flash_attn_func`` probes FA3 (Hopper) → FA4 (Blackwell) → FA2 → the hub kernel; an equality
     test stopping at major 10 makes CP silently take a different kernel for the same run on a device
     the config-level detector calls Blackwell. Probed by making ``flash_attn`` unimportable and raising
     from the FA4-only cache setup — only ``ImportError`` is caught there, so the RuntimeError escaping
     proves the branch was taken.
     """
-    cp_base_layer.get_flash_attn_func.cache_clear()
+    cp_base_layer._flash_attn_func.cache_clear()
     try:
         with (
             patch.object(cp_base_layer.torch.cuda, "is_available", lambda: True),
             patch.object(cp_base_layer.torch.cuda, "get_device_capability", lambda *a, **k: capability),
             patch.dict(sys.modules, {"flash_attn": None, "flash_attn_interface": None}),
-            patch.object(cp_base_layer, "ensure_fa4_kernel_cache_env", side_effect=RuntimeError("fa4 probe")),
+            patch.object(attention_mod, "ensure_fa4_kernel_cache_env", side_effect=RuntimeError("fa4 probe")),
             pytest.raises(RuntimeError, match="fa4 probe"),
         ):
-            cp_base_layer.get_flash_attn_func()
+            cp_base_layer._flash_attn_func()
     finally:
-        cp_base_layer.get_flash_attn_func.cache_clear()
+        cp_base_layer._flash_attn_func.cache_clear()
 
 
 def test_the_loader_reads_the_shared_blackwell_predicate():

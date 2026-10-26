@@ -120,7 +120,7 @@ def _evaluate(model, *, world_size: int, rank: int = 0, num_examples: int = 2, n
     info_lines: list[str] = []
     with (
         patch.object(cb_module, "DTensor", _FakeDTensor),
-        patch.object(cb_module, "UlyssesCPModelWrapper", _FakeCPWrapper),
+        patch.object(cb_module, "UlyssesModel", _FakeCPWrapper),
         patch.object(cb_module, "PipelineStageModule", _FakePipelineStage),
         patch.object(cb_module, "get_global_world_size", return_value=world_size),
         patch.object(cb_module, "get_global_rank", return_value=rank),

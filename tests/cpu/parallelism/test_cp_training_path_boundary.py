@@ -63,13 +63,13 @@ def _sft_worker(rank, cp_size):
         ignore_index=LABEL_IGNORE_INDEX,
     )
     expected.backward()
-    config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     for mutated in (False, True):
         model = copy.deepcopy(baseline)
         model.zero_grad()
         wrapper = unpatched_cp_wrapper(model, cp_config=config)
         if mutated:
-            with patch("src.distributed.context_parallel.wrapper.cp_shift_against_full_labels", _drop_boundary):
+            with patch("src.distributed.context_parallel.ulysses_model.cp_shift_against_full_labels", _drop_boundary):
                 loss = wrapper(ids, attention_mask=mask, labels=labels).loss
         else:
             loss = wrapper(ids, attention_mask=mask, labels=labels).loss
@@ -116,7 +116,7 @@ def _smpo_worker(rank, cp_size):
     objective = reference["chosen_logps"].sum() - reference["rejected_logps"].sum()
     objective += 0.3 * reference["chosen_sft_loss"]
     objective.backward()
-    config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     for mutated in (False, True):
         model = copy.deepcopy(baseline)
         model.zero_grad()
@@ -161,7 +161,7 @@ def _smpo_ragged_worker(rank, cp_size):
 
     model = copy.deepcopy(baseline)
     model.zero_grad()
-    config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     actual = _smpo_host(config).concatenated_forward(unpatched_cp_wrapper(model, cp_config=config), batch)
     loss = actual["chosen_logps"].sum() - actual["rejected_logps"].sum()
     (loss + 0.3 * actual["chosen_sft_loss"]).backward()

@@ -29,7 +29,7 @@ import src.model_loading.parallel.cp as cp_loading
 import src.model_loading.parallel.loader as loading
 import src.model_loading.parallel.tp as tp_loading
 import src.model_loading.parallel.whole_model as whole_model
-from src.distributed.context_parallel.wrapper import patch_model_for_cp
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
 from src.distributed.expert_parallel.hub_conversion import resolve_loaded_conversion_steps
@@ -76,7 +76,7 @@ def _cpu_pretrained(verified):
 
 def _cpu_cp_wrap(model, config):
     model.config._attn_implementation = "flash_attention_2"
-    return patch_model_for_cp(model, config)
+    return UlyssesModel(model, config)
 
 
 def _dense_pc(*, keep=True):
@@ -98,7 +98,7 @@ def test_real_dense_and_cp_construction_retains_checkpoint_masters(tmp_path, mon
     monkeypatch.setattr(whole_model, "from_pretrained_verified", _cpu_pretrained(whole_model.from_pretrained_verified))
     monkeypatch.setattr(whole_model, "move_model_to_local_device", lambda model: model)
     monkeypatch.setattr(loading, "get_local_rank", lambda: 0)
-    monkeypatch.setattr(cp_loading, "patch_model_for_cp", _cpu_cp_wrap)
+    monkeypatch.setattr(cp_loading, "UlyssesModel", _cpu_cp_wrap)
     kwargs = {
         "config": AutoConfig.from_pretrained(source),
         "dtype": torch.bfloat16,

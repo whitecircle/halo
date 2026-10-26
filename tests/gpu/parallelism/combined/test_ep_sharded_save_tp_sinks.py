@@ -4,7 +4,7 @@ Sharded EP save under TP must write COMPLETE attention sinks (GptOss).
 
 GptOss sinks cannot be DTensors (the forward concatenates them with already-sharded logits), so
 under TP ``shard_sinks_param`` slices them by hand into this rank's head range and registers the
-suffix on ``model._tp_sharded_non_dtensor``. The gathered EP save all-gathers that registry; the
+suffix with ``register_hand_sliced``. The gathered EP save all-gathers that registry; the
 sharded EP save (``save_sharded_ep=True``, i.e. EP+TP) must do the same rather than fall through to
 the plain non-expert branch, which writes rank 0's HALF of the tensor under the full-tensor key.
 Nothing downstream can repair that: ``merge_ep_shards.py`` passes non-rank-suffixed keys straight

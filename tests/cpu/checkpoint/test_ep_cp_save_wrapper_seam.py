@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """EP+CP checkpoint save must operate on the inner model, never the CP wrapper.
 
-``UlyssesCPModelWrapper`` overrides ``named_parameters()``/``state_dict()`` to yield inner-model
+``UlyssesModel`` overrides ``named_parameters()``/``state_dict()`` to yield inner-model
 names but not ``named_modules()``. A save that walks the wrapper therefore sees EP-layer module
 paths prefixed with the wrapper's ``model.`` level while parameter names stay clean, so the
 expert classification in ``_save_ep_gathered`` never matches: every expert param takes the non-EP
@@ -24,8 +24,8 @@ from accelerate import PartialState
 from safetensors import safe_open
 
 from src.distributed.checkpoint.ep_save import save_ep_model, validate_ep_sharded_save
-from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.models.unwrapping import unwrap_toolkit_wrappers
 from tests.common.ep_stubs import StubEPLayerBase
 
@@ -68,18 +68,12 @@ class _StubEPLayer(StubEPLayerBase):
         return {}
 
 
-class _StubUlyssesAttention(UlyssesAttentionBase):
+class _StubUlyssesAttention(UlyssesAttention):
     """CP-patched attention marker (skips base init — only the isinstance matters here)."""
 
     def __init__(self):
         nn.Module.__init__(self)
         self.original_attention = nn.Linear(HIDDEN, HIDDEN, bias=False)
-
-    def _project_qkv(self, hidden_states, batch_size, local_seq_len):  # pragma: no cover
-        raise NotImplementedError
-
-    def _apply_rotary_pos_emb(self, q, *args, **kwargs):  # pragma: no cover
-        raise NotImplementedError
 
 
 def _build_inner(cp_patched_attention: bool = False) -> nn.Module:
@@ -96,9 +90,9 @@ def _build_inner(cp_patched_attention: bool = False) -> nn.Module:
     return inner
 
 
-def _wrap(inner: nn.Module) -> UlyssesCPModelWrapper:
-    """A real UlyssesCPModelWrapper around ``inner`` without attention patching (needs no groups)."""
-    wrapper = UlyssesCPModelWrapper.__new__(UlyssesCPModelWrapper)
+def _wrap(inner: nn.Module) -> UlyssesModel:
+    """A real UlyssesModel around ``inner`` without attention patching (needs no groups)."""
+    wrapper = UlyssesModel.__new__(UlyssesModel)
     nn.Module.__init__(wrapper)
     wrapper.model = inner
     return wrapper

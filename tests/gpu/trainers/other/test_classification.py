@@ -37,7 +37,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from src.configs.classification import ClassificationConfig
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading.tokenizer_setup import configure_run_tokenizer
 from src.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_any, world_mean
@@ -136,7 +136,7 @@ def build_model(tokenizer):
     # never a hand-written config.pad_token_id: the pooling rule this test pins reads that id back,
     # so recording it here by hand would keep the test green through a regression in the sync.
     configure_run_tokenizer(
-        CommonScriptArguments(), model, tokenizer, MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
+        CommonScriptArguments(), model, tokenizer, MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded
     )
     return model
 

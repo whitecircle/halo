@@ -18,7 +18,6 @@ import pytest
 import torch
 from trl.trainer.utils import entropy_from_logits
 
-from src.distributed.context_parallel.config import cp_boundary_shift
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers import sft as sft_trainer
 from src.trainers.sft import _CP_METRIC_COLUMNS, _CP_METRIC_DTYPE, DistributedSFTTrainer
@@ -242,9 +241,8 @@ def test_columns_carry_the_quantities_their_names_claim():
     expected_entropy = ((entropy_from_logits(outputs.logits) * mask[:, :chunk]).sum() / mask[:, :chunk].sum()).item()
     assert _metric(rank, "entropy")[0] == pytest.approx(expected_entropy, rel=1e-6)
 
-    shift_logits, shift_labels = cp_boundary_shift(
-        outputs.logits, labels[:, :chunk], labels[:, chunk : chunk + 1], False
-    )
+    # Rank 0 is not the last rank: every local logit is scored, its last one against chunk 1's first token.
+    shift_logits, shift_labels = outputs.logits, labels[:, 1 : chunk + 1]
     loss_mask = shift_labels != LABEL_IGNORE_INDEX
     expected_accuracy = (((shift_logits.argmax(-1) == shift_labels) & loss_mask).sum() / loss_mask.sum()).item()
     assert _metric(rank, "mean_token_accuracy")[0] == pytest.approx(expected_accuracy, rel=1e-6)

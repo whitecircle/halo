@@ -41,8 +41,8 @@ from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.peft import PeftAdapterSaver, _load_peft_adapter_state, remap_cp_adapter_keys_to_live
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
 from src.models.param_roles import persistent_buffers
 
@@ -88,12 +88,12 @@ def _tiny_qwen3():
 
 
 def _cp_peft_model() -> PeftModel:
-    """``PeftModel(LoraModel(UlyssesCPModelWrapper(Qwen3)))`` — the runtime order, PEFT outside CP.
+    """``PeftModel(LoraModel(UlyssesModel(Qwen3)))`` — the runtime order, PEFT outside CP.
 
     ``cp_size=1`` still patches every attention layer, so the live keys carry the real
     ``.original_attention.`` and wrapper ``model.`` artifacts without needing a process group.
     """
-    wrapper = UlyssesCPModelWrapper(_tiny_qwen3(), CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+    wrapper = UlyssesModel(_tiny_qwen3(), CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     return get_peft_model(wrapper, LoraConfig(modules_to_save=["gate"], **_LORA_KWARGS))
 
 

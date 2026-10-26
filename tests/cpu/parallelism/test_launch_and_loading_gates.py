@@ -47,7 +47,7 @@ from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.mesh import MeshDim
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
-from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
+from src.distributed.tensor_parallel.hf_plan import plan_shards_param
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.lazy_safetensors.weights import resolve_run_dtype
 from src.model_loading.parallel import loader as model_loading
@@ -201,7 +201,7 @@ def _load_collaborators(model):
         patch.object(tp_loading, "get_tp_submesh", return_value="tp-mesh"),
         patch.object(tp_loading, "joined_node_load", _throttle),
         patch.object(tp_loading, "from_pretrained_verified", _load),
-        patch.object(tp_loading, "retarget_hf_replicated_grad_hooks", lambda _model: None),
+        patch("src.distributed.tensor_parallel.hf_plan.retarget_hf_replicated_grad_hooks", lambda _model: None),
     ):
         yield
 
@@ -318,21 +318,19 @@ def test_the_plan_is_what_separates_a_sharding_architecture_from_a_planless_one(
     """The predicate the guard is built on, over real plans and real parameter names.
 
     ``model._tp_plan`` is the plan transformers actually applied (base plan, prefixed at
-    ``post_init``); ``tp_plan_shards_params`` over ``named_parameters()`` is exactly what the guard
+    ``post_init``); ``plan_shards_param`` over ``named_parameters()`` is exactly what the guard
     counts. Qwen3 must come out with sharded parameters and Qwen3-VL with none — if those two
     collapsed to the same answer, the guard could not tell a working TP run from a wasted one.
     """
     sharded = [
-        name for name, _ in sharding_model.named_parameters() if tp_plan_shards_params(name, sharding_model._tp_plan)
+        name for name, _ in sharding_model.named_parameters() if plan_shards_param(name, sharding_model._tp_plan)
     ]
     assert sharded, "premise: qwen3 ships a base_model_tp_plan covering q/k/v/o and the MLP"
     assert any("q_proj" in name for name in sharded) and any("down_proj" in name for name in sharded)
 
     assert not (planless_model._tp_plan or {}), "premise: qwen3-vl ships no base_model_tp_plan"
     assert not [
-        name
-        for name, _ in planless_model.named_parameters()
-        if tp_plan_shards_params(name, planless_model._tp_plan or {})
+        name for name, _ in planless_model.named_parameters() if plan_shards_param(name, planless_model._tp_plan or {})
     ]
 
 
@@ -534,7 +532,7 @@ def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
     config = Qwen3Config(num_hidden_layers=1, hidden_size=8, intermediate_size=8, num_attention_heads=2)
     with (
         patch(f"{_CP_LOADING}.load_whole_model", fake_load_whole_model),
-        patch(f"{_CP_LOADING}.patch_model_for_cp", lambda model, cp_config: model),
+        patch(f"{_CP_LOADING}.UlyssesModel", lambda model, cp_config: model),
         patch("src.models.attention.selection.validate_attn_implementation", return_value="sdpa") as validator,
     ):
         with pytest.raises(KeyError, match="config"):

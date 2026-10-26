@@ -46,6 +46,7 @@ from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.pipeline_parallel.lazy_loader import PER_NODE_PLACEMENT_REMEDY
+from src.distributed.tensor_parallel.plain_params import hand_sliced_dims
 from src.log import KEY_PREVIEW_COUNT
 from src.models.param_roles import persistent_buffers
 from src.models.unwrapping import unwrap_framework_wrappers, unwrap_toolkit_wrappers
@@ -385,7 +386,8 @@ class CheckpointLoader:
         live param's own placements before ``copy_``: per style the exact inverse of the load's
         ``shard_param`` (``tests/cpu/parallelism/test_tp_load_inverse_of_save.py``), and the route
         the PP stage load and the adapter restore take. Params TP shards by hand (GptOss sinks,
-        ``model._tp_sharded_non_dtensor``) are sliced by ``tp_rank``; everything else is replicated.
+        :func:`~src.distributed.tensor_parallel.plain_params.hand_sliced_dims`) are sliced by ``tp_rank``;
+        everything else is replicated.
 
         TP+DP is the exception: FSDP2's 2-D placement stacks a strided dp shard over a strided tp
         shard for packed projections, where ``distribute_tensor`` returns the right shape with the
@@ -448,7 +450,7 @@ class CheckpointLoader:
         unwrapped = unwrap_framework_wrappers(model)
         live: dict[str, torch.Tensor] = dict(unwrapped.named_parameters())
         live.update(persistent_buffers(unwrapped))
-        hand_sliced = dict(getattr(unwrap_toolkit_wrappers(model), "_tp_sharded_non_dtensor", None) or ())
+        hand_sliced = hand_sliced_dims(unwrap_toolkit_wrappers(model))
 
         with joined_streaming_reader(checkpoint, None, what=f"{mode} checkpoint") as reader:
             view = ModuleLayoutView(unwrapped, reader.available)

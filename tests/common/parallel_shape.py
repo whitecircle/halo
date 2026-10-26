@@ -8,7 +8,7 @@ weights they hold, the TP-sharded parameters, the Ulysses attention layers.
 
 from torch.distributed.tensor import DTensor
 
-from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
+from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from src.distributed.mesh import has_tp_dim
 from src.models.moe_balancing import config_has_experts
 from tests.common.ep_reference import ep_layers
@@ -24,9 +24,9 @@ def tp_sharded_param_names(model) -> list[str]:
     ]
 
 
-def ulysses_attention_layers(model) -> list[UlyssesAttentionBase]:
+def ulysses_attention_layers(model) -> list[UlyssesAttention]:
     """The attention layers CP swapped for their Ulysses wrappers."""
-    return [module for module in model.modules() if isinstance(module, UlyssesAttentionBase)]
+    return [module for module in model.modules() if isinstance(module, UlyssesAttention)]
 
 
 def _bank_split_ep_way(layer) -> bool:

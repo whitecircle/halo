@@ -10,7 +10,7 @@ import torch.nn as nn
 from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_tp_plan
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.tensor_parallel.state_dict import get_tp_mesh
+from src.distributed.mesh import model_tp_mesh
 from src.kernels.lowp.linear import LowPrecisionLinear
 from src.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices
 from src.models.module_tree import decoder_layer_index, find_module_path
@@ -109,7 +109,7 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
     dense_count = 0
     if lowp.apply_dense_mlp:
         tp_plan = getattr(model, "_tp_plan", None) or {}
-        tp_mesh = get_tp_mesh(model)
+        tp_mesh = model_tp_mesh(model)
         for name, module in model.named_modules():
             # A vision tower or projector naming its projections like the text MLP stays bf16, as the
             # export's tower fence assumes.

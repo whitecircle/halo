@@ -23,7 +23,7 @@ from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGene
 
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading.tokenizer_setup import configure_run_tokenizer
 from src.training.script_runner import install_resolved_tokenizer
 from tests.common.models import QWEN3_5_9B, TINY_QWEN35_CONFIG
@@ -47,7 +47,7 @@ def _setup_run(args: CommonScriptArguments, processor=None):
     """The processing class a VLM training script hands its trainer, after the tokenizer seam."""
     processor = processor or load_cached_processor(QWEN3_5_9B)
     tokenizer = configure_run_tokenizer(
-        args, None, processor.tokenizer, None, embeddings_sharded=input_embeddings_tp_sharded
+        args, None, processor.tokenizer, None, embeddings_sharded=is_input_embedding_tp_sharded
     )
     return install_resolved_tokenizer(processor, tokenizer)
 

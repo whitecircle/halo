@@ -152,13 +152,13 @@ The merge itself is `merge_shards_to_hf` on the class. The base fused-GLU implem
 
 Full procedure in [Context Parallelism — Adding a new model](../parallelism/context-parallelism.md#adding-a-new-model). The machinery lives in `src/distributed/context_parallel/`.
 
-1. **Write a wrapper** under `layers/` and declare `HF_MODULE_NAMES`. Two templates: subclass `UlyssesAttentionBase` for the optimized path (RoPE before all-to-all, native GQA — copy `Qwen3MoeUlyssesAttention`), or `MLAUlyssesAttentionBase` when Q/K and V head dims differ (copy `Glm4MoeLiteUlyssesAttention`).
+1. **Write a wrapper** in `families.py` and declare `HF_MODULE_NAMES`. Two templates: subclass `UlyssesAttention` for the optimized path (RoPE before all-to-all, native GQA — copy `Qwen3MoeUlyssesAttention`), or `MLAUlyssesAttention` when Q/K and V head dims differ (copy `Glm4MoeLiteUlyssesAttention`).
 
-    There is no accept list to edit. `layers/registry.py` imports every module in the package and derives `WRAPPER_CLASS_MAP` by walking the `UlyssesAttentionBase` subclass tree, so the wrapper registers by existing and a duplicate HF name raises.
+    There is no accept list to edit. `ULYSSES_ATTENTION_MAP` is read off the `UlyssesAttention` subclass tree, so the wrapper registers by existing and a duplicate HF name raises.
 
-2. **Runtime requirements**: a real Flash Attention impl (`SUPPORTED_ATTN_IMPLEMENTATIONS` in `validation.py`) unless the wrapper declares `REQUIRES_FLASH_ATTN_LABEL = False` (modeling code that cannot carry a flash label, e.g. Bailing), and both `num_attention_heads` and `num_key_value_heads` divisible by `cp_size`.
+2. **Runtime requirements**: a real Flash Attention impl (`SUPPORTED_ATTN_IMPLEMENTATIONS` in `model_rules.py`) unless the wrapper declares `REQUIRES_FLASH_ATTN_LABEL = False` (modeling code that cannot carry a flash label, e.g. Bailing), and both `num_attention_heads` and `num_key_value_heads` divisible by `cp_size`.
 
-    Override `_resolve_scaling` / `_output_projection` when the module computes its scale inline or names its output projection something other than `o_proj`.
+    Override `_resolve_scaling` / `OUTPUT_PROJECTION` when the module computes its scale inline or names its output projection something other than `o_proj`.
 
 3. **Test** with `tests/gpu/parallelism/cp/test_cp_correctness.py`.
 
@@ -167,7 +167,7 @@ The wrapper must split Q/K/V into the local-rank slice before all-to-all, apply 
 ## Add TP support
 
 - **Model already has `base_model_tp_plan`** — `tp_plan="auto"` does everything (Llama, Mistral, most Qwen variants). Nothing to add.
-- **Selective TP for EP+TP** — add the attention class to `TP_SHARDABLE_ATTENTION_CLASSES` in `src/distributed/tensor_parallel/module_types.py`. The selective path only visits attention submodules, so MoE blocks need no opt-out; `embed_tokens` and `lm_head` stay replicated.
+- **Selective TP for EP+TP** — add the attention class to `TP_SHARDABLE_ATTENTION_CLASSES` in `src/distributed/tensor_parallel/parallelize_attention.py`. The selective path only visits attention submodules, so MoE blocks need no opt-out; `embed_tokens` and `lm_head` stay replicated.
 
     If the attention has a non-standard shape (GLM-4's LoRA-style compression, GPT-OSS's sinks), add a case in `parallelize_attention.py`. A non-shardable attention (DeepSeek-V4's shared-KV MQA) stays off the list, and `apply_tp_to_attention_only` raises when it ends up patching zero modules.
 

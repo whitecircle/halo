@@ -40,12 +40,10 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
     Qwen3_5MoeGatedDeltaNet,
 )
 
-from src.distributed.context_parallel.layers.qwen3_5 import Qwen3_5MoeUlyssesAttention
-from src.distributed.context_parallel.validation import (
-    UlyssesConfigError,
-    validate_model_for_ulysses,
-)
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.config import CPConfigError
+from src.distributed.context_parallel.families import Qwen3_5MoeUlyssesAttention
+from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import shared_scratch_dir, world_mean, world_spread
 from tests.common.ep_reference import random_token_batch
@@ -143,12 +141,12 @@ def reference_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tens
 
 
 def cp_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, rank: int, local_rank: int) -> float:
-    """CP=2 forward: load model directly, patch via UlyssesCPModelWrapper.
+    """CP=2 forward: load model directly, patch via UlyssesModel.
 
     Bypasses ``load_distributed_model`` (which tries to load a tokenizer the
     synthetic checkpoint doesn't ship). The full pipeline still goes through
-    :func:`validate_model_for_ulysses` and :func:`patch_attention_for_ulysses`
-    via :class:`UlyssesCPModelWrapper`.
+    :func:`reject_unsupported_ulysses_model` and :func:`apply_ulysses_attention`
+    via :class:`UlyssesModel`.
     """
     pc = ParallelismConfig(cp_size=2)
     log(f"  Loading CP model — {pc.mode_string}")
@@ -162,11 +160,11 @@ def cp_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, ran
     ).to(device)
 
     cp_config = pc.cp_config()
-    model = UlyssesCPModelWrapper(base_model, cp_config)
+    model = UlyssesModel(base_model, cp_config)
 
     # Confirm the wrapper landed on every full-attention layer.
     # ``Qwen3_5MoeAttention`` instances still appear as submodules because
-    # ``UlyssesAttentionBase`` stores the original as ``original_attention`` —
+    # ``UlyssesAttention`` stores the original as ``original_attention`` —
     # we check that each decoder layer's ``self_attn`` is the wrapper.
     wrappers = [m for m in model.modules() if isinstance(m, Qwen3_5MoeUlyssesAttention)]
     log(f"  Qwen3_5MoeUlyssesAttention layers: {len(wrappers)}")
@@ -224,7 +222,7 @@ def cp_aux_component(
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     ).to(device)
-    model = UlyssesCPModelWrapper(base_model, pc.cp_config())
+    model = UlyssesModel(base_model, pc.cp_config())
     model.eval()
     with torch.no_grad():
         with_aux = model(input_ids=ids, labels=labels, use_cache=False, output_router_logits=True).loss.item()
@@ -247,17 +245,17 @@ def negative_test_linear_attention_rejection(local_rank: int) -> bool:
     model.config._attn_implementation = "flash_attention_2"
 
     try:
-        validate_model_for_ulysses(model, cp_size=2)
-    except UlyssesConfigError as e:
+        reject_unsupported_ulysses_model(model, cp_size=2)
+    except CPConfigError as e:
         msg = str(e)
-        log(f"  ✓ Got expected UlyssesConfigError: {msg[:200]}...")
+        log(f"  ✓ Got expected CPConfigError: {msg[:200]}...")
         cleanup_memory()
         ok = ("linear_attention" in msg) or ("GatedDeltaNet" in msg)
         if not ok:
             log("  FAIL: error message did not mention linear_attention / GatedDeltaNet")
         return ok
     except Exception as e:
-        log(f"  FAIL: expected UlyssesConfigError, got {type(e).__name__}: {e}")
+        log(f"  FAIL: expected CPConfigError, got {type(e).__name__}: {e}")
         cleanup_memory()
         return False
     log("  FAIL: validation did not raise on hybrid layer_types")

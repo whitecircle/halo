@@ -12,7 +12,7 @@ keeps its last logit, supervised by the next chunk's first label, and only the f
 import pytest
 import torch
 
-from src.distributed.context_parallel.config import cp_shift_against_full_labels
+from src.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
 
 BATCH, SEQ, VOCAB = 3, 24, 11
 

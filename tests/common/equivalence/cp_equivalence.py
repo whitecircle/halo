@@ -21,11 +21,11 @@ import torch.distributed as dist
 from accelerate import PartialState
 from transformers.trainer_utils import enable_full_determinism
 
-from src.distributed.context_parallel import base_layer as cp_attention
-from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
-from src.distributed.context_parallel.config import split_sequence_for_cp
-from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel import ulysses_attention as cp_attention
+from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from src.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
+from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
@@ -145,13 +145,13 @@ def gloo_all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=
 
 
 def deterministic_kernels(probe):
-    """``get_flash_attn_func`` over ``probe``: the kernel ``probe`` picks for the family, called with
+    """``_flash_attn_func`` over ``probe``: the kernel ``probe`` picks for the family, called with
     ``deterministic=True``, since CP passes no such flag and FA2, FA3 and FA4 all default to an atomic dQ."""
 
-    def get_flash_attn_func(allow_fa4: bool = True):
+    def _flash_attn_func(allow_fa4: bool = True):
         return functools.partial(probe(allow_fa4), deterministic=True)
 
-    return get_flash_attn_func
+    return _flash_attn_func
 
 
 @contextlib.contextmanager
@@ -161,13 +161,13 @@ def tier_controls(tier: str) -> Iterator[None]:
     :func:`gloo_all_to_all`."""
     if tier == "cpu":
         with (
-            patch.object(cp_attention, "get_flash_attn_func", lambda allow_fa4=True: reference_flash_attn),
+            patch.object(cp_attention, "_flash_attn_func", lambda allow_fa4=True: reference_flash_attn),
             patch.object(dist, "all_to_all", gloo_all_to_all),
         ):
             yield
         return
     enable_full_determinism(SEED)
-    with patch.object(cp_attention, "get_flash_attn_func", deterministic_kernels(cp_attention.get_flash_attn_func)):
+    with patch.object(cp_attention, "_flash_attn_func", deterministic_kernels(cp_attention._flash_attn_func)):
         yield
 
 
@@ -183,11 +183,11 @@ def _tiny_model(name: str, tier: str, device) -> torch.nn.Module:
     return model.to(device=device, dtype=DTYPE[tier])
 
 
-def _first_attention(module: torch.nn.Module) -> UlyssesAttentionBase:
-    return next(child for child in module.modules() if isinstance(child, UlyssesAttentionBase))
+def _first_attention(module: torch.nn.Module) -> UlyssesAttention:
+    return next(child for child in module.modules() if isinstance(child, UlyssesAttention))
 
 
-def _nudge(attention: UlyssesAttentionBase) -> None:
+def _nudge(attention: UlyssesAttention) -> None:
     """The negative control: the first element of the attention's first weight moved by a few ulps."""
     weight = next(attention.parameters())
     finfo = torch.finfo(weight.dtype)
@@ -199,7 +199,7 @@ def _nudge(attention: UlyssesAttentionBase) -> None:
 def _decoder_attention_inputs(model: torch.nn.Module, input_ids, position_ids) -> dict:
     """The keyword inputs the decoder hands its first attention layer on ``input_ids``, the forward stopped
     there."""
-    attention = next(module for module in model.modules() if type(module).__name__ in WRAPPER_CLASS_MAP)
+    attention = next(module for module in model.modules() if type(module).__name__ in ULYSSES_ATTENTION_MAP)
     captured = {}
 
     def capture(_module, _args, kwargs):
@@ -224,12 +224,11 @@ def _attention_case(name: str, cp_config, *, tier: str, device, perturb: bool) -
     positions = torch.arange(SEQ, device=device).unsqueeze(0).expand(BATCH, -1)
     local_positions = split_sequence_for_cp(positions, cp_config)
     inputs = _decoder_attention_inputs(model, split_sequence_for_cp(input_ids, cp_config), local_positions)
-    attention = _first_attention(UlyssesCPModelWrapper(model, cp_config))
+    attention = _first_attention(UlyssesModel(model, cp_config))
     if perturb:
         _nudge(attention)
     hidden = torch.randn(BATCH, SEQ, hidden_size, generator=generator).to(device=device, dtype=DTYPE[tier])
     local_hidden = split_sequence_for_cp(hidden, cp_config).requires_grad_()
-    attention.global_position_ids = positions
     output = attention(
         hidden_states=local_hidden,
         position_embeddings=inputs["position_embeddings"],
@@ -247,7 +246,7 @@ def _model_case(name: str, cp_config, *, tier: str, device, perturb: bool) -> tu
     model = _tiny_model(name, tier, device)
     if FAMILIES[name].moe:
         patch_moe_model_for_ep(model, single_process_ep_config(use_grouped_gemm=tier == "gpu"))
-    wrapper = UlyssesCPModelWrapper(model, cp_config).train()
+    wrapper = UlyssesModel(model, cp_config).train()
     if perturb:
         _nudge(_first_attention(wrapper))
     vocab_size = model.get_input_embeddings().num_embeddings

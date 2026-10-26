@@ -14,8 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.distributed.mesh import MeshDim, ParallelDims, get_tp_submesh, has_tp_dim
-from src.distributed.tensor_parallel.state_dict import get_tp_mesh
+from src.distributed.mesh import MeshDim, ParallelDims, get_tp_submesh, has_tp_dim, model_tp_mesh
 
 
 class _FakeSubmesh:
@@ -101,7 +100,7 @@ def test_named_mesh_without_tp_dim_has_no_tp_group():
 )
 def test_every_tp_mesh_consumer_reads_one_predicate(dim_names, carries_tp):
     """Three places ask whether a mesh carries a ``tp`` dim — ``ParallelDims.tp_group``,
-    ``mesh.get_tp_submesh`` and the state dict's ``get_tp_mesh`` — and all three must read
+    ``mesh.get_tp_submesh`` and ``mesh.model_tp_mesh`` — and all three must read
     :func:`has_tp_dim`. Private spellings drift: one answering "yes" for an unnamed mesh while
     another answers "no" makes a run gather a TP save through a mesh its group lookup calls TP-less.
     Each assert below ties one consumer's verdict to the predicate.
@@ -118,7 +117,7 @@ def test_every_tp_mesh_consumer_reads_one_predicate(dim_names, carries_tp):
     assert has_tp_dim(mesh) is carries_tp
 
     # The state-dict half: a mesh the predicate rejects has no TP mesh, never a DP-only fallback.
-    assert (get_tp_mesh(SimpleNamespace(_device_mesh=mesh)) is not None) is carries_tp
+    assert (model_tp_mesh(SimpleNamespace(_device_mesh=mesh)) is not None) is carries_tp
 
     # The indexing half: descend into the tp dim exactly when the predicate says the dim is there
     # (a 1D (tp,) mesh IS its own sub-mesh, so only a multi-dim mesh is indexed).

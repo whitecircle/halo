@@ -4,7 +4,7 @@
 
 | | EP | CP | TP | ETP | PP | EP+CP | EP+TP | EP+ETP |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Mistral4 MoE | Yes | Yes (legacy path) | Yes (selective) | Yes (pure, `ep_size=1`) | — ² | partial ¹ | Yes | Experimental |
+| Mistral4 MoE | Yes | Yes | Yes (selective) | Yes (pure, `ep_size=1`) | — ² | partial ¹ | Yes | Experimental |
 
 ² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
 
@@ -41,13 +41,13 @@ packed mask itself and is clean to grouped-GEMM reduction noise.
 
 ## CP wrapper
 
-`Mistral4Attention` → `Mistral4UlyssesAttention` (`src/distributed/context_parallel/layers/mistral4.py`) — legacy `[B, H, S, D]` path (`_optimize_attention = False`).
+`Mistral4Attention` → `Mistral4UlyssesAttention` (`src/distributed/context_parallel/families.py`), on the shared `MLAUlyssesAttention`.
 
 Three MLA-specific bits the wrapper handles:
 
 - **Mismatched head dims** — `qk_head_dim` (nope + rope) and `v_head_dim` can differ. Flash-attn's native GQA wants one head_dim, so V is padded to `qk_head_dim` before the kernel and the output cropped back.
 - **Shared rope head** — `kv_a_proj_with_mqa` produces one rotary K vector broadcast to all heads. The broadcast is materialized *before* the Ulysses all-to-all so the head-dim scatter has a contiguous tensor.
-- **Llama-4 position scale** — transformers' own `get_llama_4_attn_scale` multiplies Q after RoPE. The legacy path applies it after the all-to-all, where Q spans the whole sequence, so `UlyssesCPModelWrapper` publishes the full `position_ids` on every patched layer once per forward (no per-layer gather).
+- **Llama-4 position scale** — transformers' own `get_llama_4_attn_scale` multiplies Q after RoPE, in `_apply_rotary` on the local chunk before the all-to-all, read off the `position_ids` the decoder hands the attention (this chunk's slice of the sequence's positions).
 
     A `rope_parameters` without `llama_4_scaling_beta` / `original_max_position_embeddings` is refused at construction rather than trained unscaled.
 
@@ -55,7 +55,7 @@ RoPE follows `config.rope_interleave`: rotate-half (`apply_rotary_pos_emb`) or i
 
 ## TP
 
-Selective TP via `apply_tp_to_attention_only()` — `Mistral4Attention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`). MLA reuses GLM-4's compress/expand layout, so the plan applies verbatim:
+Selective TP via `apply_tp_to_attention_only()` — `Mistral4Attention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`). MLA reuses GLM-4's compress/expand layout, so the plan applies verbatim:
 
 - **Sharded** (ColwiseParallel): `q_b_proj`, `kv_b_proj` (head-dim expansions).
 - **Replicated**: `q_a_proj`, `kv_a_proj_with_mqa`, `q_a_layernorm`, `kv_a_layernorm` — low-rank compressions where sharding produces degenerate per-rank shapes.

@@ -37,6 +37,7 @@ from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.checkpoint.peft import restore_adapters
+from src.distributed.tensor_parallel.plain_params import register_hand_sliced
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 
 
@@ -57,11 +58,10 @@ class _TinyModel(nn.Module):
 class _HandSlicedModel(_TinyModel):
     """A GptOss-shaped TP model: one param sliced by hand (a per-rank head slice, no DTensor)."""
 
-    _tp_sharded_non_dtensor = [("sinks", 0)]
-
     def __init__(self):
         super().__init__()
         self.sinks = nn.Parameter(torch.zeros(2))
+        register_hand_sliced(self, "sinks", 0)
 
 
 def _ctx(

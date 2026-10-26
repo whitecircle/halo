@@ -11,7 +11,7 @@ Phase 3 — Multi-step training trajectory and final weight convergence
 
 Non-CP baseline runs each rank independently on the full sequence (no gradient
 sync needed since each rank has identical model + data). CP mode uses the
-UlyssesCPModelWrapper which splits sequences and coordinates via all-to-all.
+UlyssesModel which splits sequences and coordinates via all-to-all.
 
 After CP backward, gradients are all-reduced (AVG) to simulate FSDP NO_SHARD
 averaging. The CP loss scaling (cp_size * local_sum / global_tokens) ensures
@@ -38,8 +38,8 @@ import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.validation import validate_model_for_ulysses
-from src.distributed.context_parallel.wrapper import patch_model_for_cp
+from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from tests.common.distributed import world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
@@ -126,10 +126,12 @@ def test_loss_and_gradient_equivalence(device, cp_size):
 
     # No except-and-skip: a refusal on a supported CP family is the regression this file exists to
     # catch, and returning (True, True, {}) would delete the train-step comparison while exiting 0.
-    validate_model_for_ulysses(model_cp, cp_size=cp_size)
+    reject_unsupported_ulysses_model(model_cp, cp_size=cp_size)
 
-    cp_config = CPConfig(cp_size=cp_size, world_size=dist.get_world_size(), gpus_per_node=dist.get_world_size())
-    model_cp = patch_model_for_cp(model_cp, cp_config)
+    cp_config = CPConfig(
+        cp_size, stage_world_size=dist.get_world_size(), stage_base_rank=0, nvlink_domain_size=dist.get_world_size()
+    )
+    model_cp = UlyssesModel(model_cp, cp_config)
     model_cp.train()
     model_cp.zero_grad()
 
@@ -275,8 +277,10 @@ def test_training_equivalence(device, cp_size):
     # ── CP training ─────────────────────────────────────────────────────
     log(f"\n  [B] CP training (lr={LEARNING_RATE})...")
     model_cp = load_model(device)
-    cp_config = CPConfig(cp_size=cp_size, world_size=dist.get_world_size(), gpus_per_node=dist.get_world_size())
-    model_cp = patch_model_for_cp(model_cp, cp_config)
+    cp_config = CPConfig(
+        cp_size, stage_world_size=dist.get_world_size(), stage_base_rank=0, nvlink_domain_size=dist.get_world_size()
+    )
+    model_cp = UlyssesModel(model_cp, cp_config)
     model_cp.train()
     optimizer_cp = torch.optim.AdamW(model_cp.parameters(), lr=LEARNING_RATE)
 

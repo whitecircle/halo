@@ -50,7 +50,7 @@ Three consequences for a training config:
 
 ## CP wrapper
 
-`BailingMoeV2UlyssesAttention` (`src/distributed/context_parallel/layers/bailing.py`) wraps Ling 2.0's attention. The math is plain softmax GQA; what the wrapper carries is the family's spellings: a fused `query_key_value` projection split into Q/K/V, an output projection named `dense`, Q/K RMSNorm applied before a partial rotary, and a softmax scale the module never stores because its own forward computes it inline.
+`BailingMoeV2UlyssesAttention` (`src/distributed/context_parallel/families.py`) wraps Ling 2.0's attention. The math is plain softmax GQA; what the wrapper carries is the family's spellings: a fused `query_key_value` projection split into Q/K/V, an output projection named `dense`, Q/K RMSNorm applied before a partial rotary, and a softmax scale the module never stores because its own forward computes it inline.
 
 All three eager/sdpa/FA2 subclasses are claimed: they hold the same weights, and CP replaces the forward either way.
 
@@ -69,7 +69,7 @@ A flash label — pinned, or auto-selected for an unset one — raises `BailingM
 
 ## Why TP doesn't work
 
-No Bailing attention class is registered for TP (`TP_SHARDABLE_ATTENTION_CLASSES`, `src/distributed/tensor_parallel/module_types.py`), so TP does not patch Bailing attention. The gap is a missing DTensor plan, not an architectural blocker — the shipped model is standard softmax GQA.
+No Bailing attention class is registered for TP (`TP_SHARDABLE_ATTENTION_CLASSES`, `src/distributed/tensor_parallel/parallelize_attention.py`), so TP does not patch Bailing attention. The gap is a missing DTensor plan, not an architectural blocker — the shipped model is standard softmax GQA.
 
 ## ETP
 

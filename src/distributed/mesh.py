@@ -147,3 +147,12 @@ class ParallelDims:
         if self.device_mesh is not None and MeshDim.DP in self.mesh_dims:
             return self.device_mesh[MeshDim.DP].get_group()
         return None
+
+
+def model_tp_mesh(model) -> DeviceMesh | None:
+    """The TP mesh ``model`` was parallelized on, or ``None`` for a model with no mesh or a mesh without a ``tp``
+    dim, rather than :func:`get_tp_submesh`'s fallback to a DP-only mesh."""
+    device_mesh = getattr(model, "_device_mesh", None)
+    if device_mesh is None or not has_tp_dim(device_mesh):
+        return None
+    return get_tp_submesh(device_mesh)

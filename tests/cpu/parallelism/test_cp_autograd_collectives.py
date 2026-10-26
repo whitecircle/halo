@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""Ulysses' two collectives move real data — pin what they move, on CPU.
+"""Ulysses' all-to-all moves real data — pin what it moves, on CPU.
 
-Neither collective in ``src/distributed/context_parallel/autograd.py`` can run for real here: gloo
+The collective in ``src/distributed/context_parallel/all_to_all.py`` cannot run for real here: gloo
 implements no alltoall at all, and the CP GPU suites only ever compare an end-to-end loss, where a
 transposed head/sequence axis or a non-inverted backward is one contribution among many.
 
-So both are driven against a simulated world instead. ``_CollectiveWorld`` runs every rank's
+So it is driven against a simulated world instead. ``_CollectiveWorld`` runs every rank's
 computation TWICE — once recording what each rank contributes to a collective, once serving each
 rank from that record — which reproduces the real collective's semantics while assuming nothing
 about how the code under test splits its input. That is the point: the reference here is the
@@ -21,8 +21,6 @@ What these tests pin:
   Ulysses contract, not merely "some permutation".
 * Its backward is the INVERSE, so a head-sharded gradient comes back sequence-sharded. The
   sign-flip check below is what keeps that assertion from passing on an all-zero gradient.
-* ``gather_pos_embeddings`` reassembles the full sequence in RANK-MAJOR order and keeps cos and sin
-  on their own halves of the fused buffer.
 
 Run: pytest tests/cpu/parallelism/test_cp_autograd_collectives.py
 """
@@ -31,28 +29,23 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed.context_parallel.autograd import (
-    UlyssesAllToAll,
-    gather_pos_embeddings,
-    ulysses_all_to_all,
-    ulysses_all_to_all_fused_kv,
-)
+from src.distributed.context_parallel.all_to_all import UlyssesAllToAll, heads_to_sequence, sequence_to_heads
 
 CP_SIZES = (2, 4)
 BATCH = 2
 SEQ = 8
 HEADS = 4
 HEAD_DIM = 3
-GROUP = object()  # never dereferenced: both functions forward the group straight to the collective
+GROUP = object()  # never dereferenced: the functions forward the group straight to the collective
 
 
 class _CollectiveWorld:
     """A single-process stand-in for a ``cp_size``-rank group, for one collective at a time.
 
     A real all-to-all hands rank ``r``, for every peer ``i``, the chunk peer ``i`` placed at index
-    ``r``; a real all-gather concatenates every rank's buffer in rank order. Both need every rank's
-    contribution before any rank's output exists, which one process cannot produce in one pass — so
-    :meth:`run` makes two, recording contributions in the first and serving them in the second.
+    ``r``. That needs every rank's contribution before any rank's output exists, which one process
+    cannot produce in one pass — so :meth:`run` makes two, recording contributions in the first and
+    serving them in the second.
 
     Recording what the code under test actually passed (rather than re-deriving it) is what keeps
     this from re-implementing the narrow/cat it is meant to check.
@@ -68,7 +61,6 @@ class _CollectiveWorld:
     def install(self, monkeypatch) -> None:
         monkeypatch.setattr(dist, "get_world_size", lambda group=None: self.cp_size)
         monkeypatch.setattr(dist, "all_to_all", self._all_to_all)
-        monkeypatch.setattr(dist, "all_gather_into_tensor", self._all_gather_into_tensor)
 
     def _contribute(self, tensors: list[torch.Tensor]) -> list[list[torch.Tensor]] | None:
         """Record this rank's contribution, or return the whole world's for this call index."""
@@ -84,14 +76,6 @@ class _CollectiveWorld:
         if peers is not None:
             for peer, out in enumerate(output_list):
                 out.copy_(peers[peer][self.rank])
-        self._call += 1
-
-    def _all_gather_into_tensor(self, output, input, group=None):  # noqa: A002 — torch's parameter name
-        del group
-        peers = self._contribute([input])
-        if peers is not None:
-            # Rank-major, exactly as the real collective lays it out.
-            output.copy_(torch.cat([peers[peer][0] for peer in range(self.cp_size)]))
         self._call += 1
 
     def run(self, per_rank):
@@ -203,7 +187,7 @@ def test_the_backward_assertion_would_catch_a_corrupted_gradient(monkeypatch, cp
 def test_all_to_all_round_trips_back_to_the_sequence_shard(monkeypatch, cp_size):
     """Ulysses attention scatters in and gathers back out; the pair must be the identity.
 
-    ``ulysses_all_to_all_fused_kv`` scatters dim 2 and gathers dim 1; ``ulysses_all_to_all`` reverses it.
+    ``sequence_to_heads`` scatters dim 2 and gathers dim 1; ``heads_to_sequence`` reverses it.
     Any rank-ordering error that the two directions do not share survives the round trip.
     """
     world = _CollectiveWorld(cp_size)
@@ -219,75 +203,6 @@ def test_all_to_all_round_trips_back_to_the_sequence_shard(monkeypatch, cp_size)
 
 
 @pytest.mark.parametrize("cp_size", CP_SIZES)
-def test_gather_pos_embeddings_rebuilds_the_full_sequence_in_rank_order(monkeypatch, cp_size):
-    """cos/sin must come back as the unsharded originals, in rank-major sequence order.
-
-    The legacy CP path applies RoPE after the all-to-all, so each rank needs the position embeddings
-    for the WHOLE sequence. The function all-gathers a flat fused buffer and rebuilds the sequence
-    axis with a permute; without it the result is batch-interleaved — same shape, same values, wrong
-    positions, and RoPE then rotates every token to the wrong angle.
-    """
-    world = _CollectiveWorld(cp_size)
-    world.install(monkeypatch)
-    # Distinct ranges so a cos/sin mix-up in the fused split cannot pass as noise.
-    cos_full = torch.rand(BATCH, SEQ, HEAD_DIM)
-    sin_full = torch.rand(BATCH, SEQ, HEAD_DIM) + 10.0
-
-    outputs = world.run(
-        lambda rank: gather_pos_embeddings(
-            _seq_shard(cos_full, rank, cp_size), _seq_shard(sin_full, rank, cp_size), GROUP, cp_size
-        )
-    )
-
-    for rank, (cos, sin) in enumerate(outputs):
-        assert cos.shape == (BATCH, SEQ, HEAD_DIM), f"rank {rank} got {tuple(cos.shape)}"
-        torch.testing.assert_close(cos, cos_full, msg=f"rank {rank} rebuilt cos in the wrong order")
-        torch.testing.assert_close(sin, sin_full, msg=f"rank {rank} rebuilt sin in the wrong order")
-
-
-def test_gather_pos_embeddings_batch_interleaving_would_be_caught(monkeypatch):
-    """Mutation check for the permute, whose absence preserves both shape and value multiset.
-
-    Reassembling the flat all-gather WITHOUT the rank-major → sequence-major permute yields a tensor
-    of the right shape holding exactly the right numbers in the wrong positions. If the assertion
-    above could not separate those two, it would certify only the shape.
-    """
-    cp_size = 4
-    world = _CollectiveWorld(cp_size)
-    world.install(monkeypatch)
-    cos_full = torch.rand(BATCH, SEQ, HEAD_DIM)
-    sin_full = torch.rand(BATCH, SEQ, HEAD_DIM)
-
-    outputs = world.run(
-        lambda rank: gather_pos_embeddings(
-            _seq_shard(cos_full, rank, cp_size), _seq_shard(sin_full, rank, cp_size), GROUP, cp_size
-        )
-    )
-
-    chunk = SEQ // cp_size
-    # What dropping the permute produces: the flat buffer read as [batch, seq, dim] directly.
-    unpermuted = torch.cat([_seq_shard(cos_full, rank, cp_size).reshape(-1) for rank in range(cp_size)]).view(
-        BATCH, SEQ, HEAD_DIM
-    )
-    assert not torch.equal(unpermuted, cos_full), (
-        f"the {BATCH}x{chunk}x{HEAD_DIM} shard layout makes the permute a no-op here, so this "
-        f"fixture cannot detect its absence"
-    )
-    with pytest.raises(AssertionError):
-        torch.testing.assert_close(unpermuted, outputs[0][0])
-
-
-def test_gather_pos_embeddings_is_a_no_op_without_context_parallelism():
-    """``cp_size == 1`` must skip the collective entirely — no group is even constructed there."""
-    cos = torch.rand(BATCH, SEQ, HEAD_DIM)
-    sin = torch.rand(BATCH, SEQ, HEAD_DIM)
-
-    out_cos, out_sin = gather_pos_embeddings(cos, sin, GROUP, 1)
-
-    assert out_cos is cos and out_sin is sin
-
-
-@pytest.mark.parametrize("cp_size", CP_SIZES)
 def test_the_attention_wrappers_swap_into_heads_and_back(monkeypatch, cp_size):
     """What the CP attention forward calls: Q/K/V go sequence-sharded → head-sharded (K and V fused
     into one collective and split back exactly), and the attention output returns head-sharded →
@@ -296,9 +211,7 @@ def test_the_attention_wrappers_swap_into_heads_and_back(monkeypatch, cp_size):
     world.install(monkeypatch)
     q, k, v = (torch.randn(BATCH, SEQ, HEADS, HEAD_DIM) for _ in range(3))
 
-    swapped = world.run(
-        lambda rank: ulysses_all_to_all_fused_kv(*(_seq_shard(t, rank, cp_size) for t in (q, k, v)), GROUP)
-    )
+    swapped = world.run(lambda rank: sequence_to_heads(*(_seq_shard(t, rank, cp_size) for t in (q, k, v)), GROUP))
     for rank, outputs in enumerate(swapped):
         for name, full, out in zip("qkv", (q, k, v), outputs, strict=True):
             assert torch.equal(out, _head_shard(full, rank, cp_size)), (rank, name)
@@ -306,7 +219,7 @@ def test_the_attention_wrappers_swap_into_heads_and_back(monkeypatch, cp_size):
     # A fresh world: each one serves the call indices of a single program.
     world = _CollectiveWorld(cp_size)
     world.install(monkeypatch)
-    restored = world.run(lambda rank: ulysses_all_to_all(_head_shard(q, rank, cp_size), GROUP))
+    restored = world.run(lambda rank: heads_to_sequence(_head_shard(q, rank, cp_size), GROUP))
     for rank, out in enumerate(restored):
         assert torch.equal(out, _seq_shard(q, rank, cp_size)), rank
 

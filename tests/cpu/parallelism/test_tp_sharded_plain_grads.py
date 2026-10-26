@@ -2,8 +2,8 @@
 """CPU tests: params the TP plan sharded as PLAIN tensors must not be treated as replicas.
 
 GptOss attention sinks cannot be DTensors — the forward concatenates them with already-sharded
-logits — so ``apply_tp_to_attention_only`` slices them by hand and records the suffix on
-``model._tp_sharded_non_dtensor`` (the same registry the save path all-gathers). They therefore
+logits — so ``apply_tp_to_attention_only`` slices them by hand and registers the suffix with
+``register_hand_sliced`` (the same registry the save path all-gathers). They therefore
 reach the gradient path looking exactly like a replicated LayerNorm weight while each TP rank owns
 a DISJOINT head slice:
 
@@ -25,6 +25,7 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from src.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
+from src.distributed.tensor_parallel.plain_params import hand_sliced_dims, register_hand_sliced
 from src.trainers.mixins import grad_sync as grad_sync_module
 from src.trainers.mixins.base import DistributedTrainerMixin
 
@@ -54,7 +55,7 @@ class _Model(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList(_Layer(local_heads) for _ in range(n_layers))
         if register:
-            self._tp_sharded_non_dtensor = [(SINKS_SUFFIX, 0)]
+            register_hand_sliced(self, SINKS_SUFFIX, 0)
 
 
 def _trainer(model: nn.Module) -> SimpleNamespace:
@@ -153,7 +154,7 @@ def test_hand_sharded_sinks_register_under_the_attribute_they_actually_live_on(a
     for layer in model.layers:
         shard_sinks_param(model, getattr(layer, attn_name), attn_name, mesh)
 
-    assert model._tp_sharded_non_dtensor == [(f"{attn_name}.sinks", 0)]
+    assert hand_sliced_dims(model) == {f"{attn_name}.sinks": 0}
     sinks = [p for name, p in model.named_parameters() if name.endswith("sinks")]
     assert [p.shape[0] for p in sinks] == [2, 2], "sinks must be sliced to this rank's head range"
     assert _trainer(model)._tp_sharded_plain_param_ids() == {id(p) for p in sinks}

@@ -18,7 +18,7 @@ the very same mechanism, so this closes the remaining case.
 import pytest
 import torch
 
-from src.distributed.context_parallel.wrapper import _reject_left_padding
+from src.distributed.context_parallel.ulysses_model import _reject_left_padding
 
 
 def test_left_padding_in_any_row_raises():

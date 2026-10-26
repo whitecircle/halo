@@ -14,7 +14,7 @@ from PIL import Image
 
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import tokenize_dataset
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading import tokenizer_backend as tb
 from src.model_loading.tokenizer_backend import (
     TOKENIZER_BACKENDS,
@@ -171,12 +171,12 @@ def test_configure_run_tokenizer_resolves_backend():
     tokenizer = load_cached_tokenizer(MODEL_NAME)
     hf_args = PreprocessingArgsStub("hf")
     assert (
-        configure_run_tokenizer(hf_args, None, tokenizer, 512, embeddings_sharded=input_embeddings_tp_sharded)
+        configure_run_tokenizer(hf_args, None, tokenizer, 512, embeddings_sharded=is_input_embedding_tp_sharded)
         is tokenizer
     )
 
     proxy = configure_run_tokenizer(
-        PreprocessingArgsStub("gigatoken"), None, tokenizer, 512, embeddings_sharded=input_embeddings_tp_sharded
+        PreprocessingArgsStub("gigatoken"), None, tokenizer, 512, embeddings_sharded=is_input_embedding_tp_sharded
     )
     assert type(proxy) is GigatokenTokenizerProxy
     text = tokenizer.apply_chat_template(CONVERSATIONS[0], tokenize=False)

@@ -187,7 +187,7 @@ GRPO reach through `sync_trainer_weights`: EP experts via each layer's
 router / shared / dense params through `materialize_dtensor`, which returns each FSDP2-DP and
 TP-mesh shard full (both HF's `tp_plan` and the toolkit's attention-only TP place theirs as
 DTensors). The hand-sliced non-DTensor TP shards — GptOss sinks — are skipped there and drained
-gathered by `iter_tp_sharded_non_dtensor_full`; shipping this rank's slice under the full-tensor
+gathered by `iter_hand_sliced_full`; shipping this rank's slice under the full-tensor
 name would corrupt the served weights. **All ranks must enter
 the gather; only the global-main tp_rank-0 process sends.** PEFT adapters are
 folded into each base weight out of place and forwarded under base-model names. Multi-homed clusters:

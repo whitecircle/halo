@@ -20,13 +20,14 @@ from trl import GRPOTrainer
 from trl.extras.profiling import profiling_decorator
 from trl.models.utils import _ForwardRedirection
 
-from src.distributed.context_parallel.config import cp_shift_against_full_labels
-from src.distributed.context_parallel.wrapper import find_cp_wrapper
+from src.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
+from src.distributed.context_parallel.ulysses_model import find_ulysses_model
 from src.distributed.expert_parallel.deepep.capacity import bump_forward_generation
-from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
+from src.distributed.tensor_parallel.hf_plan import plan_shards_param
 from src.models.attention.selection import effective_attn_implementation
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from src.models.modality import config_declares_multimodality
+from src.models.module_tree import embedding_module, find_module_path
 from src.models.unwrapping import base_transformers_model
 from src.runtime.consensus import rank_consensus
 from src.runtime.dtensor import materialize_dtensor
@@ -341,12 +342,12 @@ def _tp_gathered_output_head(model) -> torch.nn.Module | None:
     attention alone and leaves the head whole, and FSDP2 makes the head's weight a DTensor in every
     mode, so neither the axis flag nor the parameter type separates a gathered head from a plain one.
     """
-    head = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
+    head = embedding_module(model, "output")
     plan = getattr(model, "_tp_plan", None)
     if head is None or not plan:
         return None
-    name = next((n for n, module in model.named_modules() if module is head), None)
-    return head if name is not None and tp_plan_shards_params(f"{name}.weight", plan) else None
+    name = find_module_path(model, head)
+    return head if name is not None and plan_shards_param(f"{name}.weight", plan) else None
 
 
 class _ChunkedSelectiveLogProbEntropyFunction(torch.autograd.Function):
@@ -493,9 +494,9 @@ class ChunkedLogprobsCore:
         mark supervised positions; log-probs at ignored positions have no training meaning.
         """
         unwrapped = self.accelerator.unwrap_model(model)
-        wrapper = find_cp_wrapper(unwrapped)
+        wrapper = find_ulysses_model(unwrapped)
         if wrapper is None:
-            raise TypeError("CP GRPO scoring requires a UlyssesCPModelWrapper")
+            raise TypeError("CP GRPO scoring requires a UlyssesModel")
         return self._chunked_forward_redirection(
             model,
             unwrapped,
@@ -511,12 +512,9 @@ class ChunkedLogprobsCore:
             raise ValueError("CP GRPO scoring needs labels aligned with the full input row")
 
         weight, bias, head_transform = self._scoring_head(unwrapped_model)
-
-        # One CP-divisible backbone forward per loss graph also keeps the legacy attention's
-        # full-position hooks stable through gradient-checkpoint recomputation.
         hidden = unwrapped_model.forward_hidden_states(input_ids=input_ids, attention_mask=attention_mask)
         shifted_hidden, shifted_labels = cp_shift_against_full_labels(
-            hidden, labels, unwrapped_model.cp_rank, unwrapped_model.cp_size
+            hidden, labels, unwrapped_model.cp_config.cp_rank, unwrapped_model.cp_config.cp_size
         )
         logps = chunked_selective_log_softmax(
             shifted_hidden, weight, shifted_labels, bias, self.temperature, head_transform

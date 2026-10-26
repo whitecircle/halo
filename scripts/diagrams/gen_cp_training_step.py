@@ -1,6 +1,6 @@
 """Generate the CP training-step figure for parallelism/context-parallelism.md.
 
-Top to bottom: `UlyssesCPModelWrapper` slices the batch into one contiguous sequence chunk per CP
+Top to bottom: `UlyssesModel` slices the batch into one contiguous sequence chunk per CP
 rank, every layer runs Ulysses attention over the full sequence and its MLP/MoE on the local chunk
 only, the logits stay sharded, and the loss is normalized over the CP group's all-reduced token
 count.

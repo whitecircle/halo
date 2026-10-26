@@ -1,22 +1,19 @@
 """CPU CP-wrapper fixtures without CUDA attention patching."""
 
-from types import SimpleNamespace
-
 from torch import nn
 
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.config import CPConfig
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 
 
-def unpatched_cp_wrapper(model, *, cp_size=1, cp_rank=0, cp_config=None, attention_layers=()):
-    """Exercise the production wrapper while supplying CPU-compatible attention or hidden states."""
-    config = (
-        cp_config if cp_config is not None else SimpleNamespace(cp_size=cp_size, cp_rank=cp_rank, process_group=None)
-    )
-    wrapper = UlyssesCPModelWrapper.__new__(UlyssesCPModelWrapper)
+def unpatched_cp_wrapper(model, *, cp_size=1, cp_rank=0, cp_config=None):
+    """A production :class:`UlyssesModel` over ``model`` with its attention left unpatched, so a CPU test can
+    supply its own attention or hidden states; without ``cp_config``, one placing this rank at ``cp_rank``."""
+    if cp_config is None:
+        cp_config = CPConfig.__new__(CPConfig)
+        cp_config.cp_size, cp_config.cp_rank, cp_config.process_group = cp_size, cp_rank, None
+    wrapper = UlyssesModel.__new__(UlyssesModel)
     nn.Module.__init__(wrapper)
     wrapper.model = model
-    wrapper.cp_config = config
-    wrapper.cp_size, wrapper.cp_rank = config.cp_size, config.cp_rank
-    wrapper.cp_group = config.process_group
-    wrapper._attention_layers = list(attention_layers)
+    wrapper.cp_config = cp_config
     return wrapper

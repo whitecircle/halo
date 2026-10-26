@@ -17,8 +17,8 @@ run. Paths are relative to the repo root; anything that executes runs **inside t
 | Expert-LoRA coverage | `src/models/moe/expert_lora_spec.py` (`LORA_PROJECTION_COVERAGE`) |
 | Non-persistent buffers | `src/model_loading/buffer_repair.py` — add a fixer to the `_NON_PERSISTENT_FIXERS` / `_ROTARY_FIXERS` chains; `finalize_loaded_model` is the seam every load path calls, and a buffer no fixer covers stays on meta and is rejected at device placement |
 | Liger coverage | `src/model_loading/liger/family_specs.py` (`LIGER_FAMILY_SPECS`) |
-| CP wrapper | `src/distributed/context_parallel/layers/<name>.py` |
-| Selective TP | `src/distributed/tensor_parallel/module_types.py` (`TP_SHARDABLE_ATTENTION_CLASSES`) |
+| CP wrapper | `src/distributed/context_parallel/families.py` |
+| Selective TP | `src/distributed/tensor_parallel/parallelize_attention.py` (`TP_SHARDABLE_ATTENTION_CLASSES`) |
 | Head transform (forward scales, caps or cuts logits around `lm_head`) | `src/models/head_transform.py` (`HeadTransformSpec`) + the family's tiny model in `tests/cpu/models/test_head_transform.py` |
 | Attention backend (auto-detection falls short) | the family's patch in `src/models/attention/selection.py`, gated on `model_type_matches` (`src/models/config_access.py`) in `resolve_attn_implementation` or `apply_family_patches` (`src/model_loading/model_preparation.py`) |
 | Vendoring | `src/models/<name>/` + a side-effect import in `src/model_loading/model_preparation.py` |

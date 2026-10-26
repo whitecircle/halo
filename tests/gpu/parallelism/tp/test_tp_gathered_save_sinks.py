@@ -3,7 +3,7 @@
 
 GptOss attention sinks cannot be DTensors (the forward concatenates them with already-sharded
 logits), so ``shard_sinks_param`` slices the parameter by hand into this rank's head range and
-records the suffix on ``model._tp_sharded_non_dtensor``. ``full_tensor()`` therefore never
+registers the suffix with ``register_hand_sliced``. ``full_tensor()`` therefore never
 reconstructs them, and ``_tp_chunks`` gives them a collective pass of their own AFTER the parameter
 walk — which is exactly why that walk must DROP them: it emits the LIVE parameter, this rank's
 ``[heads/tp]`` slice, and the streamed writer has flushed it long before the gathered full-width
@@ -41,7 +41,7 @@ import src.distributed.expert_parallel.layers.roster  # noqa: F401
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
 from src.distributed.checkpoint.tp_save import save_tp_model
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
-from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
+from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from tests.common.checkpoint_io import weight_files
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
@@ -195,7 +195,7 @@ def run(ctx) -> dict:
     checks = {
         "tp_sliced_the_sinks_by_hand": patched == NUM_LAYERS
         and {layer.self_attn.sinks.shape[0] for layer in model.model.layers} == {NUM_HEADS // TP_SIZE}
-        and tp_sharded_non_dtensor_suffixes(model) == ("self_attn.sinks",)
+        and hand_sliced_suffixes(model) == ("self_attn.sinks",)
     }
 
     ctx.barrier()  # rank 0's wipe of the shared scratch dir must land before the save writes into it

@@ -58,7 +58,7 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
 )
-from src.distributed.context_parallel.validation import UlyssesConfigError
+from src.distributed.context_parallel.config import CPConfigError
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
@@ -318,7 +318,7 @@ def run_merged_resume(
         try:
             make_trainer(base_dir, train_out, save=True)
             refusal = None
-        except UlyssesConfigError as exc:
+        except CPConfigError as exc:
             refusal = str(exc)
         log(f"  refusal: {(refusal or 'none')[:160]}")
         checks["ulysses_cp_refuses_the_family_on_every_rank"] = world_all(refusal is not None, ctx.device)

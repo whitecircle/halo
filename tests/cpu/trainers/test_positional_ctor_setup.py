@@ -20,7 +20,7 @@ import torch.nn as nn
 from accelerate import PartialState
 from transformers import PretrainedConfig
 
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
@@ -136,7 +136,7 @@ def test_a_subclass_with_its_own_signature_is_read_through_the_base_it_forwards_
     _assert_setup_applied(training_args)
 
 
-class _CPWrapper(UlyssesCPModelWrapper):
+class _CPWrapper(UlyssesModel):
     """The wrapper type without its attention patching, which needs a real attention stack."""
 
     def __init__(self):

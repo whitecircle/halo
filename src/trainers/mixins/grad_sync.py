@@ -23,7 +23,7 @@ from transformers.trainer_utils import IntervalStrategy
 from src.distributed.fsdp import fsdp2_modules, setup_fsdp2_for_tp
 from src.distributed.grad_reduce import agree_grad_presence, reduce_grads_bucketed
 from src.distributed.mesh import MeshDim, mesh_dim_names
-from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
+from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, per_head_norm_param_names
 from src.hardware import current_device
 from src.model_loading.dtype import has_packed_quantized_params
 from src.trainers.mixins.ep_introspection import require_ep_config
@@ -542,14 +542,15 @@ class GradientSyncMixin:
         """Ids of params TP sharded as plain tensors: disjoint slices that look like replicas.
 
         Every plan-driven TP shard is a DTensor whose grad reduces itself; the plain slices are the
-        hand-sliced params in ``model._tp_sharded_non_dtensor`` (GptOss sinks). Their grads must not
-        be TP-averaged, which would blend another rank's heads into every slice; their norms are
-        summed over the TP group instead of counted as replicated. Memoized.
+        hand-sliced params (GptOss sinks) that
+        :func:`~src.distributed.tensor_parallel.plain_params.hand_sliced_suffixes` names. Their grads
+        must not be TP-averaged, which would blend another rank's heads into every slice; their norms
+        are summed over the TP group instead of counted as replicated. Memoized.
         """
         cached = getattr(self, "_tp_sharded_plain_ids_cache", None)
         if cached is not None:
             return cached
-        suffixes = tp_sharded_non_dtensor_suffixes(self._top_level_model())
+        suffixes = hand_sliced_suffixes(self._top_level_model())
         ids = {
             id(param)
             for name, param in self._top_level_model().named_parameters()
@@ -570,7 +571,7 @@ class GradientSyncMixin:
         if cached is not None:
             return cached
         model = self._top_level_model()
-        names = set(getattr(model, "_tp_per_head_norm_params", None) or ())
+        names = set(per_head_norm_param_names(model))
         ids = {id(param) for name, param in model.named_parameters() if name in names}
         if names and not ids:
             raise RuntimeError(

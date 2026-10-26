@@ -2,7 +2,7 @@
 """The CP left-padding guard must run on EVERY forward — no batch certifies the ones after it.
 
 ``_reject_left_padding`` must not report "this batch settled the collator's padding side", because
-``UlyssesCPModelWrapper.forward`` would cache that verdict and stop checking. The premise of such a
+``UlyssesModel.forward`` would cache that verdict and stop checking. The premise of such a
 latch — that trailing pads prove a right-padding collator — is false for ``DataCollatorForSMPO``,
 the collator this guard exists for and the one its own error message names, which left-pads PROMPTS
 and right-pads COMPLETIONS. A batch whose prompts happen to be equal-length carries only trailing
@@ -11,7 +11,7 @@ lengths then carries leading pads, is never inspected, and runs dense causal att
 every real token attending the pads, with a loss silently different from the same batch without CP.
 
 Driven end-to-end through the REAL wrapper (a real Qwen3 patched by the real
-``patch_attention_for_ulysses`` on a real single-rank gloo group), because the defect lives in the
+``apply_ulysses_attention`` on a real single-rank gloo group), because the defect lives in the
 CALLER's caching, not in the predicate: a test that only calls ``_reject_left_padding`` directly
 passes either way.
 
@@ -27,8 +27,8 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, _reject_left_padding
+from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from src.distributed.context_parallel.ulysses_model import UlyssesModel, _reject_left_padding
 
 VOCAB = 64
 
@@ -58,7 +58,7 @@ class _LogitsOnly(torch.nn.Module):
 
 
 def _cp_wrapped_model():
-    """A real ``UlyssesCPModelWrapper`` over a tiny Qwen3, at cp_size=1 (no all-to-all needed)."""
+    """A real ``UlyssesModel`` over a tiny Qwen3, at cp_size=1 (no all-to-all needed)."""
     config = AutoConfig.for_model(
         "qwen3",
         vocab_size=VOCAB,
@@ -73,11 +73,11 @@ def _cp_wrapped_model():
     )
     torch.manual_seed(0)
     model = AutoModelForCausalLM.from_config(config, dtype=torch.float32)
-    # `validate_model_for_ulysses` requires a flash implementation, which transformers refuses to
+    # `reject_unsupported_ulysses_model` requires a flash implementation, which transformers refuses to
     # instantiate on a CPU host (and would fetch from the hub). Build the tree eager and declare
     # the implementation the validator reads: no attention kernel is ever called.
     model.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
-    wrapper = UlyssesCPModelWrapper(model, CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+    wrapper = UlyssesModel(model, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     wrapper.model = _LogitsOnly(config)
     return wrapper
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests for the CP wrapper's stale-dense-MLP state_dict filter.
 
-``UlyssesCPModelWrapper.state_dict`` drops stale duplicate dense-MLP keys on sparse (MoE) layers.
+``UlyssesModel.state_dict`` drops stale duplicate dense-MLP keys on sparse (MoE) layers.
 A filter that substring-matches a hardcoded projection list drops the REAL expert weights of an
 EP-wrapped GptOss layer under EP+CP (``mlp.gate_up_proj`` / ``mlp.down_proj`` /
 ``mlp.down_proj_bias`` — ".mlp.down_proj" is a substring of ".mlp.down_proj_bias"). The filter
@@ -18,7 +18,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, stale_dense_mlp_keys
+from src.distributed.context_parallel.ulysses_model import UlyssesModel, stale_dense_mlp_keys
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from tests.common.parallelism import single_process_ep_config
 
@@ -156,9 +156,9 @@ def _toy_model(ep_layer: nn.Module) -> nn.Module:
     return root
 
 
-def _bare_wrapper(model: nn.Module) -> UlyssesCPModelWrapper:
+def _bare_wrapper(model: nn.Module) -> UlyssesModel:
     """Wrapper instance without CP group/patching side effects — state_dict only needs .model."""
-    wrapper = UlyssesCPModelWrapper.__new__(UlyssesCPModelWrapper)
+    wrapper = UlyssesModel.__new__(UlyssesModel)
     nn.Module.__init__(wrapper)
     wrapper.model = model
     return wrapper

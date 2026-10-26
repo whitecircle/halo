@@ -35,7 +35,7 @@ The probe fails closed: an activation it cannot vouch for runs eager rather than
 
 ## CP wrapper
 
-`Glm4MoeLiteAttention` → `Glm4MoeLiteUlyssesAttention` (`src/distributed/context_parallel/layers/glm4.py`), which declares only its HF class name. Everything below lives on the shared `MLAUlyssesAttentionBase`, which runs the DeepSeek-V3 MLA geometry on the `[B, H, S, D]` path (`_optimize_attention = False`: flash-attn's optimized GQA path assumes plain per-head QKV of one head dim, which MLA's compressed projections and nope/rope split are not). Two MLA-specific bits:
+`Glm4MoeLiteAttention` → `Glm4MoeLiteUlyssesAttention` (`src/distributed/context_parallel/families.py`), which declares only its HF class name. Everything below lives on the shared `MLAUlyssesAttention`, which runs the DeepSeek-V3 MLA geometry on the one Ulysses path. Two MLA-specific bits:
 
 - **Head dims** — `kv_b_proj` expands the compressed KV into `qk_nope_head_dim + v_head_dim`. Where `v_head_dim` is narrower than `qk_head_dim` the base pads V for the flash kernel and crops the output back.
 

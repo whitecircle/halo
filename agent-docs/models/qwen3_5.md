@@ -69,7 +69,7 @@ Both classes drop the Hub checkpoints' `mtp.*` MTP head at load, so a run's expo
 
 ## CP wrapper
 
-`Qwen3_5MoeUlyssesAttention` (`src/distributed/context_parallel/layers/qwen3_5.py`) replaces `Qwen3_5MoeAttention` / `Qwen3_5Attention` and handles two quirks:
+`Qwen3_5MoeUlyssesAttention` (`src/distributed/context_parallel/families.py`) replaces `Qwen3_5MoeAttention` / `Qwen3_5Attention` and handles two quirks:
 
 - **Double-width `q_proj`** — the output is viewed as `[..., num_q_heads, head_dim * 2]` and chunked into query + gate. The query goes through Ulysses (q_norm + RoPE + all-to-all + flash-attn + all-to-all back), then `attn_output * sigmoid(gate)` before `o_proj`.
 
@@ -86,7 +86,7 @@ Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGat
 - **`causal_conv1d_fn`** kernel 4 — output `t` depends on `t..t-3`, so each rank's first 3 positions need the previous rank's last 3 input tokens. Without a halo exchange the kernel sees zero-padding.
 - **`chunk_gated_delta_rule`** is a recurrent scan — chunk `c+1` must start from chunk `c`'s final state, which a CP rank cannot recover.
 
-`validate_model_for_ulysses` rejects any model whose `layer_types` contains `"linear_attention"`. A halo-exchange wrapper could fix this (`fla` / `causal-conv1d` upstream have no CP-aware variants) but none ships. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
+`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. A halo-exchange wrapper could fix this (`fla` / `causal-conv1d` upstream have no CP-aware variants) but none ships. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
 
 ## TP and ETP
 

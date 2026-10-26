@@ -14,7 +14,7 @@ Phase 1: Forward loss equivalence (EP-only vs EP+CP)
 Phase 2: Attention backend comparison
   - When CP is active, flex_attention is auto-switched to a flash-family
     backend (Ulysses always uses flash_attn_func internally, resolved by
-    get_flash_attn_func). This phase verifies that all attn_implementation
+    _flash_attn_func). This phase verifies that all attn_implementation
     settings (explicit FA2, explicit flex_attention, auto-detect) resolve to a
     CP-valid flash backend and produce identical losses. The resolved label is
     platform-dependent — Hopper reports flash_attention_2/3, Blackwell reports
@@ -42,7 +42,7 @@ import torch
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
+from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
@@ -287,7 +287,7 @@ def test_attention_backends(device):
         f"{'PASS' if checks['resolved_flash_family'] else 'FAIL'}"
     )
 
-    # Under CP the kernel comes from get_flash_attn_func's arch probe, never from the label, and the
+    # Under CP the kernel comes from _flash_attn_func's arch probe, never from the label, and the
     # three loads hold the same weights, so the settings must reproduce each loss bit for bit.
     checks["fa2_vs_flex_identical"] = all(a == b for a, b in zip(losses_a, losses_b, strict=True))
     checks["flex_vs_auto_identical"] = all(b == c for b, c in zip(losses_b, losses_c, strict=True))

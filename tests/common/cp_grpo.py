@@ -5,9 +5,8 @@ from unittest.mock import patch
 import torch
 from torch.distributed.tensor import DTensor, distribute_tensor
 
-from src.distributed.context_parallel.config import cp_boundary_shift
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row, next_token_targets
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.grpo.objective.offline import offline_loss
 from tests.common.tolerances import TOL
@@ -150,12 +149,12 @@ def boundary_loss_negative_control(scorer, model, ids, mask, advantages, group_s
             cp_config=cp_config,
         )
 
-    def drop_boundary(hidden, local_labels, _boundary_label, _is_last_rank):
-        return cp_boundary_shift(hidden, local_labels, None, True)
+    def drop_boundary(labels, start, length):
+        return next_token_targets(labels[:, start : start + length], 0, length)
 
     with torch.no_grad():
         correct = score_loss()
-        with patch("src.distributed.context_parallel.config.cp_boundary_shift", side_effect=drop_boundary):
+        with patch("src.distributed.context_parallel.sequence_chunks.next_token_targets", side_effect=drop_boundary):
             broken = score_loss()
     correct_error = abs((correct - expected).item())
     broken_error = abs((broken - expected).item())

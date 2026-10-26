@@ -40,7 +40,6 @@ from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
 from src.checkpoint.writing import adapter_save_dtype_caster
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
 from src.distributed.expert_parallel.expert_weights import (
     apply_ep_lora_adapters,
     gather_ep_lora_adapters,
@@ -52,6 +51,7 @@ from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.models.param_roles import persistent_buffers
 from src.models.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
+    strip_cp_attention_level,
     strip_peft_adapter_segment,
     unwrap_framework_wrappers,
     unwrap_toolkit_wrappers,
@@ -332,7 +332,7 @@ class PeftAdapterSaver:
         drops the PEFT prefix entirely, while adapter keys must KEEP it and additionally carry the
         attention-wrapper artifact and the shallower ``modules_to_save`` lm_head depth handled below.
         """
-        new_key = strip_cp_attention_prefix(key)
+        new_key = strip_cp_attention_level(key)
         if new_key.startswith("model.model."):
             new_key = new_key[len("model.") :]
         elif "base_model.model.model.model." in new_key:

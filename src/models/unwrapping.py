@@ -6,11 +6,13 @@ import torch
 from accelerate.utils import extract_model_from_parallel, is_peft_model
 
 # The module level a ``PeftModel`` inserts above the base model, in live names and saved adapter
-# keys alike, and the one ``UlyssesCPModelWrapper`` inserts (its ``_toolkit_inner_model_attr``).
+# keys alike, and the one ``UlyssesModel`` inserts (its ``_toolkit_inner_model_attr``).
 # Shared by every consumer that maps such a path back to the hub tree; a second copy drifts into an
 # unresolvable key.
 PEFT_BASE_MODEL_PREFIX = "base_model.model."
 _CP_WRAPPER_MODULE_LEVEL = "model."
+# The attribute a Ulysses attention wrapper keeps the module it replaced under: a level the hub tree lacks.
+CP_ATTENTION_INNER_ATTR = "original_attention"
 
 
 def unwrap_framework_wrappers(model: torch.nn.Module) -> torch.nn.Module:
@@ -100,3 +102,11 @@ def strip_peft_adapter_segment(name: str) -> str:
     """
     name = name.replace(".modules_to_save.default.", ".").replace(".default.", ".")
     return name.removesuffix(".default")
+
+
+def strip_cp_attention_level(key: str) -> str:
+    """Map a key read off a Ulysses-patched tree back to the hub layout by dropping the
+    ``CP_ATTENTION_INNER_ATTR`` level. Every serializer reading a state dict out of such a tree (the CP and EP
+    gathered saves, the pipeline stage shard, PEFT adapters) must apply it, or ``from_pretrained`` leaves the
+    attention weights randomly initialized."""
+    return key.replace(f".{CP_ATTENTION_INNER_ATTR}.", ".")

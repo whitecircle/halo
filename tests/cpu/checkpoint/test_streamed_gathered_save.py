@@ -32,6 +32,7 @@ from src.distributed.checkpoint.write import (
     conversion_chunk_key,
     stream_gathered_checkpoint,
 )
+from src.distributed.tensor_parallel.plain_params import register_hand_sliced
 from tests.common.checkpoint_io import weight_files
 
 SHARD_SIZE = "64KB"
@@ -149,7 +150,7 @@ def test_a_tp_hand_sliced_param_is_written_once_at_its_gathered_width(tmp_path, 
     model = _tiny_moe()
     attention = model.model.layers[0].self_attn
     attention.sinks = torch.nn.Parameter(torch.zeros(2))  # this rank's slice of 4 heads
-    model._tp_sharded_non_dtensor = [("self_attn.sinks", 0)]
+    register_hand_sliced(model, "self_attn.sinks", 0)
     key = "model.layers.0.self_attn.sinks"
 
     def _gathered(_model, state_dict, retain=True, keep_live_dtype=False):
@@ -157,7 +158,7 @@ def test_a_tp_hand_sliced_param_is_written_once_at_its_gathered_width(tmp_path, 
         if retain:
             state_dict[key] = torch.ones(4)
 
-    monkeypatch.setattr(tp_checkpoint_mod, "gather_tp_sharded_non_dtensor_params", _gathered)
+    monkeypatch.setattr(tp_checkpoint_mod, "gather_hand_sliced_params", _gathered)
 
     save_tp_model(model, str(tmp_path))
 

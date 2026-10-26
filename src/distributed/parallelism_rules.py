@@ -79,7 +79,7 @@ AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
         "at tensor_parallel_size == context_parallel_size a rank's TP partners ARE its CP partners, "
         "required to hold the same tokens (TP) and different sequence chunks (CP) at once. Ulysses "
         "also redistributes attention over HEADS, of which TP has already left this rank only "
-        "num_attention_heads / tensor_parallel_size, while validate_model_for_ulysses checks "
+        "num_attention_heads / tensor_parallel_size, while reject_unsupported_ulysses_model checks "
         "divisibility against the config's full head count; and data_parallel_size takes "
         "max(tensor_parallel_size, context_parallel_size), which counts one of the two axes only. Use "
         "EP+TP or EP+CP."

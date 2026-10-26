@@ -20,7 +20,7 @@ from transformers import TrainerCallback
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPOCPDataCollatorWithPadding
-from src.distributed.context_parallel.base_layer import get_flash_attn_func
+from src.distributed.context_parallel.ulysses_attention import _flash_attn_func
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
@@ -218,7 +218,7 @@ def run(ctx):
     if ctx.rank == 0:
         save_offline_moe_base(base, SEED)
     dist.barrier()
-    cp_kernel = get_flash_attn_func()
+    cp_kernel = _flash_attn_func()
     log(f"EP8 CP kernel: {cp_kernel.__module__}.{cp_kernel.__name__}; oracle: full-row FA2")
     train, evaluation = _dataset(16), _dataset(8, 3)
     checks = {}

@@ -28,8 +28,8 @@ from transformers.models.laguna.configuration_laguna import LagunaConfig
 from transformers.models.laguna.modeling_laguna import LagunaForCausalLM
 
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
@@ -234,7 +234,7 @@ def test_cp_wrapper_resolves_and_routes_through_its_inner_model(tmp_path):
         inner = _build("qwen3_moe", balanced=False)
         # The Ulysses validator reads a flash label; no attention kernel runs here.
         inner.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
-        wrapper = UlyssesCPModelWrapper(inner, CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+        wrapper = UlyssesModel(inner, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
         assert resolve_balancing_mode("auto", wrapper, is_moe=True) == "aux_loss"
         apply_balancing_strategy(wrapper, "aux_loss", is_moe=True)
         assert getattr(inner.model, moe_aux_loss._INSTALLED_ATTR, None) is not None

@@ -27,7 +27,7 @@ import torch.distributed as dist
 from transformers import AutoModelForImageTextToText
 
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, patch_model_for_cp
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.mesh import create_dp_tp_mesh
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from tests.common.distributed import ensure_model_downloaded, world_mean, world_spread
@@ -207,19 +207,20 @@ def test_cp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_
 
     log(f"\n  Creating CP config (cp_size={CP_SIZE})...")
     cp_config = CPConfig(
-        cp_size=CP_SIZE,
-        world_size=dist.get_world_size(),
-        gpus_per_node=dist.get_world_size(),  # Single-node test
+        CP_SIZE,
+        stage_world_size=dist.get_world_size(),
+        stage_base_rank=0,
+        nvlink_domain_size=dist.get_world_size(),  # Single-node test
     )
     log(f"    cp_rank={cp_config.cp_rank}, cp_group_idx={cp_config.cp_group_idx}")
 
     log("\n  Applying CP patching (Ulysses attention)...")
-    cp_model = patch_model_for_cp(model, cp_config)
+    cp_model = UlyssesModel(model, cp_config)
     log(f"  Wrapper type: {type(cp_model).__name__}")
 
-    is_wrapped = isinstance(cp_model, UlyssesCPModelWrapper)
+    is_wrapped = isinstance(cp_model, UlyssesModel)
     checks["cp_wrapped"] = is_wrapped
-    log(f"  Model wrapped as UlyssesCPModelWrapper: {'PASS' if is_wrapped else 'FAIL'}")
+    log(f"  Model wrapped as UlyssesModel: {'PASS' if is_wrapped else 'FAIL'}")
 
     log("\n  Running CP forward pass (text-only)...")
     cp_model.eval()

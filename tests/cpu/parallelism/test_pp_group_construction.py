@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""Pipeline chain/stage groups, and EP/CP process-group construction under PP (rank_offset threading).
+"""Pipeline chain/stage groups, and EP/CP process-group construction under PP (stage base-rank threading).
 
 PP splits the world into ``pp_size`` contiguous blocks of ``stage_world_size``; ``EPConfig`` /
-``CPConfig`` receive ONE block's width plus its base global rank (``rank_offset``) and must
+``CPConfig`` receive ONE block's width plus its base global rank (``stage_base_rank``) and must
 
   * do all coordinate math in block-local rank space (subtract the offset), and
   * emit GLOBAL rank lists to ``dist.new_group`` (add the offset back), and
@@ -28,21 +28,10 @@ from src.distributed.pipeline_parallel.groups import build_pipeline_group, build
 from tests.common.parallelism import make_parallelism_config, stubbed_process_groups
 
 
-def _make_config(cls, rank: int, *, world_size: int, stage_world_size: int, **kwargs):
-    """Build the REAL ``cls`` for ``rank`` of a ``world_size`` job split into stage-wide blocks.
-
-    Returns ``(config, calls)`` where ``calls`` is the ordered ``new_group`` rank-list sequence this
-    rank would issue.
-    """
-    calls: list = []
-    rank_offset = (rank // stage_world_size) * stage_world_size
-    with stubbed_process_groups(world_size, rank, calls):
-        return cls(world_size=stage_world_size, rank_offset=rank_offset, **kwargs), calls
-
-
 def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs):
     """Build the REAL ``EPConfig`` for ``rank`` of a ``world_size`` job split into stage-wide blocks, its
-    distributed experts outside FSDP2. Returns ``(config, calls)`` as :func:`_make_config` does."""
+    distributed experts outside FSDP2. Returns ``(config, calls)``, ``calls`` being the ordered ``new_group``
+    rank lists this rank issued."""
     calls: list = []
     stage_base_rank = (rank // stage_world_size) * stage_world_size
     with stubbed_process_groups(world_size, rank, calls):
@@ -58,6 +47,20 @@ def _ep_over_world(*, world_size: int, stage_world_size: int, **kwargs):
         rank: _make_ep(rank, world_size=world_size, stage_world_size=stage_world_size, **kwargs)
         for rank in range(world_size)
     }
+
+
+def _cp_config(rank: int, *, world_size: int, stage_world_size: int, cp_size: int):
+    """The REAL ``CPConfig`` of ``rank`` in a ``world_size`` job of 8-GPU domains split into stage-wide blocks,
+    and the ordered ``new_group`` rank lists it issued."""
+    calls: list = []
+    with stubbed_process_groups(world_size, rank, calls):
+        config = CPConfig(
+            cp_size,
+            stage_world_size=stage_world_size,
+            stage_base_rank=(rank // stage_world_size) * stage_world_size,
+            nvlink_domain_size=8,
+        )
+    return config, calls
 
 
 def _assert_partitions_world(groups: set, world_size: int, stage_world_size: int):
@@ -307,9 +310,9 @@ def test_pp1_cp_construction_is_unchanged():
     """Same no-op guarantee for CP: default offset reproduces the pre-PP group list."""
     calls: list = []
     with stubbed_process_groups(8, 5, calls):
-        cfg = CPConfig(cp_size=2, world_size=8, gpus_per_node=8)
+        cfg = CPConfig(2, stage_world_size=8, stage_base_rank=0, nvlink_domain_size=8)
 
-    assert cfg.rank_offset == 0
+    assert cfg.stage_base_rank == 0
     assert calls == [(0, 1), (2, 3), (4, 5), (6, 7)], calls
     assert cfg._cp_group_ranks == [4, 5]
     assert (cfg.cp_rank, cfg.cp_group_idx) == (1, 2)
@@ -325,17 +328,7 @@ def test_cp_groups_under_pp():
     drives ``CPConfig`` directly — the rank math must already be right when that gate lifts.
     """
     for cp_size, groups_per_stage in ((2, 4), (4, 2), (8, 1)):
-        built = {
-            rank: _make_config(
-                CPConfig,
-                rank,
-                world_size=16,
-                stage_world_size=8,
-                cp_size=cp_size,
-                gpus_per_node=8,
-            )
-            for rank in range(16)
-        }
+        built = {rank: _cp_config(rank, world_size=16, stage_world_size=8, cp_size=cp_size) for rank in range(16)}
         for rank, (cfg, _) in built.items():
             assert cfg.process_group is not None, (cp_size, rank)
             assert rank in cfg._cp_group_ranks, (cp_size, rank, cfg._cp_group_ranks)

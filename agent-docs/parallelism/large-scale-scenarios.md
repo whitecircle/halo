@@ -204,7 +204,7 @@ NVLink.
 | 8 | `ep32` global × 2 replicas | 32 | 64 | 97 | 28 | 129 | 143 | 45 | ✓ narrower EP group |
 | 8 | `ep16` global × 4 replicas | 16 | 64 | 193 | 31 | 228 | 242 | 69 | ⚠ |
 | any | plain FSDP2 · pure TP · pure ETP · pure CP | — | — | — | — | — | — | **794** | ✗ no shard-aware load |
-| any | any EP + CP | — | — | — | — | — | — | — | ✗ `validate_model_for_ulysses` |
+| any | any EP + CP | — | — | — | — | — | — | — | ✗ `reject_unsupported_ulysses_model` |
 
 **One node cannot train this model, in any shape.** Routed experts are only ever divided by `X`,
 which on 8 GPUs is at most 8, so every legal single-node shape puts the same 386 GB of expert state
@@ -233,8 +233,8 @@ and warns which ones it left replicated.
 What TP does do is divide `data_parallel_size`, which divides `F`, so it *raises* the non-expert
 term.
 
-**CP is rejected outright.** `validate_model_for_ulysses`
-(`src/distributed/context_parallel/validation.py`) raises on `Qwen3_5MoeGatedDeltaNet` and, on a meta
+**CP is rejected outright.** `reject_unsupported_ulysses_model`
+(`src/distributed/context_parallel/model_rules.py`) raises on `Qwen3_5MoeGatedDeltaNet` and, on a meta
 shell, on any `linear_attention` entry in `layer_types`: `causal_conv1d_fn` needs a cross-rank halo
 and `chunk_gated_delta_rule` is a recurrent scan. Long context comes from the activation headroom at
 4–8 nodes, not from CP.
@@ -404,7 +404,7 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 - `512 % ep_size == 0`, `expert_tp_size | moe_intermediate_size`, TP head divisibility and the
   declared tokens/rank budget are checked off `config.json` before any weight is read
   (`reject_unsupported_model`, at the top of `load_distributed_model`, after
-  the checkpoint download). `validate_model_for_ulysses` fires only once the model is built.
+  the checkpoint download). `reject_unsupported_ulysses_model` fires only once the model is built.
 - Scratch: a single checkpoint is ~800 GB with `save_only_model: true` (as shipped), ~2.4 TB with
   optimizer shards (AdamWBF16 adds 4 B/param).
 

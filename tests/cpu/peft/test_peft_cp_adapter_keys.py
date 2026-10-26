@@ -2,7 +2,7 @@
 """CP+LoRA adapter keys over a REAL CP-wrapped PeftModel: spelling, normalization, resume remap.
 
 PEFT wraps OUTSIDE the CP wrapper, so every adapter key flows through
-``UlyssesCPModelWrapper.state_dict()`` in a NESTED position: ``nn.Module.state_dict`` recursion
+``UlyssesModel.state_dict()`` in a NESTED position: ``nn.Module.state_dict`` recursion
 passes ``destination``/``prefix`` into the override. The trap this pins: an override that forwards
 them to the inner model writes raw keys at the wrapper's own prefix — collapsing the wrapper's
 ``model.`` level and discarding the cleaned dict it built — so from the PeftModel root
@@ -29,8 +29,8 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from src.distributed.checkpoint.peft import PeftAdapterSaver, remap_cp_adapter_keys_to_live
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.models.param_roles import persistent_buffers
 
 _LORA_KWARGS = {"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], "bias": "none"}
@@ -58,13 +58,13 @@ def _tiny_qwen3():
 
 
 def _cp_peft_model() -> PeftModel:
-    """``PeftModel(LoraModel(UlyssesCPModelWrapper(Qwen3)))`` — the runtime order (PEFT outside CP).
+    """``PeftModel(LoraModel(UlyssesModel(Qwen3)))`` — the runtime order (PEFT outside CP).
 
     ``cp_size=1`` still patches every attention layer (the patch walk is size-independent), so the
     live keys carry the real ``.original_attention.`` and wrapper ``model.`` artifacts without
     needing a process group.
     """
-    wrapper = UlyssesCPModelWrapper(_tiny_qwen3(), CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+    wrapper = UlyssesModel(_tiny_qwen3(), CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     return get_peft_model(wrapper, LoraConfig(**_LORA_KWARGS))
 
 
@@ -179,7 +179,7 @@ def test_resume_remap_covers_modules_to_save_buffers():
     silently resumes at init."""
     model = _tiny_qwen3()
     model.lm_head.register_buffer("balancing_bias", torch.zeros(model.config.vocab_size))
-    wrapper = UlyssesCPModelWrapper(model, CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+    wrapper = UlyssesModel(model, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     peft_model = get_peft_model(wrapper, LoraConfig(modules_to_save=["lm_head"], **_LORA_KWARGS))
 
     saved = PeftAdapterSaver._normalize_cp_adapter_keys(get_peft_model_state_dict(peft_model))
@@ -202,7 +202,7 @@ def test_resume_remap_covers_embedding_adapters():
     by replacing ``".default."`` alone never strips that spelling, so the saved key matches nothing,
     passes through in portable spelling, and the loader drops it — the embedding adapter silently
     resumes at initialization on every CP+LoRA-on-embeddings run."""
-    wrapper = UlyssesCPModelWrapper(_tiny_qwen3(), CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+    wrapper = UlyssesModel(_tiny_qwen3(), CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     peft_model = get_peft_model(wrapper, LoraConfig(**{**_LORA_KWARGS, "target_modules": ["embed_tokens"]}))
     live_embedding = {
         name for name, _ in peft_model.named_parameters() if "lora_embedding_" in name and name.endswith(".default")

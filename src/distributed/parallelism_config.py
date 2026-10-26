@@ -436,10 +436,10 @@ class ParallelismConfig:
         """Create (and cache) the CPConfig that builds the CP process groups."""
         if self._cp_config is None:
             self._cp_config = CPConfig(
-                cp_size=self.cp_size,
-                world_size=self.stage_world_size,
-                rank_offset=self.stage_base_rank,
-                gpus_per_node=self.nvlink_domain_size,
+                self.cp_size,
+                stage_world_size=self.stage_world_size,
+                stage_base_rank=self.stage_base_rank,
+                nvlink_domain_size=self.nvlink_domain_size,
             )
         return self._cp_config
 

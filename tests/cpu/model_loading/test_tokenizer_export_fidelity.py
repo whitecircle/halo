@@ -34,7 +34,7 @@ from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
 from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading.tokenizer_setup import configure_run_tokenizer, pristine_model_max_length
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.distributed import fake_process_group_mesh
@@ -77,7 +77,7 @@ def _saved_config(tokenizer, tmp_path) -> dict:
 
 def test_the_export_carries_the_tokenizers_own_bound(tmp_path):
     tokenizer = configure_run_tokenizer(
-        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
     )
     with pristine_model_max_length(tokenizer):
         assert _saved_config(tokenizer, tmp_path)["model_max_length"] == MODEL_CONTEXT
@@ -89,10 +89,10 @@ def test_a_second_pin_does_not_overwrite_the_snapshot(tmp_path):
     second pass must not record the first pass's budget as the tokenizer's own bound."""
     tokenizer = _tokenizer()
     configure_run_tokenizer(
-        CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+        CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
     )
     configure_run_tokenizer(
-        CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+        CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
     )
     with pristine_model_max_length(tokenizer):
         assert _saved_config(tokenizer, tmp_path)["model_max_length"] == MODEL_CONTEXT
@@ -102,7 +102,7 @@ def test_a_processor_reaches_its_nested_tokenizer():
     """A VLM run hands the trainer the processor, whose save delegates to the tokenizer the seam
     pinned — so the restore has to reach through it."""
     tokenizer = configure_run_tokenizer(
-        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
     )
     processor = types.SimpleNamespace(tokenizer=tokenizer)
     with pristine_model_max_length(processor):
@@ -172,7 +172,7 @@ def test_a_trainer_save_exports_the_models_own_bound(tmp_path):
     run ships, which a check that ``save_model``'s source mentions the context manager cannot make —
     it holds just as well when the manager is applied to the wrong object or after the write."""
     tokenizer = configure_run_tokenizer(
-        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
+        CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=is_input_embedding_tp_sharded
     )
     # Premise: there IS a pin to keep off disk, so the assertion below is not the tokenizer's default.
     assert tokenizer.model_max_length == RUN_BUDGET
@@ -194,7 +194,7 @@ def test_added_special_tokens_keep_the_checkpoints_own(tmp_path):
         None,
         _tokenizer(),
         RUN_BUDGET,
-        embeddings_sharded=input_embeddings_tp_sharded,
+        embeddings_sharded=is_input_embedding_tp_sharded,
     )
     assert tokenizer.extra_special_tokens == [*CONTROL_TOKENS, "<newtok>"]
     for control in CONTROL_TOKENS:
@@ -211,7 +211,7 @@ def test_re_adding_an_existing_special_token_does_not_duplicate_it():
         None,
         _tokenizer(),
         RUN_BUDGET,
-        embeddings_sharded=input_embeddings_tp_sharded,
+        embeddings_sharded=is_input_embedding_tp_sharded,
     )
     assert tokenizer.extra_special_tokens == CONTROL_TOKENS
 
@@ -236,7 +236,7 @@ def test_growing_the_vocabulary_under_tp_is_refused():
                 model,
                 tokenizer,
                 RUN_BUDGET,
-                embeddings_sharded=input_embeddings_tp_sharded,
+                embeddings_sharded=is_input_embedding_tp_sharded,
             )
 
 

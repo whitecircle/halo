@@ -18,7 +18,7 @@ import pytest
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers every EP family)
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
+from src.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 from tests.common import ep_determinism
 from tests.common.lora_sync_exactness import REPRESENTATIVE_FAMILIES, parse_row, row_families, syncable_moe_families
 from tests.common.merged_resume_e2e import ADAPTER_MODES, LAYOUTS, merged_resume_parser

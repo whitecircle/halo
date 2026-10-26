@@ -153,7 +153,7 @@ def run_mode(
     dist.broadcast(ids, src=0)
     dist.broadcast(labels, src=0)
 
-    # ``UlyssesCPModelWrapper.forward`` shards the inputs along the seq axis,
+    # ``UlyssesModel.forward`` shards the inputs along the seq axis,
     # so pass the FULL sequence. For all other modes the model gets the full
     # sequence too — the only difference is that EP/TP do not require slicing.
     model.train()

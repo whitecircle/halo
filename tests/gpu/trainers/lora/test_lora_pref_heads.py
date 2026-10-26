@@ -34,7 +34,7 @@ from src.configs.classification import ClassificationConfig
 from src.configs.preference import SmoothMarginPOConfig
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading.tokenizer_setup import configure_run_tokenizer
 from src.runtime.collectives import barrier
 from src.trainers.preference.dpo import DistributedDPOTrainer
@@ -269,7 +269,7 @@ def run(ctx) -> dict:
     # never a hand-written config.pad_token_id: the two seq-cls heads pool against that id, so
     # recording it here by hand would keep this test green through a regression in the sync.
     tokenizer = configure_run_tokenizer(
-        CommonScriptArguments(), model, tokenizer, MAXLEN, embeddings_sharded=input_embeddings_tp_sharded
+        CommonScriptArguments(), model, tokenizer, MAXLEN, embeddings_sharded=is_input_embedding_tp_sharded
     )
 
     parallelism_config = ParallelismConfig()

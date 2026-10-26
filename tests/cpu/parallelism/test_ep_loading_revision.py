@@ -126,7 +126,7 @@ def test_load_ep_cp_model_threads_revision():
     )
     with (
         patch(f"{_CP_LOADING}.load_ep_model", fake_load_ep_model),
-        patch(f"{_CP_LOADING}.patch_model_for_cp", side_effect=lambda model, cp_config: model),
+        patch(f"{_CP_LOADING}.UlyssesModel", side_effect=lambda model, cp_config: model),
     ):
         load_ep_cp_model(
             _SOURCE,

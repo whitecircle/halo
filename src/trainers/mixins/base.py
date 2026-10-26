@@ -25,8 +25,7 @@ from trl.trainer.utils import disable_dropout_in_model
 from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from src.distributed.checkpoint.ep_save import validate_ep_sharded_save
 from src.distributed.checkpoint.peft import find_peft_model
-from src.distributed.context_parallel.validation import validate_trainer_args_for_cp
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, find_cp_wrapper
+from src.distributed.context_parallel.ulysses_model import UlyssesModel, find_ulysses_model
 from src.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
@@ -83,6 +82,7 @@ from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
 from src.trainers.mixins.validation import ParallelismValidationMixin, ctor_model_and_config, disable_trl_liger
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
+from src.trainers.parallelism.trainer_rules import reject_cp_trainer_args
 
 register_custom_optimizers()
 
@@ -940,31 +940,27 @@ class DistributedTrainerMixin(
             )
 
     def _configure_cp_wrapper(self):
-        """Set the CPConfig on the already-loaded CP wrapper and validate it is wrapped
-        (CP model wrapping happens during model loading), plus the trainer settings whose loss or
-        metric path would pair this rank's sequence chunk with full-length labels."""
-        validate_trainer_args_for_cp(
+        """Adopt the CPConfig of the CP wrapper the loader installed, after refusing the trainer settings
+        whose loss or metric path would pair this rank's sequence chunk with full-length labels."""
+        reject_cp_trainer_args(
             self.args,
             compute_metrics=getattr(self, "compute_metrics", None),
             preprocess_logits_for_metrics=getattr(self, "preprocess_logits_for_metrics", None),
         )
-        self.cp_config = self.parallelism_config.cp_config()
-
         cp_wrapper = self._find_cp_wrapper()
         if cp_wrapper is None:
             raise ValueError(
-                f"CP mode requires model to be wrapped with UlyssesCPModelWrapper "
+                f"CP mode requires model to be wrapped with UlyssesModel "
                 f"during loading (via load_cp_model / load_ep_cp_model / "
                 f"load_distributed_model). Got: {type(self.model).__name__}"
             )
-
-        cp_wrapper.cp_config = self.cp_config
+        self.cp_config = cp_wrapper.cp_config
 
         logger.info("✓ CP configured (NVLink-domain-local)")
 
-    def _find_cp_wrapper(self) -> UlyssesCPModelWrapper | None:
+    def _find_cp_wrapper(self) -> UlyssesModel | None:
         """Find the CP wrapper in the model hierarchy, beneath any ``torch.compile`` wrapper."""
-        return find_cp_wrapper(self._top_level_model())
+        return find_ulysses_model(self._top_level_model())
 
     def _fsdp_exclusions(self) -> FsdpExclusions:
         """The parameters every FSDP2 wrap leaves out (see :class:`FsdpExclusions`).

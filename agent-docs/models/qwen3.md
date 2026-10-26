@@ -51,7 +51,7 @@ The per-method canonical examples (DPO, SMPO, KTO, reward, classification, disti
 
 The architecture has no bias slot (the gate is a bare weight), so the bias is trainer-only: `moe_balancing: bias_update` **raises** and the explicit `bias_update_transient` is the opt-in, with exported checkpoints serving without the trained bias. `auto` stays on `aux_loss`, since `Qwen3MoeForCausalLM.forward` declares `output_router_logits` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)).
 
-**CP** — `Qwen3MoeAttention` → `Qwen3MoeUlyssesAttention` (`src/distributed/context_parallel/layers/qwen3.py`), RoPE before all-to-all and native GQA.
+**CP** — `Qwen3MoeAttention` → `Qwen3MoeUlyssesAttention` (`src/distributed/context_parallel/families.py`), RoPE before all-to-all and native GQA.
 
 **TP and ETP** — selective attention-only TP (`q/k/v_proj` ColwiseParallel, `o_proj` RowwiseParallel); embeddings and `lm_head` stay replicated, expert layers belong to EP. ETP shards `gate_proj` / `up_proj` / `down_proj` along the intermediate dim; because Qwen3 already stores gate and up separately, the same compute path runs under both ETP and non-ETP with a smaller `M`.
 
@@ -61,7 +61,7 @@ The architecture has no bias slot (the gate is a bare weight), so the bias is tr
 
 ## Qwen3-VL
 
-`Qwen3VLTextAttention` reuses `Qwen3MoeUlyssesAttention` for CP and is in the selective-TP accept-list (`src/distributed/tensor_parallel/module_types.py`). That accept-list governs the attention-only DTensor path, which the loader takes for MoE and EP+TP shapes.
+`Qwen3VLTextAttention` reuses `Qwen3MoeUlyssesAttention` for CP and is in the selective-TP accept-list (`src/distributed/tensor_parallel/parallelize_attention.py`). That accept-list governs the attention-only DTensor path, which the loader takes for MoE and EP+TP shapes.
 
 A **dense** Qwen3-VL goes through HF-native `tp_plan="auto"` instead, and the architecture ships no `base_model_tp_plan` — the plan is empty, nothing shards, and the load **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. Use plain FSDP2 for dense VLM runs; CP covers only text-only rows, since the CP wrapper refuses `pixel_values`. The MoE variants get no EP: no wrapper claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither the CP nor the selective-TP registry.
 

@@ -15,8 +15,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.distributed.context_parallel.base_layer import get_flash_attn_func
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.ulysses_attention import _flash_attn_func
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
@@ -76,7 +76,7 @@ def _build_model(device, cp_size):
     patch_moe_model_for_ep(model, pc.ep_config())
     cp_config = pc.cp_config() if cp_size > 1 else None
     if cp_size > 1:
-        model = UlyssesCPModelWrapper(model, cp_config)
+        model = UlyssesModel(model, cp_config)
     model.train()
     ep_layers = [layer for layer in model.modules() if isinstance(layer, EPMoELayerBase)]
     assert len(ep_layers) == CONFIG["num_hidden_layers"]
@@ -120,7 +120,7 @@ def _destroy_ep(ep_layers):
 
 
 def run(ctx) -> dict:
-    cp_kernel = get_flash_attn_func()
+    cp_kernel = _flash_attn_func()
     log(f"CP attention kernel: {cp_kernel.__module__}.{cp_kernel.__name__}; CP1 oracle: flash_attention_2")
     ids, mask, labels, advantages, group_sizes = _batch(ctx.device)
     for tensor in (ids, mask, labels, advantages, group_sizes):

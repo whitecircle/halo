@@ -352,8 +352,8 @@ only after `reattach_vision_tower.py` ([Qwen3.5/3.6](../models/qwen3_5.md)).
 classes: EP expert weights, gathered by `gather_ep_layer_weights()` with local → global expert
 re-indexing; DTensor params (EP+TP attention, embeddings, `lm_head`, and FSDP2-sharded params such as
 the router under ep1 sharding), resolved via `full_tensor()`; and manually TP-sharded plain tensors
-(GptOss `sinks`, sliced plain because forward needs local shapes), all-gathered from
-`model._tp_sharded_non_dtensor`.
+(GptOss `sinks`, sliced plain because forward needs local shapes), all-gathered by
+`gather_hand_sliced_params` (`src/checkpoint/parallel/writing.py`).
 
 An export casts weights to the save dtype (BF16) except three keep-sets that hold their trained dtype:
 normalization params, the live router-balancing tensors, and the family's fp32 pins (a pinned buffer
@@ -463,7 +463,7 @@ and the checkpoint carries a single `embed_tokens.weight`, no `lm_head.weight`, 
 
 ### Context parallelism (CP)
 
-`UlyssesCPModelWrapper.state_dict()` (`src/distributed/context_parallel/wrapper.py`) remaps
+`UlyssesModel.state_dict()` (`src/distributed/context_parallel/ulysses_model.py`) remaps
 Ulysses-internal keys back to HF paths by stripping the `.original_attention.` segment the patcher
 introduces. A stale duplicate dense `.mlp.{gate,up,down}_proj` key is dropped **per layer, only on
 layers that carry routed experts** — a hybrid model's genuinely-dense layers (GLM-4 MoE Lite,

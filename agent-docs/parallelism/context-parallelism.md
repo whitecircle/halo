@@ -24,18 +24,15 @@ Multi-head attention is independent across heads, which is what makes this exact
 
 ## Implementation
 
-`UlyssesCPModelWrapper` (`src/distributed/context_parallel/wrapper.py`) is the entry point. The
-all-to-all (`UlyssesAllToAll`) is a custom autograd function: forward scatters heads and gathers
-sequence, backward swaps the dims. Per-family attention wrappers in `layers/` subclass
-`UlyssesAttentionBase` and pick one of two forward paths:
-
-- **Optimized** (`_optimize_attention = True`, the default): RoPE on the local chunk before the
-  all-to-all (no position gather), then Flash Attention with native GQA and zero transposes.
-  Requires equal head_dim across Q/K/V.
-- **Legacy** (MLA families GLM4 MoE Lite / Mistral4): all-to-all, gather full-sequence position
-  embeddings, RoPE, then the MLA base's `_flash_attention` right-pads V to `qk_head_dim` where
-  `v_head_dim` differs, runs flash, and crops back. MLA's compressed projections and rope/nope split
-  do not fit the optimized GQA path.
+`UlyssesModel` (`src/distributed/context_parallel/ulysses_model.py`) is the entry point: the CP
+loaders construct it over the loaded model and the trainer adopts its `CPConfig`. The all-to-all
+(`UlyssesAllToAll`, `all_to_all.py`) is a custom autograd function: `sequence_to_heads` scatters heads
+and gathers the sequence, `heads_to_sequence` swaps back. The per-family attention wrappers in
+`families.py` subclass `UlyssesAttention` (`ulysses_attention.py`), whose one forward path runs RoPE
+(and any position-dependent scale) on the local chunk before the all-to-all, so no position gather,
+then Flash Attention with native GQA in `[B, S, H, D]`, with zero transposes. The MLA families
+(GLM4 MoE Lite, Mistral4) share `MLAUlyssesAttention`: RoPE on the rope half of each head, and an
+`_attend` that right-pads V to `qk_head_dim` where `v_head_dim` differs, runs flash, and crops back.
 
 ### Loss computation
 
@@ -64,7 +61,7 @@ The GRPO scoring seam calls `forward_hidden_states` on the CP wrapper, which ret
 backbone hidden states without constructing vocabulary-wide logits. `cp_shift_against_full_labels`
 pairs them with the full row's next-token labels, and the vocab-chunked output head scores those
 targets. Offline GRPO's per-row token-objective sums (and SMPO's per-sequence sums) reduce through
-`cp_sum_rows` in `src/distributed/context_parallel/autograd.py`, an autograd-aware SUM whose
+`cp_sum_rows` in `src/distributed/context_parallel/sequence_chunks.py`, an autograd-aware SUM whose
 backward supplies the CP factor canceled by world-wide mean gradient synchronization. They must
 **not** also use the SFT loss's explicit `cp_size` multiplier. Offline GRPO uses this path for
 training, evaluation and reference scoring; online and environmental GRPO do not declare CP. Its
@@ -82,8 +79,8 @@ node, the rack on NVL72) and cannot exceed it; Ulysses' all-to-alls per attentio
 on NVLink. `cp_size=3` on an 8-GPU domain is rejected at config time, before the model loads
 (`_reject_cp_locality`).
 
-**Attention impl** — a real Flash Attention is required. `validate_model_for_ulysses` raises
-`UlyssesConfigError` for any `_attn_implementation` outside `SUPPORTED_ATTN_IMPLEMENTATIONS` (FA2,
+**Attention impl** — a real Flash Attention is required. `reject_unsupported_ulysses_model` raises
+`CPConfigError` for any `_attn_implementation` outside `SUPPORTED_ATTN_IMPLEMENTATIONS` (FA2,
 FA3, FA4, community kernel paths): `eager` and `sdpa` are rejected, and `flex_attention` is
 auto-switched to FA4/FA2 by `load_distributed_model` when CP is active. A wrapper declaring
 `REQUIRES_FLASH_ATTN_LABEL = False` waives the check for modeling code that cannot carry a flash
@@ -117,22 +114,22 @@ Offline GRPO's CP collator right-pads each joined prompt+completion row
 
 ### Supported model architectures
 
-Source of truth: `WRAPPER_CLASS_MAP` in `src/distributed/context_parallel/layers/registry.py`, built
-by walking the `UlyssesAttentionBase` subclass tree and reading each wrapper's `HF_MODULE_NAMES` (a
+Source of truth: `ULYSSES_ATTENTION_MAP` in `src/distributed/context_parallel/families.py`, built
+by walking the `UlyssesAttention` subclass tree and reading each wrapper's `HF_MODULE_NAMES` (a
 duplicate HF name raises). The validator and the patcher both read that map — there is no separate
 accept list to keep in sync.
 
-| Attention class | Wrapper | Path | Page |
+| Attention class | Wrapper | Family specifics | Page |
 |---|---|---|---|
-| `GptOssAttention` | `GptOssUlyssesAttention` | optimized | [gpt-oss.md](../models/gpt-oss.md) |
-| `Qwen3MoeAttention` (Qwen3 MoE) | `Qwen3MoeUlyssesAttention` | optimized | [qwen3.md](../models/qwen3.md#qwen3-moe) |
-| `Qwen3Attention` (Qwen3 dense) | `Qwen3MoeUlyssesAttention` (reused) | optimized | [qwen3.md](../models/qwen3.md#qwen3-dense) |
-| `Qwen3VLTextAttention` (Qwen3-VL text branch) | `Qwen3MoeUlyssesAttention` (reused) | optimized | [qwen3.md](../models/qwen3.md#qwen3-vl) |
-| `Glm4MoeLiteAttention` | `Glm4MoeLiteUlyssesAttention` | legacy (DeepSeek-V3 MLA: separate qk/v head dims) | [glm4.md](../models/glm4.md) |
-| `Mistral4Attention` | `Mistral4UlyssesAttention` | legacy (MLA: separate qk/v head dims, llama-4 scaling) | [mistral4.md](../models/mistral4.md) |
-| `Qwen3_5MoeAttention` / `Qwen3_5Attention` | `Qwen3_5MoeUlyssesAttention` | optimized (post-attention sigmoid gate + partial RoPE) | [qwen3_5.md](../models/qwen3_5.md#cp-wrapper) |
-| `BailingMoeV2Attention` / `…FlashAttention2` / `…SdpaAttention` (Ling 2.0) | `BailingMoeV2UlyssesAttention` | optimized (fused `query_key_value`, `dense` output projection, Q/K norm before partial RoPE) | [bailing.md](../models/bailing.md#cp-wrapper) |
-| `Cohere2MoeAttention` | `Cohere2MoeUlyssesAttention` | optimized (interleaved fp32 rotary on sliding layers only; full-attention layers are NoPE) | [cohere2-moe.md](../models/cohere2-moe.md) |
+| `GptOssAttention` | `GptOssUlyssesAttention` | split-halves RoPE; sinks must be reset | [gpt-oss.md](../models/gpt-oss.md) |
+| `Qwen3MoeAttention` (Qwen3 MoE) | `Qwen3MoeUlyssesAttention` | Q/K RMSNorm | [qwen3.md](../models/qwen3.md#qwen3-moe) |
+| `Qwen3Attention` (Qwen3 dense) | `Qwen3MoeUlyssesAttention` (reused) | Q/K RMSNorm | [qwen3.md](../models/qwen3.md#qwen3-dense) |
+| `Qwen3VLTextAttention` (Qwen3-VL text branch) | `Qwen3MoeUlyssesAttention` (reused) | Q/K RMSNorm | [qwen3.md](../models/qwen3.md#qwen3-vl) |
+| `Glm4MoeLiteAttention` | `Glm4MoeLiteUlyssesAttention` | DeepSeek-V3 MLA: separate qk/v head dims | [glm4.md](../models/glm4.md) |
+| `Mistral4Attention` | `Mistral4UlyssesAttention` | MLA: separate qk/v head dims, llama-4 scaling | [mistral4.md](../models/mistral4.md) |
+| `Qwen3_5MoeAttention` / `Qwen3_5Attention` | `Qwen3_5MoeUlyssesAttention` | post-attention sigmoid gate + partial RoPE | [qwen3_5.md](../models/qwen3_5.md#cp-wrapper) |
+| `BailingMoeV2Attention` / `…FlashAttention2` / `…SdpaAttention` (Ling 2.0) | `BailingMoeV2UlyssesAttention` | fused `query_key_value`, `dense` output projection, Q/K norm before partial RoPE | [bailing.md](../models/bailing.md#cp-wrapper) |
+| `Cohere2MoeAttention` | `Cohere2MoeUlyssesAttention` | interleaved fp32 rotary on sliding layers only; full-attention layers are NoPE | [cohere2-moe.md](../models/cohere2-moe.md) |
 
 **Not supported on production checkpoints:**
 
@@ -218,10 +215,9 @@ at construction, so the best checkpoint cannot be reloaded in place). See
 
 ## Optimizations
 
-The optimized path's native GQA (no `repeat_kv`) saves on the order of 6 GB per forward on a
-20B-class GQA model, and the `[B, S, H, D]` layout drops the transposes. Both paths use native
-BFloat16 all-to-all and fuse K/V into one all-to-all; the legacy path fuses cos/sin into one
-`all_gather_into_tensor`.
+Native GQA (no `repeat_kv`) saves on the order of 6 GB per forward on a 20B-class GQA model, and the
+`[B, S, H, D]` layout drops the transposes. The all-to-alls run in native BFloat16, with K and V fused
+into one.
 
 `torch.compile` gives no benefit: the all-to-all breaks the graph at every attention layer (±0.0% on
 Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
@@ -240,10 +236,10 @@ inspects a trainer's loss for CP-safety, so a new trainer must verify its own ob
 declaring the flag.
 
 **Models.** Only the wrappers in the [table above](#supported-model-architectures); anything else
-raises `UlyssesConfigError`. Linear-attention, sequence-axis convolution and window-pooling blocks
+raises `CPConfigError`. Linear-attention, sequence-axis convolution and window-pooling blocks
 are rejected by class name even when the surrounding attention is wrapped.
 
-**Generation.** `UlyssesCPModelWrapper.generate()` raises: each rank holds one sequence chunk and the
+**Generation.** `UlyssesModel.generate()` raises: each rank holds one sequence chunk and the
 Ulysses attention has no KV-cache path. Generate from a saved checkpoint without CP.
 
 **Axis combinations.** CP composes with EP only; TP+CP and ETP+CP are refused by the
@@ -255,14 +251,14 @@ not activations) — that is the case CP exists for.
 | Knob | Under CP | Gate |
 |---|---|---|
 | `packing`, `padding_free` | rejected — the Ulysses path runs a dense causal kernel with no per-document boundaries | `src/data/collators/factory.py`; `_reject_cp_incompatible_collator` re-checks a hand-built collator |
-| left-padded batches | rejected on **every** forward (not cached — a prompt-left-padding collator pads only its ragged batches) | `context_parallel/wrapper.py` |
-| `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on the `sdpa` label its model build forces | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `validate_model_for_ulysses` |
+| left-padded batches | rejected on **every** forward (not cached — a prompt-left-padding collator pads only its ragged batches) | `context_parallel/ulysses_model.py` |
+| `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on the `sdpa` label its model build forces | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `reject_unsupported_ulysses_model` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/loader.py` |
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `reject_unsupported_model`, re-checked in `GptOssUlyssesAttention` |
-| `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `validate_trainer_args_for_cp` |
+| `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `reject_cp_trainer_args` |
 | `compute_metrics`, `preprocess_logits_for_metrics` | rejected whenever set, not gated on `eval_strategy` (a direct `evaluate()`/`predict()` reaches the same misaligned chunk-logits path) — eval under CP is loss-only | same |
 | CP's own metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | accumulated locally per micro-batch and reduced once per log, so the metric path adds one collective per log instead of five to six per micro-batch | `src/trainers/sft.py` (`_drain_cp_metrics`) |
-| multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/wrapper.py` |
+| multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/ulysses_model.py` |
 | `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_reject_fsdp_settings` |
 | `accelerate launch` | rejected — CP requires `torchrun` | `reject_unsupported_run` and `ParallelismValidationMixin` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`) | `mixins/base.py` |
@@ -275,16 +271,17 @@ not activations) — that is the case CP exists for.
 
 ## Adding a new model
 
-1. Subclass `UlyssesAttentionBase` under `layers/`. Implement `_project_qkv` (returns `[B, S, H, D]`
-   Q/K/V); the rotary defaults to rotate-half (`_apply_partial_rotary`), so override
-   `_apply_rotary_core` only for a different one (GptOss split-concat, Cohere2 interleaved).
+1. Subclass `UlyssesAttention` in `families.py`. The default `_project_qkv` reads plain
+   `q_proj`/`k_proj`/`v_proj` into `[B, S, H, D]`, the default `_apply_rotary` is rotate-half
+   (`apply_rope`) and the output projection is `OUTPUT_PROJECTION = "o_proj"`; override only what the
+   family does differently (GptOss split-halves rotary, Cohere2 interleaved fp32, Bailing's fused
+   projection and `dense`).
 
-    For an MLA family subclass `MLAUlyssesAttentionBase` instead: it owns the geometry, the legacy
-    path flag and `_apply_rotary_pos_emb`.
+    For an MLA family subclass `MLAUlyssesAttention` instead: it owns the geometry, the rope-half
+    `_apply_rotary` and the V-padding `_attend`.
 
-2. Declare the HF attention class name in the wrapper's `HF_MODULE_NAMES`. `layers/registry.py`
-   imports every module in the package, so the file's existence is the whole registration; both the
-   map and the accept tuple are derived from the subclass tree.
+2. Declare the HF attention class name in the wrapper's `HF_MODULE_NAMES`. `ULYSSES_ATTENTION_MAP`
+   is read off the subclass tree, so defining the class is the whole registration.
 3. Test:
 
 ```bash

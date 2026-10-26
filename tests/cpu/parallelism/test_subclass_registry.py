@@ -2,10 +2,9 @@
 """CPU tests for the shared class-claim registry derivation.
 
 ``build_class_claim_map`` is the ONE subclass-tree walk behind the EP MoE-layer map, the CP
-attention-wrapper map, the PP split-spec map, the head-transform spec map and the EP ``model_type``
-roster. These tests pin its contract (own declaration only, deep tree, loud on a duplicate claim),
+attention map, the head-transform spec map and the EP ``model_type`` roster. These tests pin its contract (own declaration only, deep tree, loud on a duplicate claim),
 the noun each real registry names a clash with, that the EP side still reads through it rather than
-a second copy, and that the EP and CP registries still route every wired family.
+a second copy, and that the EP registry still routes every wired family.
 
 Run: ``python tests/cpu/parallelism/test_subclass_registry.py`` (or ``pytest -m cpu``).
 """
@@ -14,7 +13,6 @@ from __future__ import annotations
 
 import pytest
 
-from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP, build_wrapper_class_map
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, build_moe_layer_map
@@ -86,11 +84,10 @@ def _model_type_roster() -> dict[str, type]:
     ("build", "noun"),
     [
         (build_moe_layer_map, "HF MoE class name"),
-        (build_wrapper_class_map, "HF attention class name"),
         (build_head_transform_spec_map, "HF causal-LM head class name"),
         (_model_type_roster, "model_type"),
     ],
-    ids=["ep", "cp", "head-transform", "ep-model-type"],
+    ids=["ep", "head-transform", "ep-model-type"],
 )
 def test_each_real_registry_names_its_clash(monkeypatch, build, noun):
     """A second class claiming a key already taken fails the real registry with the noun of what clashed."""
@@ -120,9 +117,8 @@ def test_ep_layer_classes_is_the_shared_walk_not_a_second_copy():
     assert ep_layer_class_by_model_type() == build_class_claim_map(EPMoELayerBase, "model_type", attr="HF_MODEL_TYPES")
 
 
-def test_ep_and_cp_registries_are_derived_and_cover_the_wired_families():
+def test_ep_registry_is_derived_and_covers_the_wired_families():
     assert build_moe_layer_map() == MOE_LAYER_MAP
-    assert build_wrapper_class_map() == WRAPPER_CLASS_MAP
 
     # Every EP MoE family wired today must resolve; a dropped HF_MODULE_NAMES silently disables EP.
     expected_moe = {

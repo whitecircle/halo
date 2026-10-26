@@ -226,7 +226,7 @@ raises here.
 `_setup_ep_only()` patches gradient clipping and installs the EP gradient sync (which applies FSDP2
 with EP modules in `ignored_params`, except at `ep_group_size == 1` —
 [below](#gradient-synchronization)); it handles EP, pure ETP, and EP+ETP. CP setup validates the
-model is already a `UlyssesCPModelWrapper` (wrapped at load time). FSDP2 (`fully_shard`,
+model is already a `UlyssesModel` (wrapped at load time). FSDP2 (`fully_shard`,
 `reshard_after_forward` from `fsdp_reshard_after_forward`, default `false`) carries non-EP gradient
 sync wherever DP > 1 — pure TP and EP+TP at DP=1 skip the wrap entirely. The wrap leaves out
 frozen parameters of a dtype no trainable parameter shares, and raises if it would leave out a
@@ -414,7 +414,7 @@ applies once for every trainer that declares it.
 
 ## CP loss and metrics in SFT
 
-`UlyssesCPModelWrapper.forward()` owns the boundary handling and the globally-normalized sum loss
+`UlyssesModel.forward()` owns the boundary handling and the globally-normalized sum loss
 ([the two corrections](../parallelism/context-parallelism.md)); `_compute_cp_metrics()` mirrors the
 boundary handling for accuracy. `DistributedSFTTrainer` calls base `Trainer.compute_loss`, not
 `SFTTrainer.compute_loss`: the TRL version adds metrics that assume logits cover the full sequence,

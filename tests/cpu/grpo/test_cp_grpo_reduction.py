@@ -8,8 +8,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed.context_parallel.autograd import cp_sum_rows
 from src.distributed.context_parallel.config import CPConfig
+from src.distributed.context_parallel.sequence_chunks import cp_sum_rows
 from src.trainers.grpo.objective.offline import offline_loss, offline_loss_normalizer, offline_loss_numerator
 from tests.common.gloo import run_gloo_ranks
 
@@ -53,7 +53,7 @@ class _ForwardOnlySum(torch.autograd.Function):
 
 
 def _worker(rank: int, cp_size: int) -> None:
-    cp_config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    cp_config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     weight = torch.nn.Parameter(torch.tensor(INITIAL_WEIGHT))
     local_rows = weight * COEFFICIENTS[rank]
     global_rows = cp_sum_rows(local_rows, cp_config)
@@ -126,7 +126,7 @@ def _reference_offline_loss(losses, mask, loss_type):
 
 
 def _offline_worker(rank: int, cp_size: int) -> None:
-    cp_config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    cp_config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     full_coefficients = TOKEN_COEFFICIENTS[:cp_size].permute(1, 0, 2).reshape(3, -1)
     full_mask = SUPERVISION[:cp_size].permute(1, 0, 2).reshape(3, -1)
     for loss_type in ("grpo", "bnpo", "dr_grpo"):

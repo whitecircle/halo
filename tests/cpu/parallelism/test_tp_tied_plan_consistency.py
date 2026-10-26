@@ -19,10 +19,7 @@ from transformers import CONFIG_MAPPING, AutoConfig, AutoModelForCausalLM, Pretr
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
 from src.distributed.checkpoint.write import gather_saveable_tensors
-from src.distributed.tensor_parallel.tie_plan import (
-    consistent_tied_tp_plan,
-    validate_tied_pair_consistent,
-)
+from src.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, validate_tied_pair_consistent
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
 

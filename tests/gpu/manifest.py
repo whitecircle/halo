@@ -157,7 +157,7 @@ _PRECOMPUTE_CORE_ROWS = (
 # The core rows cover Qwen3-MoE; the family sweep runs every other family.
 _PRECOMPUTE_SWEEP_FAMILIES = tuple(family for family in _TINY_MOE_FAMILIES if family != "qwen3_moe")
 # The families whose attention the selective-TP path shards; tests/cpu/conventions/test_tiny_family_roster.py
-# holds this to src/distributed/tensor_parallel/module_types.py.
+# holds this to src/distributed/tensor_parallel/parallelize_attention.py.
 _TP_FAMILIES = ("cohere2_moe", "glm4_moe_lite", "gpt_oss", "lfm2_moe", "mistral4", "qwen3_5_moe_text", "qwen3_moe")
 _PRECOMPUTE_FAMILY_ROWS = tuple(
     f"--trainer {trainer} --family {family}{mode}"

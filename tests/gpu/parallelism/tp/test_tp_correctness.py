@@ -33,9 +33,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.distributed.tensor_parallel import gather_state_dict_for_save
 from trl import SFTConfig
 
-from src.distributed.mesh import MeshDim, mesh_dim_names
+from src.distributed.mesh import MeshDim, mesh_dim_names, model_tp_mesh
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.state_dict import get_tp_mesh
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.runtime.dtensor import materialize_dtensor
@@ -308,7 +307,7 @@ def reassemble_tp_grads(tp_model) -> dict[str, torch.Tensor]:
         param = named.get(name)
         assert param is not None and param.grad is not None, f"no live gradient for {name} under TP"
         local[name] = materialize_dtensor(param.grad)  # collective under TP+DP; identity at dp=1
-    full = gather_state_dict_for_save(local, unwrapped._tp_plan, get_tp_mesh(unwrapped), TP_SIZE)
+    full = gather_state_dict_for_save(local, unwrapped._tp_plan, model_tp_mesh(unwrapped), TP_SIZE)
     return {name: tensor.detach().float().cpu() for name, tensor in full.items()}
 
 

@@ -56,8 +56,7 @@ from src.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.spans import completion_labels, resolve_eos_token_ids
 from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS
-from src.distributed.context_parallel.autograd import cp_sum_rows
-from src.distributed.context_parallel.config import cp_chunk_bounds
+from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds, cp_sum_rows
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row, next_token_logprobs, token_logprobs
 from src.model_loading.dtype import is_kbit_quantized

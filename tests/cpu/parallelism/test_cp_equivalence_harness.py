@@ -14,11 +14,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
-from src.distributed.context_parallel.layers.gpt_oss import GptOssUlyssesAttention
-from src.distributed.context_parallel.layers.mistral4 import Mistral4UlyssesAttention
-from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.families import (
+    ULYSSES_ATTENTION_MAP,
+    GptOssUlyssesAttention,
+    Mistral4UlyssesAttention,
+)
+from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from tests.common.equivalence import cp_equivalence
 from tests.common.equivalence.cp_equivalence import (
     CP_SIZE,
@@ -51,16 +53,20 @@ MODULE = produce.__module__
 # A windowed family per wrapper path that windows (GPT-OSS on the optimized path with its own rotary, Cohere2 MoE
 # on its interleaved one) and an unwindowed one.
 SAMPLE_FAMILIES = ("gpt_oss", "cohere2_moe", "qwen3")
-FLASH_CALL_KWARGS = UlyssesAttentionBase._flash_call_kwargs
-CP_LOSS = UlyssesCPModelWrapper._compute_cp_loss
-POST_ROPE = Mistral4UlyssesAttention._post_rope
+ATTEND = UlyssesAttention._attend
+CP_LOSS = UlyssesModel._compute_cp_loss
+APPLY_ROTARY = Mistral4UlyssesAttention._apply_rotary
 
 
-def _unwindowed(self, kv_len):
-    return {**FLASH_CALL_KWARGS(self, kv_len), "window_size": (-1, -1)}
+def _unwindowed(self, query, key, value):
+    window, self.sliding_window = self.sliding_window, None
+    try:
+        return ATTEND(self, query, key, value)
+    finally:
+        self.sliding_window = window
 
 
-def _swapped_rotary(self, x, cos, sin):
+def _swapped_rotary(x, cos, sin):
     first, second = x.chunk(2, dim=-1)
     return torch.cat((second * cos + first * sin, first * cos - second * sin), dim=-1)
 
@@ -69,9 +75,9 @@ def _halved_cp_loss(self, logits, labels):
     return CP_LOSS(self, logits, labels) * 0.5
 
 
-def _chunk_local_llama4_scale(self, q, k, position_ids):
-    """The llama-4 query scale read off each rank's chunk positions instead of the sequence's."""
-    return POST_ROPE(self, q, k, position_ids % (position_ids.shape[-1] // CP_SIZE))
+def _chunk_local_llama4_scale(self, q, k, cos, sin, position_ids=None):
+    """The llama-4 query scale read off positions restarting at each chunk instead of the sequence's."""
+    return APPLY_ROTARY(self, q, k, cos, sin, position_ids % position_ids.shape[-1])
 
 
 def _raising_nudge(attention):
@@ -79,10 +85,10 @@ def _raising_nudge(attention):
 
 
 MUTATIONS = {
-    "unwindowed": (UlyssesAttentionBase, "_flash_call_kwargs", _unwindowed),
-    "swapped_rotary": (GptOssUlyssesAttention, "_rotary_emb", _swapped_rotary),
-    "halved_cp_loss": (UlyssesCPModelWrapper, "_compute_cp_loss", _halved_cp_loss),
-    "chunk_local_llama4_scale": (Mistral4UlyssesAttention, "_post_rope", _chunk_local_llama4_scale),
+    "unwindowed": (UlyssesAttention, "_attend", _unwindowed),
+    "swapped_rotary": (GptOssUlyssesAttention, "_rotate_split_halves", staticmethod(_swapped_rotary)),
+    "halved_cp_loss": (UlyssesModel, "_compute_cp_loss", _halved_cp_loss),
+    "chunk_local_llama4_scale": (Mistral4UlyssesAttention, "_apply_rotary", _chunk_local_llama4_scale),
     "raising_nudge": (cp_equivalence, "_nudge", _raising_nudge),
 }
 
@@ -124,11 +130,13 @@ def test_the_roster_runs_every_ulysses_wrapper_class_once():
     for name, family in FAMILIES.items():
         model = tiny_family_model(family.tiny, overrides=family.overrides)
         wrapped[name] = {
-            WRAPPER_CLASS_MAP[type(m).__name__] for m in model.modules() if type(m).__name__ in WRAPPER_CLASS_MAP
+            ULYSSES_ATTENTION_MAP[type(m).__name__]
+            for m in model.modules()
+            if type(m).__name__ in ULYSSES_ATTENTION_MAP
         }
     assert all(len(classes) == 1 for classes in wrapped.values()), wrapped
-    assert set().union(*wrapped.values()) == set(WRAPPER_CLASS_MAP.values())
-    assert len(FAMILIES) == len(set(WRAPPER_CLASS_MAP.values()))
+    assert set().union(*wrapped.values()) == set(ULYSSES_ATTENTION_MAP.values())
+    assert len(FAMILIES) == len(set(ULYSSES_ATTENTION_MAP.values()))
 
 
 @pytest.mark.parametrize("window", [None, 5])
@@ -162,10 +170,10 @@ def test_the_gpu_tier_keeps_the_kernel_cp_picks_and_makes_it_deterministic():
         picked.append(allow_fa4)
         return lambda *args, **kwargs: kwargs
 
-    get_flash_attn_func = deterministic_kernels(probe)
+    _flash_attn_func = deterministic_kernels(probe)
 
-    assert get_flash_attn_func(False)(causal=True) == {"causal": True, "deterministic": True}
-    assert get_flash_attn_func()() == {"deterministic": True}
+    assert _flash_attn_func(False)(causal=True) == {"causal": True, "deterministic": True}
+    assert _flash_attn_func()() == {"deterministic": True}
     assert picked == [False, True]
 
 

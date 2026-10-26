@@ -4,7 +4,7 @@
 The trap this pins: a CP wrapper that aliases ``sinks`` at construction puts the FA2 branch of
 ``_reset_gpt_oss_sinks`` (a rebind, ``attn.sinks = None``) on the wrapper while
 ``original_attention`` keeps the live pretrained tensor — which the save paths surface under the
-clean HF key after ``strip_cp_attention_prefix``. A model trained with no sinks then exports live
+clean HF key after ``strip_cp_attention_level``. A model trained with no sinks then exports live
 pretrained sinks, shifting every served logprob, while the wrapper-side guard reads its own None and
 passes. The in-place branches (eager/flex ``fill_``) are visible through both references and cannot
 fail that way — the matrix below pins all of it.
@@ -21,9 +21,9 @@ from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention
 
 PartialState()  # the sinks policy logs through accelerate's logger, which requires live state
 
-from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
-from src.distributed.context_parallel.layers.gpt_oss import GptOssUlyssesAttention
+from src.distributed.context_parallel.families import GptOssUlyssesAttention
 from src.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks, neutralized_gpt_oss_sinks
+from src.models.unwrapping import strip_cp_attention_level
 
 LIVE_SINK_VALUE = 0.75
 
@@ -67,7 +67,7 @@ class _Model(nn.Module):
 
 def _exported_sinks(model) -> dict:
     """State dict as every CP-aware serializer writes it (prefix-strip applied)."""
-    return {strip_cp_attention_prefix(k): v for k, v in model.state_dict().items() if "sinks" in k}
+    return {strip_cp_attention_level(k): v for k, v in model.state_dict().items() if "sinks" in k}
 
 
 @pytest.mark.parametrize("cp", [False, True], ids=["plain", "cp"])

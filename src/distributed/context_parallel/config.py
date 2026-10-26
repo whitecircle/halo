@@ -1,184 +1,83 @@
-"""Context Parallelism (CP) configuration, process-group construction, and the shared sequence-axis
-ops (:func:`cp_chunk_bounds`, :func:`split_sequence_for_cp`, :func:`cp_boundary_shift`,
-:func:`cp_shift_against_full_labels`).
+"""Ulysses CP's process groups: contiguous ``cp_size`` rank blocks inside each NVLink domain of a pipeline stage.
 
-:class:`CPConfig` builds CP groups inside a single NVLink domain, the only shape
-``ParallelismConfig`` accepts: the Ulysses all-to-all is bandwidth-heavy, and DeepEP dispatch under
-EP+CP is domain-local. DP size is ``world_size / cp_size``.
+Domain-local is the only shape ``ParallelismConfig`` accepts: the Ulysses all-to-all is bandwidth-heavy, and DeepEP
+dispatch under EP+CP is domain-local.
 """
 
 from __future__ import annotations
 
 import logging
 
-import torch
 import torch.distributed as dist
 
 from src.distributed.group_layout import NodeLocalLayout
-from src.env import nccl_timeout
-from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
+from src.runtime.collectives import build_groups
+from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
 
-class CPConfig:
-    """Context Parallelism configuration and process-group construction.
+class CPConfigError(ValueError):
+    """Raised when Ulysses CP is misconfigured for the given model."""
 
-    Groups are NVLink-domain-local (see the module docstring); the data loader shards by
-    ``ParallelismConfig.get_data_parallel_rank()``.
+
+class CPConfig:
+    """COLLECTIVE over the default group: this rank's CP process group, ``cp_rank`` and ``cp_group_idx``.
+
+    ``stage_world_size`` and ``stage_base_rank`` are the width and first global rank of this rank's pipeline stage
+    (the whole job without PP); the layout math runs in stage-local ranks. Without an initialized process group
+    only ``cp_size == 1`` builds, with no group.
     """
 
-    def __init__(
-        self,
-        cp_size: int,
-        world_size: int | None = None,
-        gpus_per_node: int | None = None,
-        rank_offset: int = 0,
-    ):
-        """Args:
-        world_size: width of one rank block (a pipeline stage; the whole job without PP);
-            auto-detected from the global world size if None.
-        gpus_per_node: NVLink-domain size; auto-detected from LOCAL_WORLD_SIZE if None.
-        rank_offset: first global rank of this rank block (pipeline-stage base, 0 without PP). Layout
-            math runs in block-local rank space; emitted membership is lifted back to global ranks.
-        """
-        self.cp_size = cp_size
-
-        if world_size is None:
-            world_size = get_global_world_size()
-        self.world_size = world_size
-        self.rank_offset = rank_offset
-
-        # Same unit as EPConfig: ``gpus_per_node`` is the NVLink-domain size, which production passes
-        # as ``ParallelismConfig.nvlink_domain_size``. On an NVL72 rack LOCAL_WORLD_SIZE would cap
-        # node-local CP at one OS node, so the fallback warns.
-        if gpus_per_node is None:
-            gpus_per_node = get_local_world_size()
-            logger.warning(
-                "CPConfig built without an explicit domain size — assuming LOCAL_WORLD_SIZE "
-                f"({gpus_per_node}). On a multi-node NVLink domain (NVL72) that is the wrong unit; "
-                "pass ParallelismConfig.nvlink_domain_size."
-            )
-        if cp_size > gpus_per_node:
+    def __init__(self, cp_size: int, *, stage_world_size: int, stage_base_rank: int, nvlink_domain_size: int):
+        if cp_size > nvlink_domain_size:
             raise ValueError(
-                f"context_parallel_size ({cp_size}) cannot exceed the NVLink-domain size ({gpus_per_node})"
+                f"context_parallel_size ({cp_size}) cannot exceed the NVLink-domain size ({nvlink_domain_size})"
             )
-        if gpus_per_node % cp_size != 0:
-            raise ValueError(f"context_parallel_size ({cp_size}) must divide the NVLink-domain size ({gpus_per_node})")
-        self._create_cp_groups(gpus_per_node)
-
-        # Logged, not stored: ``ParallelismConfig`` computes data_parallel_size (its divisor also
-        # counts TP/ETP) and the domain count.
-        if is_global_main_process():
-            logger.info(f"CP Config: cp_size={self.cp_size}, world_size={world_size}")
-            logger.info(f"  Data parallel size: {world_size // self.cp_size} (distinct batches)")
-            logger.info(f"  NVLink domains={world_size // gpus_per_node}, GPUs/domain={gpus_per_node}")
-
-    def _init_single_process_defaults(self) -> bool:
-        """Set defaults for single-process mode. Returns True if distributed is not initialized.
-
-        ``cp_size > 1`` raises here: with no process group there is no all-to-all, so each rank
-        would train on sequence chunk 0 alone.
-        """
-        if dist.is_initialized():
-            return False
-        if self.cp_size > 1:
-            raise RuntimeError(
-                f"context_parallel_size={self.cp_size} needs an initialized torch.distributed "
-                f"process group: without one Ulysses has no all-to-all, so this process would "
-                f"attend over sequence chunk 0 alone. Launch with torchrun, or set "
-                f"context_parallel_size=1."
+        if nvlink_domain_size % cp_size != 0:
+            raise ValueError(
+                f"context_parallel_size ({cp_size}) must divide the NVLink-domain size ({nvlink_domain_size})"
             )
-        self.process_group = None
-        self.cp_rank = 0
-        self.cp_group_idx = 0
-        logger.warning("Distributed not initialized - using single process mode")
-        return True
+        self.cp_size = cp_size
+        self.stage_base_rank = stage_base_rank
 
-    def _create_cp_groups(self, domain_size: int):
-        """Create CP process groups over contiguous rank blocks inside each ``domain_size`` domain.
-
-        Membership math comes from the shared ``group_layout`` helpers in block-local rank space,
-        lifted to global ranks per block; every rank creates all groups in the same order.
-        """
-        if self._init_single_process_defaults():
+        if not dist.is_initialized():
+            if cp_size > 1:
+                raise RuntimeError(
+                    f"context_parallel_size={cp_size} needs an initialized torch.distributed "
+                    f"process group: without one Ulysses has no all-to-all, so this process would "
+                    f"attend over sequence chunk 0 alone. Launch with torchrun, or set "
+                    f"context_parallel_size=1."
+                )
+            self.process_group, self.cp_rank, self.cp_group_idx = None, 0, 0
+            logger.warning("Distributed not initialized - using single process mode")
             return
 
         global_rank = get_global_rank()
-
-        layout = NodeLocalLayout(world_size=self.world_size, group_size=self.cp_size, domain_size=domain_size)
-        num_cp_groups = layout.num_groups
-        self.cp_rank, self.cp_group_idx = layout.rank_and_group(global_rank - self.rank_offset)
-
-        self.process_group = None
-        self._cp_group_ranks = None
-
-        # ``dist.new_group`` is collective: under PP every rank must also create the other stages' groups.
-        for base in range(0, get_global_world_size(), self.world_size):
-            for group_idx in range(num_cp_groups):
-                cp_group_ranks = [base + r for r in layout.group_ranks(group_idx)]
-                group = dist.new_group(cp_group_ranks, timeout=nccl_timeout())
-                if base == self.rank_offset and group_idx == self.cp_group_idx:
-                    self.process_group = group
-                    self._cp_group_ranks = cp_group_ranks
+        layout = NodeLocalLayout(world_size=stage_world_size, group_size=cp_size, domain_size=nvlink_domain_size)
+        self.cp_rank, self.cp_group_idx = layout.rank_and_group(global_rank - stage_base_rank)
+        groups_per_stage = layout.num_groups
+        rank_lists = [
+            [base + rank for rank in layout.group_ranks(group_idx)]
+            for base in range(0, get_global_world_size(), stage_world_size)
+            for group_idx in range(groups_per_stage)
+        ]
+        mine = stage_base_rank // stage_world_size * groups_per_stage + self.cp_group_idx
+        self.process_group = build_groups(rank_lists, mine=mine, what="CP group")
+        self._cp_group_ranks = rank_lists[mine]
 
         # Membership and layout must agree, or the first CP all-to-all hangs.
-        if self._cp_group_ranks is None or global_rank not in self._cp_group_ranks:
+        if global_rank not in self._cp_group_ranks:
             raise RuntimeError(
                 f"CP group selection inconsistency: global_rank={global_rank} not in its "
                 f"selected CP group {self._cp_group_ranks} (cp_group_idx={self.cp_group_idx}, "
-                f"cp_rank={self.cp_rank}, rank_offset={self.rank_offset}, domain_size={domain_size})."
+                f"cp_rank={self.cp_rank}, stage_base_rank={stage_base_rank}, "
+                f"nvlink_domain_size={nvlink_domain_size})."
             )
 
         if is_global_main_process():
-            logger.info("CP process groups created:")
-            logger.info(f"  - CP group ranks (rank 0): {self._cp_group_ranks}")
-            logger.info(f"  - Total CP groups (=DP size): {num_cp_groups}")
+            logger.info(
+                f"CP process groups created: cp_size={cp_size}, {groups_per_stage} groups per stage (= data-parallel "
+                f"size), {nvlink_domain_size} GPUs per NVLink domain; rank 0's group {self._cp_group_ranks}"
+            )
         logger.debug(f"CP rank {global_rank}: group_idx={self.cp_group_idx}, cp_rank={self.cp_rank}")
-
-
-def cp_chunk_bounds(seq_len: int, cp_rank: int, cp_size: int) -> tuple[int, int]:
-    """``[start, end)`` of CP rank ``cp_rank``'s contiguous chunk of a ``seq_len``-token sequence."""
-    if seq_len % cp_size != 0:
-        raise ValueError(f"Sequence length {seq_len} must be divisible by context_parallel_size {cp_size}")
-    chunk_size = seq_len // cp_size
-    return cp_rank * chunk_size, (cp_rank + 1) * chunk_size
-
-
-def cp_boundary_shift(
-    logits: torch.Tensor,
-    local_labels: torch.Tensor,
-    boundary_labels: torch.Tensor | None,
-    is_last_rank: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Causal shift of one CP rank's local ``(logits, labels)`` chunk → ``(shift_logits, shift_labels)``.
-
-    The last rank (or a rank without a boundary label) uses the standard shift. A non-final rank's
-    final logit predicts the next chunk's first token, so ``boundary_labels`` is appended rather than
-    dropped, keeping every position supervised and the per-rank shifted length equal to the chunk
-    length.
-    """
-    if is_last_rank or boundary_labels is None:
-        return logits[:, :-1, :], local_labels[:, 1:]
-    # Every local logit is supervised, so the logits tensor passes through uncopied.
-    return logits, torch.cat([local_labels[:, 1:], boundary_labels], dim=1)
-
-
-def cp_shift_against_full_labels(
-    logits: torch.Tensor, labels: torch.Tensor, cp_rank: int, cp_size: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """:func:`cp_boundary_shift` of CP rank ``cp_rank``'s local logits against the full pre-split
-    ``[batch, seq_len]`` labels: its own label chunk, plus the next chunk's first label (the token
-    its last logit predicts) on every rank but the last."""
-    start, end = cp_chunk_bounds(labels.size(1), cp_rank, cp_size)
-    is_last_rank = cp_rank == cp_size - 1
-    boundary_labels = None if is_last_rank else labels[:, end : end + 1]
-    return cp_boundary_shift(logits, labels[:, start:end], boundary_labels, is_last_rank)
-
-
-def split_sequence_for_cp(tensor: torch.Tensor, cp_config: CPConfig) -> torch.Tensor:
-    """Split a ``[batch, seq, ...]`` tensor's sequence dimension for context parallelism."""
-    if cp_config.cp_size == 1:
-        return tensor
-    start, end = cp_chunk_bounds(tensor.shape[1], cp_config.cp_rank, cp_config.cp_size)
-    return tensor.narrow(1, start, end - start).contiguous()

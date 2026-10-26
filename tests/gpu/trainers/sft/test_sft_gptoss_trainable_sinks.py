@@ -26,7 +26,7 @@ from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.state_dict import iter_tp_sharded_non_dtensor_full
+from src.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
 from src.hardware import supports_grouped_mm
 from src.model_loading.parallel.loader import load_distributed_model
 from src.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
@@ -69,7 +69,7 @@ class SinkGradProbe(TrainerCallback):
 def _full_sinks(model) -> dict[str, torch.Tensor]:
     """Every layer's full sink vector on this rank — DTensor shards materialized, TP hand-slices gathered."""
     full = {}
-    tp_gathered = dict(iter_tp_sharded_non_dtensor_full(model))
+    tp_gathered = dict(iter_hand_sliced_full(model))
     for name, param in model.named_parameters():
         if not name.endswith("self_attn.sinks"):
             continue

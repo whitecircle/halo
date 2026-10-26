@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from transformers.models.inkling.configuration_inkling import InklingTextConfig
 from transformers.models.inkling.modeling_inkling import InklingTopkRouter
 
-from src.distributed.context_parallel.validation import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
+from src.distributed.context_parallel.model_rules import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP

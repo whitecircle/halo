@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 
-import src.distributed.context_parallel.wrapper as cp_wrapper
+import src.distributed.context_parallel.ulysses_model as cp_wrapper
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 
 SEQ = 12
@@ -45,14 +45,12 @@ class _Model(nn.Module):
 
 
 def _wrapper(model, cp_size, cp_rank):
-    return unpatched_cp_wrapper(
-        model, cp_size=cp_size, cp_rank=cp_rank, attention_layers=[SimpleNamespace(global_position_ids=None)]
-    )
+    return unpatched_cp_wrapper(model, cp_size=cp_size, cp_rank=cp_rank)
 
 
 @pytest.mark.parametrize("cp_size", [1, 2, 4])
 def test_hidden_only_scores_each_contiguous_chunk_at_global_positions(cp_size):
-    """CP2/4 cover rank-ordering; each rank sees its shard but hooks see all positions."""
+    """CP2/4 cover rank-ordering: each rank's backbone sees its own chunk at its global positions."""
     torch.manual_seed(18)
     model = _Model()
     ids = torch.randint(1, 32, (2, SEQ))
@@ -72,7 +70,6 @@ def test_hidden_only_scores_each_contiguous_chunk_at_global_positions(cp_size):
         torch.testing.assert_close(seen_mask, mask[:, start:end])
         torch.testing.assert_close(seen_positions, positions[:, start:end])
         assert use_cache is False
-        torch.testing.assert_close(wrapper._attention_layers[0].global_position_ids, positions)
 
     stitched = torch.cat(
         [

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """EP+CP gathered-checkpoint save→reload round-trip correctness.
 
-Under EP+CP the trainer holds a ``UlyssesCPModelWrapper`` whose ``named_modules()`` walk yields
+Under EP+CP the trainer holds a ``UlyssesModel`` whose ``named_modules()`` walk yields
 wrapper-prefixed EP-layer paths while ``named_parameters()`` yields inner names. A save that walks
 the wrapper misclassifies every expert param as non-EP: the rank-local expert shard is written
 under the canonical key, gathered full experts land under doubled bogus keys, and the checkpoint
@@ -29,7 +29,7 @@ from safetensors import safe_open
 from transformers import AutoConfig, AutoTokenizer
 
 from src.distributed.checkpoint.ep_save import save_ep_model
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_str
@@ -137,7 +137,7 @@ def run(ctx):
         attn_implementation=ATTN,
         use_liger_kernel=False,
     )
-    checks["cp_wrapped"] = isinstance(model, UlyssesCPModelWrapper)
+    checks["cp_wrapped"] = isinstance(model, UlyssesModel)
     checks["ep_patched"] = any(isinstance(m, EPMoELayerBase) for m in model.modules())
 
     ids, labels = _fixed_batch(tokenizer, ctx.device)

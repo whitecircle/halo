@@ -30,8 +30,8 @@ from transformers.models.glm4_moe_lite import (
     Glm4MoeLiteForCausalLM,
 )
 
-from src.distributed.context_parallel.layers.glm4 import Glm4MoeLiteUlyssesAttention
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.families import Glm4MoeLiteUlyssesAttention
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import shared_scratch_dir, world_mean
 from tests.common.ep_reference import random_token_batch
@@ -111,7 +111,7 @@ def cp_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, ran
         attn_implementation="flash_attention_2",
     ).to(device)
 
-    model = UlyssesCPModelWrapper(base_model, pc.cp_config())
+    model = UlyssesModel(base_model, pc.cp_config())
 
     wrappers = [m for m in model.modules() if isinstance(m, Glm4MoeLiteUlyssesAttention)]
     log(f"  Glm4MoeLiteUlyssesAttention layers: {len(wrappers)}")

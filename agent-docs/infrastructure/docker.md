@@ -166,7 +166,7 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
 
     Split-K is unreachable from the varlen forward and the whole backward, but the **non-varlen** forward
     sets `num_splits=0` and can select it by occupancy heuristic at small batch/head/seq. A non-varlen
-    caller must therefore prefer FA3 on sm_90, which `src/distributed/context_parallel/base_layer.py` does.
+    caller must therefore prefer FA3 on sm_90, which `src/distributed/context_parallel/ulysses_attention.py` does.
 
 Rebuild when `pyproject.toml`/`uv.lock` change (run `uv lock` first), or when Flash Attention / DeepEP / the
 base NGC image need updating.

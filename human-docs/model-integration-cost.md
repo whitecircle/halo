@@ -27,8 +27,8 @@ file registers itself by naming the HF MoE class it claims and the config
 - GPT-OSS is the outlier at about 360, because of its interleaved gate/up
   weights and attention sinks.
 
-Context parallelism works the same way: one `UlyssesAttentionBase` subclass under
-`src/distributed/context_parallel/layers/` that declares the attention classes it
+Context parallelism works the same way: one `UlyssesAttention` subclass in
+`src/distributed/context_parallel/families.py` that declares the attention classes it
 wraps. Both registries are built from the subclass tree, so a wrapper that exists
 gets used.
 

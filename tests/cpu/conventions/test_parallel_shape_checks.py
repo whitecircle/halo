@@ -17,7 +17,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig
 
-from src.distributed.context_parallel.patching import patch_attention_for_ulysses
+from src.distributed.context_parallel.ulysses_model import apply_ulysses_attention
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.mesh import MeshDim
 from tests.common.distributed import fake_process_group_mesh
@@ -116,7 +116,7 @@ def test_a_tp_run_needs_a_param_sharded_over_a_tp_mesh(dim_name, ok):
 def test_a_cp_run_needs_the_attention_swapped_for_ulysses(patched):
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     if patched:
-        patch_attention_for_ulysses(model, cp_group=None, cp_size=WORLD_SIZE, validate=False)
+        apply_ulysses_attention(model, cp_group=None, cp_size=WORLD_SIZE)
     assert parallel_shape_checks(model, _config(cp_size=WORLD_SIZE)) == {"cp_attention_wrapped": patched}
 
 

@@ -28,8 +28,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from src.distributed.context_parallel.config import split_sequence_for_cp
-from src.distributed.context_parallel.wrapper import _reject_left_padding
+from src.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
+from src.distributed.context_parallel.ulysses_model import _reject_left_padding
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.first_step import AUTOGRAD_FALLBACK_WARNING

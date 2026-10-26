@@ -27,10 +27,10 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.patching import patch_attention_for_ulysses
-from src.distributed.context_parallel.validation import validate_model_for_ulysses
+from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
+from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from src.distributed.context_parallel.ulysses_model import apply_ulysses_attention
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.tolerances import TOL
@@ -153,38 +153,34 @@ def run(ctx) -> dict:
 
     # No except-and-skip: a refusal on a supported CP family is the regression this file
     # exists to catch, and swallowing it removes the log-prob comparison while exiting 0.
-    validate_model_for_ulysses(model_cp, cp_size=cp_size)
+    reject_unsupported_ulysses_model(model_cp, cp_size=cp_size)
     log("  Model validated for Ulysses CP")
 
     # ── Step 5: CP forward pass - get local logits ───────────────────
     log("\n[5/6] Running CP forward pass and gathering logits...")
     cp_config = CPConfig(
-        cp_size=cp_size,
-        world_size=world_size,
-        gpus_per_node=world_size,  # single-node test: the whole world is one NVLink domain
+        cp_size,
+        stage_world_size=world_size,
+        stage_base_rank=0,
+        nvlink_domain_size=world_size,  # single-node test: the whole world is one NVLink domain
     )
 
     # The CP wrapper patches attention for Ulysses but handles
     # sequence splitting in forward(). For logit comparison, we need
     # to get the raw logits from the CP forward pass.
     #
-    # Strategy: Use the model WITHOUT the full UlyssesCPModelWrapper, but WITH
+    # Strategy: Use the model WITHOUT the full UlyssesModel, but WITH
     # Ulysses attention patching. Manually split input and gather output.
     cp_group = cp_config.process_group
 
-    num_patched = patch_attention_for_ulysses(
-        model_cp,
-        cp_group,
-        cp_size,
-        validate=False,  # Already validated above
-    )
+    num_patched = apply_ulysses_attention(model_cp, cp_group, cp_size)
     log(f"  Patched {num_patched} attention layers")
 
     # Same-kernel comparison: the wrapper's runtime probe would pick FA4 on Blackwell while
     # the baseline above runs HF's FA2, and FA4-vs-FA2 per-token bf16 deltas swamp the atol.
     # This test pins the CP MATH (head-scatter/gather), so hold the kernel constant instead.
     for module in model_cp.modules():
-        if isinstance(module, UlyssesAttentionBase):
+        if isinstance(module, UlyssesAttention):
             module._allow_fa4 = False
 
     model_cp.eval()

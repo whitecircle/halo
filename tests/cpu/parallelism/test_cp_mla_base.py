@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""CPU tests for the shared MLA Ulysses base (``MLAUlyssesAttentionBase``).
+"""CPU tests for the shared MLA Ulysses base (``MLAUlyssesAttention``).
 
 GLM4-MoE-Lite and Mistral4 are both DeepSeek-V3-style MLA, and the whole shared layer — the
-``head_dim`` back-fill, the geometry read off the wrapped module, ``_project_qkv``,
-``_apply_rotary_pos_emb``, the legacy-path flag — lives once on the base. These tests fail if a
-family re-forks a private copy (a hand-written geometry block drifts on ``use_qkv_lora``,
+``head_dim`` back-fill, the geometry read off the wrapped module, ``_project_qkv``, the rope-half
+``_apply_rotary``, the V-padding ``_attend`` — lives once on the base. These tests fail if a
+family re-forks a private copy (a hand-written geometry block drifts on ``use_q_lora``,
 ``rope_interleave`` and the ``qk_rope_head_dim`` fallback) or if the hoisted MLA compute stops
 matching the compressed-KV reference.
 
@@ -19,9 +19,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.context_parallel.base_layer import MLAUlyssesAttentionBase
-from src.distributed.context_parallel.layers.glm4 import Glm4MoeLiteUlyssesAttention
-from src.distributed.context_parallel.layers.mistral4 import Mistral4UlyssesAttention
+from src.distributed.context_parallel import ulysses_attention
+from src.distributed.context_parallel.families import Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention
+from src.distributed.context_parallel.ulysses_attention import MLAUlyssesAttention
 
 HIDDEN = 32
 NUM_Q_HEADS = 4
@@ -94,6 +94,15 @@ class _FakeCompressedQAttention(_FakeMLAAttention):
         self.q_b_proj = nn.Linear(self.q_lora_rank, NUM_Q_HEADS * QK_HEAD_DIM, bias=False)
 
 
+def _reference_rope(x, cos, sin, interleave):
+    """Rotate-half RoPE on ``[B, S, H, D]``, after transformers' pair de-interleave when ``interleave``."""
+    if interleave:
+        b, s, h, d = x.shape
+        x = x.view(b, s, h, d // 2, 2).transpose(4, 3).reshape(b, s, h, d)
+    x1, x2 = x.chunk(2, dim=-1)
+    return (x * cos) + (torch.cat((-x2, x1), dim=-1) * sin)
+
+
 def _make_wrapper(cls, attn=None):
     return cls(attn if attn is not None else _FakeMLAAttention(), cp_group=None, cp_size=2)
 
@@ -101,43 +110,35 @@ def _make_wrapper(cls, attn=None):
 @pytest.mark.parametrize("cls", [Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention])
 def test_mla_families_do_not_fork_the_shared_compute(cls):
     """Neither family may re-declare the hoisted MLA methods — a private copy is silent drift."""
-    for method in ("_project_qkv", "_apply_rotary_pos_emb", "_flash_attention", "_resolve_num_kv_heads"):
+    for method in ("_project_qkv", "_attend", "_resolve_num_kv_heads"):
         assert method not in vars(cls), (
             f"{cls.__name__} re-declares {method}; the MLA implementation lives on "
-            f"MLAUlyssesAttentionBase — delete the fork or justify a genuinely different layout."
+            f"MLAUlyssesAttention — delete the fork or justify a genuinely different layout."
         )
-        assert getattr(cls, method) is getattr(MLAUlyssesAttentionBase, method)
-
-
-@pytest.mark.parametrize("cls", [Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention])
-def test_legacy_path_flag_is_declared_once_on_the_mla_base(cls):
-    """MLA geometry (qk vs v head dims) IS the reason for the legacy path — one declaration, not
-    one per family, or a new MLA family silently lands on flash-attn's native GQA."""
-    assert "_optimize_attention" not in vars(cls)
-    assert cls._optimize_attention is False
+        assert getattr(cls, method) is getattr(MLAUlyssesAttention, method)
 
 
 @pytest.mark.parametrize("cls", [Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention])
 def test_head_dim_backfill_runs_on_the_base_not_in_the_family(cls):
-    """``UlyssesAttentionBase.__init__`` reads ``original_attention.head_dim``, which MLA modules
+    """``UlyssesAttention.__init__`` reads ``original_attention.head_dim``, which MLA modules
     spell ``qk_head_dim``. The back-fill that bridges the two belongs to the MLA base — a family
     copy is the same fork this file exists to catch."""
     attn = _FakeMLAAttention()
     assert not hasattr(attn, "head_dim"), "the fake must reproduce an MLA module's naming"
 
     backfilled_before_base = None
-    base_init = MLAUlyssesAttentionBase.__init__
+    base_init = MLAUlyssesAttention.__init__
 
     def spy(self, original_attention, cp_group, cp_size):
         nonlocal backfilled_before_base
         backfilled_before_base = hasattr(original_attention, "head_dim")
         base_init(self, original_attention, cp_group, cp_size)
 
-    with patch.object(MLAUlyssesAttentionBase, "__init__", spy):
+    with patch.object(MLAUlyssesAttention, "__init__", spy):
         wrapper = cls(attn, cp_group=None, cp_size=2)
 
     assert backfilled_before_base is False, (
-        f"{cls.__name__}.__init__ back-fills head_dim itself; MLAUlyssesAttentionBase owns that."
+        f"{cls.__name__}.__init__ back-fills head_dim itself; MLAUlyssesAttention owns that."
     )
     assert attn.head_dim == QK_HEAD_DIM
     assert wrapper.head_dim == QK_HEAD_DIM
@@ -166,7 +167,7 @@ def test_mla_geometry_is_read_off_the_wrapped_module_by_the_base(cls):
     assert wrapper.qk_rope_head_dim == QK_ROPE
     assert wrapper.v_head_dim == V_HEAD_DIM
     assert wrapper.kv_lora_rank == KV_LORA_RANK
-    assert wrapper.use_qkv_lora is False  # the fake module has a plain q_proj
+    assert wrapper.use_q_lora is False  # the fake module has a plain q_proj
     assert wrapper.rope_interleave is False  # read off the config, not defaulted
 
 
@@ -177,11 +178,11 @@ def test_glm4_carries_no_layer_of_its_own():
 
 
 @pytest.mark.parametrize("cls", [Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention])
-def test_use_qkv_lora_follows_the_modules_project_qkv_actually_calls(cls):
+def test_use_q_lora_follows_the_modules_project_qkv_actually_calls(cls):
     """A compressed-Q module must take the ``q_a_proj``→norm→``q_b_proj`` branch, and only it — both
     families decide it from the same fact (the module's own ``q_a_proj``, not ``q_lora_rank``)."""
     wrapper = _make_wrapper(cls, _FakeCompressedQAttention())
-    assert wrapper.use_qkv_lora is True
+    assert wrapper.use_q_lora is True
 
     batch, seq = 2, 3
     hidden = torch.randn(batch, seq, HIDDEN)
@@ -218,7 +219,6 @@ def test_kv_head_count_comes_from_kv_b_proj_not_the_config(cls):
     wrapper = _make_wrapper(cls, attn)
 
     assert wrapper.num_kv_heads == NUM_KV_HEADS
-    assert wrapper.local_num_key_value_groups == (NUM_Q_HEADS // 2) // (NUM_KV_HEADS // 2)
     batch, seq = 2, 3
     _, k, v = wrapper._project_qkv(torch.randn(batch, seq, HIDDEN), batch, seq)
     assert k.shape == (batch, seq, NUM_KV_HEADS, QK_HEAD_DIM)
@@ -255,16 +255,17 @@ def test_project_qkv_matches_compressed_kv_reference(cls):
 
 @pytest.mark.parametrize("cls", [Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention])
 @pytest.mark.parametrize("interleave", [False, True])
-def test_apply_rotary_pos_emb_touches_only_the_rope_half(cls, interleave):
+def test_apply_rotary_touches_only_the_rope_half(cls, interleave):
+    """Positions inside Mistral4's original window, where its llama-4 scale is exactly 1."""
     wrapper = _make_wrapper(cls)
     wrapper.rope_interleave = interleave
-    batch, heads, seq = 2, NUM_Q_HEADS, 3
-    q = torch.randn(batch, heads, seq, QK_HEAD_DIM)
-    k = torch.randn(batch, NUM_KV_HEADS, seq, QK_HEAD_DIM)
-    cos = torch.randn(batch, seq, QK_ROPE)
-    sin = torch.randn(batch, seq, QK_ROPE)
+    batch, seq = 2, 3
+    q = torch.randn(batch, seq, NUM_Q_HEADS, QK_HEAD_DIM)
+    k = torch.randn(batch, seq, NUM_KV_HEADS, QK_HEAD_DIM)
+    cos = torch.randn(batch, seq, 1, QK_ROPE)
+    sin = torch.randn(batch, seq, 1, QK_ROPE)
 
-    q_out, k_out = wrapper._apply_rotary_pos_emb(q, k, cos, sin)
+    q_out, k_out = wrapper._apply_rotary(q, k, cos, sin, torch.arange(seq).expand(batch, seq))
 
     assert q_out.shape == q.shape and k_out.shape == k.shape
     # nope half passes through untouched; rope half is rotated.
@@ -272,8 +273,28 @@ def test_apply_rotary_pos_emb_touches_only_the_rope_half(cls, interleave):
     torch.testing.assert_close(k_out[..., :QK_NOPE], k[..., :QK_NOPE])
     assert not torch.allclose(q_out[..., QK_NOPE:], q[..., QK_NOPE:])
 
-    rotary = wrapper._apply_rotary_emb_interleaved if interleave else wrapper._apply_rotary_emb
-    torch.testing.assert_close(q_out[..., QK_NOPE:], rotary(q[..., QK_NOPE:], cos.unsqueeze(1), sin.unsqueeze(1)))
+    torch.testing.assert_close(q_out[..., QK_NOPE:], _reference_rope(q[..., QK_NOPE:], cos, sin, interleave))
+
+
+@pytest.mark.parametrize("cls", [Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention])
+def test_attend_pads_v_to_the_qk_head_dim_and_crops_back(cls):
+    """The kernel takes one head dim across Q/K/V; the output must come back at ``v_head_dim``, holding
+    exactly what attention over the unpadded V gives."""
+    wrapper = _make_wrapper(cls)
+    batch, seq = 2, 5
+    q, k = (torch.randn(batch, seq, NUM_KV_HEADS, QK_HEAD_DIM) for _ in range(2))
+    v = torch.randn(batch, seq, NUM_KV_HEADS, V_HEAD_DIM)
+    seen = []
+
+    def kernel(query, key, value, **kwargs):
+        seen.append(value.shape[-1])
+        return torch.einsum("bqhk,bkhd->bqhd", torch.einsum("bqhd,bkhd->bqhk", query, key).softmax(-1), value)
+
+    with patch.object(ulysses_attention, "_flash_attn_func", lambda allow_fa4: kernel):
+        out = wrapper._attend(q, k, v)
+
+    assert seen == [QK_HEAD_DIM]
+    torch.testing.assert_close(out, kernel(q, k, v))
 
 
 if __name__ == "__main__":

@@ -19,7 +19,7 @@ Pipeline parallelism is [not yet available in this release](../parallelism/pipel
 
 ## TP and ETP
 
-Selective attention-only TP — `Lfm2MoeAttention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`); `Lfm2MoeSparseMoeBlock` is skipped (handled by EP). Only the full-attention layers shard — the short-conv layers stay replicated, so the per-rank footprint falls by far less than `1/tp_size`.
+Selective attention-only TP — `Lfm2MoeAttention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`); `Lfm2MoeSparseMoeBlock` is skipped (handled by EP). Only the full-attention layers shard — the short-conv layers stay replicated, so the per-rank footprint falls by far less than `1/tp_size`.
 
 LFM-2 uses the [fused contiguous-halves ETP layout](../parallelism/expert-tensor-parallelism.md#weight-sharding): `_init_fused_glu_params` splits the `[gate(M) | up(M)]` halves and stores `gate_proj` / `up_proj` / `down_proj` separately when `expert_tp_size > 1`. The non-trainable `expert_bias` buffer is replicated across ETP ranks.
 

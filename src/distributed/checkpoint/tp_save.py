@@ -12,15 +12,13 @@ import logging
 import torch.nn as nn
 
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.checkpoint.parallel.writing import gather_hand_sliced_params
 from src.distributed.checkpoint.write import (
     chunked_saveable_tensors,
     saveable_items,
     stream_gathered_checkpoint,
 )
-from src.distributed.tensor_parallel.state_dict import (
-    gather_tp_sharded_non_dtensor_params,
-    tp_sharded_non_dtensor_suffixes,
-)
+from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from src.models.unwrapping import unwrap_toolkit_wrappers
 from src.runtime.collectives import barrier_on_exit
 from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
@@ -78,12 +76,11 @@ def _tp_chunks(model: nn.Module, model_to_save: nn.Module, *, retain: bool, keep
 
     They are excluded from the parameter walk, which emits the live parameter (this rank's
     ``[heads/tp]`` slice) that the streamed writer would flush before the gathered tensor arrives
-    under the same key. The exclusion reads the same ``_tp_sharded_non_dtensor`` registry the gather
-    iterates.
+    under the same key. The exclusion reads the same hand-sliced registry the gather iterates.
     """
-    hand_sliced = tp_sharded_non_dtensor_suffixes(model)
+    hand_sliced = hand_sliced_suffixes(model)
     items = ((name, tensor) for name, tensor in saveable_items(model_to_save) if not name.endswith(hand_sliced))
     yield from chunked_saveable_tensors(model_to_save, retain=retain, items=items)
     sharded_plain: dict = {}
-    gather_tp_sharded_non_dtensor_params(model, sharded_plain, retain=retain, keep_live_dtype=keep_live_dtype)
+    gather_hand_sliced_params(model, sharded_plain, retain=retain, keep_live_dtype=keep_live_dtype)
     yield sharded_plain

@@ -3,7 +3,7 @@
 
 Under tensor parallelism every param the plan owns is a DTensor, which the sync materializes full one
 at a time. The sinks are not: they carry no plan entry, are sliced by hand across the TP group, and
-are recorded in ``model._tp_sharded_non_dtensor``. That leaves the sync two ways to be silently
+are recorded by ``register_hand_sliced``. That leaves the sync two ways to be silently
 wrong, both of which serve a corrupt policy with no error at sync time:
 
 * stream them like any other param — the engine gets TP-rank 0's *slice* under the full-tensor name,
@@ -14,7 +14,7 @@ wrong, both of which serve a corrupt policy with no error at sync time:
   exactly the failure ``validate_weight_sync_support`` refuses the FA2 sink reset over.
 
 So ``_send_dense_weights`` skips them by suffix in the streaming loop and re-sends them gathered from
-``iter_tp_sharded_non_dtensor_full``. This pins that wiring: the sinks arrive once, at full shape,
+``iter_hand_sliced_full``. This pins that wiring: the sinks arrive once, at full shape,
 after everything streamed. The gather itself moves its tensors to CUDA before the collective, so the
 group half is the GPU tier's (``parallelism/tp``); what stands in for it here is a fake TP drain, and
 the sync's own halves — the skip and the drain — are what is under test.
@@ -28,7 +28,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
+from src.distributed.tensor_parallel.plain_params import hand_sliced_dims, hand_sliced_suffixes, register_hand_sliced
 from src.trainers.grpo.rollout import weight_sync
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 
@@ -49,7 +49,7 @@ class _Attention(nn.Module):
 
 class _TPModel(nn.Module):
     """A TP-parallelized policy as ``parallelize_attention`` leaves it: the hand-sliced params
-    recorded on the model as ``(suffix, shard_dim)``."""
+    registered on the model with their shard dim."""
 
     def __init__(self, register_sinks: bool = True):
         super().__init__()
@@ -58,7 +58,7 @@ class _TPModel(nn.Module):
         self.layers = nn.ModuleList([layer])
         self.lm_head = nn.Linear(HIDDEN, HIDDEN, bias=False)
         if register_sinks:
-            self._tp_sharded_non_dtensor = [("sinks", 0)]
+            register_hand_sliced(self, "sinks", 0)
 
     def forward(self, x):  # pragma: no cover - never called
         return x
@@ -79,17 +79,17 @@ class _RecordingSender:
 
 
 def _fake_tp_drain(model: nn.Module):
-    """Stand-in for ``iter_tp_sharded_non_dtensor_full``: the TP group's all-gather of each recorded
+    """Stand-in for ``iter_hand_sliced_full``: the TP group's all-gather of each recorded
     hand-sliced param, with the peer rank's slice faked in. Same contract — collective, in
     ``named_parameters`` order, yielding full tensors."""
     for name, param in model.named_parameters():
-        for suffix, shard_dim in getattr(model, "_tp_sharded_non_dtensor", None) or ():
+        for suffix, shard_dim in hand_sliced_dims(model).items():
             if name.endswith(suffix):
                 yield name, torch.cat([param.data, param.data + PEER_OFFSET], dim=shard_dim)
 
 
 def _sync(model: nn.Module, monkeypatch) -> _RecordingSender:
-    monkeypatch.setattr(weight_sync, "iter_tp_sharded_non_dtensor_full", _fake_tp_drain)
+    monkeypatch.setattr(weight_sync, "iter_hand_sliced_full", _fake_tp_drain)
     sender = _RecordingSender()
     gather_and_send_weights(model, sender)
     return sender
@@ -97,7 +97,7 @@ def _sync(model: nn.Module, monkeypatch) -> _RecordingSender:
 
 def test_sinks_are_forwarded_once_gathered_and_last(monkeypatch):
     model = _TPModel()
-    assert tp_sharded_non_dtensor_suffixes(model) == ("sinks",), "the model no longer registers hand-sliced sinks"
+    assert hand_sliced_suffixes(model) == ("sinks",), "the model no longer registers hand-sliced sinks"
 
     names = [name for name, _tensor in _sync(model, monkeypatch).sent]
 

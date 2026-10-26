@@ -8,7 +8,7 @@ Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel resid
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
 | DeepSeek-V4 | Yes | No | No | Yes | No | No |
 
-- **CP** — the CSA/HCA compressors pool non-overlapping token windows along the sequence axis; a CP shard would compress incomplete windows at every chunk boundary. Rejected by class name in `src/distributed/context_parallel/validation.py`.
+- **CP** — the CSA/HCA compressors pool non-overlapping token windows along the sequence axis; a CP shard would compress incomplete windows at every chunk boundary. Rejected by class name in `src/distributed/context_parallel/model_rules.py`.
 - **TP** — `DeepseekV4Attention` (shared-KV MQA broadcast to all heads + the compressor branch) is not shardable; `apply_tp_to_attention_only` raises when a model ends up with zero shardable attention layers under `tp_size > 1`.
 - **ETP** — the experts use the shared fused-GLU storage, split through `_init_fused_glu_params`. Pure ETP and EP+ETP train, save and resume on the tiny model (the precompute-resume suites, `--mode etp2` / `ep2etp2`); the full V4-Flash checkpoint is not run under ETP.
 - **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).

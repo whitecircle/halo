@@ -16,7 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.distributed.context_parallel.config import CPConfig, cp_chunk_bounds
+from src.distributed.context_parallel.config import CPConfig
+from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds
 from src.distributed.parallelism_rules import reject_accelerate_launch
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
 from src.model_loading.parallel.load_rules import reject_unsupported_model
@@ -170,7 +171,7 @@ def test_model_shape_refusal_names_the_yaml_knobs(shape, model_config, knob):
     ("refuse", "knob"),
     [
         pytest.param(
-            lambda: CPConfig(cp_size=16, world_size=16, gpus_per_node=8),
+            lambda: CPConfig(16, stage_world_size=16, stage_base_rank=0, nvlink_domain_size=8),
             "context_parallel_size (16) cannot exceed the NVLink-domain size",
             id="cp_config",
         ),

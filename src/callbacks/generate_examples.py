@@ -20,7 +20,7 @@ from transformers import (
     TrainerState,
 )
 
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.mesh import has_tp_dim
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
@@ -61,7 +61,7 @@ def _generation_skip_reason(model) -> str | None:
             "a pipeline-parallel stage holds only part of the model and cannot generate. "
             "Generate from a saved checkpoint instead."
         )
-    if any(isinstance(module, UlyssesCPModelWrapper) for module in model.modules()):
+    if any(isinstance(module, UlyssesModel) for module in model.modules()):
         return "Context Parallelism is incompatible with autoregressive generation."
     if any(isinstance(param.data, DTensor) and has_tp_dim(param.data.device_mesh) for param in model.parameters()):
         return "Tensor Parallelism (DTensor) is incompatible with autoregressive generation."

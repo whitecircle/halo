@@ -1,7 +1,7 @@
 """The import layering of ``src/``, read off the import graph itself.
 
-Enforced: the sharding-agnostic trees (``src/checkpoint/``, ``src/model_loading/`` outside its ``parallel/``
-loaders, ``src/models/``) import no ``src.distributed``, ``torch.distributed`` or loader dispatch; nothing in
+Enforced: the sharding-agnostic trees (``src/checkpoint/`` and ``src/model_loading/`` outside their ``parallel/``
+halves, ``src/models/``) import no ``src.distributed``, ``torch.distributed`` or loader dispatch; nothing in
 ``src/distributed`` imports the loader dispatch (``src/model_loading/parallel/``); the members of
 ``src/distributed`` and of the dispatch import each other acyclically; every toolkit env knob is read through
 ``src/env.py``.
@@ -34,6 +34,8 @@ _INDEX = RepoIndex(REPO_ROOT)
 # The package above every parallelism implementation, which nothing in src/distributed imports.
 _DISPATCH_PACKAGE = "model_loading.parallel"
 _DISPATCH_DIR = _SRC.joinpath(*_DISPATCH_PACKAGE.split("."))
+# The collective half of the checkpoint tree, which the agnostic sweep skips and the dispatch sweep covers.
+_CHECKPOINT_PARALLEL = "checkpoint.parallel"
 
 # The sharding-agnostic trees and what they may not reach.
 _AGNOSTIC_DIRS = ("checkpoint", "model_loading", "models")
@@ -122,7 +124,6 @@ _PENDING_MOVES = {
     "distributed.loading.vlm_setup": "entrypoints.model_setup",
     "distributed.nccl": "weight_sync.transport",
     "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
-    "distributed.context_parallel.key_mapping": "models.unwrapping",
     "distributed.pipeline_parallel.lazy_loader": "model_loading.parallel.pp",
     "distributed.expert_parallel.balancing_strategy": "callbacks.balancing",
     "distributed.expert_parallel.expert_gather": "distributed.expert_parallel.moe_layer.gather",
@@ -265,7 +266,7 @@ _AGNOSTIC_FILES = sorted(
     path
     for directory in _AGNOSTIC_DIRS
     for path in (_SRC / directory).rglob("*.py")
-    if not path.is_relative_to(_DISPATCH_DIR)
+    if not path.is_relative_to(_DISPATCH_DIR) and not _is_within(_module_name(_SRC, path), _CHECKPOINT_PARALLEL)
 )
 _ENV_SWEPT_FILES = _package_files(_INDEX) + sorted((REPO_ROOT / "scripts").rglob("*.py"))
 

@@ -21,7 +21,7 @@
 // just decode. mha_varlen_fwd gates the same call behind seqlenq_ngroups_swapped, so
 // packed/padding-free training never reaches it. Callers that use the non-varlen
 // entry point must therefore prefer FA3 on sm_90; src/distributed/context_parallel/
-// base_layer.py does exactly that.
+// ulysses_attention.py does exactly that.
 //
 // If/when CUDA 13.3+ fixes the ptxas regression, drop this file and restore
 // the original split .cu kernels.

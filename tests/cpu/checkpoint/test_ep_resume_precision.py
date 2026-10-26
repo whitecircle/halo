@@ -33,13 +33,13 @@ from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
 from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, patch_model_for_cp
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks
 from src.distributed.mesh import create_dp_tp_mesh
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
-from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
+from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from src.model_loading.parallel.cp import load_ep_cp_model
 from src.model_loading.parallel.loader import _load_ep_model, _load_pp_stage_model, _load_undistributed_model
 from src.model_loading.parallel.model_source import ModelSource
@@ -147,7 +147,7 @@ def _patch_cpu_loading(monkeypatch):
         return verified(model_class, source, **kwargs)
 
     monkeypatch.setattr(whole_model, "from_pretrained_verified", cpu_pretrained)
-    monkeypatch.setattr(cp_loading, "patch_model_for_cp", _cpu_cp_wrap)
+    monkeypatch.setattr(cp_loading, "UlyssesModel", _cpu_cp_wrap)
 
 
 @pytest.fixture
@@ -159,7 +159,7 @@ def _cpu_cp_wrap(model, config):
     # HF materializes on CPU without flash; CP construction validates its own flash-only forward.
     # No attention forward runs in this weight-construction test.
     model.config._attn_implementation = "flash_attention_2"
-    return patch_model_for_cp(model, config)
+    return UlyssesModel(model, config)
 
 
 def _ep_config(*, fp32_router, fp32_experts, fp32_non_ep, managed_experts):
@@ -210,7 +210,7 @@ def _construct(
         preserve_checkpoint_precision=preserve,
         **extra,
     )
-    assert isinstance(model, UlyssesCPModelWrapper) == (mode == "ep_cp")
+    assert isinstance(model, UlyssesModel) == (mode == "ep_cp")
     return model
 
 
@@ -222,12 +222,12 @@ def _loaded_checkpoint_layout(model):
         for name, tensor in model.named_parameters()
     }
     # Attention sinks stay plain tensors under TP, each rank holding its contiguous run of heads.
-    for suffix in tp_sharded_non_dtensor_suffixes(model):
+    for suffix in hand_sliced_suffixes(model):
         for name in [name for name in state if name.endswith(suffix)]:
             shards = [torch.empty_like(state[name]) for _ in range(dist.get_world_size())]
             dist.all_gather(shards, state[name].detach().contiguous())
             state[name] = torch.cat(shards)
-    inner = model.model if isinstance(model, UlyssesCPModelWrapper) else model
+    inner = model.model if isinstance(model, UlyssesModel) else model
     layers = [(name, module) for name, module in inner.named_modules() if isinstance(module, EPMoELayerBase)]
     assert layers, "the real EP constructors must run"
     for path, layer in layers:

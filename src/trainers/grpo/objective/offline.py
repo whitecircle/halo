@@ -18,8 +18,8 @@ from typing import get_args
 import torch
 
 from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.context_parallel.autograd import cp_sum_rows
 from src.distributed.context_parallel.config import CPConfig
+from src.distributed.context_parallel.sequence_chunks import cp_sum_rows
 from src.trainers.grpo.objective.logratio import clamp_ref_logps
 
 # Derived from the config's own Literal annotations, so the dispatches here and the parse-time gate

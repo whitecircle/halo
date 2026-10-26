@@ -4,7 +4,7 @@
 
 The **TP column** tracks the Halo-side path: pure TP for dense models, and *selective* TP (attention only; embeddings and `lm_head` replicated; MoE left to EP) for MoE models in EP+TP mode. Most modern HF models also support native TP via `base_model_tp_plan`; GPT-OSS ships a `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo path. **No** means no working selective-TP path.
 
-The registries behind the matrix: EP wrappers under `src/distributed/expert_parallel/layers/`, CP wrappers (which the CP accept-list is derived from) under `src/distributed/context_parallel/layers/`, TP accept-list in `src/distributed/tensor_parallel/module_types.py`.
+The registries behind the matrix: EP wrappers under `src/distributed/expert_parallel/layers/`, CP wrappers (which the CP accept-list is derived from) in `src/distributed/context_parallel/families.py`, TP accept-list in `src/distributed/tensor_parallel/parallelize_attention.py`.
 
 ## Compatibility matrix
 

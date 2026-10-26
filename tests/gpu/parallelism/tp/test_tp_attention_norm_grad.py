@@ -36,6 +36,7 @@ from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from src.distributed.mesh import get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.tensor_parallel.plain_params import per_head_norm_param_names
 from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.distributed import shared_scratch_dir, world_spread
@@ -160,7 +161,7 @@ def run(ctx):
     )
     model.train()
 
-    registered = set(getattr(model, "_tp_per_head_norm_params", None) or ())
+    registered = set(per_head_norm_param_names(model))
     # The reduction is driven off this registry, so an empty one would make the comparison vacuous.
     checks["norms_registered_for_step_sync"] = registered.issuperset(names)
 

@@ -28,7 +28,7 @@ from src.data.vlm import dataset_declares_images, is_vlm_run
 from src.distributed.loading.vlm_setup import load_model_consuming_init_kwargs
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading.parallel.model_source import probe_checkpoint
 from src.model_loading.parallel.peft_setup import split_expert_lora_targets
 from src.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
@@ -339,7 +339,7 @@ def apply_max_length(
     """
     training_config.max_length = resolve_length_to_context(training_config.max_length, model, tokenizer)
     return configure_run_tokenizer(
-        args, model, tokenizer, training_config.max_length, embeddings_sharded=input_embeddings_tp_sharded
+        args, model, tokenizer, training_config.max_length, embeddings_sharded=is_input_embedding_tp_sharded
     )
 
 
@@ -356,7 +356,7 @@ def apply_context_window(args, model: PreTrainedModel, tokenizer: PreTrainedToke
         model,
         tokenizer,
         get_model_context_window(model, tokenizer),
-        embeddings_sharded=input_embeddings_tp_sharded,
+        embeddings_sharded=is_input_embedding_tp_sharded,
     )
 
 
@@ -417,7 +417,9 @@ def apply_prompt_completion_window(
     window = None
     if is_bounded_length(max_prompt_length) and is_bounded_length(max_completion_length):
         window = max_prompt_length + max_completion_length
-    tokenizer = configure_run_tokenizer(args, model, tokenizer, window, embeddings_sharded=input_embeddings_tp_sharded)
+    tokenizer = configure_run_tokenizer(
+        args, model, tokenizer, window, embeddings_sharded=is_input_embedding_tp_sharded
+    )
     return tokenizer, window
 
 

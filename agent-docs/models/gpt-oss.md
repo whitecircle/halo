@@ -36,7 +36,7 @@ FA) whenever packing is on, and use padded batches otherwise
 
 GptOss attention adds a per-head learnable scalar to the attention logits before softmax, with two parallelism consequences.
 
-**TP sharding.** `shard_sinks_param()` (`src/distributed/tensor_parallel/parallelize_attention.py`) shards sinks per rank as plain tensors, not DTensors — the forward concatenates sinks with locally-sharded logits, and a DTensor would dimension-mismatch on the concat. The slice is recorded in `model._tp_sharded_non_dtensor` so `gather_tp_sharded_non_dtensor_params()` all-gathers it at save time.
+**TP sharding.** `shard_sinks_param()` (`src/distributed/tensor_parallel/parallelize_attention.py`) shards sinks per rank as plain tensors, not DTensors — the forward concatenates sinks with locally-sharded logits, and a DTensor would dimension-mismatch on the concat. The slice is recorded through `register_hand_sliced` so `gather_hand_sliced_params()` all-gathers it at save time.
 
 **Sink handling** (`src/models/attention/gpt_oss_sinks.py`). One `SinksPolicy` per run, resolved from `reset_sinks` / `train_sinks` at load, stamped on the model for the trainer gates, and recorded in a LoRA run's `training_provenance.json` so the merge tools re-apply it (a merge rebuilds the base from the hub, whose sinks are always live).
 
@@ -55,7 +55,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
 ## CP, TP, ETP
 
-- **CP** — `GptOssAttention` → `GptOssUlyssesAttention` (`src/distributed/context_parallel/layers/gpt_oss.py`), RoPE before all-to-all and native GQA. Needs `reset_sinks: true`: the CP kernels drop the sink column, so the wrapper raises at the first forward on live sinks rather than normalizing every softmax wrongly.
+- **CP** — `GptOssAttention` → `GptOssUlyssesAttention` (`src/distributed/context_parallel/families.py`), RoPE before all-to-all and native GQA. Needs `reset_sinks: true`: the CP kernels drop the sink column, so the wrapper raises at the first forward on live sinks rather than normalizing every softmax wrongly.
 - **TP** — a DTensor plan on attention only; `embed_tokens`/`lm_head` stay replicated (sharding them faults with a cuBLAS illegal-memory error under EP+TP), MoE experts belong to EP. See [the selective-TP plan](../parallelism/tensor-parallelism.md#the-selective-tp-plan).
 - **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Expert compute drops to the per-expert loop at `expert_tp_size > 1`: ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads (`_grouped_mm_enabled`).
 

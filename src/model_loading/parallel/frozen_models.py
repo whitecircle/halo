@@ -11,7 +11,7 @@ from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedMode
 from trl import ModelConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.log import warn_once
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
@@ -213,7 +213,7 @@ def load_frozen_reference_model(
         # so every rank would otherwise fetch at once.
         download_tag="reference_model",
     )
-    configure_run_tokenizer(args, model_ref, tokenizer, embeddings_sharded=input_embeddings_tp_sharded)
+    configure_run_tokenizer(args, model_ref, tokenizer, embeddings_sharded=is_input_embedding_tp_sharded)
     return model_ref
 
 

@@ -26,15 +26,17 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
 from src.data.collators.factory import select_data_collator
-from src.distributed.context_parallel.validation import (
+from src.distributed.context_parallel.config import CPConfigError
+from src.distributed.context_parallel.model_rules import (
     _UNSUPPORTED_SEQUENCE_AXIS_LAYERS,
-    UlyssesConfigError,
-    validate_model_for_ulysses,
+    reject_unsupported_ulysses_model,
 )
 from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
 from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
-from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
-from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from src.distributed.tensor_parallel.parallelize_attention import (
+    TP_SHARDABLE_ATTENTION_CLASSES,
+    apply_tp_to_attention_only,
+)
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.attention.selection import (
     is_fa4_backward_nan_prone,
@@ -101,16 +103,16 @@ def test_cp_module_scan_refuses_the_kda_layer():
     """The instantiated tree must be refused by the module scan itself, naming the KDA class —
     the scan runs before the config gate and before any attention-class probing."""
     assert "Glm5NextTextLinearAttention" in _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
-    with pytest.raises(UlyssesConfigError, match="instantiates 'Glm5NextTextLinearAttention'"):
-        validate_model_for_ulysses(_tiny_text_model(), 2)
+    with pytest.raises(CPConfigError, match="instantiates 'Glm5NextTextLinearAttention'"):
+        reject_unsupported_ulysses_model(_tiny_text_model(), 2)
 
 
 def test_cp_config_only_gate_refuses_a_meta_init_shell():
     """Without instantiated modules the ``layer_types`` gate must still refuse, counting the
     linear-attention layers and naming the sequence-axis mechanism."""
     config = Glm5NextConfig(text_config=dict(TINY_GLM5_NEXT_TEXT_CONFIG))
-    with pytest.raises(UlyssesConfigError) as excinfo:
-        validate_model_for_ulysses(_ConfigOnlyShell(config), 2)
+    with pytest.raises(CPConfigError) as excinfo:
+        reject_unsupported_ulysses_model(_ConfigOnlyShell(config), 2)
     message = str(excinfo.value)
     assert "1 of 2 layers are ``linear_attention``" in message, message
     assert "recurrent scan over the sequence axis" in message, message
@@ -123,8 +125,8 @@ def test_cp_config_only_gate_is_family_agnostic():
         model_type = "qwen3_5_moe"
         layer_types = ["linear_attention", "full_attention"]
 
-    with pytest.raises(UlyssesConfigError, match=r"1 of 2 layers are ``linear_attention``"):
-        validate_model_for_ulysses(_ConfigOnlyShell(_Config()), 2)
+    with pytest.raises(CPConfigError, match=r"1 of 2 layers are ``linear_attention``"):
+        reject_unsupported_ulysses_model(_ConfigOnlyShell(_Config()), 2)
 
 
 # Pipeline parallelism

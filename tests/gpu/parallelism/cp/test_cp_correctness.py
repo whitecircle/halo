@@ -5,7 +5,7 @@ Context Parallelism forward pass equivalence test.
 Validates that CP (Ulysses sequence parallelism) produces equivalent results to a
 non-CP baseline: the same Qwen3-0.6B model and a fixed-seed input (seq_len divisible
 by cp_size) run first without CP (each rank independently, full sequence), then
-through UlyssesCPModelWrapper, which takes the full input_ids/labels, splits by
+through UlyssesModel, which takes the full input_ids/labels, splits by
 cp_rank, computes the local loss with boundary handling, and normalizes globally
 across CP ranks.
 
@@ -31,8 +31,8 @@ import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.validation import validate_model_for_ulysses
-from src.distributed.context_parallel.wrapper import patch_model_for_cp
+from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from tests.common.distributed import world_mean, world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
@@ -122,7 +122,7 @@ def run(ctx) -> dict:
 
     # ── Step 4: Validate model compatibility with Ulysses ────────────
     log("\n[4/6] Validating model for Ulysses CP...")
-    # Load a fresh model to validate (validate_model_for_ulysses checks config)
+    # Load a fresh model to validate (reject_unsupported_ulysses_model checks config)
     model_cp = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         dtype=torch.bfloat16,
@@ -134,19 +134,20 @@ def run(ctx) -> dict:
     # No except-and-skip: this model IS a supported CP family, so a refusal here is the
     # regression the file exists to catch. Swallowing it deletes the CP-vs-single-GPU
     # comparison below from the suite while still exiting 0.
-    validate_model_for_ulysses(model_cp, cp_size=world_size)
+    reject_unsupported_ulysses_model(model_cp, cp_size=world_size)
     log("  Model validated for Ulysses CP")
 
     # ── Step 5: CP forward pass ──────────────────────────────────────
     log("\n[5/6] Running CP forward pass...")
     cp_config = CPConfig(
-        cp_size=world_size,
-        world_size=world_size,
-        gpus_per_node=world_size,  # single-node test: the whole world is one NVLink domain
+        world_size,
+        stage_world_size=world_size,
+        stage_base_rank=0,
+        nvlink_domain_size=world_size,  # single-node test: the whole world is one NVLink domain
     )
 
     # Wrap model for CP (Ulysses patches attention layers)
-    model_cp = patch_model_for_cp(model_cp, cp_config)
+    model_cp = UlyssesModel(model_cp, cp_config)
     model_cp.eval()
 
     log(f"  CP config: cp_size={cp_config.cp_size}, cp_rank={cp_config.cp_rank}")

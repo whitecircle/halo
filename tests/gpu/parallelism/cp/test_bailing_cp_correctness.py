@@ -32,12 +32,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.distributed.context_parallel.layers.bailing import BailingMoeV2UlyssesAttention
-from src.distributed.context_parallel.validation import (
-    UlyssesConfigError,
-    validate_model_for_ulysses,
-)
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.config import CPConfigError
+from src.distributed.context_parallel.families import BailingMoeV2UlyssesAttention
+from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.remote_code import apply_remote_code_compat_shims
 from tests.common.distributed import world_mean
@@ -114,9 +112,9 @@ def check_validation_gates(model: nn.Module) -> bool:
     ok = True
 
     try:
-        validate_model_for_ulysses(model, cp_size=2)
+        reject_unsupported_ulysses_model(model, cp_size=2)
         log(f"  sdpa label accepted (attn_implementation={model.config._attn_implementation!r})")
-    except UlyssesConfigError as e:
+    except CPConfigError as e:
         log(f"  FAIL: validation rejected the shipped Bailing label: {e}")
         ok = False
 
@@ -126,10 +124,10 @@ def check_validation_gates(model: nn.Module) -> bool:
     linear_cls = type("BailingMoeV2LinearAttention", (nn.Module,), {})
     model.model.layers[0].linear_attn_probe = linear_cls()
     try:
-        validate_model_for_ulysses(model, cp_size=2)
+        reject_unsupported_ulysses_model(model, cp_size=2)
         log("  FAIL: a BailingMoeV2LinearAttention layer was NOT rejected")
         ok = False
-    except UlyssesConfigError as e:
+    except CPConfigError as e:
         if "BailingMoeV2LinearAttention" not in str(e):
             log(f"  FAIL: rejection did not name the linear-attention class: {e}")
             ok = False
@@ -161,7 +159,7 @@ def check_attention_equivalence(model: nn.Module, cp_group, rank: int, cp_size: 
     structural = {
         "scaling": wrapper.scaling == config.head_dim**-0.5,
         "use_qk_norm": wrapper.use_qk_norm == config.use_qk_norm,
-        "output_projection": wrapper._output_projection is attn.dense,
+        "output_projection": getattr(wrapper.original_attention, wrapper.OUTPUT_PROJECTION) is attn.dense,
         "rotary_dim": cos.shape[-1] == int(config.head_dim * config.partial_rotary_factor),
     }
     for name, passed in structural.items():
@@ -236,7 +234,7 @@ def run(ctx):
     reference_value = reference_loss.item()
     model.zero_grad(set_to_none=True)
 
-    cp_model = UlyssesCPModelWrapper(model, cp_config)
+    cp_model = UlyssesModel(model, cp_config)
     checks["all_attention_layers_wrapped"] = check_wrapped_layers(model)
 
     cp_loss = cp_model(input_ids=ids, labels=labels, use_cache=False).loss

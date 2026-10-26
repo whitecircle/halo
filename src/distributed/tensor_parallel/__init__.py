@@ -1,1 +1,2 @@
-"""Tensor parallelism: selective attention TP (EP owns the expert FFNs) and the DTensor state-dict gather."""
+"""Tensor parallelism, two mechanisms: HF-native ``tp_plan="auto"`` for dense models and selective attention-only TP
+for MoE models (EP owns the experts), plus the plain-tensor shards both leave on the model."""

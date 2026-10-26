@@ -80,7 +80,7 @@ def _rung_ep_config(*, wraps_experts: bool) -> object | None:
     with (
         patch.object(cp_loading, "load_whole_model", fake_load),
         patch.object(cp_loading, "patch_moe_model_for_ep", lambda model, ep_config: model),
-        patch.object(cp_loading, "patch_model_for_cp", lambda model, cp_config: model),
+        patch.object(cp_loading, "UlyssesModel", lambda model, cp_config: model),
     ):
         cp_loading.load_cp_model(
             ModelSource("dummy/path", None, "dummy/path"),

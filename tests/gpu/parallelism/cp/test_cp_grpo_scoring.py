@@ -16,9 +16,9 @@ from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.distributed.context_parallel.base_layer import get_flash_attn_func
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.ulysses_attention import _flash_attn_func
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.fsdp import reshard_fsdp2_modules, setup_fsdp2_for_dp
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
@@ -90,7 +90,7 @@ def _step(model):
 def run(ctx) -> dict:
     if ctx.world_size != 4:
         raise ValueError("this suite compares CP2 and CP4 in one four-GPU launch")
-    cp_kernel = get_flash_attn_func()
+    cp_kernel = _flash_attn_func()
     log(f"CP attention kernel: {cp_kernel.__module__}.{cp_kernel.__name__}; CP1 oracle: flash_attention_2")
     ids, mask, labels, advantages, group_sizes = _batch(ctx.device)
     for tensor in (ids, mask, labels, advantages, group_sizes):
@@ -111,8 +111,10 @@ def run(ctx) -> dict:
 
     checks = {}
     for cp_size in (2, 4):
-        cp_config = CPConfig(cp_size=cp_size, world_size=ctx.world_size, gpus_per_node=ctx.world_size)
-        model = UlyssesCPModelWrapper(_model(ctx.device), cp_config)
+        cp_config = CPConfig(
+            cp_size, stage_world_size=ctx.world_size, stage_base_rank=0, nvlink_domain_size=ctx.world_size
+        )
+        model = UlyssesModel(_model(ctx.device), cp_config)
         scorer = ChunkedLogprobsCore()
         scorer.temperature = 1.0
         scorer.accelerator = SimpleNamespace(unwrap_model=lambda m: m)
@@ -201,8 +203,8 @@ def run(ctx) -> dict:
     # Production-shaped entry: FSDP2 wraps both decoder layers and the model root. The scorer's
     # redirection must enter that root, unshard lm_head, and keep it live through the local head
     # sweep; a bare CP model above cannot detect a missing root-forward redirect.
-    cp_config = CPConfig(cp_size=2, world_size=ctx.world_size, gpus_per_node=ctx.world_size)
-    model = UlyssesCPModelWrapper(_model(ctx.device), cp_config)
+    cp_config = CPConfig(2, stage_world_size=ctx.world_size, stage_base_rank=0, nvlink_domain_size=ctx.world_size)
+    model = UlyssesModel(_model(ctx.device), cp_config)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
     setup_fsdp2_for_dp(
         model,

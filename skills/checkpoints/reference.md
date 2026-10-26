@@ -222,8 +222,8 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
 - **GptOss EP-save biases** — `EPGptOssMoELayer.gather_expert_state_dict`
   (`src/distributed/expert_parallel/layers/gpt_oss.py`) carries the 2-D `gate_up_proj_bias` /
   `down_proj_bias` alongside the 3-D expert weights, so the gathered checkpoint reloads cleanly.
-- **CP-only state_dict drops dense MLP only on sparse layers** — `UlyssesCPModelWrapper.state_dict`
-  (`src/distributed/context_parallel/wrapper.py`) filters duplicate dense `.mlp.{gate,up,down}_proj`
+- **CP-only state_dict drops dense MLP only on sparse layers** — `UlyssesModel.state_dict`
+  (`src/distributed/context_parallel/ulysses_model.py`) filters duplicate dense `.mlp.{gate,up,down}_proj`
   keys per layer, gated on layers that actually carry routed experts. A model-global filter would drop
   the genuinely-dense early layers (GLM-4 MoE Lite, Mistral4 `first_k_dense_replace`) → a corrupt CP-only
   checkpoint.

@@ -9,8 +9,9 @@ scale is a smooth ramp. Two ways it can be lost, pinned here:
 * the wrapper must not return Q UNSCALED when ``rope_parameters`` lacks either key (the config
   injects them only when ``rope_parameters`` is None, so a checkpoint shipping its own dict can lack
   them);
-* the scale is indexed by GLOBAL position and the legacy path applies it after the all-to-all, so
-  this rank's chunk positions are the wrong tensor — the CP wrapper publishes the full ones.
+* the scale is indexed by each token's position, so it must read the positions the decoder hands the
+  attention (this chunk's slice of the sequence's), in the ``[B, S, H, D]`` layout Q has before the
+  all-to-all.
 
 Run: ``python tests/cpu/parallelism/test_cp_llama4_attn_scale.py`` (or ``pytest -m cpu``).
 """
@@ -21,8 +22,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.context_parallel.layers import mistral4 as cp_mistral4
-from src.distributed.context_parallel.layers.mistral4 import Mistral4UlyssesAttention
+from src.distributed.context_parallel import families as cp_mistral4
+from src.distributed.context_parallel.families import Mistral4UlyssesAttention
 
 HIDDEN = 32
 NUM_Q_HEADS = 4
@@ -86,9 +87,14 @@ def _wrapper(rope_parameters=None) -> Mistral4UlyssesAttention:
 def _qk(seq_len: int):
     torch.manual_seed(1)
     return (
-        torch.randn(2, NUM_Q_HEADS, seq_len, QK_HEAD_DIM),
-        torch.randn(2, NUM_KV_HEADS, seq_len, QK_HEAD_DIM),
+        torch.randn(2, seq_len, NUM_Q_HEADS, QK_HEAD_DIM),
+        torch.randn(2, seq_len, NUM_KV_HEADS, QK_HEAD_DIM),
     )
+
+
+def _identity_rotary(seq_len: int):
+    """``cos``/``sin`` of a zero angle, so the rotary leaves Q and K bit for bit and only the scale moves Q."""
+    return torch.ones(2, seq_len, 1, QK_ROPE), torch.zeros(2, seq_len, 1, QK_ROPE)
 
 
 def test_scale_is_upstreams_own_function_applied_to_q_only():
@@ -100,17 +106,27 @@ def test_scale_is_upstreams_own_function_applied_to_q_only():
     wrapper = _wrapper()
     seq_len = 4 * ORIGINAL_MAX_PE
     q, k = _qk(seq_len)
-    position_ids = torch.arange(seq_len, dtype=torch.long).expand(2, seq_len).contiguous()
+    # A rank's chunk: positions that do not start at 0.
+    position_ids = torch.arange(seq_len, 2 * seq_len, dtype=torch.long).expand(2, seq_len).contiguous()
 
-    q_out, k_out = wrapper._post_rope(q, k, position_ids)
+    q_out, k_out = wrapper._apply_rotary(q, k, *_identity_rotary(seq_len), position_ids)
 
     expected = upstream(position_ids, BETA, ORIGINAL_MAX_PE)
-    assert expected.shape == (2, 1, seq_len, 1), "the scale must broadcast over [B, H, S, D]"
-    torch.testing.assert_close(q_out, q * expected.to(q.dtype), rtol=0, atol=0)
+    assert expected.shape == (2, 1, seq_len, 1), "upstream's scale broadcasts over [B, H, S, D]"
+    torch.testing.assert_close(q_out, q * expected.transpose(1, 2).to(q.dtype), rtol=0, atol=0)
     torch.testing.assert_close(k_out, k, rtol=0, atol=0)
-    # The ramp is the whole point: inside the original window the scale is exactly 1.0.
-    torch.testing.assert_close(q_out[:, :, :ORIGINAL_MAX_PE], q[:, :, :ORIGINAL_MAX_PE], rtol=0, atol=0)
-    assert not torch.allclose(q_out[:, :, ORIGINAL_MAX_PE:], q[:, :, ORIGINAL_MAX_PE:])
+    # The ramp is the whole point: past the original window Q moves.
+    assert not torch.allclose(q_out, q)
+
+
+def test_the_scale_is_one_inside_the_original_window():
+    wrapper = _wrapper()
+    q, k = _qk(ORIGINAL_MAX_PE)
+    position_ids = torch.arange(ORIGINAL_MAX_PE).expand(2, ORIGINAL_MAX_PE)
+
+    q_out, _ = wrapper._apply_rotary(q, k, *_identity_rotary(ORIGINAL_MAX_PE), position_ids)
+
+    torch.testing.assert_close(q_out, q, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("missing", ["llama_4_scaling_beta", "original_max_position_embeddings"])
@@ -124,16 +140,6 @@ def test_unresolvable_scale_raises_instead_of_training_unscaled(missing):
 def test_missing_rope_parameters_entirely_also_raises():
     with pytest.raises(ValueError, match="llama-4 attention scale"):
         _wrapper({})
-
-
-def test_absent_global_positions_raise_rather_than_silently_skipping_the_scale():
-    """The legacy path applies the scale AFTER the all-to-all, where Q spans the whole sequence, so
-    it takes the wrapper-published global positions; ``None`` means nothing published them."""
-    wrapper = _wrapper()
-    q, k = _qk(ORIGINAL_MAX_PE)
-
-    with pytest.raises(ValueError, match="FULL sequence's position_ids"):
-        wrapper._post_rope(q, k, None)
 
 
 def test_no_per_layer_position_gather_survives():

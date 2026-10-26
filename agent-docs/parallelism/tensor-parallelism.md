@@ -43,7 +43,7 @@ embedding/lm_head replicated):
 
 Every MoE under **pure** TP routes to `load_tp_moe_model` rather than `tp_plan="auto"`, because
 HF's auto plan wrongly shards MoE expert biases. Supported attention classes:
-`src/distributed/tensor_parallel/module_types.py`.
+`TP_SHARDABLE_ATTENTION_CLASSES` in `src/distributed/tensor_parallel/parallelize_attention.py`.
 
 **Not supported:** every family absent from the table above, and Qwen3-VL: a dense checkpoint loads
 through HF-native `tp_plan="auto"` and the architecture ships no `base_model_tp_plan`, so the load
@@ -70,12 +70,12 @@ Three paths in `load_distributed_model` (`src/model_loading/parallel/loader.py`)
 | `load_tp_moe_model` | Pure TP, MoE, `ep_size=1` | `apply_tp_to_attention_only()`; experts replicated |
 | `load_ep_tp_model` | EP+TP | `apply_tp_to_attention_only()`; EP owns experts |
 
-The HF-native path validates the load's materialization, not just its plan: a plan that shards zero
-parameters raises (the run would be `tp_size` replicas), and a plan-sharded param that materialized
+The HF-native path validates the load's materialization, not just its plan (`finish_hf_tp_load`): a plan
+that shards zero parameters raises (the run would be `tp_size` replicas), and a plan-sharded param that materialized
 as a **plain** tensor raises too (`reject_plan_sharded_plain_params`,
-`src/distributed/tensor_parallel/state_dict.py`) — such a bare slice is indistinguishable from a
+`src/distributed/tensor_parallel/hf_plan.py`) — such a bare slice is indistinguishable from a
 replica downstream, and the replicated-grad AVG would mix disjoint slices across the TP group.
-Hand-sliced params recorded in `_tp_sharded_non_dtensor` are exempt.
+Hand-sliced params (`register_hand_sliced`, `src/distributed/tensor_parallel/plain_params.py`) are exempt.
 
 ### Tied embeddings under HF-native TP
 
@@ -95,7 +95,7 @@ An architecture planning only **one** end of the pair (a multimodal wrapper clas
 `lm_head` entry; a backbone shipping no `base_model_tp_plan`) cannot do that: the tie would hand the
 unplanned end a weight of the other kind and the first forward dies on mixed plain/DTensor operands.
 
-`consistent_tied_tp_plan` (`src/distributed/tensor_parallel/tie_plan.py`) drops that lone entry for
+`consistent_tied_tp_plan` (`src/distributed/tensor_parallel/hf_plan.py`) drops that lone entry for
 the load so the pair stays replicated instead, warning that those weights cost a full copy per rank.
 `validate_tied_pair_consistent` then fails the
 load loud if the loaded pair is untied, or if its sharding disagrees with the applied plan.
@@ -138,7 +138,7 @@ the DTensor graph ends at the projection and each rank's gradient covers only it
 true gradient is the **SUM** over the TP group, not the average a replica gets.
 
 `apply_tp_to_attention_only` finds those norms structurally (any unplanned attention child with
-trainable parameters, never a name list), records their names on `model._tp_per_head_norm_params`,
+trainable parameters, never a name list), records their names through `register_per_head_norm_params`,
 and `_sync_tp_replicated_grads` sums them once per optimizer step. A name missing from that set is
 AVG-reduced as a plain replica, i.e. `1/tp_size` of its true gradient.
 
@@ -201,7 +201,7 @@ wrong is silent — the loss stays finite and the objective is just different:
 | Kind | Produced by | Grad sync | Grad-norm bucket |
 |---|---|---|---|
 | DTensor shard | either mechanism — HF's `tp_plan` styles, selective attention TP | DTensor / FSDP2 | summed over the axes its mesh names |
-| **Plain slice** | hand-sliced GptOss `sinks` (`model._tp_sharded_non_dtensor`) | none — the slices are already disjoint | summed over the TP group |
+| **Plain slice** | hand-sliced GptOss `sinks` (`register_hand_sliced`) | none — the slices are already disjoint | summed over the TP group |
 | Replica | `embed_tokens`/`lm_head` under selective TP, router, norms outside attention | `_sync_tp_replicated_grads` averages over the TP group (the local `dp` shards once FSDP2 wraps them — TP siblings hold the same shard) | counted once, no TP reduce |
 | Per-head attention norm | a norm after a colwise projection (`q_norm`/`k_norm`) | `_sync_tp_replicated_grads` **sums** over the TP group | counted once, no TP reduce |
 
@@ -209,9 +209,9 @@ The trap is the plain slice. It is indistinguishable from a replica by tensor ty
 wraps the run for DP **both** become 1-D `dp` DTensors, so the mesh cannot separate them either.
 
 `_tp_sharded_plain_param_ids()` (`src/trainers/mixins/grad_sync.py`) is the single source of truth:
-it reads the `_tp_sharded_non_dtensor` registry (the `(suffix, shard_dim)` pairs recorded when a
-param is sliced by hand), and both `_sync_tp_replicated_grads` and `_sharded_grad_bucket` key off
-it. Everything a TP plan shards is a DTensor whose gradient reduces itself, so the plan contributes
+it reads the hand-sliced registry (`hand_sliced_suffixes`: the suffixes `register_hand_sliced`
+records, each with its shard dim, when a param is sliced by hand), and both
+`_sync_tp_replicated_grads` and `_sharded_grad_bucket` key off it. Everything a TP plan shards is a DTensor whose gradient reduces itself, so the plan contributes
 no entries here.
 
 Classifying a slice as a replica costs twice: the TP-group average mixes another rank's heads into
@@ -246,7 +246,7 @@ parallel-vs-baseline bound.
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 **Models.** There is no per-family "supports TP" flag. Selective TP shards exactly the attention
-classes in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`), and
+classes in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`), and
 a `tp_size > 1` run that shards **zero** layers raises, naming the model's attention classes; that
 is how the [unsupported families](#supported-models) are rejected.
 
@@ -284,7 +284,7 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `_validate_load_best_model_reloadable` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `src/model_loading/liger/dispatch.py` |
-| `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `configure_run_tokenizer` (`input_embeddings_tp_sharded`) |
+| `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `configure_run_tokenizer` (`is_input_embedding_tp_sharded`) |
 | `gradient_checkpointing`, `packing`, `padding_free`, `lowp_precision`, `moe_balancing` | not gated under TP | — |
 | `torch_compile` | not gated, and no meaningful speedup — DTensor's sharded-op dispatch breaks the graph at every sharded op. Use Liger | — |
 
@@ -314,9 +314,9 @@ writers. There is no per-rank TP save. The write streams through `stream_gathere
 the save rank's host RAM is bounded by one chunk plus one pending shard rather than the whole model.
 
 `chunked_saveable_tensors` reconstructs every sharded param with `DTensor.full_tensor()` — one walk
-covers both mechanisms — and `gather_tp_sharded_non_dtensor_params` all-gathers the hand-sliced
-GptOss `sinks` after it. Both are **collective**: every TP-mesh rank must drive them or the gather
-hangs.
+covers both mechanisms — and `gather_hand_sliced_params` (`src/checkpoint/parallel/writing.py`)
+all-gathers the hand-sliced GptOss `sinks` after it. Both are **collective**: every TP-mesh rank
+must drive them or the gather hangs.
 
 On resume every TP shape is Path B: the training scripts repoint `model_name_or_path` at the
 checkpoint, so the weights load at construction and `CheckpointLoader._load_streamed` skips the re-read.

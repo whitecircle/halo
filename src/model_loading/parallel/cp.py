@@ -8,7 +8,7 @@ import logging
 import torch
 import torch.nn as nn
 
-from src.distributed.context_parallel.wrapper import patch_model_for_cp
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.loading import load_ep_model
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
@@ -57,7 +57,7 @@ def load_cp_model(
     if wraps_experts:
         model = patch_moe_model_for_ep(model, ep_config)
 
-    model = patch_model_for_cp(model, cp_config)
+    model = UlyssesModel(model, cp_config)
     logger.info(f"[Rank {rank}] ✓ Model loaded with CP")
     return model
 
@@ -91,7 +91,7 @@ def load_ep_cp_model(
         preserve_checkpoint_precision=preserve_checkpoint_precision,
         **from_pretrained_kwargs,
     )
-    model = patch_model_for_cp(model, cp_config)
+    model = UlyssesModel(model, cp_config)
 
     gc.collect()
     if torch.cuda.is_available():

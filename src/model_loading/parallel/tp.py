@@ -4,7 +4,6 @@ MoE, and EP+TP with the experts distributed by DeepEP."""
 from __future__ import annotations
 
 from accelerate.logging import get_logger
-from torch.distributed.tensor import DTensor
 from transformers import DistributedConfig, PreTrainedModel
 
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint, load_ep_model_lazy
@@ -12,17 +11,12 @@ from src.distributed.expert_parallel.master_weights import restore_fp32_master_p
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.parallelize_attention import (
-    apply_tp_to_attention_only,
-    retarget_hf_replicated_grad_hooks,
-)
-from src.distributed.tensor_parallel.state_dict import reject_plan_sharded_plain_params, tp_plan_shards_params
-from src.distributed.tensor_parallel.tie_plan import consistent_tied_tp_plan, validate_tied_pair_consistent
+from src.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, finish_hf_tp_load
+from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.parallel.model_source import ModelSource, resolve_lazy_checkpoint
 from src.model_loading.parallel.whole_model import load_whole_model
-from src.models.config_access import ties_word_embeddings
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.load_coordination import joined_node_load, timed_global_load
 from src.runtime.ranks import get_global_rank
@@ -72,29 +66,8 @@ def load_tp_model(
             )
         )
     precision_guard.reject()
-    # tp_plan="auto" resolves to an empty plan for an architecture shipping no base_model_tp_plan
-    # (Qwen3-VL), and transformers only warns; checked against the applied plan, so a plan covering no
-    # parameter (or covering them only with transform-only styles) is named directly.
-    applied_plan = getattr(model, "_tp_plan", None) or {}
-    if tp_size > 1 and not any(tp_plan_shards_params(name, applied_plan) for name, _ in model.named_parameters()):
-        raise ValueError(
-            f"tensor_parallel_size={tp_size} sharded ZERO parameters: this architecture ships no "
-            f"base_model_tp_plan, so TP would run {tp_size} full replicas at 1/{tp_size} throughput. "
-            f"Drop tensor_parallel_size for this model."
-        )
-    if tp_size > 1:
-        reject_plan_sharded_plain_params(model, applied_plan)
-    if ties_word_embeddings(model.config):
-        validate_tied_pair_consistent(model, applied_plan)
-        if tp_size > 1 and not isinstance(model.get_input_embeddings().weight, DTensor):
-            logger.warning(
-                "This architecture plans only one end of its tied embedding/head pair, so the pair "
-                "stays REPLICATED: budget a full vocab-sized weight, gradient and optimizer state on "
-                "every TP rank."
-            )
-    model._device_mesh = device_mesh
-    retarget_hf_replicated_grad_hooks(model)
-    # After the tie check above: the seam re-ties, which would mask a load that left the pair untied.
+    finish_hf_tp_load(model, device_mesh, tp_size)
+    # After finish_hf_tp_load's tie check: the seam re-ties, which would mask a load that left the pair untied.
     finalize_loaded_model(model)
 
     logger.info(f"Model loaded with TP (tp_size={tp_size})")

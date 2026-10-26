@@ -741,7 +741,7 @@ holds the seeded EP changes it catches.
 `make verify-cp BASE=<sha>` (`tests/common/equivalence/cp_equivalence.py`) runs a two-rank CP group under
 `torchrun` in each tree, on one tiny model per Ulysses wrapper class, at two levels: the first attention layer
 alone on fixed hidden states with the position embeddings its decoder hands it, and the model under
-`UlyssesCPModelWrapper` through its loss (MoE experts on the `ep_size == 1` wrappers). Each rank records the
+`UlyssesModel` through its loss (MoE experts on the `ep_size == 1` wrappers). Each rank records the
 outputs and every gradient. The base tree runs twice and must repeat bit for bit before base and head are
 compared bit for bit; a record whose base does not repeat is compared forward bit for bit with each gradient
 inside its base-vs-base max-abs envelope, and the evidence names it under `enveloped`. The tiny Mistral4

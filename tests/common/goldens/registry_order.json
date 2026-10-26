@@ -219,11 +219,11 @@
   "router.bias"
  ],
  "cp attention claims": {
-  "Qwen3_5MoeAttention": "Qwen3_5MoeUlyssesAttention",
-  "Qwen3_5Attention": "Qwen3_5MoeUlyssesAttention",
   "Qwen3MoeAttention": "Qwen3MoeUlyssesAttention",
   "Qwen3Attention": "Qwen3MoeUlyssesAttention",
   "Qwen3VLTextAttention": "Qwen3MoeUlyssesAttention",
+  "Qwen3_5MoeAttention": "Qwen3_5MoeUlyssesAttention",
+  "Qwen3_5Attention": "Qwen3_5MoeUlyssesAttention",
   "GptOssAttention": "GptOssUlyssesAttention",
   "Cohere2MoeAttention": "Cohere2MoeUlyssesAttention",
   "BailingMoeV2Attention": "BailingMoeV2UlyssesAttention",

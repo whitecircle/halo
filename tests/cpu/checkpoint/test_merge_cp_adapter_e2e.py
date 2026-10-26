@@ -45,8 +45,8 @@ from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sid
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.model_loading.parallel.peft_setup import build_peft_config
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from tests.common.repo import load_script_module
@@ -111,7 +111,7 @@ def _train_cp_adapter(base_dir: Path, adapter_dir: Path) -> dict[str, torch.Tens
     """
     inner = Qwen3ForCausalLM.from_pretrained(base_dir, dtype=torch.float32)
     inner.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
-    wrapper = UlyssesCPModelWrapper(inner, CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+    wrapper = UlyssesModel(inner, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     peft_model = get_peft_model(wrapper, LoraConfig(r=_LORA_R, lora_alpha=_LORA_ALPHA, target_modules=_TARGETS))
 
     # lora_B initializes to zero, so an untrained adapter merges to a no-op and every check below
@@ -193,7 +193,7 @@ def test_cp_saved_exclusions_are_spelled_for_a_plain_model():
         attention.q_proj = Gemma4ClippableLinear(
             SimpleNamespace(use_clipped_linears=False), attention.q_proj.in_features, attention.q_proj.out_features
         )
-        wrapper = UlyssesCPModelWrapper(inner, CPConfig(cp_size=1, world_size=1, gpus_per_node=1))
+        wrapper = UlyssesModel(inner, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
         model_config = ModelConfig(
             model_name_or_path=str(base),
             use_peft=True,

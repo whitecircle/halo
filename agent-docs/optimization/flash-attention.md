@@ -19,11 +19,11 @@ Why tiling attention is the standard fix for the model's most memory-bound op: [
 
 GPU support: A100 (SM80) = FA2/flex/sdpa. H100/H200 (SM90) = FA2/FA3/flex/sdpa, no FA4. B200 (SM100) / B300 (SM103) = FA2/FA4/flex/sdpa, no FA3.
 
-The CP column above is what `validate_model_for_ulysses` (`src/distributed/context_parallel/validation.py`) accepts as a config label; it is not which kernel runs. CP's attention call goes through `get_flash_attn_func` (`src/distributed/context_parallel/base_layer.py`), which ignores that label and probes in a fixed order: FA3 on Hopper (SM90), FA4 on Blackwell (SM100+), then FA2, then the `kernels-community/flash-attn2` kernel.
+The CP column above is what `reject_unsupported_ulysses_model` (`src/distributed/context_parallel/model_rules.py`) accepts as a config label; it is not which kernel runs. CP's attention call goes through `_flash_attn_func` (`src/distributed/context_parallel/ulysses_attention.py`), which ignores that label and probes in a fixed order: FA3 on Hopper (SM90), FA4 on Blackwell (SM100+), then FA2, then the `kernels-community/flash-attn2` kernel.
 
 Both architecture probes precede FA2 because every image ships FA2; an FA2 probe placed first would resolve on every device and leave the arch-matched kernel unreachable.
 
-The one exception is model-level: `get_flash_attn_func` takes an `allow_fa4` veto, resolved per wrapper from
+The one exception is model-level: `_flash_attn_func` takes an `allow_fa4` veto, resolved per wrapper from
 `is_fa4_backward_nan_prone`, so the FA4-backward-NaN families (Qwen3.5/3.6/Qwen3-Next, GLM-4 MoE Lite)
 run FA2 on Blackwell under CP. The probe overrides the configured label, so that veto is their only
 protection. Its device predicates are the same `is_hopper_gpu` / `is_blackwell_gpu` the automatic detection
@@ -139,7 +139,7 @@ That default costs throughput at the lengths these methods actually run. Measure
 
 FA4 wins every row, on MoE and dense alike. Set `attn_implementation: flash_attention_4` explicitly in a preference/reward config.
 
-**Context Parallelism**: an explicit `flex_attention` label auto-switches to `flash_attention_4` (Blackwell) / `flash_attention_2` (Hopper) since Ulysses can't dispatch flex — the label is cosmetic, though: see [Supported backends](#supported-backends) for what `get_flash_attn_func` actually runs. SDPA/eager unsupported.
+**Context Parallelism**: an explicit `flex_attention` label auto-switches to `flash_attention_4` (Blackwell) / `flash_attention_2` (Hopper) since Ulysses can't dispatch flex — the label is cosmetic, though: see [Supported backends](#supported-backends) for what `_flash_attn_func` actually runs. SDPA/eager unsupported.
 
 ## Installation
 
@@ -159,7 +159,7 @@ cd flash-attention/hopper && pip install --no-cache-dir --no-build-isolation .
 
 On Hopper (sm_90) under CUDA 13.2, `ptxas` hangs on the 24 `flash_fwd_split_hdim*_*_sm80.cu` kernels. The Docker Hopper build replaces them with throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`). Building FA2 for Hopper outside Docker on CUDA 13.2 needs the same workaround (or CUDA 13.1).
 
-`mha_varlen_fwd` gates split-K behind `seqlenq_ngroups_swapped`, so packed/padding-free training and the whole backward never reach these kernels. `mha_fwd` (non-varlen) does **not** gate it: with dropout 0 the occupancy heuristic picks split-K whenever `batch*heads*ceil(seq_q/64)` is under ~`0.8*2*SMs`, so a non-varlen caller must prefer FA3 on sm_90, which `src/distributed/context_parallel/base_layer.py` does.
+`mha_varlen_fwd` gates split-K behind `seqlenq_ngroups_swapped`, so packed/padding-free training and the whole backward never reach these kernels. `mha_fwd` (non-varlen) does **not** gate it: with dropout 0 the occupancy heuristic picks split-K whenever `batch*heads*ceil(seq_q/64)` is under ~`0.8*2*SMs`, so a non-varlen caller must prefer FA3 on sm_90, which `src/distributed/context_parallel/ulysses_attention.py` does.
 
 Import FA3 from `flash_attn_interface` (`import flash_attn_3` succeeds but does not guarantee a functional
 build). transformers auto-detects FA3 through `is_flash_attn_3_available()`, which reads the

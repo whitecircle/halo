@@ -24,7 +24,7 @@ from transformers import AutoModelForSequenceClassification
 import src.environments.registry as environment_registry
 import src.models.moe_balancing as moe_balancing
 import src.models.seq_cls_heads as seq_cls_heads
-from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
+from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
@@ -66,7 +66,7 @@ def registry_order() -> dict[str, object]:
             for model_type, slot in moe_balancing._NATIVE_BALANCING_SLOTS_BY_MODEL_TYPE.items()
         },
         "balancing key suffixes": sorted(moe_balancing._BALANCING_KEY_SUFFIXES),
-        "cp attention claims": _claims(WRAPPER_CLASS_MAP),
+        "cp attention claims": _claims(ULYSSES_ATTENTION_MAP),
         "pp backbone claims": list(PP_SPEC_MAP),
         "head transform claims": _claims(_HEAD_TRANSFORM_SPEC_MAP),
         "weight-sync clients": _claims(

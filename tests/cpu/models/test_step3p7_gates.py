@@ -20,14 +20,15 @@ from accelerate import PartialState
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config, Step3p7TextConfig
 from transformers.models.step3p7.modeling_step3p7 import Step3p7TextModel
 
-from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
-from src.distributed.context_parallel.validation import UlyssesConfigError, validate_model_for_ulysses
+from src.distributed.context_parallel.config import CPConfigError
+from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
 from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
 from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
 from src.distributed.pipeline_parallel.partition import compute_layer_partition, layer_types_period, validate_partition
-from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
 from src.distributed.tensor_parallel.parallelize_attention import (
+    TP_SHARDABLE_ATTENTION_CLASSES,
     apply_tp_to_attention_only,
     validate_tp_head_divisibility,
 )
@@ -125,17 +126,17 @@ def test_cp_wrapper_lookup_refuses_step3p7():
     ``g_proj`` gate applied after the attention output, sliding masks), and the family has no
     linear-attention layers so the ``layer_types`` gate stays silent — the wrapper lookup itself is
     the refusal, and it must fire loudly instead of leaving layers unwrapped."""
-    assert "Step3p7Attention" not in WRAPPER_CLASS_MAP
-    with pytest.raises(UlyssesConfigError, match="does not appear to use a supported attention module"):
-        validate_model_for_ulysses(_tiny_text_model(), 2)
+    assert "Step3p7Attention" not in ULYSSES_ATTENTION_MAP
+    with pytest.raises(CPConfigError, match="does not appear to use a supported attention module"):
+        reject_unsupported_ulysses_model(_tiny_text_model(), 2)
 
 
 def test_cp_config_only_shell_hits_the_same_refusal():
     """A meta-init shell (no instantiated modules) must be refused by the same lookup — the
     config-only ``layer_types`` gate matches nothing here (no ``linear_attention`` entries), so the
     wrapper scan is what stands between step3p7 and a silent unwrapped CP run."""
-    with pytest.raises(UlyssesConfigError, match="does not appear to use a supported attention module"):
-        validate_model_for_ulysses(_ConfigOnlyShell(_composite_config()), 2)
+    with pytest.raises(CPConfigError, match="does not appear to use a supported attention module"):
+        reject_unsupported_ulysses_model(_ConfigOnlyShell(_composite_config()), 2)
 
 
 # Tensor parallelism

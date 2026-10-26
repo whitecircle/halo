@@ -38,10 +38,7 @@ from src.distributed.expert_parallel.expert_weights import (
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.tensor_parallel.state_dict import (
-    iter_tp_sharded_non_dtensor_full,
-    tp_sharded_non_dtensor_suffixes,
-)
+from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, iter_hand_sliced_full
 from src.env import env_flag
 from src.model_loading.dtype import has_packed_quantized_params
 from src.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
@@ -212,7 +209,7 @@ def _dense_params(
     all but the EP experts (the expert gather's) and the hand-sliced TP shards (sent gathered by the
     drain), which are not DTensors, so shipping this rank's slice under the full name would corrupt
     them."""
-    hand_sliced = tp_sharded_non_dtensor_suffixes(model)
+    hand_sliced = hand_sliced_suffixes(model)
     for name, param in model.named_parameters():
         if _is_ep_expert_param(name, ep_layers) or (hand_sliced and name.endswith(hand_sliced)):
             continue
@@ -404,7 +401,7 @@ def _send_dense_weights(
     _reject_unpushed_folds(model, folds, folded)
 
     # Every rank drains this (collective); only the forwarding rank sends.
-    for name, full_tensor in iter_tp_sharded_non_dtensor_full(model):
+    for name, full_tensor in iter_hand_sliced_full(model):
         if forwarder is not None:
             forwarder.send(name, full_tensor)
     if forwarder is not None:

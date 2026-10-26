@@ -66,7 +66,7 @@ and are never wrapped.
 ## CP wrapper
 
 `Cohere2MoeAttention` → `Cohere2MoeUlyssesAttention`
-(`src/distributed/context_parallel/layers/cohere2_moe.py`), optimized `[B, S, H, D]` path. RoPE is
+(`src/distributed/context_parallel/families.py`), optimized `[B, S, H, D]` path. RoPE is
 applied only where the HF layer applies it: sliding-window layers, plus the `force_rope`
 dense-prefix override — full-attention layers pass Q/K through untouched (NoPE). The rotary is the
 interleaved GPT-J form in fp32, matching `apply_rotary_pos_emb` bit-for-bit in bf16. The 8 KV heads
