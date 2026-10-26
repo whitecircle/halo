@@ -6,7 +6,7 @@ configurations, or APIs, update the owning page(s) below in the same change: a c
 holds is in the module map, [architecture.md](../../agent-docs/reference/architecture.md).
 
 Always also check whether the change affects: the section **README.md** index, the
-**Documentation index** in `CLAUDE.md`, the **Configuration Reference**
+agent index (`agent-docs/README.md`), the **Configuration Reference**
 (`agent-docs/reference/configuration-reference.md`), and the **Trainer Architecture**
 page (`agent-docs/reference/trainer-architecture.md`) when a trainer or the mixin
 changes.
@@ -37,13 +37,13 @@ changes.
 | `halo/trainers/reward/` | `agent-docs/training-methods/preference/reward-modeling.md`, `agent-docs/training-methods/classification.md` |
 | `halo/trainers/distillation/` | `agent-docs/training-methods/distillation/{README,teacher-distillation,self-distillation,online-sdpg}.md` |
 | `halo/trainers/embedding/` | `agent-docs/training-methods/embedding.md` |
-| any new trainer | `agent-docs/reference/trainer-architecture.md` + new method page + the section `README.md` + `CLAUDE.md` index |
+| any new trainer | `agent-docs/reference/trainer-architecture.md` + new method page + the section `README.md` |
 
 ## Distributed / parallelism
 
 | `halo/` area | Owning doc page(s) |
 |---|---|
-| `halo/distributed/{parallelism_config,parallelism_rules}.py` | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md`, the parallelism matrix in `CLAUDE.md` |
+| `halo/distributed/{parallelism_config,parallelism_rules}.py` | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md` |
 | `halo/distributed/expert_parallel/` | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md`, `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
 | `halo/distributed/expert_parallel/deepep/`, `halo/distributed/rank_uniform_env.py` | `agent-docs/infrastructure/deepep.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/models/moe/expert_lora_spec.py` | `agent-docs/optimization/peft.md`, `agent-docs/models/adding-a-model.md` |
@@ -232,7 +232,7 @@ changes.
 | Change | Owning doc page(s) |
 |---|---|
 | a new user-facing fail-fast raise or failure mode (config-time rejection, NCCL/DeepEP fault, OOM path) | `agent-docs/reference/troubleshooting.md` (symptom → cause → fix), plus `agent-docs/reference/debugging.md` when it needs a diagnosis helper |
-| a new, moved, renamed, or deleted `halo/` subpackage or top-level module | `agent-docs/reference/architecture.md` (source map) + the architecture tree in `CLAUDE.md` |
+| a new, moved, renamed, or deleted `halo/` subpackage or top-level module | `agent-docs/reference/architecture.md` (source map) |
 | code enters or leaves a path in `.github/sensitive-paths` (any module or package move, rename or delete) | `.github/sensitive-paths` |
 
 ## Cross-cutting pages
@@ -278,8 +278,6 @@ what a user sets, runs or can combine there, update the page with its owner. A n
 
 - Trainer/mixin behavior → `agent-docs/reference/trainer-architecture.md`.
 - Any new config field → `agent-docs/reference/configuration-reference.md`.
-- A change to what parallelism combinations are valid → the parallelism matrix in
-  `CLAUDE.md` and the Supported combinations table in `agent-docs/parallelism/README.md`, plus the
-  owning `agent-docs/parallelism/` page.
-- A new page → wire it into its section `README.md` and the `CLAUDE.md` Documentation
-  index, then run `./scripts/docs/check_links.sh`.
+- A change to what parallelism combinations are valid → the Supported combinations table in
+  `agent-docs/parallelism/README.md`, plus the owning `agent-docs/parallelism/` page.
+- A new page → wire it into its section `README.md`, then run `./scripts/docs/check_links.sh`.

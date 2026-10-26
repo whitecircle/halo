@@ -73,7 +73,7 @@ Single-GPU / accelerate / pytest variants just swap the `bash -lc "..."` body, e
 # Single GPU, plain python
 bash -lc "python <script> <config> > \"$D/<job>.log\" 2>&1"
 
-# Accelerate DDP / FSDP (prefer the FSDP2 config; CLAUDE.md flags an Accelerate FSDP-v1 corruption bug)
+# Accelerate DDP / FSDP (prefer the FSDP2 config: agent-docs/parallelism/data-parallelism.md#accelerate-launch-configs)
 bash -lc "accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml \
           <script> <config> > \"$D/<job>.log\" 2>&1"
 

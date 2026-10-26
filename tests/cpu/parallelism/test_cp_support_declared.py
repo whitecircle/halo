@@ -16,7 +16,7 @@ import pytest
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.rosters import distributed_trainer_classes
 
-# The trainers whose objective is verified under CP (CLAUDE.md, "Distributed trainers" CP column).
+# The trainers whose objective is verified under CP (agent-docs/reference/trainer-architecture.md#trainer-compatibility).
 CP_TRAINERS = {"DistributedSFTTrainer", "SmoothMarginPOTrainer", "OfflineGRPOTrainer"}
 
 # Derived from the class hierarchy, not listed: a new trainer joins by existing, at the default off.

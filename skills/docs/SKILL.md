@@ -35,8 +35,8 @@ owning doc page). This skill does both, to the house voice.
    with the answer, cut to load-bearing facts, cite sparingly, tables only when
    they earn their space, present-state only, banned register removed.
 4. **Keep the indexes and cross-links in sync.** A new or renamed page must be
-   wired into its section `README.md` **and** the Documentation index in `CLAUDE.md`;
-   a removed page comes out of both. Link a heading by the slug GitHub generates:
+   wired into its section `README.md`; a removed page comes out of it. Link a heading
+   by the slug GitHub generates:
    lowercased, punctuation like `&`/`+`/`/` dropped, each space a hyphen, so
    `## EP+TP mode` → `#eptp-mode` and `## Checkpointing & state dict` →
    `#checkpointing--state-dict` (a double hyphen where a symbol sat between

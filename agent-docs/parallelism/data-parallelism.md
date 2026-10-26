@@ -305,6 +305,13 @@ trainer's config.
 Accelerate's DDP wrapping is skipped whenever the mixin syncs gradients
 (`AcceleratorMixin._inner_training_loop`).
 
+Anything that reads parameters outside a forward — the optimizer build (`create_optimizer`), every
+checkpoint writer, `save_model`, RL weight sync — calls `reshard_fsdp2_modules` (`halo/distributed/fsdp.py`)
+first. A forward leaves the transient unsharded params registered (`reshard_after_forward=False`; the root
+never reshards after its forward), so a read would see objects the optimizer never steps: param groups
+built over them update orphans, a writer saves state one step stale, and the PEFT save's DTensor probe
+mis-routes.
+
 `use_grouped_gemm` does not count as custom parallelism; it only activates for MoE models during
 loading, and an MoE under `accelerate launch` is rejected at load ([Two launchers](#two-launchers)).
 
