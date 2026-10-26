@@ -41,6 +41,10 @@ TURN_FLAG_NOTES = {
 # the note each renders with. They never ran, so they stay apart from ``tool_calls``, which the chat wire reads.
 CUT_CALLS_KEY = "cut_tool_calls"
 CUT_CALL_NOTE = "cut by the engine before the turn closed; never run"
+# The sample-message key an environment lists the ids of a turn's calls it refused unrun under, and the note each
+# such call renders with, so a judge reads a refused call as never run (it spent nothing) though the policy wrote it.
+REFUSED_CALL_IDS_KEY = "refused_call_ids"
+REFUSED_CALL_NOTE = "refused unrun; never run"
 # The keys of a message as the chat wire spells it; a sample message's other keys (the reasoning under
 # either engine's spelling, the turn flags, a cut turn's calls) are the sample's own.
 WIRE_KEYS = ("role", "content", "name", "tool_calls", "tool_call_id")
@@ -65,13 +69,16 @@ class ScoringSample:
     and task turns), ``completion`` its turns after that (assistant turns with their reasoning and
     tool calls, tool results), ``final_answer`` what the episode delivered — the final text answer,
     a submitted program — or ``None`` when it ended without one, ``reference`` the row's reference
-    answer when it carries one, and ``tools`` the OpenAI tool schemas the policy could call."""
+    answer when it carries one, ``tools`` the OpenAI tool schemas the policy could call, and ``facts`` the
+    episode facts the environment establishes itself, which a judge check names to stand exempt under
+    (:attr:`~src.rewards.terms.Check.unless`)."""
 
     prompt: list[Message]
     completion: list[Message]
     final_answer: str | None = None
     reference: Any = None
     tools: list[dict[str, Any]] | None = field(default=None, compare=False)
+    facts: frozenset[str] = frozenset()
 
 
 def final_assistant_text(messages: Sequence[Message]) -> str:
@@ -283,8 +290,13 @@ def _render_turn(
             content = _head(content, DIGEST_CHARS) if role == "assistant" else cut_middle(content, DIGEST_CHARS)
         lines.append(content)
     argument_chars = DIGEST_INLINE_CHARS if digest else None
+    refused = set(message.get(REFUSED_CALL_IDS_KEY) or ())
     for call in message.get("tool_calls") or []:
-        lines.append(escape_tags(_render_call(call, argument_chars)))
+        lines.append(
+            escape_tags(
+                _render_call(call, argument_chars, note=REFUSED_CALL_NOTE if _call_id(call) in refused else None)
+            )
+        )
     for call in message.get(CUT_CALLS_KEY) or []:
         lines.append(escape_tags(_render_call(call, argument_chars, note=CUT_CALL_NOTE)))
     return "\n".join(lines)
@@ -320,7 +332,7 @@ def _render_call(call: Any, argument_chars: int | None, *, note: str | None = No
     """``→ name`` with the call id and ``note`` beside it, then every argument cut to its head past
     ``argument_chars`` (``None`` keeps each whole)."""
     function = call.get("function", call) if isinstance(call, Mapping) else {}
-    call_id = call.get("id") if isinstance(call, Mapping) else None
+    call_id = _call_id(call)
     tags = "; ".join(tag for tag in (f"call {call_id}" if call_id else None, note) if tag)
     head = f"→ {function.get('name', '?')}" + (f" ({tags})" if tags else "")
     arguments = function.get("arguments", "")
@@ -338,6 +350,10 @@ def _render_call(call: Any, argument_chars: int | None, *, note: str | None = No
         text = _argument_text(value, argument_chars)
         lines.append(f"  {key}:\n{text}" if "\n" in text else f"  {key}: {text}")
     return "\n".join(lines)
+
+
+def _call_id(call: Any) -> str | None:
+    return call.get("id") if isinstance(call, Mapping) else None
 
 
 def _argument_text(value: Any, max_chars: int | None) -> str:

@@ -476,6 +476,11 @@ _EXPECTED = {
         "train_on_completions_only": "True",
         "train_on_last_assistant_only": "False",
         "train_sinks": "False",
+        "tree_full_attention": "'split'",
+        "tree_min_shared_tokens": "16",
+        "tree_packing": "False",
+        "tree_share_markers": "factory:[]",
+        "tree_share_requires": "None",
         "unfreeze_layers_patterns": "None",
     },
     "SMPOScriptArguments": {
@@ -581,6 +586,11 @@ _EXPECTED = {
         "train_on_completions_only": "True",
         "train_on_last_assistant_only": "False",
         "train_sinks": "False",
+        "tree_full_attention": "'split'",
+        "tree_min_shared_tokens": "16",
+        "tree_packing": "False",
+        "tree_share_markers": "factory:[]",
+        "tree_share_requires": "None",
         "unfreeze_layers_patterns": "None",
     },
     "TeacherDistillScriptArguments": {

@@ -18,7 +18,12 @@ from torch.distributed.tensor import DTensor
 
 from src.kernels.histogram import accumulate_bincount
 from src.models.gradient_checkpointing import counts_toward_expert_load
-from src.models.moe.balancing import BALANCING_BIASES_ATTR, NATIVE_BALANCING_BIAS_ADOPTED_ATTR, resolve_balancing_slot
+from src.models.moe.balancing import (
+    BALANCING_BIASES_ATTR,
+    NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
+    resolve_balancing_slot,
+    resolve_expert_load_weights,
+)
 from src.models.moe.family_specs import MoEFamilySpec
 from src.runtime.ranks import is_global_main_process
 
@@ -207,8 +212,11 @@ class EPBalancingBiasMixin:
 
     def _record_expert_load(self, indices: torch.Tensor) -> None:
         """Accumulate per-expert selection counts while training, once per microbatch in every checkpoint
-        mode (:func:`counts_toward_expert_load`)."""
+        mode (:func:`counts_toward_expert_load`), each selection at its token's weight
+        (:func:`~src.models.moe.balancing.expert_load_token_weights`)."""
         if getattr(self, BALANCING_BIASES_ATTR, None) is None or not self.training or not counts_toward_expert_load():
             return
         with torch.no_grad():
-            self.expert_load_counter = accumulate_bincount(self.expert_load_counter, indices, self.num_experts)
+            self.expert_load_counter = accumulate_bincount(
+                self.expert_load_counter, indices, self.num_experts, weights=resolve_expert_load_weights(indices)
+            )

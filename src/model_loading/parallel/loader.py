@@ -41,6 +41,22 @@ from src.runtime.ranks import get_local_rank
 logger = get_logger(__name__)
 
 
+def _backend_sinks_policy(sinks_policy: SinksPolicy, init_from_scratch: bool) -> SinksPolicy:
+    """The sinks policy the attention backend is chosen under: a from-scratch build has no pretrained sinks to
+    neutralize, so its backend must carry them."""
+    return SinksPolicy.LIVE if init_from_scratch else sinks_policy
+
+
+def resolve_policy_attn_implementation(
+    model_config, requested: str | None, dtype: torch.dtype, *, sinks_policy: SinksPolicy, init_from_scratch: bool
+) -> str:
+    """The attention backend :func:`load_distributed_model` resolves for a policy from its config, dtype and GPU,
+    before the Context Parallelism swap: what a run can check before any weight loads."""
+    return resolve_attn_implementation(
+        model_config, requested, dtype, sinks_policy=_backend_sinks_policy(sinks_policy, init_from_scratch)
+    )
+
+
 def _resolve_run_attention(
     model_config,
     pc: ParallelismConfig,
@@ -53,9 +69,9 @@ def _resolve_run_attention(
 ) -> str:
     """The attention implementation the model is built with: resolved against this model and dtype,
     swapped to FlashAttention under CP, and passed through the family patches."""
-    # A from-scratch build has no pretrained sinks to neutralize, so its backend must carry them.
-    attn_sinks_policy = SinksPolicy.LIVE if init_from_scratch else sinks_policy
-    attn_implementation = resolve_attn_implementation(model_config, requested, dtype, sinks_policy=attn_sinks_policy)
+    attn_implementation = resolve_policy_attn_implementation(
+        model_config, requested, dtype, sinks_policy=sinks_policy, init_from_scratch=init_from_scratch
+    )
 
     # CP (Ulysses) always runs flash_attn_func; label the config with the kernel it will actually use.
     if attn_implementation == "flex_attention" and pc.is_cp_mode:
@@ -72,7 +88,9 @@ def _resolve_run_attention(
         )
         # Re-validated, not assigned: the substitute must clear the same sink-capability matrix, or a
         # run keeping live sinks (reset_sinks=false) silently moves to a sink-dropping kernel.
-        attn_implementation = validate_attn_implementation(model_config, cp_fa, attn_sinks_policy)
+        attn_implementation = validate_attn_implementation(
+            model_config, cp_fa, _backend_sinks_policy(sinks_policy, init_from_scratch)
+        )
         if not attn_implementation.startswith("flash_attention"):
             raise ValueError(
                 f"Context Parallelism runs attention through flash_attn regardless of the config's "

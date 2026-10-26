@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import gc
 from collections.abc import Callable
+from functools import partial
 
 import torch
 from accelerate.logging import get_logger
@@ -21,6 +22,8 @@ from src.model_loading.parallel.fp32_masters import restore_fp32_master_paramete
 from src.model_loading.parallel.model_source import ModelSource, resolve_model_source
 from src.models.attention.backend_setup import warm_fa4_kernels
 from src.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
+from src.models.attention.tree import warm_tree_kernels
+from src.models.attention.tree_plan import FullAttentionForm
 from src.models.config_access import set_config_field_run_scoped
 from src.runtime.collectives import barrier
 from src.runtime.consensus import DeferredRankFailure
@@ -141,8 +144,8 @@ def resolve_trainer_model(model, args, *, model_class=None, keep_fp32_non_ep: bo
     return model
 
 
-def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> None:
-    """COLLECTIVE: pre-compile this model's FA4 or FlexAttention kernels, then barrier. No-op below world 2.
+def _warm_then_barrier(*warmups: Callable[[], None]) -> None:
+    """COLLECTIVE: run rank-local kernel warm-ups on every rank, then barrier. No-op below world 2.
 
     A first-use JIT compile (~10s) on one rank lets its peers race ahead into the next collective. World
     size is the only condition every rank evaluates identically: the resolved backend and an FA4 build
@@ -151,8 +154,8 @@ def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> Non
     if get_global_world_size() <= 1:
         return
     try:
-        warm_fa4_kernels(model, dtype=dtype)
-        warm_flex_sliding_kernels(model, dtype=dtype)
+        for warmup in warmups:
+            warmup()
     finally:
         try:
             barrier()
@@ -164,3 +167,15 @@ def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> Non
                 f"entering the next collective",
                 main_process_only=False,
             )
+
+
+def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> None:
+    """COLLECTIVE: pre-compile this model's FA4 or FlexAttention kernels on every rank, then barrier."""
+    _warm_then_barrier(
+        partial(warm_fa4_kernels, model, dtype=dtype), partial(warm_flex_sliding_kernels, model, dtype=dtype)
+    )
+
+
+def warm_tree_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype, full_form: FullAttentionForm) -> None:
+    """COLLECTIVE: pre-compile the kernels tree attention adds on every rank, then barrier."""
+    _warm_then_barrier(partial(warm_tree_kernels, model, dtype=dtype, full_form=full_form))

@@ -30,7 +30,6 @@ from src.environments.episode import (
     describe_exception,
     generate_turn,
     is_terminal_client_status,
-    recovering_turn,
     step_context_from_generation,
 )
 from src.environments.registry import create_environment
@@ -294,11 +293,9 @@ class EnvironmentActor:
             )
 
             for _ in range(env.max_turns):
-                # The engine caps this turn: the level's reasoning cap (a retry's share of it after a cut
-                # or empty turn) and the turn total, both narrowed to what the output budget has left;
-                # none once it holds no turn.
-                recovery = recovering_turn(step.trajectory)
-                caps = effort.turn_caps(generated, recovery=recovery)
+                # The engine caps this turn: the level's reasoning cap and the turn total, both narrowed to
+                # what the output budget has left; none once it holds no turn.
+                caps = effort.turn_caps(generated)
                 if step.done or caps is None:
                     break
                 turn_config = replace(config, **caps)
@@ -320,7 +317,7 @@ class EnvironmentActor:
                 step_ctx = step_context_from_generation(
                     context,
                     gen,
-                    thinking_cap=effort.turn_thinking_cap(recovery),
+                    thinking_cap=effort.thinking_cap,
                     reasoning_end_token_id=config.reasoning_end_token_id,
                     last_turn=effort.turn_caps(generated) is None,
                 )

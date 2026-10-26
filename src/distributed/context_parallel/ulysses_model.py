@@ -18,7 +18,7 @@ from src.distributed.context_parallel.sequence_chunks import cp_shift_against_fu
 from src.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.models.config_access import get_config_field
+from src.models.moe.config_fields import require_router_aux_loss_coef
 from src.models.unwrapping import base_transformers_model, strip_cp_attention_level, unwrap_framework_wrappers
 from src.subclass_registry import swap_registered_modules
 
@@ -73,17 +73,7 @@ class UlyssesModel(nn.Module):
                 # Eval: rank-uniform like the CE term (see _compute_cp_loss).
                 aux_loss = aux_loss.detach().clone()
                 dist.all_reduce(aux_loss, op=dist.ReduceOp.AVG, group=self.cp_config.process_group)
-            # No stand-in default: it would train a different objective than the same config without CP.
-            config = self.model.config
-            coef = get_config_field(config, "router_aux_loss_coef")
-            if coef is None:
-                raise ValueError(
-                    f"The model returned an `aux_loss` but its config ({type(config).__name__}) declares "
-                    f"no `router_aux_loss_coef`, so Context Parallelism cannot weigh the router balancing "
-                    f"term. Set router_aux_loss_coef on the model config (model_init_kwargs), or "
-                    f"disable the aux loss (moe_balancing) for this family."
-                )
-            loss = loss + coef * aux_loss
+            loss = loss + require_router_aux_loss_coef(self.model.config) * aux_loss
         # Dict-style: the Trainer checks ``"loss" in outputs``.
         outputs["loss"] = loss
         return outputs

@@ -76,14 +76,17 @@ Only this arm accepts a **veto judge**: a `judge` that lists `checks` instead of
 `veto: true` check strips the episode of its credit, `reward/objective` included. The judge reads the
 policy's reasoning for context but fires only on what it did: its visible text, its tool calls and their
 results. Its other checks are process flags: the term's `weight`, which must be ≤ 0, prices the fired
-share of them, each counted by its own `weight` (default 1; `0` logs a flag without pricing it). Its
+share of them, each counted by its own `weight` (default 1; `0` logs a flag without pricing it). A veto
+check counts there only when given a `weight`, a price on top of its gate. Its
 `on_error` defaults to `neutral`, so a judge outage leaves the environment's grade standing
 ([Veto judge](../../agent-docs/training-methods/grpo/rewards/judge.md#veto-judge) ↗).
 
-Every code-contests recipe runs one over the whole episode, with eight checks. Six are vetoes on hacks
+Every code-contests recipe runs one over the whole episode, with nine checks. Six are vetoes on hacks
 and tool misuse: working-out carried into a submitted program, or into any call the engine cut before it
-ran, is one of them (`reasoning_in_actions`). `wasted_run` charges 0.1 for a scratchpad run that could
-test nothing, and `reasoning_in_runs` is logged at weight 0. These recipes set `on_error: invalid`: an
+ran, is one of them (`reasoning_in_actions`); `hardcoded_output` and `verdict_probe` also cost 0.3 and
+0.2 on top of the veto. `wasted_run` charges 0.1 for a scratchpad run that could test nothing,
+`untested_submission` 0.1 for a failed submission whose logic no earlier run exercised or that ran only
+on the samples, and `reasoning_in_runs` is logged at weight 0. These recipes set `on_error: invalid`: an
 episode the judge could not score leaves training, so an outage trains nothing instead of unjudged
 episodes, and a second step in a row with no valid episode stops the run
 ([Audit judge](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/reward.md#audit-judge) ↗).
@@ -136,7 +139,7 @@ Three decisions matter more than the rest:
 
 - **Turn budget.** `rollout_max_tokens` caps one turn and `max_turns` the number of turns.
   `rollout_max_episode_tokens` caps what one episode samples across all its turns (off by default,
-  `131072` in the code-contests recipes). The trajectory is never truncated: a row longer than the
+  `131072` in the code-contests recipes, `160000` in the Qwen3.6 curriculum stages). The trajectory is never truncated: a row longer than the
   context window fails the step. If `episode/turns` sits at the cap, raise `max_turns`; if it sits far
   below, lower it, since turns run one after another
   ([Trajectory length](../../agent-docs/training-methods/async-grpo/episodes.md#trajectory-length) ↗).

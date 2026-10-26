@@ -99,9 +99,10 @@ class SandboxInfraError(SandboxFault):
     """A sandbox run was lost to a backend/transport failure (remote HTTP error, missing compiler).
 
     Distinct from the program's own non-zero exit, compile error, or timeout; those are verdicts on
-    the submitted code and stay ordinary string results. The REPL layer raises this so an
-    infrastructure outage reaches the tool layer by type: the call is booked unpriced, and the episode
-    ends and leaves the GRPO group baseline instead of pricing the fault as the policy's.
+    the submitted code and stay ordinary string results. A backend (a launch still short of the program
+    after its bound) or the REPL layer raises this so an infrastructure outage reaches the tool layer by
+    type: the call is booked unpriced, and the episode ends and leaves the GRPO group baseline instead of
+    pricing the fault as the policy's.
     """
 
 

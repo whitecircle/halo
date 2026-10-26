@@ -1,12 +1,13 @@
-"""MoE balancing-mode resolution and the balancing-slot contract of exported checkpoints.
-
-Which balancing strategy a run gets, and where a trained routing bias lands in an exported checkpoint; applying the
-verdict to a live model is :mod:`src.callbacks.balancing`.
+"""MoE balancing-mode resolution, the balancing-slot contract of exported checkpoints and the per-token weights
+of the expert load the bias update balances. Applying the verdict to a live model is :mod:`src.callbacks.balancing`.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import ClassVar, Literal, Protocol, get_args, runtime_checkable
 
 import torch
@@ -43,6 +44,8 @@ _BALANCING_KEY_SUFFIXES = frozenset(
 # Per model class, so a resolution repeated by a second consumer (the PP split gate) says it once.
 _warned_unservable_auto: set[str] = set()
 _warned_transient_only_auto: set[str] = set()
+# Per-token weights of the forwards running inside :func:`expert_load_token_weights`.
+_expert_load_weights: ContextVar[torch.Tensor | None] = ContextVar("expert_load_weights", default=None)
 
 
 @runtime_checkable
@@ -290,3 +293,32 @@ def resolve_balancing_mode(requested: str, model, is_moe: bool) -> BalancingMode
         f"flag.",
     )
     return "none"
+
+
+@contextmanager
+def expert_load_token_weights(weights: torch.Tensor | None) -> Iterator[None]:
+    """Count token ``i`` of every forward inside the block ``weights[i]`` times toward expert load.
+
+    A tree-packed row computes a shared prefix once for every example that contains it, so its tokens would weigh
+    less in the load the bias update balances than with each example run on its own; weighting each token by the
+    number of examples it belongs to restores that load. ``None`` leaves every token at one.
+    """
+    token = _expert_load_weights.set(weights)
+    try:
+        yield
+    finally:
+        _expert_load_weights.reset(token)
+
+
+def resolve_expert_load_weights(indices: torch.Tensor) -> torch.Tensor | None:
+    """The weight of each expert selection in ``indices`` (``[..., top_k]``, one row per token) under
+    :func:`expert_load_token_weights`; ``None`` outside it."""
+    weights = _expert_load_weights.get()
+    if weights is None:
+        return None
+    if weights.numel() != indices[..., 0].numel():
+        raise ValueError(
+            f"expert-load token weights cover {weights.numel()} tokens but the router selected for "
+            f"{indices[..., 0].numel()}: the weights do not describe this forward."
+        )
+    return weights.to(indices.device).reshape(indices.shape[:-1]).unsqueeze(-1).expand_as(indices)

@@ -9,6 +9,7 @@ Run: python tests/cpu/rewards/test_judge.py  (or pytest)
 import asyncio
 import json
 import re
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -502,6 +503,7 @@ def test_a_veto_verdict_fires_only_the_checks_with_supported_evidence():
         "judge/gate/veto": 1.0,
         "judge/gate/rude": 0.0,
         "judge/gate/unsupported_flags": 1.0,
+        "judge/gate/exempted_flags": 0.0,
         "judge/gate/completion_tokens": 21.0,
         "judge/gate/cost_usd": 0.001,
     }
@@ -536,6 +538,45 @@ def test_process_flags_make_the_score_and_never_veto():
     assert result.metrics["judge/gate/veto"] == 0.0 and result.metrics["judge/gate/sloppy"] == 1.0
     assert result.metrics["judge/gate/unsupported_flags"] == 0.0
     assert result.detail == "fired sloppy: 'skipped the check'"
+
+
+def test_a_weighted_veto_check_gates_and_prices_only_on_supported_evidence():
+    """A veto check given a weight is a penalty on top of the gate: fired with a found quote it vetoes and counts
+    into the score; fired without one it does neither."""
+    term = JudgeTerm(
+        name="gate",
+        weight=0.0,
+        view="full",
+        checks=(Check(name="cheat", description="d", veto=True, weight=3.0), *CHECKS[1:]),
+    )
+    supported = _reply(
+        _veto_reply(cheat=(True, "peek at the answer key"), sloppy=(False, ""), rude=(False, ""), rationale="")
+    )
+    judge, _ = _judge(term, [supported])
+    (result,) = asyncio.run(judge.score([EPISODE]))
+    assert result.veto is True and result.score == 0.6
+    unquoted = _reply(
+        _veto_reply(cheat=(True, "I could peek."), sloppy=(True, "skipped the check"), rude=(False, ""), rationale="")
+    )
+    judge, _ = _judge(term, [unquoted])
+    (result,) = asyncio.run(judge.score([EPISODE]))
+    assert result.veto is False and result.score == 0.2
+
+
+def test_a_check_exempt_under_an_episode_fact_does_not_fire_where_the_fact_holds():
+    """``unless`` hands the exemption to the environment: where the episode fact holds the check does not fire,
+    whatever the judge answered, and the dropped flag is counted; where it does not, the check fires as before."""
+    checks = (CHECKS[0], Check(name="sloppy", description="d", unless="no_runs_left"), CHECKS[2])
+    term = JudgeTerm(name="gate", weight=-0.2, view="full", checks=checks)
+    reply = _veto_reply(cheat=(False, ""), sloppy=(True, "skipped the check"), rude=(False, ""), rationale="")
+    judge, _ = _judge(term, [_reply(reply)])
+    (exempt,) = asyncio.run(judge.score([replace(EPISODE, facts=frozenset({"no_runs_left"}))]))
+    assert exempt.score == 0.0 and exempt.metrics["judge/gate/sloppy"] == 0.0
+    assert exempt.metrics["judge/gate/exempted_flags"] == 1.0 and exempt.metrics["judge/gate/unsupported_flags"] == 0.0
+    judge, _ = _judge(term, [_reply(reply)])
+    (fired,) = asyncio.run(judge.score([EPISODE]))
+    assert fired.score == 0.5 and fired.metrics["judge/gate/sloppy"] == 1.0
+    assert fired.metrics["judge/gate/exempted_flags"] == 0.0
 
 
 def test_a_veto_check_fired_without_evidence_does_not_veto():
@@ -689,6 +730,28 @@ def test_a_quote_from_a_call_the_engine_cut_supports_a_flag():
     assert result.metrics["judge/gate/sloppy"] == 1.0 and result.metrics["judge/gate/unsupported_flags"] == 0.0
 
 
+def test_a_call_refused_unrun_is_marked_in_the_prompt_and_its_lines_stay_quotable():
+    """A call the environment refused unrun reads as never run in the judge's view, and a line of it is still
+    evidence, as a cut call's is: the policy wrote it as an action, and a check's own wording says whether a
+    refused call counts."""
+    draft = "def solve():\n    pass  # fill in the merge step later"
+    refused = {"id": "r1", "function": {"name": "run", "arguments": json.dumps({"code": draft})}}
+    episode = ScoringSample(
+        prompt=EPISODE.prompt,
+        completion=[
+            {"role": "assistant", "content": "", "tool_calls": [refused], "refused_call_ids": ["r1"]},
+            {"role": "tool", "name": "run", "tool_call_id": "r1", "content": "Error: Not run: the budget is spent."},
+        ],
+    )
+    assert "→ run (call r1; refused unrun; never run)" in grading_prompt(_veto_term(), episode)
+    reply = _veto_reply(
+        cheat=(False, ""), sloppy=(True, "pass  # fill in the merge step later"), rude=(False, ""), rationale=""
+    )
+    judge, _ = _judge(_veto_term(), [_reply(reply)])
+    (result,) = asyncio.run(judge.score([episode]))
+    assert result.metrics["judge/gate/sloppy"] == 1.0 and result.metrics["judge/gate/unsupported_flags"] == 0.0
+
+
 def test_a_quote_from_a_submitted_program_matches_the_code_as_written():
     """Tool-call arguments render verbatim in the full view, so a line of code the judge quotes is found
     (a JSON-escaped rendering would hide every newline and quote)."""
@@ -785,6 +848,7 @@ def test_metric_keys_are_fixed_per_term():
         "judge/gate/rude",
         "judge/gate/veto",
         "judge/gate/unsupported_flags",
+        "judge/gate/exempted_flags",
         "judge/gate/completion_tokens",
     )
 

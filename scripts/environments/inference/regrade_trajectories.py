@@ -42,7 +42,7 @@ from src.environments.envs.tasks.coding.code_contests import (
     normalized_program,
 )
 from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, ContestSelection
-from src.environments.envs.tasks.coding.grading import grade_solution
+from src.environments.envs.tasks.coding.grading import FloatTolerance, grade_solution, stated_float_tolerance
 from src.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
 from src.environments.registry import resolve_environment
 from src.environments.tools.definitions import NativeToolCall, ToolArgumentError
@@ -173,6 +173,18 @@ def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -
     return solutions
 
 
+def episode_stated_tolerance(episode: dict[str, Any]) -> FloatTolerance | None:
+    """The float tolerance an episode's own statement states (:func:`stated_float_tolerance`), read from its user
+    turns as the environment read it from the prompt."""
+    return stated_float_tolerance(
+        "\n".join(
+            str(message.get("content") or "")
+            for message in episode.get("messages", [])
+            if message.get("role") == "user"
+        )
+    )
+
+
 def display_language(language: str | list[str]) -> str:
     """The meta ``language`` for the report line: a list (a model-chosen set) joined with commas."""
     return ",".join(language) if isinstance(language, list) else str(language)
@@ -204,8 +216,9 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
         meta.get("env_grading") or {}, stop_on_first_failure=True, max_grading_seconds=None
     )
 
-    def grade(idx: int, code: str | None, language: str | None) -> bool:
-        """True iff ``code`` passes all of problem ``idx``'s tests, graded in the submission's language."""
+    def grade(idx: int, code: str | None, language: str | None, stated_tolerance: FloatTolerance | None) -> bool:
+        """True iff ``code`` passes all of problem ``idx``'s tests, graded in the submission's language under the
+        float tolerance its statement states."""
         payload = payloads[idx]
         if not code or not payload.get("tests"):
             return False
@@ -215,6 +228,7 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
             spec,
             checker=payload.get("checker"),
             time_limit=payload.get("time_limit"),
+            stated_tolerance=stated_tolerance,
             language=language,
         )
         return total > 0 and passed == total
@@ -226,7 +240,8 @@ def regrade_file(path: str, workers: int) -> dict[str, Any]:
         for code, language in submitted_solutions(episode, env)[: episode_submission_budget(episode, env)]
     ]
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        verdicts = list(pool.map(lambda t: grade(episodes[t[0]]["index"], t[1], t[2]), tasks))
+        tolerances = [episode_stated_tolerance(episode) for episode in episodes]
+        verdicts = list(pool.map(lambda t: grade(episodes[t[0]]["index"], t[1], t[2], tolerances[t[0]]), tasks))
 
     per_episode: dict[int, list[bool]] = {}
     for (ep_i, _, _), ok in zip(tasks, verdicts, strict=True):

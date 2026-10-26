@@ -19,6 +19,7 @@ from src.callbacks import efficiency
 from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.model_flops import RankFlopsModel
 from src.models.attention.layout import AttentionLayout, LayerAttention
+from src.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
 from tests.common.parallelism import make_parallelism_config
 
@@ -235,6 +236,28 @@ def test_measured_work_carries_the_config_depth_share_under_pp():
     assert callback._drain_measured_attention_flops() == pytest.approx(
         float(LAYOUT.flops_for_documents(lengths)) * 0.25, rel=1e-12
     )
+
+
+def test_a_tree_batch_costs_each_node_its_own_tokens_at_its_path_length():
+    """Three examples over one 600-token prefix: the prefix is attended once, each branch attends its
+    whole path. Read by position resets alone, the row would be one 810-token document."""
+    branches = (50, 70, 90)
+    position_ids = torch.cat([torch.arange(600), *(torch.arange(600, 600 + n) for n in branches)])
+    depth = torch.tensor([0] * 600 + [1] * sum(branches))
+    plan = build_tree_attention_plan(build_node_table(position_ids, depth), sliding_window=128, full_form="split")
+    row = {"input_ids": torch.zeros(1, len(position_ids), dtype=torch.long), "position_ids": position_ids[None]}
+
+    callback, trainer = _bound()
+    trainer._accumulate_attention_flops({**row, TREE_ATTENTION_KEY: plan})
+    paths, own = torch.tensor([600, *(600 + n for n in branches)]), torch.tensor([600, *branches])
+    expected = float(LAYOUT.flops_for_documents(paths, own))
+    assert callback._drain_measured_attention_flops() == pytest.approx(expected, rel=1e-12)
+
+    flat = float(LAYOUT.flops_for_documents(torch.tensor([600 + n for n in branches])))
+    one_document = float(LAYOUT.flops_for_documents(torch.tensor([len(position_ids)])))
+    assert expected < flat and expected != pytest.approx(one_document, rel=1e-3)
+    trainer._accumulate_attention_flops(row)
+    assert callback._drain_measured_attention_flops() == pytest.approx(one_document, rel=1e-12)
 
 
 def test_the_drain_counts_documents_and_ignores_empty_slots():

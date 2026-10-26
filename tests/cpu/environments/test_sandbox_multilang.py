@@ -42,7 +42,7 @@ import pytest
 from src.environments.sandbox import base as _base
 from src.environments.sandbox import bubblewrap as _bubblewrap
 from src.environments.sandbox import local as local_sandbox
-from src.environments.sandbox.base import LANGUAGES, resolve_language
+from src.environments.sandbox.base import LANGUAGES, SandboxInfraError, resolve_language
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
@@ -208,6 +208,69 @@ def test_cpp_memory_cap_applies_to_binary():
     res = LocalSubprocessSandbox(memory_limit_mb=256).run(code, language="cpp")
     assert not res.ok, "a 2GiB allocation past the 256MiB cap must not succeed"
     assert not res.timed_out
+
+
+# A launch past the run's time limit, as a jail set up while the host builds and tears down many others is.
+_SLOW_LAUNCH_SECONDS = 1.5
+
+
+class _SlowLaunch:
+    """Reaches the program :data:`_SLOW_LAUNCH_SECONDS` after the launch starts."""
+
+    def _wrap_command(self, argv, workdir):
+        launch = super()._wrap_command(argv, workdir)
+        return ["/bin/bash", "-c", f'sleep {_SLOW_LAUNCH_SECONDS}; exec "$@"', "slow-launch", *launch]
+
+
+class _DeadLaunch(LocalSubprocessSandbox):
+    """A launcher that exits before it reaches the program."""
+
+    def _wrap_command(self, argv, workdir):
+        return ["/bin/bash", "-c", "exit 7"]
+
+
+def _slow_launch(backend: str):
+    if backend == "local":
+        return type("SlowLocal", (_SlowLaunch, LocalSubprocessSandbox), {})()
+    if _BWRAP is None:
+        _skip("bubblewrap not usable here")
+    return type("SlowBubblewrap", (_SlowLaunch, BubblewrapSandbox), {})()
+
+
+@pytest.mark.parametrize("backend", ["local", "bubblewrap"])
+def test_a_runs_time_limit_starts_when_its_program_does(backend):
+    """The launch (the limit shell, on bubblewrap the jail's namespaces and mounts) is the host's cost: a
+    program that finishes within the limit passes however slow the launch, one that does not times out,
+    and the program holds no descriptor the launch used to mark its start."""
+    sandbox = _slow_launch(backend)
+    fast = sandbox.run("import os\nprint(sorted(os.listdir('/proc/self/fd')))", timeout=1.0)
+    assert fast.ok, fast
+    assert fast.stdout.strip() == "['0', '1', '2', '3']", "only the standard streams and listdir's own handle"
+    assert sandbox.run("import time\ntime.sleep(3)", timeout=1.0).timed_out
+
+
+def test_a_launch_that_never_reaches_the_program_is_lost_to_the_host(monkeypatch):
+    monkeypatch.setattr(local_sandbox, "LAUNCH_TIMEOUT_SECONDS", 0.5)
+    with pytest.raises(SandboxInfraError, match="did not reach the program"):
+        _slow_launch("local").run("print('ok')", timeout=5.0)
+
+
+def test_a_lost_start_marker_never_runs_the_program_untimed(monkeypatch):
+    """A marker that cannot be written (its descriptor lost on the way into the jail) stops the launch before the
+    program, so no program ever runs timed by the launch bound alone."""
+    marked = local_sandbox._start_marked
+    monkeypatch.setattr(local_sandbox, "_start_marked", lambda argv, fd: marked(argv, 1023))
+    result = LocalSubprocessSandbox().run("print('ran')", timeout=1.0)
+    assert "ran" not in result.stdout and not result.ok
+
+
+def test_a_launcher_that_exits_early_ends_the_run_at_its_exit():
+    """A launcher that dies short of the program ends the run then, as its own result, without waiting
+    out the launch bound."""
+    start = time.monotonic()
+    result = _DeadLaunch().run("print('ok')", timeout=1.0)
+    assert time.monotonic() - start < local_sandbox.LAUNCH_TIMEOUT_SECONDS / 2
+    assert result.returncode == 7 and not result.timed_out and result.error is None
 
 
 def test_missing_compiler_is_backend_error():

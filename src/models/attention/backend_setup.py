@@ -18,9 +18,9 @@ from src.models.config_access import text_config
 
 logger = get_logger(__name__)
 
-# Warm-up row length: the floor keeps the dense kernel on a realistic tile count, the margin pushes the
-# row past a sliding window so the windowed variant is the one that compiles.
-_WARMUP_MIN_SEQ_LEN = 512
+# Warm-up row length: the floor keeps a kernel on a realistic tile count, the margin pushes the row past a
+# sliding window so the windowed variant is the one that compiles.
+WARMUP_MIN_SEQ_LEN = 512
 _WARMUP_WINDOW_MARGIN = 8
 
 
@@ -121,7 +121,7 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
         sliding_window = getattr(text_cfg, "sliding_window", None)
         if device is None:
             device = torch.device(f"cuda:{torch.cuda.current_device()}")
-        seq_len = max(_WARMUP_MIN_SEQ_LEN, (sliding_window or 0) + _WARMUP_WINDOW_MARGIN)
+        seq_len = max(WARMUP_MIN_SEQ_LEN, (sliding_window or 0) + _WARMUP_WINDOW_MARGIN)
         scale = head_dim**-0.5
         sink = torch.randn(n_heads, device=device, dtype=dtype) if uses_gpt_oss_sinks(config) else None
 

@@ -18,11 +18,14 @@ from src.rewards.samples import (
     DIGEST_CHARS,
     DIGEST_INLINE_CHARS,
     NO_FINAL_ANSWER,
+    REFUSED_CALL_IDS_KEY,
+    REFUSED_CALL_NOTE,
     TURN_FLAG_NOTES,
     WIRE_KEYS,
     ScoringSample,
     cut_middle,
     final_assistant_text,
+    render_actions,
     render_digest,
     render_final_answer,
     render_tools,
@@ -177,6 +180,19 @@ def test_a_cut_turns_calls_render_under_it_marked_as_never_run():
     both = {**TURNS[0], CUT_CALLS_KEY: CUT_TURN[CUT_CALLS_KEY]}
     rendered = render_transcript([both], include_reasoning=False)
     assert rendered.index("→ run (call call_1)\n") < rendered.index(head) and rendered.count(CUT_CALL_NOTE) == 1
+
+
+def test_a_call_refused_unrun_renders_marked_beside_the_calls_that_ran():
+    """A judge reads a refused call under its turn marked as never run, its arguments and reply kept and quotable,
+    and the chat wire drops the sample-only key."""
+    refused = {**CALL, "id": "call_2"}
+    turn = {**TURNS[0], "tool_calls": [CALL, refused], REFUSED_CALL_IDS_KEY: ["call_2"]}
+    rendered = render_transcript([turn], include_reasoning=False)
+    assert "→ run (call call_1)\n" in rendered and f"→ run (call call_2; {REFUSED_CALL_NOTE})\n" in rendered
+    sample = ScoringSample(prompt=PROMPT, completion=[turn])
+    assert render_actions(sample, View.FULL, max_chars=10_000).count("print(1)") == 2
+    (wire,) = [m for m in scored_messages(sample, View.FULL) if m["role"] == "assistant"]
+    assert REFUSED_CALL_IDS_KEY not in wire and len(wire["tool_calls"]) == 2
 
 
 def test_the_digest_cuts_a_cut_calls_arguments_like_every_other_argument():

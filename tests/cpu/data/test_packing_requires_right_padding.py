@@ -26,7 +26,7 @@ from src.subclass_registry import iter_subclasses
 # Constructor arguments the subclasses add on top of ``tokenizer``. Only values needed to reach the
 # guard; a subclass introducing a new REQUIRED argument fails
 # ``test_extra_required_args_are_declared`` rather than silently dropping out of the sweep below.
-_EXTRA_REQUIRED_ARGS = {"response_prompt_template": "<|assistant|>"}
+_EXTRA_REQUIRED_ARGS = {"response_prompt_template": "<|assistant|>", "sliding_window": None, "full_form": "split"}
 
 
 def _packing_collator_classes() -> list[type]:

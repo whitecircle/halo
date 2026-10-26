@@ -129,6 +129,10 @@ Both bias modes force `output_router_logits=False`, overriding `model_init_kwarg
 
 `aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP wrappers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, so a forward that reads the flag from `kwargs` only never reaches the aux term. The probe reads the model under a PEFT or CP wrapper, both of which pass the flag through.
 
+The SFT trainer weighs the term at `router_aux_loss_coef` once per optimizer step: it averages the window's micro-batch aux losses, and the gradient sync averages them over ranks. In each eval batch it adds the term once at that coefficient, so `loss` and `eval_loss` both read as the language-model mean plus `router_aux_loss_coef × aux_loss`.
+
+HF's `num_items_in_batch` path multiplies every micro-batch loss, train and eval, by the process count and sums the accumulation window. That is right for the token-summed cross-entropy, but it would weigh the per-micro-batch aux mean `world_size × gradient_accumulation_steps` times its coefficient (`world_size` times in eval). `DistributedSFTTrainer._weigh_router_aux_loss` therefore rescales the term. When HF withholds the labels from the forward, the forward adds no aux term, so the trainer adds it itself. HF does this under a label smoother (`label_smoothing_factor`) or a TRL `compute_loss_func` (`loss_type: dft` with Liger off). Both this rescale and the CP model read the coefficient through `require_router_aux_loss_coef` (`src/models/moe/config_fields.py`), which raises when the config declares none. CP computes its own mean and needs no rescale.
+
 The resolved mode is reconciled world-wide with precedence `bias_update > bias_update_transient > aux_loss > none`, so every rank runs the same collectives.
 
 ### `aux_loss` under gradient checkpointing

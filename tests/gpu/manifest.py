@@ -205,6 +205,9 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_chunked_logprob_precision.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_deepgemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_fa4_trainable_sink_rescale.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    "kernels/test_fa4_tree_attention.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "moe", "gptoss", "qwen3"), timeout=900
+    ),
     "kernels/test_flex_sliding_attention.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "kernels/test_fused_glu.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_moe_permute.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),

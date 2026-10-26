@@ -42,7 +42,6 @@ from src.environments.envs.tasks.coding.code_contests import (
 )
 from src.environments.envs.tasks.coding.datasets import ContestSelection
 from src.environments.envs.tasks.coding.grading import VERDICT_DETAIL_FULL
-from src.environments.episode import recovering_turn
 from src.environments.registry import resolve_environment
 from src.environments.rollout_config import RolloutConfig
 from tests.common.code_contests import (
@@ -163,16 +162,15 @@ def _scratchpad_turn(env, ids):
 
 def test_a_leaderboard_scratchpad_call_flags_no_turn_while_a_spent_budget_still_does():
     """The leaderboard closes the scratchpad: a call to it gets the spent-budget reply and price, but it refuses
-    nothing the protocol offered, so its turn is not flagged and the next one gets no recovery reserve, which would
-    buy the leaderboard more output per sample than the setting it reproduces. A harness budget the episode spent
-    still flags a turn of nothing else."""
+    nothing the protocol offered, so its turn is not flagged and stays trainable. A harness budget the episode
+    spent still flags a turn of nothing else untrainable."""
     leaderboard = _env(eval_protocol="leaderboard", tool_error_penalty=0.05)
     ids, _ = leaderboard.reset(["solve it"], [SINGLE_TEST_ANSWER])
     step = _scratchpad_turn(leaderboard, ids)
     traj = step.trajectory
     assert traj.messages[-1].content == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
     assert step.reward == pytest.approx(-0.05)
-    assert not traj.messages[-2].calls_rejected and not recovering_turn(traj)
+    assert not traj.messages[-2].calls_rejected and not traj.messages[-2].untrainable
 
     harness = _env(max_test_calls=1, tool_error_penalty=0.05)
     ids, _ = harness.reset(["solve it"], [SINGLE_TEST_ANSWER])
@@ -181,7 +179,7 @@ def test_a_leaderboard_scratchpad_call_flags_no_turn_while_a_spent_budget_still_
     traj = step.trajectory
     assert traj.messages[-1].content == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
     assert step.reward == pytest.approx(-0.05)
-    assert traj.messages[-2].calls_rejected and recovering_turn(traj)
+    assert traj.messages[-2].calls_rejected and traj.messages[-2].untrainable
 
 
 def test_the_registry_presets_take_the_protocol():

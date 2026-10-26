@@ -39,6 +39,7 @@ class JudgeMetric(StrEnum):
     COST_USD = "cost_usd"
     VETO = "veto"
     UNSUPPORTED_FLAGS = "unsupported_flags"
+    EXEMPTED_FLAGS = "exempted_flags"
 
 
 class OnError(StrEnum):
@@ -256,30 +257,35 @@ class Check:
     and what firing means. A ``veto`` check gates the episode's credit — the objective and every other
     positive component go to 0, the penalties stand; every other check is a process flag, counted into
     the term's score with its ``weight`` (default 1; 0 logs the flag without counting it). A veto check
-    takes no weight: the gate is all it does."""
+    counts only when given a weight (default 0): a penalty on top of the gate, which takes little from an
+    episode that had little credit. ``unless`` names an episode fact the environment establishes itself
+    (:attr:`~src.rewards.samples.ScoringSample.facts`); where it holds, the check does not fire, whatever
+    the judge answered: an exemption the environment can decide exactly is not left to the judge."""
 
     name: str
     description: str
     veto: bool = False
     weight: float | None = None
+    unless: str | None = None
 
     def __post_init__(self) -> None:
         owner = f"check {self.name!r}"
         _require_name("check", self.name)
         _require_text(owner, description=self.description)
         _require_bool(owner, veto=self.veto)
+        if self.unless is not None:
+            _require_text(owner, unless=self.unless)
         if self.weight is None:
             return
-        if self.veto:
-            raise ValueError(f"{owner}: a veto check gates the credit and takes no weight")
         require_finite(owner, ge=0, why=" (the term's own weight signs the price)", weight=self.weight)
 
     @property
     def share(self) -> float:
-        """The process flag's weight in the term's score: 0 for a veto check, 1 unless the config set one."""
-        if self.veto:
-            return 0.0
-        return 1.0 if self.weight is None else self.weight
+        """The check's weight in the term's score: the configured one, else 1 for a process flag and 0 for a
+        veto check."""
+        if self.weight is None:
+            return 0.0 if self.veto else 1.0
+        return self.weight
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -291,9 +297,9 @@ class JudgeTerm(ScoredTerm):
       weight-averaged fraction of the scale, priced as every term is.
     - ``checks`` (veto mode): each either fires, with a verbatim quote of the span that shows it, or
       does not. A fired ``veto`` check zeroes the objective and every other positive component, the
-      penalties standing; the term's own score is the weighted fired fraction of the other checks, so its
-      ``weight`` (0 by default when parsed from a config, never positive) prices process flags without
-      ever adding reward. A verdict the judge never
+      penalties standing; the term's own score is the weighted fired fraction of the checks that carry
+      weight (the process flags, and a veto check given one), so its ``weight`` (0 by default when parsed
+      from a config, never positive) prices them without ever adding reward. A verdict the judge never
       reached defaults, from a config, to ``on_error: neutral``: no flag, and the exact grade stands.
 
     ``view`` selects what the judge reads: the final answer (``final``), every turn with its
@@ -342,7 +348,7 @@ class JudgeTerm(ScoredTerm):
             )
         if self.checks and self.weight > 0:
             raise ValueError(
-                f"{owner}: a veto judge never adds reward — its weight prices the fired process flags, so it "
+                f"{owner}: a veto judge never adds reward — its weight prices the fired weighted checks, so it "
                 f"must be <= 0 (0 logs them unpriced), got {self.weight}"
             )
         _require_text(owner, model=self.model, base_url=self.base_url, api_key_env=self.api_key_env)
@@ -391,8 +397,8 @@ class JudgeTerm(ScoredTerm):
         return min(1.0, weighted / sum(requirement.weight for requirement in self.requirements))
 
     def flag_fraction(self, fired: Mapping[str, bool]) -> float:
-        """The veto-mode term's score: the weighted fired fraction of its process checks, the ones that flag
-        a fault without gating the objective (0 without any that carries weight)."""
+        """The veto-mode term's score: the weighted fired fraction of its checks that carry weight (0 without
+        any)."""
         total = sum(check.share for check in self.checks)
         if not total:
             return 0.0

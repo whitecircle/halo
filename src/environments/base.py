@@ -18,12 +18,13 @@ from src.environments.rollout_config import ReasoningEffortChoice
 from src.environments.sandbox.base import SandboxFault, SandboxInfraError
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.composer import RewardComposer
-from src.rewards.samples import CUT_CALLS_KEY, TURN_FLAG_NOTES, ScoringSample
+from src.rewards.samples import CUT_CALLS_KEY, REFUSED_CALL_IDS_KEY, TURN_FLAG_NOTES, ScoringSample
 from src.rewards.scorers.base import ScoreResult
 from src.rewards.terms import (
     ENVIRONMENT_REWARD_SOURCES,
     OBJECTIVE_TERM_NAME,
     EnvironmentTerm,
+    JudgeTerm,
     RewardTerm,
     component_key,
     parse_reward_terms,
@@ -250,9 +251,10 @@ class Message:
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
-    # The reasoning cap the engine enforced on the turn — its level's budget, a soft level's ceiling or a retry's reserve (an output budget may narrow
-    # the request's own below it; SGLang ignores the field), and the reasoning tokens the turn sampled, counted off its ids by
-    # ``episode.sampled_reasoning_tokens`` (``None`` without them): the pair ``episode/thinking_cap_turns`` reads.
+    # The reasoning cap the engine enforced on the turn — its level's budget or a soft level's ceiling (an output
+    # budget may narrow the request's own below it; SGLang ignores the field), and the reasoning tokens the turn
+    # sampled, counted off its ids by ``episode.sampled_reasoning_tokens`` (``None`` without them): the pair
+    # ``episode/thinking_cap_turns`` reads.
     thinking_cap: int | None = None
     reasoning_tokens: int | None = None
     # Engine cut the turn off at its token cap: the text is a fragment, never rewarded (``untrainable``).
@@ -261,10 +263,13 @@ class Message:
     # Never run and dropped by to_dict, so neither the engine nor the training render sees them; a scorer's
     # view and the completions record show them, marked.
     cut_tool_calls: list[dict[str, Any]] | None = None
-    # Every tool call named a tool that does not exist or was refused unrun (malformed, over budget, or an
-    # identical resubmission), so the turn accomplished nothing — never rewarded like a fragment, or a
-    # recovering episode reinforces the invented or refused call that cost it a turn.
+    # Every tool call named a tool that does not exist or was refused unrun (malformed, over budget, an
+    # identical resubmission or a mislabelled language), so the turn accomplished nothing — never rewarded
+    # like a fragment, or a recovering episode reinforces the invented or refused call that cost it a turn.
     calls_rejected: bool = False
+    # The calls of the turn the environment refused unrun or that named a tool that does not exist: a scorer's view
+    # marks them as never run.
+    refused_call_ids: tuple[str, ...] = ()
     # The model ended the turn with neither visible content nor a tool call — never rewarded for the
     # same reason: a recovering episode would reinforce stopping on nothing.
     empty: bool = False
@@ -466,6 +471,10 @@ class BaseEnvironment(ABC):
     # component's name, and an undeclared shaping name fails at the first settled episode.
     SHAPING_COMPONENTS: tuple[str, ...] = ()
 
+    # Names of the episode facts this class establishes itself (:meth:`_episode_facts`), the union over the
+    # MRO being what a judge check may name to stand exempt under (``unless``).
+    EPISODE_FACTS: tuple[str, ...] = ()
+
     # Effort level -> profile defaults. The base binds no budget to any level (the global rollout caps
     # stand); an env that prices effort declares its own table. ``reasoning_effort_profiles`` merges
     # per level over it.
@@ -482,7 +491,7 @@ class BaseEnvironment(ABC):
     # (default true) has the engine close a turn's reasoning at the level's ``thinking_tokens``; false makes
     # the budget soft — stated to the model and read by the reasoning terms, never enforced: the engine then
     # closes the reasoning only at the run's ceiling (``rollout_max_thinking_tokens``, else where
-    # ``rollout_max_answer_tokens`` is left of the turn) and at a retry's reserve.
+    # ``rollout_max_answer_tokens`` is left of the turn).
     EFFORT_PROFILE_FLAGS: frozenset[str] = frozenset({"enforce_thinking_cap"})
 
     def __init__(
@@ -578,6 +587,18 @@ class BaseEnvironment(ABC):
                 f"reward term name(s) {taken} are shaping components of {type(self).__name__}; "
                 f"pick another name for the term"
             )
+        unknown = sorted(
+            f"{term.name}.{check.name}: {check.unless!r}"
+            for term in self._rewards.external_terms
+            if isinstance(term, JudgeTerm)
+            for check in term.checks
+            if check.unless is not None and check.unless not in self.episode_facts()
+        )
+        if unknown:
+            raise ValueError(
+                f"judge check(s) {unknown} stand exempt under episode facts {type(self).__name__} never establishes "
+                f"(it establishes {sorted(self.episode_facts()) or 'none'})"
+            )
         self._background_tasks: set[asyncio.Task] = set()
         if hasattr(type(self), "_compute_reward"):
             raise TypeError(
@@ -603,6 +624,11 @@ class BaseEnvironment(ABC):
     def shaping_components(cls) -> frozenset[str]:
         """The shaping component names this class may add: every ``SHAPING_COMPONENTS`` along the MRO."""
         return frozenset(name for klass in cls.__mro__ for name in getattr(klass, "SHAPING_COMPONENTS", ()))
+
+    @classmethod
+    def episode_facts(cls) -> frozenset[str]:
+        """The episode fact names this class establishes: every ``EPISODE_FACTS`` along the MRO."""
+        return frozenset(name for klass in cls.__mro__ for name in getattr(klass, "EPISODE_FACTS", ()))
 
     @classmethod
     def effort_profile_flags(cls) -> frozenset[str]:
@@ -837,7 +863,7 @@ class BaseEnvironment(ABC):
         metrics["episode/empty_turns"] = float(trajectory.info.get("empty_turns", 0))
         # Turns whose counted reasoning reached their recorded cap — where a cap binds, and where reasoning
         # carried past the close into the call starts — emitted only where the rollout counts reasoning
-        # (wherever a vLLM thinking cap can bind), never as a constant 0 that reads as "no cap binds".
+        # (a budgeted vLLM run), never as a constant 0 where it cannot count.
         counted = [m for m in trajectory.messages if m.role == "assistant" and m.reasoning_tokens is not None]
         if counted:
             metrics["episode/thinking_cap_turns"] = float(sum(m.reasoning_capped for m in counted))
@@ -1130,11 +1156,17 @@ class BaseEnvironment(ABC):
         converted before grading (a choice index to its letter) overrides this."""
         return (trajectory.info.get("context") or {}).get(ANSWER_KEY)
 
+    def _episode_facts(self, trajectory: Trajectory) -> frozenset[str]:
+        """The episode facts (:data:`EPISODE_FACTS`) that hold for a finished episode, which a judge check
+        names to stand exempt under. The base establishes none."""
+        return frozenset()
+
     def _scoring_sample(self, trajectory: Trajectory) -> ScoringSample:
         """What an external scorer reads of a finished episode: the prompt turns (everything before the
         first assistant turn), the policy's turns after them with their reasoning, turn flags and the calls
         a cut turn never ran, the final answer (:meth:`_final_answer`), the reference
-        (:meth:`_scoring_reference`) and the tools the policy could call."""
+        (:meth:`_scoring_reference`), the tools the policy could call and the episode facts
+        (:meth:`_episode_facts`)."""
         messages = [self._sample_message(message) for message in trajectory.messages]
         first = next((i for i, m in enumerate(trajectory.messages) if m.role == "assistant"), len(messages))
         return ScoringSample(
@@ -1143,17 +1175,21 @@ class BaseEnvironment(ABC):
             final_answer=self._final_answer(trajectory),
             reference=self._scoring_reference(trajectory),
             tools=self.get_tools_schema() or None,
+            facts=self._episode_facts(trajectory),
         )
 
     @staticmethod
     def _sample_message(message: Message) -> dict[str, Any]:
         """A message as a scorer reads it: the wire fields with the reasoning, the turn flags
         (:data:`~src.rewards.samples.TURN_FLAG_NOTES`) a judge should see named, and the calls a cut turn
-        never ran under :data:`~src.rewards.samples.CUT_CALLS_KEY`, apart from the calls that ran."""
+        never ran under :data:`~src.rewards.samples.CUT_CALLS_KEY`, apart from the calls that ran, and the ids of the
+        calls refused unrun under :data:`~src.rewards.samples.REFUSED_CALL_IDS_KEY`."""
         rendered = message.to_dict(include_thinking=True)
         rendered.update({flag: True for flag in TURN_FLAG_NOTES if getattr(message, flag)})
         if message.cut_tool_calls:
             rendered[CUT_CALLS_KEY] = message.cut_tool_calls
+        if message.refused_call_ids:
+            rendered[REFUSED_CALL_IDS_KEY] = list(message.refused_call_ids)
         return rendered
 
     def _apply_external_scores(self, trajectory: Trajectory, verdict: Mapping[str, ScoreResult]) -> None:

@@ -132,6 +132,7 @@ changes.
 | `src/data/collators/` (CompletionsOnly, packing, padding-free) | `agent-docs/data/collators.md`, `agent-docs/optimization/padding-free-collator.md` |
 | `src/data/collators/offline_grpo.py`, `src/data/collators/vlm_preference.py` + `src/data/pipeline/preferences.py` (per-method collators and their maps) | `agent-docs/training-methods/grpo/offline.md`, `agent-docs/training-methods/preference/reward-modeling.md` |
 | `src/data/collators/factory.py` | `agent-docs/data/collators.md` |
+| tree packing (`src/data/tree_layout.py`, `src/data/pipeline/tree_rows.py`, `src/data/collators/tree_packing.py`, `src/models/attention/tree_plan.py`, `src/models/attention/tree.py`) | `agent-docs/optimization/tree-packing.md`; the `tree_*` rows of `agent-docs/reference/configuration-reference.md` |
 | `src/data/spans.py` (turn terminators, completion spans, the one completion-mask implementation) | `agent-docs/data/collators.md`, `agent-docs/data/dataset-preparation.md` |
 | `src/data/` (loading, processing, sharding, VLM) | `agent-docs/data/{dataset-formats,dataset-preparation,filesystem-handling}.md`, `agent-docs/parallelism/data-loading.md` |
 | `src/data/sources/s3_client.py`, `src/data/sources/dataset_cache.py`, `src/data/sources/paths.py`, `scripts/before_training/s3_datasets.py` (CLI) | `agent-docs/data/s3-utilities.md` |

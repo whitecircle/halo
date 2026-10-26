@@ -20,7 +20,7 @@ from scripts.environments.inference import regrade_trajectories
 from scripts.environments.inference.run_code_contests import contest_meta
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.coding.datasets import ContestSelection
-from src.environments.envs.tasks.coding.grading import GradingSpec
+from src.environments.envs.tasks.coding.grading import FloatTolerance, GradingSpec
 
 # What run_code_contests.py stamps (generic eval meta + its meta_extra).
 _FULL_META = {
@@ -198,6 +198,19 @@ def test_submitted_solutions_skip_a_program_the_environment_refused_for_its_lang
     episode = {"messages": [{"role": "assistant", "tool_calls": tool_calls}]}
     env = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
     assert regrade_trajectories.submitted_solutions(episode, env) == [(cpp, "cpp")]
+
+
+def test_an_episode_s_statement_sets_the_tolerance_it_is_re_graded_under():
+    stated = {
+        "messages": [
+            {"role": "system", "content": "error 10^-1"},
+            {"role": "user", "content": "Absolute error up to 10^{-4}."},
+        ]
+    }
+    assert regrade_trajectories.episode_stated_tolerance(stated) == FloatTolerance(absolute=1e-4, relative=None)
+    assert (
+        regrade_trajectories.episode_stated_tolerance({"messages": [{"role": "user", "content": "Print n."}]}) is None
+    )
 
 
 def test_display_language_joins_a_model_chosen_set():

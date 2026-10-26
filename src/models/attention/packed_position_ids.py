@@ -1,9 +1,11 @@
-"""Packed-document ``position_ids`` re-injection for families whose forward drops them before flash attention."""
+"""The flash-interface view a modeling module's attention registry takes, and packed-document ``position_ids``
+re-injection through it for families whose forward drops them before flash attention."""
 
 from __future__ import annotations
 
 import functools
 import inspect
+from abc import ABC, abstractmethod
 
 from accelerate.logging import get_logger
 from transformers.models.mistral4 import modeling_mistral4 as m4
@@ -11,26 +13,22 @@ from transformers.models.mistral4 import modeling_mistral4 as m4
 logger = get_logger(__name__)
 
 
-class PositionIdsInjectingRegistry:
-    """A view of ``ALL_ATTENTION_FUNCTIONS`` whose flash interfaces re-inject the module's stashed
-    ``position_ids``, installed into one modeling module so every other family keeps the original."""
+class FlashInterfaceViewBase(ABC):
+    """A view of ``ALL_ATTENTION_FUNCTIONS`` that hands out wrapped flash interfaces and everything else
+    untouched, installed into one modeling module so every other family keeps the original."""
 
     def __init__(self, inner):
         self._inner = inner
+
+    @abstractmethod
+    def wrap_flash_interface(self, fn):
+        """``fn``, a flash attention interface, as this view hands it out."""
 
     def get_interface(self, impl, *args, **kwargs):
         fn = self._inner.get_interface(impl, *args, **kwargs)
         if not isinstance(impl, str) or "flash" not in impl:
             return fn
-
-        @functools.wraps(fn)
-        def with_position_ids(module, *fargs, **fkwargs):
-            position_ids = getattr(module, "_halo_packed_position_ids", None)
-            if position_ids is not None and "position_ids" not in fkwargs:
-                fkwargs["position_ids"] = position_ids
-            return fn(module, *fargs, **fkwargs)
-
-        return with_position_ids
+        return self.wrap_flash_interface(fn)
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -47,6 +45,20 @@ class PositionIdsInjectingRegistry:
 
     def __len__(self):
         return len(self._inner)
+
+
+class PositionIdsInjectingRegistry(FlashInterfaceViewBase):
+    """Flash interfaces that re-inject the module's stashed ``position_ids``."""
+
+    def wrap_flash_interface(self, fn):
+        @functools.wraps(fn)
+        def with_position_ids(module, *fargs, **fkwargs):
+            position_ids = getattr(module, "_halo_packed_position_ids", None)
+            if position_ids is not None and "position_ids" not in fkwargs:
+                fkwargs["position_ids"] = position_ids
+            return fn(module, *fargs, **fkwargs)
+
+        return with_position_ids
 
 
 def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targets) -> bool:

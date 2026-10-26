@@ -31,7 +31,7 @@ Rules that bite:
     - `shaping` maps episode-level terms to values (`{"submission": 0.25}`), each added as `reward/<name>`. Declare the names in `SHAPING_COMPONENTS`, or the first [settled](../../grpo/rewards/README.md#settlement) episode fails. `objective` and `turn_shaping` are reserved, and no reward term may reuse a declared name.
     - Protocol-level shaping goes in `_episode_shaping(trajectory) -> dict`.
     - An episode whose grade carries no signal (a grader outage, a null `answer` cell) sets `trajectory.info[EPISODE_INVALID_KEY] = True`, its cause under `EPISODE_INVALID_REASON_KEY`, and grades 0, so it leaves the group baseline.
-- **Hand a scorer what to read.** Override `_final_answer` and `_scoring_reference` for `judge` and `reward_model` terms ([What a scorer reads](../../grpo/rewards/README.md#what-a-scorer-reads)).
+- **Hand a scorer what to read.** Override `_final_answer`, `_scoring_reference` and `_episode_facts` (with `EPISODE_FACTS`) for `judge` and `reward_model` terms ([What a scorer reads](../../grpo/rewards/README.md#what-a-scorer-reads)).
 - **Forward `**kwargs` to `super().__init__`.** The base binds `rewards` (as `reward_terms`), `max_turns` and the [common knobs](README.md#common-knobs); a keyword no constructor binds raises `TypeError` at construction.
 - **Declare differing defaults on the class** (`DEFAULT_MAX_TURNS`, `DEFAULT_TOOL_SUCCESS_REWARD`, `DEFAULT_TOOL_ERROR_PENALTY`, `requires_answer`), not in the factory, so a YAML `max_turns` still wins.
 - **Build through `self._init_trajectory(...)`**, so the system turn, the task turn and the context land where the base expects them.

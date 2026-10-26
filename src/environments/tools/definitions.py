@@ -32,8 +32,8 @@ class ToolBudgetExhausted(Exception):
 class ToolDisabled(ToolBudgetExhausted):
     """A call to a tool whose episode budget is zero: the run disabled it (the ``leaderboard`` evaluation
     protocol's scratchpad, a ``tool_budgets`` cap of 0). Answered and booked like a spent budget, but no refusal
-    (:func:`refused_unrun`): the turn stands as one failed call and the next gets no recovery reserve, which would
-    buy a protocol that disables the tool more output per sample than the setting it reproduces."""
+    (:func:`refused_unrun`): where the run offers no such tool the call is an ordinary failed one, so its turn
+    stays trainable."""
 
 
 class ToolArgumentError(TypeError):
@@ -50,7 +50,8 @@ class ToolArgumentError(TypeError):
 
 class ToolCallRefused(ToolArgumentError):
     """A handler refusing an admitted call it will not run, the call returned to the episode's budget
-    (code contests: a program identical to one already graded)."""
+    (code contests: a program identical to one already graded, or one evidently in another language than its
+    call names)."""
 
 
 # What refuses a call unrun, expected control flow logged without a traceback: its arguments failing to bind or
@@ -61,8 +62,7 @@ TOOL_CALL_REFUSALS = (ToolBudgetExhausted, ToolArgumentError)
 def refused_unrun(outcome: object) -> bool:
     """Whether a call's ``outcome`` refused it unrun (:data:`TOOL_CALL_REFUSALS`), a disabled tool's
     (:class:`ToolDisabled`) aside. Under the native protocol a turn whose every call was refused or named no
-    existing tool is flagged ``calls_rejected``, so an episode that recovers never reinforces it and the turn
-    after it runs on the recovery reserve."""
+    existing tool is flagged ``calls_rejected``, so an episode that recovers never reinforces it."""
     return isinstance(outcome, TOOL_CALL_REFUSALS) and not isinstance(outcome, ToolDisabled)
 
 

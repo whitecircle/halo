@@ -114,6 +114,7 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
             train_on_completions_only=train_on_completions_only,
             assistant_message_template="<|assistant|>" if train_on_completions_only else None,
             train_on_last_assistant_only=False,
+            tree_packing=False,
         )
         sft_config = SimpleNamespace(max_length=64, packing=False, padding_free=False, per_device_train_batch_size=1)
         model_config = SimpleNamespace(model_name_or_path="stub-model")

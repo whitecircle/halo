@@ -184,8 +184,8 @@ def generation_control_fields(
             # vLLM forces the reasoning-end marker; needs a server-side reasoning parser.
             fields["thinking_token_budget"] = config.max_thinking_tokens
         else:
-            # A cap reaching here came from the env's profile — a level's budget, a soft level's ceiling or a
-            # retry's reserve (a global one is rejected at config time); the budget still reaches the reward side.
+            # A cap reaching here came from the env's profile — a level's budget or a soft level's ceiling (a
+            # global one is rejected at config time); the budget still reaches the reward side.
             warn_once(
                 logger,
                 _THINKING_BUDGET_UNENFORCED_WARNED,

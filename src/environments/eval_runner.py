@@ -51,7 +51,6 @@ from src.environments.episode import (
     generate_turn,
     is_context_overflow,
     is_engine_fault,
-    recovering_turn,
     step_context_from_generation,
 )
 from src.environments.rollout_config import RolloutConfig
@@ -299,8 +298,7 @@ async def run_episode(
         for _ in range(env.max_turns):
             # The per-turn contract, narrowed as the training actor narrows it, so the request carries the
             # turn's reasoning cap here too rather than the trajectory only recording it.
-            recovery = recovering_turn(step.trajectory)
-            caps = effort.turn_caps(generated, recovery=recovery)
+            caps = effort.turn_caps(generated)
             if step.done or caps is None:
                 break
             turn_rollout = replace(rollout, **caps)
@@ -324,7 +322,7 @@ async def run_episode(
             step_ctx = step_context_from_generation(
                 context,
                 gen,
-                thinking_cap=effort.turn_thinking_cap(recovery),
+                thinking_cap=effort.thinking_cap,
                 last_turn=effort.turn_caps(generated) is None,
             )
             steps = await episode.step([eid], [gen.text], [step_ctx])

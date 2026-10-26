@@ -164,5 +164,5 @@ Start from `gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml` for a tool-heavy
 
 - Every family recipe runs `beta: 0`; the root template runs `0.01`.
 - The code-contests recipes drive two servers at `episode_timeout: 2700`; launch them with
-  `DIST_NCCL_TIMEOUT_MINUTES=60` ([timeout bounds](performance.md#sizing-a-run)). The rest are single-server,
-  prefetch off.
+  `DIST_NCCL_TIMEOUT_MINUTES=60` ([timeout bounds](performance.md#sizing-a-run)). The Qwen3.6 curriculum stages
+  run `episode_timeout: 3600` and need `DIST_NCCL_TIMEOUT_MINUTES=120`. The rest are single-server, prefetch off.

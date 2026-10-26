@@ -92,11 +92,10 @@ What follows:
   ([Native tool-use](environments/protocols/native-tool-use.md#reward)).
 - A turn past the cap, on the episode's last turn, or on the last turn the output budget affords ends the episode
   truncated, priced like a `max_turns` overflow.
-- The next turn runs under a reduced reasoning cap ([Retry reserve](reasoning.md#retry-reserve)).
 - Their rows train only under a negative advantage ([Untrainable turns](objective.md#untrainable-turns)).
 
-Under [carried reasoning](#carried-reasoning) a retry thinks on from where the cut stopped, so a per-turn budget binds
-only once cuts are priced.
+The next turn runs under the same caps as any other. Under [carried reasoning](#carried-reasoning) a retry thinks on
+from where the cut stopped, so a per-turn budget binds only once cuts are priced.
 
 ### Engine aborts
 

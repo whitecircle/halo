@@ -93,29 +93,19 @@ The answer room is `R − cap`, or `A` where smaller; the whole turn without a c
 SGLang takes no `thinking_token_budget`, the vLLM field every reasoning cap travels in.
 
 - `rollout_max_thinking_tokens` is refused when the config is parsed.
-- An enforced budget, a soft ceiling and a retry reserve are dropped from the request (warned once per process), so
-  nothing caps reasoning below the turn's total.
+- An enforced budget and a soft ceiling are dropped from the request (warned once per process), so nothing caps
+  reasoning below the turn's total.
 - The template still states the budget and the reasoning terms still read it. Prefer a soft budget here: an enforced
   one is stated as a cut this engine never makes.
 - `rollout_max_answer_tokens` still caps the turn at the cap plus `A`, since `max_tokens` binds on both engines.
 
-### Retry reserve
-
-The turn after an unproductive one ([Unproductive turns](episodes.md#unproductive-turns)) runs under a reserve: a
-quarter of the episode's per-turn budget, which is `rollout_max_thinking_tokens` where the level sets none.
-
-- It is a hard cap even under a soft budget, so a cut never buys a second budget.
-- Under `rollout_max_answer_tokens` the retry's total is `min(R, reserve + A)`. Under an output budget the reserve
-  clamps what is left and never shrinks with it.
-- The template still states the level's budget. An episode with no budget retries uncapped.
-
 ## Thinking-cap metric
 
 `episode/thinking_cap_turns` counts turns whose reasoning (sampled ids through `rollout_reasoning_end_token`) reached
-the cap they ran under: an enforced budget, a soft ceiling, or a retry reserve. It ignores the narrower cap an output
-budget leaves a late turn.
+the cap they ran under: an enforced budget or a soft ceiling. It ignores the narrower cap an output budget leaves a
+late turn.
 
-It is logged only with a vLLM cap that can bind, `train_on_sampled_tokens`, and a `rollout_reasoning_end_token` that
+It is logged only on a budgeted vLLM run, with `train_on_sampled_tokens` and a `rollout_reasoning_end_token` that
 encodes to one added token. gpt-oss's six-token move into the final channel logs none, nor do the standalone eval scripts.
 
 ## Reasoning length reward
@@ -171,5 +161,5 @@ floor, which must out-slope the price below its reference, so a short episode is
 
 Keep `reasoning_price_cap + reasoning_floor` below what the environment charges for the decisions it prices. Under
 `reasoning_price_past_budget` each alone must sit below it: an episode pays one at most, since a turn past its budget
-clears the floor's reference. The code-contests recipes run the past-budget mode and size both under their
-resubmission price ([Shipped recipes](environments/tasks/code-contests/README.md#shipped-recipes)).
+clears the floor's reference. The code-contests recipes run the past-budget mode and size both under one more
+failed submission, the resubmission penalty plus `untested_submission` ([Shipped recipes](environments/tasks/code-contests/README.md#shipped-recipes)).

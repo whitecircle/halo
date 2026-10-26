@@ -104,6 +104,8 @@ Pin `attn_implementation: flash_attention_2` with `packing: true` (fixed-length)
 
 Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeGatedDeltaNet` receives its boundaries from the collators and SMPO's padding-free forward, which emit `seq_idx` (its causal conv) and `cu_seq_lens_q` (its chunked delta rule) for the family, the two kwargs upstream reads and nothing model-side derives ([Document isolation](../data/collators.md#document-isolation-under-packing)). The same holds for Qwen3-Next.
 
+[Tree packing](../optimization/tree-packing.md) (`tree_packing: true`) runs on Qwen3.5/3.6 with `attn_implementation: flash_attention_2` and `tree_full_attention: gather`: a branch's conv context and recurrent state come from its own path.
+
 Examples under `examples/sft/qwen3_5/`:
 
 - `qwen3.5-35b-a3b-ultrachat-ep.yaml`.

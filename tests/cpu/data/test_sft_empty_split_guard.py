@@ -39,6 +39,7 @@ def _args() -> SimpleNamespace:
         train_on_completions_only=False,
         assistant_message_template=None,
         train_on_last_assistant_only=False,
+        tree_packing=False,
     )
 
 

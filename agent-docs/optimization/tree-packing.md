@@ -1,0 +1,149 @@
+# Tree Packing
+
+Tree packing stores a prefix that several rows share once. Rows that start identically — the same
+instructions and document, then a different question and answer — become branches of one tree inside a
+packed row. A branch attends the shared prefix and itself, never a sibling, so every example gets the
+logits, language-model loss and gradients it gets when packed flat, at fewer tokens.
+
+![Three rows that share a prefix, packed flat with the prefix repeated per row and packed as a tree with the prefix once and one branch per row, each branch continuing the prefix's positions; in the tree row a token attends the prefix and its own branch, never a sibling](../assets/diagrams/tree_packing_layout.png)
+
+SFT only (`scripts/training/sft.py`), on GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE), raw (not
+pre-processed) text datasets, `flash_attention_4` or `flash_attention_2`.
+
+```yaml
+packing: true
+tree_packing: true
+tree_share_markers:
+- "\nQuestions:\n"
+tree_share_requires: "\nDocument:\n"
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `tree_packing` | `false` | Pack rows that share a prefix as trees. |
+| `tree_share_markers` | `[]` | Rows whose message before the final turn is identical up to and including one of these strings are examined together. Required. |
+| `tree_share_requires` | `null` | A row is shared only if this text occurs before its marker. Leaves rows that put the long part *after* the marker alone, instead of sharing a short header. |
+| `tree_min_shared_tokens` | `16` | A shared span shorter than this is repeated per row, not split off. |
+| `tree_full_attention` | `split` | How full-attention layers see the prefix: `split` (FA4 only) or `gather`. See [Attention](#attention). |
+
+## What is shared
+
+The markers only decide which rows are *examined* together. Each split is ordered by a digest of the
+text up to the marker, so rows over one document become adjacent. Every row is then rendered and
+tokenized whole, exactly as the flat path does it, and a run of adjacent rows shares what its token
+sequences have in common. A row whose tokenization differs one token into the "shared" text shares one
+token less; nothing is assumed from the text.
+
+- Sharing stops one token before a row's first trained token, so the token a completion is predicted
+  from sits in the branch with it. Two rows with one prompt and different answers share all but the
+  last prompt token.
+- Rows may share at several depths: the document, then the start of what follows it.
+- A group longer than `max_length` splits into several trees that each repeat the prefix. A row
+  longer than `max_length` on its own is dropped, as on the flat path.
+- A row with no marker, or with the marker more than once, shares only with an exact duplicate.
+
+The digest order replaces the dataset's row order, in both splits. The trainer still shuffles packed
+rows every epoch.
+
+The gain is the share of tokens that sit in shared prefixes: a dataset where half the rows share a long
+prefix with others packs into about 1.4× fewer rows. A tree row costs about what a flat row costs where
+sliding-window layers dominate (GPT-OSS). Qwen3-30B-A3B, where every layer is a full layer in the
+`split` form, pays 10% per step, and Qwen3.5-35B-A3B on FA2 about 7%. Building the trees adds dataset
+maps on top of tokenization.
+
+## Attention
+
+The collator (`src/data/collators/tree_packing.py`) concatenates the batch's packed rows, recovers every
+tree from two per-token columns (position along the token's own path, depth of its node) and puts the
+index tensors each layer needs under the `tree_attention` batch key (`src/models/attention/tree_plan.py`).
+`src/models/attention/tree.py` installs the readers on the family's own modeling module; nothing else in
+the model changes. A softmax layer runs the stock packed path on a batch with no branch.
+
+- **Sliding-window layers** gather, per tree node, the last `sliding_window - 1` prefix tokens ahead
+  of the node's own. FlashAttention aligns the causal mask bottom-right when a sequence has more
+  keys than queries, which is "the prefix, then yourself causally".
+- **Full layers, `split`** (default): the stock packed call runs over every node, and one
+  rectangular pass per parent lets its children attend the prefix. The two partial softmaxes merge
+  through their log-sum-exps. No key is copied per branch, and tokens outside any branch are
+  bit-identical to flat packing. Needs `flash_attention_4`, the one backend that returns the
+  log-sum-exp with a gradient.
+- **Full layers, `gather`**: one key sequence per node, the whole prefix ahead of it. Runs on FA2 as
+  well; the gathered keys grow with fan-out × prefix length, so a layer whose row gathers more than
+  2^19 keys (`GATHER_KEYS_PER_CALL` in `src/models/attention/tree_plan.py`) attends in several calls of
+  whole nodes. That bounds the GQA backward, which expands key and value gradients to every query head.
+- **GatedDeltaNet layers** (Qwen3.5/3.6): the causal convolution runs each node behind the last
+  `linear_conv_kernel_dim - 1` tokens of its path, and the delta-rule recurrence runs one tree depth
+  at a time, each node starting from its parent's final state.
+
+A model on `flash_attention_2` sets `tree_full_attention: gather`. Qwen3.5/3.6 pins
+`attn_implementation: flash_attention_2`, since FA4 falls the family back to SDPA ([Qwen3.5](../models/qwen3_5.md)),
+and its GatedDeltaNet layers need the `fla` and `causal_conv1d` kernels the images ship. On Hopper, pin
+`flash_attention_2` too: auto-selection picks FA3, which tree packing refuses. The backend is checked before any
+weight loads, against the one the loader resolves for the config, dtype and GPU, and again on the loaded model.
+
+The `split` form and the state-passing recurrence add kernel variants to the
+[warm-up](flash-attention.md), compiled on every rank at startup of a multi-rank run.
+
+## Equivalence
+
+Every example of a tree row is compared with the same example run completely alone. In fp32 on eager
+attention the per-example loss agrees to about 1e-5 and the argmax at every trained position is the
+same. In bf16 the difference is at the level of the backend's own noise — the yardstick column runs the
+*unpacked* examples through eager instead of the flash kernel:
+
+| Model | Backend, form | Same argmax at trained positions | Yardstick |
+|---|---|---|---|
+| Qwen3-30B-A3B | FA4, `gather` | 100% (bit-identical) | 99.4% |
+| Qwen3-30B-A3B | FA4, `split` | 99.5% | 99.4% |
+| Qwen3.5-35B-A3B | FA2, `gather` | 98.1% | 98.5% |
+
+Gradients are compared in fp32: in bf16, two attention backends already disagree on input-embedding
+gradients by more than a defect would move them. With the whole model in fp32, Triton dots in IEEE
+precision (`TRITON_F32_DEFAULT=ieee`, `FLA_TRIL_PRECISION=ieee`) and an exact torch varlen kernel
+standing in for flash attention, the examples of real trees agree with their runs alone in loss and in
+every argmax, and their input-embedding gradients to rounding; detaching the delta-rule state passed
+between depths moves the shared tokens' gradients by orders of magnitude more. The residual is fp32
+rounding of equivalent kernels, not the tree: each example run alone through the tree path, with no cut
+and no sharing, moves its gradients just as much, while cutting a path into nodes and sharing a prefix
+each add a few percent of that. Against a float64 recurrence, fla's delta rule cut in two with the state
+handed over, and the causal convolution split at a `seq_idx` boundary, are as exact as one call.
+
+A gather split into several calls gives the one-call forward bit for bit in fp32. Two bf16 forwards of
+the same row already differ, so chunked and one-call bf16 runs agree only to that level.
+
+A tree row read as one causal sequence agrees at 69% on Qwen3.5-35B-A3B. That never runs: a
+truncated, split or reordered tree row raises at collation, and a model whose layers would not read
+the `tree_attention` key is refused at startup.
+
+`tests/cpu/data/test_tree_rows.py` holds the data path to this (tree and flat packing of one dataset
+yield the same examples and labels), `tests/cpu/models/test_tree_attention_oracle.py` and
+`tests/gpu/kernels/test_fa4_tree_attention.py` the forward and gradients of every admitted family.
+
+## What differs from flat packing
+
+- **Steps per epoch.** A packed row holds more examples, so an epoch has fewer optimizer steps and
+  each step more trained tokens. The learning-rate schedule spans fewer steps.
+- **Counters.** `num_input_tokens_seen` and tokens/s count each stored token once. Throughput in
+  stored tokens/s is that of flat packing; examples/s is higher by the sharing factor. The MFU
+  attention term costs each node's own tokens at its path's length, so a shared prefix is costed once.
+- **`eval_loss`.** Each eval step's loss is token-weighted over that step's rows and the steps are
+  averaged, so the value depends on which rows share a step. A tree run and a flat run of one model
+  report different numbers on a small eval split while every example's loss is the same.
+- **Router balancing.** `bias_update` counts a token once per example it belongs to, the load flat
+  packing sees. The `aux_loss` term is computed over stored tokens, so a shared token weighs once
+  in that regularizer instead of once per example; the language-model loss is unaffected. The MoE load
+  metrics (`enable_moe_metrics`) count stored tokens too.
+- **Disk.** The token caches hold four columns, about 10 bytes per token against flat packing's 5.
+
+## Limits
+
+`tree_packing` raises unless `packing: true` with `packing_strategy: bfd` (the other strategies cut a
+row below a tree), `eval_packing` is left on and `train_on_completions_only` is on. It is refused
+under context, tensor and pipeline parallelism, with `torch_compile`, with `train_sinks`, on a
+pre-processed dataset and on the VLM path. The other `tree_*` options raise when set without it.
+Expert parallelism and FSDP2 data parallelism never slice a row and run tree rows unchanged.
+
+Families are admitted one by one (`TREE_FAMILIES` in `src/models/attention/tree.py`), each by passing
+the per-example oracle test; every other family is refused before the model loads. GLM-5 Next is among
+those: its sparse-attention indexer selects keys over the whole row and takes no per-sequence bounds.
+Backends are admitted the same way, by the GPU kernel test: `flash_attention_3` is refused.

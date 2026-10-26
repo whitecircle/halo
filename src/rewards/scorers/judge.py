@@ -274,6 +274,7 @@ class GenerativeJudge(Scorer):
                 *(self._key(check.name) for check in term.checks),
                 self._key(JudgeMetric.VETO),
                 self._key(JudgeMetric.UNSUPPORTED_FLAGS),
+                self._key(JudgeMetric.EXEMPTED_FLAGS),
             ]
         else:
             keys = [self._key(requirement.name) for requirement in term.requirements]
@@ -341,20 +342,26 @@ class GenerativeJudge(Scorer):
             )
         metrics = self._usage_metrics(completion)
         if term.is_veto:
-            return self._veto_result(verdict, action_text(term, sample), metrics)
+            return self._veto_result(verdict, action_text(term, sample), metrics, sample.facts)
         fractions = term.requirement_fractions(verdict.scores)
         metrics.update({self._key(name): fraction for name, fraction in fractions.items()})
         return ScoreResult(term.score_from(fractions), metrics, detail=verdict.rationale)
 
-    def _veto_result(self, verdict: Verdict, actions: str, metrics: dict[str, float]) -> ScoreResult:
-        """A fired check counts only with a line of its evidence found in the policy's actions; the veto checks
-        strip the episode's credits, the others make the term's score."""
+    def _veto_result(
+        self, verdict: Verdict, actions: str, metrics: dict[str, float], facts: frozenset[str]
+    ) -> ScoreResult:
+        """A fired check counts only with a line of its evidence found in the policy's actions and while the
+        episode fact it is exempt under (``unless``) does not hold; the veto checks strip the episode's
+        credits, and the checks that carry weight make the term's score."""
         term = self.term
         fired: dict[str, bool] = {}
         unsupported = 0
-        quotes = []
+        quotes, exempt = [], []
         for check in term.checks:
             flagged, evidence = verdict.checks[check.name]
+            if flagged and check.unless in facts:
+                exempt.append(check.name)
+                flagged = False
             found = (
                 next((quote for quote in evidence if evidence_supported(quote, actions)), None) if flagged else None
             )
@@ -366,5 +373,7 @@ class GenerativeJudge(Scorer):
         veto = any(fired[check.name] for check in term.checks if check.veto)
         metrics[self._key(JudgeMetric.VETO)] = 1.0 if veto else 0.0
         metrics[self._key(JudgeMetric.UNSUPPORTED_FLAGS)] = float(unsupported)
-        detail = "\n".join(filter(None, [verdict.rationale, *(f"fired {quote}" for quote in quotes)])) or None
+        metrics[self._key(JudgeMetric.EXEMPTED_FLAGS)] = float(len(exempt))
+        lines = [verdict.rationale, *(f"fired {quote}" for quote in quotes), *(f"exempt {name}" for name in exempt)]
+        detail = "\n".join(filter(None, lines)) or None
         return ScoreResult(term.flag_fraction(fired), metrics, detail=detail, veto=veto)

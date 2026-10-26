@@ -3,7 +3,7 @@
 
 Every shaping term is small next to the objective by intent, but "small" is a relation between the
 recipe's own numbers, and a knob edited alone can break it silently. These pin the relations a run
-depends on: the length terms stay under the resubmission price, an honest failed attempt still beats
+depends on: the length terms stay under one more failed submission, an honest failed attempt still beats
 not attempting, at every effort level a solve paying every per-episode price beats the best
 zero-objective episode, and — per effort level — the under-use floor out-slopes the reasoning price, so
 below its floor a level is paid to reason more and never less.
@@ -40,8 +40,24 @@ RECIPES = sorted((REPO_ROOT / "examples" / "grpo" / "environmental").rglob("*cod
 _yaml = YAML(typ="safe")
 _DEFAULTS = AsyncTrainingConfig()
 # The most tokens a shipped recipe lets one episode sample: its worst-case trajectory beside the prompt
-# budget is what the rollout servers' context window is sized for.
+# budget is what the rollout servers' context window is sized for, and Qwen3.6 serves twice the others'.
 _EPISODE_TOKENS_CEILING = 131072
+_EPISODE_TOKENS_CEILINGS = {"qwen3_5": 160000}
+# The audit's process checks a solved episode can never raise: each is defined on an episode that never passed.
+_FAILURE_ONLY_CHECKS = ("untested_submission",)
+# The curriculum stages run one after another on one cluster: one economy and one set of limits.
+_STAGE_RECIPES = [p for p in RECIPES if "-stage" in p.name]
+_STAGE_SHARED_KEYS = (
+    "rollout_max_tokens",
+    "rollout_max_answer_tokens",
+    "rollout_max_episode_tokens",
+    "max_train_row_tokens",
+    "request_timeout",
+    "episode_timeout",
+    "reasoning_floor",
+    "reasoning_price",
+    "reasoning_price_cap",
+)
 # The per-turn thinking budget of each level, one contract at every family.
 _PER_TURN_BUDGETS = {"low": 8192, "medium": 12288, "high": 16384}
 # The knobs every code-contests recipe states explicitly, so a recipe never rides on a default it does
@@ -59,6 +75,7 @@ def _economy(path: Path) -> dict:
         "solve": sum(term.get("weight", 1.0) for term in terms if term["source"] == "environment"),
         "submission": env.get("submission_reward", 0.0),
         "resubmission": env.get("resubmission_penalty", 0.0),
+        "unrun": env.get("unrun_submission_penalty", 0.0),
         "no_tool_use": env.get("no_tool_use_penalty", 0.0),
         "turn_overflow": env.get("turn_overflow_penalty", 0.0),
         "cut": env.get("length_cutoff_penalty", 0.0),
@@ -79,6 +96,14 @@ def _economy(path: Path) -> dict:
         "episode_tokens": cfg.get("rollout_max_episode_tokens"),
         "answer_tokens": cfg.get("rollout_max_answer_tokens"),
         "max_turns": cfg["max_turns"],
+        # What each fired process check of a veto judge costs; a veto check's own price is left out, its gate costs more.
+        "process_prices": {
+            check.name: -judge.price(judge.flag_fraction({check.name: True}))
+            for judge in parse_reward_terms(terms, ENVIRONMENT_REWARD_SOURCES)
+            if isinstance(judge, JudgeTerm) and judge.is_veto
+            for check in judge.checks
+            if not check.veto
+        },
     }
 
 
@@ -111,6 +136,18 @@ def _worst_length(economy: dict) -> float:
     if economy["past_budget"]:
         return max(economy["price_cap"], economy["floor"])
     return economy["price_cap"] + economy["floor"]
+
+
+def _failure_only_price(economy: dict) -> float:
+    """The most one failed submission adds in failure-only prices: the environment's price for a program never
+    run as submitted and the failure-only checks, which also cover a program no earlier run exercised, so both
+    can fire on one submission."""
+    return economy["unrun"] + sum(economy["process_prices"].get(name, 0.0) for name in _FAILURE_ONLY_CHECKS)
+
+
+def _failed_resubmission(economy: dict) -> float:
+    """One more submission that fails, at its worst honest price: the resubmission and its failure-only price."""
+    return economy["resubmission"] + _failure_only_price(economy)
 
 
 def _price(economy: dict, level: str, tokens: int) -> float:
@@ -203,7 +240,8 @@ def test_the_episode_output_budget_binds_below_what_the_turn_caps_alone_allow(pa
     assert isinstance(e["episode_tokens"], int) and not isinstance(e["episode_tokens"], bool), (
         "a code-contests recipe runs without an episode output budget"
     )
-    assert e["max_tokens"] <= e["episode_tokens"] <= _EPISODE_TOKENS_CEILING
+    ceiling = _EPISODE_TOKENS_CEILINGS.get(path.parent.parent.name, _EPISODE_TOKENS_CEILING)
+    assert e["max_tokens"] <= e["episode_tokens"] <= ceiling
     uncapped = e["max_turns"] * e["max_tokens"]
     assert e["episode_tokens"] < uncapped, (
         f"the per-turn caps alone let an episode sample {uncapped} tokens over {e['max_turns']} turns, so a "
@@ -232,14 +270,37 @@ def test_the_answer_room_binds_below_the_turn_ceiling_at_every_level(path):
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
-def test_length_terms_stay_under_the_resubmission_price(path):
-    """Resubmitting is the decision this ladder prices hardest; the length terms together bound what
-    reasoning length can ever cost, and that bound stays under it."""
+def test_length_terms_stay_under_one_more_failed_submission(path):
+    """The length terms together bound what reasoning length can ever cost, and that bound stays under one
+    more failed submission at its worst honest price, so guessing again is never the cheaper way to fail."""
     e = _economy(path)
-    assert _worst_length(e) < e["resubmission"], (
-        f"the length terms can cost up to {_worst_length(e)}, not under the {e['resubmission']} a resubmission "
-        "costs: how long an episode reasons would then outweigh whether it resubmits"
+    assert _worst_length(e) < _failed_resubmission(e), (
+        f"the length terms can cost up to {_worst_length(e)}, not under the {_failed_resubmission(e)} of one more "
+        "failed submission: how long an episode reasons would then outweigh whether it resubmits"
     )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_one_turn_at_the_ceiling_leaves_the_price_its_slope(path):
+    """A price that reaches its cap inside one turn charges every longer episode the same: past that turn more
+    reasoning is free, and a level's attempts stop differing by what they reasoned. A soft turn reasons to its
+    ceiling (:func:`_cap`), or through the whole turn where the engine closes none."""
+    e = _economy(path)
+    if not e["past_budget"]:
+        return
+    for level in VALID_REASONING_EFFORTS:
+        ceiling = _cap(e, level) or e["max_tokens"]
+        charged = -_price(e, level, ceiling)
+        assert 0 < charged < e["price_cap"], (
+            f"{level}: one turn reasoning to the {ceiling}-token ceiling is charged {charged} under a cap of "
+            f"{e['price_cap']}"
+        )
+
+
+def test_the_curriculum_stages_run_one_economy_and_one_set_of_limits():
+    assert len(_STAGE_RECIPES) == 3, f"expected the three curriculum stages, found {[p.name for p in _STAGE_RECIPES]}"
+    stated = [{key: _yaml.load(p).get(key) for key in _STAGE_SHARED_KEYS} for p in _STAGE_RECIPES]
+    assert stated[0] == stated[1] == stated[2], dict(zip([p.name for p in _STAGE_RECIPES], stated, strict=True))
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
@@ -264,13 +325,48 @@ def test_an_honest_failed_attempt_beats_not_attempting(path):
         f"a graded submission that passes nothing can score {worst_attempt}, not above the {best_no_attempt} of "
         "an episode that never attempts: the ladder would pay for giving up"
     )
+    # A failed attempt raising every process flag it can, at the no-attempt's length terms, still never scores below it.
+    flagged_attempt = (
+        e["submission"]
+        - sum(price for name, price in e["process_prices"].items() if name not in _FAILURE_ONLY_CHECKS)
+        - _failure_only_price(e)
+    )
+    assert flagged_attempt >= best_no_attempt, (
+        f"a failed attempt that raises every process flag scores {flagged_attempt}, below the {best_no_attempt} of "
+        "an episode that never attempts: the flags would pay for giving up"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_running_out_costs_more_than_one_more_failed_submission(path):
+    """An episode that runs out of turns or output budget never solves, and every one ends with a submission
+    left: the overflow must cost more than spending it and failing at its worst honest price (the
+    resubmission and the failure-only process flags), or thinking until the cut is the cheapest way to fail."""
+    e = _economy(path)
+    assert e["turn_overflow"] > _failed_resubmission(e), (
+        f"an overflow costs {e['turn_overflow']}, not above the {_failed_resubmission(e)} of one more failed submission"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_the_failure_only_process_checks_are_defined_on_failed_episodes(path):
+    """The worst solve leaves these out of what it pays, which holds only while the check text says so."""
+    checks = {
+        check["name"]: check["description"]
+        for term in _economy(path)["raw"].get("rewards", [])
+        for check in term.get("checks", [])
+    }
+    for name in _FAILURE_ONLY_CHECKS:
+        if name in checks:
+            assert "an episode that never passed every test" in checks[name], f"{name} no longer excludes solves"
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_at_every_level_the_worst_solve_beats_the_best_zero_objective_episode(path):
-    """A solve costs at most every resubmission its level allows, the overflow, each recovered cut the
-    cap admits and the worst length terms; a zero-objective episode collects at most the submission
-    bonus. The first must stay above the second at every level, or a group ranks a failure over a solve."""
+    """A solve costs at most every resubmission its level allows, each recovered cut the cap admits and the
+    worst length terms — never the overflow, since the accept ends the episode; a zero-objective episode
+    collects at most the submission bonus. The first must stay above the second at every level, or a group
+    ranks a failure over a solve."""
     e = _economy(path)
     assert e["recoveries"] is not None, "an uncapped recovery count leaves the cut price on a solve unbounded"
     best_zero_objective = e["submission"]
@@ -279,9 +375,9 @@ def test_at_every_level_the_worst_solve_beats_the_best_zero_objective_episode(pa
             e["solve"]
             + e["submission"]
             - e["resubmission"] * (e["profiles"][level]["max_submissions"] - 1)
-            - e["turn_overflow"]
             - e["cut"] * e["recoveries"]
             - _worst_length(e)
+            - sum(price for name, price in e["process_prices"].items() if name not in _FAILURE_ONLY_CHECKS)
         )
         assert worst_solve > best_zero_objective, (
             f"{level}: a full solve can score as low as {worst_solve}, not above the {best_zero_objective} a "
@@ -332,10 +428,10 @@ def test_the_price_relations_pass_a_sound_price_and_refuse_a_bad_one():
         return {**base, "price": price, "price_cap": cap, "floor": 0.05, "past_budget": False}
 
     sound = priced({"low": 0.0037, "medium": 0.0013, "high": 0.00018}, cap=0.05)
-    assert _worst_length(sound) < sound["resubmission"] and _prices_fall_with_level(sound)
+    assert _worst_length(sound) < _failed_resubmission(sound) and _prices_fall_with_level(sound)
     assert all(_not_paid_to_reason_more(sound, level) is None for level in VALID_REASONING_EFFORTS)
-    # A cap that, with the floor, reaches the resubmission price.
-    assert _worst_length(priced(sound["price"], cap=base["resubmission"] - 0.05)) >= base["resubmission"]
+    # A cap that, with the floor, reaches one more failed submission.
+    assert _worst_length(priced(sound["price"], cap=_failed_resubmission(base) - 0.05)) >= _failed_resubmission(base)
     # A higher level priced higher.
     assert not _prices_fall_with_level(priced({"low": 0.00018, "medium": 0.0013, "high": 0.0037}, cap=0.05))
     # 0.01 per 1k at low out-slopes a 0.05 floor over its 6144-token target (0.0081 per 1k).

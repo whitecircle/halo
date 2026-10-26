@@ -71,5 +71,15 @@ def test_accumulate_creates_on_the_first_call_and_adds_afterwards():
     assert counter.tolist() == [1.0, 2.0, 1.0]
 
 
+def test_weights_count_an_occurrence_that_many_times():
+    """A weighted count is what a token shared by several examples needs: one selection, counted once
+    per example."""
+    indices = torch.tensor([[0, 2], [2, 1]])
+    weights = torch.tensor([[3, 3], [1, 1]])
+    assert sync_free_bincount(indices, 4, weights=weights).tolist() == [3.0, 1.0, 4.0, 0.0]
+    counter = accumulate_bincount(torch.ones(4), indices, 4, weights=weights)
+    assert counter.tolist() == [4.0, 2.0, 5.0, 1.0]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

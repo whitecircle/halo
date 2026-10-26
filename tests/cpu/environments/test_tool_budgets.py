@@ -5,8 +5,8 @@ Every native or ReAct env can cap calls per tool per episode (``tool_budgets``):
 a call — binds its arguments, checks the episode's cap, counts it — before the handler runs, so a call
 the handler could never run or one past the cap is refused as a tool error without spending the
 budget, and a one-call cap cannot be double-spent by two calls in one turn. Under the native protocol a
-turn whose every call was refused ran nothing: it is flagged untrainable like a turn of unknown tools, so the
-next turn retries on the recovery reserve; a call to a tool a cap of 0 disables is an error but no refusal.
+turn whose every call was refused ran nothing: it is flagged untrainable like a turn of unknown tools; a call
+to a tool a cap of 0 disables is an error but no refusal.
 Every env binds an
 effort profile at reset: the thinking budget is the base key; a task adds its own through
 ``EFFORT_PROFILE_KEY_MINIMA`` and ``_apply_effort_profile``. A refusal states the fact, never the cap:
@@ -24,7 +24,6 @@ import pytest
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.episode import recovering_turn
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 # The generic refusal, as the protocol prefixes it: the tool's name and the fact, no cap and no count.
@@ -65,6 +64,10 @@ def _react_observations(traj):
 
 def _flags(traj):
     return [m.calls_rejected for m in traj.messages if m.role == "assistant"]
+
+
+def _untrainable(traj):
+    return [m.untrainable for m in traj.messages if m.role == "assistant"]
 
 
 def _step(env, ids, *calls):
@@ -156,29 +159,29 @@ def test_an_enum_argument_outside_the_schema_is_refused_unspent():
 )
 def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers(call):
     """A call whose arguments do not bind ran nothing and spent nothing: a turn of nothing else is flagged
-    like one that named no tool, so it is never rewarded and the next turn retries on the recovery reserve.
-    Its reply and its tool-error price are the ones it always had."""
+    like one that named no tool, so it is never rewarded, and the well-formed turn after it trains as any
+    turn. Its reply and its tool-error price are the ones it always had."""
     env = NativeToolUseEnvironment(tool_registry=_registry(), tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     step = _step(env, ids, call)
     traj = step.trajectory
-    assert _flags(traj) == [True] and recovering_turn(traj)
+    assert _flags(traj) == _untrainable(traj) == [True]
     assert _observations(traj)[0].startswith("Error: echo: ")
     assert step.reward == pytest.approx(-0.1) and traj.info[TOOL_CALL_COUNTS_KEY] == {}
     step = _step(env, ids, _call("b", "echo", code="x"))
-    assert _flags(step.trajectory) == [True, False] and not recovering_turn(step.trajectory)
+    assert _flags(step.trajectory) == _untrainable(step.trajectory) == [True, False]
 
 
 @pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
 def test_a_turn_of_only_calls_past_their_budget_is_flagged(cls):
-    """A call refused over its tool's episode cap ran nothing: a turn of nothing else is flagged and the next
-    turn recovers, the refusal text and price unchanged."""
+    """A call refused over its tool's episode cap ran nothing: a turn of nothing else is flagged untrainable,
+    the refusal text and price unchanged."""
     env = cls(tool_registry=_registry(), tool_budgets={"echo": 1}, tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     assert _flags(_step(env, ids, _call("a", "echo", code="x")).trajectory) == [False]
     step = _step(env, ids, _call("b", "echo", code="y"), _call("c", "echo", code="z"))
     traj = step.trajectory
-    assert _flags(traj) == [False, True] and recovering_turn(traj)
+    assert _flags(traj) == _untrainable(traj) == [False, True]
     assert _observations(traj)[1:] == [_ECHO_SPENT, _ECHO_SPENT]
     assert step.reward == pytest.approx(-0.2) and traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1}
 
@@ -186,14 +189,14 @@ def test_a_turn_of_only_calls_past_their_budget_is_flagged(cls):
 @pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
 def test_a_turn_of_only_calls_to_a_disabled_tool_is_an_error_and_not_flagged(cls):
     """A cap of 0 disables the tool: a call to it gets the spent-budget reply and price, but the run offered no
-    budget to lose, so it is no refusal: the turn stays unflagged and the next one gets no recovery reserve."""
+    budget to lose, so it is no refusal: the turn stays unflagged and trainable."""
     env = cls(tool_registry=_registry(), tool_budgets={"echo": 0}, tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     step = _step(env, ids, _call("a", "echo", code="x"), _call("b", "echo", code="y"))
     traj = step.trajectory
     assert _observations(traj) == [_ECHO_SPENT, _ECHO_SPENT]
     assert step.reward == pytest.approx(-0.2) and traj.info[TOOL_CALL_COUNTS_KEY] == {}
-    assert _flags(traj) == [False] and not recovering_turn(traj)
+    assert _flags(traj) == _untrainable(traj) == [False]
 
 
 def test_a_refused_call_beside_one_that_ran_leaves_the_turn_trainable():
@@ -201,7 +204,7 @@ def test_a_refused_call_beside_one_that_ran_leaves_the_turn_trainable():
     ids, _ = env.reset(["t"])
     step = _step(env, ids, _call("a", "echo", code="x"), _call("b", "echo"), _call("c", "ping"))
     assert _observations(step.trajectory)[2] == "pong"
-    assert _flags(step.trajectory) == [False] and not recovering_turn(step.trajectory)
+    assert _flags(step.trajectory) == _untrainable(step.trajectory) == [False]
 
 
 async def test_two_calls_in_one_async_turn_cannot_double_spend_a_one_call_cap():

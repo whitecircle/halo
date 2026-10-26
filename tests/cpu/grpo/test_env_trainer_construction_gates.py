@@ -66,6 +66,8 @@ _INIT_GATES = (
     "_force_full_dataset_columns",
     "_reject_answerless_datasets",
     "_validate_reasoning_terms",
+    "_resolve_reasoning_end_ids",
+    "_resolve_forced_close_ids",
     "_require_forced_close_neutralized",
     "reject_off_policy_mask_threshold",
     "reject_vespo_loss",
@@ -364,42 +366,47 @@ def _close_host(budgets: dict, knows_close: bool = True, soft: tuple = (), model
     host.model = torch.nn.Module()
     if model_config is not None:
         host.model.config = model_config
+    host._reasoning_end_ids = host._resolve_reasoning_end_ids()
     return host
+
+
+def _forced_close_ids(host) -> tuple[int, ...] | None:
+    """The forced-close ids as the trainer's init derives them from the marker it resolved."""
+    return host._resolve_forced_close_ids(host._reasoning_end_ids)
 
 
 def test_a_vllm_thinking_budget_resolves_the_close_the_engine_forces():
     """A level's ``thinking_tokens`` or the run's ceiling each enforce a budget, and either way the loss
     needs the marker's ids to find the closes the engine forced."""
-    assert _close_host({"high": 16384})._resolve_forced_close_ids() == (_CLOSE_ID,)
-    assert _close_host({}, rollout_max_thinking_tokens=8192)._resolve_forced_close_ids() == (_CLOSE_ID,)
+    assert _forced_close_ids(_close_host({"high": 16384})) == (_CLOSE_ID,)
+    assert _forced_close_ids(_close_host({}, rollout_max_thinking_tokens=8192)) == (_CLOSE_ID,)
 
 
 def test_a_multi_token_close_resolves_to_its_whole_sequence():
     """gpt-oss's budget forces a five-token opener; the loss needs every id of it, in the engine's order."""
     host = _close_host({"high": 16384}, knows_close=False, rollout_reasoning_end_token=_OPENER)
-    assert host._resolve_forced_close_ids() == _OPENER_IDS
+    assert _forced_close_ids(host) == _OPENER_IDS
 
 
 def test_no_forced_close_where_no_budget_can_be_enforced():
     """SGLang enforces no thinking budget and an unbudgeted run caps nothing, so neither forces a close: a
     resolved marker would demand the IS correction of a run that needs none, and zero the ratio at a close
     the model itself emitted with certainty."""
-    assert _close_host({"high": 16384}, rollout_backend=SGLANG_BACKEND)._resolve_forced_close_ids() is None
-    assert _close_host({})._resolve_forced_close_ids() is None
+    assert _forced_close_ids(_close_host({"high": 16384}, rollout_backend=SGLANG_BACKEND)) is None
+    assert _forced_close_ids(_close_host({})) is None
 
 
-def test_a_soft_budget_still_forces_closes_at_its_ceiling_and_its_retries_reserve():
-    """A soft budget forces no close of its own, but its ceiling (where the answer room is left of the turn, or the
-    run's cap) does, and so does every retry's reserve, a hard cap at a quarter of the budget even with no ceiling."""
+def test_a_soft_budget_forces_a_close_only_where_a_ceiling_caps_it():
+    """A soft budget forces no close of its own: its ceiling does (where the answer room is left of the turn, or
+    the run's cap), and with neither nothing closes a turn's reasoning, so the run resolves no close, like an
+    unbudgeted one. One enforced level among soft ones still binds."""
     every = {"low": 8192, "medium": 12288, "high": 16384}
     soft = ("low", "medium", "high")
-    assert _close_host(every, soft=soft)._resolve_forced_close_ids() == (_CLOSE_ID,), "the retry reserve binds"
     room = _close_host(every, soft=soft, rollout_max_tokens=30000, rollout_max_answer_tokens=8192)
-    assert room._resolve_forced_close_ids() == (_CLOSE_ID,)
-    assert _close_host(every, soft=soft, rollout_max_thinking_tokens=21800)._resolve_forced_close_ids() == (_CLOSE_ID,)
-    assert _close_host(every, soft=("low",))._resolve_forced_close_ids() == (_CLOSE_ID,), (
-        "an enforced level still binds"
-    )
+    assert _forced_close_ids(room) == (_CLOSE_ID,)
+    assert _forced_close_ids(_close_host(every, soft=soft, rollout_max_thinking_tokens=21800)) == (_CLOSE_ID,)
+    assert _forced_close_ids(_close_host(every, soft=soft)) is None, "no ceiling: no cap can bind"
+    assert _forced_close_ids(_close_host(every, soft=("low",))) == (_CLOSE_ID,), "an enforced level still binds"
 
 
 def test_a_vllm_budget_on_a_mistral_common_served_model_is_refused():
@@ -408,17 +415,11 @@ def test_a_vllm_budget_on_a_mistral_common_served_model_is_refused():
     The wrapper's own model_type is mistral3, so the text tower's spelling is what has to match."""
     mistral_small_4 = CONFIG_MAPPING["mistral3"](text_config=CONFIG_MAPPING["mistral4"]())
     with pytest.raises(ValueError, match=r"cannot enforce a thinking budget for model_type \['mistral4'\]"):
-        _close_host({"high": 16384}, model_config=mistral_small_4)._resolve_forced_close_ids()
-    assert (
-        _close_host(
-            {"high": 16384}, model_config=mistral_small_4, rollout_backend=SGLANG_BACKEND
-        )._resolve_forced_close_ids()
-        is None
-    )
-    assert _close_host({}, model_config=mistral_small_4)._resolve_forced_close_ids() is None
-    assert _close_host({"high": 16384}, model_config=CONFIG_MAPPING["mistral3"]())._resolve_forced_close_ids() == (
-        _CLOSE_ID,
-    )
+        _close_host({"high": 16384}, model_config=mistral_small_4)
+    sglang = _close_host({"high": 16384}, model_config=mistral_small_4, rollout_backend=SGLANG_BACKEND)
+    assert _forced_close_ids(sglang) is None
+    assert _forced_close_ids(_close_host({}, model_config=mistral_small_4)) is None
+    assert _forced_close_ids(_close_host({"high": 16384}, model_config=CONFIG_MAPPING["mistral3"]())) == (_CLOSE_ID,)
 
 
 def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_closes(caplog):
@@ -426,7 +427,7 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
     its forced closes stay in the loss."""
     host = _close_host({"high": 16384}, knows_close=False)
     with caplog.at_level(logging.WARNING, logger="src.trainers.grpo.environmental"):
-        assert host._resolve_forced_close_ids() is None
+        assert _forced_close_ids(host) is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
         "stay in the policy loss" in w and AsyncTrainingConfig.rollout_reasoning_end_token in w for w in warnings
@@ -434,19 +435,18 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
 
 
 def _count_end_id(budgets: dict, knows_close: bool = True, **config) -> int | None:
-    """The id the rollout counts a turn's reasoning up to, off the forced close construction resolved."""
-    host = _close_host(budgets, knows_close, **config)
-    host._forced_close_ids = host._resolve_forced_close_ids()
-    return host._resolve_reasoning_end_token_id()
+    """The id the rollout counts a turn's reasoning up to, off the marker construction resolved."""
+    return _close_host(budgets, knows_close, **config)._resolve_reasoning_end_token_id()
 
 
-def test_the_reasoning_count_reads_up_to_a_one_token_close_wherever_a_vllm_cap_can_bind():
-    """``episode/thinking_cap_turns`` reads each turn's reasoning counted up to the forced close: resolved
-    wherever a vLLM cap can bind, a level's or the run's. Where none can (SGLang, or no budget), where the
-    tokenizer does not write the marker, and where the close spans several tokens (gpt-oss's opener) no one
-    id marks the count's end, and the run goes without it."""
+def test_the_reasoning_count_reads_up_to_a_one_token_close_on_every_budgeted_vllm_run():
+    """A turn's reasoning is counted up to the marker, and a cut call split at it, wherever a vLLM run's episodes
+    carry a budget, a soft one without a ceiling included: no close is forced there, but the model still writes
+    its own. An unbudgeted run and SGLang resolve none, as does a marker the tokenizer does not write or one
+    spanning several tokens (gpt-oss's opener), which no one id marks."""
     assert _count_end_id({"high": 16384}) == _CLOSE_ID
     assert _count_end_id({}, rollout_max_thinking_tokens=8192) == _CLOSE_ID
+    assert _count_end_id({"high": 16384}, soft=("high",)) == _CLOSE_ID
     assert _count_end_id({}) is None
     assert _count_end_id({"high": 16384}, rollout_backend=SGLANG_BACKEND) is None
     assert _count_end_id({"high": 16384}, knows_close=False) is None

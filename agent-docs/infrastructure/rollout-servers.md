@@ -444,7 +444,7 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 TRAINER_CUDA_DEVIC
 | `VLLM_TOOL_CALLING_FLAGS` | `--enable-auto-tool-choice --tool-call-parser $VLLM_TOOL_PARSER` | Set to empty (`VLLM_TOOL_CALLING_FLAGS=`) to serve with no tool parser, as the ReAct recipes do; unset keeps the default |
 | `VLLM_TOOL_PARSER_PLUGIN` | *(unset)* | `--tool-parser-plugin` path (gpt-oss uses the baked `/opt/gpt_oss_text_tool_parser.py`) |
 | `VLLM_CHAT_TEMPLATE` | *(unset)* | Set to the SAME `.jinja` the trainer's `chat_template:` uses; the file must be visible inside the server container |
-| `VLLM_REASONING_PARSER` | *(unset)* | Required when a turn can carry a thinking cap: `rollout_max_thinking_tokens`, or any level's `thinking_tokens` (a soft one through its ceiling and every retry's reserve) |
+| `VLLM_REASONING_PARSER` | *(unset)* | Required when a turn can carry a thinking cap: `rollout_max_thinking_tokens`, or any level's `thinking_tokens` (a soft one only through its ceiling) |
 | `VLLM_REASONING_PARSER_PLUGIN` | *(unset)* | `--reasoning-parser-plugin` path for families without a built-in parser |
 | `TRAIN_IMAGE` | `halo:blackwell` | Image the compose file's optional trainer service runs |
 
@@ -513,7 +513,7 @@ Native-tool parsers per family:
 | Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does NOT parse their XML `<function=…>` calls) |
 | GPT-OSS | bundled plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4 | `glm45` / `glm47` |
-| Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text, so no tool ever runs); with a thinking cap (`rollout_max_thinking_tokens`, or any level's `thinking_tokens`: a soft one through its ceiling and every retry's reserve) also `VLLM_REASONING_PARSER=gemma4`, else every request 400s |
+| Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text, so no tool ever runs); with a thinking cap (`rollout_max_thinking_tokens`, or any level's `thinking_tokens`: a soft one only through its ceiling) also `VLLM_REASONING_PARSER=gemma4`, else every request 400s |
 | LFM-2 | `lfm2` (pythonic calls between `<\|tool_call_start\|>` and `<\|tool_call_end\|>`) |
 | Laguna | `poolside_v1` (`<tool_call>` with `<arg_key>`/`<arg_value>` pairs) |
 | Step-3.7 Flash | `step3p5` (`<tool_call>` around `<function=…>`/`<parameter=…>` XML) |

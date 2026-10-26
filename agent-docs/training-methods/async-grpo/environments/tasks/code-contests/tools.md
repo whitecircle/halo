@@ -46,21 +46,19 @@ A call is refused when:
 - its arguments do not bind: an undeclared argument such as `language` on a single-language run
   (`Error: <tool>: unknown argument 'language'; …`), a list or object as `code` or `stdin`, or a `language`
   outside the run's list;
+- its program is [evidently in another language](#evident-language) than its `language` names;
 - it resubmits a graded program: `Error: Not graded: this program is identical to one already graded …`.
 
 A refused call pays `tool_error_penalty`, never `tool_success_reward`. It spends its turn but none of
 `max_test_calls` or `max_submissions`, and grades nothing. A turn whose every call was refused or unknown is
-[untrainable](../../../objective.md#untrainable-turns), and the next turn runs on the
-[retry reserve](../../../reasoning.md#retry-reserve).
+[untrainable](../../../objective.md#untrainable-turns).
 
 Not refusals:
 
 - A call to a tool whose budget is 0 (`ToolDisabled`: the [`leaderboard`](evaluation.md#evaluation-protocols)
-  scratchpad, `max_test_calls: 0`) gets the same reply and price, but its turn is not flagged and the next gets no
-  retry reserve.
-- A call returned to its budget (a program sent with the [wrong language](#evident-language), a submission after
-  an accept that the budget still admits) is neither paid nor charged. It counts in `episode/tool_calls`, but not
-  as a successful call.
+  scratchpad, `max_test_calls: 0`) gets the same reply and price, but its turn is not flagged.
+- A submission after an accept in the same turn that the budget still admits is returned to its budget, neither
+  paid nor charged. It counts in `episode/tool_calls`, but not as a successful call.
 
 ## Languages
 
@@ -79,12 +77,14 @@ Not refusals:
 With a language list, a program evidently written in another of its languages is not run:
 
 ```text
-Not run: this looks like cpp code sent with language "python"; send it again with language "cpp". No scratchpad run was spent.
+Error: Not run: this looks like cpp code sent with language "python"; send it again with language "cpp". No scratchpad run was spent.
 ```
 
-`submit_solution` says `Not graded` instead. The call is returned to the budget: no charge, no grade, and the
-`language` slice unchanged. The check (`evident_language` in `code_contests.py`) acts only when a Python parse and
-the program's textual marks point the same way; a program it misses runs as labeled.
+`submit_solution` says `Not graded` instead. The call is [refused](#refused-calls): it pays `tool_error_penalty`,
+spends no budget, grades nothing and leaves the `language` slice unchanged, and a turn of such calls alone is
+untrainable, so no solve reinforces the wasted turn. The check (`evident_language` in `code_contests.py`) acts
+only when a Python parse and the program's textual marks point the same way; a program it misses runs as labeled.
+A submission after an accept takes the post-accept reply whatever its label.
 
 ## Recovery nudges
 

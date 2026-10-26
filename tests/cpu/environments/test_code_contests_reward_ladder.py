@@ -230,6 +230,7 @@ def test_rollout_metrics_decomposition_sums_to_reward():
         OBJECTIVE_REWARD_KEY,
         "reward/submission",
         "reward/resubmission",
+        "reward/unrun_submission",
         "reward/tool_shaping",
         "reward/turn_shaping",
     }

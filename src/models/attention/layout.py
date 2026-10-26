@@ -105,19 +105,24 @@ class AttentionLayout:
     layers: tuple[LayerAttention, ...]
     source: str = "layers"
 
-    def flops_for_documents(self, lengths: torch.Tensor) -> torch.Tensor:
+    def flops_for_documents(self, lengths: torch.Tensor, own_tokens: torch.Tensor | None = None) -> torch.Tensor:
         """Attention-score FLOPs of documents of the given token lengths (a float64 scalar), summed per
         document because the varlen kernels never attend across a packed row. Full attention is costed
         at every key (the PaLM convention), bounded layers at the keys their kernel visits.
+
+        ``own_tokens`` counts only part of each document: a tree node is the tail of its root-to-leaf
+        path, so it costs its own tokens at that path's length and its ancestors are costed once, as
+        their own nodes.
         """
         lengths = lengths.to(torch.float64)
+        own_tokens = lengths if own_tokens is None else own_tokens.to(torch.float64)
         total = torch.zeros((), dtype=torch.float64, device=lengths.device)
         for layer in self.grouped():
             per_token = SCORE_PASSES * layer.width * layer.score_keys(lengths)
             if layer.index_width:
                 pooled_keys = lengths / (layer.rate * layer.index_pool)
                 per_token = per_token + INDEX_PASSES * layer.index_width * pooled_keys
-            total = total + (per_token * lengths).sum()
+            total = total + (per_token * own_tokens).sum()
         return total
 
     def flops_per_token(self, seq_len: int) -> float:

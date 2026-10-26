@@ -273,7 +273,14 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         )
 
     def _run_in_new_session(
-        self, argv: list[str], *, stdin: str, timeout: float, cwd: str, env: dict[str, str]
+        self,
+        argv: list[str],
+        *,
+        stdin: str,
+        timeout: float,
+        cwd: str,
+        env: dict[str, str],
+        started: tuple[int, int] | None = None,
     ) -> tuple[str, str, int | None, bool]:
         """The local run inside the subreaper window :meth:`_reap_adopted` needs, with ``bwrap``'s status
         read back: its init cannot die of its program's signal, so ``bwrap`` exits ``128 + n`` for a
@@ -281,7 +288,7 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         that exits with such a code itself reads as that signal."""
         with _JAIL_REAPER.held():
             stdout, stderr, returncode, timed_out = super()._run_in_new_session(
-                argv, stdin=stdin, timeout=timeout, cwd=cwd, env=env
+                argv, stdin=stdin, timeout=timeout, cwd=cwd, env=env, started=started
             )
         if returncode is not None and 128 < returncode < 128 + signal.NSIG:
             returncode = 128 - returncode

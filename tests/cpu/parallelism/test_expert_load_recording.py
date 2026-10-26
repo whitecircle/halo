@@ -19,13 +19,18 @@ The hub-router Zaya patch gates through the same predicate.
 """
 
 import types
+from unittest import mock
 
 import pytest
 import torch
 import torch.utils.checkpoint as torch_checkpoint
+from trl import SFTTrainer
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.models.attention.tree_plan import TREE_ATTENTION_KEY
 from src.models.gradient_checkpointing import scoped_checkpoint_func
+from src.models.moe.balancing import expert_load_token_weights
+from src.trainers.sft import DistributedSFTTrainer
 
 _INDICES = torch.tensor([0, 1, 1, 3])
 _EXPECTED = torch.tensor([1.0, 2.0, 0.0, 1.0])
@@ -66,6 +71,50 @@ def test_training_forward_counts():
     stub = _stub()
     EPMoELayerBase._record_expert_load(stub, _INDICES)
     assert torch.equal(stub.expert_load_counter, _EXPECTED)
+
+
+def test_token_weights_count_a_shared_token_once_per_example():
+    """A tree-packed row routes a shared prefix token once for the three examples that contain it;
+    flat packing would have routed it three times. The balancer must see the flat load."""
+    selections = torch.tensor([[0, 1], [1, 3], [2, 3]])  # three tokens, top-2
+    stub = _stub()
+    with expert_load_token_weights(torch.tensor([3, 1, 1])):
+        EPMoELayerBase._record_expert_load(stub, selections)
+    assert stub.expert_load_counter.tolist() == [3.0, 4.0, 1.0, 2.0]
+
+    EPMoELayerBase._record_expert_load(stub, selections)
+    assert stub.expert_load_counter.tolist() == [4.0, 6.0, 2.0, 4.0], "outside the block every token counts once"
+
+
+def _sft_step_load(inputs: dict) -> list[float]:
+    """Expert load recorded by a forward the SFT trainer's own ``compute_loss`` drives."""
+    stub = _stub()
+
+    def routed(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        EPMoELayerBase._record_expert_load(stub, torch.tensor([[0, 1], [1, 3], [2, 3]]))
+        return (torch.zeros(()), {}) if return_outputs else torch.zeros(())
+
+    trainer = object.__new__(DistributedSFTTrainer)
+    trainer.__dict__.update(
+        _warned_empty_labels=True,
+        parallelism_config=types.SimpleNamespace(is_cp_mode=False, non_dp_replication_factor=1),
+        _total_train_tokens=0,
+        _metrics={},
+    )
+    with mock.patch.object(SFTTrainer, "compute_loss", routed):
+        DistributedSFTTrainer.compute_loss(trainer, None, inputs)
+    return stub.expert_load_counter.tolist()
+
+
+def test_the_sft_trainer_weights_a_tree_batch_by_its_leaf_count():
+    assert _sft_step_load({TREE_ATTENTION_KEY: {"leaf_count": torch.tensor([3, 1, 1])}}) == [3.0, 4.0, 1.0, 2.0]
+    assert _sft_step_load({}) == [1.0, 2.0, 1.0, 2.0]
+
+
+def test_token_weights_for_another_forward_are_refused():
+    """Weights that do not cover this forward's tokens would be scattered onto the wrong ones."""
+    with expert_load_token_weights(torch.ones(5)), pytest.raises(ValueError, match="do not describe this forward"):
+        EPMoELayerBase._record_expert_load(_stub(), torch.tensor([[0, 1], [1, 3], [2, 3]]))
 
 
 @pytest.mark.parametrize("use_reentrant", [True, False])

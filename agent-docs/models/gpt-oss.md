@@ -32,6 +32,9 @@ interfaces do receive `position_ids` and isolate correctly, so pin `flash_attent
 FA) whenever packing is on, and use padded batches otherwise
 ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
+[Tree packing](../optimization/tree-packing.md) (`tree_packing: true`) runs on this family: rows that
+share a prefix store it once.
+
 ## Attention sinks
 
 GptOss attention adds a per-head learnable scalar to the attention logits before softmax, with two parallelism consequences.

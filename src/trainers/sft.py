@@ -12,6 +12,10 @@ from trl.trainer.utils import entropy_from_logits
 from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds, cp_shift_against_full_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.models.attention.tree_plan import TREE_ATTENTION_KEY
+from src.models.moe.balancing import expert_load_token_weights
+from src.models.moe.config_fields import require_router_aux_loss_coef
+from src.models.unwrapping import base_transformers_model
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value
 
@@ -137,9 +141,13 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         # TRL's gather().sum() double-counts attended tokens under TP/ETP (identical data per rank).
         prev_tokens = self._total_train_tokens
 
-        result = super().compute_loss(
-            model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch
-        )
+        tree_plan = inputs.get(TREE_ATTENTION_KEY)
+        with expert_load_token_weights(None if tree_plan is None else tree_plan["leaf_count"]):
+            loss, outputs = super().compute_loss(
+                model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+            )
+        loss = self._weigh_router_aux_loss(model, loss, outputs, num_items_in_batch)
+        result = (loss, outputs) if return_outputs else loss
 
         non_dp_factor = self.parallelism_config.non_dp_replication_factor
         if non_dp_factor > 1 and self.model.training:
@@ -149,6 +157,37 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
                 self._metrics["train"]["num_tokens"] = [self._total_train_tokens]
         self._relabel_attended_tokens()
         return result
+
+    def _weigh_router_aux_loss(self, model, loss, outputs, num_items_in_batch):
+        """Weigh the router aux loss at its coefficient: ``coef x mean(aux)`` per optimizer step, and
+        ``coef x aux`` in an eval batch's loss.
+
+        On HF's ``num_items_in_batch`` path ``Trainer.compute_loss`` multiplies a micro-batch loss by the process
+        count and ``Trainer.training_step`` sums the accumulation window instead of averaging it. That makes the
+        token-summed language-model term the window's mean, but the aux term the forward folds in is a
+        per-micro-batch mean and would weigh ``processes x accumulation`` times its coefficient. The forward adds
+        it only when it receives the labels, which HF withholds under a label smoother or a ``compute_loss_func``;
+        the term is then added here alone.
+        """
+        aux = outputs.get("aux_loss") if isinstance(outputs, dict) else None
+        if aux is None or num_items_in_batch is None:
+            return loss
+        weighted = require_router_aux_loss_coef(base_transformers_model(model).config) * aux.to(loss.dtype)
+        forward_added = weighted if self.label_smoother is None and self.compute_loss_func is None else 0.0
+        target = weighted / self.current_gradient_accumulation_steps if model.training else weighted
+        return loss - forward_added * self._hf_loss_scale() + target
+
+    def _hf_loss_scale(self) -> int:
+        """The factor ``Trainer.compute_loss`` multiplies a loss by on the ``num_items_in_batch`` path, which HF
+        computes only for a model accepting loss kwargs or a ``compute_loss_func``."""
+        if not self.args.average_tokens_across_devices:
+            return 1
+        if self.args.n_gpu > 1:
+            return self.args.n_gpu
+        scale = self.accelerator.num_processes
+        if (pc := getattr(self.accelerator, "parallelism_config", None)) is not None:
+            scale //= pc.tp_size
+        return scale
 
     def _relabel_attended_tokens(self):
         """Rename TRL's cumulative ``num_tokens`` (non-padding attended tokens) to

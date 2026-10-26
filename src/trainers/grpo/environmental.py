@@ -361,7 +361,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(
             self._tokenizer, self.async_config.rollout_stop_tokens
         )
-        self._forced_close_ids = self._resolve_forced_close_ids()
+        self._reasoning_end_ids = self._resolve_reasoning_end_ids()
+        self._forced_close_ids = self._resolve_forced_close_ids(self._reasoning_end_ids)
         self._max_train_row_tokens = self.async_config.max_train_row_tokens
         self._rows_over_cap = 0
         # An eval round is the whole eval set; TRL's one-generation-batch buffer would keep its tail only.
@@ -585,11 +586,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         return dense_row_spans(attention_mask)
 
     def _resolve_reasoning_end_token_id(self) -> int | None:
-        """The id a turn's reasoning is counted up to, for ``episode/thinking_cap_turns``: the close the engine
-        forces wherever a vLLM thinking cap can bind (:meth:`_resolve_forced_close_ids`), where it is one token.
-        ``None`` where no close is forced, and for a close of several tokens (gpt-oss's final-channel opener),
-        which no one id marks: the count goes without."""
-        ids = self._forced_close_ids
+        """The id a turn's reasoning ends at, where the marker is one token: what the rollout counts a turn's
+        reasoning up to (``episode/thinking_cap_turns``) and splits a cut call's ids at. ``None`` where the run
+        resolves no marker (:meth:`_resolve_reasoning_end_ids`) and for a marker of several tokens (gpt-oss's
+        final-channel opener), which no one id marks."""
+        ids = self._reasoning_end_ids
         return ids[0] if ids is not None and len(ids) == 1 else None
 
     def _require_forced_close_neutralized(self) -> None:
@@ -643,6 +644,12 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         return any(effort.thinking_budget is not None for effort in self._efforts_by_level().values())
 
     @property
+    def _any_episode_capped(self) -> bool:
+        """Whether the engine can close some episode's reasoning: a drawable level binds a reasoning cap (its
+        enforced budget, or a soft budget's ceiling)."""
+        return any(effort.thinking_cap is not None for effort in self._efforts_by_level().values())
+
+    @property
     def _every_budget_soft(self) -> bool:
         """Whether every episode the run draws runs under a soft budget, one a turn can reason past."""
         return all(effort.budget_soft for effort in self._efforts_by_level().values())
@@ -660,15 +667,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             max_episode_tokens=cfg.rollout_max_episode_tokens,
         )
 
-    def _resolve_forced_close_ids(self) -> tuple[int, ...] | None:
-        """The reasoning-end ids the engine forces when a turn reaches its reasoning cap (a level's enforced budget,
-        a soft level's ceiling, or a retry's reserve), whose forced occurrences the loss must not train on; ``None``
-        when no cap can bind (SGLang enforces none, and an unbudgeted run caps nothing).
-
-        A marker the tokenizer does not write (the ``</think>`` default on a family whose reasoning ends
-        otherwise) keeps the forced closes in the loss, said loudly."""
+    def _resolve_reasoning_end_ids(self) -> tuple[int, ...] | None:
+        """The ids the server's reasoning parser ends reasoning with, on a vLLM run whose episodes carry a
+        thinking budget; ``None`` on SGLang and in an unbudgeted run. A marker the tokenizer does not write
+        (the ``</think>`` default on a family whose reasoning ends otherwise) resolves none, said loudly."""
         cfg = self.async_config
-        # A budget, soft or not, caps every retry at its reserve, so any budgeted episode can be force-closed.
         if cfg.rollout_backend == SGLANG_BACKEND or not self._any_episode_budgeted:
             return None
         model_config = getattr(unwrap_framework_wrappers(self.model), "config", None)
@@ -676,10 +679,17 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         try:
             return resolve_reasoning_end_ids(self._tokenizer, cfg.rollout_reasoning_end_token)
         except ValueError as e:
-            logger.warning(
-                "%s The reasoning closes the engine forces at the thinking budget stay in the policy loss.", e
-            )
+            lost = "A turn's reasoning goes uncounted"
+            if self._any_episode_capped:
+                lost += ", and the closes the engine forces at a thinking cap stay in the policy loss"
+            logger.warning("%s %s.", e, lost)
             return None
+
+    def _resolve_forced_close_ids(self, reasoning_end_ids: tuple[int, ...] | None) -> tuple[int, ...] | None:
+        """``reasoning_end_ids`` where the engine can force them: a turn that reaches its reasoning cap (a level's
+        enforced budget or a soft level's ceiling) is closed with them, and the loss must not train on those
+        occurrences. ``None`` where no cap can bind, a soft budget without a ceiling included."""
+        return reasoning_end_ids if self._any_episode_capped else None
 
     def train(self, *args, **kwargs):
         """Train with async rollout collection."""

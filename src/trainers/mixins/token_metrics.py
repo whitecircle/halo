@@ -12,6 +12,7 @@ from collections.abc import Mapping
 import torch
 
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
+from src.models.attention.tree_plan import TREE_ATTENTION_KEY
 from src.trainers.mixins.loss_masks import effective_loss_mask
 
 
@@ -62,6 +63,18 @@ class TokenMetricsMixin:
         lengths.scatter_add_(0, document, valid.flatten().long())
         return lengths
 
+    def _extract_tree_nodes(self, inputs):
+        """``(path length, own tokens)`` of every node of a tree-packed batch, or ``None`` for any other.
+
+        A node's tokens attend along its root-to-leaf path, whose length is the position of the
+        node's last token plus one; position resets would read a whole tree as one document.
+        """
+        plan = inputs.get(TREE_ATTENTION_KEY) if isinstance(inputs, Mapping) else None
+        if plan is None:
+            return None
+        bounds = plan["cu_seqlens_q"].long()
+        return inputs["position_ids"][0, bounds[1:] - 1] + 1, bounds[1:] - bounds[:-1]
+
     def _accumulate_attention_flops(self, inputs):
         """Cost this micro-batch's documents through the bound layout into the on-device accumulator,
         read once per optimizer step by :meth:`drain_attention_flops`."""
@@ -69,11 +82,12 @@ class TokenMetricsMixin:
             self._bind_attention_work_sources()
         if self._attention_layout is None:
             return
-        lengths = self._extract_document_lengths(inputs)
+        nodes = self._extract_tree_nodes(inputs)
+        lengths, own_tokens = nodes if nodes is not None else (self._extract_document_lengths(inputs), None)
         if lengths is None:
             return
         lengths = lengths.detach()
-        flops = self._attention_layout.flops_for_documents(lengths)
+        flops = self._attention_layout.flops_for_documents(lengths, own_tokens)
         step = torch.stack((flops, (lengths > 0).sum().to(flops)))
         prev = getattr(self, "_local_attention_work_accum", None)
         self._local_attention_work_accum = step if prev is None else prev + step

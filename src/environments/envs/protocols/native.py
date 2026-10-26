@@ -306,11 +306,13 @@ class NativeToolUseEnvironment(BaseEnvironment):
             trajectory.add_message(result.to_message())
 
         # Nothing this turn could execute (an invented tool, a call refused unrun): mark the assistant message so
-        # the trainer never rewards it and the next turn retries on the recovery reserve. Read off the flags, never
-        # the reply text — a tool whose backend answers "Tool not found: x" failed for real, and dropping that turn
-        # would hide a broken tool as a model mistake.
+        # the trainer never rewards it. Read off the flags, never the reply text — a tool whose backend answers
+        # "Tool not found: x" failed for real, and dropping that turn would hide a broken tool as a model mistake.
         if results and all(r.unknown_tool or r.refused for r in results):
             self._flag_calls_rejected(trajectory)
+        refused = tuple(r.tool_call_id for r in results if (r.unknown_tool or r.refused) and r.tool_call_id)
+        if refused:
+            self._last_assistant_message(trajectory).refused_call_ids = refused
 
         # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.
         return {"step_tool_calls": len(results)}

@@ -32,6 +32,7 @@ from src.environments.sandbox.base import (
     LanguageSpec,
     SandboxAgentFault,
     SandboxExecutor,
+    SandboxInfraError,
     SandboxResult,
     SandboxSession,
     compile_failure_verdict,
@@ -56,6 +57,10 @@ LOCAL_FSIZE_LIMIT = 64 * 1024 * 1024
 LOCAL_NPROC_LIMIT = 4096
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
 RLIMIT_CPU_SLACK_SECONDS = 1.0
+
+# How long a run's launch (the limit shell and, on bubblewrap, the jail's namespaces and mounts) may take to
+# reach the program before the run is lost to the host. The program's time limit starts where the launch ends.
+LAUNCH_TIMEOUT_SECONDS = 30.0
 
 # Math libraries size their thread pools to the host and allocate per-thread buffers at load, which
 # the run's address-space limit refuses: numpy's OpenBLAS then aborts a correct program at import.
@@ -183,18 +188,50 @@ def _require_pidfd() -> None:
         ) from exc
 
 
-def _exited_within(pid: int, timeout: float) -> bool:
+def _readable_within(fds: tuple[int, ...], timeout: float) -> bool:
+    """Whether any of ``fds`` polls readable within ``timeout`` seconds."""
+    # poll, not select: a busy host hands out descriptors past select's FD_SETSIZE.
+    poller = select.poll()
+    for fd in fds:
+        poller.register(fd, select.POLLIN)
+    return bool(poller.poll(math.ceil(timeout * 1000)))
+
+
+def _exited_within(pid: int, timeout: float, marker_fd: int | None = None) -> bool:
     """Whether process ``pid`` exits within ``timeout`` seconds, without reaping it: its pidfd polls
     readable once it has exited, and until it is reaped its zombie keeps the pid, and so the id of the
-    process group it leads, taken."""
+    process group it leads, taken.
+
+    With ``marker_fd``, the read end of the run's start marker (:func:`_start_marked`), ``timeout`` runs
+    from the marker's byte, or from the exit of a launch that never reached the program; a launch still
+    short of the program after :data:`LAUNCH_TIMEOUT_SECONDS` raises :class:`SandboxInfraError`."""
     pidfd = os.pidfd_open(pid)
     try:
-        # poll, not select: a busy host hands out descriptors past select's FD_SETSIZE.
-        poller = select.poll()
-        poller.register(pidfd, select.POLLIN)
-        return bool(poller.poll(math.ceil(timeout * 1000)))
+        if marker_fd is not None and not _readable_within((marker_fd, pidfd), LAUNCH_TIMEOUT_SECONDS):
+            raise SandboxInfraError(
+                f"the sandbox launch did not reach the program within {LAUNCH_TIMEOUT_SECONDS:g} s"
+            )
+        return _readable_within((pidfd,), timeout)
     finally:
         os.close(pidfd)
+
+
+def _start_marked(argv: list[str], fd: int) -> list[str]:
+    """``argv`` behind a shell that writes one byte to ``fd``, closes it and ``exec``s ``argv``: the start
+    of the program, which its time limit runs from. The program never holds ``fd``, and never runs when the byte
+    cannot be written, so a lost marker never leaves a program timed by the launch bound alone."""
+    return ["/bin/bash", "-c", f'printf . >&{fd} && exec {fd}>&- && exec "$@"', "halo-start", *argv]
+
+
+@contextmanager
+def _start_marker() -> Iterator[tuple[int, int]]:
+    """A pipe ``(read_fd, write_fd)`` for one run's start marker, closed once the run is over."""
+    read_fd, write_fd = os.pipe()
+    try:
+        yield read_fd, write_fd
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
 
 
 def _entry_kinds(workdir: str) -> _EntryKinds:
@@ -415,7 +452,14 @@ class LocalSubprocessSandbox(SandboxExecutor):
         return ["/bin/bash", "-c", script, "halo-sandbox", *argv]
 
     def _run_in_new_session(
-        self, argv: list[str], *, stdin: str, timeout: float, cwd: str, env: dict[str, str]
+        self,
+        argv: list[str],
+        *,
+        stdin: str,
+        timeout: float,
+        cwd: str,
+        env: dict[str, str],
+        started: tuple[int, int] | None = None,
     ) -> tuple[str, str, int | None, bool]:
         """Run ``argv`` in its own session; returns ``(stdout, stderr, returncode, timed_out)``.
 
@@ -427,6 +471,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
         pipes: nothing the child leaves running can hold the run open, and the child's ``RLIMIT_FSIZE``
         bounds its output, so a flood ends as the program's own failure at the file-size limit, never as
         host memory the grader runs out of.
+
+        ``started`` is the start marker's pipe whose write end ``argv`` names (:func:`_start_marked`):
+        ``timeout`` then runs from the program's start instead of the launch's (:func:`_exited_within`).
         """
         # poll() reads a negative timeout as none: the host would wait as long as the program runs.
         if not (math.isfinite(timeout) and timeout > 0):
@@ -435,9 +482,18 @@ class LocalSubprocessSandbox(SandboxExecutor):
             # What UTF-8 cannot carry (a lone surrogate in a model-written stdin) is replaced.
             feed.write(utf8_encodable(stdin).encode("utf-8"))
             feed.seek(0)
-            proc = subprocess.Popen(argv, stdin=feed, stdout=out, stderr=err, cwd=cwd, env=env, start_new_session=True)
+            proc = subprocess.Popen(
+                argv,
+                stdin=feed,
+                stdout=out,
+                stderr=err,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
+                pass_fds=(started[1],) if started else (),
+            )
             try:
-                timed_out = not _exited_within(proc.pid, timeout)
+                timed_out = not _exited_within(proc.pid, timeout, started[0] if started else None)
             finally:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
@@ -505,23 +561,26 @@ class LocalSubprocessSandbox(SandboxExecutor):
         return None
 
     def _run_program(self, workdir: str, spec: LanguageSpec, *, stdin: str, timeout: float) -> SandboxResult:
-        """Run the staged (and built) program in ``workdir`` under the run-step limits."""
+        """Run the staged (and built) program in ``workdir`` under the run-step limits, ``timeout`` measured
+        from the program's start: the launch before it (on bubblewrap, a jail setup that queues on a
+        host-wide kernel lock while other runs build theirs) is the host's cost, not the program's."""
         run_argv = [PYTHON_INTERPRETER if tok == INTERPRETER_PLACEHOLDER else tok for tok in spec.run_argv]
-        run_argv = self._wrap_command(run_argv, workdir)
-        # RLIMIT_CPU backstop: SIGXCPU still kills a busy loop if timeout delivery lags. A compiled
-        # program's stack gets the whole memory limit, as on a contest judge; an interpreter's does not,
-        # since glibc sizes every thread's stack by that limit and its worker threads would each take it.
-        run_argv = self._limit_wrap(
-            run_argv,
-            int(math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS)),
-            self.memory_limit_mb,
-            nproc=LOCAL_NPROC_LIMIT,
-            stack_mb=self.memory_limit_mb if spec.is_compiled else None,
-        )
-        # The slot is held for the whole run, so ``timeout`` measures near-dedicated-core time.
-        with SANDBOX_EXECUTION_GATE.slot():
+        # The slot is held for the whole run, so ``timeout`` measures near-dedicated-core time; the marker's pipe
+        # opens inside it, so waiting runs hold no descriptors.
+        with SANDBOX_EXECUTION_GATE.slot(), _start_marker() as started:
+            run_argv = self._wrap_command(_start_marked(run_argv, started[1]), workdir)
+            # RLIMIT_CPU backstop: SIGXCPU still kills a busy loop if timeout delivery lags. A compiled
+            # program's stack gets the whole memory limit, as on a contest judge; an interpreter's does not,
+            # since glibc sizes every thread's stack by that limit and its worker threads would each take it.
+            run_argv = self._limit_wrap(
+                run_argv,
+                int(math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS)),
+                self.memory_limit_mb,
+                nproc=LOCAL_NPROC_LIMIT,
+                stack_mb=self.memory_limit_mb if spec.is_compiled else None,
+            )
             stdout, stderr, returncode, timed_out = self._run_in_new_session(
-                run_argv, stdin=stdin, timeout=timeout, cwd=workdir, env=self._child_env(workdir)
+                run_argv, stdin=stdin, timeout=timeout, cwd=workdir, env=self._child_env(workdir), started=started
             )
         # SIGXCPU (the backstop) is reported as a timeout so callers bucket it as TLE.
         return SandboxResult(

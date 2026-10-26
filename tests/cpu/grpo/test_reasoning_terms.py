@@ -291,6 +291,8 @@ def test_construction_refuses_a_floor_no_episode_can_ever_be_priced_by():
     # One budgeted level is enough, and so is the run-wide cap.
     _constructing({"high": 16384}, reasoning_floor=0.05)._validate_reasoning_terms()
     _constructing({}, reasoning_floor=0.05, rollout_max_thinking_tokens=8000)._validate_reasoning_terms()
+    # The floor reads the stated budget, so a soft one no engine cap backs still carries it.
+    _constructing({"high": 16384}, soft=("high",), reasoning_floor=0.05)._validate_reasoning_terms()
     _constructing({})._validate_reasoning_terms()  # off: nothing to check
 
 

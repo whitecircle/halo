@@ -41,6 +41,7 @@ output_dir: checkpoints/sft-qwen3-4b
 | `assistant_message_template` | unset | The rendered assistant-turn prefix; required by the flag above and checked against the chat template at startup |
 | `train_on_last_assistant_only` | `false` | Loss on the final assistant turn only; needs completions-only |
 | `packing` / `packing_strategy` | `false` / `bfd` | Pack short rows into fixed `max_length` blocks |
+| `tree_packing` | `false` | Store a prefix shared by several rows once ([Tree Packing](../optimization/tree-packing.md)) |
 | `padding_free` | `false` | Flatten the batch into one varlen sequence |
 | `max_length` | `1024` | `null` or non-positive → the model context window |
 | `use_peft` | `false` | LoRA; 5–10× the full-FT rate ([PEFT](../optimization/peft.md#hyperparameters)) |

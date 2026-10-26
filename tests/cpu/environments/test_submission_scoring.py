@@ -19,6 +19,7 @@ import pytest
 
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, REWARD_COMPONENTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
+    FAILED_WITH_NO_RUNS_LEFT,
     NO_STDIN_NOTE,
     SUBMISSION_PASS_FRACS_KEY,
     CodeContestsEnvironment,
@@ -95,6 +96,49 @@ def _step_submit(env, ids, program):
     arguments = json.dumps({"code": f"program = {program!r}"})
     call = {"id": "s", "type": "function", "function": {"name": "submit_solution", "arguments": arguments}}
     return env.step(ids, [""], [{"tool_calls": [call]}])[0]
+
+
+@pytest.mark.parametrize(
+    ("turns", "exempt"),
+    [
+        ([["run"], ["submit 0"]], True),  # the one run spent a turn before the only failure
+        ([["submit 0"]], False),  # a run was left when it failed
+        ([["run", "submit 0"]], False),  # the last run spent in the submission's own turn returned nothing to fix from
+        ([["submit 0"], ["run"], ["submit 01"]], False),  # the first failure still had a run
+        ([["run"], ["submit 0"], ["submit 01"]], True),  # every failure after the budget was spent
+        ([["run"], ["submit 0123"]], False),  # no failure to exempt
+    ],
+)
+def test_the_no_runs_left_fact_holds_only_when_every_failed_submission_had_no_run_left(turns, exempt):
+    """The fact a judge check stands exempt under: established by the environment from its own budget
+    counter as each turn begins, so a failure graded after the scratchpad budget was spent is never priced as
+    untested, and a throwaway run beside the submission does not buy the exemption."""
+    env = _env(reasoning_effort_profiles={"high": {"max_submissions": 3, "max_test_calls": 1}})
+    traj = _episode(env)
+    for k, turn in enumerate(turns):
+        calls = [
+            NativeToolCall(id=f"r{k}", name=env.test_tool_name, arguments={"code": "print(1)", "stdin": "1"})
+            if action == "run"
+            else NativeToolCall(
+                id=f"s{k}", name="submit_solution", arguments={"code": f"program = {action.split()[1]!r}"}
+            )
+            for action in turn
+        ]
+        env._execute_tool_calls(calls, traj)
+    assert (FAILED_WITH_NO_RUNS_LEFT in env._scoring_sample(traj).facts) is exempt
+
+
+def test_a_judge_check_exempt_under_a_fact_the_environment_never_establishes_is_refused():
+    judge = {
+        "source": "judge",
+        "name": "audit",
+        "weight": -0.1,
+        "checks": [{"name": "x", "description": "d", "unless": "nope"}],
+    }
+    with pytest.raises(ValueError, match="never establishes"):
+        _env(reward_terms=[{"source": "environment"}, judge])
+    judge["checks"][0]["unless"] = FAILED_WITH_NO_RUNS_LEFT
+    _env(reward_terms=[{"source": "environment"}, judge])
 
 
 def test_a_submission_passing_every_test_ends_the_episode():

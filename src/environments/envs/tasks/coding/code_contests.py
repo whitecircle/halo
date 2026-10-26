@@ -36,6 +36,7 @@ from src.environments.envs.tasks.coding.grading import (
     grade_solution,
     host_build_error,
     python_syntax_error,
+    stated_float_tolerance,
 )
 from src.environments.sandbox.base import (
     SANDBOX_DEFAULT_TIMEOUT,
@@ -47,7 +48,9 @@ from src.environments.sandbox.repl import format_sandbox_repl_output
 from src.environments.sandbox.resolve import resolve_sandbox, warn_if_unisolated
 from src.environments.tools.definitions import (
     NativeTool,
+    NativeToolCall,
     NativeToolRegistry,
+    NativeToolResult,
     ToolArgumentError,
     ToolCallRefused,
     ToolParameter,
@@ -103,6 +106,26 @@ IDENTICAL_RESUBMISSION_REPLY = (
 )
 IDENTICAL_RESUBMISSIONS_KEY = "identical_resubmissions"
 GRADED_PROGRAMS_KEY = "_graded_programs"
+# Per failed graded submission, whether a scratchpad run was still left when its turn began: a run spent
+# in the same turn returned nothing the program could have been fixed from.
+FAILED_SUBMISSION_RUNS_LEFT_KEY = "_failed_submission_runs_left"
+TURN_RUNS_LEFT_KEY = "_turn_runs_left"
+# The programs the scratchpad ran, normalized (:func:`normalized_program`), and how many of them had run as the
+# turn began: a run in the submission's own turn returned nothing it was written from.
+RUN_PROGRAMS_KEY = "_run_programs"
+TURN_RUN_PROGRAMS_KEY = "_turn_run_programs"
+# Per failed graded submission, whether its program had run as submitted (:meth:`_ran_as_submitted`), and the
+# public mark of a failure that had not while a run was left: the private lists leave with the grading payload.
+FAILED_SUBMISSION_RAN_KEY = "_failed_submission_ran"
+UNRUN_FAILED_SUBMISSION_KEY = "unrun_failed_submission"
+# A line a program sheds between its last run and its submission without becoming another program: an output
+# statement (a debug print), whose removal is no change to what the run tested.
+_OUTPUT_STATEMENT = re.compile(
+    r"^\s*(?:print\s*\(|sys\.std(?:out|err)\.write\s*\(|(?:std::)?(?:cout|cerr|clog)\s*<<|f?printf\s*\(|puts\s*\()"
+)
+# The episode fact a judge check stands exempt under: every failed graded submission came with no
+# scratchpad run left, so none of them could have been tested first.
+FAILED_WITH_NO_RUNS_LEFT = "failed_with_no_runs_left"
 
 # Marks of C or C++ source for the language-label check: an include directive, a main function, a
 # namespace directive or a std-qualified name; else statements ending in ``;`` on this share of the
@@ -165,6 +188,20 @@ def normalized_program(code: str, language: str) -> str:
     return f"{language}\n" + "\n".join(line for line in lines if line)
 
 
+def sheds_only_output(ran: str, submitted: str) -> bool:
+    """Whether normalized program ``submitted`` is normalized program ``ran`` with nothing changed but output
+    statements dropped (:data:`_OUTPUT_STATEMENT`): the same program, less its debug prints. A walk in order, since
+    matching an equal line is never worse than skipping it."""
+    submitted_lines = submitted.split("\n")
+    matched = 0
+    for line in ran.split("\n"):
+        if matched < len(submitted_lines) and line == submitted_lines[matched]:
+            matched += 1
+        elif not _OUTPUT_STATEMENT.match(line):
+            return False
+    return matched == len(submitted_lines)
+
+
 def evident_language(code: str, language: str, offered: Sequence[str]) -> str | None:
     """The language among ``offered`` that ``code``, sent as ``language``, is evidently written in
     instead, else ``None``.
@@ -207,7 +244,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     # Agentic solvers iterate test→fix→submit, which the protocol's generic budget cuts mid-loop.
     DEFAULT_MAX_TURNS = 15
 
-    SHAPING_COMPONENTS = ("submission", "resubmission")
+    SHAPING_COMPONENTS = ("submission", "resubmission", "unrun_submission")
+
+    EPISODE_FACTS = (FAILED_WITH_NO_RUNS_LEFT,)
 
     # The ``answer`` payload IS the hidden test set: without it every episode grades against zero
     # tests, grading 0 whatever it submitted.
@@ -284,6 +323,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_test_calls: int | None = None,
         submission_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
+        unrun_submission_penalty: float = 0.0,
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float | bool]] | None = None,
         eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
@@ -304,7 +344,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
                 f"max_time_limit ({max_time_limit}) must be >= timeout_per_test ({timeout_per_test}), "
                 f"the per-test floor the task contract states"
             )
-        require_magnitudes(submission_reward=submission_reward, resubmission_penalty=resubmission_penalty)
+        require_magnitudes(
+            submission_reward=submission_reward,
+            resubmission_penalty=resubmission_penalty,
+            unrun_submission_penalty=unrun_submission_penalty,
+        )
         # The canonical names the model may name; ``language`` is the run's default (and the grading
         # contract's), the only one when the run fixes it.
         self.languages = tuple(spec.name for spec in specs)
@@ -315,6 +359,10 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # Each graded submission after the first is a probe of the judge. Free, and with only the last
         # one counting, probing out-earns testing in the scratchpad within a GRPO group at every effort.
         self.resubmission_penalty = resubmission_penalty
+        # Charged once to an episode that never passed when a failed graded submission was a program the scratchpad
+        # never ran as submitted while a run was left: failure-only, since the policy tests when it is unsure and an
+        # outcome-only reward charges testing within a group.
+        self.unrun_submission_penalty = unrun_submission_penalty
         # Reaching the cap ends the episode; further calls are rejected as tool errors.
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
@@ -533,16 +581,19 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             return None
         return evident_language(code, language, self.languages)
 
-    def _refuse_mislabelled(self, code: str, language: str, tool: str, trajectory: Trajectory | None) -> str | None:
-        """The reply refusing a program :meth:`mislabelled_as` names another language for, the call
-        returned to the budget unpaid (:meth:`_refund_tool_call`); ``None`` when the label fits."""
+    def _refuse_mislabelled(self, code: str, language: str, tool: str, trajectory: Trajectory | None) -> None:
+        """Refuse a program :meth:`mislabelled_as` names another language for unrun, as a tool error with the
+        call returned to the budget and the turn flagged like any refusal: a free, trainable refusal is a
+        wasted turn that every solve reinforces."""
         evident = self.mislabelled_as(code, language)
         if evident is None:
-            return None
+            return
         if trajectory is not None:
-            self._refund_tool_call(trajectory, tool)
+            self._uncount_tool_call(trajectory, tool)
         verb, spent = ("run", "scratchpad run") if tool == self.test_tool_name else ("graded", "submission")
-        return MISLABELLED_LANGUAGE_REPLY.format(verb=verb, evident=evident, language=language, spent=spent)
+        raise ToolCallRefused(
+            MISLABELLED_LANGUAGE_REPLY.format(verb=verb, evident=evident, language=language, spent=spent)
+        )
 
     def _fit_observation(self, output: str, notes: list[str]) -> str:
         """``output`` with ``notes`` on lines after it, the output cut when the whole would pass the
@@ -562,14 +613,14 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         runs uncapped."""
         language = self._call_language(language, self.test_tool_name)
         trajectory = self.active_trajectory()
-        refusal = self._refuse_mislabelled(code, language, self.test_tool_name, trajectory)
-        if refusal is not None:
-            return refusal
+        self._refuse_mislabelled(code, language, self.test_tool_name, trajectory)
         if trajectory is not None:
             self._note_language(trajectory, language)
         stated = trajectory.info.get("_time_limit") if trajectory is not None else None
         timeout = self.grading_spec.time_limit_for(language, stated)
         result = self.sandbox.run(code, stdin=stdin, timeout=timeout, language=language)
+        if trajectory is not None:
+            trajectory.info.setdefault(RUN_PROGRAMS_KEY, []).append(normalized_program(code, language))
         output = format_sandbox_repl_output(result, timeout)
         if result.timed_out:
             output += f" {SCRATCHPAD_TIME_LIMIT_NOTE}"
@@ -588,14 +639,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         trajectory = self.active_trajectory()
         if trajectory is None:
             raise ValueError("submit_solution called outside an active episode.")
-        refusal = self._refuse_mislabelled(code, language, SUBMIT_TOOL, trajectory)
-        if refusal is not None:
-            return refusal
         if self._accepted(trajectory.info):
             # A later call in the turn that submitted the accept: the episode ends on this turn, and
             # grading another program could only replace the solve.
             self._refund_tool_call(trajectory, SUBMIT_TOOL)
             return SUBMISSION_AFTER_ACCEPT_REPLY
+        self._refuse_mislabelled(code, language, SUBMIT_TOOL, trajectory)
         self._refuse_identical_resubmission(code, language, trajectory)
         self._note_language(trajectory, language)
 
@@ -614,6 +663,11 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         trajectory.info.setdefault(SUBMISSION_PASS_FRACS_KEY, []).append(
             grade.passed / grade.total if grade.total else 0.0
         )
+        info = trajectory.info
+        if not (self._accepted(info) or self._grading_infra_outage(info) or self._grade_inconclusive(info)):
+            info.setdefault(FAILED_SUBMISSION_RUNS_LEFT_KEY, []).append(info.get(TURN_RUNS_LEFT_KEY, True))
+            info.setdefault(FAILED_SUBMISSION_RAN_KEY, []).append(self._ran_as_submitted(code, language, info))
+            info[UNRUN_FAILED_SUBMISSION_KEY] = self._unrun_failed_submission(info)
         # The graded artifact an external scorer reads (``_scoring_sample``); private, so it leaves
         # the record with the grading payload.
         trajectory.info["_submitted_code"] = code
@@ -621,6 +675,35 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             # A grade the backend lost says nothing about the program, so the same one may come back.
             trajectory.info.setdefault(GRADED_PROGRAMS_KEY, []).append(normalized_program(code, language))
         return grade.details
+
+    def _execute_tool_calls(
+        self, tool_calls: list[NativeToolCall], trajectory: Trajectory
+    ) -> tuple[list[NativeToolResult], float]:
+        self._stamp_turn_runs_left(trajectory)
+        return super()._execute_tool_calls(tool_calls, trajectory)
+
+    def _stamp_turn_runs_left(self, trajectory: Trajectory) -> None:
+        """Whether a scratchpad run is left as the turn's calls begin, and how many programs had run by then: what a
+        failed submission in the turn is judged by (:data:`FAILED_SUBMISSION_RUNS_LEFT_KEY`,
+        :data:`FAILED_SUBMISSION_RAN_KEY`)."""
+        trajectory.info[TURN_RUNS_LEFT_KEY] = self._tool_budget_exhausted(trajectory, self.test_tool_name) is None
+        trajectory.info[TURN_RUN_PROGRAMS_KEY] = len(trajectory.info.get(RUN_PROGRAMS_KEY, []))
+
+    @staticmethod
+    def _ran_as_submitted(code: str, language: str, info: dict[str, Any]) -> bool:
+        """Whether a program the scratchpad ran before this turn is the submitted one, comments, whitespace and
+        dropped output statements aside (:func:`sheds_only_output`)."""
+        submitted = normalized_program(code, language)
+        runs = info.get(RUN_PROGRAMS_KEY, [])
+        ran = runs[: info.get(TURN_RUN_PROGRAMS_KEY, len(runs))]
+        return any(program == submitted or sheds_only_output(program, submitted) for program in ran)
+
+    @staticmethod
+    def _unrun_failed_submission(info: dict[str, Any]) -> bool:
+        """Whether a failed graded submission was a program never run as submitted while a run was left."""
+        runs_left = info.get(FAILED_SUBMISSION_RUNS_LEFT_KEY, [])
+        ran = info.get(FAILED_SUBMISSION_RAN_KEY, [])
+        return any(left and not run for left, run in zip(runs_left, ran, strict=True))
 
     def _refuse_identical_resubmission(self, code: str, language: str, trajectory: Trajectory) -> None:
         """Refuse a program identical to one this episode already graded (:func:`normalized_program`) unrun, the
@@ -661,6 +744,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             self.grading_spec,
             checker=trajectory.info.get("_checker"),
             time_limit=trajectory.info.get("_time_limit"),
+            stated_tolerance=trajectory.info.get("_stated_tolerance"),
             language=language,
         )
 
@@ -669,10 +753,13 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         prompt: str | list[dict[str, str]],
         context: dict[str, Any] | None = None,
     ) -> Trajectory:
-        """Build the base trajectory, then store the problem's grading data via the hook; a payload
-        carrying no time limit gets the one each test runs under stated in the task message."""
+        """Build the base trajectory, then store the problem's grading data via the hook and the float
+        tolerance its statement states; a payload carrying no time limit gets the one each test runs under
+        stated in the task message."""
         traj = super()._reset_single(prompt, context)
         self._store_problem_data(traj, context or {})
+        statement = prompt if isinstance(prompt, str) else "\n".join(str(m.get("content") or "") for m in prompt)
+        traj.info["_stated_tolerance"] = stated_float_tolerance(statement)
         if traj.info["_time_limit"] is None:
             limits = {name: self.grading_spec.time_limit_for(name, None) for name in self.languages}
             if len(set(limits.values())) == 1:
@@ -799,7 +886,10 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # Gated on graded_content, not submission_count: _submit bumps the count before grading.
         submission = self.submission_reward if graded_content else 0.0
         resubmission = -self.resubmission_penalty * max(0, self._submissions(trajectory) - 1)
-        return EpisodeGrade(objective, {"submission": submission, "resubmission": resubmission})
+        unrun = -self.unrun_submission_penalty if not objective and info.get(UNRUN_FAILED_SUBMISSION_KEY) else 0.0
+        return EpisodeGrade(
+            objective, {"submission": submission, "resubmission": resubmission, "unrun_submission": unrun}
+        )
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:
         """What the episode delivered: the last submitted program as a fenced block, or nothing — a
@@ -812,6 +902,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     def _scoring_reference(self, trajectory: Trajectory) -> None:
         """The hidden tests are the grader's payload, never a reference a judge reads."""
         return None
+
+    def _episode_facts(self, trajectory: Trajectory) -> frozenset[str]:
+        """:data:`FAILED_WITH_NO_RUNS_LEFT` when the episode failed graded submissions and every one of them
+        came with the scratchpad budget spent."""
+        runs_left = trajectory.info.get(FAILED_SUBMISSION_RUNS_LEFT_KEY, [])
+        return frozenset({FAILED_WITH_NO_RUNS_LEFT}) if runs_left and not any(runs_left) else frozenset()
 
     def rollout_metrics(self, trajectory: Trajectory) -> dict[str, float]:
         """CodeContests diagnostics: task outcome, submission behavior, and the reward decomposition."""
@@ -829,6 +925,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         metrics["episode/submission_rate"] = 1.0 if submissions > 0 else 0.0
         metrics["episode/test_calls"] = float(self._test_calls(trajectory))
         metrics["episode/identical_resubmissions"] = float(info.get(IDENTICAL_RESUBMISSIONS_KEY, 0))
+        metrics["episode/unrun_failed_submission"] = 1.0 if info.get(UNRUN_FAILED_SUBMISSION_KEY) else 0.0
         if submissions > 0:
             # Mean over submitting episodes: the share that ran the scratchpad before submitting.
             metrics["episode/tested_before_submission"] = 1.0 if info.get("tested_before_submission") else 0.0

@@ -6,8 +6,8 @@ a compile error as the compiler's first diagnostics (the last stderr line of g++
 a crash as its signal and the traceback's tail, ahead of any stdout (the protocol cuts a long
 observation from the end), and a program run under the same limits its graded tests get — the
 problem's time limit, and a stack as large as the memory limit. A run given no input says so and is booked like
-any other run; a turn of calls refused unrun is flagged untrainable, so the next turn retries on the recovery
-reserve. Every program here really compiles and runs on the local backend.
+any other run; a turn of calls refused unrun is flagged untrainable. Every program here really compiles and runs
+on the local backend.
 
 Run: python tests/cpu/environments/test_scratchpad_feedback.py  (or pytest)
 """
@@ -27,7 +27,6 @@ from src.environments.envs.tasks.coding.code_contests import (
     CodeContestsEnvironment,
 )
 from src.environments.envs.tasks.coding.grading import run_solution_against_tests
-from src.environments.episode import recovering_turn
 from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.repl import run_code_via_sandbox
@@ -99,8 +98,12 @@ def _turn(env, ids, *calls: tuple[str, dict]):
     return env.step(ids, [""], [{"finish_reason": "stop", "tool_calls": tool_calls}])[0]
 
 
+def _last_turn(traj):
+    return next(m for m in reversed(traj.messages) if m.role == "assistant")
+
+
 def _last_turn_flagged(traj) -> bool:
-    return next(m for m in reversed(traj.messages) if m.role == "assistant").calls_rejected
+    return _last_turn(traj).calls_rejected
 
 
 def _scratchpad(env, traj, **arguments):
@@ -292,7 +295,7 @@ def test_a_silent_input_less_run_is_an_ordinary_run():
     assert step.reward == pytest.approx(0.05 + 0.05)
     assert (traj.info["total_tool_calls"], traj.info["successful_tool_calls"]) == (2, 2)
     assert env._test_calls(traj) == 2
-    assert not _last_turn_flagged(traj) and not recovering_turn(traj)
+    assert not _last_turn_flagged(traj) and not _last_turn(traj).untrainable
 
 
 def test_output_computed_from_no_input_says_it_got_none():
@@ -334,18 +337,18 @@ def test_every_input_less_run_spends_its_run_and_carries_the_note():
 
 def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers():
     """A ``run_code`` call missing the ``language`` a language list requires is refused at binding, unrun and
-    unspent: a turn of nothing else is flagged untrainable and the next turn runs on the recovery reserve, the
-    reply and the tool-error price as they were. Beside a call that ran, it is not."""
+    unspent: a turn of nothing else is flagged untrainable, the reply and the tool-error price as they were.
+    Beside a call that ran, it is not."""
     env = _env(language=["python", "cpp"], tool_error_penalty=0.05)
     ids = _reset(env)
     step = _turn(env, ids, ("run_code", {"code": "print(1)", "stdin": "1\n"}))
     traj = step.trajectory
     assert traj.messages[-1].content == "Error: run_code: missing a required argument: 'language'"
-    assert _last_turn_flagged(traj) and recovering_turn(traj)
+    assert _last_turn_flagged(traj) and _last_turn(traj).untrainable
     assert step.reward == pytest.approx(-0.05) and env._test_calls(traj) == 0
     step = _turn(env, ids, ("run_code", {"code": "print(1)", "stdin": "1\n", "language": "python"}))
     assert step.trajectory.messages[-1].content == "1"
-    assert not _last_turn_flagged(step.trajectory) and not recovering_turn(step.trajectory)
+    assert not _last_turn_flagged(step.trajectory) and not _last_turn(step.trajectory).untrainable
     step = _turn(
         env,
         ids,
@@ -356,8 +359,8 @@ def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers():
 
 
 def test_a_turn_of_only_scratchpad_calls_past_the_budget_is_flagged():
-    """A scratchpad call past ``max_test_calls`` is refused unrun: a turn of nothing else is flagged and the next
-    turn recovers, the refusal text unchanged; beside a submission it is not."""
+    """A scratchpad call past ``max_test_calls`` is refused unrun: a turn of nothing else is flagged untrainable,
+    the refusal text unchanged; beside a submission it is not."""
     env = _env(language="python", max_test_calls=1)
     ids = _reset(env)
     assert not _last_turn_flagged(
@@ -366,7 +369,7 @@ def test_a_turn_of_only_scratchpad_calls_past_the_budget_is_flagged():
     step = _turn(env, ids, (env.test_tool_name, {"code": "print(2)", "stdin": "1\n"}))
     traj = step.trajectory
     assert traj.messages[-1].content == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
-    assert _last_turn_flagged(traj) and recovering_turn(traj) and env._test_calls(traj) == 1
+    assert _last_turn_flagged(traj) and _last_turn(traj).untrainable and env._test_calls(traj) == 1
     step = _turn(
         env, ids, (env.test_tool_name, {"code": "print(3)", "stdin": "1\n"}), (SUBMIT_TOOL, {"code": "print(2)"})
     )

@@ -20,7 +20,11 @@ import pytest
 
 from scripts.environments.inference.run_code_contests import parse_language_flag, refuse_flag_owned_env_kwargs
 from src.environments.base import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY, TOOL_CALL_COUNTS_KEY
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment, evident_language
+from src.environments.envs.tasks.coding.code_contests import (
+    SUBMISSION_AFTER_ACCEPT_REPLY,
+    CodeContestsEnvironment,
+    evident_language,
+)
 from src.environments.envs.tasks.coding.grading import GradingSpec, grade_solution
 from src.environments.sandbox.base import LANGUAGES, SandboxExecutor, SandboxResult
 from src.environments.sandbox.local import LocalSubprocessSandbox
@@ -235,9 +239,10 @@ def test_the_prompt_states_the_compiled_multiplier_only_when_it_is_not_one_and_t
 
 
 def test_a_program_sent_with_the_wrong_language_is_refused_without_spending_the_call():
-    """C++ sent as python, and Python sent as cpp, are refused before they run and returned to the
-    budget unpriced: neither scratchpad run nor submission counts, the submission cap and its price
-    stay whole, nothing is recorded as graded, and the language slice is untouched."""
+    """C++ sent as python, and Python sent as cpp, are refused before they run like any refusal: each pays
+    the tool-error price and flags its turn untrainable, neither scratchpad run nor submission counts, the
+    submission cap and its price stay whole, nothing is recorded as graded, and the language slice is
+    untouched."""
     sandbox = _RecordingSandbox()
     env = _env(
         sandbox=sandbox,
@@ -259,14 +264,16 @@ def test_a_program_sent_with_the_wrong_language_is_refused_without_spending_the_
     to_cpp = 'this looks like cpp code sent with language "python"; send it again with language "cpp".'
     to_py = 'this looks like python code sent with language "cpp"; send it again with language "python".'
     assert [m.content for m in traj.messages if m.role == "tool"] == [
-        f"Not run: {to_cpp} No scratchpad run was spent.",
-        f"Not graded: {to_cpp} No submission was spent.",
-        f"Not run: {to_py} No scratchpad run was spent.",
-        f"Not graded: {to_py} No submission was spent.",
+        f"Error: Not run: {to_cpp} No scratchpad run was spent.",
+        f"Error: Not graded: {to_cpp} No submission was spent.",
+        f"Error: Not run: {to_py} No scratchpad run was spent.",
+        f"Error: Not graded: {to_py} No submission was spent.",
     ]
     assert sandbox.runs == [], "a refused program never reaches the sandbox"
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"run_code": 0, "submit_solution": 0}
-    assert step.reward == 0.0 and not step.done, "neither paid as a success nor charged as an error"
+    assert step.reward == pytest.approx(-4 * 0.5) and not step.done, "each refusal charged as an error"
+    (turn,) = [m for m in traj.messages if m.role == "assistant"]
+    assert turn.calls_rejected and turn.untrainable, "a turn of refusals alone is never rewarded"
     assert (traj.info["total_tool_calls"], traj.info["successful_tool_calls"]) == (4, 0)
     assert EPISODE_SLICES_KEY not in traj.info and "language_switches" not in traj.info
     for key in ("submission_result", "submission_language", "_submitted_code", "tested_before_submission"):
@@ -278,8 +285,25 @@ def test_a_program_sent_with_the_wrong_language_is_refused_without_spending_the_
     assert len(sandbox.runs) == 2 and traj.done, "both graded submissions of the cap were still there"
     components = traj.info[REWARD_COMPONENTS_KEY]
     assert components["reward/resubmission"] == pytest.approx(-0.2), "only the one real resubmission is priced"
-    assert components["reward/turn_shaping"] == pytest.approx(0.1), "the two graded submissions alone are paid"
+    assert components["reward/turn_shaping"] == pytest.approx(-4 * 0.5 + 2 * 0.05), (
+        "the four refusals charged, the two graded submissions paid"
+    )
     assert traj.info["tested_before_submission"] is False
+
+
+def test_a_mislabelled_call_beside_the_accept_takes_the_free_post_accept_reply():
+    """After the accept the task has ended: a later submission in the turn is returned unpriced whatever its
+    label, never refused as mislabelled, which would charge it and ask for a resend."""
+    env = _env(sandbox=_RecordingSandbox(), max_submissions=3, tool_error_penalty=0.5)
+    ids, _ = env.reset(["a+b"], [_ADD])
+    calls = [
+        _call("1", "submit_solution", code=_PY_ADD, language="python"),
+        _call("2", "submit_solution", code=_CPP_SOURCE, language="python"),
+    ]
+    (step,) = env.step(ids, [""], [{"tool_calls": calls}])
+    assert step.done and step.trajectory.info["submission_result"].startswith("Passed 1/1")
+    assert step.trajectory.messages[-1].content == SUBMISSION_AFTER_ACCEPT_REPLY
+    assert step.reward == 0.0, "the refund, not the error price"
 
 
 def test_a_program_quoting_the_other_language_keeps_its_label():

@@ -42,10 +42,15 @@ from src.environments.envs.tasks.coding.datasets import (
     pack_livecodebench_verification,
 )
 from src.environments.envs.tasks.coding.grading import (
+    DEFAULT_FLOAT_TOLERANCE,
+    FloatTolerance,
     GradingSpec,
     compare_tokens,
+    float_tolerance,
     grade_solution,
     run_solution_against_tests,
+    select_verdict,
+    stated_float_tolerance,
 )
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.environments.sandbox.base import SandboxExecutor, SandboxResult
@@ -85,6 +90,69 @@ def test_compare_tokens_float_tolerance():
     assert not compare_tokens("0.333", "0.444")
     assert not compare_tokens("1.0 2.0", "1.0 2.5")
     assert not compare_tokens("5", "5.0000001")  # integer-expected tokens stay byte-exact
+
+
+@pytest.mark.parametrize(
+    ("statement", "stated"),
+    [
+        (
+            "Your answer is considered correct if its absolute or relative error does not exceed 10^{-4}.",
+            FloatTolerance(absolute=1e-4, relative=1e-4),
+        ),
+        (
+            "The answer is accepted if the absolute or relative error doesn't exceed 10 - 6.",
+            FloatTolerance(absolute=1e-6, relative=1e-6),
+        ),
+        (
+            "Print the area; an error of at most $$$10^{-9}$$$ is allowed.",
+            FloatTolerance(absolute=1e-9, relative=1e-9),
+        ),
+        ("Answers within an absolute error of 1e-3 are accepted.", FloatTolerance(absolute=1e-3, relative=None)),
+        ("Output the probability with a precision of 0.0001.", FloatTolerance(absolute=1e-4, relative=1e-4)),
+        (
+            "the relative error must not exceed 10^-8 (i.e., |a-o|/a ≤ 10^−8)",
+            FloatTolerance(absolute=None, relative=1e-8),
+        ),
+        (
+            "An absolute error of 10^{-2} or a relative error of 10^{-6} is accepted.",
+            FloatTolerance(absolute=1e-2, relative=1e-6),
+        ),
+        (
+            "Your answer is correct if its absolute or relative error does not exceed 10^{-6}: if a is yours and b the "
+            "jury's, it is accepted when |a - b| / max(1, |b|) ≤ 10^{-6}.",
+            FloatTolerance(absolute=1e-6, relative=1e-6),
+        ),
+        ("1 ≤ n ≤ 10^5. Print the answer modulo 10^9+7.", None),
+        ("The error for the first measurement is 2 × |10 - 3| = 14, an error of 17 in total.", None),
+        ("Each value lies in [-10^{-3}, 10^3]. Print the number of pairs.", None),
+    ],
+)
+def test_stated_float_tolerance_reads_the_spellings_statements_carry(statement, stated):
+    assert stated_float_tolerance(statement) == stated
+
+
+def test_a_stated_tolerance_loosens_the_float_comparison_but_never_tightens_it():
+    # A reference printed to four places: within the statement's 1e-4 a correct answer passes, under 1e-6 it fails.
+    both = FloatTolerance(absolute=1e-4, relative=1e-4)
+    assert not compare_tokens("0.1235", "0.12345678")
+    assert compare_tokens("0.1235", "0.12345678", tolerance=float_tolerance(both))
+    tight = FloatTolerance(absolute=1e-9, relative=None)
+    assert float_tolerance(tight) == float_tolerance(None) == DEFAULT_FLOAT_TOLERANCE
+    verdict = select_verdict(None, "tokens", StubSandbox(), stated_tolerance=both)
+    assert verdict("", "0.1235", "0.12345678") and not verdict("", "0.1235", "0.1245")
+    assert not select_verdict(None, "tokens", StubSandbox())("", "0.1235", "0.12345678")
+
+
+def test_each_stated_bound_holds_in_its_own_kind():
+    """An absolute and a relative bound accept an error within either, each in its own kind: "absolute 10^-2 or
+    relative 10^-6" allows 1 on an answer of 10^6, not 10^4, and 10^-2 on an answer below 1."""
+    stated = stated_float_tolerance("An absolute error of 10^{-2} or a relative error of 10^{-6} is accepted.")
+    verdict = select_verdict(None, "tokens", StubSandbox(), stated_tolerance=stated)
+    assert verdict("", "1000000.0", "1000000.9") and not verdict("", "1000000.0", "1000001.5")
+    assert verdict("", "0.5", "0.509") and not verdict("", "0.5", "0.52")
+    # A single kind keeps it: an absolute bound never widens with the answer's magnitude.
+    absolute = select_verdict(None, "tokens", StubSandbox(), stated_tolerance=FloatTolerance(1e-3, None))
+    assert absolute("", "2.5", "2.5009") and not absolute("", "2500.0", "2500.5")
 
 
 # Grading (token + checker + TLE) through the sandbox

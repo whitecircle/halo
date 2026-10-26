@@ -235,6 +235,26 @@ def test_flag_fraction_weighs_each_process_check():
     assert only_logged.flag_fraction({"logged": True}) == 0.0
 
 
+def test_a_veto_check_given_a_weight_also_prices():
+    """Weighted, a veto check is priced like a process flag on top of its gate: each fired check costs its own
+    share of the term weight, so the prices add."""
+    term = JudgeTerm(
+        name="gate",
+        weight=-0.7,
+        checks=(
+            Check(name="guess", description="d", veto=True, weight=3.0),
+            Check(name="probe", description="d", veto=True, weight=2.0),
+            Check(name="gate_only", description="d", veto=True),
+            Check(name="wasted", description="d"),
+            Check(name="untested", description="d"),
+        ),
+    )
+    assert [check.share for check in term.checks] == [3.0, 2.0, 0.0, 1.0, 1.0]
+    assert term.price(term.flag_fraction({"guess": True})) == pytest.approx(-0.3)
+    assert term.price(term.flag_fraction({"guess": True, "untested": True})) == pytest.approx(-0.4)
+    assert term.flag_fraction({"gate_only": True}) == 0.0
+
+
 def test_a_check_weight_parses_from_config():
     checks = [*CHECKS, {"name": "logged", "description": "d", "weight": 0}]
     (term,) = parse_reward_terms([{"source": "judge", "name": "gate", "checks": checks, "weight": -0.1}], SOURCES)
@@ -254,7 +274,8 @@ def test_a_check_weight_parses_from_config():
         ({"name": "a", "description": "d", "weight": -1.0}, "weight must be >= 0"),
         ({"name": "a", "description": "d", "weight": float("nan")}, "weight must be a finite number"),
         ({"name": "a", "description": "d", "weight": True}, "weight must be a finite number"),
-        ({"name": "a", "description": "d", "veto": True, "weight": 1.0}, "takes no weight"),
+        ({"name": "a", "description": "d", "veto": True, "weight": -1.0}, "weight must be >= 0"),
+        ({"name": "a", "description": "d", "unless": " "}, "unless must be a non-blank string"),
     ],
 )
 def test_check_validation(kwargs, message):

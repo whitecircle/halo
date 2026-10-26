@@ -71,6 +71,21 @@ def resolve_expert_ffn_width(cfg) -> int | None:
     return int(value) if value else None
 
 
+def require_router_aux_loss_coef(cfg) -> float:
+    """The ``router_aux_loss_coef`` a model that returned an ``aux_loss`` weighs it by, read where its head reads
+    it (the text config of a composite). Raises when undeclared: a stand-in weight would train a different
+    objective than the model's own forward."""
+    coef = get_config_field(cfg, "router_aux_loss_coef")
+    if coef is None:
+        raise ValueError(
+            f"The model returned an `aux_loss` but its config ({type(cfg).__name__}) declares no "
+            f"`router_aux_loss_coef`, so the trainer cannot weigh the router balancing term. Set "
+            f"router_aux_loss_coef on the model config (model_init_kwargs), or disable the aux loss "
+            f"(moe_balancing) for this family."
+        )
+    return float(coef)
+
+
 def has_routed_experts(cfg) -> bool:
     """Whether the config describes a MoE model, at either level of a composite config."""
     return resolve_expert_count(cfg) > 0

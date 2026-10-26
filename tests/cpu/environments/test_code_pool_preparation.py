@@ -13,6 +13,7 @@ import dataclasses
 import json
 import logging
 import pickle
+import re
 import subprocess
 import sys
 import zlib
@@ -34,9 +35,11 @@ from scripts.environments.preparation.prepare_code_dataset import (
     band_of,
     carve_holdout,
     checker_is_sound,
+    drop_listed_rows,
     excluded_by,
     load_exclusions,
     load_tests_table,
+    suite_rejects_constants,
 )
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from src.environments.envs.tasks.coding.datasets import (
@@ -54,6 +57,7 @@ from src.environments.envs.tasks.coding.datasets import (
     pack_codeforces_verification,
     pack_hardtests_verification,
 )
+from tests.common.repo import REPO_ROOT
 
 _SUITE = json.dumps([{"input": "1 2\n", "output": "3\n"}, {"input": "5 5\n", "output": "10\n"}])
 
@@ -238,6 +242,44 @@ def test_checker_soundness_gate_keeps_real_judges_and_drops_broken_ones():
     assert not checker_is_sound(_prepared_row(raising_judge))
 
 
+def _suite_row(outputs, checker=None):
+    tests = [{"input": f"{i}\n", "output": f"{out}\n"} for i, out in enumerate(outputs)]
+    return {"answer": json.dumps({"tests": tests, "checker": checker, "time_limit": 1.0})}
+
+
+def test_a_checker_that_rejects_any_test_s_own_reference_is_unsound():
+    # Accepts the first test's reference only: the second test fails every correct solution.
+    first_only = "import sys\nprint(1 if open(sys.argv[3]).read().strip() == 'A' else 0)\n"
+    assert not checker_is_sound(_suite_row(["A", "B"], first_only))
+    same = "import sys\nprint(1 if open(sys.argv[3]).read().split() == open(sys.argv[2]).read().split() else 0)\n"
+    assert checker_is_sound(_suite_row(["A", "B"], same))
+
+
+def test_a_suite_any_constant_answer_passes_is_rejected():
+    assert suite_rejects_constants(_suite_row(["3", "NO", "7"]))
+    assert not suite_rejects_constants(_suite_row(["NO", "NO"])), "every expected answer is the same constant"
+    # A checker that also takes -1 wherever the reference says otherwise pays a program that prints -1.
+    lax = "import sys\ngot = open(sys.argv[3]).read().split()\nprint(1 if got == ['-1'] or got == open(sys.argv[2]).read().split() else 0)\n"
+    assert not suite_rejects_constants(_suite_row(["3", "5"], lax))
+    strict = "import sys\nprint(1 if open(sys.argv[3]).read().split() == open(sys.argv[2]).read().split() else 0)\n"
+    assert suite_rejects_constants(_suite_row(["3", "5"], strict))
+
+
+def test_listed_training_rows_are_dropped_by_id_and_prefix(tmp_path):
+    listing = tmp_path / "drop.txt"
+    listing.write_text("# audited\ncodeforces_1063_d\nuva_*\n")
+    split = Dataset.from_list([{"id": i} for i in ("codeforces_1063_d", "codeforces_1064_f", "uva_1496", "luogu_p1")])
+    assert drop_listed_rows(split, str(listing))["id"] == ["codeforces_1064_f", "luogu_p1"]
+
+
+def test_the_shipped_training_exclusions_parse_and_hold_no_held_out_spelling():
+    exact, prefixes = load_exclusions(
+        str(REPO_ROOT / "scripts/environments/preparation/hardtests_train_exclusions.txt")
+    )
+    assert len(exact) == 144 and not prefixes
+    assert all(re.fullmatch(r"[a-z0-9]+_[a-z0-9_]+", problem) for problem in exact)
+
+
 def test_exclusions_match_exact_ids_and_prefixes(tmp_path):
     listing = tmp_path / "exclude.txt"
     listing.write_text("codeforces_2063_a\ncodeforces_1873_*\n\n# comment\n")
@@ -419,7 +461,9 @@ def _prepare(monkeypatch, tmp_path, source: DatasetDict, name: str, *flags: str)
     monkeypatch.setattr(prepare_code_dataset, "disable_caching", lambda: None)
     out = tmp_path / name
     argv = ["prepare_code_dataset.py", "--adapter", "codeforces", "--dataset", "src", "--output_dir", str(out)]
-    monkeypatch.setattr(sys, "argv", [*argv, "--num_proc", "1", "--no-verify_checkers", *flags])
+    # The filters these tests are not about stay off: the fixtures' samples are constant answers.
+    filters_off = ["--no-verify_checkers", "--no-reject_constant_answers"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--num_proc", "1", *filters_off, *flags])
     prepare_code_dataset.main()
     return load_from_disk(str(out))
 

@@ -58,6 +58,13 @@ padding. It is the default choice for text SFT and requires an explicit `max_len
 With `per_device_train_batch_size` N > 1, the packed rows merge into one row of up to N × `max_length`
 tokens, so that product is the memory bound.
 
+**Tree packing** (`tree_packing: true` with `tree_share_markers`) goes further when many rows repeat one
+long prefix, such as several questions over one document: the prefix is stored once and each row
+branches after it, attending only the prefix and itself. Every example trains exactly as it does packed
+flat, at fewer tokens. It runs on GPT-OSS, Qwen3 and Qwen3.5/3.6 under FSDP2 and expert parallelism, and
+is refused under context, tensor and pipeline parallelism
+([Tree Packing](../../agent-docs/optimization/tree-packing.md) ↗).
+
 **Padding-free** (`padding_free: true`) flattens a batch into one variable-length sequence instead. It
 needs a varlen Flash Attention kernel and cannot be combined with packing. Context parallelism refuses
 both, as do a vision run (images cannot be packed) and DeepSeek-V4, whose compressed-KV layers cannot

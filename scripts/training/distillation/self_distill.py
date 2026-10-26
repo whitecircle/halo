@@ -32,6 +32,7 @@ from src.config_validation import reject_non_default_args
 from src.configs.distillation import SelfDistillScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
+from src.configs.sft import TREE_PACKING_FIELDS
 from src.data.collators.self_distill import (
     SelfDistillTextCollator,
     audit_self_distill_row,
@@ -264,6 +265,8 @@ def main():
     # "generate" split and self-distillation keeps the dataset raw. num_eval_examples rides along on
     # the default-comparing form, since its own default (50) is truthy.
     reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
+    # Tree packing lives in the SFT script's data path; the collators here pack nothing as trees.
+    reject_non_default_args("Self-distillation", args, *TREE_PACKING_FIELDS)
 
     # Both only feed the reference term, which is not built at all below this coefficient.
     if args.reference_kl_coef <= 0:

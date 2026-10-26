@@ -8,6 +8,7 @@ primitives share the ``(test_input, expected, actual) -> bool`` signature.
 """
 
 import logging
+import re
 import textwrap
 import time
 import warnings
@@ -15,6 +16,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
+from functools import partial
 from math import isfinite
 from typing import Any, NamedTuple
 
@@ -35,7 +37,27 @@ logger = logging.getLogger(__name__)
 
 VerdictFn = Callable[[str, str, str], bool]
 
-_FLOAT_TOL = 1e-6
+
+class FloatTolerance(NamedTuple):
+    """How far a float token may stray from the expected value: within ``absolute`` of it or within ``relative`` of
+    its magnitude, each bound in its own kind; ``None`` where a statement states no bound of that kind."""
+
+    absolute: float | None
+    relative: float | None
+
+
+DEFAULT_FLOAT_TOLERANCE = FloatTolerance(absolute=1e-6, relative=1e-6)
+# A tolerance a statement states ("absolute or relative error does not exceed 10^{-4}"), in the spellings the
+# scraped statements carry: 10^{-k}, 10^-k, 10^(-k), 1e-k, 0.0…01, and a lost superscript ("10 - k") only right
+# after a bound word, where "|10 - 3|" in a worked example cannot pass for one.
+_STATED_TOLERANCE = re.compile(
+    r"10\s*\^\s*[{(]?\s*[-\u2212\u2013]\s*(\d{1,2})\s*[})]?(?!\d)"
+    r"|(?:exceeds?|than|of|most|within|\u2264|<=|<)\s+10\s*[-\u2212\u2013]\s*(\d{1,2})(?!\d)"
+    r"|\b1\s*[eE]\s*[-\u2212\u2013]\s*(\d{1,2})\b|\b0\.(0{1,11})1\b"
+)
+_TOLERANCE_CONTEXT = re.compile(r"\berror\b|\bprecision\b|\btolerance\b", re.IGNORECASE)
+_TOLERANCE_CONTEXT_CHARS = 200
+_TOLERANCE_KINDS = re.compile(r"\b(absolute|relative)\b", re.IGNORECASE)
 
 # Characters of stdout a test accepts before OUTPUT LIMIT EXCEEDED, raised per test to a multiple of that
 # test's own expected output: a fixed cap fails every correct solution whose answer is larger than it.
@@ -89,11 +111,56 @@ class _Failure:
         return f"Tests {named}{f' and {rest} more' if rest > 0 else ''}: {self.body}"
 
 
-def _tokens_equal(expected: str, actual: str) -> bool:
+def stated_float_tolerance(statement: str) -> FloatTolerance | None:
+    """The float tolerance a problem statement states, ``None`` when it states none.
+
+    Each ``10^-k`` within :data:`_TOLERANCE_CONTEXT_CHARS` of an "error", "precision" or "tolerance" bounds the
+    kinds ("absolute", "relative") named between it and the previous one, the loosest bound per kind. A bound that
+    names no kind bounds both, and only in a statement where no bound names one: "i.e., |a-o|/a <= 10^-8" after a
+    stated relative error restates it.
+    """
+    named: dict[str, float] = {}
+    unnamed = None
+    previous_end = 0
+    for match in _STATED_TOLERANCE.finditer(statement):
+        lead = statement[max(previous_end, match.start() - _TOLERANCE_CONTEXT_CHARS) : match.start()]
+        previous_end = match.end()
+        window = statement[max(0, match.start() - _TOLERANCE_CONTEXT_CHARS) : match.end() + _TOLERANCE_CONTEXT_CHARS]
+        if not _TOLERANCE_CONTEXT.search(window):
+            continue
+        power, lost_power, e_power, zeros = match.groups()
+        digits = power or lost_power or e_power
+        exponent = int(digits) if digits else len(zeros) + 1
+        if not 1 <= exponent <= 12:
+            continue
+        bound = 10.0**-exponent
+        kinds = {kind.lower() for kind in _TOLERANCE_KINDS.findall(lead)}
+        if not kinds:
+            unnamed = max(unnamed or 0.0, bound)
+        for kind in kinds:
+            named[kind] = max(named.get(kind, 0.0), bound)
+    if named:
+        return FloatTolerance(absolute=named.get("absolute"), relative=named.get("relative"))
+    return None if unnamed is None else FloatTolerance(absolute=unnamed, relative=unnamed)
+
+
+def float_tolerance(stated: FloatTolerance | None) -> FloatTolerance:
+    """The tolerance a float token is compared under: per kind, a stated bound where looser than the default, never
+    tighter, since the expected outputs are a reference solution's printed digits, not exact values."""
+    if stated is None:
+        return DEFAULT_FLOAT_TOLERANCE
+    return FloatTolerance(
+        absolute=max(DEFAULT_FLOAT_TOLERANCE.absolute, stated.absolute or 0.0),
+        relative=max(DEFAULT_FLOAT_TOLERANCE.relative, stated.relative or 0.0),
+    )
+
+
+def _tokens_equal(expected: str, actual: str, tolerance: FloatTolerance = DEFAULT_FLOAT_TOLERANCE) -> bool:
     """Compare one output token, tolerant of float rounding.
 
     Exact match first; only when the *expected* token looks like a float (``.``/``e``/``E``) do both parse
-    as floats within :data:`_FLOAT_TOL` — so integer problems stay byte-exact (``5`` != ``5.0000001``).
+    as floats, equal within ``tolerance``'s absolute or its relative bound — so integer problems stay byte-exact
+    (``5`` != ``5.0000001``).
     """
     if expected == actual:
         return True
@@ -103,16 +170,17 @@ def _tokens_equal(expected: str, actual: str) -> bool:
         e, a = float(expected), float(actual)
     except ValueError:
         return False
-    return abs(e - a) <= _FLOAT_TOL * max(1.0, abs(e))
+    error = abs(e - a)
+    return error <= tolerance.absolute or error <= tolerance.relative * abs(e)
 
 
-def compare_tokens(expected: str, actual: str) -> bool:
-    """Codeforces token comparison: same sequence of whitespace tokens (case-sensitive, float-tolerant), so
-    line endings, trailing spaces and blank lines do not count."""
+def compare_tokens(expected: str, actual: str, tolerance: FloatTolerance = DEFAULT_FLOAT_TOLERANCE) -> bool:
+    """Codeforces token comparison: same sequence of whitespace tokens (case-sensitive, float-tolerant within
+    ``tolerance``), so line endings, trailing spaces and blank lines do not count."""
     et, at = expected.split(), actual.split()
     if len(et) != len(at):
         return False
-    return all(_tokens_equal(e, a) for e, a in zip(et, at, strict=False))
+    return all(_tokens_equal(e, a, tolerance) for e, a in zip(et, at, strict=False))
 
 
 def _lf_lines(text: str) -> str:
@@ -327,7 +395,7 @@ def run_solution_against_tests(
 
     ``max_grading_seconds`` bounds one grade's total wall clock, since tests run sequentially and a
     several-hundred-test problem would otherwise stall the whole rollout round. It is checked between
-    tests (hard bound: the budget plus one per-test timeout) and at least one test always runs. A
+    tests (hard bound: the budget plus one per-test timeout and its launch) and at least one test always runs. A
     budget stop keeps the FULL pool as the denominator, so a solution too slow to reach its remaining
     tests cannot outscore one that ran them all — size the budget to the pool.
     """
@@ -470,9 +538,12 @@ def run_solution_against_tests(
     return GradeResult(passed, total, "\n".join([summary, *details]), ran_ok, graded, infra_errors, budget_hit)
 
 
-def select_verdict(checker: str | None, comparison: str, sandbox: SandboxExecutor) -> VerdictFn:
+def select_verdict(
+    checker: str | None, comparison: str, sandbox: SandboxExecutor, *, stated_tolerance: FloatTolerance | None = None
+) -> VerdictFn:
     """Pick the per-test verdict: a special-judge ``checker`` if given (always wins), else ``comparison``
-    (``"tokens"`` = whitespace-token equality, ``"exact"`` = trimmed byte equality).
+    (``"tokens"`` = whitespace-token equality, floats within :func:`float_tolerance` of ``stated_tolerance``;
+    ``"exact"`` = trimmed byte equality).
 
     The checker runs at the infra default timeout, never the solution's clamped per-test limit: a
     tight C++-tuned limit must TLE the solution, not the trusted judge grading it."""
@@ -480,7 +551,10 @@ def select_verdict(checker: str | None, comparison: str, sandbox: SandboxExecuto
         return CheckerVerdict(checker, sandbox, timeout=SANDBOX_DEFAULT_TIMEOUT)
     if comparison not in OUTPUT_COMPARATORS:
         raise ValueError(f"unknown output comparison {comparison!r} (expected one of {list(OUTPUT_COMPARATORS)})")
-    return as_verdict(OUTPUT_COMPARATORS[comparison])
+    comparator = OUTPUT_COMPARATORS[comparison]
+    if comparison == "tokens":
+        comparator = partial(comparator, tolerance=float_tolerance(stated_tolerance))
+    return as_verdict(comparator)
 
 
 @dataclass(frozen=True)
@@ -489,8 +563,8 @@ class GradingSpec:
 
     Built once by the environment and handed to every :func:`grade_solution` call, so the offline
     re-grader reproduces a run's verdicts by taking the same object rather than re-threading each
-    knob and silently defaulting one it forgot. The two per-problem facts (``checker``,
-    ``time_limit``) come from the problem payload and stay arguments.
+    knob and silently defaulting one it forgot. The per-problem facts (``checker``, ``time_limit``, and the
+    statement's ``stated_tolerance``) come from the problem and stay arguments.
 
     :meth:`to_meta` / :meth:`with_meta` carry that same contract across a trajectory dump, derived
     from the field list so a field added here reaches the re-grade without a second edit.
@@ -579,6 +653,7 @@ def grade_solution(
     *,
     checker: str | None = None,
     time_limit: float | None = None,
+    stated_tolerance: FloatTolerance | None = None,
     language: str | None = None,
 ) -> GradeResult:
     """Grade ``code`` against ``tests`` -> :class:`GradeResult`; the single grading entry point.
@@ -586,6 +661,7 @@ def grade_solution(
     Selects the verdict via :func:`select_verdict` and runs every test at the limit
     :meth:`GradingSpec.time_limit_for` derives from the problem's ``time_limit``. ``spec.max_grading_seconds``
     bounds the total sequential grading cost per submission (see :func:`run_solution_against_tests`).
+    ``stated_tolerance`` is the float tolerance the problem's statement states (:func:`stated_float_tolerance`).
     ``language`` is the submission's own language when the run lets the model choose per submission; unset,
     the contract's ``spec.language`` applies.
     """
@@ -597,7 +673,7 @@ def grade_solution(
         max_output_size=spec.max_output_size,
         sandbox=spec.sandbox,
         language=language,
-        verdict_fn=select_verdict(checker, spec.comparison, spec.sandbox),
+        verdict_fn=select_verdict(checker, spec.comparison, spec.sandbox, stated_tolerance=stated_tolerance),
         stop_on_first_failure=spec.stop_on_first_failure,
         max_grading_seconds=spec.max_grading_seconds,
         verdict_detail=spec.verdict_detail,

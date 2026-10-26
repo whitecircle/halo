@@ -67,6 +67,8 @@ logger = logging.getLogger(__name__)
 
 # What a sound judge must reject: not a wrong answer to any problem, but no answer at all.
 _GARBAGE_OUTPUT = "\x00 garbage \x00\n"
+# Answers a sound suite fails on at least one test: one every test accepts pays the problem's reward for no work.
+CONSTANT_ANSWERS = ("0", "1", "-1", "YES", "NO", "Yes", "No", "IMPOSSIBLE", "Impossible", "")
 
 # Training stages on the Codeforces rating scale: ``--push_bands`` publishes one Hub config per band
 # over the pool's shared test split, and ``--holdout_per_band`` stratifies the hold-out by them (plus
@@ -124,6 +126,14 @@ def excluded_by(problem_id: str, exact: set[str], prefixes: tuple[str, ...]) -> 
     return problem_id in exact or problem_id.startswith(prefixes)
 
 
+def drop_listed_rows(split: Dataset, path: str, num_proc: int | None = None) -> Dataset:
+    """``split`` without the rows whose ``id`` the exclusion file at ``path`` lists (:func:`load_exclusions`)."""
+    exact, prefixes = load_exclusions(path)
+    kept = split.filter(lambda row: not excluded_by(str(row.get("id") or ""), exact, prefixes), num_proc=num_proc)
+    report_rejected_rows(len(split), len(kept), f"drop {path}")
+    return kept
+
+
 def load_tests_table(path: str) -> tuple[Dataset, dict[str, int]]:
     """A compacted tests table (parquet parts written by ``compact_code_tests.py``) and its key index.
     The table stays memory-mapped; only the keys are materialized. A key present twice means a
@@ -168,16 +178,33 @@ def _sandbox():
 
 
 def checker_is_sound(row: dict) -> bool:
-    """Whether a prepared row's special judge accepts the first test's own reference output and rejects
-    garbage. A judge failing either grades every answer the same way, so its problem is dropped. A sandbox
-    backend failure propagates as :class:`CheckerInfraError` instead of dropping rows."""
+    """Whether a prepared row's special judge accepts every test's own reference output and rejects garbage on
+    the first. A judge rejecting a reference fails every correct solution on that test, and one accepting garbage
+    grades every answer the same way, so its problem is dropped. A sandbox backend failure propagates as
+    :class:`CheckerInfraError` instead of dropping rows."""
     payload = json.loads(row[DEFAULT_ANSWER_FIELD])
     checker, tests = payload.get("checker"), payload.get("tests") or []
     if not checker or not tests:
         return True
     verdict = select_verdict(checker, "tokens", _sandbox())
-    test_input, expected = tests[0].get("input", ""), tests[0].get("output", "")
-    return verdict(test_input, expected, expected) and not verdict(test_input, expected, _GARBAGE_OUTPUT)
+    if verdict(tests[0].get("input", ""), tests[0].get("output", ""), _GARBAGE_OUTPUT):
+        return False
+    return all(verdict(test.get("input", ""), test.get("output", ""), test.get("output", "")) for test in tests)
+
+
+def suite_rejects_constants(row: dict) -> bool:
+    """Whether every answer of :data:`CONSTANT_ANSWERS` fails at least one of a prepared row's tests, under its
+    checker or the token comparison. A suite that accepts a constant everywhere (a lax checker, or a problem
+    whose every expected answer is the same) pays its reward to a program that never reads the input."""
+    payload = json.loads(row[DEFAULT_ANSWER_FIELD])
+    checker, tests = payload.get("checker"), payload.get("tests") or []
+    if not tests:
+        return True
+    verdict = select_verdict(checker, "tokens", _sandbox() if checker else None)
+    return not any(
+        all(verdict(test.get("input", ""), test.get("output", ""), answer + "\n") for test in tests)
+        for answer in CONSTANT_ANSWERS
+    )
 
 
 def band_of(rating: int | None) -> str | None:
@@ -273,6 +300,13 @@ def parse_args() -> argparse.Namespace:
         help="File of problem ids to drop (one per line; a trailing * excludes a prefix): held-out and benchmark ids.",
     )
     p.add_argument(
+        "--drop_train_keys",
+        default=None,
+        help="File of problem ids (same format as --exclude_keys) dropped from the train split only, after the "
+        "hold-out is carved, so the test split stays the same: known defects such as "
+        "scripts/environments/preparation/hardtests_train_exclusions.txt.",
+    )
+    p.add_argument(
         "--holdout_per_band",
         type=int,
         default=0,
@@ -289,7 +323,13 @@ def parse_args() -> argparse.Namespace:
         "--verify_checkers",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Drop problems whose special judge rejects its own reference output or accepts garbage (first test).",
+        help="Drop problems whose special judge rejects a test's own reference output, or accepts garbage on the first.",
+    )
+    p.add_argument(
+        "--reject_constant_answers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Drop problems whose suite accepts one constant answer (0, 1, -1, YES, NO, ...) on every test.",
     )
     p.add_argument(
         "--include_examples_only",
@@ -360,6 +400,10 @@ def main() -> None:
             sound = mapped.filter(checker_is_sound, num_proc=num_proc, desc=f"verify[{split}]")
             report_rejected_rows(len(mapped), len(sound), f"verify[{split}]")
             mapped = sound
+        if args.reject_constant_answers:
+            strict = mapped.filter(suite_rejects_constants, num_proc=num_proc, desc=f"constants[{split}]")
+            report_rejected_rows(len(mapped), len(strict), f"constants[{split}]")
+            mapped = strict
         prepared[split] = mapped
         logger.info("  %s: %d -> %d kept", split, len(ds[split]), len(mapped))
 
@@ -370,6 +414,11 @@ def main() -> None:
             raise SystemExit(f"--holdout_per_band needs a train split; the source ships {sorted(prepared)}")
         prepared["train"], prepared["test"] = carve_holdout(prepared["train"], args.holdout_per_band)
         logger.info("  held out %d rows as the test split", len(prepared["test"]))
+    if args.drop_train_keys:
+        if "train" not in prepared:
+            raise SystemExit(f"--drop_train_keys needs a train split; the source ships {sorted(prepared)}")
+        # After the hold-out is carved, so dropping training rows never redraws the test split.
+        prepared["train"] = drop_listed_rows(prepared["train"], args.drop_train_keys, num_proc)
 
     prepared = DatasetDict(prepared)
 

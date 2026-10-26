@@ -58,6 +58,8 @@ The architecture has no bias slot (the gate is a bare weight), so the bias is tr
 
 **LoRA** on the experts works under EP through native grouped adapters (`_init_expert_lora`). It is rejected under TP and EP+TP, and at `expert_tp_size > 1` (the replicated adapter half would take partial gradients) — attention LoRA still runs there.
 
+**Tree packing** — dense and MoE Qwen3 take `tree_packing: true` ([Tree Packing](../optimization/tree-packing.md)); a run pinned to `flash_attention_2` needs `tree_full_attention: gather`.
+
 **Configs** — `examples/sft/qwen3/qwen3-4b-ultrachat.yaml` (plain FSDP2; `-lora` / `-qlora` variants). `Qwen/Qwen3-235B-A22B-Instruct-2507` trains at `--expert_parallel_size=8`.
 
 ## Qwen3-VL

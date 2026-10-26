@@ -3,10 +3,10 @@
 
 Supervised fine-tuning for both language and vision-language models. The model class follows the
 checkpoint; the data path follows the run (``is_vlm_run``), so a natively-multimodal checkpoint
-trained on a text-only dataset takes the text path. That path supports packing, padding-free,
-pre-processed datasets, QLoRA and ``init_from_scratch``; the VLM path loads an
-``AutoModelForImageTextToText`` plus processor and uses the VLM collators (packing/padding-free do
-not apply to images).
+trained on a text-only dataset takes the text path. That path supports packing (flat, or as
+prefix-sharing trees under ``tree_packing``), padding-free, pre-processed datasets, QLoRA and
+``init_from_scratch``; the VLM path loads an ``AutoModelForImageTextToText`` plus processor and uses
+the VLM collators (packing/padding-free do not apply to images).
 
 Parallelism: every axis set ``ParallelismConfig`` admits (``SUPPORTED_AXIS_SETS``), CP and PP
 included. CP and PP are incompatible with padding-free and text-only: the CP wrapper raises on a
@@ -24,8 +24,9 @@ from src.callbacks.generate_examples import GenerateExamplesCallback
 from src.config_validation import reject_non_default_args
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
-from src.configs.sft import SFTScriptArguments
+from src.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
 from src.data.collators.factory import select_data_collator
+from src.data.collators.tree_packing import DataCollatorWithTreePacking
 from src.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
 from src.data.pipeline.preprocessed_metadata import load_preprocessed_metadata, validate_preprocessing_compatibility
 from src.data.pipeline.processing import (
@@ -34,8 +35,10 @@ from src.data.pipeline.processing import (
     resolve_map_num_proc,
 )
 from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
+from src.data.pipeline.tree_rows import prepare_tree_dataset
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
 from src.data.sources.loading import load_datasets_auto
+from src.data.spans import require_rendered_response_marker, resolve_eos_token_ids
 from src.entrypoints.data_setup import (
     disable_trl_dataset_prep,
     load_script_datasets,
@@ -58,8 +61,17 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
+from src.model_loading.dtype import resolve_training_dtype
+from src.model_loading.parallel.loader import resolve_policy_attn_implementation
 from src.model_loading.parallel.model_source import probe_checkpoint
 from src.model_loading.parallel.peft_setup import configure_adapter_training
+from src.model_loading.parallel.whole_model import warm_tree_attention_kernels
+from src.models.attention.gpt_oss_sinks import SinksPolicy
+from src.models.attention.tree import (
+    install_tree_attention,
+    reject_unsupported_tree_attention,
+    resolve_tree_plan_options,
+)
 from src.models.context_window import is_bounded_length
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.runtime.collectives import barrier
@@ -86,9 +98,53 @@ def _reject_empty_split(dataset, split: str, max_length: int) -> None:
         )
 
 
+def _reject_unsupported_tree_packing(args, sft_config, dist_args) -> None:
+    """Refuse the options tree packing cannot honour, before the model load.
+
+    A tree row that reaches the model without its attention plan runs as one causal sequence and its
+    branches attend each other, so every path that would drop or reshape the plan is closed here
+    instead of being left to produce a plausible loss.
+    """
+    row_parallelism = (dist_args.context_parallel_size, dist_args.pipeline_parallel_size)
+    requirements = {
+        "tree_share_markers (what the rows share is found up to one of them)": bool(args.tree_share_markers),
+        "packing: true (trees are packed rows)": sft_config.packing,
+        "packing_strategy: bfd (the other strategies cut a row below a tree)": sft_config.packing_strategy == "bfd",
+        "eval_packing left on (one collator serves both splits)": sft_config.eval_packing is not False,
+        "train_on_completions_only: true (a shared prefix carries no labels)": args.train_on_completions_only,
+        "no context or pipeline parallelism (each slices or re-collates the row)": max(row_parallelism) == 1,
+        "no tensor parallelism (unverified under tree attention)": dist_args.tensor_parallel_size == 1,
+        "torch_compile off (unverified under tree attention)": not sft_config.torch_compile,
+        "train_sinks off (the sink-gradient rescale is unverified under tree attention)": not args.train_sinks,
+    }
+    unmet = [requirement for requirement, met in requirements.items() if not met]
+    if unmet:
+        raise ValueError("tree_packing needs: " + "; ".join(unmet) + ".")
+
+
+def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_kwargs):
+    """Raw splits to tree rows; ``processor_kwargs`` are the render and map arguments of the flat path."""
+    require_rendered_response_marker(
+        tokenizer, args.assistant_message_template, args.train_on_completions_only, "tree packing"
+    )
+    return prepare_tree_dataset(
+        ds,
+        tokenizer,
+        sft_config.max_length,
+        share_markers=tuple(args.tree_share_markers),
+        share_requires=args.tree_share_requires,
+        min_shared_tokens=args.tree_min_shared_tokens,
+        eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config),
+        assistant_message_template=args.assistant_message_template,
+        train_on_last_assistant_only=args.train_on_last_assistant_only,
+        **processor_kwargs,
+    )
+
+
 def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, tokenizer, parallelism_config, hf_config):
-    """Text dataset path: preprocessed passthrough, or raw tokenize (+ packing); returns
-    (train, eval, generate, collator)."""
+    """Text dataset path: preprocessed passthrough, or raw tokenize (+ packing, flat or as trees);
+    returns (train, eval, generate, collator)."""
+    tree_packing = args.tree_packing
     if is_preprocessed:
         metadata = load_preprocessed_metadata(args.dataset)
         validate_preprocessing_compatibility(
@@ -105,13 +161,9 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
         train_dataset, eval_dataset, generate_dataset = ds["train"], ds["test"], None
     else:
         collator_packing = sft_config.packing
-        use_padding = not sft_config.padding_free
         cache_extras = text_render_kwargs(args)
         common = {"tokenizer": tokenizer, "max_length": sft_config.max_length, **cache_extras}
-        train_processor = create_llm_processor(**common, add_generation_prompt=False, use_padding=use_padding)
         generate_processor = create_llm_processor(**common, add_generation_prompt=True, use_padding=True)
-        # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
-        extra_columns = sorted(set(ds["train"].column_names))
         map_kwargs = {"num_proc": resolve_map_num_proc(sft_config.dataset_num_proc)}
         # Build the generation set from the raw test split before the train map remaps `ds`.
         generate_dataset = process_dataset_with_map_and_filter(
@@ -121,14 +173,21 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
             cache_key_extras={**cache_extras, "add_generation_prompt": True},
             **map_kwargs,
         )
-        ds = process_dataset_with_map_and_filter(
-            ds,
-            train_processor,
-            remove_columns=extra_columns,
-            desc="Processing dataset",
-            cache_key_extras={**cache_extras, "add_generation_prompt": False},
-            **map_kwargs,
-        )
+        if tree_packing:
+            ds = _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **cache_extras, **map_kwargs)
+        else:
+            train_processor = create_llm_processor(
+                **common, add_generation_prompt=False, use_padding=not sft_config.padding_free
+            )
+            ds = process_dataset_with_map_and_filter(
+                ds,
+                train_processor,
+                # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
+                remove_columns=sorted(set(ds["train"].column_names)),
+                desc="Processing dataset",
+                cache_key_extras={**cache_extras, "add_generation_prompt": False},
+                **map_kwargs,
+            )
         train_dataset, eval_dataset = ds["train"], ds["test"]
         _reject_empty_split(train_dataset, "training", sft_config.max_length)
         if sft_config.packing:
@@ -142,6 +201,12 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
                     eval_dataset, seq_length=sft_config.max_length, strategy=sft_config.packing_strategy, split="eval"
                 )
 
+    if tree_packing:
+        logger.info(f"Using DataCollatorWithTreePacking (full layers: {args.tree_full_attention})")
+        collator = DataCollatorWithTreePacking(
+            tokenizer, full_form=args.tree_full_attention, **resolve_tree_plan_options(hf_config)
+        )
+        return train_dataset, eval_dataset, generate_dataset, collator
     collator = select_data_collator(
         tokenizer=tokenizer,
         padding_free=sft_config.padding_free,
@@ -241,6 +306,10 @@ def main():
             "eval_packing=True packs nothing without packing=True: it can only turn packing off for the "
             "eval split. Set packing: true to pack both splits, or remove eval_packing."
         )
+    if args.tree_packing:
+        _reject_unsupported_tree_packing(args, sft_config, dist_args)
+    else:
+        reject_non_default_args("Halo SFT with tree_packing off", args, *TREE_PACKING_FIELDS)
     reject_trl_dataset_prep_args(
         "Halo SFT",
         sft_config,
@@ -269,6 +338,19 @@ def main():
         supports_init_from_scratch=True,
     )
     parallelism_config = context.parallelism_config
+    if args.tree_packing:
+        # Before any weight loads: the backend the loader will resolve for this config, dtype and GPU.
+        reject_unsupported_tree_attention(
+            checkpoint_config,
+            resolve_policy_attn_implementation(
+                checkpoint_config,
+                model_config.attn_implementation,
+                resolve_training_dtype(sft_config),
+                sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
+                init_from_scratch=dist_args.init_from_scratch,
+            ),
+            args.tree_full_attention,
+        )
 
     (ds, is_preprocessed), dataset_presharded = load_script_datasets(
         args,
@@ -279,6 +361,7 @@ def main():
     if is_preprocessed:
         # Both splits are used as baked, so eval_packing has nothing to decide.
         reject_non_default_args("Halo SFT on a pre-processed dataset", sft_config, "eval_packing")
+        reject_non_default_args("Halo SFT on a pre-processed dataset", args, "tree_packing")
 
     # The run's data path, decided before the model load because it also decides whether the
     # checkpoint's processor is required: a multimodal checkpoint carrying text-only rows is a text
@@ -287,6 +370,8 @@ def main():
     is_vlm = resolve_vlm_run(
         args, model_config, ds, text_only_model=args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
     )
+    if is_vlm:
+        reject_non_default_args("Halo SFT on the VLM path", args, "tree_packing")
 
     policy = load_policy_model(
         context, sft_config, model_config, args, vlm_run=is_vlm, init_from_scratch=dist_args.init_from_scratch
@@ -298,6 +383,11 @@ def main():
 
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
+    if args.tree_packing:
+        install_tree_attention(model, args.tree_full_attention)
+        warm_tree_attention_kernels(
+            model, dtype=resolve_training_dtype(sft_config), full_form=args.tree_full_attention
+        )
 
     if is_vlm:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_vlm_data(

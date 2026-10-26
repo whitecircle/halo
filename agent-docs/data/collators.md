@@ -61,6 +61,9 @@ accept all three strategies (see [Pre-Processing](dataset-preparation.md#paramet
 **`DataCollatorForCompletionOnlyLMWithPacking`** — packing plus completion masking; masks each packed
 sub-sequence independently, falls back to standard completion masking for non-packed input.
 
+**`DataCollatorWithTreePacking`** — packed rows of prefix-sharing trees (`tree_packing: true`). Built by
+the SFT script, not the factory; see [Tree Packing](../optimization/tree-packing.md).
+
 **`DataCollatorWithFlattening`** — padding-free. Flattens the batch into one `[1, total_tokens]`
 sequence and emits Flash Attention varlen kwargs. Output keys: `input_ids`, `labels`, `position_ids`
 (reset per sequence), `cu_seq_lens_q`/`cu_seq_lens_k`, `max_length_q`/`max_length_k`. The first token

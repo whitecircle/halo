@@ -41,22 +41,28 @@ def _segmented_conv1d(torch_function, hidden_states, *args, **kwargs):
 
 
 def _segmented_chunk_gated_delta_rule(torch_function, query, key, value, **kwargs):
-    """Run the torch chunked delta rule per packed document from a fresh state: it swallows
-    ``cu_seqlens`` and would carry recurrent state across documents. A cached call (``initial_state``)
-    runs unsegmented rather than inferring per-sequence state."""
+    """Run the torch chunked delta rule per packed document: it swallows ``cu_seqlens`` and would carry
+    recurrent state across documents. Each document starts from a fresh state, or from its own row of
+    ``initial_state``, which then holds one state per document as the CUDA kernel takes it."""
     cu_seqlens = kwargs.pop("cu_seqlens", None)
-    if cu_seqlens is None or kwargs.get("initial_state") is not None:
+    if cu_seqlens is None:
         return torch_function(query, key, value, **kwargs)
-    g, beta = kwargs.pop("g"), kwargs.pop("beta")
+    g, beta, initial_state = kwargs.pop("g"), kwargs.pop("beta"), kwargs.pop("initial_state", None)
     outputs, states = [], []
     edges = cu_seqlens.tolist()
-    for start, end in zip(edges[:-1], edges[1:], strict=False):
+    if initial_state is not None and initial_state.shape[0] != len(edges) - 1:
+        raise ValueError(
+            f"initial_state holds {initial_state.shape[0]} states for {len(edges) - 1} segments: with "
+            f"cu_seqlens the delta rule takes one initial state per segment."
+        )
+    for segment, (start, end) in enumerate(zip(edges[:-1], edges[1:], strict=False)):
         out, state = torch_function(
             query[:, start:end],
             key[:, start:end],
             value[:, start:end],
             g=g[:, start:end],
             beta=beta[:, start:end],
+            initial_state=None if initial_state is None else initial_state[segment : segment + 1],
             **kwargs,
         )
         outputs.append(out)
