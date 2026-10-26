@@ -111,7 +111,7 @@ def cp_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, ran
         attn_implementation="flash_attention_2",
     ).to(device)
 
-    model = UlyssesCPModelWrapper(base_model, pc.create_cp_config())
+    model = UlyssesCPModelWrapper(base_model, pc.cp_config())
 
     wrappers = [m for m in model.modules() if isinstance(m, Glm4MoeLiteUlyssesAttention)]
     log(f"  Glm4MoeLiteUlyssesAttention layers: {len(wrappers)}")

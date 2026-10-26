@@ -73,7 +73,7 @@ def run(ctx) -> dict:
     log(f"\n{'=' * 70}\n  Teacher-distill adapter test — mode={mode}, world={ctx.world_size}, ep={ep}\n{'=' * 70}")
     checks: dict[str, bool] = {}
     parallelism_config = ParallelismConfig(ep_size=ep) if mode in ("lora_ep", "expert_lora") else ParallelismConfig()
-    attn = "flex_attention" if parallelism_config.is_ep_mode else "sdpa"
+    attn = "flex_attention" if parallelism_config.has_ep_group else "sdpa"
     # Student + adapter config via the production path; the trainer wraps it, as the script has it do.
     student, tokenizer, peft_config = load_peft_model(mode, parallelism_config, attn_implementation=attn)
     expert_lora = is_expert_lora_active(student)
@@ -108,7 +108,7 @@ def run(ctx) -> dict:
         dataset_num_proc=1,
         dataloader_num_workers=0,
         fsdp="",
-        ddp_find_unused_parameters=parallelism_config.is_ep_mode,
+        ddp_find_unused_parameters=parallelism_config.has_ep_group,
         distill_loss="kl_divergence",
         distill_temperature=1.0,
         distill_alpha=0.5,

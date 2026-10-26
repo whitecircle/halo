@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
-from src.distributed.parallelism_config import AXIS_FLAGS, SUPPORTED_AXIS_SETS
+from src.distributed.parallelism_rules import AXES, SUPPORTED_AXIS_SETS
 from tests.common.repo import REPO_ROOT
 from tests.common.rosters import distributed_trainer_classes
 
@@ -122,7 +122,9 @@ def _axis_set_from_mode(label: str) -> frozenset[str] | None:
     axes = set()
     for token in text.split("+"):
         axis = token.replace("only", "").replace("Only", "").strip().lower()
-        assert axis in AXIS_FLAGS, f"supported-combinations row {label!r} names {axis!r}, which is not an axis"
+        assert axis in {a.name for a in AXES}, (
+            f"supported-combinations row {label!r} names {axis!r}, which is not an axis"
+        )
         axes.add(axis)
     return frozenset(axes)
 

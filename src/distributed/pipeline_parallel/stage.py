@@ -26,9 +26,9 @@ from transformers import PretrainedConfig
 from src.checkpoint.config_export import hf_architecture_name
 from src.checkpoint.hub_layout import CheckpointNamespace
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.pipeline_parallel.split import (
     decoder_layers_attr,
     layer_types_shift_invariant,
@@ -250,7 +250,7 @@ class PipelineStageModule(nn.Module):
     def ep_moe_layers(self) -> list[tuple[str, nn.Module]]:
         """This stage's EP MoE layers, by local module path: the modules whose expert weights are
         exported by their family's gather rather than by ``state_dict``."""
-        return find_ep_layers(self)
+        return named_ep_layers(self)
 
     def checkpoint_name_map(self) -> dict[str, str]:
         """Global (unsplit-model) name → local ``state_dict`` key, for the tensors this stage serializes.

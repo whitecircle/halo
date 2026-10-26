@@ -34,7 +34,7 @@ Each PP **Yes** cell's suite lives under `tests/gpu/parallelism/pp/`.
 
 ## Parallelism-mode matrix (from `CLAUDE.md`)
 
-The allowlist is `SUPPORTED_AXIS_SETS` (`src/distributed/parallelism_config.py`) — anything not in
+The allowlist is `SUPPORTED_AXIS_SETS` (`src/distributed/parallelism_rules.py`) — anything not in
 it is rejected before any rank math. Supported (need a correctness test): plain DP, EP-only,
 TP-only, CP-only, PP-only, pure ETP (`ep_size=1`), EP+CP (node-local EP), EP+TP (node-local TP),
 EP+ETP (experimental, node-local ETP only), PP+EP, PP+ETP (`ep_size=1`).
@@ -44,7 +44,7 @@ group filling the domain) is supported. Multiple >2-rank dispatch groups in one 
 (`num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size`, e.g. ep4 on an
 8-GPU domain) are rejected — mechanism and evidence in the `parallelism` skill (`matrix.md`, row
 *Multi-group >2-rank EP on one NVLink domain*). The enforcement point a test can target:
-`ParallelismConfig._validate_single_domain_multigroup_ep` raises at
+`parallelism_rules._reject_single_domain_multigroup_ep` raises at
 config time (predicate `is_racy_single_domain_multigroup_ep`), hand-built configs included. Write it
 as a **rejection** test (CPU config test is enough), not a correctness test.
 

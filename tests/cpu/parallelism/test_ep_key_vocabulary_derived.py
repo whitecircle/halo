@@ -17,7 +17,6 @@ from unittest.mock import patch
 
 import pytest
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_class_by_model_type,
     ep_layer_classes,
@@ -33,6 +32,7 @@ from src.distributed.expert_parallel.lazy_loader import (
     CheckpointFormat,
     lazy_loader_supports_checkpoint,
 )
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 def test_every_declared_container_is_matched_by_both_patterns():

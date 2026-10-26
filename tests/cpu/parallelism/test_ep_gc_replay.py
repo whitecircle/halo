@@ -28,10 +28,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
 from src.distributed.expert_parallel.deepep.backends import DeepEPBackend
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
 from tests.common.parallelism import single_process_ep_config
@@ -88,7 +88,7 @@ def _live_model(name: str, log: list, *, use_reentrant: bool | None) -> torch.nn
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES[name]).train()
     patch_moe_model_for_ep(model, single_process_ep_config())
-    layers = find_ep_layers(model)
+    layers = named_ep_layers(model)
     assert layers, f"{name}: the EP patch wrapped no MoE block"
     for _, layer in layers:
         layer.dispatcher._noop = False
@@ -109,7 +109,7 @@ def _loss(model: torch.nn.Module, input_ids: torch.Tensor) -> torch.Tensor:
 
 def _ops_by_layer(model: torch.nn.Module, log: list) -> dict[str, list[tuple[str, str]]]:
     """Each EP layer's logged transport ops, in call order, as ``(op, handle)``."""
-    path_of = {layer.dispatcher: path for path, layer in find_ep_layers(model)}
+    path_of = {layer.dispatcher: path for path, layer in named_ep_layers(model)}
     ops = {path: [] for path in path_of.values()}
     for op, dispatcher, handle in log:
         ops[path_of[dispatcher]].append((op, handle))
@@ -119,7 +119,7 @@ def _ops_by_layer(model: torch.nn.Module, log: list) -> dict[str, list[tuple[str
 def _record_passes(model: torch.nn.Module) -> dict[str, list]:
     """Per EP layer, the ``(checkpoint scope, is recompute)`` of every forward pass it enters."""
     passes = defaultdict(list)
-    for path, layer in find_ep_layers(model):
+    for path, layer in named_ep_layers(model):
 
         def record(_module, _args, path=path):
             scope = active_recompute_scope()
@@ -134,7 +134,7 @@ def _assert_same_gradients(model: torch.nn.Module, reference: torch.nn.Module) -
         assert (param.grad is None) == (expected.grad is None), name
         if param.grad is not None:
             assert torch.equal(param.grad, expected.grad), name
-    for path, layer in find_ep_layers(model):
+    for path, layer in named_ep_layers(model):
         ungraded = [name for name, param in layer.expert_named_params() if param.grad is None]
         assert not ungraded, f"{path}: no gradient reached the experts {ungraded}"
 
@@ -197,7 +197,7 @@ def test_microbatches_in_flight_replay_their_own_frames(name, mode):
 def test_checkpointing_without_the_ep_scopes_raises_naming_the_family(name, mode):
     model = _live_model(name, [], use_reentrant=None)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": CHECKPOINT_MODES[mode]})
-    (family_class,) = {type(layer).__name__ for _, layer in find_ep_layers(model)}
+    (family_class,) = {type(layer).__name__ for _, layer in named_ep_layers(model)}
     with pytest.raises(RuntimeError, match=re.escape(f"{family_class}: training forward inside backward")):
         _loss(model, _microbatch(model, seed=1)).backward()
 

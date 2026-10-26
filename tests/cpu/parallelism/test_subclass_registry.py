@@ -15,8 +15,8 @@ from __future__ import annotations
 import pytest
 
 from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP, build_wrapper_class_map
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, build_moe_layer_map
 from src.distributed.pipeline_parallel.split import build_pp_spec_map
 from src.models.head_transform import build_head_transform_spec_map

@@ -18,7 +18,7 @@ from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig
 
 from src.distributed.context_parallel.patching import patch_attention_for_ulysses
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.mesh import MeshDim
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG

@@ -34,16 +34,17 @@ from src.distributed.context_parallel.validation import (
 from src.distributed.pipeline_parallel.split import MTP_LAYER_COUNT_FIELDS, PP_SPEC_MAP, validate_model_supports_pp
 from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from src.models.attention.gpt_oss_sinks import SinksPolicy
+from src.models.attention.selection import (
+    is_fa4_backward_nan_prone,
+    resolve_attn_implementation,
+    validate_attn_implementation,
+)
 from src.models.moe_balancing import (
     ROUTER_EXPERT_COUNT_FIELDS,
     get_first_router_field,
     resolve_expert_ffn_shard_width,
     resolve_router_topk,
-)
-from src.models.patches.attention import (
-    model_fa4_backward_nan_prone,
-    resolve_attn_implementation,
-    validate_attn_implementation,
 )
 from tests.common.distributed import fake_process_group_mesh
 
@@ -166,11 +167,19 @@ def test_attention_resolution_lands_on_sdpa():
     every flash request to sdpa itself; returning flash defers the failure to transformers' model
     build, after the whole checkpoint has been fetched. Not an FA4-NaN entry: the refusal derives
     from the class flag and covers FA2/FA3 too."""
-    assert model_fa4_backward_nan_prone(Glm5NextConfig()) is False
-    for requested in (None, "flash_attention_4", "flash_attention_2"):
-        assert resolve_attn_implementation(Glm5NextConfig(), requested, torch.bfloat16) == "sdpa", requested
-    assert resolve_attn_implementation(Glm5NextConfig(), "sdpa", torch.bfloat16) == "sdpa"
-    assert resolve_attn_implementation(Glm5NextConfig(), "eager", torch.bfloat16) == "eager"
+    assert is_fa4_backward_nan_prone(Glm5NextConfig()) is False
+    expected = {
+        None: "sdpa",
+        "flash_attention_4": "sdpa",
+        "flash_attention_2": "sdpa",
+        "sdpa": "sdpa",
+        "eager": "eager",
+    }
+    for requested, backend in expected.items():
+        resolved = resolve_attn_implementation(
+            Glm5NextConfig(), requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+        assert resolved == backend, requested
 
 
 def test_attention_flash_gate_reads_the_class_flag_not_a_family_list():

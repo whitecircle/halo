@@ -9,7 +9,7 @@ import logging
 import torch.nn as nn
 from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_tp_plan
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.tensor_parallel.state_dict import get_tp_mesh
 from src.kernels.lowp.linear import LowPrecisionLinear
 from src.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices

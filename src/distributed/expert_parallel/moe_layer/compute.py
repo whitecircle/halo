@@ -1,0 +1,358 @@
+"""Expert compute for EP MoE layers: the activation and GLU combine, the per-expert loop and grouped-GEMM
+paths, the expert-weight layout and the kernel warm-up."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable
+
+import torch
+import torch.nn as nn
+from transformers.activations import ACT2FN
+
+from src.distributed.expert_parallel.config import EPConfig
+from src.kernels.expert_gemm import expert_gemm
+from src.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
+from src.kernels.histogram import sync_free_bincount
+from src.kernels.lowp.spec import QuantFormat
+from src.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map, warm_permute_kernels
+from src.runtime.ranks import is_global_main_process
+
+logger = logging.getLogger(__name__)
+
+# Tokens the expert-kernel warmup runs. The kernels do not specialize on their row count
+# (``do_not_specialize``), so one count compiles the binary every dispatch size runs.
+_WARMUP_TOKENS = 16
+
+
+class EPExpertComputeMixin:
+    """Expert compute, mixed into :class:`EPMoELayerBase`, whose construction builds the state annotated here."""
+
+    ep_config: EPConfig
+    ep_size: int
+    experts_per_rank: int
+    expert_start: int
+    expert_end: int
+    expert_tp_size: int
+    expert_tp_rank: int
+    fp32_experts: bool
+    act_fn: Callable[[torch.Tensor], torch.Tensor]
+    _use_grouped_mm: bool
+    _activation_warmed: bool
+    _lowp_quant_format: QuantFormat | None
+    _lowp_weight_cacheable: bool
+    _expert_lora_attrs: frozenset[str]
+    _expert_adapters_enabled: bool
+    expert_lora_scaling: float
+    expert_lora_dropout: nn.Module
+
+    # Fused GLU-combine kernel, derived from the resolved activation by ``_resolve_activation``; None = eager.
+    _fused_glu_mul: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
+
+    def set_lowp_compute(self, quant_format: QuantFormat, *, weight_cacheable: bool) -> bool:
+        """Set this layer's expert-compute quantization format; return whether it applies, False on the
+        per-expert loop, where the grouped kernels and their fake-quant never run."""
+        self._lowp_quant_format = quant_format
+        self._lowp_weight_cacheable = weight_cacheable
+        return self._grouped_mm_enabled()
+
+    def _resolve_activation(self, *sources, original_layer: nn.Module | None = None, default: str = "silu") -> None:
+        """Set ``act_fn`` from the first source carrying one, else by name off ``original_layer`` (its
+        ``hidden_act``, its config's, ``default``), and latch the fused combine that activation has."""
+        for source in sources:
+            act_fn = getattr(source, "act_fn", None) if source is not None else None
+            if act_fn is not None:
+                self.act_fn = act_fn
+                break
+        else:
+            hidden_act = getattr(original_layer, "hidden_act", None)
+            if hidden_act is None:
+                hidden_act = getattr(getattr(original_layer, "config", None), "hidden_act", None)
+            self.act_fn = ACT2FN[hidden_act or default]
+        self._fused_glu_mul = resolve_fused_glu_mul(self.act_fn)
+
+    def _init_fused_glu_params(self, experts: nn.Module, weights_already_sharded: bool = False):
+        """Store this rank's fused-GLU experts in matmul convention ``[E, K, N]``: ``gate_up_proj`` +
+        ``down_proj``, or under ETP gate and up apart, since sharding the fused halves misaligns them."""
+        self._require_fused_experts(experts)
+        start, end = (0, self.experts_per_rank) if weights_already_sharded else (self.expert_start, self.expert_end)
+        gate_up = experts.gate_up_proj.data[start:end]  # [E, 2M, H], dim 1 = [gate(M) | up(M)]
+        down = experts.down_proj.data[start:end]  # [E, H, M]
+        if self.expert_tp_size > 1:
+            self._store_separate_glu_params(*gate_up.chunk(2, dim=1), down)
+        else:
+            self.gate_up_proj = nn.Parameter(gate_up.transpose(1, 2).contiguous())
+            self.down_proj = nn.Parameter(down.transpose(1, 2).contiguous())
+
+    @staticmethod
+    def _require_fused_experts(experts: nn.Module) -> nn.Module:
+        """``experts`` when it carries the fused ``gate_up_proj``/``down_proj`` pair; else raise, rather than
+        register no expert weight and train an empty expert set."""
+        missing = [name for name in ("gate_up_proj", "down_proj") if not hasattr(experts, name)]
+        if missing:
+            raise AttributeError(
+                f"Expected fused-GLU experts carrying gate_up_proj and down_proj, but "
+                f"{type(experts).__name__} carries no {missing} — the family renamed its expert "
+                f"tensors upstream."
+            )
+        return experts
+
+    def _store_separate_glu_params(self, gate: torch.Tensor, up: torch.Tensor, down: torch.Tensor) -> None:
+        """Store this rank's ``F.linear``-convention ``gate``/``up`` ``[E, M, H]`` and ``down`` ``[E, H, M]`` as
+        matmul-convention ``gate_proj``/``up_proj``/``down_proj``, ETP-sharded."""
+        if self.expert_tp_size > 1:
+            self.gate_proj = nn.Parameter(self._etp_narrow(gate, 1).transpose(1, 2).contiguous())
+            self.up_proj = nn.Parameter(self._etp_narrow(up, 1).transpose(1, 2).contiguous())
+            self.down_proj = nn.Parameter(self._etp_narrow(down, 2).transpose(1, 2).contiguous())
+        else:
+            self.gate_proj = nn.Parameter(gate.transpose(1, 2).contiguous())  # [E, H, M]
+            self.up_proj = nn.Parameter(up.transpose(1, 2).contiguous())  # [E, H, M]
+            self.down_proj = nn.Parameter(down.transpose(1, 2).contiguous())  # [E, M, H]
+
+    def _etp_narrow(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:
+        """A view of this ETP rank's contiguous slice of ``tensor`` along the expert-intermediate axis
+        ``dim``."""
+        shard = self._etp_shard_size(tensor.shape[dim])
+        return tensor.narrow(dim, self.expert_tp_rank * shard, shard)
+
+    def _etp_shard_size(self, intermediate: int) -> int:
+        """Per-rank size of an ETP-sharded expert intermediate dim; raises when ``expert_tp_size`` does not
+        divide it, which would drop the top units of every expert."""
+        if intermediate % self.expert_tp_size != 0:
+            raise ValueError(
+                f"Expert TP requires the expert intermediate size ({intermediate}) to be divisible by "
+                f"expert_tensor_parallel_size ({self.expert_tp_size}); got remainder "
+                f"{intermediate % self.expert_tp_size}. Reduce expert_tensor_parallel_size."
+            )
+        return intermediate // self.expert_tp_size
+
+    def _upcast_experts_to_fp32(self) -> None:
+        """Upcast the expert weights and adapters under ``fp32_experts``, keeping each ``requires_grad`` (the
+        LoRA-frozen base stays frozen); skipped where FSDP2 manages the experts and casts them to bf16."""
+        if not self.fp32_experts:
+            return
+        if self.ep_config.experts_fsdp_managed:
+            logger.warning(
+                f"{type(self).__name__}: fp32_experts has NO effect with fsdp_shard_ep1_experts at "
+                f"ep_group_size==1 — FSDP2 manages the replicated experts and its bf16 param_dtype "
+                f"policy casts them for compute, so the upcast would only mix fp32 experts into a bf16 "
+                f"fully_shard group. Skipping; for fp32 master weights set fp32_non_ep_params: true "
+                f"AND fsdp_shard_ep1_experts: false (the managed-experts combination is refused at "
+                f"config time)."
+            )
+            return
+        for name, param in self.expert_named_params():
+            setattr(self, name, nn.Parameter(param.data.float(), requires_grad=param.requires_grad))
+        if is_global_main_process():
+            logger.info(f"{type(self).__name__}: FP32 experts (compute stays BF16)")
+
+    def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype, hidden: int, top_k: int) -> None:
+        """Compile this layer's Triton expert and permute kernels, forward and backward, before its first
+        dispatch: compiled inside the span they stall every peer in DeepEP's barrier (no barrier at ep1)."""
+        if self._activation_warmed or self.ep_size <= 1:
+            return
+        self._activation_warmed = True
+        width = 2 * self.down_proj.shape[1]  # down_proj is [E, M, H] on every layout, ETP included
+        # Zeros, not a draw: the recompute restores the RNG to region entry and this latched warmup does not
+        # rerun, so a draw would shift expert-LoRA dropout's sample. Grad on and inference mode off, since a
+        # first forward under either still has to compile the backward kernels.
+        with torch.inference_mode(False):
+            # Identity saved-tensor hooks: under a non-reentrant checkpoint the backward below would unpack a
+            # packed tensor, run the recompute mid-forward and replay a dispatch the original pass has not made.
+            with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
+                gate_up = torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype, requires_grad=True)
+                torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
+                if self._grouped_mm_enabled():  # the fused permute runs only on the grouped path
+                    warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype)
+            with torch.no_grad():
+                self._warm_expert_activation(torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype))
+
+    def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
+        """The expert activation over a synthetic ``[T, 2M]``, in the operand layout the compute path hands
+        it: Triton specializes a launch on its row strides."""
+        if hasattr(self, "gate_up_proj"):
+            return self._glu_combine_packed(gate_up)
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self._glu_combine(gate.contiguous(), up.contiguous())
+
+    def _compute_experts(
+        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Expert outputs for the dispatched tokens: grouped GEMM when enabled and non-empty, else the
+        per-expert loop. ``experts``/``weights`` are ``[T, top_k]`` local ids and gate weights."""
+        if self._grouped_mm_enabled() and tokens.shape[0] > 0:
+            return self._compute_experts_gmm(tokens, experts, weights, output_dtype)
+        return self._compute_experts_weighted(tokens, experts, weights, output_dtype, self._expert_forward)
+
+    def _grouped_mm_enabled(self) -> bool:
+        """Whether the grouped-GEMM path runs: the hardware/config flag (GptOss also requires no ETP)."""
+        return self._use_grouped_mm
+
+    def _compute_experts_gmm(
+        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Grouped-GEMM GLU experts on either :meth:`_glu_expert` layout."""
+
+        def compute(sorted_tokens, offs, _eids):
+            return self._glu_expert(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
+
+        return self._compute_experts_with_grouped_mm(tokens, experts, weights, output_dtype, compute)
+
+    def _compute_experts_with_grouped_mm(
+        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype, compute_fn
+    ) -> torch.Tensor:
+        """Sort -> ``compute_fn(sorted_tokens, offs, sorted_expert_ids)`` under autocast -> weighted unpermute.
+        ``F.grouped_mm`` does not autocast, so ``compute_fn`` casts its weights to ``output_dtype``."""
+        if tokens.shape[0] == 0:
+            return self._expert_hook_grad_edge(
+                torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
+            )
+
+        sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map = (
+            self._sort_tokens_for_grouped_mm(tokens, experts, weights)
+        )
+
+        with torch.amp.autocast("cuda", dtype=output_dtype):
+            expert_out = compute_fn(sorted_tokens, offs, sorted_expert_ids)
+
+        return MoEWeightedUnpermute.apply(
+            expert_out.to(output_dtype).contiguous(), sorted_weights.to(output_dtype), sorted_token_idx, inv_map
+        )
+
+    def _sort_tokens_for_grouped_mm(self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor):
+        """``(sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map)`` over the valid
+        local assignments, by expert; DeepEP's -1 padding is dropped (it would misalign the groups)."""
+        N = tokens.shape[0]
+        device = tokens.device
+
+        width = experts.shape[1]  # top_k = max local-expert assignments per token → inv_map width
+        flat_indices = experts.reshape(-1)
+        flat_weights = weights.reshape(-1)
+        flat_token_idx = torch.arange(N, device=device).unsqueeze(1).expand(-1, width).reshape(-1)
+
+        # DeepEP pads unfilled slots with -1; the host-known ep_size gate avoids a device sync at ep_size==1.
+        if self.ep_size > 1:
+            valid_mask = (flat_indices >= 0) & (flat_indices < self.experts_per_rank)
+            valid_idx = valid_mask.nonzero(as_tuple=True)[0]
+            flat_indices = flat_indices[valid_idx]
+            flat_weights = flat_weights[valid_idx]
+            flat_token_idx = flat_token_idx[valid_idx]
+
+        sort_order = torch.argsort(flat_indices, stable=True)
+        sorted_expert_ids = flat_indices[sort_order]
+        sorted_token_idx = flat_token_idx[sort_order]
+        sorted_weights = flat_weights[sort_order]
+
+        # A histogram, not unique_consecutive(return_counts=True): the latter sizes its output from the
+        # run count, a host sync per layer per forward.
+        expert_counts = sync_free_bincount(sorted_expert_ids, self.experts_per_rank, dtype=torch.long)
+        offs = torch.cumsum(expert_counts, dim=0).to(torch.int32)
+
+        # Atomic-free in both directions: the bf16 ``index_add_`` of the default gather backward and the
+        # scatter-back is a CAS-loop atomic, ~1.5 ms per call on the gpt-oss-20b ep8 shape.
+        inv_map = build_inv_map(sorted_token_idx, N, width)
+        sorted_tokens = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
+        return sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map
+
+    def _expert_proj(
+        self, x: torch.Tensor, weight_attr: str, offs: torch.Tensor, out_dtype: torch.dtype
+    ) -> torch.Tensor:
+        """Grouped-GEMM expert projection ``x @ W[weight_attr]``, plus the LoRA delta where it is adapted."""
+        out = self._grouped_mm(x, getattr(self, weight_attr).to(out_dtype), offs=offs)
+        if self._expert_adapters_enabled and weight_attr in self._expert_lora_attrs:
+            # Adapters stay bf16 under lowp: block-scaling along rank r is unrepresentable (r < block size).
+            lora_a = getattr(self, f"{weight_attr}_lora_A").to(out_dtype)
+            lora_b = getattr(self, f"{weight_attr}_lora_B").to(out_dtype)
+            hidden = self._grouped_mm(self.expert_lora_dropout(x), lora_a, offs=offs, lowp=False)
+            out = out + self.expert_lora_scaling * self._grouped_mm(hidden, lora_b, offs=offs, lowp=False)
+        return out
+
+    def _grouped_mm(
+        self,
+        mat_a: torch.Tensor,
+        mat_b: torch.Tensor,
+        *,
+        offs: torch.Tensor | None = None,
+        lowp: bool = True,
+    ) -> torch.Tensor:
+        """Grouped GEMM at this layer's quantization format; ``lowp=False`` keeps bf16 (the LoRA adapters).
+        Expert biases go through ``MoEExpertBiasGather``, never a fused bias."""
+        return expert_gemm(
+            mat_a,
+            mat_b,
+            offs=offs,
+            quant_format=self._lowp_quant_format if lowp else None,
+            weight_cacheable=self._lowp_weight_cacheable,
+        )
+
+    def _compute_experts_weighted(
+        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype, compute_fn
+    ) -> torch.Tensor:
+        """The per-expert loop: ``compute_fn(local_idx, x)`` per expert, outputs weighted and accumulated."""
+        if tokens.shape[0] == 0:
+            return self._expert_hook_grad_edge(
+                torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
+            )
+
+        output = torch.zeros(tokens.shape, device=tokens.device, dtype=output_dtype)
+
+        with torch.amp.autocast("cuda", dtype=output_dtype, enabled=self.fp32_experts):
+            for local_idx in range(self.experts_per_rank):
+                top_k_pos, token_idx = torch.where((experts == local_idx).t())
+                if token_idx.numel() == 0:
+                    continue
+                expert_weights = weights[token_idx, top_k_pos]
+                out = compute_fn(local_idx, tokens.index_select(0, token_idx))
+                expert_output = out.to(output_dtype) * expert_weights.unsqueeze(-1).to(output_dtype)
+                output.index_add_(0, token_idx, expert_output)
+
+        # Per-expert params (this loop's regime) miss the sync-microbatch divide when their expert
+        # idles in it after accumulating earlier; edges are per-param, so the rank-level wrap on the
+        # zero-token return above cannot cover an individual idle expert.
+        return self._expert_hook_grad_edge(output)
+
+    def _expert_forward(self, idx: int, x: torch.Tensor) -> torch.Tensor:
+        """One local expert's GLU forward for the loop."""
+        return self._glu_expert(x, lambda t, attr: self._expert_proj_single(idx, t, attr))
+
+    def _glu_expert(self, x: torch.Tensor, proj: Callable[[torch.Tensor, str], torch.Tensor]) -> torch.Tensor:
+        """The GLU expert through ``proj(x, weight_attr)``: fused ``gate_up_proj``, or ``gate_proj`` and
+        ``up_proj`` stored apart (Qwen3, Bailing, every family under ETP)."""
+        if hasattr(self, "gate_up_proj"):
+            return proj(self._glu_combine_packed(proj(x, "gate_up_proj")), "down_proj")
+        return proj(self._glu_combine(proj(x, "gate_proj"), proj(x, "up_proj")), "down_proj")
+
+    def _expert_proj_single(self, idx: int, x: torch.Tensor, weight_attr: str) -> torch.Tensor:
+        """Loop-path projection ``x @ W[weight_attr][idx]``, plus the LoRA delta."""
+        out = x @ getattr(self, weight_attr)[idx]
+        if self._expert_adapters_enabled and weight_attr in self._expert_lora_attrs:
+            lora_a = getattr(self, f"{weight_attr}_lora_A")[idx]
+            lora_b = getattr(self, f"{weight_attr}_lora_B")[idx]
+            out = out + self.expert_lora_scaling * (self.expert_lora_dropout(x) @ lora_a @ lora_b)
+        return out
+
+    def _glu_combine(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        """``act_fn(gate) * up`` through the latched fused kernel where one exists; a family with its own
+        combine latches it in ``_fused_glu_mul`` rather than overriding this."""
+        if self._fused_glu_mul is not None:
+            return self._fused_glu_mul(gate, up)
+        return self.act_fn(gate) * up
+
+    def _glu_combine_packed(self, gate_up: torch.Tensor) -> torch.Tensor:
+        """:meth:`_glu_combine` over a fused ``[gate | up]`` output, in place for a :class:`GluCombine` latch
+        (:meth:`GluCombine.packed`)."""
+        if isinstance(self._fused_glu_mul, GluCombine):
+            return self._fused_glu_mul.packed(gate_up)
+        gate, up = gate_up.chunk(2, dim=-1)
+        return self._glu_combine(gate, up)
+
+    def _glu_combine_name(self) -> str:
+        """The combine this layer runs, read off the latch: a :class:`GluCombine`'s name, else the latched
+        callable's (a ``partial`` names its function); ``eager`` under ``HALO_FUSED_GLU=0``."""
+        combine = self._fused_glu_mul
+        if combine is None or not fused_glu_enabled():
+            return "eager"
+        if isinstance(combine, GluCombine):
+            return combine.name
+        combine = getattr(combine, "func", combine)
+        return getattr(combine, "__name__", type(combine).__name__)

@@ -43,8 +43,8 @@ from src.distributed.checkpoint.peft import PeftAdapterSaver, _load_peft_adapter
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
 from src.models.param_roles import persistent_buffers
-from src.models.patches.gpt_oss_sinks import LIVE_SINKS_ATTR, SinksPolicy
 
 _LORA_KWARGS = {"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], "bias": "none"}
 NUM_EXPERTS = 6
@@ -268,7 +268,7 @@ def test_save_writes_the_sinks_provenance_only_when_the_policy_stamped_the_model
     attention matching what the adapter trained under. An absent stamp means "nothing to record",
     never "neutralized", so an unstamped run must leave no file at all."""
     stamped = _cp_peft_model()
-    setattr(stamped.get_base_model(), LIVE_SINKS_ATTR, SinksPolicy.NEUTRALIZED)
+    setattr(stamped.get_base_model(), SINKS_POLICY_ATTR, SinksPolicy.NEUTRALIZED)
     with tempfile.TemporaryDirectory() as tmp:
         _save_adapter(stamped, tmp)
         path = os.path.join(tmp, TRAINING_PROVENANCE_FILE)
@@ -285,7 +285,7 @@ def test_non_save_rank_writes_no_adapter_and_no_provenance():
     """Every rank enters ``save`` (the gathers are collective) but only the save rank writes; a
     non-save rank writing would race the writer on a shared filesystem."""
     peft_model = _cp_peft_model()
-    setattr(peft_model.get_base_model(), LIVE_SINKS_ATTR, SinksPolicy.NEUTRALIZED)
+    setattr(peft_model.get_base_model(), SINKS_POLICY_ATTR, SinksPolicy.NEUTRALIZED)
     with tempfile.TemporaryDirectory() as tmp:
         PeftAdapterSaver().save(_context(peft_model, is_save_rank=False), peft_model, tmp)
         assert not os.path.isfile(os.path.join(tmp, ADAPTER_SAFETENSORS_FILE))

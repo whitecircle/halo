@@ -16,12 +16,10 @@ import itertools
 
 import pytest
 
-from src.distributed.parallelism_config import (
-    AXIS_FLAGS,
-    AXIS_SET_MECHANISMS,
-    SUPPORTED_AXIS_SETS,
-    ParallelismConfig,
-)
+from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.parallelism_rules import AXES, AXIS_SET_MECHANISMS, SUPPORTED_AXIS_SETS
+
+AXIS_NAMES = tuple(a.name for a in AXES)
 
 DOMAIN = 8
 
@@ -32,10 +30,7 @@ _AXIS_SIZES = {"pp": 2, "ep": DOMAIN, "etp": 2, "tp": 2, "cp": 2}
 
 def _sizes_for(axes: frozenset[str]) -> dict:
     """Config kwargs realizing exactly ``axes`` — inactive axes pinned to 1."""
-    sizes = {f"{axis}_size" if axis != "etp" else "expert_tp_size": 1 for axis in AXIS_FLAGS}
-    for axis in axes:
-        key = "expert_tp_size" if axis == "etp" else f"{axis}_size"
-        sizes[key] = _AXIS_SIZES[axis]
+    sizes = {a.size_field: _AXIS_SIZES[a.name] if a.name in axes else 1 for a in AXES}
     if "etp" in axes and "ep" in axes:
         # ep_size * expert_tp_size IS the full EP group; keep it to exactly one domain.
         sizes["ep_size"], sizes["expert_tp_size"] = DOMAIN // 2, 2
@@ -66,8 +61,8 @@ def test_every_supported_set_is_constructible(axes):
     sorted(
         (
             frozenset(combo)
-            for size in range(1, len(AXIS_FLAGS) + 1)
-            for combo in itertools.combinations(AXIS_FLAGS, size)
+            for size in range(1, len(AXIS_NAMES) + 1)
+            for combo in itertools.combinations(AXIS_NAMES, size)
             if frozenset(combo) not in SUPPORTED_AXIS_SETS
         ),
         key=lambda s: (len(s), sorted(s)),
@@ -109,7 +104,7 @@ def test_mechanisms_are_written_for_the_reachable_rejections():
 def test_the_allowlist_is_not_vacuous():
     """Guards the tests above: an empty or all-inclusive matrix would make both halves pass."""
     all_sets = {
-        frozenset(combo) for size in range(len(AXIS_FLAGS) + 1) for combo in itertools.combinations(AXIS_FLAGS, size)
+        frozenset(combo) for size in range(len(AXIS_NAMES) + 1) for combo in itertools.combinations(AXIS_NAMES, size)
     }
     assert frozenset() in SUPPORTED_AXIS_SETS, "plain data parallelism must be supported"
     assert frozenset({"pp", "ep"}) in SUPPORTED_AXIS_SETS, "PP+EP is an allowlisted combination"

@@ -72,7 +72,7 @@ from src.distributed.pipeline_parallel.losses import (
 )
 from src.model_loading.dtype import is_kbit_quantized
 from src.model_loading.tokenizer_setup import resolve_tokenizer
-from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
+from src.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from src.models.segment_markers import (
     document_ids,
     flattened_document_positions,

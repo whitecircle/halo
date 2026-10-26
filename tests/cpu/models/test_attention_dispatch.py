@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the attention-backend dispatch in ``src/models/patches/attention.py``.
+"""CPU tests for the attention-backend dispatch in ``src/models/attention/selection.py``.
 
 The arch and model gates that pick the kernel, all silent when they break: the SM100+ Blackwell
 predicate every backend choice shares, the per-model kernel limits ``resolve_attn_implementation``
@@ -11,17 +11,20 @@ Run: ``python tests/cpu/models/test_attention_dispatch.py`` (or ``pytest -m cpu`
 from __future__ import annotations
 
 import sys
+import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src import hardware
 from src.distributed.context_parallel import base_layer as cp_base_layer
 from src.distributed.loading import model_loading
-from src.models.patches import attention as attention_mod
+from src.models.attention import selection as attention_mod
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 
 # Every ``model_type`` transformers actually registers for an FA4-NaN attention stack. Listed
 # literally, NOT splatted from the EP wrappers' ``HF_MODEL_TYPES``: those declare which MoE block a
@@ -167,6 +170,73 @@ def test_detect_attn_impl_on_cpu_host_is_silent_fa2():
     warn.assert_not_called()
 
 
+def _kernel_module(name: str, *entry_points: str) -> types.ModuleType:
+    """A stand-in flash build exposing only ``entry_points``."""
+    module = types.ModuleType(name)
+    for entry_point in entry_points:
+
+        def kernel(q, k, v):
+            raise NotImplementedError
+
+        setattr(module, entry_point, kernel)
+    return module
+
+
+def _hopper():
+    return (
+        patch.object(attention_mod.torch.cuda, "is_available", lambda: True),
+        patch.object(attention_mod.torch.cuda, "get_device_capability", lambda *a, **k: (9, 0)),
+        patch.object(attention_mod.logger, "info"),
+    )
+
+
+def test_hopper_detects_fa3_through_the_module_transformers_dispatches():
+    """transformers runs flash_attention_3 through ``flash_attn_interface``; a Hopper host carrying only
+    that build must detect FA3 rather than settle for FA2."""
+    interface = _kernel_module("flash_attn_interface", "flash_attn_func", "flash_attn_varlen_func")
+    is_avail, capability, quiet_info = _hopper()
+    with (
+        is_avail,
+        capability,
+        quiet_info,
+        patch.dict(sys.modules, {"flash_attn_interface": interface, "flash_attn_3": None}),
+        patch.object(attention_mod.logger, "warning") as warn,
+    ):
+        assert attention_mod._detect_attention_impl() == "flash_attention_3"
+    warn.assert_not_called()
+
+
+def test_an_fa3_build_without_the_varlen_kernel_reads_as_absent():
+    """A build missing the entry point transformers binds is an absent FA3 (info, FA2, no sink support),
+    not a broken one."""
+    interface = _kernel_module("flash_attn_interface", "flash_attn_func")
+    is_avail, capability, quiet_info = _hopper()
+    with (
+        is_avail,
+        capability,
+        quiet_info as info,
+        patch.dict(sys.modules, {"flash_attn_interface": interface, "flash_attn_3": None}),
+        patch.object(attention_mod.logger, "warning") as warn,
+    ):
+        assert attention_mod._detect_attention_impl() == "flash_attention_2"
+        assert attention_mod._attn_impl_handles_sinks("flash_attention_3") is False
+    warn.assert_not_called()
+    assert any("not installed" in call.args[0] for call in info.call_args_list)
+
+
+@pytest.mark.parametrize(
+    ("attn_impl", "module_name"), [("flash_attention_4", "flash_attn.cute"), ("flash_attention_2", "flash_attn")]
+)
+def test_flash_kernel_returns_the_builds_own_entry_points(attn_impl, module_name):
+    build = _kernel_module(module_name, "flash_attn_func", "flash_attn_varlen_func")
+    with (
+        patch.dict(sys.modules, {module_name: build}),
+        patch.object(attention_mod, "ensure_fa4_kernel_cache_env", lambda: None),
+    ):
+        assert attention_mod.flash_kernel(attn_impl) is build.flash_attn_varlen_func
+        assert attention_mod.flash_kernel(attn_impl, varlen=False) is build.flash_attn_func
+
+
 def test_unmapped_config_never_opens_the_sdpa_sinks_escape_hatch():
     """A sinks config absent from the Auto mapping must not reach sdpa.
 
@@ -180,10 +250,10 @@ def test_unmapped_config_never_opens_the_sdpa_sinks_escape_hatch():
 
     config = UnmappedSinksConfig()
     assert attention_mod.AutoModelForCausalLM._model_mapping.get(UnmappedSinksConfig, None) is None
-    # sinks_reset=None is the re-validation context: nothing has recorded a reset, so sdpa must be
+    # sinks_policy=None is the re-validation context: nothing has recorded a reset, so sdpa must be
     # refused on the "sinks were never reset" evidence alone.
     with patch.object(attention_mod.logger, "info"), patch.object(attention_mod.logger, "warning"):
-        resolved = attention_mod.validate_attn_implementation(config, "sdpa", sinks_reset=None)
+        resolved = attention_mod.validate_attn_implementation(config, "sdpa", sinks_policy=None)
     assert resolved != "sdpa", "unmapped sinks config must not resolve to the sink-dropping sdpa"
 
 
@@ -198,7 +268,10 @@ def test_fa4_is_demoted_to_sdpa_for_every_nan_prone_model_type(model_type):
     """
     with patch.object(attention_mod.logger, "warning") as warn, patch.object(attention_mod.logger, "info"):
         resolved = attention_mod.resolve_attn_implementation(
-            SimpleNamespace(model_type=model_type), "flash_attention_4", torch.bfloat16
+            SimpleNamespace(model_type=model_type),
+            "flash_attention_4",
+            torch.bfloat16,
+            sinks_policy=SinksPolicy.NEUTRALIZED,
         )
     assert resolved == "sdpa", f"{model_type} kept FA4, whose backward emits NaN gradients"
     assert any("NaN gradients" in call.args[0] for call in warn.call_args_list)
@@ -213,7 +286,7 @@ def test_fa4_survives_for_families_outside_the_nan_gate(model_type):
     """
     with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
         resolved = attention_mod.resolve_attn_implementation(
-            CONFIG_MAPPING[model_type](), "flash_attention_4", torch.bfloat16
+            CONFIG_MAPPING[model_type](), "flash_attention_4", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
         )
     assert resolved == "flash_attention_4"
 
@@ -230,7 +303,12 @@ def test_heads_past_the_flash_cap_fall_back_to_sdpa(model_type, overrides, reque
     multimodal wrapper), and any other config declaring the same width."""
     config = CONFIG_MAPPING[model_type](**overrides)
     with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
-        assert attention_mod.resolve_attn_implementation(config, requested, torch.bfloat16) == "sdpa"
+        assert (
+            attention_mod.resolve_attn_implementation(
+                config, requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+            )
+            == "sdpa"
+        )
 
 
 @pytest.mark.parametrize("requested", [None, "flash_attention_2", "sdpa"])
@@ -238,20 +316,26 @@ def test_an_attention_free_config_resolves_without_a_head_geometry(requested):
     """Mamba declares neither ``head_dim`` nor ``num_attention_heads``: the head-width gate must read
     that as nothing to reject, not raise, and the validator then lands on the eager the config takes."""
     config = CONFIG_MAPPING["mamba"]()
-    assert not attention_mod.head_dim_exceeds_flash(config)
+    assert not attention_mod.has_head_dim_beyond_flash(config)
     with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
-        assert attention_mod.resolve_attn_implementation(config, requested, torch.bfloat16) == "eager"
+        assert (
+            attention_mod.resolve_attn_implementation(
+                config, requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+            )
+            == "eager"
+        )
 
 
 def test_a_head_at_the_flash_cap_keeps_flash():
     """The cap is inclusive: Qwen3-Next's 256-wide heads are within it (its FA4 demote is the NaN gate's)."""
     config = CONFIG_MAPPING["qwen3_next"]()
     assert attention_mod.resolve_head_dim(config) == attention_mod.FLASH_MAX_HEAD_DIM
-    assert not attention_mod.head_dim_exceeds_flash(config)
+    assert not attention_mod.has_head_dim_beyond_flash(config)
     with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
-        assert attention_mod.resolve_attn_implementation(config, "flash_attention_2", torch.bfloat16) == (
-            "flash_attention_2"
+        resolved = attention_mod.resolve_attn_implementation(
+            config, "flash_attention_2", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
         )
+    assert resolved == "flash_attention_2"
 
 
 def test_a_config_rejecting_every_candidate_raises():
@@ -284,8 +368,30 @@ def test_fa4_demote_reads_the_multimodal_text_tower_model_type():
         get_text_config=lambda: SimpleNamespace(model_type="qwen3_5_moe_text"),
     )
     with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
-        resolved = attention_mod.resolve_attn_implementation(config, "flash_attention_4", torch.bfloat16)
+        resolved = attention_mod.resolve_attn_implementation(
+            config, "flash_attention_4", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
     assert resolved == "sdpa"
+
+
+def test_a_config_without_a_causal_lm_class_is_judged_by_its_image_text_class(monkeypatch):
+    """A composite with no CausalLM sibling (GLM-5 Next, Mistral4) declares ``_supports_flash_attn`` on its
+    conditional-generation class only, so the validator must read that class when the CausalLM mapping misses;
+    the conservative default would keep a flash backend transformers refuses at model build."""
+
+    class ImageTextOnlyConfig(PretrainedConfig):
+        model_type = "image_text_only"
+
+    class ImageTextOnlyModel:
+        _supports_flash_attn = False
+
+    monkeypatch.setattr(
+        attention_mod,
+        "AutoModelForImageTextToText",
+        SimpleNamespace(_model_mapping={ImageTextOnlyConfig: ImageTextOnlyModel}),
+    )
+    with patch.object(attention_mod.logger, "warning"):
+        assert attention_mod.validate_attn_implementation(ImageTextOnlyConfig(), "flash_attention_2") == "sdpa"
 
 
 if __name__ == "__main__":

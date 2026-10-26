@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from transformers import Trainer
 
-from src.kernels.liger.lce_forward import build_lce_forward
+from src.model_loading.liger.cross_entropy import build_lce_forward
 from src.trainers.sft import DistributedSFTTrainer
 
 

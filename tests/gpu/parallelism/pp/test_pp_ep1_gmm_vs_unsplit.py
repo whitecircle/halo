@@ -22,7 +22,7 @@ import sys
 
 from torch.distributed.tensor import DTensor
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from tests.common import pp_equivalence as ppeq

@@ -23,7 +23,7 @@ import pytest
 import torch
 from torch import nn
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 from tests.common.ep_stubs import StubEPLayerBase
 

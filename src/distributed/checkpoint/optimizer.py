@@ -30,7 +30,7 @@ from src.checkpoint.format import OPTIMIZER_META_FILE, OPTIMIZER_STATE_FILES, SC
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.coordination import all_ranks_ok, consensus_read
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
-from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.hardware import available_host_ram_bytes
 from src.log import KEY_PREVIEW_COUNT
@@ -62,7 +62,7 @@ def expert_replica_writer(model) -> tuple[int, frozenset[str]]:
     ``(this rank, empty)`` whenever nothing is replicated: no EP layers, experts FSDP-managed
     (``ep_group_size == 1`` with ``fsdp_shard_ep1_experts`` — already sharded), or one EP group.
     """
-    ep_layers = find_ep_layers(model)
+    ep_layers = named_ep_layers(model)
     ep_config = ep_layers[0][1].ep_config if ep_layers else None
     if ep_config is None or ep_config.experts_fsdp_managed or not ep_config.needs_expert_grad_sync:
         return get_global_rank(), frozenset()

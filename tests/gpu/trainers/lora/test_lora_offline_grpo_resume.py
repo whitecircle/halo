@@ -53,7 +53,7 @@ import src.distributed.checkpoint.optimizer as optimizer_store_mod
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.checkpoint.peft import find_peft_model
-from src.distributed.expert_parallel.base_layer import disable_expert_adapters
+from src.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
@@ -149,14 +149,16 @@ def _config(
         dataloader_num_workers=0,
         seed=SEED,
         fsdp="",
-        ddp_find_unused_parameters=pc.is_ep_mode,
+        ddp_find_unused_parameters=pc.has_ep_group,
     )
 
 
 def _make_trainer(mode: str, pc: ParallelismConfig, tokenizer, dataset, config) -> OfflineGRPOTrainer:
     # gpt-oss needs flex_attention once the experts are distributed; dense qwen and the ep1 leg,
     # whose sinks the default reset neutralizes, take the auto default.
-    model, _, peft_config = load_peft_model(mode, pc, attn_implementation="flex_attention" if pc.is_ep_mode else None)
+    model, _, peft_config = load_peft_model(
+        mode, pc, attn_implementation="flex_attention" if pc.has_ep_group else None
+    )
     return OfflineGRPOTrainer(
         model=model,
         args=config,
@@ -178,7 +180,7 @@ def _adapters_disabled(model):
     """The production reference context for this model's adapter kind.
 
     A PEFT-wrapped policy uses ``disable_adapter()`` — already EP-aware where native expert adapters
-    ride along, patched by ``make_disable_adapter_ep_aware``. An expert-only run builds no PeftModel,
+    ride along, patched by ``install_ep_aware_disable_adapter``. An expert-only run builds no PeftModel,
     so its adapters are reverted by the EP-side context directly.
     """
     peft_model = find_peft_model(model)

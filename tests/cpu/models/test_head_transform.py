@@ -26,6 +26,7 @@ from transformers.models.auto import modeling_auto
 from trl.trainer.utils import selective_log_softmax
 
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
+from src.model_loading.remote_code import apply_remote_code_compat_shims
 from src.models import head_transform
 from src.models.head_transform import (
     IDENTITY_HEAD_TRANSFORM,
@@ -35,7 +36,6 @@ from src.models.head_transform import (
     resolve_head_transform_spec,
     verify_head_transform,
 )
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
 from tests.common.models import (
     BAILING_MOE_LING_MINI,

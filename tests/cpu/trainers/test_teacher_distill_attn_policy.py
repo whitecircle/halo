@@ -13,7 +13,7 @@ declares has to reach the hub fetch:
   config fetch without it, and no teacher should import remote code the run did not opt into.
 * On a live-sinks model (``reset_sinks: false``, the GptOss RL flow) a sink-dropping backend shifts
   every teacher logprob by nats while the student is restricted to sink-carrying impls, so the
-  backend must be resolved under the SAME ``sinks_reset`` policy the student was loaded with.
+  backend must be resolved under the SAME ``SinksPolicy`` the student was loaded with.
 
 Run: python tests/cpu/trainers/test_teacher_distill_attn_policy.py  (or pytest)
 """
@@ -26,6 +26,7 @@ import torch
 from transformers import AutoModelForImageTextToText, PreTrainedTokenizerBase
 
 import scripts.training.distillation.teacher_distill as distill_script
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
 
@@ -145,7 +146,8 @@ def test_script_teacher_defaults_to_the_padded_workload_backend():
 @pytest.mark.parametrize("reset_sinks", [True, False])
 def test_script_teacher_resolution_mirrors_the_student_sinks_policy(reset_sinks):
     """With live sinks the resolver must reject the sink-dropping backends for the teacher too."""
-    assert _script_teacher_load_capturing(reset_sinks=reset_sinks).resolver["sinks_reset"] is reset_sinks
+    resolver = _script_teacher_load_capturing(reset_sinks=reset_sinks).resolver
+    assert resolver["sinks_policy"] is SinksPolicy.from_flags(reset_sinks=reset_sinks)
 
 
 @pytest.mark.parametrize(
@@ -163,7 +165,7 @@ def test_script_teacher_load_uses_the_run_precision(bf16, fp16, expected):
 def test_script_teacher_load_applies_the_sinks_policy_it_resolved_under(reset_sinks, is_vlm):
     """Resolving the backend is only half the policy — the sinks themselves have to be applied.
 
-    ``resolve_attn_implementation(..., sinks_reset=True)`` approves a sink-DROPPING backend (sdpa) on
+    ``resolve_attn_implementation`` under a neutralized policy approves a sink-DROPPING backend (sdpa) on
     the premise that the caller then resets the sinks. A loader that resolves under that premise and
     never applies it leaves a GptOss teacher running sdpa over live sinks, shifting every teacher
     logprob — the distillation target — by nats with nothing logged. This is the shipped path: the

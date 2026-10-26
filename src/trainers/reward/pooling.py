@@ -22,7 +22,7 @@ def sequence_classification_pad_id(config, tokenizer_pad_id: int | None) -> int:
     Also raises when the two ids disagree. PP pads every batch to ``max_length`` with the
     tokenizer's pad id while pooling keys on the config's; if they differ, no filler token counts as
     padding and every row pools at ``max_length - 1``, scoring a pad token at a finite loss. The
-    training scripts arrive here already synced (``setup_model_and_tokenizer`` records the
+    training scripts arrive here already synced (``configure_run_tokenizer`` records the
     tokenizer's pad id on every config level that declares it), so both raises gate a hand-built
     trainer whose config and tokenizer disagree, or whose tokenizer carries no pad id.
     """

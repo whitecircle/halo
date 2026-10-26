@@ -10,13 +10,8 @@ from dataclasses import dataclass
 import torch
 from transformers.utils.import_utils import is_causal_conv1d_available, is_flash_linear_attention_available
 
-from src.models.attention_layout import compressed_layer_types
+from src.models.attention.layout import GDN_MODEL_TYPE_PREFIXES, compressed_layer_types
 from src.models.config_access import model_type_matches
-
-# Families interleaving GatedDeltaNet (linear-attention) layers with softmax attention. Prefixes
-# rather than exact spellings, so text-tower variants (``qwen3_5_moe_text``) match; shared by the
-# segment-marker gates below and the FA4 backward gate in ``src/models/patches/attention.py``.
-GDN_MODEL_TYPE_PREFIXES = ("qwen3_5", "qwen3_next")
 
 # Families whose forward never passes ``position_ids`` into mask construction, so on a dense backend a
 # packed row runs as one causal sequence; packing is refused for them.
@@ -55,7 +50,7 @@ def segment_markers_for(model_config) -> SegmentMarkers:
 
 def reject_compressed_kv_rows(model_config, mode: str) -> None:
     """Refuse a multi-document row (``mode``, the flag that asks for one) on a model with
-    compressed-KV layers (:func:`~src.models.attention_layout.compressed_layer_types`), on every
+    compressed-KV layers (:func:`~src.models.attention.layout.compressed_layer_types`), on every
     backend: no segment marker or ``position_ids`` reaches windows cut by row index."""
     compressed = compressed_layer_types(model_config) if model_config is not None else []
     if not compressed:

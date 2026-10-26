@@ -38,7 +38,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
 **TP sharding.** `shard_sinks_param()` (`src/distributed/tensor_parallel/parallelize_attention.py`) shards sinks per rank as plain tensors, not DTensors — the forward concatenates sinks with locally-sharded logits, and a DTensor would dimension-mismatch on the concat. The slice is recorded in `model._tp_sharded_non_dtensor` so `gather_tp_sharded_non_dtensor_params()` all-gathers it at save time.
 
-**Sink handling** (`src/models/patches/gpt_oss_sinks.py`). One `SinksPolicy` per run, resolved from `reset_sinks` / `train_sinks` at load, stamped on the model for the trainer gates, and recorded in a LoRA run's `training_provenance.json` so the merge tools re-apply it (a merge rebuilds the base from the hub, whose sinks are always live).
+**Sink handling** (`src/models/attention/gpt_oss_sinks.py`). One `SinksPolicy` per run, resolved from `reset_sinks` / `train_sinks` at load, stamped on the model for the trainer gates, and recorded in a LoRA run's `training_provenance.json` so the merge tools re-apply it (a merge rebuilds the base from the hub, whose sinks are always live).
 
 - **Neutralized** (`reset_sinks: true`, the SFT default): `None` under FA2 (its kernel takes no sink argument), `dtype.min` and frozen everywhere else (~0 softmax mass, zero gradient). Every checkpoint writer re-emits the FA2-removed sinks as `dtype.min`.
 - **Live, frozen** (`reset_sinks: false`): the pretrained sinks stay in every softmax, `requires_grad=False`. This is the RL setting — the trainer scores with the sinks the rollout engine serves — and the only live policy an adapter run or weight-sync trainer accepts.

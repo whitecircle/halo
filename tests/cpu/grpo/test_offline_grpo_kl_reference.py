@@ -21,6 +21,7 @@ from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
@@ -285,7 +286,7 @@ def test_native_expert_lora_keeps_the_original_base_when_the_policy_resumes():
     assert captured.load["trust_remote_code"] is False
     assert captured.load["dtype"] is torch.bfloat16
     assert captured.resolver["attn_implementation"] == "sdpa"
-    assert captured.resolver["sinks_reset"] is False
+    assert captured.resolver["sinks_policy"] is SinksPolicy.LIVE
     captured.freeze_sinks.assert_called_once()
     assert reference.generation_config.pad_token_id == 3, "the tokenizer setup never reached the reference"
 

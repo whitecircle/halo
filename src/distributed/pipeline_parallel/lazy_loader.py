@@ -52,6 +52,7 @@ from src.distributed.pipeline_parallel.stage import (
     split_layer_path,
 )
 from src.log import KEY_PREVIEW_COUNT
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.lazy_safetensors.weights import (
     SafetensorsWeightLoader,
@@ -61,7 +62,6 @@ from src.model_loading.lazy_safetensors.weights import (
     materialize_empty_like,
 )
 from src.models.module_tree import backbone_with_layers
-from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from src.runtime.ranks import get_global_rank, get_local_rank
 
@@ -474,7 +474,7 @@ def _unmaterialized_reason(model: nn.Module, model_path: str, pp_rank: int, lo: 
     key. A tensor left on meta means either the checkpoint does not carry it or the re-base dropped
     its plan — and every decoder layer shares its shapes, so an omission is otherwise invisible until
     the first forward. Scope is ``state_dict`` (parameters + persistent buffers), i.e. exactly the
-    state a checkpoint carries; non-persistent buffers are recomputed by the ``buffer_fixes`` pass
+    state a checkpoint carries; non-persistent buffers are recomputed by the ``buffer_repair`` pass
     and a family that leaves one on meta is that pass's problem, not the loader's.
     """
     stranded = sorted(name for name, tensor in model.state_dict().items() if tensor is not None and tensor.is_meta)

@@ -21,7 +21,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import detect_gpu_model, get_gpu_peak_flops
 from src.kernels.lowp.spec import LOWP_RECIPES
 from src.model_loading.dtype import resolve_training_dtype
-from src.models.attention_layout import AttentionLayout
+from src.models.attention.layout import AttentionLayout
 from src.models.moe_balancing import detect_moe_experts_topk
 from src.runtime.ranks import get_global_world_size, is_global_main_process
 

@@ -55,10 +55,10 @@ from transformers import (
     Qwen3MoeForCausalLM,
 )
 
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.split import resolve_layer_partition
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
@@ -184,7 +184,7 @@ def _expert_bank_names(stage) -> set[str]:
     """
     return {
         stage.global_parameter_name(f"{path}.{name}")
-        for path, layer in find_ep_layers(stage)
+        for path, layer in named_ep_layers(stage)
         for name, _ in layer._base_expert_named_params()
     }
 

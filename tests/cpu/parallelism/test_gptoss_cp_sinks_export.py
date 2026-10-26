@@ -23,7 +23,7 @@ PartialState()  # the sinks policy logs through accelerate's logger, which requi
 
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
 from src.distributed.context_parallel.layers.gpt_oss import GptOssUlyssesAttention
-from src.models.patches.gpt_oss_sinks import _reset_gpt_oss_sinks, neutralized_gpt_oss_sinks
+from src.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks, neutralized_gpt_oss_sinks
 
 LIVE_SINK_VALUE = 0.75
 

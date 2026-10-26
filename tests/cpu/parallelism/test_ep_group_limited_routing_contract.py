@@ -25,11 +25,11 @@ from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteMoE
 from transformers.models.mistral4.modeling_mistral4 import Mistral4MoE
 
-from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
@@ -115,10 +115,10 @@ def _group_limited_families() -> list[type]:
 
 
 # Whose knob writer is exercised against a real block: the two families that build from the shared
-# one, plus every family EXTENDING _init_routing. An extension that skipped super() would leave all
+# one, plus every family EXTENDING _adopt_routing. An extension that skipped super() would leave all
 # six knobs at their neutral defaults with no attribute missing, so only the values catch it.
 _KNOB_WRITER_FAMILIES = sorted(
-    {EPGlm4MoELayer, EPMistral4MoELayer, *(cls for cls in _group_limited_families() if "_init_routing" in vars(cls))},
+    {EPGlm4MoELayer, EPMistral4MoELayer, *(cls for cls in _group_limited_families() if "_adopt_routing" in vars(cls))},
     key=lambda cls: cls.__name__,
 )
 
@@ -154,7 +154,7 @@ def test_no_family_forks_the_shared_routing_body(cls):
 @pytest.mark.parametrize("cls", _KNOB_WRITER_FAMILIES, ids=lambda c: c.__name__)
 def test_every_consumed_knob_is_populated(cls):
     """Every knob the shared top-k reads, at the value the real block carries — which is also what
-    pins that a family extending ``_init_routing`` (GLM-4 materializes a meta correction bias first)
+    pins that a family extending ``_adopt_routing`` (GLM-4 materializes a meta correction bias first)
     still calls ``super()``."""
     torch.manual_seed(0)
     layer = _build(cls, _GroupRoutedBlock(norm_topk_prob=True))

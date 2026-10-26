@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from torch import nn
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class StubEPLayerBase(EPMoELayerBase):

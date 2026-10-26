@@ -175,7 +175,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
         self.args = SimpleNamespace(save_total_limit=None, save_only_model=False, should_save=True, push_to_hub=False)
         self.state = TrainerState(global_step=2)
         self.parallelism_config = SimpleNamespace(
-            is_pp_mode=False, is_cp_mode=False, is_tp_mode=False, is_ep_tp_mode=False, merge_expert_lora_on_save=False
+            is_pp_mode=False, is_cp_mode=False, is_tp_mode=False, has_ep_group=False, merge_expert_lora_on_save=False
         )
         self._fsdp_wrapped = False
         self._accelerate_manages_fsdp = False

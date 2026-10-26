@@ -99,7 +99,7 @@ def run(ctx):
     # ── EP=2: same weights, same batch ────────────────────────────────────────
     model = _build_model(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
-    model = patch_moe_model_for_ep(model, pc.create_ep_config())
+    model = patch_moe_model_for_ep(model, pc.ep_config())
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPStep3p7MoELayer)]
     text_layers = model.model.language_model.layers

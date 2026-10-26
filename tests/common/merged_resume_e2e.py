@@ -133,7 +133,7 @@ def _adapter_snapshot(model) -> dict[str, torch.Tensor]:
 
 
 def _parallelism_config(ep_size: int, cp_size: int, fp32_masters: bool) -> ParallelismConfig:
-    """A fresh config per phase: ``create_ep_config`` caches the ``EPConfig`` it builds on the config,
+    """A fresh config per phase: ``ep_config`` caches the ``EPConfig`` it builds on the config,
     so a phase reusing another's would build its model against that phase's expert groups."""
     return ParallelismConfig(
         ep_size=ep_size,

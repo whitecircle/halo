@@ -42,11 +42,11 @@ from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner, load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, resolve_layer_root
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import cast_parameters_to_run_dtype
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
 from src.models.param_roles import fp32_pinned_names
-from src.models.patches.buffer_fixes import finalize_loaded_model
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B
 from tests.common.pinned_params import pins_off_stored, stored_fp32_pins
@@ -505,7 +505,7 @@ def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
     build_tiny_family_checkpoint(TINY_MOE_FAMILIES["deepseek_v4"], str(base), load_cached_tokenizer(QWEN3_0_6B))
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(
-            is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+            has_ep_group=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
         ),
         model_source=str(base),
     )

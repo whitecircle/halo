@@ -190,9 +190,9 @@ kwargs-style values win over explicit ones. The model and `training_args` defaul
 resolved it first, and `EmbeddingTrainer` passes a synthetic `{"model": model, "args": args}` (a
 `SentenceTransformer`'s `config` is its backbone's).
 
-`ParallelismConfig` validates the combination and exposes mode-flag properties (`is_ep_mode`,
-`is_cp_mode`, `is_tp_mode`, `is_expert_tp_mode`, `is_ep_tp_mode`, `is_ep_cp_mode`, `is_pp_mode`);
-`is_ep_mode` is `ep_group_size > 1`, covering both EP and pure ETP.
+`ParallelismConfig` validates the combination and exposes mode-flag properties (`has_ep_group`,
+`is_cp_mode`, `is_tp_mode`, `is_expert_tp_mode`, `is_pp_mode`); `has_ep_group` is `ep_group_size > 1`,
+covering both EP and pure ETP.
 
 **`create_accelerator_and_postprocess()`** is overridden during base init, on the custom path only
 (`_needs_custom_accelerator()`; otherwise it delegates to the base): no DDP wrapping (manual gradient
@@ -207,11 +207,11 @@ step on scaled gradients.
 
 ```text
 is_pp_mode         -> _setup_pipeline_parallel()   # stage-scoped (EP-aware) FSDP, runtime, clip
-is_ep_tp_mode      -> _setup_ep_tp()               # EP + attention TP
-is_ep_cp_mode      -> _setup_ep_cp()               # EP + CP
+has_ep_group + TP  -> _setup_ep_tp()               # EP + attention TP
+has_ep_group + CP  -> _setup_ep_cp()               # EP + CP
 is_cp_mode         -> _setup_cp_only()
 is_tp_mode         -> _setup_tp_only()             # FSDP2 on the DP axis + TP clipping (TP applied at load)
-is_ep_mode         -> _setup_ep_only()             # EP only, ETP only, or EP+ETP
+has_ep_group       -> _setup_ep_only()             # EP only, ETP only, or EP+ETP
 accelerate-managed -> accelerate FSDP / DDP        # raises if the model carries EP/grouped-GEMM wrappers
 needs_ep_wrappers  -> _setup_ep_only() if MoE, else _setup_standard_data_parallel()
 else               -> _setup_standard_data_parallel()   # standard FSDP2

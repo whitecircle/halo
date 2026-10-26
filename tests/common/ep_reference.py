@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
-from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, cos_sim, log_all
 
@@ -76,7 +76,7 @@ FIXED_CONVERSATIONS = (
 
 def ep_layers(model) -> list:
     """Every EP/ETP-wrapped MoE layer in ``model``, by the walk the toolkit's own EP consumers use."""
-    return [layer for _name, layer in find_ep_layers(model)]
+    return [layer for _name, layer in named_ep_layers(model)]
 
 
 def find_router_weight(model) -> tuple[str, torch.nn.Parameter]:

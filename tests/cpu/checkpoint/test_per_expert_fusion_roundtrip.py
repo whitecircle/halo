@@ -28,11 +28,11 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_classes,
     per_expert_fusion_map,
 )
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 E, H, M = 3, 8, 16
 

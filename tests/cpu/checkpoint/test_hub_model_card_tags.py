@@ -52,8 +52,8 @@ from src.configs.embedding import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.ep_save import save_ep_lora_adapters
 from src.distributed.checkpoint.peft import PeftAdapterSaver
-from src.model_loading.model_preparation import finalize_run_model
-from src.models.patches.gpt_oss_sinks import SinksPolicy
+from src.model_loading.model_preparation import apply_run_model_policies
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.tiny_models import word_level_tokenizer
 
@@ -333,7 +333,7 @@ def test_the_config_finalizer_adds_the_tag_to_a_trainer_written_card(tmp_path):
 def test_a_peft_adapter_of_a_loaded_model_carries_the_tag(tmp_path):
     """PEFT's card replaces its tags with the base model's ``model_tags``: the load stamps them there."""
     model = _tiny_qwen3()
-    finalize_run_model(model, model.config, sinks_policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
+    apply_run_model_policies(model, model.config, sinks_policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
     get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])).save_pretrained(tmp_path)
 
     card = _card(tmp_path)
@@ -490,7 +490,7 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     word_level_tokenizer(("hello",)).save_pretrained(base)
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
-            is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+            has_ep_group=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
         ),
         model_source=str(base),
     )

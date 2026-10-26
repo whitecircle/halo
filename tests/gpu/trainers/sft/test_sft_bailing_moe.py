@@ -17,7 +17,7 @@ Requirements: 2x GPUs with >=40GB each, DeepEP (EP modes), flash-linear-attentio
 inclusionAI/Ring-mini-linear-2.0.
 """
 
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.model_loading.remote_code import apply_remote_code_compat_shims
 
 apply_remote_code_compat_shims()
 

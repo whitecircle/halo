@@ -8,11 +8,11 @@ Run: python tests/cpu/parallelism/test_ep_bitwise_harness.py
 import pytest
 import torch
 
-from src.distributed.expert_parallel import base_layer
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.expert_parallel.grad_sync import create_expert_grad_hook
+from src.distributed.expert_parallel.moe_layer import grad_sync
+from src.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from tests.common.equivalence import ep_bitwise
 from tests.common.equivalence.ep_bitwise import (
     CONSTRUCTION_VARIANTS,
@@ -170,8 +170,8 @@ def test_a_rescaled_glu_combine_is_a_logit_and_gradient_delta(monkeypatch, tmp_p
 def test_a_router_master_at_another_dtype_is_a_dtype_delta(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", ["qwen3_moe"], ["in_backward_grad_sync"])
 
-    def to_fp64(self, router_attr):
-        setattr(self, router_attr, getattr(self, router_attr).double())
+    def to_fp64(self):
+        setattr(self, self._ROUTER_ATTR, getattr(self, self._ROUTER_ATTR).double())
 
     monkeypatch.setattr(EPMoELayerBase, "_upcast_router_to_fp32", to_fp64)
 
@@ -188,7 +188,7 @@ def test_a_router_master_at_another_dtype_is_a_dtype_delta(monkeypatch, tmp_path
 
 def test_unregistered_gradient_hooks_are_an_order_delta(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", ["gpt_oss"], ["in_backward_grad_sync"])
-    monkeypatch.setattr(EPMoELayerBase, "_setup_gradient_sync", lambda self, router, expert_params: None)
+    monkeypatch.setattr(EPMoELayerBase, "_setup_gradient_sync", lambda self: None)
 
     entries = _differences(
         baseline,
@@ -203,7 +203,7 @@ def test_unregistered_gradient_hooks_are_an_order_delta(monkeypatch, tmp_path):
 def test_a_router_given_the_expert_hook_is_an_order_delta(monkeypatch, tmp_path):
     """Router gradients that lose their DP all-reduce: the same hook count, a different hook."""
     baseline = _produced(tmp_path / "baseline", ["qwen3_moe"], ["in_backward_grad_sync"])
-    monkeypatch.setattr(base_layer, "create_router_grad_hook", create_expert_grad_hook)
+    monkeypatch.setattr(grad_sync, "build_router_grad_hook", build_expert_grad_hook)
 
     entries = _differences(
         baseline,

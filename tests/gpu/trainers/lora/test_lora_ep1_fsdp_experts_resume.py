@@ -95,7 +95,7 @@ def run(ctx) -> dict:
     )
     freeze_base_keep_expert_adapters(model)
 
-    checks = {"experts_fsdp_managed": parallelism_config.create_ep_config().experts_fsdp_managed}
+    checks = {"experts_fsdp_managed": parallelism_config.ep_config().experts_fsdp_managed}
     checks["has_expert_lora"] = has_ep_lora(model)
     adapted = sorted({a for m in ep_layers(model) for a in m._expert_lora_attrs})
     checks["multiple_adapted_attrs"] = len(adapted) >= 2  # else ordering cannot differ

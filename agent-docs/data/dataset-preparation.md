@@ -53,7 +53,7 @@ dataset that trains zero tokens.
 
 `--tokenizer-backend gigatoken` (optional extra `halo[gigatoken]`) encodes text→ids with the [gigatoken](https://github.com/marcelroed/gigatoken) Rust encoder — ~6× faster tokenization on UltraChat 200K with Qwen3-0.6B — while chat templating and decoding stay on the model's tokenizer (`src/model_loading/tokenizer_backend.py`). Token IDs are verified against the HF tokenizer at startup; any divergence raises. VLM mode swaps the processor's inner tokenizer the same way, but image processing dominates there, so the win is small.
 
-The same two values are also a **training** config field, `tokenizer_backend` (default `hf`). It resolves in `setup_model_and_tokenizer`, so every training method that tokenizes rows honors it with no preparation pass; embedding training rejects a non-`hf` value, since SentenceTransformer owns its own tokenization.
+The same two values are also a **training** config field, `tokenizer_backend` (default `hf`). It resolves in `configure_run_tokenizer`, so every training method that tokenizes rows honors it with no preparation pass; embedding training rejects a non-`hf` value, since SentenceTransformer owns its own tokenization.
 
 With `--train-on-completions-only` the completion-only `labels` are baked into the saved dataset under **the span policy the artifact's own runtime collator applies** (`mask_batch_to_completion_spans`): marker tokens trained, each turn's terminator bounded by the next marker start.
 

@@ -52,7 +52,7 @@ from src.models.moe_balancing import (
     ROUTER_LOGITS_FORCED_OFF_ATTR,
     is_transient_balancing_router,
 )
-from src.models.patches.zaya import patch_zaya_router_load_recording
+from src.models.zaya import patch_zaya_router_load_recording
 
 
 class _Cfg:

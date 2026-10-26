@@ -8,7 +8,7 @@ restricted to the replayed selection; replaying weights or logits zeroes the rou
 arXiv:2510.23027).
 
 :class:`RoutingReplayInjector` holds the per-layer capture/arm state on
-:class:`~src.distributed.expert_parallel.base_layer.EPMoELayerBase` as plain attributes (following
+:class:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase` as plain attributes (following
 ``balancing_biases``); its methods document the capture → arm → disarm → ``flip_rate`` cycle.
 """
 
@@ -23,12 +23,11 @@ import torch
 from numpy.lib.format import MAGIC_PREFIX as NPY_MAGIC_PREFIX
 from torch import nn
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.models.config_access import text_config
 from src.models.module_tree import decoder_layer_index
 from src.models.unwrapping import unwrap_framework_wrappers
 from src.trainers.grpo.world_metrics import world_sums
-from src.trainers.mixins.ep_introspection import named_ep_layers
 
 ROUTING_MASKS_KEY = "routing_masks"
 
@@ -327,7 +326,7 @@ class RoutingReplayInjector:
 def build_routing_replay_injector(model: nn.Module) -> RoutingReplayInjector:
     """Build an injector over ``model``'s EP MoE layers (named_modules order), matched to the engine's
     one-row-per-decoder-layer wire through the model's own layer count and each layer's index."""
-    layers = named_ep_layers(model)
+    layers = dict(named_ep_layers(model))
     return RoutingReplayInjector(
         list(layers.values()),
         engine_layers=int(text_config(unwrap_framework_wrappers(model).config).num_hidden_layers),

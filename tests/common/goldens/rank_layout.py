@@ -89,15 +89,15 @@ def layout_record(shape: LayoutShape) -> dict:
     ep_configs, cp_configs = [], []
     for rank, config in enumerate(configs):
         with stubbed_process_groups(shape.world_size, rank):
-            ep_configs.append(config.create_ep_config())
+            ep_configs.append(config.ep_config())
             if config.is_cp_mode:
-                cp_configs.append(config.create_cp_config())
+                cp_configs.append(config.cp_config())
     pipelined = shape.pp_size > 1
     return {
         "data_parallel_size": _job_wide(configs, "data_parallel_size"),
         "num_ep_groups": _job_wide(configs, "num_ep_groups"),
         "dp_rank": [config.get_data_parallel_rank() for config in configs],
-        "pp_chain": _partition(tuple(config.get_pp_group_ranks()) for config in configs) if pipelined else None,
+        "pp_chain": _partition(tuple(config.pp_chain_ranks()) for config in configs) if pipelined else None,
         "ep_group": _partition(ep.process_group for ep in ep_configs),
         "ep_rank": [ep.ep_rank for ep in ep_configs],
         "dispatch_group": _partition(ep.dispatch_ep_group for ep in ep_configs),

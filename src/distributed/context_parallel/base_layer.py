@@ -26,10 +26,8 @@ from src.distributed.context_parallel.autograd import (
     ulysses_all_to_all_fused_kv,
 )
 from src.hardware import is_blackwell_gpu, is_hopper_gpu
-from src.models.patches.attention import (
-    ensure_fa4_kernel_cache_env,
-    model_fa4_backward_nan_prone,
-)
+from src.kernels.jit_cache import ensure_fa4_kernel_cache_env
+from src.models.attention.selection import is_fa4_backward_nan_prone
 
 # Hub kernel id of the flash-attn2 build the CP fallback loads; ``validation.py`` also accepts it as an
 # attn_implementation.
@@ -89,7 +87,7 @@ def get_flash_attn_func(allow_fa4: bool = True):
             pass
 
     # FA4 only on data-center Blackwell (SM100+): its CuTe kernels do not run elsewhere. It is also
-    # the backend the model was labelled with and whose kernels warmup_fa4_kernels pre-compiled.
+    # the backend the model was labelled with and whose kernels warm_fa4_kernels pre-compiled.
     if allow_fa4 and is_blackwell_gpu():
         try:
             ensure_fa4_kernel_cache_env()  # persist the CuTe DSL compile cache before first import
@@ -186,7 +184,7 @@ class UlyssesAttentionBase(nn.Module, ABC):
 
         # The kernel probe overrides the configured label, so a family whose FA4 backward emits NaN
         # gradients cannot opt out by requesting FA2. Resolved once, not per forward.
-        self._allow_fa4 = not model_fa4_backward_nan_prone(self.config)
+        self._allow_fa4 = not is_fa4_backward_nan_prone(self.config)
 
         # Last, so family-derived state sees every field above.
         self._configure(original_attention)

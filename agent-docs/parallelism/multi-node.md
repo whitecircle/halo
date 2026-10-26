@@ -2,7 +2,8 @@
 
 Multi-node training spans EP, CP, TP, and DP across machines connected by InfiniBand/RDMA.
 `ParallelismConfig` (`src/distributed/parallelism_config.py`) validates every combination against
-the [supported-axis allowlist](README.md#supported-combinations); this page adds the locality rules —
+the [supported-axis allowlist](README.md#supported-combinations) and the refusals in
+`src/distributed/parallelism_rules.py`; this page adds the locality rules —
 which dimensions must stay NVLink-local and which may span domains.
 
 Runnable launches, SLURM, and troubleshooting live in [Launch Recipes](launch-recipes.md).
@@ -43,7 +44,7 @@ Gradient-sync scope follows the mode — the world or the EP group
 | Node-local (`ep_scope="node"`) | Within each NVLink domain (consecutive ranks) | NVLink |
 | Cross-node (`ep_scope="global"`) | Span every NVLink domain, contiguous block per domain | NVLink + RDMA |
 
-Cross-node EP uses the **column-block** layout (`src/distributed/group_layout.py`): each group spans
+Cross-node EP uses the **column-block** layout (`CrossNodeLayout`, `src/distributed/group_layout.py`): each group spans
 every domain with a contiguous device block per domain, and the group-relative rank is
 `rdma_rank * members_per_domain + nvl_rank` — what DeepEP's internode transport expects. Contiguity
 is mandatory because DeepEP's intranode P2P kernel addresses CUDA IPC peers by device offset.
@@ -203,7 +204,7 @@ TP (DTensor) shards attention within each NVLink domain; EP (DeepEP) distributes
 syncs DP across domains. Attention TP leaves `ep_group_size` at `ep_size`, so it adds no expert
 sharding. DP = `world_size / tp_size`. Rules, all checked at config time:
 
-- `tp_size` divides the NVLink domain, and `ep_size` is a multiple of `tp_size` (`_validate_tp`).
+- `tp_size` divides the NVLink domain, and `ep_size` is a multiple of `tp_size` (`_reject_tp`).
 - **One domain:** the
   [single-domain multi-group rule](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)
   applies unchanged, so `ep_size` is 2 or fills the domain. `ep2+tp2` on 8 GPUs (four 2-rank EP
@@ -241,7 +242,7 @@ config = ParallelismConfig(ep_size=8, tp_size=8, ep_scope="node")
 The dataclass and the `--ep_scope` CLI flag share that default, so a hand-built config behaves like a
 YAML-built one. Derived fields: `data_parallel_size`,
 `num_ep_groups`, `requires_rdma` (True only when the EP group spans more than one NVLink domain).
-`create_ep_config()` / `create_cp_config()` build the process groups.
+`ep_config()` / `cp_config()` build the process groups.
 
 ## DeepEP inter-node communication
 
@@ -351,7 +352,7 @@ per rank, and the ranks of a node that read the same shard share its page cache,
 serves each page once per node.
 
 For remote-code families, the lazy meta shell fetches the modeling file at the commit its config was
-read from. transformers' copies into `HF_MODULES_CACHE` land whole (`src/models/patches/remote_code_hooks.py`),
+read from. transformers' copies into `HF_MODULES_CACHE` land whole (`src/model_loading/remote_code.py`),
 so ranks sharing that cache never import a half-written module.
 
 ## Verified topologies
@@ -394,7 +395,7 @@ The toolkit then builds node-local EP/CP groups as contiguous blocks across the 
 
 **The domain is the tiling unit, so every node-local width must divide it.** `tp_size`, `cp_size`,
 `expert_tp_size` and a node-scope `ep_group_size` are each required to divide `nvlink_domain_size`
-exactly (`_validate_tp`, `_validate_cp_locality`, `_validate_expert_tp`, `_validate_ep_group`). Groups
+exactly (`_reject_tp`, `_reject_cp_locality`, `_reject_expert_tp`, `_reject_ep_group`). Groups
 are contiguous rank blocks, and a non-dividing width straddles a domain boundary while
 `requires_rdma` still reports False.
 

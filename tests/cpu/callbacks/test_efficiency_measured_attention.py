@@ -14,7 +14,7 @@ import pytest
 import torch
 
 from src.callbacks.efficiency import EfficiencyCallback
-from src.models.attention_layout import AttentionLayout, LayerAttention
+from src.models.attention.layout import AttentionLayout, LayerAttention
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
 from tests.common.parallelism import make_parallelism_config
 

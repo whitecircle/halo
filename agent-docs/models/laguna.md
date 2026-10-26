@@ -28,7 +28,7 @@ Transformers ships `transformers.models.laguna` natively, and the released check
 
 - **Where the routing knobs live.** In-library GLM-4 hangs `routed_scaling_factor` / `num_group` / `topk_group` / `norm_topk_prob` on the router and leaves `n_routed_experts` / `n_group` on the config; the Laguna remote-code revisions put `norm_topk_prob` on the router and declare no groups.
 
-    `EPGroupLimitedMoELayerBase._init_routing` resolves each knob off the block, then the gate, then the config, accepting both the `n_group` and `num_group` spellings. An explicit declaration always wins over the family default, and with no group knob at all group-limited selection degenerates to a plain top-k. Both families list exactly the knobs they lack in `_OPTIONAL_ROUTING_KNOBS`; any other missing knob raises.
+    `EPGroupLimitedMoELayerBase._adopt_routing` resolves each knob off the block, then the gate, then the config, accepting both the `n_group` and `num_group` spellings. An explicit declaration always wins over the family default, and with no group knob at all group-limited selection degenerates to a plain top-k. Both families list exactly the knobs they lack in `_OPTIONAL_ROUTING_KNOBS`; any other missing knob raises.
 
 - **A missing router bias** (inherited). A checkpoint without `e_score_correction_bias` would leave it on meta under lazy loading; the wrapper materializes it at zero (a no-op additive bias) instead of letting the first routing matmul fault. The released Laguna checkpoints carry it.
 - **Hub vs module key spelling.** Laguna is the only family declaring `_EXPORT_KEY_RENAMES`: module `mlp.shared_experts.` is hub `mlp.shared_expert.`, and module `mlp.gate.e_score_correction_bias` is hub `mlp.experts.e_score_correction_bias`.

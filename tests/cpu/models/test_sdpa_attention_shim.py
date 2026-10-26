@@ -20,7 +20,7 @@ import pytest
 import torch
 import transformers.dynamic_module_utils
 
-from src.models.patches.remote_code_compat import (
+from src.model_loading.remote_code import (
     _shim_dispatchless_eager_attention,
     apply_remote_code_compat_shims,
 )

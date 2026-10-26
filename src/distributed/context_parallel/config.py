@@ -14,11 +14,7 @@ import logging
 import torch
 import torch.distributed as dist
 
-from src.distributed.group_layout import (
-    node_local_group_ranks,
-    node_local_groups_per_domain,
-    node_local_rank_and_group,
-)
+from src.distributed.group_layout import NodeLocalLayout
 from src.env import nccl_timeout
 from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
@@ -110,11 +106,9 @@ class CPConfig:
 
         global_rank = get_global_rank()
 
-        num_domains = self.world_size // domain_size
-        num_cp_groups = num_domains * node_local_groups_per_domain(domain_size, self.cp_size)
-        self.cp_rank, self.cp_group_idx = node_local_rank_and_group(
-            global_rank - self.rank_offset, domain_size, self.cp_size
-        )
+        layout = NodeLocalLayout(world_size=self.world_size, group_size=self.cp_size, domain_size=domain_size)
+        num_cp_groups = layout.num_groups
+        self.cp_rank, self.cp_group_idx = layout.rank_and_group(global_rank - self.rank_offset)
 
         self.process_group = None
         self._cp_group_ranks = None
@@ -122,7 +116,7 @@ class CPConfig:
         # ``dist.new_group`` is collective: under PP every rank must also create the other stages' groups.
         for base in range(0, get_global_world_size(), self.world_size):
             for group_idx in range(num_cp_groups):
-                cp_group_ranks = [base + r for r in node_local_group_ranks(group_idx, domain_size, self.cp_size)]
+                cp_group_ranks = [base + r for r in layout.group_ranks(group_idx)]
                 group = dist.new_group(cp_group_ranks, timeout=nccl_timeout())
                 if base == self.rank_offset and group_idx == self.cp_group_idx:
                     self.process_group = group

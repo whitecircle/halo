@@ -151,7 +151,7 @@ def run(ctx) -> dict:
 
     model = build_tiny_gptoss(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
-    model = patch_moe_model_for_ep(model, pc.create_ep_config())
+    model = patch_moe_model_for_ep(model, pc.ep_config())
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPGptOssMoELayer)]
     check(checks, "EP layers patched", len(ep_layers) > 0, f"{len(ep_layers)} EPGptOssMoELayer(s)")

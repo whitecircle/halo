@@ -17,15 +17,15 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, PreTrainedModel
 from trl import ModelConfig, get_peft_config
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
 from src.model_loading.dtype import is_kbit_quantized
+from src.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
 from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
 from src.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projections
 from src.models.moe_balancing import config_has_experts
 from src.models.param_roles import EMBEDDING_HEAD_MARKERS, is_normalization_module
-from src.models.patches.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
 from src.runtime.consensus import reject_across_ranks, reject_divergent_settings
 from src.runtime.filesystem import hub_metadata_main_first
 
@@ -155,9 +155,8 @@ def _reenable_expert_lora_grads(model: PreTrainedModel) -> None:
     Base experts stay frozen."""
     for module in model.modules():
         if isinstance(module, EPMoELayerBase):
-            for attr in module._expert_lora_attrs:
-                getattr(module, f"{attr}_lora_A").requires_grad_(True)
-                getattr(module, f"{attr}_lora_B").requires_grad_(True)
+            for _name, adapter in module.expert_lora_named_params():
+                adapter.requires_grad_(True)
 
 
 def _pins_a_decoder_layer_index(pattern: str) -> bool:

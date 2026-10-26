@@ -143,7 +143,7 @@ def run(ctx):
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = load_ep_model_lazy(
         composite_dir,
-        pc.create_ep_config(),
+        pc.ep_config(),
         AutoConfig.from_pretrained(composite_dir),
         dtype=torch.bfloat16,
         model_class=InklingForConditionalGeneration,
@@ -167,7 +167,7 @@ def run(ctx):
     pc = ParallelismConfig(ep_size=1, expert_tp_size=2)
     model = load_ep_model_lazy(
         composite_dir,
-        pc.create_ep_config(),
+        pc.ep_config(),
         AutoConfig.from_pretrained(composite_dir),
         dtype=torch.bfloat16,
         model_class=InklingForConditionalGeneration,
@@ -189,7 +189,7 @@ def run(ctx):
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = load_ep_model_lazy(
         text_dir,
-        pc.create_ep_config(),
+        pc.ep_config(),
         AutoConfig.from_pretrained(text_dir),
         dtype=torch.bfloat16,
         model_class=InklingForCausalLM,

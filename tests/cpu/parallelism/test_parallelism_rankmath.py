@@ -181,8 +181,7 @@ def test_h2_ep_etp_dp_rank_partition_and_partners():
         assert cfg.data_parallel_size == 4  # world(8) / expert_tp_size(2)
         assert cfg.ep_group_size == ep_size * etp == 4
         dp_by_rank[r] = cfg.get_data_parallel_rank()
-        ep_rank_by_rank[r] = cfg.get_ep_rank()
-        group_by_rank[r] = cfg.get_ep_group_idx()
+        ep_rank_by_rank[r], group_by_rank[r] = cfg.ep_layout.rank_and_group(r)
 
     distinct = set(dp_by_rank.values())
     assert len(distinct) == 4, dp_by_rank  # exactly data_parallel_size distinct dp-ranks
@@ -236,16 +235,13 @@ def test_h2_ep_etp_dp_rank_concrete_values():
 
 
 def _all_global_groups(ep_size, world_size, gpus_per_node):
+    layout = create_config(
+        ep_size=ep_size, world_size=world_size, gpus_per_node=gpus_per_node, ep_scope="global"
+    ).ep_layout
     groups = {}
     for rank in range(world_size):
-        cfg = create_config(
-            ep_size=ep_size,
-            world_size=world_size,
-            gpus_per_node=gpus_per_node,
-            rank=rank,
-            ep_scope="global",
-        )
-        groups.setdefault(cfg.get_ep_group_idx(), cfg.get_ep_group_ranks())
+        group_idx = layout.rank_and_group(rank)[1]
+        groups.setdefault(group_idx, layout.group_ranks(group_idx))
     return groups
 
 
@@ -284,27 +280,24 @@ def test_h3_cross_node_world32_partition_and_contiguity():
 
 
 def test_h3_cross_node_world32_replica_round_trip():
-    """Every expert-replica rank shares the same group-rank (get_ep_rank) — at the 4-domain topology.
+    """Every expert-replica rank shares the same group-rank (ep_rank) — at the 4-domain topology.
 
     For ep_size=8 on world=32 (4 domains, m=2, 4 EP groups), the replicas of a rank are exactly the
-    same-group-rank position across the 4 EP groups. Round-trip: build a config at each replica and
-    confirm its get_ep_rank equals the source rank's, and that there are num_ep_groups of them.
+    same-group-rank position across the 4 EP groups. Round-trip: confirm each replica's ep_rank
+    equals the source rank's, and that there are num_ep_groups of them.
     """
     world, dom = 32, 8
+    cfg = create_config(ep_size=8, world_size=world, gpus_per_node=dom, ep_scope="global")
+    layout = cfg.ep_layout
     for src in (0, 5, 17, 30):
-        cfg = create_config(ep_size=8, world_size=world, gpus_per_node=dom, rank=src, ep_scope="global")
-        replicas = cfg.get_expert_replica_ranks()
+        ep_rank = layout.rank_and_group(src)[0]
+        replicas = layout.replica_ranks(ep_rank)
         assert len(replicas) == cfg.num_ep_groups == 4, (src, replicas)
         assert src in replicas, (src, replicas)
         for r in replicas:
-            rcfg = create_config(ep_size=8, world_size=world, gpus_per_node=dom, rank=r, ep_scope="global")
-            assert rcfg.get_ep_rank() == cfg.get_ep_rank(), (src, r, rcfg.get_ep_rank(), cfg.get_ep_rank())
-        # Replicas are one-per-group: their ep_group_idx values are all distinct and cover 0..3.
-        gidx = sorted(
-            create_config(ep_size=8, world_size=world, gpus_per_node=dom, rank=r, ep_scope="global").get_ep_group_idx()
-            for r in replicas
-        )
-        assert gidx == [0, 1, 2, 3], (src, gidx)
+            assert layout.rank_and_group(r)[0] == ep_rank, (src, r, layout.rank_and_group(r), ep_rank)
+        # Replicas are one-per-group: their group indices are all distinct and cover 0..3.
+        assert sorted(layout.rank_and_group(r)[1] for r in replicas) == [0, 1, 2, 3], src
 
 
 # H4 — Multi-node DP rank is GLOBAL, not domain-local

@@ -1,6 +1,6 @@
 """What the flash-attention probes ask the kernel, and what the FA4 warm-up compiles.
 
-Two decisions in ``patches/attention.py`` are read off a flash kernel's signature, and both must ask
+Two decisions in ``attention/selection.py`` are read off a flash kernel's signature, and both must ask
 the VARLEN entry point rather than the DENSE one:
 
   * the sink-capability probe. transformers builds its whole per-argument capability map
@@ -31,12 +31,8 @@ from transformers import modeling_flash_attention_utils as flash_utils
 
 import src.distributed.loading.warmup as warmup_mod
 from src.distributed.loading.warmup import warm_attention_kernels
-from src.models.patches.attention import (
-    FLASH_SINK_PARAM_NAMES,
-    _attn_impl_handles_sinks,
-    flash_varlen_fn,
-    warmup_fa4_kernels,
-)
+from src.models.attention.backend_setup import warm_fa4_kernels
+from src.models.attention.selection import FLASH_SINK_PARAM_NAMES, _attn_impl_handles_sinks, flash_kernel
 
 PartialState()  # the warm-up logs through accelerate's logger
 
@@ -46,7 +42,7 @@ PartialState()  # the warm-up logs through accelerate's logger
 
 def test_transformers_still_keys_capability_off_the_varlen_function():
     """Drift pin. If a transformers upgrade builds the capability map from the dense function
-    instead, this fails and ``flash_varlen_fn`` has to be re-pointed with it — otherwise the probe
+    instead, this fails and ``flash_kernel`` has to be re-pointed with it — otherwise the probe
     would quietly answer a question the library no longer asks."""
     source = inspect.getsource(flash_utils.lazy_import_flash_attention)
     assert "_lazy_define_process_function(_flash_varlen_fn)" in source, source
@@ -56,7 +52,7 @@ def test_the_probe_returns_the_function_transformers_would_bind():
     """Identity, not just spelling: the probe and transformers must reach the same object for the
     installed FA4 build."""
     cute = pytest.importorskip("flash_attn.cute")
-    assert flash_varlen_fn("flash_attention_4") is cute.flash_attn_varlen_func
+    assert flash_kernel("flash_attention_4") is cute.flash_attn_varlen_func
 
 
 def test_the_sink_argument_names_match_transformers_alias_table():
@@ -151,7 +147,7 @@ def warmed(monkeypatch):
 def test_the_warmup_compiles_both_entry_points(warmed):
     """Warming only the dense kernel leaves the varlen one to JIT-compile mid-forward on the first
     packed step — one rank stalls ~10s while its peers run ahead into the next collective."""
-    warmup_fa4_kernels(_fa4_model(), dtype=torch.bfloat16, device=torch.device("cpu"))
+    warm_fa4_kernels(_fa4_model(), dtype=torch.bfloat16, device=torch.device("cpu"))
     assert [call["entry"] for call in warmed.calls] == ["dense", "varlen"]
 
     varlen = next(call for call in warmed.calls if call["entry"] == "varlen")
@@ -164,7 +160,7 @@ def test_the_warmup_compiles_both_entry_points(warmed):
 def test_the_warmup_compiles_the_runs_dtype(warmed):
     """The kernel is keyed by dtype: a hardcoded bf16 warm-up under an fp16 run compiles a kernel
     the run never calls and leaves the one it does call cold — the deadlock, plus the compile."""
-    warmup_fa4_kernels(_fa4_model(), dtype=torch.float16, device=torch.device("cpu"))
+    warm_fa4_kernels(_fa4_model(), dtype=torch.float16, device=torch.device("cpu"))
     assert warmed.calls
     for call in warmed.calls:
         assert {call[side].dtype for side in ("q", "k", "v")} == {torch.float16}
@@ -173,7 +169,7 @@ def test_the_warmup_compiles_the_runs_dtype(warmed):
 def test_the_warmup_stays_inert_for_another_backend(warmed):
     model = _fa4_model()
     model.config._attn_implementation = "sdpa"
-    warmup_fa4_kernels(model, dtype=torch.bfloat16, device=torch.device("cpu"))
+    warm_fa4_kernels(model, dtype=torch.bfloat16, device=torch.device("cpu"))
     assert warmed.calls == []
 
 

@@ -28,12 +28,12 @@ from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.model_source import resolve_model_source
 from src.distributed.loading.peft_setup import build_peft_config
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
-from src.model_loading.model_preparation import finalize_run_model
+from src.model_loading.model_preparation import apply_run_model_policies
+from src.model_loading.remote_code import apply_remote_code_compat_shims
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.context_window import resolve_length_to_context
-from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.patches.gpt_oss_sinks import SinksPolicy
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from src.models.peft_adapters import tuner_adapter_param_ids
 from src.runtime.collectives import barrier
 from src.runtime.load_coordination import joined_node_load
@@ -78,7 +78,7 @@ def build_sentence_transformer(
             "silently ignored. Use full-precision LoRA (--use_peft) or full fine-tuning."
         )
     parallelism_config = runtime.parallelism_config
-    if parallelism_config.is_ep_mode or parallelism_config.is_tp_mode:
+    if parallelism_config.has_ep_group or parallelism_config.is_tp_mode:
         backbone, tokenizer = load_script_model(
             runtime,
             embedding_config,
@@ -139,7 +139,7 @@ def build_sentence_transformer(
         backbone = st_model[0].auto_model
         cast_parameters_to_run_dtype(backbone, model_kwargs["dtype"], keep_fp32=parallelism_config.fp32_non_ep_params)
         finalize_loaded_model(backbone)
-        finalize_run_model(
+        apply_run_model_policies(
             backbone,
             backbone.config,
             sinks_policy=SinksPolicy.from_flags(reset_sinks=dist_args.reset_sinks, train_sinks=dist_args.train_sinks),
@@ -255,7 +255,7 @@ def main():
     parser = H4ArgumentParser((EmbeddingScriptArguments, EmbeddingConfig, ModelConfig, DistributedArguments))
     args, embedding_config, model_config, dist_args = parser.parse()
 
-    # The ST path has no setup_model_and_tokenizer / freeze stage, so these shared knobs would parse
+    # The ST path has no configure_run_tokenizer / freeze stage, so these shared knobs would parse
     # and do nothing (a freeze request would become a full fine-tune). Reject them instead.
     reject_unsupported_args(
         "Embedding training",

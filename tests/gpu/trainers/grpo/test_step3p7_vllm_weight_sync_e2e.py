@@ -52,12 +52,12 @@ from transformers import AutoTokenizer
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.hardware import supports_grouped_mm
 from src.trainers.grpo.rollout.weight_sync import sync_weights_to_client, validate_weight_sync_support
-from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.utils import log, max_or_nan
@@ -235,7 +235,7 @@ def _perturb(params: list[torch.Tensor], generator: torch.Generator) -> None:
 
 def _weight_groups(model) -> dict[str, list[torch.Tensor]]:
     """The three conversion classes the sync must carry, as disjoint parameter groups."""
-    ep_layers = named_ep_layers(model)
+    ep_layers = dict(named_ep_layers(model))
     experts = [param for layer in ep_layers.values() for _name, param in layer.expert_named_params()]
     router_and_shared = [
         param

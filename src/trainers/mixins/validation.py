@@ -19,21 +19,21 @@ from accelerate.logging import get_logger
 from peft import PeftModel
 
 from src.distributed.checkpoint.peft import find_peft_model
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.loading.frozen_models import (
     PREFERENCE_REFERENCE_ALTERNATIVES,
     ReferenceAlternatives,
     warn_unparallelized_reference,
 )
-from src.distributed.parallelism_config import accelerate_launch_rejection
+from src.distributed.parallelism_rules import reject_accelerate_launch
 from src.log import KEY_PREVIEW_COUNT
+from src.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from src.models.config_access import config_sources, set_config_field_run_scoped
 from src.models.moe_balancing import (
     config_has_experts,
     mark_router_logits_forced_off,
 )
-from src.models.patches.gpt_oss_sinks import has_live_attention_sinks
 from src.models.peft_adapters import tuner_adapter_param_ids
 
 logger = get_logger(__name__)
@@ -193,8 +193,7 @@ class ParallelismValidationMixin:
                 f"See agent-docs/parallelism/pipeline-parallelism.md for the supported trainers."
             )
 
-        if message := accelerate_launch_rejection(config):
-            raise ValueError(message)
+        reject_accelerate_launch(config)
 
     def _validate_reference_model(self, ref_model):
         """Warn about an explicit reference model under EP/TP (:func:`warn_unparallelized_reference`)."""
@@ -210,7 +209,7 @@ class ParallelismValidationMixin:
         property of the loaded weights, not of the sharding — it holds under plain FSDP2 DP, TP and
         ``ep_size == 1`` exactly as it does under EP, so it raises unconditionally. A reference loaded with the
         policy's ``reset_sinks`` carries the same sinks and passes; one TRL builds itself keeps GptOss's
-        pretrained sinks live (:func:`~src.models.patches.gpt_oss_sinks.has_live_attention_sinks`), so it
+        pretrained sinks live (:func:`~src.models.attention.gpt_oss_sinks.has_live_attention_sinks`), so it
         passes beside live sinks only. The un-sharded replica is merely **wasteful** — its log-probs match the
         policy's up to kernel numerics — and worst under EP (experts replicated per rank), so that is
         :func:`warn_unparallelized_reference`'s warning.
@@ -245,8 +244,8 @@ class ParallelismValidationMixin:
             return
 
         offending = []
-        for name, module in find_ep_layers(model):
-            native = {f"{attr}_lora_{w}" for attr in module._expert_lora_attrs for w in ("A", "B")}
+        for name, module in named_ep_layers(model):
+            native = {adapter_name for adapter_name, _ in module.expert_lora_named_params()}
             for param_name, _ in module.named_parameters():
                 if "lora_" in param_name and param_name not in native:
                     offending.append(f"{name}.{param_name}")

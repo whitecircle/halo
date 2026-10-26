@@ -15,6 +15,15 @@ gradients sync via the EP layer's own backward hooks, or a post-backward sweep w
 one EP group ([Gradient synchronization](#gradient-synchronization)). [Expert Tensor
 Parallelism](expert-tensor-parallelism.md) further shards each expert's FFN inside the EP group.
 
+Every family wrapper subclasses `EPMoELayerBase` (`src/distributed/expert_parallel/moe_layer/layer.py`):
+construction, the dispatch → expert compute → combine forward and the expert-parameter views. Each other
+concern is one mixin in `moe_layer/` — expert compute (`compute.py`), routing and routing replay
+(`routing.py`), gradient-sync hooks (`grad_sync.py`), native expert LoRA (`expert_lora.py`), the balancing
+bias (`balancing_bias.py`) — plus the checkpoint gather (`expert_parallel/expert_gather.py`);
+`shared_experts_layer.py` holds the standard shared-expert forward and the DeepSeek-V3 group-limited router.
+`compute`, `routing`, `grad_sync` and `balancing_bias` are imported only inside `expert_parallel/`: callers
+reach that behavior through the layers `named_ep_layers(model)` walks.
+
 ![EP token routing: each rank routes its own batch's tokens by router top-k, DeepEP's dispatch all-to-all sends every token to the rank that owns its expert, a grouped GEMM runs the local experts, and the combine all-to-all returns each token to its origin rank](../assets/diagrams/ep_token_routing.png)
 
 ## Supported models
@@ -123,7 +132,7 @@ deterministically on ~step 2 (`DeepEP timeout check failed` → `cudaErrorLaunch
 Gradient checkpointing on or off does not change this, and `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked
 into the images) does not cover it.
 
-`ParallelismConfig._validate_single_domain_multigroup_ep` **rejects the shape at config
+`parallelism_rules._reject_single_domain_multigroup_ep` **rejects the shape at config
 construction**, before the model loads, hand-built configs included. Deferring the cross-replica
 average does not help here: on one domain FSDP2 still shards the non-expert params over every rank
 (`is_deferred_dp` engages only across domains), so its reduce-scatter spans the whole domain while
@@ -266,7 +275,7 @@ What an EP run has to plan around:
 
 ## Gradient synchronization
 
-Hybrid sync (`src/distributed/expert_parallel/grad_sync.py`):
+Hybrid sync (`src/distributed/expert_parallel/moe_layer/grad_sync.py`):
 
 - **Non-EP params** — FSDP2 `fully_shard` reduce-scatter over the DP world; EP modules sit in
   `ignored_params`.
@@ -339,7 +348,7 @@ costs about 2% of throughput (14.9k vs 15.1k tokens/s/GPU), and the whole `full_
 **Not supported across NVLink domains.** DeepEP's cross-domain (hybrid RDMA) dispatch has no
 deterministic mode. `full_determinism` on an EP group spanning domains is refused while the entry
 script builds its config, before the load, and again at trainer construction for a hand-built config
-(`ParallelismConfig.reject_cross_domain_determinism`). Keep EP node-local (`ep_scope: node`) with DP
+(`parallelism_rules.reject_cross_domain_determinism`). Keep EP node-local (`ep_scope: node`) with DP
 across domains; on a multi-node NVLink fabric set `NVLINK_DOMAIN_SIZE` to the fabric's size.
 
 `tests/gpu/parallelism/ep/test_ep_deterministic_expert_grads.py` replays a backward under
@@ -566,10 +575,10 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | QLoRA / `load_in_4bit` | rejected — the EP loaders materialize plain de-quantized weights, losing `Params4bit` | `model_loading.py` |
 | fp32 training (`bf16: false`) | rejected at `expert_parallel_size > 1` — DeepEP's buffer carries 2-byte tokens; FP32 storage comes from the `fp32_*` masters ([Precision control](#precision-control)) | `model_loading.py` |
 | `use_peft` / LoRA | attention adapters are fine; a PEFT `LoraLayer` **inside** an EP layer is rejected — expert LoRA must go through the native grouped adapters | `_validate_lora_ep_compatibility` |
-| expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads (`EPConfig` re-checks hand-built configs at group construction); rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_validate_expert_tp`, `_validate_lora_tp_compatibility`, `ep_save.py` |
+| expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads (`EPConfig` re-checks hand-built configs at group construction); rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_reject_expert_tp`, `_validate_lora_tp_compatibility`, `ep_save.py` |
 | `use_grouped_gemm: false` | drops the wrappers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `_validate_expert_lora_realized` |
-| `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_validate_fsdp_settings` |
-| `use_hsdp` | rejected — EP already shards over the EP group | `_validate_hsdp` |
+| `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_reject_fsdp_settings` |
+| `use_hsdp` | rejected — EP already shards over the EP group | `_reject_hsdp` |
 | `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build ([why](../optimization/bf16-optimizer.md#usage)); `fp32_non_ep_params: true`, `muon` and `flash_adamw` build | `mixins/base.py` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
@@ -577,9 +586,9 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `validate_ep_sharded_save` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`. `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family declaring `_supports_gradient_checkpointing = False` | `_setup_ep_gradient_checkpointing` |
 | `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`_supports_lazy_loading = False`); that fallback is the only EP path `max_concurrent_loading` throttles | `model_loading.py`, `expert_parallel/loading.py` |
-| `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the wrappers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `kernels/liger/orchestrator.py` |
+| `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the wrappers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `src/model_loading/liger/dispatch.py` |
 | `moe_balancing` | `aux_loss` is inert on families whose EP wrapper severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `expert_parallel/balancing_strategy.py` |
-| `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_config.py` |
+| `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |
 | `ddp_find_unused_parameters` | must be `True`; the entry scripts set it — do not rely on setting it yourself | — |
 | `packing`, `padding_free`, `torch_compile`, `lowp_precision`, `dataset_num_proc` | not gated under EP | — |
 

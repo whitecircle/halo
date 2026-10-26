@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """
 ep_size==1 vLLM weight-sync correctness: the EP expert gather must run even though
-``is_ep_mode`` is False.
+``has_ep_group`` is False.
 
 At ep_size==1 the MoE is still EP-wrapped (``needs_ep_wrappers`` is True for the grouped-GEMM
-path) but ``is_ep_mode`` is False (``ep_group_size == 1``). ``gather_and_send_weights`` must not gate
-the EP expert reshape on ``is_ep_mode``: gating it there drops the ep1 experts onto the DENSE path,
+path) but ``has_ep_group`` is False (``ep_group_size == 1``). ``gather_and_send_weights`` must not gate
+the EP expert reshape on ``has_ep_group``: gating it there drops the ep1 experts onto the DENSE path,
 which forwards them to vLLM in the EP-internal layout — transposed ``gate_up_proj [E,H,2M]`` or, on the
 GptOss grouped-GEMM path, the de-interleaved ``gate_proj_gmm`` / ``up_proj_gmm`` attributes. vLLM's
 fused loader rejects those names/shapes, stops consuming the NCCL stream, and the producer hangs in

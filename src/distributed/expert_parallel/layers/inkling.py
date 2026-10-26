@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class EPInklingMoELayer(EPMoELayerBase):
@@ -52,9 +52,9 @@ class EPInklingMoELayer(EPMoELayerBase):
 
     _SHARED_EXPERT_ATTRS = ("shared_experts",)
 
-    def _init_routing(self, original_layer: nn.Module) -> None:
+    def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Top-k plus the two knobs of the joint routed+shared normalisation, both on the router."""
-        super()._init_routing(original_layer)
+        super()._adopt_routing(original_layer)
         self.n_shared_experts = self.gate.n_shared_experts
         self.route_scale = self.gate.route_scale
         if self.n_shared_experts < 1:

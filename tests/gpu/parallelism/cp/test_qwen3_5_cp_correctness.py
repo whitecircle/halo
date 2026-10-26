@@ -161,7 +161,7 @@ def cp_forward(checkpoint_dir: str, ids: torch.Tensor, labels: torch.Tensor, ran
         attn_implementation="flash_attention_2",
     ).to(device)
 
-    cp_config = pc.create_cp_config()
+    cp_config = pc.cp_config()
     model = UlyssesCPModelWrapper(base_model, cp_config)
 
     # Confirm the wrapper landed on every full-attention layer.
@@ -224,7 +224,7 @@ def cp_aux_component(
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     ).to(device)
-    model = UlyssesCPModelWrapper(base_model, pc.create_cp_config())
+    model = UlyssesCPModelWrapper(base_model, pc.cp_config())
     model.eval()
     with torch.no_grad():
         with_aux = model(input_ids=ids, labels=labels, use_cache=False, output_router_logits=True).loss.item()

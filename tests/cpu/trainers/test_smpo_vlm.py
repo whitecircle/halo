@@ -142,8 +142,8 @@ def make_trainer(**attrs):
         # The real trainer resolves this once from tokenizer + model config.
         "_eos_token_ids": frozenset({EOS_ID}),
         "pad_token_id": 0,
-        # cp_size is a read-only mixin property; is_ep_mode gates dataset-map workers (EP pins 1).
-        "parallelism_config": SimpleNamespace(cp_size=1, is_ep_mode=False),
+        # cp_size is a read-only mixin property; has_ep_group gates dataset-map workers (EP pins 1).
+        "parallelism_config": SimpleNamespace(cp_size=1, has_ep_group=False),
         "cp_config": None,
         "lower_clip_percentile": None,
         "upper_clip_percentile": None,

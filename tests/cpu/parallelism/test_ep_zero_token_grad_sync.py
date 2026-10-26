@@ -3,7 +3,7 @@
 
 ``register_post_accumulate_grad_hook`` fires only where a grad was actually accumulated. A rank whose
 DeepEP dispatch delivered ZERO tokens for a layer returns early from ``_compute_experts`` without
-touching that layer's expert weights (``base_layer.py`` — both the grouped-GEMM and the per-expert
+touching that layer's expert weights (``moe_layer/compute.py`` — both the grouped-GEMM and the per-expert
 loop template short-circuit on ``tokens.shape[0] == 0``), so those weights end the step with
 ``grad is None`` and their hook never runs. If that hook carried the cross-replica ``all_reduce``,
 the rank's replicas — which DID receive tokens — would block forever inside a collective it never
@@ -14,7 +14,7 @@ topology (not just the cross-node ``is_deferred_dp`` one), routing the sum throu
 post-backward sweep, which walks ``named_parameters()`` and agrees grad presence over its reduce group
 (zero-filling a grad only a peer holds) so membership is rank-uniform. Grad-equivalence holds: a zero
 grad contributes nothing to the SUM, and the sweep's expert divisor is the same
-``world_size // expert_tp_size`` a hook would use. ``create_expert_grad_hook`` refuses to build a
+``world_size // expert_tp_size`` a hook would use. ``build_expert_grad_hook`` refuses to build a
 reducing hook at all, so a regression fails loudly instead of hanging.
 
 The end-to-end proof is a GPU test: an 8-GPU ``ep_size=2`` run (4 EP groups, one NVLink domain — the
@@ -37,10 +37,10 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.grad_sync import create_expert_grad_hook
+from src.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
 from tests.common.parallelism import stubbed_process_groups
 
-_GS_MOD = "src.distributed.expert_parallel.grad_sync"
+_GS_MOD = "src.distributed.expert_parallel.moe_layer.grad_sync"
 
 
 def _make_ep(
@@ -69,7 +69,7 @@ def _expert_hook_from(**ep_attrs):
     ep = SimpleNamespace(**{**defaults, **ep_attrs})
     fake_dist = types.SimpleNamespace(is_available=lambda: True, is_initialized=lambda: True, ReduceOp=dist.ReduceOp)
     with patch(f"{_GS_MOD}.dist", fake_dist):
-        return create_expert_grad_hook(ep)
+        return build_expert_grad_hook(ep)
 
 
 # EPConfig: every multi-group topology defers
@@ -118,7 +118,7 @@ def test_fsdp_managed_ep1_experts_never_defer():
 
 def test_no_topology_leaves_a_reducing_hook_on_any_rank():
     """The invariant, swept over every rank of every EP shape this box admits: a cross-replica reduce
-    is never left to the hook path. Equivalently — ``create_expert_grad_hook`` never raises for a config
+    is never left to the hook path. Equivalently — ``build_expert_grad_hook`` never raises for a config
     that reaches it."""
     world = 8
     shapes = [

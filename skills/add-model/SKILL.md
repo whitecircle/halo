@@ -29,10 +29,10 @@ file-touch list, the traps and the commands; read it before editing.
 1. **Dense or MoE?** Dense `AutoModelForCausalLM` / multimodal `AutoModelForImageTextToText`
    needs **no EP work** — plain FSDP works as is. Only MoE families need an EP wrapper.
 2. **MoE → add an EP wrapper.** Create `src/distributed/expert_parallel/layers/<name>.py`
-   subclassing `EPMoELayerBase` (`base_layer.py`) — or `EPSharedExpertsMoELayerBase`,
+   subclassing `EPMoELayerBase` (`moe_layer/layer.py`) — or `EPSharedExpertsMoELayerBase`,
    `EPSeparateGluMoELayerBase`, `EPGroupLimitedMoELayerBase` where the family fits one. The base
-   owns `__init__` and calls one hook per construction step (`_detect_hidden_dim`, `_init_routing`,
-   `_init_shared_experts`, `_init_expert_compute`, `_init_expert_params`); the wrapper supplies
+   owns `__init__` and calls one hook per construction step (`_detect_hidden_dim`, `_adopt_routing`,
+   `_adopt_shared_experts`, `_adopt_expert_compute`, `_adopt_expert_params`); the wrapper supplies
    `forward` and overrides only the hooks that differ. Dropping the file into `layers/` is the whole
    registration — `layers/roster.py` imports every module in the package. Set **both** class attrs: `HF_MODULE_NAMES` (the HF block class name(s) — `build_moe_layer_map()` in
    `patching.py` walks the subclass tree, so there is no map to edit) and
@@ -44,8 +44,8 @@ file-touch list, the traps and the commands; read it before editing.
    `_HUB_PER_EXPERT_KEYS`, is refused.
    Reuse an existing wrapper if the expert-weight layout matches (layout→wrapper table in the guide).
 3. **Liger coverage.** Add one `LigerFamilySpec` to `LIGER_FAMILY_SPECS` in
-   `src/kernels/liger/families.py` — there is no per-family applier module; the builder
-   (`src/kernels/liger/builder.py`) turns each spec into the applier the orchestrator dispatches.
+   `src/model_loading/liger/family_specs.py` — there is no per-family applier module; `src/model_loading/liger/applier.py`
+   turns each spec into the applier `src/model_loading/liger/dispatch.py` resolves.
    Name a role only where the kernel reproduces the family's forward exactly. A family upstream
    Liger already covers sets `delegates_to_upstream=True` and names only the roles it adds.
 4. **Router balancing.** Leave `moe_balancing` at `auto` and make the family resolvable — the
@@ -56,7 +56,7 @@ file-touch list, the traps and the commands; read it before editing.
    module-level side effect of `src/model_loading/model_preparation.py` (the module every loader
    imports before resolving an `Auto*` class). **Record the removal trigger** —
    the directory goes when upstream ships the family. A `trust_remote_code` model needs no
-   vendoring: `apply_remote_code_compat_shims()` (`src/models/patches/remote_code_compat.py`)
+   vendoring: `apply_remote_code_compat_shims()` (`src/model_loading/remote_code.py`)
    restores the transformers-v5 APIs those files call.
 6. **Configs + tests.** Add `examples/sft/<family>/` YAMLs and the required tests: an EP-vs-FSDP
    equivalence test, a save-and-reload trainer test, a CPU support test, and the Liger numerics
@@ -68,8 +68,8 @@ prefix); see `CLAUDE.md`.
 ## Sources of truth
 
 `agent-docs/models/adding-a-model.md` + `checklist.md` are the guide. The code is the **ultimate** authority:
-`src/distributed/expert_parallel/` (`base_layer.py`, `patching.py`, the existing `layers/*.py`),
-`src/kernels/liger/families.py`, and the HF `modeling_*.py` you are wrapping are what actually
+`src/distributed/expert_parallel/` (`moe_layer/`, `patching.py`, the existing `layers/*.py`),
+`src/model_loading/liger/family_specs.py`, and the HF `modeling_*.py` you are wrapping are what actually
 behave — when a doc, this skill, or memory disagrees, or you are unsure, read the real file before
 editing. (`CLAUDE.md`: docs-first, the code wins.) Related skill: `checkpoints` (the save/export format
 the new family must round-trip through — EP gather, per-expert layout, vLLM keys).

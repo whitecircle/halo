@@ -30,8 +30,8 @@ from trl import SFTConfig
 
 PartialState()  # the trainer logs through accelerate's logger, which refuses an uninitialized state
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.deepep.capacity import capacity_scope
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG

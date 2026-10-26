@@ -83,7 +83,7 @@ def _dense_pc(*, keep=True):
         fp32_non_ep_params=keep,
         needs_ep_wrappers=False,
         cp_size=2,
-        create_cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
+        cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
     )
 
 

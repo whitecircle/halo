@@ -39,7 +39,7 @@ from src.distributed.context_parallel.validation import (
 )
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.model_loading.remote_code import apply_remote_code_compat_shims
 from tests.common.distributed import world_mean
 from tests.common.ep_reference import random_token_batch
 from tests.common.harness import gpu_test_main
@@ -224,7 +224,7 @@ def run(ctx):
 
     log("[2/4] Attention-module equivalence")
     pc = ParallelismConfig(cp_size=2)
-    cp_config = pc.create_cp_config()
+    cp_config = pc.cp_config()
     cp_group = cp_config.process_group
     checks["attention_equivalence"] = check_attention_equivalence(model, cp_group, ctx.rank, cp_size=2, device=device)
 

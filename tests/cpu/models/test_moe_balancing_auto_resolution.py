@@ -23,7 +23,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import PretrainedConfig
 
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
-from src.kernels.liger.lce_forward import build_lce_forward
+from src.model_loading.liger.cross_entropy import build_lce_forward
 from src.models.moe_balancing import _WARNED_UNSERVABLE_AUTO, resolve_balancing_mode
 
 _RESOLVER_LOGGER = "src.models.moe_balancing"

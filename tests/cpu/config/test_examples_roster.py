@@ -28,10 +28,11 @@ import yaml
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
 from src.distributed.loading.peft_setup import split_expert_lora_targets
 from src.environments.episode import resolve_reasoning_end_ids
+from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
+from src.models.attention.selection import validate_attn_implementation
 from src.models.config_access import text_config
 from src.models.context_window import is_bounded_length
 from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, native_balancing_bias_attrs
-from src.models.patches.attention import model_has_sinks, validate_attn_implementation
 from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
@@ -517,9 +518,11 @@ def test_example_attention_carries_the_sinks_it_keeps_live(config):
     if attn_implementation is None:
         return  # unset: the resolver picks a sink-carrying candidate itself
     model_config = model_config_for(config, parsed)
-    if not model_has_sinks(model_config):
+    if not uses_gpt_oss_sinks(model_config):
         return
-    validate_attn_implementation(model_config, attn_implementation, sinks_reset=parsed_field(parsed, "reset_sinks"))
+    validate_attn_implementation(
+        model_config, attn_implementation, SinksPolicy.from_flags(reset_sinks=parsed_field(parsed, "reset_sinks"))
+    )
 
 
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
@@ -540,7 +543,7 @@ def test_weight_sync_example_keeps_a_pushable_sink_parameter(config):
     parsed = parser_for(script).parse_yaml_file(str(config))
     if parsed_field(parsed, "attn_implementation") != "flash_attention_2" or not parsed_field(parsed, "reset_sinks"):
         return
-    assert not model_has_sinks(model_config_for(config, parsed)), (
+    assert not uses_gpt_oss_sinks(model_config_for(config, parsed)), (
         "weight-sync RL with the flash_attention_2 reset_sinks reset removes the sinks parameter, so "
         "the sync never pushes it and the generator stays on the pretrained sinks. Set reset_sinks: "
         "false with a sink-carrying implementation (flash_attention_4 on Blackwell; eager or "

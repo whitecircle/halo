@@ -69,8 +69,8 @@ from transformers import (
 from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
 from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
+from src.model_loading.remote_code import apply_remote_code_compat_shims
 from src.models.param_roles import fp32_pinned_names
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import (
     BAILING_MOE_LING_MINI,

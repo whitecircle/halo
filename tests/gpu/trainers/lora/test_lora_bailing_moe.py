@@ -28,7 +28,7 @@ import traceback
 
 import torch
 
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.model_loading.remote_code import apply_remote_code_compat_shims
 
 apply_remote_code_compat_shims()
 
@@ -132,7 +132,7 @@ def run_lora_ep(
             processing_class=tokenizer,
             parallelism_config=parallelism_config,
         )
-        log(f"  EP mode: {trainer.parallelism_config.is_ep_mode}")
+        log(f"  EP mode: {trainer.parallelism_config.has_ep_group}")
 
         log(f"  Training for {MAX_STEPS} steps...")
         barrier()

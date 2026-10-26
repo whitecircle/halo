@@ -199,7 +199,7 @@ def run_mode(
 
     # ── EP checkpoint roundtrip (pure EP only) ─────────────────────────────
     saved_loss = float("nan")
-    if pc.is_ep_mode and not (pc.is_cp_mode or pc.is_tp_mode):
+    if pc.has_ep_group and not (pc.is_cp_mode or pc.is_tp_mode):
         save_dir = Path(reload_dir)
         dist.barrier()
         if rank == 0:

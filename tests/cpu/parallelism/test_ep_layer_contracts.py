@@ -10,6 +10,8 @@
 * ``_ROUTER_ATTR`` / ``_EXPERTS_CONTAINER_ATTRS``: the router and expert-container probes must read
   the family's own declaration, not guess from a global name ladder, and the per-layer construction
   INFO must be rank-gated.
+* The ``moe_layer`` mixins: none defines ``__init__``, and ``EPExpertLoraMixin`` is mixed only into
+  ``EPMoELayerBase``.
 
 Run: ``python tests/cpu/parallelism/test_ep_layer_contracts.py`` (or ``pytest -m cpu``).
 """
@@ -17,6 +19,7 @@ Run: ``python tests/cpu/parallelism/test_ep_layer_contracts.py`` (or ``pytest -m
 from __future__ import annotations
 
 import logging
+from abc import ABC
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -26,11 +29,12 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from transformers import Qwen3MoeConfig
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraMixin
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.fused_glu import GluCombine
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
@@ -127,7 +131,7 @@ def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
     trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True)
     trainer.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2)
     trainer.model.config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
-    assert not trainer.parallelism_config.is_ep_mode, "fixture must leave only the config to decide"
+    assert not trainer.parallelism_config.has_ep_group, "fixture must leave only the config to decide"
     with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
         trainer._setup_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
@@ -288,7 +292,7 @@ def test_init_summary_is_rank_gated(caplog, is_main):
     layer.fp32_router = layer.fp32_experts = False
 
     with (
-        patch("src.distributed.expert_parallel.base_layer.is_global_main_process", return_value=is_main),
+        patch("src.distributed.expert_parallel.moe_layer.layer.is_global_main_process", return_value=is_main),
         caplog.at_level(logging.INFO, logger=EPMoELayerBase.__module__),
     ):
         layer._log_init_summary()
@@ -307,7 +311,7 @@ def test_every_rank_debug_logs_the_expert_range_it_owns(caplog, is_main):
     layer.fp32_router = layer.fp32_experts = False
 
     with (
-        patch("src.distributed.expert_parallel.base_layer.is_global_main_process", return_value=is_main),
+        patch("src.distributed.expert_parallel.moe_layer.layer.is_global_main_process", return_value=is_main),
         caplog.at_level(logging.DEBUG, logger=EPMoELayerBase.__module__),
     ):
         layer._log_init_summary()
@@ -387,6 +391,20 @@ def test_the_gptoss_wrapper_stores_its_router_under_the_declared_attribute():
     ``_ROUTER_ATTR``) reach the module the forward actually routes through."""
     layer = EPGptOssMoELayer(_GptOssBlock(), single_process_ep_config(E))
     assert getattr(layer, EPGptOssMoELayer._ROUTER_ATTR) is layer.router
+
+
+def test_the_layer_mixins_define_no_init():
+    """``EPMoELayerBase.__init__`` builds the state every mixin reads; a mixin ``__init__`` would run
+    out of that order or be skipped by the ``nn.Module.__init__`` the base calls."""
+    mixins = [base for base in EPMoELayerBase.__bases__ if base not in (nn.Module, ABC)]
+    assert len(mixins) == 6, f"premise: EPMoELayerBase composes its six concerns as mixins, got {mixins}"
+    assert [m.__name__ for m in mixins if "__init__" in vars(m)] == []
+
+
+def test_expert_lora_mixin_is_mixed_only_into_the_layer_base():
+    """The model-level adapter helpers select layers by ``isinstance(m, EPExpertLoraMixin)``, which equals
+    ``isinstance(m, EPMoELayerBase)`` only while the base is its sole direct subclass."""
+    assert EPExpertLoraMixin.__subclasses__() == [EPMoELayerBase]
 
 
 if __name__ == "__main__":

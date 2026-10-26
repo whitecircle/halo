@@ -139,7 +139,7 @@ def run(ctx):
     checks, metrics = {}, {}
     config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model().to(ctx.device)
-    patch_moe_model_for_ep(model, config.create_ep_config())
+    patch_moe_model_for_ep(model, config.ep_config())
 
     # ── The dense ground truth: the same seeded init, never EP-patched, so its grouped expert
     # weights are the reference layout AND the reference expert order.

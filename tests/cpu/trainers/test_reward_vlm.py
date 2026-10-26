@@ -108,7 +108,7 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
         parallelism_config=SimpleNamespace(
             cp_size=1,
             is_cp_mode=False,
-            is_ep_mode=False,
+            has_ep_group=False,
             pp_size=1,
             get_data_parallel_rank=lambda: 0,
             data_parallel_size=1,

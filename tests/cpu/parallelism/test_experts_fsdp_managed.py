@@ -56,7 +56,7 @@ def test_only_truly_replicated_experts_are_fsdp_managed(ep_size, expert_tp_size,
 def test_parallelism_config_and_ep_config_agree(ep_size, expert_tp_size, shard_ep1):
     """The verdict on ``ParallelismConfig`` must be the one the ``EPConfig`` the layers read carries."""
     config = _config(ep_size, expert_tp_size, shard_ep1)
-    ep_config = config.create_ep_config()
+    ep_config = config.ep_config()
 
     assert ep_config.experts_fsdp_managed is config.experts_fsdp_managed, (
         f"ep_size={ep_size} expert_tp_size={expert_tp_size} shard_ep1={shard_ep1}: "

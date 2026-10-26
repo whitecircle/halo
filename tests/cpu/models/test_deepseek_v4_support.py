@@ -21,9 +21,9 @@ from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_laye
 from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.kernels.fused_glu import GluCombine, clamped_silu_mul_eager
+from src.model_loading.buffer_repair import finalize_loaded_model
+from src.models.attention.selection import _model_is_deepseek_v4
 from src.models.moe_balancing import resolve_balancing_mode
-from src.models.patches.attention import _model_is_deepseek_v4
-from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.segment_markers import reject_compressed_kv_rows
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.parallelism import single_process_ep_config
@@ -172,7 +172,7 @@ def test_clamped_glu_matches_hf_apply_gate():
     assert torch.allclose(clamped_silu_mul_eager(gate, up, config.swiglu_limit), expected, atol=1e-6)
 
     # The layer seam — the compiled SiLU combine and the generic act_fn fallback, as
-    # _init_expert_compute latches them into _fused_glu_mul.
+    # _adopt_expert_compute latches them into _fused_glu_mul.
     layer = _bare_ep_layer(act_fn=experts.act_fn, limit=config.swiglu_limit)
     for combine in (GluCombine.clamped_silu(config.swiglu_limit), layer._clamped_swiglu_eager):
         layer._fused_glu_mul = combine

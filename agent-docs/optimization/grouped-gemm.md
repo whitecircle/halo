@@ -2,7 +2,7 @@
 
 Grouped GEMM (`torch.nn.functional.grouped_mm`) batches a rank's per-expert matmuls into one kernel launch, eliminating per-expert dispatch overhead in MoE layers. Available on SM90+ (Hopper, Blackwell) with the pinned PyTorch 2.11.x. Enabled by default (`use_grouped_gemm: true`).
 
-The MoE expert step sorts tokens by expert (contiguous per-expert blocks), builds an int32 cumulative-offset tensor, runs one `F.grouped_mm` over all groups, then scatters outputs back and applies routing weights. The sort (`base_layer._sort_tokens_for_grouped_mm`) drops `-1` padding from DeepEP dispatch (expert IDs outside `[0, experts_per_rank)`) before sorting; an unfiltered padding ID misaligns the groups and produces NaN.
+The MoE expert step sorts tokens by expert (contiguous per-expert blocks), builds an int32 cumulative-offset tensor, runs one `F.grouped_mm` over all groups, then scatters outputs back and applies routing weights. The sort (`_sort_tokens_for_grouped_mm`, `src/distributed/expert_parallel/moe_layer/compute.py`) drops `-1` padding from DeepEP dispatch (expert IDs outside `[0, experts_per_rank)`) before sorting; an unfiltered padding ID misaligns the groups and produces NaN.
 
 ## Performance
 
@@ -61,7 +61,7 @@ The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `src/ke
 
 The permute expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded, built by `build_inv_map`), turning the scatter into gather + reduction. It matches `index_add_` to rounding, not bit for bit: the kernels accumulate in fp32, and the unpermute skips the bf16 rounding of each weighted row (checked fwd+bwd against a float64 `index_add_`).
 
-It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`base_layer._sort_tokens_for_grouped_mm`; the EP warm-up compiles it). Even where a received token lands on few local rows (gpt-oss top-4 at EP8), a bf16 `index_add_` is a CAS-loop atomic. On packed chat data (BFD-packed `HuggingFaceH4/ultrachat_200k`, 16k tokens/GPU/step, GC on, 8× B300) it costs ~1.5 ms per call on gpt-oss-20b EP8: 108 ms of a 1.24 s step, and 161 ms of gpt-oss-120b's 1.57 s. The gather-reduce makes one memory-bandwidth pass. On that data gpt-oss-20b EP8 runs 16,574 tok/s/GPU at s4096 b4 and 16,618 at s16384 b1, against 13,050 and 13,138 with `index_add_` (+27%); gpt-oss-120b EP8 runs 12,832 against 10,301 (+25%). Those figures include the copy-free DeepEP padding ([DeepEP](../infrastructure/deepep.md#hidden-padding-hidden--256)), about 2 points at gpt-oss-20b EP8; the permute alone is +24% there.
+It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`_sort_tokens_for_grouped_mm`; the EP warm-up compiles it). Even where a received token lands on few local rows (gpt-oss top-4 at EP8), a bf16 `index_add_` is a CAS-loop atomic. On packed chat data (BFD-packed `HuggingFaceH4/ultrachat_200k`, 16k tokens/GPU/step, GC on, 8× B300) it costs ~1.5 ms per call on gpt-oss-20b EP8: 108 ms of a 1.24 s step, and 161 ms of gpt-oss-120b's 1.57 s. The gather-reduce makes one memory-bandwidth pass. On that data gpt-oss-20b EP8 runs 16,574 tok/s/GPU at s4096 b4 and 16,618 at s16384 b1, against 13,050 and 13,138 with `index_add_` (+27%); gpt-oss-120b EP8 runs 12,832 against 10,301 (+25%). Those figures include the copy-free DeepEP padding ([DeepEP](../infrastructure/deepep.md#hidden-padding-hidden--256)), about 2 points at gpt-oss-20b EP8; the permute alone is +24% there.
 
 The per-expert loop (`use_grouped_gemm: false`) does not use it: it gathers each expert's tokens with `index_select` and scatters the weighted outputs back with a bf16 atomic `index_add_`.
 
@@ -94,7 +94,7 @@ Compute–comm overlap is the remaining structural lever. One narrow form ships 
 
 ## Low precision
 
-This is the bf16 path, the MoE production default. fp8/fp4 grouped GEMM and the opt-in DeepGEMM kernel (`HALO_DEEPGEMM_NATIVE=1`) are net-slower than bf16 at the toolkit's MoE shapes — the per-expert GEMM is bandwidth-bound at the bf16 roofline. See [Low-Precision Kernels](low-precision-moe-kernels.md). The quantization-format dispatch is `expert_gemm()` (`src/kernels/expert_gemm.py`, called by `base_layer._grouped_mm`): `quant_format=None` is this bf16 path.
+This is the bf16 path, the MoE production default. fp8/fp4 grouped GEMM and the opt-in DeepGEMM kernel (`HALO_DEEPGEMM_NATIVE=1`) are net-slower than bf16 at the toolkit's MoE shapes — the per-expert GEMM is bandwidth-bound at the bf16 roofline. See [Low-Precision Kernels](low-precision-moe-kernels.md). The quantization-format dispatch is `expert_gemm()` (`src/kernels/expert_gemm.py`, called by the EP layer's `_grouped_mm` in `moe_layer/compute.py`): `quant_format=None` is this bf16 path.
 
 ## Requirements and compatibility
 

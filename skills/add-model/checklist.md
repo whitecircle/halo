@@ -13,14 +13,14 @@ run. Paths are relative to the repo root; anything that executes runs **inside t
 | Concern | File(s) |
 |---|---|
 | EP wrapper | `src/distributed/expert_parallel/layers/<name>.py` — `layers/roster.py` imports the whole package, so the file's existence *is* the registration |
-| EP base / hooks | `src/distributed/expert_parallel/base_layer.py` (gather in `expert_gather.py`, balancing in `balancing.py`) |
+| EP base / hooks | `src/distributed/expert_parallel/moe_layer/layer.py` (gather in `expert_gather.py`, balancing in `moe_layer/balancing_bias.py`) |
 | Expert-LoRA coverage | `src/models/moe/expert_lora_spec.py` (`LORA_PROJECTION_COVERAGE`) |
-| Non-persistent buffers | `src/models/patches/buffer_fixes.py` — add a fixer to the `_NON_PERSISTENT_FIXERS` / `_ROTARY_FIXERS` chains; `finalize_loaded_model` is the seam every load path calls, and a buffer no fixer covers stays on meta and is rejected at device placement |
-| Liger coverage | `src/kernels/liger/families.py` (`LIGER_FAMILY_SPECS`) |
+| Non-persistent buffers | `src/model_loading/buffer_repair.py` — add a fixer to the `_NON_PERSISTENT_FIXERS` / `_ROTARY_FIXERS` chains; `finalize_loaded_model` is the seam every load path calls, and a buffer no fixer covers stays on meta and is rejected at device placement |
+| Liger coverage | `src/model_loading/liger/family_specs.py` (`LIGER_FAMILY_SPECS`) |
 | CP wrapper | `src/distributed/context_parallel/layers/<name>.py` |
 | Selective TP | `src/distributed/tensor_parallel/module_types.py` (`TP_SHARDABLE_ATTENTION_CLASSES`) |
 | Head transform (forward scales, caps or cuts logits around `lm_head`) | `src/models/head_transform.py` (`HeadTransformSpec`) + the family's tiny model in `tests/cpu/models/test_head_transform.py` |
-| Attention backend (auto-detection falls short) | the family's patch in `src/models/patches/attention.py`, gated on `model_type_matches` (`src/models/config_access.py`) in `resolve_attn_implementation` or `apply_family_attention_patches` (`src/model_loading/model_preparation.py`) |
+| Attention backend (auto-detection falls short) | the family's patch in `src/models/attention/selection.py`, gated on `model_type_matches` (`src/models/config_access.py`) in `resolve_attn_implementation` or `apply_family_patches` (`src/model_loading/model_preparation.py`) |
 | Vendoring | `src/models/<name>/` + a side-effect import in `src/model_loading/model_preparation.py` |
 | Configs | `examples/sft/<family>/` |
 | Tests | `tests/gpu/parallelism/ep/`, `tests/gpu/trainers/sft/`, `tests/cpu/models/`, `tests/gpu/manifest.py` |
@@ -99,7 +99,7 @@ allocates one per run.
 ```bash
 make lint
 python tests/cpu/models/test_<name>_support.py            # registration, gather/merge, balancing
-python tests/cpu/kernels/test_liger_family_coverage.py    # every spec class exists and is exact
+python tests/cpu/model_loading/test_liger_family_coverage.py    # every spec class exists and is exact
 python tests/cpu/checkpoint/test_merge_ep_shards.py       # only if you overrode the gather
 torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_vs_fsdp_<name>.py
 ```

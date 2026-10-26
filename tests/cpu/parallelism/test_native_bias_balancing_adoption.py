@@ -18,7 +18,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.balancing import EPRouterBalancingMixin
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
@@ -31,6 +30,7 @@ from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
+from src.distributed.expert_parallel.moe_layer.balancing_bias import EPBalancingBiasMixin
 from src.models.moe_balancing import is_transient_balancing_router, iter_balancing_routers
 
 NUM_EXPERTS = 8
@@ -96,8 +96,13 @@ def test_every_family_with_a_native_slot_is_covered_here():
     """Derived from the class hierarchy, so a family that starts adopting a native slot cannot land
     without tests. Read as the EFFECTIVE attribute rather than ``vars(cls)``: adoption is inherited
     (Laguna takes GLM-4's), and an inheriting family still needs its own row — its hub slot may be a
-    Parameter where the parent's is a buffer, which is a different re-registration path."""
-    declaring = {cls.__name__ for cls in ep_layer_classes() if cls._NATIVE_BALANCING_BIAS_ATTR}
+    Parameter where the parent's is a buffer, which is a different re-registration path. Test-local
+    subclasses that other modules leave in the tree are not families."""
+    declaring = {
+        cls.__name__
+        for cls in ep_layer_classes()
+        if cls._NATIVE_BALANCING_BIAS_ATTR and cls.__module__.startswith("src.")
+    }
     assert declaring == _COVERED
 
 
@@ -260,10 +265,10 @@ def test_lfm2_refuses_a_block_whose_router_asks_for_a_bias_it_does_not_carry():
 
     router.use_expert_bias = True
     with pytest.raises(AttributeError, match="use_expert_bias=True"):
-        layer._init_routing(block)
+        layer._adopt_routing(block)
 
     router.use_expert_bias = False
-    layer._init_routing(block)
+    layer._adopt_routing(block)
     assert layer.use_expert_bias is False
 
 
@@ -312,7 +317,7 @@ def test_exactly_one_family_materializes_its_native_balancing_slot():
     implementing = {
         cls.__name__
         for cls in ep_layer_classes()
-        if cls._materialize_native_balancing_slot is not EPRouterBalancingMixin._materialize_native_balancing_slot
+        if cls._materialize_native_balancing_slot is not EPBalancingBiasMixin._materialize_native_balancing_slot
     }
     assert implementing == {"EPLfm2MoELayer"}, implementing
 

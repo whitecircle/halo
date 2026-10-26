@@ -18,13 +18,12 @@ from src.model_loading.tokenizer_backend import resolve_tokenizer_backend
 from src.models.config_access import set_config_field
 
 if TYPE_CHECKING:
-    # Annotation only: the entry scripts' argument layer sits above this loading leaf, and nothing
-    # here reads the dataclass itself.
+    # Annotation only: the entry scripts' argument layer sits above this package.
     from src.configs.script_arguments import CommonScriptArguments
 
 logger = get_logger(__name__)
 
-# Where :func:`setup_model_and_tokenizer` parks the tokenizer's own ``model_max_length`` before
+# Where :func:`configure_run_tokenizer` parks the tokenizer's own ``model_max_length`` before
 # pinning the run's, for :func:`pristine_model_max_length` to serve back at save time. A plain int on
 # the instance, so the tokenizer stays picklable for the dataset-map fingerprint and the workers.
 _PRISTINE_MODEL_MAX_LENGTH_ATTR = "_halo_pristine_model_max_length"
@@ -86,22 +85,20 @@ def resolve_peft_processing_class(
     return adapter_pc or base_pc
 
 
-def load_chat_template(chat_template: str) -> str:
+def load_chat_template(chat_template: str | None) -> str | None:
     """Load a chat template from a ``.jinja``/``.jinja2``/``.j2`` file, or return the
     string directly if it isn't such a path."""
     if chat_template is None:
         return None
-
     if chat_template.endswith((".jinja", ".jinja2", ".j2")):
-        if os.path.isfile(chat_template):
-            logger.info(f"Loading chat template from file: {chat_template}")
-            with open(chat_template, encoding="utf-8") as f:
-                return f.read()
-        else:
+        if not os.path.isfile(chat_template):
             raise FileNotFoundError(
                 f"Chat template file not found: {chat_template}. "
                 f"Make sure the file exists or provide the template string directly."
             )
+        logger.info(f"Loading chat template from file: {chat_template}")
+        with open(chat_template, encoding="utf-8") as f:
+            return f.read()
     if os.path.isfile(chat_template):
         raise ValueError(
             f"chat_template points at an existing file ({chat_template}) whose extension is not "
@@ -133,7 +130,7 @@ def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -
         setattr(generation_config, field, token_id)
 
 
-def setup_model_and_tokenizer(
+def configure_run_tokenizer(
     args: CommonScriptArguments,
     model: PreTrainedModel | None,
     tokenizer: PreTrainedTokenizer,
@@ -148,15 +145,11 @@ def setup_model_and_tokenizer(
     tokenizer state (chat template, added special tokens).
 
     ``embeddings_sharded`` says whether a vocabulary grow is impossible because the model's input
-    embedding is a parallelism shard — a parameter rather than an import, since what sharding is
-    lives under ``src.distributed`` and this layer stays sharding-agnostic. Asked only about a run
-    that actually grows the vocabulary.
+    embedding is a parallelism shard; a parameter, since this package stays sharding-agnostic.
     """
     if max_seq_len is not None:
-        # Recorded once, before the first pin overwrites it (a script holding a frozen reference —
-        # preference, offline GRPO, self-distillation — runs this seam twice against the same
-        # tokenizer), so every export can be written with the tokenizer's OWN bound — see
-        # :func:`pristine_model_max_length`.
+        # Recorded once, before the first pin overwrites it (a run with a frozen reference calls this
+        # twice on one tokenizer), so every export writes the tokenizer's own bound.
         if not hasattr(tokenizer, _PRISTINE_MODEL_MAX_LENGTH_ATTR):
             setattr(tokenizer, _PRISTINE_MODEL_MAX_LENGTH_ATTR, tokenizer.model_max_length)
         tokenizer.model_max_length = max_seq_len
@@ -164,10 +157,8 @@ def setup_model_and_tokenizer(
     # afterwards has none at the time of the read, so ``--pad_token <new>`` with the same token in
     # ``--added_special_tokens`` would pad with an id the model config never recorded.
     if args.added_special_tokens is not None:
-        # UNION, not the transformers default: ``replace_extra_special_tokens=True`` swaps the whole
-        # extra-special list for the request, dropping every control token the checkpoint shipped
-        # (Qwen's 13, GLM's role enders) from ``all_special_ids``, the trainers' special-token masks
-        # and the exported tokenizer_config.json.
+        # A union, not the transformers default, which swaps the whole extra-special list for the
+        # request and drops every control token the checkpoint shipped.
         tokenizer.add_special_tokens(
             {"additional_special_tokens": args.added_special_tokens}, replace_extra_special_tokens=False
         )
@@ -201,8 +192,6 @@ def setup_model_and_tokenizer(
     if tokenizer.pad_token_id is not None:
         sync_special_token_id(model, "pad_token_id", tokenizer.pad_token_id)
         if tokenizer.pad_token_id == tokenizer.eos_token_id and model is not None:
-            # A live pairing, not a hypothetical: DeepSeek-V4's tokenizer pads with eos and its config
-            # ships no pad id, so this is the first place the cost can be named.
             logger.info(
                 "Tokenizer pad token IS eos (id %s), so the recorded pad id binds "
                 "nn.Embedding(padding_idx=%s) on the next load and that row's input-embedding gradient "
@@ -246,18 +235,6 @@ def adopt_tokenizer_chat_template(processing_class) -> None:
         processing_class.chat_template = tokenizer.chat_template
 
 
-def _length_pinned_tokenizer(processing_class):
-    """The object :func:`setup_model_and_tokenizer` pinned, or ``None`` if the run never pinned one.
-
-    Reached through a processor wrapper as well as directly: a VLM run hands the trainer the
-    processor while the pin lands on its nested tokenizer.
-    """
-    for candidate in (processing_class, getattr(processing_class, "tokenizer", None)):
-        if candidate is not None and hasattr(candidate, _PRISTINE_MODEL_MAX_LENGTH_ATTR):
-            return candidate
-    return None
-
-
 @contextlib.contextmanager
 def pristine_model_max_length(processing_class):
     """Serve the tokenizer's OWN ``model_max_length`` for the duration of a save.
@@ -265,10 +242,17 @@ def pristine_model_max_length(processing_class):
     The run's budget is pinned onto ``tokenizer.model_max_length`` because HF resolves every
     ``truncation=True, max_length=None`` call against it, but ``save_pretrained`` writes the LIVE
     attribute into ``tokenizer_config.json``: unrestored, an SFT run at ``max_length: 40000`` exports
-    a 262k-context model whose served context is 40k. The pin is put back on exit, and a run that
-    never pinned one has no value to keep off disk.
+    a 262k-context model whose served context is 40k. The pin is put back on exit. A VLM run hands the
+    trainer its processor while the pin sits on the nested tokenizer.
     """
-    tokenizer = _length_pinned_tokenizer(processing_class)
+    tokenizer = next(
+        (
+            candidate
+            for candidate in (processing_class, getattr(processing_class, "tokenizer", None))
+            if candidate is not None and hasattr(candidate, _PRISTINE_MODEL_MAX_LENGTH_ATTR)
+        ),
+        None,
+    )
     if tokenizer is None:
         yield
         return

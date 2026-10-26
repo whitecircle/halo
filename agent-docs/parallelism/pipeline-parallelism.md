@@ -30,7 +30,7 @@ microbatch.
   NVLink-domain boundaries and rejects single-rank stages. The
   [capability-matrix allowlist](README.md#supported-combinations) admits PP alone, PP+EP and PP+ETP;
   every other axis combination (PP+TP, PP+CP, PP+EP+ETP, …) is refused with the breaking mechanism
-  named in the error. `_validate_pipeline_parallel` separately refuses the PP-incompatible knobs
+  named in the error. `_reject_pipeline_parallel` separately refuses the PP-incompatible knobs
   (HSDP, expert LoRA, ZeRO-3, non-`bf16` low precision).
 - **Trainer gates.** `_supports_pp` is declare-to-enable per trainer (like `_supports_cp`), and
   `src/trainers/mixins/pp_gates.py` is the shared rejection vocabulary (PEFT, live reference

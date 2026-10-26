@@ -44,8 +44,7 @@ def _fake_log_self(*, training=True, global_step=5, cumulative=None):
     config = types.SimpleNamespace(
         data_parallel_size=1,
         non_dp_replication_factor=1,
-        is_ep_tp_mode=False,
-        is_ep_cp_mode=False,
+        has_ep_group=False,
         is_tp_mode=False,
         is_cp_mode=False,
         is_expert_tp_mode=False,

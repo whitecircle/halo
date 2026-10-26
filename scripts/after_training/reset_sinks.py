@@ -44,7 +44,7 @@ from src.checkpoint.writing import sweep_after_full_save
 from src.log import configure_cli_logging
 from src.model_loading.model_preparation import auto_load_model
 from src.model_loading.tokenizer_setup import load_processing_class
-from src.models.patches.gpt_oss_sinks import (
+from src.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
     is_sink_key,

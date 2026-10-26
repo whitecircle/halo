@@ -30,7 +30,7 @@ from trl.trainer.utils import create_model_from_path
 
 from src.distributed.loading.frozen_models import PREFERENCE_REFERENCE_ALTERNATIVES
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, has_live_attention_sinks
+from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, has_live_attention_sinks
 from src.trainers.mixins.validation import ParallelismValidationMixin
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.parallelism import make_parallelism_config
@@ -132,7 +132,7 @@ def test_the_reference_trl_builds_itself_runs_the_pretrained_sinks(tmp_path, mon
     """The premise, on the installed TRL and transformers: TRL's own build applies no sinks policy and lands
     on eager attention, which adds the sink column to every softmax."""
     # A reset-sinks SDPA load earlier in this process opens the class's SDPA gate for the whole process
-    # (``_enable_sink_model_sdpa``); the premise is transformers' own default, so it reads the declared flag.
+    # (``install_sdpa_for_reset_sinks``); the premise is transformers' own default, so it reads the declared flag.
     monkeypatch.setattr(GptOssPreTrainedModel, "_supports_sdpa", False)
     config = {key: value for key, value in TINY_GPTOSS_CONFIG.items() if key != "attn_implementation"}
     GptOssForCausalLM(GptOssConfig(**{**config, "num_hidden_layers": 2})).save_pretrained(tmp_path)

@@ -21,7 +21,7 @@ PartialState()  # the sinks policy logs through accelerate's logger, which requi
 
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.loading.peft_setup import setup_peft_model
-from src.models.patches.gpt_oss_sinks import (
+from src.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
     has_live_attention_sinks,

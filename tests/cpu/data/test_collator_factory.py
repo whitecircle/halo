@@ -14,7 +14,7 @@ from accelerate import PartialState
 
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import DataCollatorForCausalLMWithPadding
-from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS
+from src.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 

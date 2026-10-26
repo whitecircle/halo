@@ -20,9 +20,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 
 LAYER_PATH = "mlp"

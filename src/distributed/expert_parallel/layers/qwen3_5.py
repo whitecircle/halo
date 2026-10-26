@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class EPQwen3_5MoELayer(EPMoELayerBase):
@@ -40,8 +40,8 @@ class EPQwen3_5MoELayer(EPMoELayerBase):
     # which is why ``replicated_named_params`` is overridden.
     _SHARED_EXPERT_ATTRS = ("shared_expert",)
 
-    def _init_shared_experts(self, original_layer: nn.Module) -> None:
-        super()._init_shared_experts(original_layer)
+    def _adopt_shared_experts(self, original_layer: nn.Module) -> None:
+        super()._adopt_shared_experts(original_layer)
         self.shared_expert_gate = getattr(original_layer, "shared_expert_gate", None)
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:

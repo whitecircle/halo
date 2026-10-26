@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPSeparateGluMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPSeparateGluMoELayerBase
 
 
 class EPQwen3MoELayer(EPSeparateGluMoELayerBase):
@@ -28,7 +28,7 @@ class EPQwen3MoELayer(EPSeparateGluMoELayerBase):
     # transformers fuses them into ``experts.gate_up_proj`` on load and reverts on save.
     _HUB_PER_EXPERT_KEYS = ("gate_proj", "up_proj", "down_proj")
 
-    def _init_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False):
+    def _adopt_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False):
         """Split pre-fused gate_up_proj into separate matmul-convention tensors (ETP shards dim M;
         weights_already_sharded skips dim-0 slicing)."""
         self._require_fused_experts(experts)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class EPGemma4MoELayer(EPMoELayerBase):
@@ -56,7 +56,7 @@ class EPGemma4MoELayer(EPMoELayerBase):
         layer, so there is no block to read one off."""
         return layer
 
-    def _init_routing(self, original_layer: nn.Module) -> None:
+    def _adopt_routing(self, original_layer: nn.Module) -> None:
         """No-op: the sibling ``Gemma4TextRouter`` passes the routing decision in already made, and
         ``Gemma4TextExperts`` carries no routing knob."""
 

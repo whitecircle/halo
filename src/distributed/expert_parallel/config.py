@@ -12,15 +12,9 @@ from typing import Literal
 import torch.distributed as dist
 
 from src.distributed.group_layout import (
-    cross_node_group_ranks,
-    cross_node_layout,
-    cross_node_rank_and_group,
-    cross_node_replica_ranks,
-    etp_dispatch_coords,
-    node_local_group_ranks,
-    node_local_groups_per_domain,
-    node_local_rank_and_group,
-    node_local_replica_ranks,
+    CrossNodeLayout,
+    NodeLocalLayout,
+    ep_layout,
     reject_cross_node_ep_group,
     reject_cross_node_etp_shape,
     reject_node_local_ep_group,
@@ -211,7 +205,7 @@ class EPConfig:
 
         # Narrower than ``defer_grad_sync``: this flag marks the multi-domain multi-group case where
         # non-expert DP additionally shards over the EP group. Attention TP cannot reach it;
-        # ParallelismConfig._validate_tp rejects that shape.
+        # parallelism_rules._reject_tp rejects that shape.
         self.is_deferred_dp = (
             self.num_ep_groups > 1 and self.num_domains > 1 and self.expert_tp_size == 1 and self.ep_group_size > 1
         )
@@ -245,15 +239,15 @@ class EPConfig:
         Rank numbers are stage-local (add ``stage_base_rank`` for global).
         Example (2 domains of 8, ep_group_size=8): domain 0 = [0-7], domain 1 = [8-15].
         """
-        domain_size = self.nvlink_domain_size
+        layout = NodeLocalLayout(
+            world_size=self.stage_world_size, group_size=self.ep_group_size, domain_size=self.nvlink_domain_size
+        )
         self._create_ep_groups(
             global_rank,
-            num_groups=self.num_domains * node_local_groups_per_domain(domain_size, self.ep_group_size),
-            my_coords=node_local_rank_and_group(global_rank - self.stage_base_rank, domain_size, self.ep_group_size),
-            group_ranks=lambda idx: node_local_group_ranks(idx, domain_size, self.ep_group_size),
-            replica_ranks=lambda r: node_local_replica_ranks(
-                r, self.stage_world_size, domain_size, self.ep_group_size
-            ),
+            num_groups=layout.num_groups,
+            my_coords=layout.rank_and_group(global_rank - self.stage_base_rank),
+            group_ranks=layout.group_ranks,
+            replica_ranks=layout.replica_ranks,
         )
 
     def _create_cross_node_groups(self, global_rank: int):
@@ -268,19 +262,15 @@ class EPConfig:
             EP group 0: [0, 1, 2, 3, 8, 9, 10, 11]
             EP group 1: [4, 5, 6, 7, 12, 13, 14, 15]
         """
-        num_groups, _, _ = cross_node_layout(self.stage_world_size, self.ep_group_size, self.nvlink_domain_size)
+        layout = CrossNodeLayout(
+            world_size=self.stage_world_size, group_size=self.ep_group_size, domain_size=self.nvlink_domain_size
+        )
         self._create_ep_groups(
             global_rank,
-            num_groups=num_groups,
-            my_coords=cross_node_rank_and_group(
-                global_rank - self.stage_base_rank, self.stage_world_size, self.ep_group_size, self.nvlink_domain_size
-            ),
-            group_ranks=lambda idx: cross_node_group_ranks(
-                idx, self.stage_world_size, self.ep_group_size, self.nvlink_domain_size
-            ),
-            replica_ranks=lambda r: cross_node_replica_ranks(
-                r, self.stage_world_size, self.ep_group_size, self.nvlink_domain_size
-            ),
+            num_groups=layout.num_groups,
+            my_coords=layout.rank_and_group(global_rank - self.stage_base_rank),
+            group_ranks=layout.group_ranks,
+            replica_ranks=layout.replica_ranks,
         )
 
     def _rank_block_bases(self) -> range:
@@ -380,9 +370,12 @@ class EPConfig:
         ep_size = self.ep_size
 
         # Shared leaf with ParallelismConfig: ETP partners share dispatch_ep_rank → identical batches.
-        self.dispatch_ep_rank, self.expert_tp_rank = etp_dispatch_coords(
-            self.ep_rank, ep_size, expert_tp_size, self.node_local
-        )
+        self.dispatch_ep_rank, self.expert_tp_rank = ep_layout(
+            world_size=self.stage_world_size,
+            group_size=self.ep_group_size,
+            domain_size=self.nvlink_domain_size,
+            node_local=self.node_local,
+        ).etp_partition(self.ep_rank, ep_size, expert_tp_size)
 
         if self.node_local:
             for _, _, group_ranks in self._iter_all_ep_group_ranks():

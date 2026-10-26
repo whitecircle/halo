@@ -4,7 +4,7 @@
 The DPO/KTO reference, the on-policy GRPO KL reference, the SDPG KL anchor, the offline-GRPO native
 expert-LoRA KL reference and the distillation teacher all load an unparallelized frozen model whose
 logprobs are the other half of the objective. A per-site copy of that load buys a silent numerical bug the moment it drifts — a pin read off an object that cannot
-carry it (a "pinned" teacher on hub ``main``), or a backend resolved under ``sinks_reset=True``
+carry it (a "pinned" teacher on hub ``main``), or a backend resolved under a neutralized ``SinksPolicy``
 whose sink reset is then never applied (a GptOss teacher running sdpa over live sinks, every
 logprob shifted by nats). Both are "this copy is missing a step the others have".
 
@@ -49,7 +49,7 @@ PartialState()
 AUX_MODEL = "org/auxiliary"
 
 # The steps no call site may own itself: resolving the backend and applying the sinks policy are one
-# decision (``sinks_reset=True`` is what APPROVES a sink-dropping backend), so a site that binds
+# decision (a neutralized ``SinksPolicy`` is what APPROVES a sink-dropping backend), so a site that binds
 # either of them again owns a second copy of it, free to drift from the loaders that own the first.
 # The two sink primitives are not swept: only their definer binds them, and every caller reaches
 # them through ``apply_sinks_policy`` — which is what a drifting copy would have to bind.
@@ -57,13 +57,13 @@ FROZEN_LOAD_STEPS = ("resolve_attn_implementation", "apply_sinks_policy")
 
 # Allowlist, not a list of known offenders: the sweep below is over the whole tree, so a new copy is
 # caught by default. attention.py and gpt_oss_sinks.py define the two steps; the loaders and the
-# shared ``finalize_run_model`` apply them, with model_loading.py re-running the resolver AFTER the
+# shared ``apply_run_model_policies`` apply them, with model_loading.py re-running the resolver AFTER the
 # parallelism-specific overrides (CP's flex→FA switch, EP's flex-compile disable). The rest apply a
 # RECORDED or explicit policy to a checkpoint on disk rather than filling ``.sinks`` by name behind it.
 FROZEN_LOAD_STEP_OWNERS = frozenset(
     {
-        "src/models/patches/attention.py",
-        "src/models/patches/gpt_oss_sinks.py",
+        "src/models/attention/selection.py",
+        "src/models/attention/gpt_oss_sinks.py",
         "src/model_loading/model_preparation.py",
         "src/distributed/loading/frozen_models.py",
         "src/distributed/loading/model_loading.py",
@@ -262,8 +262,8 @@ def test_a_separate_reference_repo_of_another_tokenizer_is_refused():
 def test_every_frozen_load_site_gets_the_sinks_policy(site, reset_sinks):
     """The policy the backend was resolved UNDER must land on the model every site returns.
 
-    ``resolve_attn_implementation(..., sinks_reset=True)`` approves sdpa for a GptOss model only on
-    the premise that the caller then neutralizes the sinks; ``sinks_reset=False`` keeps them live and
+    ``resolve_attn_implementation`` under a neutralized policy approves sdpa for a GptOss model only on
+    the premise that the caller then neutralizes the sinks; a live policy keeps them live and
     they must be frozen instead. Skipping the pairing shifts every logprob of the frozen model by nats
     against the policy it scores, with nothing logged.
     """
@@ -321,7 +321,7 @@ def test_the_resolve_and_sinks_steps_live_only_in_their_owners(step):
 
 
 def test_the_frozen_model_is_finalized_like_the_policy():
-    """Both loaders end in ``finalize_run_model``, so the frozen copy carries the same fixups.
+    """Both loaders end in ``apply_run_model_policies``, so the frozen copy carries the same fixups.
 
     ``sanitize_generation_config`` is the one the frozen path did NOT run: a config shipping sampling
     params with ``do_sample=False`` is what ``save_pretrained`` refuses, and a teacher exported or

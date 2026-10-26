@@ -323,7 +323,7 @@ def test_online_grpo_replaces_each_trl_method_the_surface_walk_skips():
     PartialState()  # the install logs through accelerate's logger
     host = object.__new__(DistributedGRPOTrainer)
     host.vllm_generation = types.SimpleNamespace()
-    host.parallelism_config = types.SimpleNamespace(is_ep_mode=False, is_tp_mode=False, is_expert_tp_mode=False)
+    host.parallelism_config = types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, is_expert_tp_mode=False)
 
     DistributedGRPOTrainer._setup_weight_sync(host)
 

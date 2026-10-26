@@ -1,5 +1,5 @@
 """Per-token training-FLOPS estimation behind MFU / S-MFU: PaLM/Megatron ``6·N`` plus the
-attention-score term of :mod:`src.models.attention_layout`.
+attention-score term of :mod:`src.models.attention.layout`.
 
 Every count is the RANK's own (``local_numel`` reads the TP/PP shard off the parameter, the layout
 comes off this rank's decoder layers), so the estimate describes what this GPU computes.
@@ -8,7 +8,7 @@ comes off this rank's decoder layers), so the estimate describes what this GPU c
 from transformers.utils import logging
 
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
-from src.models.attention_layout import AttentionLayout, attention_layout
+from src.models.attention.layout import AttentionLayout, attention_layout
 from src.models.config_access import get_config_field, text_config
 from src.runtime.dtensor import local_numel
 

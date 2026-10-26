@@ -23,7 +23,7 @@ import torch
 from transformers import GptOssConfig, GptOssForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
@@ -69,7 +69,7 @@ def run(ctx):
     family = parser.parse_args().family
     checks, metrics = {}, {}
     model = build_model(family, ctx.device)
-    patch_moe_model_for_ep(model, ParallelismConfig(ep_size=EP_SIZE).create_ep_config())
+    patch_moe_model_for_ep(model, ParallelismConfig(ep_size=EP_SIZE).ep_config())
     apply_balancing_strategy(model, "aux_loss", is_moe=True)
     model.train()
     ep_layers = [module for module in model.modules() if isinstance(module, EPMoELayerBase)]

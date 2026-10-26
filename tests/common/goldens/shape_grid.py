@@ -17,7 +17,8 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import MappingProxyType
 
-from src.distributed.parallelism_config import AXIS_FLAGS, SUPPORTED_AXIS_SETS, ParallelismConfig
+from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.parallelism_rules import AXES, SUPPORTED_AXIS_SETS
 from tests.common.parallelism import make_parallelism_config
 
 STAGE_WIDTH_LIMIT = 32
@@ -27,10 +28,8 @@ PRODUCTION_WORLDS = (64, 72, 128, 144, 256)
 PRODUCTION_DOMAINS = ((8, 8), (72, 4))
 DIGEST_HEX_CHARS = 16
 
-# Allowlist axis -> the ParallelismConfig field sizing it; _accepted checks it against the config.
-AXIS_FIELDS = MappingProxyType(
-    {"pp": "pp_size", "ep": "ep_size", "etp": "expert_tp_size", "tp": "tp_size", "cp": "cp_size"}
-)
+# Allowlist axis -> the ParallelismConfig field sizing it, in AXES order; _accepted checks it against the config.
+AXIS_FIELDS = MappingProxyType({a.name: a.size_field for a in AXES})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -61,7 +60,7 @@ class LayoutShape:
         """``w<world> d<domain> n<node>``, each active axis with its size, and the EP scope where an EP
         group spans more than one rank, e.g. ``w16 d8 n8 pp2 ep4 node``."""
         parts = [f"w{self.world_size}", f"d{self.nvlink_domain_size}", f"n{self.gpus_per_node}"]
-        parts += [f"{axis}{getattr(self, AXIS_FIELDS[axis])}" for axis in AXIS_FLAGS if axis in self.axes]
+        parts += [f"{axis}{getattr(self, AXIS_FIELDS[axis])}" for axis in AXIS_FIELDS if axis in self.axes]
         if self.ep_group_size > 1:
             parts.append(self.ep_scope)
         return " ".join(parts)
@@ -79,7 +78,7 @@ def _shapes_on(world_size: int, nvlink_domain_size: int, gpus_per_node: int, pp_
     """Every allowlisted axis assignment over the divisors of the stage width, under both EP scopes
     where an EP group spans more than one rank."""
     sizes = [d for d in _divisors(world_size // pp_size) if d > 1]
-    for axes in sorted(sorted(axis_set, key=list(AXIS_FLAGS).index) for axis_set in SUPPORTED_AXIS_SETS):
+    for axes in sorted(sorted(axis_set, key=list(AXIS_FIELDS).index) for axis_set in SUPPORTED_AXIS_SETS):
         if ("pp" in axes) != (pp_size > 1):
             continue
         free_axes = [axis for axis in axes if axis != "pp"]

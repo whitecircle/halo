@@ -36,7 +36,7 @@ from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForSequenceClass
 from trl import RewardConfig
 
 from src.configs.classification import ClassificationConfig
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
@@ -180,7 +180,7 @@ def run(ctx):
     num_labels = 1 if kind == "reward" else NUM_LABELS
     config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model(num_labels).to(ctx.device)
-    patch_moe_model_for_ep(model, config.create_ep_config())
+    patch_moe_model_for_ep(model, config.ep_config())
 
     # ── EP is structurally live: a dense run wearing an EP config would pass every loss check
     # below (the dense reference IS the unsharded path), so the sharding itself is asserted.
@@ -194,7 +194,7 @@ def run(ctx):
     dataset = build_reward_dataset(7) if kind == "reward" else build_classification_dataset(7)
     trainer = build_trainer(kind, model, dataset, tokenizer, config, ctx.output_dir)
     ctx.on_teardown(trainer.cleanup_ep)
-    checks["trainer_in_ep_mode"] = trainer.parallelism_config.is_ep_mode is True
+    checks["trainer_in_ep_mode"] = trainer.parallelism_config.has_ep_group is True
 
     # ── Capture step 1's batch straight off the trainer's own compute_loss, so the reference
     # consumes exactly the rows and padding the EP forward saw.

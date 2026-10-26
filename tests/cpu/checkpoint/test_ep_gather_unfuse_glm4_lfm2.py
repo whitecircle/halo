@@ -18,10 +18,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 E, H, M = 4, 8, 16
 

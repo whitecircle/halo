@@ -372,7 +372,7 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) ->
             processing_class=tokenizer,
             parallelism_config=parallelism_config,
         )
-        log(f"  EP mode: {trainer.parallelism_config.is_ep_mode}, TP mode: {trainer.parallelism_config.is_tp_mode}")
+        log(f"  EP mode: {trainer.parallelism_config.has_ep_group}, TP mode: {trainer.parallelism_config.is_tp_mode}")
 
         log(f"[C.6] Training ({MAX_STEPS} steps)...")
         train_result = trainer.train()
@@ -385,7 +385,7 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) ->
         checks["lora_updated"] = lora_updated
         log(f"  LoRA weights updated: {'PASS' if lora_updated else 'FAIL'} ({lora_details})")
 
-        checks["ep_mode"] = trainer.parallelism_config.is_ep_mode
+        checks["ep_mode"] = trainer.parallelism_config.has_ep_group
         checks["no_tp_mode"] = not trainer.parallelism_config.is_tp_mode
         log(f"  EP mode active: {'PASS' if checks['ep_mode'] else 'FAIL'}")
         log(f"  TP mode inactive: {'PASS' if checks['no_tp_mode'] else 'FAIL'}")
@@ -504,7 +504,7 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, base_output_dir: str) -
             processing_class=tokenizer,
             parallelism_config=parallelism_config,
         )
-        log(f"  EP mode: {trainer.parallelism_config.is_ep_mode}, TP mode: {trainer.parallelism_config.is_tp_mode}")
+        log(f"  EP mode: {trainer.parallelism_config.has_ep_group}, TP mode: {trainer.parallelism_config.is_tp_mode}")
         log(f"  FSDP wrapped: {trainer._fsdp_wrapped}")
 
         log(f"[D.6] Training ({MAX_STEPS} steps)...")
@@ -518,7 +518,7 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, base_output_dir: str) -
         checks["lora_updated"] = lora_updated
         log(f"  LoRA weights updated: {'PASS' if lora_updated else 'FAIL'} ({lora_details})")
 
-        checks["no_ep_mode"] = not trainer.parallelism_config.is_ep_mode
+        checks["no_ep_mode"] = not trainer.parallelism_config.has_ep_group
         checks["no_tp_mode"] = not trainer.parallelism_config.is_tp_mode
         log(f"  EP mode inactive: {'PASS' if checks['no_ep_mode'] else 'FAIL'}")
         log(f"  TP mode inactive: {'PASS' if checks['no_tp_mode'] else 'FAIL'}")

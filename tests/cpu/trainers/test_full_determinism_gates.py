@@ -5,7 +5,7 @@ the mode on.
 Both refusals come from the shared ``_init_distributed_config``, which runs before ``super().__init__``:
 
 * Once the flex-sliding warm-up compiled its graphs without the mode. Dynamo guards on it, so the
-  sliding-layer graphs ``warmup_flex_sliding_kernels`` compiled at load would recompile rank by rank at
+  sliding-layer graphs ``warm_flex_sliding_kernels`` compiled at load would recompile rank by rank at
   each rank's first long sliding call, mid-forward, with EP peers waiting in DeepEP's dispatch. A
   process that warmed nothing (a single-rank run, or ``HALO_FLEX_SLIDING=0``), one whose warm-up already
   ran deterministic, and a run without ``full_determinism`` construct normally.
@@ -28,7 +28,7 @@ from accelerate import PartialState
 from transformers import Gemma4ForCausalLM, Gemma4TextConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches import flex_sliding_attention
+from src.models.attention import sdpa_flex_sliding
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -79,7 +79,7 @@ def _construct(trainer_cls, full_determinism: bool, parallelism_config: Parallel
 
 @pytest.mark.parametrize("trainer_cls", TRAINERS, ids=lambda cls: cls.__name__)
 def test_full_determinism_after_a_non_deterministic_warmup_is_refused(trainer_cls, monkeypatch):
-    monkeypatch.setattr(flex_sliding_attention, "_WARMED_DETERMINISTIC", False)
+    monkeypatch.setattr(sdpa_flex_sliding, "_warmed_deterministic", False)
     with pytest.raises(ValueError, match="HALO_FLEX_SLIDING=0"):
         _construct(trainer_cls, full_determinism=True)
 
@@ -90,7 +90,7 @@ def test_full_determinism_after_a_non_deterministic_warmup_is_refused(trainer_cl
     ids=["no_warmup", "warmed_deterministic", "no_full_determinism"],
 )
 def test_runs_that_keep_the_warmed_mode_construct(warmed_deterministic, full_determinism, monkeypatch):
-    monkeypatch.setattr(flex_sliding_attention, "_WARMED_DETERMINISTIC", warmed_deterministic)
+    monkeypatch.setattr(sdpa_flex_sliding, "_warmed_deterministic", warmed_deterministic)
     with pytest.raises(_SetupDone):
         _construct(DistributedSFTTrainer, full_determinism=full_determinism)
 
@@ -98,19 +98,19 @@ def test_runs_that_keep_the_warmed_mode_construct(warmed_deterministic, full_det
 def test_a_warmup_that_compiles_nothing_records_no_mode(monkeypatch):
     """A wide-head model with no sliding layer is built with the flex-sliding implementation, but its warm-up
     has no graph to compile, so it must leave nothing for ``full_determinism`` to be refused over."""
-    monkeypatch.setattr(flex_sliding_attention, "_WARMED_DETERMINISTIC", None)
+    monkeypatch.setattr(sdpa_flex_sliding, "_warmed_deterministic", None)
     config = Gemma4TextConfig(**TINY_GEMMA4_WIDE_HEAD_CONFIG, layer_types=["full_attention", "full_attention"])
-    config._attn_implementation = flex_sliding_attention.register_flex_sliding_attention()
+    config._attn_implementation = sdpa_flex_sliding.register_flex_sliding_attention()
     model = Gemma4ForCausalLM(config)
-    assert flex_sliding_attention.sliding_attention_calls(model) == set()  # premise: no sliding layer
-    flex_sliding_attention.warmup_flex_sliding_kernels(model, dtype=torch.bfloat16)
-    assert flex_sliding_attention._WARMED_DETERMINISTIC is None
+    assert sdpa_flex_sliding.sliding_attention_calls(model) == set()  # premise: no sliding layer
+    sdpa_flex_sliding.warm_flex_sliding_kernels(model, dtype=torch.bfloat16)
+    assert sdpa_flex_sliding._warmed_deterministic is None
     with pytest.raises(_SetupDone):
         _construct(DistributedSFTTrainer, full_determinism=True)
 
 
 def test_full_determinism_over_a_hand_built_cross_domain_ep_config_is_refused(monkeypatch):
-    monkeypatch.setattr(flex_sliding_attention, "_WARMED_DETERMINISTIC", None)
+    monkeypatch.setattr(sdpa_flex_sliding, "_warmed_deterministic", None)
     # 16 ranks over two 8-GPU NVLink domains, one EP group spanning both.
     config = create_config(ep_size=8, world_size=16, gpus_per_node=8, ep_scope="global")
     with pytest.raises(ValueError, match="spanning NVLink domains"):

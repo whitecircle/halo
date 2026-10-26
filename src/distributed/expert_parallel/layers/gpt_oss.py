@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.kernels.fused_glu import GluCombine, fused_glu_enabled
 from src.kernels.moe_permute import MoEExpertBiasGather
 
@@ -75,13 +75,13 @@ class EPGptOssMoELayer(EPMoELayerBase):
         + ("gate_proj_bias", "up_proj_bias", "down_proj_bias")
     )
 
-    def _init_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
+    def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
         """GptOss implements its own interleaved clamped-SwiGLU compute paths, so it latches that combine
         instead of an activation. ``alpha`` and ``limit`` are read as attributes, not with defaults: a
         substituted default corrupts the clamped SwiGLU on every expert."""
         self._gptoss_glu = GluCombine.gptoss(experts.alpha, experts.limit)
 
-    def _init_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False):
+    def _adopt_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False):
         """Slice and register expert parameters for this rank.
 
         GptOss gate_up_proj is interleaved ``[g0,u0,g1,u1,...]``. Under ETP and grouped_mm it is

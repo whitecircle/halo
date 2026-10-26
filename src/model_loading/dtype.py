@@ -1,9 +1,5 @@
 """Run precision: ``dtype`` resolution, quantized-load detection, the loaded-parameter cast and the
-process-global fp32 matmul pin.
-
-Depends on torch, TRL and :mod:`src.env` only, so a CLI or entry point can resolve a dtype or apply the
-matmul pin without importing the loaders.
-"""
+process-global fp32 matmul pin. Imports no loader, so any CLI can resolve a dtype or apply the pin."""
 
 import warnings
 
@@ -26,15 +22,8 @@ DTYPE_BY_NAME: dict[str, torch.dtype] = {
 
 _VALID_FP32_MATMUL_PRECISION = ("highest", "high", "medium")
 
-# The attribute bnb's ``Params4bit`` carries (``None`` until quantized), read without importing bnb.
-_BNB_4BIT_STATE_ATTR = "quant_state"
 
-# The model-level flags a quantized load sets: bitsandbytes sets the 8/4-bit pair, torchao/quanto only
-# ``is_quantized``.
-_KBIT_QUANTIZED_FLAGS = ("is_loaded_in_8bit", "is_loaded_in_4bit", "is_quantized")
-
-
-def resolve_model_dtype(model_init_kwargs: dict) -> dict:
+def normalize_model_init_dtype(model_init_kwargs: dict) -> dict:
     """Normalize the dtype in model_init_kwargs to transformers' ``dtype`` key, resolved (in place).
 
     ``model_init_kwargs`` is user YAML handed straight to ``from_pretrained``, so the pre-v5
@@ -88,21 +77,20 @@ def reject_fp8_tensor(name: str, tensor: torch.Tensor, dtype: torch.dtype | None
 
 
 def is_packed_4bit_parameter(param: nn.Parameter) -> bool:
-    """bnb's storage holds packed codes even when its declared storage dtype is floating point."""
-    return hasattr(param, _BNB_4BIT_STATE_ATTR)
+    """Whether ``param`` is bnb's ``Params4bit``, whose storage holds packed codes even when its declared
+    storage dtype is floating point. Read off its ``quant_state`` attribute, without importing bnb."""
+    return hasattr(param, "quant_state")
 
 
 def has_packed_quantized_params(model: torch.nn.Module) -> bool:
-    """Whether ``model`` carries quantized (non-floating-point) params, i.e. bnb 4/8-bit packed
-    storage (QLoRA). Shared by the FSDP2 routing in the trainer mixin and the GRPO weight-sync
-    construction gate."""
+    """Whether ``model`` carries quantized (non-floating-point) params, i.e. bnb 4/8-bit packed storage (QLoRA)."""
     return any(not p.dtype.is_floating_point for p in model.parameters())
 
 
 def is_kbit_quantized(model: torch.nn.Module) -> bool:
-    """Whether ``model`` was loaded quantized (any of :data:`_KBIT_QUANTIZED_FLAGS`), the condition
-    ``prepare_peft_model`` runs peft's k-bit preparation on."""
-    return any(getattr(model, flag, False) for flag in _KBIT_QUANTIZED_FLAGS)
+    """Whether ``model`` was loaded quantized, the condition ``prepare_peft_model`` runs peft's k-bit
+    preparation on: bitsandbytes sets the 8/4-bit pair, torchao/quanto only ``is_quantized``."""
+    return any(getattr(model, flag, False) for flag in ("is_loaded_in_8bit", "is_loaded_in_4bit", "is_quantized"))
 
 
 def cast_parameters_to_run_dtype(
@@ -110,28 +98,15 @@ def cast_parameters_to_run_dtype(
 ) -> None:
     """Cast every floating parameter of a freshly loaded ``model`` to the run's ``dtype`` (in place).
 
-    ``from_pretrained`` keeps a family's ``_keep_in_fp32_modules[_strict]`` parameters in fp32
-    (DeepSeek-V4 norms and hyper-connections, GLM-5 Next KDA state, Inkling short convolutions).
-    FSDP2 rejects mixed dtypes in one shard group, and DeepSeek-V4's fp32 norms promote activations
-    into its run-dtype projections. The training and scoring loaders call this right after the load,
-    before any parallel wrapper, so a family trains in one precision whatever the parallelism (the EP
-    lazy loader casts per tensor to the same effect); conversion tools keep the pins.
+    ``from_pretrained`` keeps a family's ``_keep_in_fp32_modules[_strict]`` parameters in fp32, which
+    FSDP2 rejects inside one shard group and which promote activations into run-dtype projections, so
+    the loaders call this right after the load, before any parallel wrap. ``keep_fp32`` leaves
+    parameters that already arrived in fp32 untouched. Parameters only (a float buffer may be fp32 by
+    design); "auto" and None leave the model as loaded; bnb's packed 4-bit storage is skipped.
 
-    ``keep_fp32`` leaves parameters that *already arrived* in fp32 untouched; it cannot undo
-    ``from_pretrained(dtype=run_dtype)`` rounding them first. Training construction separately
-    streams configured master weights from the checkpoint before wrapping, while lazy loaders
-    materialize the selected keys directly in fp32. The caster itself remains a run-dtype operation.
-    Parameters only: a float buffer may be fp32 by design (Zaya's balancing biases). "auto" and None
-    leave the model as loaded. bnb's 4-bit storage is left alone: a ``Params4bit`` holds packed codes
-    in a tensor that reports ``bnb_4bit_quant_storage``, which may be a float dtype, and a cast would
-    re-encode the codes as values.
-
-    Raises on any other ``dtype`` (a name the caller should have resolved), on a 1-byte float (fp8)
-    parameter (:func:`reject_fp8_tensor`), and on any other ``Parameter`` subclass or tensor-subclass
-    parameter off the run dtype: its storage is not plain values, and rebinding a DTensor's ``.data``
-    leaves its local shard in the old dtype, which is why native dense TP does not call this. Its
-    separate checkpoint replay rebuilds FP32 DTensor parameters from CPU-selected local shards,
-    with the original placements and all tied owners, before the trainer adds DP/FSDP2.
+    Raises on any other ``dtype``, on an fp8 parameter (:func:`reject_fp8_tensor`), and on a
+    ``Parameter`` or tensor subclass off the run dtype: rebinding a DTensor's ``.data`` leaves its local
+    shard in the old dtype.
     """
     if dtype in ("auto", None):
         return
@@ -155,11 +130,9 @@ def cast_parameters_to_run_dtype(
 def resolve_quantization_config(model_config, training_config):
     """The run's BitsAndBytes config, with the 4-bit compute dtype pinned to the run's own dtype.
 
-    TRL derives ``bnb_4bit_compute_dtype`` from ``ModelConfig.dtype``, which defaults to ``"float32"``
-    and is read by nothing else here; every other consumer takes the training config's
-    ``bf16``/``fp16`` through :func:`resolve_training_dtype`. Left alone, a bf16 QLoRA run dequantizes
-    and computes every 4-bit matmul in fp32. Every loader that accepts a quantized base must go
-    through this rather than ``get_quantization_config`` directly.
+    TRL derives ``bnb_4bit_compute_dtype`` from ``ModelConfig.dtype``, which defaults to ``"float32"``,
+    so a bf16 QLoRA run would otherwise compute every 4-bit matmul in fp32. Every loader accepting a
+    quantized base goes through this rather than ``get_quantization_config``.
     """
     quantization_config = get_quantization_config(model_config)
     if getattr(quantization_config, "load_in_4bit", False):

@@ -387,7 +387,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
 class DataCollatorWithFlattening(DefaultDataCollator):
     """Padding-free Flash Attention collator (no completion masking): flattens the
     mini-batch into a single [1, total_tokens] sequence. Requires a varlen flash implementation
-    (:data:`~src.models.patches.attention.VARLEN_ATTN_IMPLEMENTATIONS`).
+    (:data:`~src.models.attention.selection.VARLEN_ATTN_IMPLEMENTATIONS`).
     """
 
     tokenizer: PreTrainedTokenizerBase = None

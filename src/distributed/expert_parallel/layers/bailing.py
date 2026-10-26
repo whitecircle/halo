@@ -5,7 +5,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import TOPK_WEIGHT_NORM_EPS, EPSeparateGluMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPSeparateGluMoELayerBase
+from src.distributed.expert_parallel.moe_layer.routing import TOPK_WEIGHT_NORM_EPS
 
 
 class EPBailingMoELayer(EPSeparateGluMoELayerBase):
@@ -45,12 +46,12 @@ class EPBailingMoELayer(EPSeparateGluMoELayerBase):
 
     _SHARED_EXPERT_ATTRS = ("shared_experts",)
 
-    def _init_expert_compute(self, original_layer: nn.Module, experts: nn.ModuleList) -> None:
+    def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.ModuleList) -> None:
         """Resolve the activation off the first expert this rank fuses: each ``BailingMoeV2MLP``
         holds ``ACT2FN[config.hidden_act]``, the plain ``nn.ModuleList`` container holds none."""
         self._resolve_activation(experts[self.expert_start], original_layer=original_layer)
 
-    def _init_expert_params(self, experts: nn.ModuleList, weights_already_sharded: bool = False):
+    def _adopt_expert_params(self, experts: nn.ModuleList, weights_already_sharded: bool = False):
         """Stack per-expert weights (nn.Linear convention) into 3D matmul-convention tensors.
 
         The lazy loader materializes only this rank's experts, at their global indices (remote ones

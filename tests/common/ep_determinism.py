@@ -88,7 +88,7 @@ def run_backward_replay(ctx, *, family: str, mode: str) -> dict:
     GradientState()._set_sync_gradients(True)
     torch.manual_seed(SEED)
     model = tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides).to(torch.bfloat16)
-    model = patch_moe_model_for_ep(model.to(ctx.device), ParallelismConfig(**parallelism).create_ep_config())
+    model = patch_moe_model_for_ep(model.to(ctx.device), ParallelismConfig(**parallelism).ep_config())
     model.train()
     layers = ep_layers(model)
     expert_params = {id(param) for layer in layers for _, param in layer.expert_named_params()}

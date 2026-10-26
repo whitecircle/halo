@@ -3,12 +3,12 @@
 
 ``EPMoELayerBase.__init__`` is one template: it resolves the router and the expert container off the
 family's own declarations, then hands each step to a hook the family may override
-(``_detect_hidden_dim`` / ``_init_routing`` / ``_init_shared_experts`` / ``_init_expert_compute`` /
-``_init_expert_params``). What a family declares is therefore the ONLY thing standing between the
+(``_detect_hidden_dim`` / ``_adopt_routing`` / ``_adopt_shared_experts`` / ``_adopt_expert_compute`` /
+``_adopt_expert_params``). What a family declares is therefore the ONLY thing standing between the
 wrapper and the HF block it replaces, and every way of getting a declaration wrong is silent: a
 ``_ROUTER_ATTR`` pointing at the wrong module hooks and upcasts something the forward never calls; a
 missing ``_SHARED_EXPERT_ATTRS`` drops the shared FFN from every token's output; an
-``_init_routing`` override that stops consulting the router leaves ``routed_scaling_factor`` /
+``_adopt_routing`` override that stops consulting the router leaves ``routed_scaling_factor`` /
 ``norm_topk_prob`` / the group knobs at their neutral defaults; a restated activation or a mis-read
 clamp bound trains the experts on a different function. None of those changes a shape, a dtype or a
 key.
@@ -99,7 +99,7 @@ _KNOB_SPELLINGS = {
 }
 
 # Knobs whose fallback is read off the LIVE tree rather than a constant (the ``required=False`` read
-# in ``EPGroupLimitedMoELayerBase._init_routing``), so an absent declaration cannot become a wrong
+# in ``EPGroupLimitedMoELayerBase._adopt_routing``), so an absent declaration cannot become a wrong
 # number and the strictness above does not apply.
 _LIVE_TREE_FALLBACKS = {"n_routed_experts"}
 
@@ -446,7 +446,7 @@ def test_the_parity_check_is_sensitive_to_a_dropped_declaration():
         self.routed_scaling_factor = getattr(original_layer, "routed_scaling_factor", 1.0)
         self.top_k = self._find_top_k(original_layer)
 
-    neutral_knobs = type("_NeutralRoutingKnobs", (glm4_wrapper,), {"_init_routing": _block_only_knobs})
+    neutral_knobs = type("_NeutralRoutingKnobs", (glm4_wrapper,), {"_adopt_routing": _block_only_knobs})
     block, layer = _build(glm4_factory, neutral_knobs)
     assert any("routed_scaling_factor" in failure for failure in _parity_failures(block, layer, neutral_knobs)), (
         "a wrapper whose routing knobs fell back to their neutral defaults passed the parity check"
@@ -457,7 +457,7 @@ def test_the_parity_check_is_sensitive_to_a_dropped_declaration():
     def _restated_activation(self, original_layer, experts):
         self.act_fn = F.relu
 
-    restated = type("_RestatedActivation", (glm4_wrapper,), {"_init_expert_compute": _restated_activation})
+    restated = type("_RestatedActivation", (glm4_wrapper,), {"_adopt_expert_compute": _restated_activation})
     block, layer = _build(glm4_factory, restated)
     assert any("act_fn" in failure for failure in _parity_failures(block, layer, restated)), (
         "a wrapper that restated its activation passed the parity check"
@@ -467,10 +467,10 @@ def test_the_parity_check_is_sensitive_to_a_dropped_declaration():
     # scale takes when the block it came from renamed or dropped it. Nothing is missing and nothing
     # raises: the layer simply computes with a number the checkpoint never carried.
     def _invented_limit(self, original_layer, experts):
-        glm4_wrapper._init_expert_compute(self, original_layer, experts)
+        glm4_wrapper._adopt_expert_compute(self, original_layer, experts)
         self.limit = 7.0
 
-    invented = type("_InventedLimit", (glm4_wrapper,), {"_init_expert_compute": _invented_limit})
+    invented = type("_InventedLimit", (glm4_wrapper,), {"_adopt_expert_compute": _invented_limit})
     block, layer = _build(glm4_factory, invented)
     assert any("limit" in failure for failure in _parity_failures(block, layer, invented)), (
         "a wrapper holding a compute constant no source declares passed the parity check"

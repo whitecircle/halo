@@ -51,16 +51,16 @@ from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.checkpoint.save import is_pp_shard_writer, save_pp_checkpoint
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
+from src.models.attention.gpt_oss_sinks import neutralized_sink_value
 from src.models.param_roles import persistent_buffers
-from src.models.patches.gpt_oss_sinks import neutralized_sink_value
 from src.runtime import dtensor
 from src.runtime.filesystem import is_fs_save_rank
 from src.trainers.mixins.pipeline import stash_wrapper_state

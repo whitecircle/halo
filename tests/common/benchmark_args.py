@@ -9,7 +9,8 @@ import argparse
 import torch
 from transformers import AutoConfig
 
-from src.models.patches.attention import resolve_attn_implementation
+from src.models.attention.gpt_oss_sinks import SinksPolicy
+from src.models.attention.selection import resolve_attn_implementation
 from tests.common.models import DEFAULT_MODEL, MODEL_CONFIGS
 
 
@@ -152,4 +153,4 @@ def resolve_benchmark_attn(
     different kernel than production runs.
     """
     model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-    return resolve_attn_implementation(model_config, attn_implementation, dtype)
+    return resolve_attn_implementation(model_config, attn_implementation, dtype, sinks_policy=SinksPolicy.NEUTRALIZED)

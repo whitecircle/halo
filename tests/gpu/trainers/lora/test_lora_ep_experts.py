@@ -32,8 +32,9 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase, disable_expert_adapters
 from src.distributed.expert_parallel.expert_weights import apply_ep_lora_adapters, gather_ep_lora_adapters, has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str

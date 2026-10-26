@@ -72,13 +72,13 @@ def test_building_the_cp_groups_before_the_ep_groups_breaks_the_trace(checkpoint
     """Anti-vacuity: both configs cache their groups, so building the CP config first moves its
     ``new_group`` calls ahead of the EP ones, which on a real job pairs one rank's EP group build
     with a peer's CP group build."""
-    create_ep_config = ParallelismConfig.create_ep_config
+    ep_config = ParallelismConfig.ep_config
 
     def cp_first(config):
-        config.create_cp_config()
-        return create_ep_config(config)
+        config.cp_config()
+        return ep_config(config)
 
-    with patch.object(ParallelismConfig, "create_ep_config", cp_first):
+    with patch.object(ParallelismConfig, "ep_config", cp_first):
         reordered = checkpoints.portable(trace_rank(CASES["ep+cp lazy"], 0, checkpoints).events)
     golden = GOLDEN["ep+cp lazy"][golden_key(0)]
     assert sorted(reordered) == sorted(golden), "premise: the reorder issues the same events"

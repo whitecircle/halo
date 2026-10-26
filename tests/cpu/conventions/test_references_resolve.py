@@ -17,7 +17,7 @@ next runs. This sweep resolves them statically, through the index the docs gate 
   function reads when it runs, one of that module or, outside the tests, one reading it through the module
   object; patching a name that is only bound, or read only at import, intercepts nothing, and the test
   passes vacuously;
-* each attribute chain on such an owner (``flex_sliding_attention._SAVED_BYTES_PER_SCORE``) where no
+* each attribute chain on such an owner (``sdpa_flex_sliding._SAVED_BYTES_PER_SCORE``) where no
   local name hides it. It must exist, but may name a binding the module only imports: that binding is
   what a patch replaces and restores through the module;
 * each dotted name and repo-root path any other string literal or comment names: ``caplog`` loggers,

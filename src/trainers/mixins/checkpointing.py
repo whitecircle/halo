@@ -43,9 +43,9 @@ from src.distributed.checkpoint.save import (
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.model_loading.tokenizer_setup import pristine_model_max_length
+from src.models.attention.gpt_oss_sinks import gpt_oss_sinks_restored
 from src.models.config_access import config_export_ready, restore_special_token_ids
 from src.models.moe_balancing import BALANCING_BIASES_ATTR
-from src.models.patches.gpt_oss_sinks import gpt_oss_sinks_restored
 from src.models.unwrapping import base_transformers_model
 from src.runtime.collectives import barrier, barrier_on_exit, broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure, rank_consensus
@@ -548,7 +548,7 @@ class CheckpointingMixin:
             is_pp_mode=config.is_pp_mode,
             is_cp_mode=config.is_cp_mode,
             is_tp_mode=config.is_tp_mode,
-            is_ep_tp_mode=config.is_ep_tp_mode,
+            is_ep_tp_mode=config.has_ep_group and config.is_tp_mode,
             has_ep_layers=self._has_ep_layers,
             fsdp_wrapped=self._fsdp_wrapped or isinstance(self.model, FSDP),
             accelerate_manages_fsdp=self._accelerate_manages_fsdp,

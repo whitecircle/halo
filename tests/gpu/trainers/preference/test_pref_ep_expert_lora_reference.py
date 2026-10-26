@@ -6,7 +6,7 @@ A mixed run (stock PEFT on attention, native grouped LoRA on the EP experts) wit
 reference gets its reference log-probs from TRL, which scores the policy inside
 ``use_adapter(accelerator.unwrap_model(model), None)`` -> ``PeftModel.disable_adapter()`` every step.
 PEFT's own context disables only the attention half: the expert adapters are not PEFT modules, and they
-drop out only because ``make_disable_adapter_ep_aware`` wraps that context on the trainer's PeftModel.
+drop out only because ``install_ep_aware_disable_adapter`` wraps that context on the trainer's PeftModel.
 The run is built as the dpo/kto scripts build it: the targets are peeled before the load, and the
 trainer's ``ref_model`` comes from ``load_reference_model_for_preference`` on that peeled config, whose
 gate must hand a mixed run ``None`` rather than refuse it for want of precomputed log-probs.
@@ -43,8 +43,8 @@ from trl.models.utils import disable_gradient_checkpointing
 from trl.trainer.utils import use_adapter
 
 from src.configs.preference import DPOScriptArguments
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str

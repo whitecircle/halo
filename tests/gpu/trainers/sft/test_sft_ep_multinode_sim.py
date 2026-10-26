@@ -8,7 +8,7 @@ world_size // 2``) and setting ``ep_size = gpus_per_node`` — one node-local EP
 That is the canonical production multi-node MoE shape: experts distributed node-locally (NVLink
 all-to-all), DP across nodes, and expert gradients averaged across nodes via the
 cross-domain expert-replica groups. It exercises the membership math in
-``src.distributed.group_layout`` (``node_local_group_ranks`` / ``node_local_replica_ranks``) and the
+``src.distributed.group_layout`` (``NodeLocalLayout.group_ranks`` / ``replica_ranks``) and the
 ``num_ep_groups > 1`` replica-grad-sync path — the parts that only run when there is more than one
 EP group, i.e. only in multi-node.
 
@@ -176,7 +176,7 @@ def run(ctx):
     assert parallelism_config.num_ep_groups == 2, (
         f"expected 2 node-local EP groups, got {parallelism_config.num_ep_groups}"
     )
-    assert parallelism_config.create_ep_config().is_deferred_dp, (
+    assert parallelism_config.ep_config().is_deferred_dp, (
         "expected deferred cross-replica DP sync for multi-group node-local EP across 2 domains"
     )
 
@@ -217,7 +217,7 @@ def run(ctx):
         parallelism_config=parallelism_config,
     )
 
-    ep_config = parallelism_config.create_ep_config()
+    ep_config = parallelism_config.ep_config()
     log(f"EP groups={ep_config.num_ep_groups}, needs_expert_grad_sync={ep_config.needs_expert_grad_sync}")
     shape_checks = parallel_shape_checks(model, parallelism_config)
 

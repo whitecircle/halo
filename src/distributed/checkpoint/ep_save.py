@@ -39,7 +39,6 @@ from src.checkpoint.writing import (
 from src.distributed.checkpoint.write import exchange_shard_index
 from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import (
     gather_ep_layer_weights,
     gather_ep_lora_adapters,
@@ -49,9 +48,10 @@ from src.distributed.expert_parallel.expert_weights import (
     to_hub_layer_key,
 )
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.tensor_parallel.state_dict import gather_tp_sharded_non_dtensor_params
+from src.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from src.models.param_roles import persistent_buffers
-from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from src.models.peft_adapters import LoraFolds, lora_folded_data
 from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_toolkit_wrappers
 from src.runtime.collectives import barrier_on_exit
@@ -200,7 +200,7 @@ def _save_ep_gathered(
     if is_save_rank:
         logger.info(f"Saving EP model to {output_dir} (gathered mode)")
 
-    ep_layers = find_ep_layers(model)
+    ep_layers = named_ep_layers(model)
     ep_layer_names = {name for name, _ in ep_layers}
 
     cast = save_dtype_caster(model, keep_live_dtype=keep_live_dtype)
@@ -489,7 +489,7 @@ def validate_ep_sharded_save(
         )
     if world_size is None:
         world_size = get_global_world_size()
-    ep_layers = find_ep_layers(model)
+    ep_layers = named_ep_layers(model)
     if not ep_layers:
         # Accepting the flag on a run that can never shard would write ordinary gathered checkpoints
         # while a planned merge_ep_shards.py step waits for shards that never exist.
@@ -516,7 +516,7 @@ def _save_ep_sharded(
     """
     rank, world_size = get_global_rank(), get_global_world_size()
 
-    ep_layers = find_ep_layers(model)
+    ep_layers = named_ep_layers(model)
     _check_ep_sharded_save_supported(model, ep_layers, world_size)
 
     logger.info(f"[Rank {rank}] Saving EP model sharded to {output_dir}")

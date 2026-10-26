@@ -28,8 +28,8 @@ import triton
 from accelerate import PartialState
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
-from src.models.patches.attention import patch_sdpa_for_wide_heads
-from src.models.patches.flex_sliding_attention import flex_sliding_attention
+from src.models.attention.backend_setup import patch_sdpa_for_wide_heads
+from src.models.attention.sdpa_flex_sliding import flex_sliding_attention
 
 LAYERS = {"sliding": (256, 8, 1024), "global": (512, 2, None)}
 HEADS = 16

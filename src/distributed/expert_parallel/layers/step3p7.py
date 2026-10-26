@@ -7,7 +7,7 @@ import math
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
 from src.kernels.fused_glu import GluCombine, is_silu_activation
 
 
@@ -71,13 +71,13 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
     _SHARED_EXPERT_ATTRS = ("shared_experts",)
     _SHARED_EXPERT_REQUIRED = True
 
-    def _init_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
+    def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
         """The activation (the base latch serves the unclamped layers through the fused SiLU kernel)
         plus this layer's own clamp bound, where ``inf`` means unclamped (most layers), with
         Step-3.7-Flash clamping layers 43-44 at 7.0. A clamped layer replaces the latch with its own
         combine, whose Triton kernel implements SiLU only, so any other activation falls through to
         the eager form. Read as an attribute: a substituted default un-clamps those layers."""
-        super()._init_expert_compute(original_layer, experts)
+        super()._adopt_expert_compute(original_layer, experts)
         self.swiglu_limit = float(experts.limit)
         if not math.isinf(self.swiglu_limit):
             self._fused_glu_mul = (

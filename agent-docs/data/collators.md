@@ -156,7 +156,7 @@ too, so a composite (VLM) wrapper is covered:
 - **GPT-OSS** (`DENSE_PACKING_LEAK_MODEL_TYPES` in `src/models/segment_markers.py`): packing on a
   non-varlen backend raises. Pin `flash_attention_2` or turn packing off.
 - **DeepSeek-V4**, or any model whose `layer_types` declare a compressed-KV layer (the
-  `"compressed"` kind in `src/models/attention_layout.py`: `compressed_sparse_attention`,
+  `"compressed"` kind in `src/models/attention/layout.py`: `compressed_sparse_attention`,
   `heavily_compressed_attention`): `packing` and `padding_free` raise on every backend
   (`reject_compressed_kv_rows`). Positions restart per document but the compressor windows are cut
   at row indices, so a later document reads another document's compressed KV as its own context.
@@ -193,7 +193,7 @@ they score packed rows under the same masks the student does.
 
 - **Both want a varlen Flash Attention backend.** The gate is the model's **resolved**
   `_attn_implementation` against `VARLEN_ATTN_IMPLEMENTATIONS` (`flash_attention_2/3/4`,
-  `src/models/patches/attention.py`), not a model-family list.
+  `src/models/attention/selection.py`), not a model-family list.
 
     Off it, `padding_free` **raises** (its `cu_seq_lens` kwargs have no consumer) and `packing`
     **warns** (it pays a dense `[L, L]` mask per layer). A family whose dense path leaks documents

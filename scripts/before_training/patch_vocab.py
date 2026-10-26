@@ -54,7 +54,7 @@ from src.model_loading.tokenizer_setup import (
     resolve_tokenizer,
     set_run_chat_template,
 )
-from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
+from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

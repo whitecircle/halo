@@ -2,8 +2,8 @@
 """CPU guards on how the FLOPs estimator learns which params are sparse (routed) MoE experts.
 
 The estimator must read the EP layer classes' declared
-:attr:`~src.distributed.expert_parallel.base_layer.EPMoELayerBase._EXPERT_WEIGHT_ATTR_ROOTS` and
-:attr:`~src.distributed.expert_parallel.base_layer.EPMoELayerBase._EXPERTS_CONTAINER_ATTRS` — not a
+:attr:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase._EXPERT_WEIGHT_ATTR_ROOTS` and
+:attr:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase._EXPERTS_CONTAINER_ATTRS` — not a
 copy of them. A copy drifts silently: a family adding an expert-weight root or container spelling
 the callback does not know is classified as a DENSE parameter, so its params count as always-active
 and S-MFU (sparsity = top_k/num_experts applies only to expert params) is over-reported for that
@@ -26,8 +26,8 @@ import sys
 import pytest
 
 from src.callbacks.model_flops import _is_expert_param
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from tests.common.repo import REPO_ROOT
 
 

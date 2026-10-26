@@ -71,7 +71,7 @@ from src.checkpoint.adapters import has_adapter_weight_file, resume_adapter_dir
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR
 from src.checkpoint.reading import load_full_state_dict
 from src.configs.embedding import EmbeddingConfig
-from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import resolve_resume_weights_source
@@ -335,7 +335,7 @@ def _mode_checks(ctx, mode: str, lora: str, trainer: EmbeddingTrainer) -> dict[s
             and any(isinstance(param.data, DTensor) for param in trainable)
         )
     elif mode == "ep":
-        checks["mode_is_ep"] = trainer.parallelism_config.is_ep_mode and trainer._has_ep_layers
+        checks["mode_is_ep"] = trainer.parallelism_config.has_ep_group and trainer._has_ep_layers
     else:
         checks["mode_is_fsdp2_with_dtensor_params"] = trainer._fsdp_wrapped and all(
             isinstance(param.data, DTensor) for param in trainable
@@ -507,7 +507,7 @@ def _uninterrupted(ctx, family: Family, mode: str, lora: str, base_source: str, 
     # Expert weights live in the EP layer's own layout (this rank's experts under EP), not the hub's.
     expert_weights = {
         f"{name}.{param_name}"[len(prefix) :]
-        for name, layer in find_ep_layers(trainer.model)
+        for name, layer in named_ep_layers(trainer.model)
         for param_name, _param in layer.named_parameters()
     }
     at_save = _RestorePoint("save", trainer)

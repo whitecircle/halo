@@ -31,12 +31,12 @@ from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_mod
 from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.models.moe_balancing import (
     accepts_native_balancing_bias,
     is_transient_balancing_router,
     resolve_balancing_mode,
 )
-from src.models.patches.buffer_fixes import finalize_loaded_model
 from tests.common.models import TINY_COHERE2_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config
 

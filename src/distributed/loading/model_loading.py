@@ -39,7 +39,8 @@ from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.loading.model_source import resolve_model_source
 from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
-from src.distributed.parallelism_config import ParallelismConfig, accelerate_launch_rejection
+from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.parallelism_rules import reject_accelerate_launch
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.distributed.tensor_parallel.parallelize_attention import (
@@ -50,35 +51,31 @@ from src.distributed.tensor_parallel.state_dict import reject_plan_sharded_plain
 from src.distributed.tensor_parallel.tie_plan import consistent_tied_tp_plan, validate_tied_pair_consistent
 from src.env import is_accelerate_launch
 from src.hardware import is_blackwell_gpu
-from src.kernels.liger.orchestrator import apply_liger_kernel
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.dtype import (
     cast_parameters_to_run_dtype,
     configure_float32_matmul_precision,
-    resolve_model_dtype,
+    normalize_model_init_dtype,
 )
+from src.model_loading.liger.dispatch import apply_liger_kernel
 from src.model_loading.model_preparation import (
-    apply_family_attention_patches,
+    apply_family_patches,
+    apply_run_model_policies,
     auto_load_model,
-    finalize_run_model,
     resolve_auto_model_class,
 )
 from src.model_loading.parallel.lowp_compute import apply_lowp_compute
+from src.model_loading.remote_code import apply_remote_code_compat_shims
+from src.models.attention.backend_setup import patch_flex_attention_compile
+from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
+from src.models.attention.selection import resolve_attn_implementation, validate_attn_implementation
 from src.models.config_access import (
     configs_declaring,
     set_config_field_run_scoped,
     ties_word_embeddings,
 )
 from src.models.moe_balancing import config_has_experts
-from src.models.patches.attention import (
-    model_has_sinks,
-    patch_flex_attention_compile,
-    resolve_attn_implementation,
-    validate_attn_implementation,
-)
-from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.patches.gpt_oss_sinks import SinksPolicy
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from src.runtime.load_coordination import joined_node_load, log_global_load_duration_seconds
 from src.runtime.ranks import get_global_rank, get_local_rank
@@ -106,8 +103,7 @@ def _validate_launch_method_for_parallelism(pc: ParallelismConfig) -> None:
     ``_validate_gmm_launch_method``, which needs the loaded config — those wrappers activate only on
     a MoE, so a dense model must not be rejected for a knob that is inert on it.
     """
-    if message := accelerate_launch_rejection(pc):
-        raise ValueError(message)
+    reject_accelerate_launch(pc)
 
 
 def _validate_fp32_non_ep_params(pc: ParallelismConfig, model_config) -> None:
@@ -140,7 +136,7 @@ def _validate_gmm_launch_method(pc: ParallelismConfig, model_config) -> None:
     accelerate's DDP management (custom accelerator, FSDP2 grad sync the user never asked for),
     and under accelerate FSDP they are unvalidated against the plugin's wrapping.
     """
-    if pc.is_ep_mode or pc.is_cp_mode or pc.is_tp_mode:
+    if pc.has_ep_group or pc.is_cp_mode or pc.is_tp_mode:
         return  # already rejected above for accelerate launches
     if not (pc.needs_ep_wrappers and config_has_experts(model_config) and is_accelerate_launch()):
         return
@@ -238,7 +234,7 @@ def load_distributed_model(
 
     # DeepEP's dispatch buffer is sized for 2-byte tokens; fp32 activations trip a raw C++ assert in
     # `get_dispatch_buffer_size` at the first dispatch, naming neither fp32 nor the config. Keyed on
-    # ep_size, not is_ep_mode: pure ETP folds into is_ep_mode but never reaches the transport.
+    # ep_size, not has_ep_group: pure ETP folds into has_ep_group but never reaches the transport.
     if dtype == torch.float32 and parallelism_config.ep_size > 1:
         raise ValueError(
             f"fp32 training is not supported under Expert Parallelism "
@@ -265,7 +261,7 @@ def load_distributed_model(
     # so failing here costs a second instead of minutes.
     parallelism_config.validate_against_model_config(model_config)
     _validate_gmm_launch_method(parallelism_config, model_config)
-    if parallelism_config.is_cp_mode and model_has_sinks(model_config) and sinks_policy.live:
+    if parallelism_config.is_cp_mode and uses_gpt_oss_sinks(model_config) and sinks_policy.live:
         raise ValueError(
             f"GptOss under Context Parallelism requires reset_sinks: true (requested policy: {sinks_policy}): "
             "the Ulysses attention kernels never receive the sink column, so live sinks would give a wrong "
@@ -283,11 +279,10 @@ def load_distributed_model(
             f"(task-head scripts resolve their own class). The flag only affects auto-resolution."
         )
 
+    # A from-scratch build has no pretrained sinks to neutralize, so its backend must carry them.
+    attn_sinks_policy = SinksPolicy.LIVE if init_from_scratch else sinks_policy
     attn_implementation = resolve_attn_implementation(
-        model_config,
-        attn_implementation,
-        dtype,
-        sinks_reset=(reset_sinks and not init_from_scratch),
+        model_config, attn_implementation, dtype, sinks_policy=attn_sinks_policy
     )
 
     # CP (Ulysses) always runs flash_attn_func; label the config with the kernel it will actually use.
@@ -305,9 +300,7 @@ def load_distributed_model(
         )
         # Re-validated, not assigned: the substitute must clear the same sink-capability matrix, or a
         # run keeping live sinks (reset_sinks=false) silently moves to a sink-dropping kernel.
-        attn_implementation = validate_attn_implementation(
-            model_config, cp_fa, sinks_reset=(reset_sinks and not init_from_scratch)
-        )
+        attn_implementation = validate_attn_implementation(model_config, cp_fa, attn_sinks_policy)
         if not attn_implementation.startswith("flash_attention"):
             raise ValueError(
                 f"Context Parallelism runs attention through flash_attn regardless of the config's "
@@ -319,14 +312,14 @@ def load_distributed_model(
 
     # EP recompiles deadlock with NCCL all-to-all; FSDP2 + trainable sinks NaN in the compiled backward.
     if attn_implementation == "flex_attention":
-        if parallelism_config.is_ep_mode:
+        if parallelism_config.has_ep_group:
             patch_flex_attention_compile("EP recompilation deadlock avoidance")
-        elif model_has_sinks(model_config) and reset_sinks:
+        elif uses_gpt_oss_sinks(model_config) and reset_sinks:
             patch_flex_attention_compile("FSDP2 + trainable attention sinks NaN gradient fix")
 
     # Built with the implementation the seam returns (Gemma 4's sparse-window `sdpa_flex_sliding` for `sdpa`),
     # whose FlexAttention graphs `warm_attention_kernels` below compiles on every rank before training.
-    attn_implementation = apply_family_attention_patches(model_config, attn_implementation)
+    attn_implementation = apply_family_patches(model_config, attn_implementation)
 
     if use_liger_kernel:
         apply_liger_kernel(
@@ -360,7 +353,7 @@ def load_distributed_model(
     if quantization_config is not None:
         # Also gated on MoE: a dense QLoRA run routing to DDP (or to CP, which keeps Params4bit) must pass.
         if (
-            parallelism_config.is_ep_mode
+            parallelism_config.has_ep_group
             or parallelism_config.is_tp_mode
             or parallelism_config.is_pp_mode
             or (parallelism_config.needs_ep_wrappers and config_has_experts(model_config))
@@ -380,7 +373,7 @@ def load_distributed_model(
     if init_from_scratch:
         # Identical per-rank seeds give consistent FSDP2 shards; EP/TP/CP would need a sharded random-init.
         if (
-            parallelism_config.is_ep_mode
+            parallelism_config.has_ep_group
             or parallelism_config.is_tp_mode
             or parallelism_config.is_cp_mode
             or parallelism_config.is_expert_tp_mode
@@ -406,7 +399,7 @@ def load_distributed_model(
     # "already holds these weights" skip on this, since ``_name_or_path`` survives init_from_scratch.
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, None if init_from_scratch else model_name_or_path)
 
-    finalize_run_model(
+    apply_run_model_policies(
         model,
         model_config,
         sinks_policy=sinks_policy,
@@ -450,7 +443,7 @@ def _dispatch_model_loading(
     if pc.is_pp_mode:
         return _load_pp_stage_model(model_name_or_path, pc, model_class, common_kwargs, is_moe)
 
-    if pc.is_ep_tp_mode:
+    if pc.has_ep_group and pc.is_tp_mode:
         return _load_ep_tp_model(model_name_or_path, pc, model_class, common_kwargs)
 
     if pc.is_tp_mode:
@@ -458,16 +451,16 @@ def _dispatch_model_loading(
             return _load_tp_moe_model(model_name_or_path, pc, model_class, common_kwargs)
         return _load_tp_model(model_name_or_path, pc, model_class, common_kwargs)
 
-    if pc.is_ep_mode and pc.is_cp_mode:
+    if pc.has_ep_group and pc.is_cp_mode:
         return _load_ep_cp_model(model_name_or_path, pc, model_class, common_kwargs)
 
-    if pc.is_ep_mode:
+    if pc.has_ep_group:
         return _load_ep_model(model_name_or_path, pc, model_class, common_kwargs)
 
     if pc.is_cp_mode:
         return _load_cp_model(model_name_or_path, pc, model_class, common_kwargs)
 
-    # is_ep_mode returned above, so nothing below distributes experts across ranks.
+    # has_ep_group returned above, so nothing below distributes experts across ranks.
     return _load_undistributed_model(
         model_name_or_path,
         pc,
@@ -562,9 +555,9 @@ def _load_pp_stage_model(
     """
     rank = get_global_rank()
     t_start_wall = time.time()
-    # Built BEFORE the checkpoint probe below: create_ep_config() issues new_group on every rank, so
+    # Built BEFORE the checkpoint probe below: ep_config() issues new_group on every rank, so
     # a per-rank filesystem decision must never come first.
-    ep_config = pc.create_ep_config() if (is_moe and pc.needs_ep_wrappers) else None  # is_ep_mode implies it
+    ep_config = pc.ep_config() if (is_moe and pc.needs_ep_wrappers) else None  # has_ep_group implies it
 
     local_dir = resolve_hub_or_local_dir(model_name_or_path, revision=common_kwargs.get("revision"))
     # Same gate the EP loaders run, rank-0-decided for the reason decide_lazy_loadable documents.
@@ -632,9 +625,9 @@ def _load_ep_tp_model(
     logger.info(f"[Rank {rank}] Loading model for EP+TP mode...")
     logger.info(f"  EP size: {pc.ep_size}, TP size: {pc.tp_size}, DP size: {pc.data_parallel_size}")
 
-    # Built BEFORE the branch: create_ep_config() issues new_group on every rank while the lazy-path
+    # Built BEFORE the branch: ep_config() issues new_group on every rank while the lazy-path
     # predicate below is a per-rank FS probe, so branching first orders the groups per rank (deadlock).
-    ep_config = pc.create_ep_config()
+    ep_config = pc.ep_config()
 
     # Parity with load_ep_model: an ep_sharded dir would otherwise fall into the lazy loader, whose
     # keys match no expert pattern — every expert stays on meta until a copy-out-of-meta error.
@@ -783,7 +776,7 @@ def _load_tp_moe_model(
     logger.info(f"[Rank {rank}] Loading MoE model for TP-only mode (attention-only TP)...")
     logger.info(f"  TP size: {tp_size}, DP size: {dp_size}")
 
-    ep_config = pc.create_ep_config() if pc.needs_ep_wrappers else None
+    ep_config = pc.ep_config() if pc.needs_ep_wrappers else None
     model = load_through_cpu(
         model_class,
         model_name_or_path,
@@ -813,8 +806,8 @@ def _load_ep_cp_model(
     """Load model with EP+CP: experts distributed + sequences split."""
     model = load_model_for_ep_cp(
         model_name_or_path,
-        pc.create_ep_config(),
-        pc.create_cp_config(),
+        pc.ep_config(),
+        pc.cp_config(),
         model_class=model_class,
         max_concurrent_loading=pc.max_concurrent_loading,
         lazy=pc.ep_lazy_loading,
@@ -834,14 +827,14 @@ def _load_ep_model(
     """Load model with EP: all-to-all expert routing."""
     model = load_ep_model(
         model_name_or_path,
-        pc.create_ep_config(),
+        pc.ep_config(),
         model_class=model_class,
         max_concurrent_loading=pc.max_concurrent_loading,
         lazy=pc.ep_lazy_loading,
         keep_fp32_params=pc.fp32_non_ep_params,
         **common_kwargs,
     )
-    scope_str = "node-local" if pc.is_node_local_ep else "cross-node"
+    scope_str = "node-local" if pc.ep_scope == "node" else "cross-node"
     logger.info(f"Model loaded with EP (ep_size={pc.ep_size}, {scope_str})")
     return model
 
@@ -858,10 +851,10 @@ def _load_cp_model(
     needs_wrappers = pc.needs_ep_wrappers and config_has_experts(common_kwargs.get("config"))
     model = load_model_for_cp(
         model_name_or_path,
-        pc.create_cp_config(),
+        pc.cp_config(),
         model_class=model_class,
         max_concurrent_loading=pc.max_concurrent_loading,
-        ep_config=pc.create_ep_config() if needs_wrappers else None,
+        ep_config=pc.ep_config() if needs_wrappers else None,
         keep_fp32_params=pc.fp32_non_ep_params,
         **common_kwargs,
     )
@@ -885,7 +878,7 @@ def _load_undistributed_model(
     for the FSDP-managed ep1 expert shard).
     """
     # Creating the groups must precede the node-serialized rank-local checkpoint replay.
-    ep_config = pc.create_ep_config() if ep_wrappers else None
+    ep_config = pc.ep_config() if ep_wrappers else None
     model = _from_pretrained_on_local_gpu(
         model_name_or_path,
         model_class,
@@ -924,7 +917,7 @@ def load_model_from_pretrained(
     if isinstance(model, str):
         model_id = model
         model_init_kwargs = getattr(args, "model_init_kwargs", None) or {}
-        resolve_model_dtype(model_init_kwargs)
+        normalize_model_init_dtype(model_init_kwargs)
         revision = resolve_model_source(model, model_init_kwargs.get("revision"), tag="trainer_model")
 
         # Applied RUN-scoped after the load, never through from_pretrained: a kwarg write lands in

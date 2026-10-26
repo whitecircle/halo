@@ -25,11 +25,11 @@ import src.environments.registry as environment_registry
 import src.models.moe_balancing as moe_balancing
 import src.models.seq_cls_heads as seq_cls_heads
 from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.distributed.pipeline_parallel.split import PP_SPEC_MAP
-from src.kernels.liger.families import LIGER_FAMILY_SPECS
+from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from src.models.head_transform import _HEAD_TRANSFORM_SPEC_MAP
 from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
 from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends

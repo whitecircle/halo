@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.models.patches import flex_sliding_attention
+from src.models.attention import sdpa_flex_sliding
 
 HEADS, KV_HEADS, SEQ = 4, 2, 200
 
@@ -45,10 +45,10 @@ def _sliding_call(query, key, value, autocast: bool) -> list[dict]:
         return q.clone()
 
     with (
-        patch.object(flex_sliding_attention, "_compiled_flex", compiled),
+        patch.object(sdpa_flex_sliding, "_compiled_flex", compiled),
         torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast),
     ):
-        flex_sliding_attention._sliding_flex_attention(query, key, value, [None], scaling=1.0)
+        sdpa_flex_sliding._sliding_flex_attention(query, key, value, [None], scaling=1.0)
     return seen
 
 
@@ -71,9 +71,9 @@ def test_inputs_keep_their_dtype_outside_autocast():
 def test_cast_inputs_take_the_tuned_tiles():
     """The tiles are chosen off the inputs the kernel receives: fp32 inputs cast to bf16 under autocast at head
     dim 256 on SM100+ run the tuned tiles, as bf16 inputs do."""
-    with patch.object(flex_sliding_attention, "is_blackwell_gpu", lambda: True):
+    with patch.object(sdpa_flex_sliding, "is_blackwell_gpu", lambda: True):
         (call,) = _sliding_call(*_inputs(256, (torch.float32,) * 3), autocast=True)
-    assert call["kernel_options"] is flex_sliding_attention._SM100_SLIDING_KERNEL_OPTIONS
+    assert call["kernel_options"] is sdpa_flex_sliding._SM100_SLIDING_KERNEL_OPTIONS
 
 
 def test_the_sdpa_fallback_takes_the_calls_is_causal_over_the_modules():
@@ -84,9 +84,7 @@ def test_the_sdpa_fallback_takes_the_calls_is_causal_over_the_modules():
     module.is_causal = True
     module.num_key_value_groups = 1
     query, key, value = (torch.randn(1, KV_HEADS, 16, 32) for _ in range(3))
-    out, _ = flex_sliding_attention.flex_sliding_attention(
-        module, query, key, value, None, scaling=0.25, is_causal=False
-    )
+    out, _ = sdpa_flex_sliding.flex_sliding_attention(module, query, key, value, None, scaling=0.25, is_causal=False)
 
     def sdpa(is_causal: bool) -> torch.Tensor:
         attended = torch.nn.functional.scaled_dot_product_attention(query, key, value, scale=0.25, is_causal=is_causal)

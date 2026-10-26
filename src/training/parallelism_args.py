@@ -4,6 +4,7 @@ from dataclasses import fields
 from typing import TYPE_CHECKING
 
 from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.parallelism_rules import reject_cross_domain_determinism
 from src.kernels.lowp.spec import LowpSpec
 from src.models.context_window import is_bounded_length
 
@@ -67,7 +68,7 @@ def parallelism_config_from_args(
             rejected.
         expert_lora: peeled native EP expert-LoRA spec. Must be passed here, not assigned onto the
             returned config: only construction runs ``__post_init__``, where its PP and expert-TP
-            refusals live, and :meth:`ParallelismConfig.create_ep_config` caches the ``EPConfig`` it
+            refusals live, and :meth:`ParallelismConfig.ep_config` caches the ``EPConfig`` it
             builds, so a later assignment never reaches the layers.
     """
     lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
@@ -133,7 +134,7 @@ def parallelism_config_from_args(
         ep_declared_max_length=declared_row_length(training_config),
     )
     config = ParallelismConfig(**kwargs)
-    config.reject_cross_domain_determinism(bool(getattr(training_config, "full_determinism", False)))
+    reject_cross_domain_determinism(config, bool(getattr(training_config, "full_determinism", False)))
     return config
 
 

@@ -46,7 +46,7 @@ Three consequences for a training config:
 - Routing: `BailingMoeV2Gate` — sigmoid scoring, group-limited top-k, expert bias, normalization.
 - Routed experts: per-expert `BailingMoeV2MLP` modules stacked into 3D tensors at init and transposed to matmul convention (`gate_proj [E, H, M]`, `up_proj [E, H, M]`, `down_proj [E, M, H]`). Compute via 3-call Grouped GEMM.
 - Shared experts: replicated per rank and added after DeepEP combine (dispatch overlap is the opt-in `HALO_EP_SHARED_OVERLAP` side stream).
-- Checkpoint round-trip: the lazy loader materializes only this rank's expert range and `_init_expert_params` stacks it into a 3D slice. On save, `gather_expert_state_dict` (via `_gather_individual_glu_state_dict`) gathers, transposes back to `F.linear` convention, and re-splits to per-expert `experts.{i}.{gate,up,down}_proj.weight`.
+- Checkpoint round-trip: the lazy loader materializes only this rank's expert range and `_adopt_expert_params` stacks it into a 3D slice. On save, `gather_expert_state_dict` (via `_gather_individual_glu_state_dict`) gathers, transposes back to `F.linear` convention, and re-splits to per-expert `experts.{i}.{gate,up,down}_proj.weight`.
 
 ## CP wrapper
 
@@ -73,7 +73,7 @@ No Bailing attention class is registered for TP (`TP_SHARDABLE_ATTENTION_CLASSES
 
 ## ETP
 
-`EPBailingMoELayer._init_expert_params` stacks the per-expert modules through `_store_separate_glu_params`, which at `expert_tp_size > 1` slices `gate_proj` / `up_proj` along the intermediate dim `M` and `down_proj` to match; the shared expert stays replicated. Use pure ETP (`ep_size=1`) when expert memory is the bottleneck. See [ETP](../parallelism/expert-tensor-parallelism.md#limitations).
+`EPBailingMoELayer._adopt_expert_params` stacks the per-expert modules through `_store_separate_glu_params`, which at `expert_tp_size > 1` slices `gate_proj` / `up_proj` along the intermediate dim `M` and `down_proj` to match; the shared expert stays replicated. Use pure ETP (`ep_size=1`) when expert memory is the bottleneck. See [ETP](../parallelism/expert-tensor-parallelism.md#limitations).
 
 ## Remote-code compatibility
 

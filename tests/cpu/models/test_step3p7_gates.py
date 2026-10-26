@@ -36,10 +36,9 @@ from src.distributed.tensor_parallel.parallelize_attention import (
     apply_tp_to_attention_only,
     validate_tp_head_divisibility,
 )
-from src.models.attention_geometry import (
-    resolve_head_dim,
-    resolve_num_key_value_heads,
-)
+from src.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks
+from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
+from src.models.attention.selection import is_fa4_backward_nan_prone, resolve_attn_implementation
 from src.models.config_access import get_config_field
 from src.models.modality import config_declares_multimodality, is_vlm_model
 from src.models.moe_balancing import (
@@ -50,8 +49,6 @@ from src.models.moe_balancing import (
     resolve_expert_ffn_shard_width,
     resolve_router_topk,
 )
-from src.models.patches.attention import model_fa4_backward_nan_prone, resolve_attn_implementation
-from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from tests.common.distributed import fake_process_group_mesh
 
 PartialState()  # the attention resolver and balancing strategy log through accelerate's logger
@@ -110,11 +107,19 @@ def test_attention_resolution_lands_on_sdpa():
     sdpa at resolve time; returning flash defers the failure to transformers' model build, after
     the whole checkpoint has been fetched. Not an FA4-NaN entry: the refusal derives from the class
     flag and covers FA2/FA3 too."""
-    assert model_fa4_backward_nan_prone(_composite_config()) is False
-    for requested in (None, "flash_attention_4", "flash_attention_2"):
-        assert resolve_attn_implementation(_composite_config(), requested, torch.bfloat16) == "sdpa", requested
-    assert resolve_attn_implementation(_composite_config(), "sdpa", torch.bfloat16) == "sdpa"
-    assert resolve_attn_implementation(_composite_config(), "eager", torch.bfloat16) == "eager"
+    assert is_fa4_backward_nan_prone(_composite_config()) is False
+    expected = {
+        None: "sdpa",
+        "flash_attention_4": "sdpa",
+        "flash_attention_2": "sdpa",
+        "sdpa": "sdpa",
+        "eager": "eager",
+    }
+    for requested, backend in expected.items():
+        resolved = resolve_attn_implementation(
+            _composite_config(), requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+        assert resolved == backend, requested
 
 
 # Context parallelism

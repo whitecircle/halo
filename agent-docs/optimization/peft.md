@@ -128,7 +128,7 @@ equivalents on other families), not `nn.Linear`, so PEFT's `all-linear` cannot r
 resolves to the attention `q/k/v/o_proj` only. Name the expert projections explicitly instead.
 `split_expert_lora_targets` (`src/distributed/loading/peft_setup.py`) peels those entries out of the list and
 routes them to native grouped-LoRA built inside each EP layer (`_init_expert_lora` in
-`src/distributed/expert_parallel/base_layer.py`); the remaining attention names stay on stock PEFT.
+`src/distributed/expert_parallel/moe_layer/layer.py`); the remaining attention names stay on stock PEFT.
 
 | `lora_target_modules` entry | Requests |
 |---|---|
@@ -294,7 +294,7 @@ On `qwen3-30b-a3b` (128 experts) at EP=2, experts-only r=64 is 9.39% trainable a
 
 Non-CP offline GRPO and Async GRPO with Environments disable the adapter (`disable_adapter()`) to compute reference log-probs
 from the frozen base instead of a second model copy. Under EP the mixin patches that context
-(`make_disable_adapter_ep_aware`) so it reverts the native EP expert adapters too, giving a true frozen-base
+(`install_ep_aware_disable_adapter`) so it reverts the native EP expert adapters too, giving a true frozen-base
 reference for both adapter halves; the patch also covers TRL's `use_adapter(None)` for online GRPO / DPO / KTO.
 
 peft clears `requires_grad` on the adapter tensors a module holds at entry and restores it on the ones it

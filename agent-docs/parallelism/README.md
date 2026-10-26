@@ -38,7 +38,7 @@ All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignore
 | **Anything else** | **Not supported** | Rejected at config time with the mechanism named — see below |
 
 The supported set is an **allowlist** (`SUPPORTED_AXIS_SETS` in
-`src/distributed/parallelism_config.py`), checked before any rank math, so a combination nobody
+`src/distributed/parallelism_rules.py`), checked before any rank math, so a combination nobody
 considered is refused rather than run unvalidated. Adding one means adding the equivalence gate that
 proves its gradients against an unsplit reference. Rejections quote the flags you typed and the
 mechanism that would break, for example:
@@ -69,9 +69,9 @@ Two ways to group ranks, used where each fits:
     DeepEP also needs contiguous rank blocks for its intra-node kernel, which a mesh's row-major
     order cannot produce. `EPConfig` (`src/distributed/expert_parallel/config.py`) builds the EP,
     expert-replica, dispatch (sub-EP) and expert-TP groups; `CPConfig`
-    (`src/distributed/context_parallel/config.py`) builds the CP groups. All rank math (node-local
-    vs cross-node, which dim divides `world_size`) lives in `src/distributed/group_layout.py` and
-    `ParallelismConfig`.
+    (`src/distributed/context_parallel/config.py`) builds the CP groups. All of them, and
+    `ParallelismConfig`, take their membership from the two layouts in
+    `src/distributed/group_layout.py`: `NodeLocalLayout` and the cross-node `CrossNodeLayout`.
 
 What crosses the wire:
 

@@ -33,8 +33,8 @@ from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
 from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, patch_model_for_cp
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks
 from src.distributed.loading.model_loading import (
     _load_ep_cp_model,
@@ -194,12 +194,12 @@ def _construct(
     pc = SimpleNamespace(
         ep_size=1,
         cp_size=2,
-        is_node_local_ep=True,
+        ep_scope="node",
         ep_lazy_loading=lazy,
         max_concurrent_loading=1,
         fp32_non_ep_params=fp32_non_ep,
-        create_ep_config=lambda: ep_config,
-        create_cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
+        ep_config=lambda: ep_config,
+        cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
     )
     loader = {"ep_cp": _load_ep_cp_model, "ep": _load_ep_model, "ep1": _load_undistributed_model}[mode]
     config = AutoConfig.from_pretrained(path)
@@ -459,7 +459,7 @@ def _construct_pp_stage(
         data_parallel_size=1,
         needs_ep_wrappers=True,
         fp32_non_ep_params=fp32_non_ep,
-        create_ep_config=lambda: ep_config,
+        ep_config=lambda: ep_config,
     )
     config = AutoConfig.from_pretrained(path)
     common = {
@@ -640,7 +640,7 @@ def _construct_tp(path, mode, *, fp32_router, fp32_experts, fp32_non_ep, preserv
         max_concurrent_loading=1,
         fp32_non_ep_params=fp32_non_ep,
         needs_ep_wrappers=True,
-        create_ep_config=lambda: ep_config,
+        ep_config=lambda: ep_config,
     )
     config = AutoConfig.from_pretrained(path)
     common = {

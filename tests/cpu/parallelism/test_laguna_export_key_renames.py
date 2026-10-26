@@ -27,7 +27,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.conversion_mapping import get_checkpoint_conversion_mapping
 from transformers.core_model_loading import WeightRenaming
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
     gather_ep_layer_weights,
     hub_to_module_key_renames,
@@ -35,6 +34,7 @@ from src.distributed.expert_parallel.expert_weights import (
 )
 from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
 from src.distributed.expert_parallel.lazy_loader import build_family_key_mapping
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 LAGUNA_MOE_LAYER = 1  # layer 0 is dense (first_k_dense_replace)
 

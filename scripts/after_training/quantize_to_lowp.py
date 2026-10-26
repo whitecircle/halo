@@ -209,7 +209,7 @@ def _fused_expert_axis(input_dir: str) -> int | None:
     """Contraction axis for this checkpoint's fused 3-D expert tensors, or ``None`` if unresolvable.
 
     Resolved through the EP layer class that owns the family's checkpoint layout
-    (:attr:`~src.distributed.expert_parallel.base_layer.EPMoELayerBase.HF_FUSED_EXPERT_CONTRACTION_AXIS`),
+    (:attr:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase.HF_FUSED_EXPERT_CONTRACTION_AXIS`),
     so a new MoE family gets the right axis by declaring it once on its layer class. ``None`` means the
     ``model_type`` matches no registered family; the caller then raises if a fused expert shows up
     rather than guessing an axis, which would corrupt every dequantized expert.

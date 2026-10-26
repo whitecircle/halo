@@ -15,8 +15,8 @@ Run: python tests/cpu/parallelism/test_ep_family_instantiation.py
 import pytest
 import torch
 
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks, patch_moe_model_for_ep
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
@@ -42,7 +42,7 @@ def test_the_family_wraps_every_block_it_claims(family_cls):
     patch_moe_model_for_ep(model, single_process_ep_config())
 
     assert set(claimed.values()) == {family_cls}
-    wrapped = {path: type(layer) for path, layer in find_ep_layers(model)}
+    wrapped = {path: type(layer) for path, layer in named_ep_layers(model)}
     assert wrapped == claimed
     assert _parameter_count(model) == parameters
 

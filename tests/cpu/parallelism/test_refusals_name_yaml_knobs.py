@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.distributed.context_parallel.config import CPConfig, cp_chunk_bounds
-from src.distributed.parallelism_config import accelerate_launch_rejection
+from src.distributed.parallelism_rules import reject_accelerate_launch
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
 from src.models.moe.expert_lora_spec import reject_expert_lora_with_expert_tp
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -214,7 +214,9 @@ def test_accelerate_refusal_launch_lines_pass_the_config(monkeypatch):
     """The entry scripts take the YAML config as their positional, so a printed torchrun line
     without it fails before the run starts."""
     monkeypatch.setenv("ACCELERATE_MIXED_PRECISION", "bf16")
-    message = accelerate_launch_rejection(make_parallelism_config(ep_size=2, world_size=2, gpus_per_node=2))
+    with pytest.raises(ValueError) as err:
+        reject_accelerate_launch(make_parallelism_config(ep_size=2, world_size=2, gpus_per_node=2))
+    message = str(err.value)
     script_lines = [line for line in message.splitlines() if "scripts/training/" in line]
     assert len(script_lines) == 3, message
     assert all("<config>" in line for line in script_lines), message

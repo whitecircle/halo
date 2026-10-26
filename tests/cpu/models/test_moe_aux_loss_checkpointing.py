@@ -31,7 +31,7 @@ from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.models import moe_aux_loss
 from src.models.config_access import config_export_ready

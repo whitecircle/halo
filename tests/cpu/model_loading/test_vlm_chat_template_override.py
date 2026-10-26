@@ -6,7 +6,7 @@ renders with it, and ``save_pretrained`` writes it over the ``chat_template.jinj
 wrote. The toolkit applies ``chat_template`` / ``force_chat_template`` to the tokenizer, so unless the
 processor adopts it a VLM run renders its rows on the checkpoint's original template and ships that
 template too. Each entry point that sets the override is driven here on a cached Qwen3.5 processor:
-the training seam (``setup_model_and_tokenizer`` + ``install_resolved_tokenizer``) through the FSDP2
+the training seam (``configure_run_tokenizer`` + ``install_resolved_tokenizer``) through the FSDP2
 saver, ``prepare_dataset --vlm``'s processor setup, and ``patch_vocab.py``'s export.
 
     python tests/cpu/model_loading/test_vlm_chat_template_override.py
@@ -24,7 +24,7 @@ from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGene
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.model_loading.tokenizer_setup import setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import configure_run_tokenizer
 from src.training.script_runner import install_resolved_tokenizer
 from tests.common.models import QWEN3_5_9B, TINY_QWEN35_CONFIG
 from tests.common.repo import load_script_module
@@ -46,7 +46,7 @@ def _render(processor) -> str:
 def _setup_run(args: CommonScriptArguments, processor=None):
     """The processing class a VLM training script hands its trainer, after the tokenizer seam."""
     processor = processor or load_cached_processor(QWEN3_5_9B)
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         args, None, processor.tokenizer, None, embeddings_sharded=input_embeddings_tp_sharded
     )
     return install_resolved_tokenizer(processor, tokenizer)

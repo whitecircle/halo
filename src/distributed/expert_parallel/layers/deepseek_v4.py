@@ -6,7 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.base_layer import TOPK_WEIGHT_NORM_EPS, EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.routing import TOPK_WEIGHT_NORM_EPS
 from src.kernels.fused_glu import GluCombine, is_silu_activation
 
 
@@ -47,10 +48,10 @@ class EPDeepseekV4MoELayer(EPMoELayerBase):
 
     _SHARED_EXPERT_ATTRS = ("shared_experts",)
 
-    def _init_routing(self, original_layer: nn.Module) -> None:
+    def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Top-k plus the router variant and its scoring: hash layers route off the frozen
         ``tid2eid`` table, top-k layers off ``score_fn`` over the gate's logits."""
-        super()._init_routing(original_layer)
+        super()._adopt_routing(original_layer)
         self.is_hash = bool(getattr(original_layer, "is_hash", False))
         self.routed_scaling_factor = getattr(self.gate, "routed_scaling_factor", 1.0)
         self.score_fn = self.gate.score_fn
@@ -66,7 +67,7 @@ class EPDeepseekV4MoELayer(EPMoELayerBase):
                     "token — fix the tid2eid table (each row must hold top_k distinct expert ids)."
                 )
 
-    def _init_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
+    def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
         """Read ``act_fn`` and ``limit`` off ``DeepseekV4Experts`` as attributes, not with defaults:
         a substituted default rescales the clamped SwiGLU on every expert.
 

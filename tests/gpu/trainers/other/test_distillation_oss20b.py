@@ -183,7 +183,7 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
             dataloader_num_workers=0,
             dataset_num_proc=1,
             fsdp="",  # Mixin handles wrapping
-            ddp_find_unused_parameters=pc.is_ep_mode,
+            ddp_find_unused_parameters=pc.has_ep_group,
             distill_loss="kl_divergence",
             distill_temperature=1.0,
             distill_alpha=0.5,
@@ -202,8 +202,8 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
             parallelism_config=pc,
         )
 
-        if pc.is_ep_mode:
-            assert trainer.parallelism_config.is_ep_mode, "Expected EP mode"
+        if pc.has_ep_group:
+            assert trainer.parallelism_config.has_ep_group, "Expected EP mode"
             log("Confirmed: EP mode active")
         if pc.is_tp_mode:
             assert trainer.parallelism_config.is_tp_mode, "Expected TP mode"

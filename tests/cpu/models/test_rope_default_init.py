@@ -7,7 +7,7 @@ look the registry entry up by name, so the toolkit re-registers it — but an en
 ``config.rope_theta`` raises ``AttributeError`` on every v5 config, and one silently defaulting the
 base to 10000.0 would retune every RoPE position past the first few thousand tokens.
 
-The entry is :func:`~src.models.patches.buffer_fixes.default_rope_parameters`, shared with the
+The entry is :func:`~src.model_loading.buffer_repair.default_rope_parameters`, shared with the
 meta-device buffer-recompute pass so the registry and that pass cannot disagree.
 
     python tests/cpu/models/test_rope_default_init.py
@@ -20,8 +20,8 @@ import torch
 from transformers import CONFIG_MAPPING
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
-from src.models.patches.buffer_fixes import default_rope_parameters
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.model_loading.buffer_repair import default_rope_parameters
+from src.model_loading.remote_code import apply_remote_code_compat_shims
 
 apply_remote_code_compat_shims()
 

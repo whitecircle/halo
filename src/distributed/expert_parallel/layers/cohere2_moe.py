@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.base_layer import EPSharedExpertsMoELayerBase
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
 
 
 class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
@@ -54,10 +54,10 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
 
     _SHARED_EXPERT_ATTRS = ("shared_experts",)
 
-    def _init_routing(self, original_layer: nn.Module) -> None:
+    def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Top-k plus the router's activation choice: ``Cohere2MoeTopKRouter`` activates only the
         selected raw scores, so the activation and the renorm flag determine every gate weight."""
-        super()._init_routing(original_layer)
+        super()._adopt_routing(original_layer)
         self.expert_selection_fn = getattr(self.gate, "expert_selection_fn", "softmax")
         if self.expert_selection_fn not in ("softmax", "sigmoid"):
             raise ValueError(
@@ -66,10 +66,10 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
             )
         self.norm_topk_prob = bool(getattr(self.gate, "norm_topk_prob", True))
 
-    def _init_shared_experts(self, original_layer: nn.Module) -> None:
+    def _adopt_shared_experts(self, original_layer: nn.Module) -> None:
         """The shared expert plus the block's combination strategy, which scales the whole output:
         defaulting ``average`` to ``sum`` would emit 2x every token."""
-        super()._init_shared_experts(original_layer)
+        super()._adopt_shared_experts(original_layer)
         strategy = getattr(original_layer, "shared_expert_combination_strategy", "sum")
         if strategy not in ("sum", "average"):
             raise ValueError(

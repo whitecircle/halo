@@ -61,7 +61,7 @@ def _install_host(model, vllm_generation):
     me = object.__new__(DistributedGRPOTrainer)
     me.model = model
     me.vllm_generation = vllm_generation
-    me.parallelism_config = types.SimpleNamespace(is_ep_mode=False, is_tp_mode=False, is_expert_tp_mode=False)
+    me.parallelism_config = types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, is_expert_tp_mode=False)
     return me
 
 

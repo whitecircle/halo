@@ -58,11 +58,11 @@ own default.
 
 ## Liger kernels
 
-`use_liger_kernel: true` (default) enables fused Triton kernels (cross-entropy, RMSNorm, SwiGLU, RoPE); Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 fill the RMSNorm role with torch's fused `F.rms_norm`. Four safety filters (`liger_parallelism_overrides` and `liger_routed_expert_overrides`, `src/kernels/liger/orchestrator.py`) override the defaults, applied by one sanitizer (`sanitize_liger_config`) at model load and again when the trainer re-sanitizes the config HF Trainer re-applies:
+`use_liger_kernel: true` (default) enables fused Triton kernels (cross-entropy, RMSNorm, SwiGLU, RoPE); Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 fill the RMSNorm role with torch's fused `F.rms_norm`. Four safety filters (`liger_parallelism_overrides` and `liger_routed_expert_overrides`, `src/model_loading/liger/dispatch.py`) override the defaults, applied by one sanitizer (`sanitize_liger_config`) at model load and again when the trainer re-sanitizes the config HF Trainer re-applies:
 
 - **Wrapped MoE experts** — `swiglu`/`geglu` fusion off, because the EP or grouped-GEMM wrapper replaces the expert FFN Liger would swap.
 
-    The trigger is `liger_ep_disables_fused_glu` (`src/kernels/liger/orchestrator.py`): the run needs EP wrappers (`ep_size > 1`, `expert_tensor_parallel_size > 1` including pure ETP, or `use_grouped_gemm`), the model has experts, the family has a registered EP layer class, **and** the applier that owns the GLU swap is the one the wrapper replaces.
+    The trigger is `liger_ep_disables_fused_glu` (`src/model_loading/liger/dispatch.py`): the run needs EP wrappers (`ep_size > 1`, `expert_tensor_parallel_size > 1` including pure ETP, or `use_grouped_gemm`), the model has experts, the family has a registered EP layer class, **and** the applier that owns the GLU swap is the one the wrapper replaces.
 
     Dense runs keep fused SwiGLU, as does a family whose toolkit Liger spec patches the dense and shared-expert MLPs the wrappers adopt unchanged.
 
@@ -158,7 +158,7 @@ eos_token: "<|im_end|>"
 ```
 
 Leave `attn_implementation` unset — a manual pin is arch-specific. `_detect_attention_impl`
-(`src/models/patches/attention.py`) picks `flash_attention_4` on Blackwell (SM 10.0+),
+(`src/models/attention/selection.py`) picks `flash_attention_4` on Blackwell (SM 10.0+),
 `flash_attention_3` on Hopper when installed, else `flash_attention_2`.
 
 The loader then drops off FlashAttention where it cannot serve: Gemma 4's `head_dim=512` and the FA4

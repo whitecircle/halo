@@ -3,7 +3,7 @@
 
 With an attention target left after the expert peel the run is PEFT-wrapped, and TRL scores the
 reference inside the ``PeftModel``'s ``disable_adapter()``, which also drops the expert adapters
-(``make_disable_adapter_ep_aware``; the GPU pin is
+(``install_ep_aware_disable_adapter``; the GPU pin is
 ``tests/gpu/trainers/preference/test_pref_ep_expert_lora_reference.py``). Such a run needs no
 precomputed reference. An expert-only run has no ``PeftModel``: TRL would build its own unsharded fp32
 dense reference on every rank, so the loader refuses it unless the reference log-probs are precomputed.

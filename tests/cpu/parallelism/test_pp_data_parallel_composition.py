@@ -24,7 +24,7 @@ from src.distributed import mesh as mesh_mod
 from src.distributed.checkpoint.save import is_pp_shard_writer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.lowp.spec import LowpSpec
-from tests.common.parallelism import make_parallelism_config
+from tests.common.parallelism import built_ep_config, make_parallelism_config
 
 GPUS = 8
 
@@ -159,10 +159,11 @@ def test_no_intra_stage_group_crosses_a_pipeline_boundary(nodes, pp, ep, scope):
         c = _config(rank=rank, world=world, pp_size=pp, ep_size=ep, ep_scope=scope)
         lo = c.stage_base_rank
         hi = lo + c.stage_world_size
-        assert all(lo <= r < hi for r in c.get_ep_group_ranks()), (rank, c.get_ep_group_ranks())
-        assert all(lo <= r < hi for r in c.get_expert_replica_ranks()), (rank, c.get_expert_replica_ranks())
+        ep_config = built_ep_config(c)
+        assert all(lo <= r < hi for r in ep_config._my_ep_group_ranks), (rank, ep_config._my_ep_group_ranks)
+        assert all(lo <= r < hi for r in ep_config.expert_replica_ranks), (rank, ep_config.expert_replica_ranks)
         # A pipeline chain, by contrast, must span every stage exactly once.
-        chain = c.get_pp_group_ranks()
+        chain = c.pp_chain_ranks()
         assert len(chain) == pp and len({r // c.stage_world_size for r in chain}) == pp, chain
 
 

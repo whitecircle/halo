@@ -1,7 +1,7 @@
 """Collective half of the attention kernel warm-up: run the rank-local compiles, then barrier.
 
-The compiles themselves are :func:`~src.models.patches.attention.warmup_fa4_kernels` (FA4) and
-:func:`~src.models.patches.flex_sliding_attention.warmup_flex_sliding_kernels` (FlexAttention on sliding
+The compiles themselves are :func:`~src.models.attention.backend_setup.warm_fa4_kernels` (FA4) and
+:func:`~src.models.attention.sdpa_flex_sliding.warm_flex_sliding_kernels` (FlexAttention on sliding
 layers); this module adds the world-size check and the fence around them.
 """
 
@@ -11,8 +11,8 @@ import torch
 from accelerate.logging import get_logger
 from transformers import PreTrainedModel
 
-from src.models.patches.attention import warmup_fa4_kernels
-from src.models.patches.flex_sliding_attention import warmup_flex_sliding_kernels
+from src.models.attention.backend_setup import warm_fa4_kernels
+from src.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
 from src.runtime.collectives import barrier
 from src.runtime.ranks import get_global_world_size
 
@@ -30,8 +30,8 @@ def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> Non
     if get_global_world_size() <= 1:
         return
     try:
-        warmup_fa4_kernels(model, dtype=dtype)
-        warmup_flex_sliding_kernels(model, dtype=dtype)
+        warm_fa4_kernels(model, dtype=dtype)
+        warm_flex_sliding_kernels(model, dtype=dtype)
     finally:
         try:
             barrier()

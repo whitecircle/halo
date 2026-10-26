@@ -59,7 +59,7 @@ The decorator computes `all(checks.values())`. **Returning no checks is an error
 return at least one. `metrics` is optional but should be present on any test that trains.
 
 Every check must be able to fail. A cross-rank spread of a logged loss cannot (HF logs the world
-mean), and neither can `trainer.parallelism_config.is_ep_mode` / `is_tp_mode` / `is_cp_mode`, which
+mean), and neither can `trainer.parallelism_config.has_ep_group` / `is_tp_mode` / `is_cp_mode`, which
 read back the config the trainer was handed; read the axis off the model instead.
 
 ### Shared checks and probes

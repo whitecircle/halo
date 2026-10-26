@@ -11,7 +11,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
 
 
 class EPMistral4MoELayer(EPGroupLimitedMoELayerBase):

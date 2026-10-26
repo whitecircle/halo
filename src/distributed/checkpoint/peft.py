@@ -41,15 +41,15 @@ from src.checkpoint.writing import adapter_save_dtype_caster
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
     apply_ep_lora_adapters,
     gather_ep_lora_adapters,
 )
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.log import KEY_PREVIEW_COUNT
+from src.models.attention.gpt_oss_sinks import stamped_sinks_policy
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.models.param_roles import persistent_buffers
-from src.models.patches.gpt_oss_sinks import stamped_sinks_policy
 from src.models.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
     strip_peft_adapter_segment,
@@ -123,7 +123,7 @@ class PeftAdapterSaver:
             if ctx.is_save_rank:
                 self._write_training_provenance(ctx.model, output_dir)
                 # The hand-written branches write no card, and PEFT's own save_pretrained rebuilds the
-                # card's tags from the base model's model_tags, which only a finalize_run_model load carries.
+                # card's tags from the base model's model_tags, which only an apply_run_model_policies load carries.
                 tag_model_card(output_dir)
 
     def _save_adapter_files(self, ctx: CheckpointContext, peft_model: PeftModel, output_dir: str) -> None:

@@ -6,9 +6,6 @@
   "EPGptOssMoELayer",
   "EPGemma4MoELayer",
   "EPDeepseekV4MoELayer",
-  "EPSeparateGluMoELayerBase",
-  "EPQwen3MoELayer",
-  "EPBailingMoELayer",
   "EPSharedExpertsMoELayerBase",
   "EPLfm2MoELayer",
   "EPCohere2MoELayer",
@@ -17,7 +14,10 @@
   "EPMistral4MoELayer",
   "EPGlm5NextMoELayer",
   "EPGlm4MoELayer",
-  "EPLagunaMoELayer"
+  "EPLagunaMoELayer",
+  "EPSeparateGluMoELayerBase",
+  "EPQwen3MoELayer",
+  "EPBailingMoELayer"
  ],
  "ep moe block claims": {
   "ZayaSparseMoeBlock": "EPZayaMoELayer",
@@ -26,16 +26,16 @@
   "GptOssMLP": "EPGptOssMoELayer",
   "Gemma4TextExperts": "EPGemma4MoELayer",
   "DeepseekV4SparseMoeBlock": "EPDeepseekV4MoELayer",
-  "Qwen3MoeSparseMoeBlock": "EPQwen3MoELayer",
-  "BailingMoeV2SparseMoeBlock": "EPBailingMoELayer",
-  "BailingMoeV3SparseMoeBlock": "EPBailingMoELayer",
   "Lfm2MoeSparseMoeBlock": "EPLfm2MoELayer",
   "Cohere2MoeSparseMoeBlock": "EPCohere2MoELayer",
   "Step3p7SparseMoeBlock": "EPStep3p7MoELayer",
   "Mistral4MoE": "EPMistral4MoELayer",
   "Glm5NextTextMoE": "EPGlm5NextMoELayer",
   "Glm4MoeLiteMoE": "EPGlm4MoELayer",
-  "LagunaSparseMoeBlock": "EPLagunaMoELayer"
+  "LagunaSparseMoeBlock": "EPLagunaMoELayer",
+  "Qwen3MoeSparseMoeBlock": "EPQwen3MoELayer",
+  "BailingMoeV2SparseMoeBlock": "EPBailingMoELayer",
+  "BailingMoeV3SparseMoeBlock": "EPBailingMoELayer"
  },
  "ep model_type claims": {
   "zaya": "EPZayaMoELayer",
@@ -47,10 +47,6 @@
   "gemma4": "EPGemma4MoELayer",
   "gemma4_text": "EPGemma4MoELayer",
   "deepseek_v4": "EPDeepseekV4MoELayer",
-  "qwen3_moe": "EPQwen3MoELayer",
-  "bailing_moe": "EPBailingMoELayer",
-  "bailing_moe_linear": "EPBailingMoELayer",
-  "bailing_hybrid": "EPBailingMoELayer",
   "lfm2_moe": "EPLfm2MoELayer",
   "lfm2_vl": "EPLfm2MoELayer",
   "cohere2_moe": "EPCohere2MoELayer",
@@ -62,7 +58,11 @@
   "glm5_next": "EPGlm5NextMoELayer",
   "glm5_next_text": "EPGlm5NextMoELayer",
   "glm4_moe_lite": "EPGlm4MoELayer",
-  "laguna": "EPLagunaMoELayer"
+  "laguna": "EPLagunaMoELayer",
+  "qwen3_moe": "EPQwen3MoELayer",
+  "bailing_moe": "EPBailingMoELayer",
+  "bailing_moe_linear": "EPBailingMoELayer",
+  "bailing_hybrid": "EPBailingMoELayer"
  },
  "ep-wrapped model types": [
   "bailing_hybrid",
@@ -277,7 +277,6 @@
    "causal_lm": [
     "Mistral4ForCausalLM"
    ],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -301,7 +300,6 @@
    "causal_lm": [
     "ZayaForCausalLM"
    ],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": true,
@@ -323,7 +321,6 @@
    "causal_lm": [
     "DeepseekV4ForCausalLM"
    ],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": true,
    "rope": false,
    "flce_default": true,
@@ -349,7 +346,6 @@
    "causal_lm": [
     "Glm4MoeLiteForCausalLM"
    ],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": true,
@@ -375,7 +371,6 @@
    "causal_lm": [
     "LagunaForCausalLM"
    ],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": true,
    "rope": false,
    "flce_default": false,
@@ -405,7 +400,6 @@
    ],
    "glu_mlp": [],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -428,7 +422,6 @@
    ],
    "glu_mlp": [],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -453,7 +446,6 @@
     "Qwen3_5MoeMLP"
    ],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -479,7 +471,6 @@
     "Qwen3NextMLP"
    ],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -503,7 +494,6 @@
    "gated_rms_norm": [],
    "glu_mlp": [],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -527,7 +517,6 @@
    "gated_rms_norm": [],
    "glu_mlp": [],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -553,7 +542,6 @@
     "Gemma4TextMLP"
    ],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -579,7 +567,6 @@
    "gated_rms_norm": [],
    "glu_mlp": [],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -603,7 +590,6 @@
    "causal_lm": [
     "Lfm2ForCausalLM"
    ],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": true,
    "flce_default": false,
@@ -627,7 +613,6 @@
    "causal_lm": [
     "Lfm2MoeForCausalLM"
    ],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": true,
    "flce_default": false,
@@ -651,7 +636,6 @@
    "causal_lm": [
     "Cohere2ForCausalLM"
    ],
-   "logit_scale_attr": "logit_scale",
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -677,7 +661,6 @@
    "causal_lm": [
     "Cohere2MoeForCausalLM"
    ],
-   "logit_scale_attr": "logit_scale",
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -700,7 +683,6 @@
    "gated_rms_norm": [],
    "glu_mlp": [],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -725,7 +707,6 @@
     "BailingMoeV2MLP"
    ],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,
@@ -752,7 +733,6 @@
     "BailingMoeV3MLP"
    ],
    "causal_lm": [],
-   "logit_scale_attr": null,
    "router_aux_loss_in_head": false,
    "rope": false,
    "flce_default": false,

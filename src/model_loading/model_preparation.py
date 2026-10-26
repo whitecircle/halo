@@ -1,9 +1,6 @@
-"""Model construction shared by every entry point: the widest Auto* class for a config and the
-verified load through it, the per-family attention patches and the implementation a model is built
-with, and the post-load generation-config / Liger fixups.
-
-The callers that place a model on a parallelism live in :mod:`src.distributed.loading`, above it.
-"""
+"""Sharding-agnostic model construction every entry point shares: the widest Auto* class for a config and
+the verified load through it, the per-family patches and the implementation a model is built with, and
+the run policies every loaded model takes."""
 
 from accelerate.logging import get_logger
 from transformers import (
@@ -20,31 +17,17 @@ from transformers.models.auto.modeling_auto import (
 
 import src.models.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
 from src.checkpoint.model_card import HUB_TAGS
-from src.kernels.liger.orchestrator import LIGER_APPLIED_CONFIG_ATTR, trl_reapplication_config
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.remote_code import apply_remote_code_compat_shims
+from src.models.attention.backend_setup import patch_sdpa_for_wide_heads, patch_transformers_flash_varlen_int_seqlen
+from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
+from src.models.attention.packed_position_ids import patch_mistral4_flash_packed_position_ids
+from src.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_implementation
+from src.models.attention.selection import has_head_dim_beyond_flash
 from src.models.config_access import model_type_matches
-from src.models.patches.attention import (
-    head_dim_exceeds_flash,
-    patch_mistral4_flash_packed_position_ids,
-    patch_sdpa_for_wide_heads,
-    patch_transformers_flash_varlen_int_seqlen,
-)
-from src.models.patches.flex_sliding_attention import resolve_flex_sliding_attn_implementation
-from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
-from src.models.patches.zaya import apply_zaya_patches
+from src.models.zaya import apply_zaya_patches
 
 logger = get_logger(__name__)
-
-# Neutral sampling values, the thresholds GenerationConfig.validate() warns against. Stated
-# explicitly because the stock GenerationConfig() instance carries None for all three fields, so
-# comparing against the instance would read a neutral temperature=1.0 as a sampling request.
-_NEUTRAL_SAMPLING_VALUES = {"temperature": 1.0, "top_p": 1.0, "top_k": 50}
-
-
-# Auto-map keys under which a hub repo names its multimodal (vision-bearing) class. Read to spot a
-# CausalLM auto_map entry that is really that class re-declared for pre-VLM loaders.
-_VISION_AUTO_MAP_KEYS = ("AutoModelForImageTextToText", "AutoModelForVision2Seq")
 
 
 def _auto_map_class_name(auto_map: dict, key: str) -> str | None:
@@ -78,7 +61,12 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
         has_native_sibling = model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
         auto_map = getattr(model_config, "auto_map", None) or {}
         remote_target = _auto_map_class_name(auto_map, "AutoModelForCausalLM")
-        vision_targets = {name for key in _VISION_AUTO_MAP_KEYS if (name := _auto_map_class_name(auto_map, key))}
+        # A CausalLM entry naming the multimodal class itself is that class re-declared for pre-VLM loaders.
+        vision_targets = {
+            name
+            for key in ("AutoModelForImageTextToText", "AutoModelForVision2Seq")
+            if (name := _auto_map_class_name(auto_map, key))
+        }
         masquerading = remote_target is not None and (
             remote_target.endswith("ForConditionalGeneration") or remote_target in vision_targets
         )
@@ -96,11 +84,8 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
                 f"multimodal class (text_only_model: false)."
             )
         return AutoModelForCausalLM
-    # Bare mapping membership rather than the value-inspecting
-    # :func:`~src.models.modality.config_declares_multimodality`: the two disagree on ``mistral4``,
-    # whose ITT entry is its text decoder and which has no ``AutoModelForCausalLM`` entry at all, so
-    # unifying them would leave that family with no loadable class here, and would send it down the
-    # VLM branch (a processor it does not ship) at every reader of that predicate.
+    # Bare mapping membership, not ``config_declares_multimodality``: ``mistral4``'s image-text-to-text
+    # entry is its text decoder and it has no ``AutoModelForCausalLM`` entry at all.
     if getattr(model_config, "model_type", None) in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES:
         return AutoModelForImageTextToText
     return AutoModelForCausalLM
@@ -125,16 +110,10 @@ def auto_load_model(
     """Load a model from a path, picking the widest Auto* class for its config unless one is pinned.
 
     The unsharded load core: the compat shims, the config fetch, the class resolution and the
-    coverage-verified ``from_pretrained``. Every caller holding only a path string runs it;
-    distributed paths use ``load_distributed_model()``.
-
-    ``model_class`` pins the class and skips the config fetch, for a caller that resolved its own
-    (a task head). ``text_only`` is :func:`resolve_auto_model_class`'s: the text-only class of a
-    multimodal checkpoint, as a ``text_only_model`` run trains it.
+    coverage-verified ``from_pretrained``. ``model_class`` pins the class and skips the config fetch;
+    ``text_only`` is :func:`resolve_auto_model_class`'s.
     """
-    # Before the config fetch, which is already enough to import a remote modeling file: every
-    # standalone tool loads through here, so the shims cannot depend on each caller applying them
-    # first (a CLI is the process's first remote-code load by definition). Idempotent.
+    # Before the config fetch, which can already import a remote modeling file.
     apply_remote_code_compat_shims()
     if model_class is None:
         # revision must reach the config fetch too, else a pinned checkpoint pairs with hub-main's config.
@@ -145,20 +124,16 @@ def auto_load_model(
     return from_pretrained_verified(model_class, model_name_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
 
-def apply_family_attention_patches(model_config, attn_implementation: str) -> str:
-    """Apply the family/backend-keyed attention patches every loaded model needs, trainable or frozen,
-    and return the implementation to build it with.
+def apply_family_patches(model_config, attn_implementation: str) -> str:
+    """Apply the family/backend-keyed patches every loaded model needs, trainable or frozen, and return
+    the implementation to build it with.
 
-    Shared by both loaders: a frozen teacher or reference paired with a different-family policy
-    would otherwise miss its family's patch (the policy's load keys on the policy's config) and, for
-    example, score packed rows with cross-document flash attention while the student is isolated.
-
-    The patches key on the resolved backend, the build on its variant
-    (:func:`resolve_flex_sliding_attn_implementation`: Gemma 4's ``sdpa_flex_sliding`` for ``sdpa``).
-    The variant still hands SDPA its short sliding calls (within the window or one tile) and its global
-    layers past the matmul budget, so a wide-head model keeps the SDPA pin under it.
+    Keyed on each model's own config, so a frozen teacher or reference of another family gets its own
+    patches. The patches key on the resolved backend, the build on its variant
+    (:func:`resolve_flex_sliding_attn_implementation`), which still hands SDPA some calls, so a
+    wide-head model keeps the SDPA pin under it.
     """
-    if attn_implementation == "sdpa" and head_dim_exceeds_flash(model_config):
+    if attn_implementation == "sdpa" and has_head_dim_beyond_flash(model_config):
         patch_sdpa_for_wide_heads()
     # Else Mistral4's attention swallows position_ids before the flash interface, so the varlen
     # packed path never engages and packed documents attend across each other.
@@ -184,54 +159,30 @@ def sanitize_generation_config(model: PreTrainedModel) -> None:
     if generation_config is None:
         return
 
-    # None means explicitly unset rather than a sampling request; a neutral value is not one either.
+    # The neutral values GenerationConfig.validate() tests against, stated because the stock instance
+    # carries None for all three; neither None nor a neutral value is a sampling request.
     sampling_params_set = any(
         (value := getattr(generation_config, field, None)) is not None and value != neutral
-        for field, neutral in _NEUTRAL_SAMPLING_VALUES.items()
+        for field, neutral in {"temperature": 1.0, "top_p": 1.0, "top_k": 50}.items()
     )
     if sampling_params_set and not getattr(generation_config, "do_sample", False):
         generation_config.do_sample = True
         logger.info("Sanitized generation_config: set do_sample=True (model ships sampling params without do_sample)")
 
 
-def finalize_run_model(
+def apply_run_model_policies(
     model, model_config, *, sinks_policy: SinksPolicy, attn_implementation: str, sinks_pretrained: bool = True
 ) -> None:
-    """The sharding-agnostic finalization every loaded model needs, in a fixed order.
+    """The sharding-agnostic run policies every loaded model takes, policy and frozen reference alike.
 
-    Shared by the policy dispatcher and the frozen auxiliary loader, so a reference or teacher is
-    finalized exactly like the policy whose logprobs it is differenced against.
-    ``sinks_pretrained=False`` (a from-scratch build) skips only the neutralized policy: there are
-    no pretrained sinks to neutralize, and the live policies still apply.
-
-    The Halo Hub tags go on ``model_tags`` for the card writers that read nothing else: PEFT's own
-    adapter ``save_pretrained`` and a user's ``model.push_to_hub()``. Directory writers tag their cards.
+    ``sinks_pretrained=False`` (a from-scratch build) skips only the neutralized sinks policy: there are
+    no pretrained sinks to neutralize. The Hub tags go on ``model_tags`` for the card writers that read
+    nothing else (PEFT's adapter save, ``push_to_hub``).
     """
     model.add_model_tags(list(HUB_TAGS))
     sanitize_generation_config(model)
     if sinks_pretrained or sinks_policy is not SinksPolicy.NEUTRALIZED:
         apply_sinks_policy(model, model_config, policy=sinks_policy, attn_implementation=attn_implementation)
-
-
-def finalize_liger_after_direct_load(training_config, original_use_liger: bool, model) -> None:
-    """Reconcile TRL's ``use_liger_kernel`` flag after a direct model load already applied Liger.
-
-    Reads the effective config the orchestrator applied (per-model defaults and EP/TP force-offs
-    included), not the user's raw ``liger_kernel_config``. Under ``fused_linear_cross_entropy`` the
-    model returns no logits, so the flag must stay on or TRL slices ``None`` in its metric path
-    (the FLCE-default families: DeepSeek-V4, GLM-4 MoE Lite, Zaya); pinning the applied config makes TRL's
-    re-application an identical re-patch. Otherwise the flag is cleared, so TRL does not re-apply
-    Liger with its own defaults over the patched modules.
-    """
-    if not original_use_liger:
-        return
-    applied = getattr(model.config, LIGER_APPLIED_CONFIG_ATTR, None)
-    if applied and applied.get("fused_linear_cross_entropy", False):
-        training_config.use_liger_kernel = True
-        # Minus the flags a delegating spec withheld from upstream: TRL runs upstream's applier alone.
-        training_config.liger_kernel_config = trl_reapplication_config(model.config, applied)
-    else:
-        training_config.use_liger_kernel = False
 
 
 def log_model_info(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> None:

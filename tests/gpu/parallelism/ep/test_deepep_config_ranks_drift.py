@@ -2,7 +2,7 @@
 """``DEEPEP_V1_CONFIG_RANKS`` must equal the widths DeepEP V1 itself ships a tuned config for.
 
 The toolkit table is a MIRROR of ``deep_ep.Buffer``'s two ``config_map`` dicts, kept so an
-``ep_group_size`` V1 has no tuning for is refused by ``ParallelismConfig._validate_ep_buffer_backend``
+``ep_group_size`` V1 has no tuning for is refused by ``parallelism_rules._reject_ep_buffer_backend``
 at config time. Nothing else notices when a DeepEP bump moves that table:
 
 * a width DROPPED upstream stays in ours, so the run passes the config gate and dies on DeepEP's own

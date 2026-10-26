@@ -52,7 +52,6 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSpars
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
@@ -63,6 +62,7 @@ from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.kernels.fused_glu import GluCombine, is_silu_activation, silu_mul_eager
 from tests.common.parallelism import single_process_ep_config
 

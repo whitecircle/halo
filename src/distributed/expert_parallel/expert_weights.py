@@ -22,7 +22,7 @@ from functools import lru_cache
 import torch
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers every family subclass
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.models.config_access import config_sources
 from src.models.moe_balancing import apply_export_renames
 from src.models.param_roles import persistent_buffers

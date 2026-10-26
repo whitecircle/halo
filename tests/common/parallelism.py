@@ -16,6 +16,7 @@ from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.parallelism_config import ParallelismConfig
 
 _MOD = "src.distributed.parallelism_config"
+_RULES_MOD = "src.distributed.parallelism_rules"
 
 
 @contextlib.contextmanager
@@ -24,6 +25,7 @@ def _mocked_rank(rank: int):
     with (
         patch(f"{_MOD}.get_global_rank", return_value=rank),
         patch(f"{_MOD}.is_global_main_process", return_value=rank == 0),
+        patch(f"{_RULES_MOD}.is_global_main_process", return_value=rank == 0),
     ):
         yield
 
@@ -96,6 +98,12 @@ def make_parallelism_config(
             nvlink_domain_size=gpus_per_node if nvlink_domain_size is None else nvlink_domain_size,
             **kwargs,
         )
+
+
+def built_ep_config(config: ParallelismConfig) -> EPConfig:
+    """``config``'s :class:`EPConfig` as its rank builds it, over :func:`stubbed_process_groups`."""
+    with stubbed_process_groups(config.world_size, config.global_rank):
+        return config.ep_config()
 
 
 def create_config(**kwargs):

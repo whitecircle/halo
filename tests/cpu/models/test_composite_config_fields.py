@@ -8,7 +8,7 @@ is silently or loudly wrong for those families unless it goes through the nested
   * ``_apply_config_overrides`` must not reject a ``model_init_kwargs`` key living on ``text_config``
     (``output_router_logits``, which the shipped Qwen3.6 GRPO configs set for MoE metrics, or
     ``router_aux_loss_coef``), or those runs die at model load.
-  * ``setup_model_and_tokenizer`` must not write the tokenizer's ``pad_token_id`` to the top level
+  * ``configure_run_tokenizer`` must not write the tokenizer's ``pad_token_id`` to the top level
     only, while transformers' own sequence-classification pooling reads
     ``config.get_text_config().pad_token_id`` — leaving it ``None`` (batch > 1 then raises) or stale
     at the checkpoint's value (pooling silently picks the wrong last token).
@@ -28,15 +28,12 @@ from transformers import CONFIG_MAPPING, Qwen3_5MoeForCausalLM, Qwen3_5MoeForCon
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.loading.model_loading import _apply_config_overrides
 from src.model_loading.tokenizer_setup import sync_special_token_id
 from src.models import config_access, moe_balancing
-from src.models.attention_geometry import (
-    resolve_head_dim,
-    resolve_num_key_value_heads,
-)
+from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
 from src.models.config_access import (
     config_sources,
     configs_declaring,

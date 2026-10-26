@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
 
 
 class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
@@ -54,7 +54,7 @@ class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
         router = getattr(self, self._ROUTER_ATTR, None) if self._ROUTER_ATTR else None
         return not type(router).__module__.startswith("transformers.models.")
 
-    def _init_routing(self, original_layer: nn.Module) -> None:
+    def _adopt_routing(self, original_layer: nn.Module) -> None:
         """The shared group-limited knobs, plus the correction bias a lazy load can leave on meta.
 
         Laguna's pinned remote-code revision omits the correction bias from its checkpoint (the
@@ -66,7 +66,7 @@ class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
                 torch.zeros(correction_bias.shape, dtype=correction_bias.dtype),
                 requires_grad=correction_bias.requires_grad,
             )
-        super()._init_routing(original_layer)
+        super()._adopt_routing(original_layer)
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
         return (f"hf_layer={type(original_layer).__name__}",)

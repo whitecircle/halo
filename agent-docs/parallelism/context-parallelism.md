@@ -80,7 +80,7 @@ through `model_init_kwargs`, or turn the aux loss off for that family with `moe_
 **NVLink-local topology** — `cp_size` must divide the NVLink domain (`gpus_per_node` on a standard
 node, the rack on NVL72) and cannot exceed it; Ulysses' all-to-alls per attention layer must stay
 on NVLink. `cp_size=3` on an 8-GPU domain is rejected at config time, before the model loads
-(`_validate_cp_locality`).
+(`_reject_cp_locality`).
 
 **Attention impl** — a real Flash Attention is required. `validate_model_for_ulysses` raises
 `UlyssesConfigError` for any `_attn_implementation` outside `SUPPORTED_ATTN_IMPLEMENTATIONS` (FA2,
@@ -162,7 +162,7 @@ gradients from its chunk. `DistributedTrainerMixin` applies FSDP2 across all ran
 same wrapper runs with EP params in `ignored_params`.
 
 EP+CP requires node-local EP with `ep_group_size == nvlink_domain_size`
-(`ParallelismConfig._validate_ep_cp` rejects cross-domain EP under CP). Supported 8-GPU shapes:
+(`parallelism_rules._reject_ep_cp` rejects cross-domain EP under CP). Supported 8-GPU shapes:
 ep8/cp2 → DP4, ep8/cp4 → DP2, ep8/cp8 → DP1.
 
 **Pure CP on a MoE still gets expert wrappers.** `_load_cp_model` hands `load_model_for_cp` an
@@ -263,13 +263,13 @@ not activations) — that is the case CP exists for.
 | `compute_metrics`, `preprocess_logits_for_metrics` | rejected whenever set, not gated on `eval_strategy` (a direct `evaluate()`/`predict()` reaches the same misaligned chunk-logits path) — eval under CP is loss-only | same |
 | CP's own metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | accumulated locally per micro-batch and reduced once per log, so the metric path adds one collective per log instead of five to six per micro-batch | `src/trainers/sft.py` (`_drain_cp_metrics`) |
 | multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/wrapper.py` |
-| `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_validate_fsdp_settings` |
+| `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_reject_fsdp_settings` |
 | `accelerate launch` | rejected — CP requires `torchrun` | `model_loading.py` and `ParallelismValidationMixin` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`) | `mixins/base.py` |
-| `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `kernels/liger/orchestrator.py` |
+| `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `src/model_loading/liger/dispatch.py` |
 | `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `_reject_cp_explicit_options` (offline GRPO) |
 | QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading.py`, `_reject_cp_explicit_options` |
-| `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_validate_hsdp`, `_validate_fsdp_settings` |
+| `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_reject_hsdp`, `_reject_fsdp_settings` |
 | `torch_compile` | not gated, and no measured benefit — the all-to-all breaks the graph at every attention layer | — |
 | `save_sharded_ep` | rejected on a CP run — per-rank shards carry `.original_attention.` keys the merge script cannot remap | `validate_ep_sharded_save` |
 

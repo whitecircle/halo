@@ -25,7 +25,7 @@ import sys
 import torch
 import torch.distributed as dist
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing

@@ -24,9 +24,9 @@ from src.distributed.context_parallel.config import cp_shift_against_full_labels
 from src.distributed.context_parallel.wrapper import find_cp_wrapper
 from src.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
+from src.models.attention.selection import effective_attn_implementation
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from src.models.modality import config_declares_multimodality
-from src.models.patches.attention import effective_attn_implementation
 from src.models.unwrapping import base_transformers_model
 from src.runtime.consensus import rank_consensus
 from src.runtime.dtensor import materialize_dtensor

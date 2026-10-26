@@ -23,12 +23,12 @@ import torch.nn as nn
 
 from src.distributed.checkpoint.ep_save import _check_ep_merge_family_supported
 from src.distributed.expert_parallel import expert_weights as ew
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
     resolve_ep_merge_layer_class,
     supported_ep_merge_model_types,
 )
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 E, H, M = 3, 8, 5
 

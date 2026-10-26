@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable, Generator
+from typing import get_args
 
 import torch
 import torch.distributed as dist
@@ -23,7 +24,8 @@ from torch.distributed.pipelining import PipelineStage, Schedule1F1B, ScheduleGP
 from torch.distributed.pipelining.schedules import PipelineScheduleSingle
 
 from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.parallelism_config import PP_SCHEDULES, ParallelismConfig
+from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.parallelism_rules import PPSchedule
 from src.distributed.pipeline_parallel.losses import (
     causal_lm_token_loss,
     fused_causal_lm_token_loss,
@@ -32,9 +34,9 @@ from src.distributed.pipeline_parallel.losses import (
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
 
 _SCHEDULES = {"1f1b": Schedule1F1B, "gpipe": ScheduleGPipe}
-if set(_SCHEDULES) != set(PP_SCHEDULES):
+if set(_SCHEDULES) != set(get_args(PPSchedule)):
     raise RuntimeError(
-        f"Pipeline schedule table {sorted(_SCHEDULES)} drifted from PP_SCHEDULES {sorted(PP_SCHEDULES)}"
+        f"Pipeline schedule table {sorted(_SCHEDULES)} drifted from PPSchedule {sorted(get_args(PPSchedule))}"
     )
 
 # Each key the pipeline consumes → its pad value (None = tokenizer pad id). The trainer's

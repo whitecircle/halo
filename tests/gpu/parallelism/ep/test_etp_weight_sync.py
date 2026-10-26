@@ -52,7 +52,7 @@ def run(ctx):
     checks, metrics = {}, {}
     config = ParallelismConfig(ep_size=1, expert_tp_size=ETP_SIZE)
     model = build_model().to(ctx.device)
-    patch_moe_model_for_ep(model, config.create_ep_config())
+    patch_moe_model_for_ep(model, config.ep_config())
 
     etp_layers = [m for m in model.modules() if getattr(m, "expert_tp_size", 1) > 1]
     checks["layers_really_expert_tp_sharded"] = len(etp_layers) == N_LAYERS

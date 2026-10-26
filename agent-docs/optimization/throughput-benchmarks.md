@@ -103,7 +103,7 @@ the full `input_ids`; the wrapper splits inside forward).
 The attention-score term costs each decoder layer at `6 × keys × heads·(d_qk + d_v)` per token (QKᵀ and Attn·V,
 forward + backward; `12·S·H` for standard heads). Full attention is costed at every key (the PaLM convention,
 not the causal half); bounded layers at the keys their kernel visits. `keys` is set by the layer's
-`config.layer_types` entry (`src/models/attention_layout.py`):
+`config.layer_types` entry (`src/models/attention/layout.py`):
 
 | `layer_types` entry | `keys` |
 |---|---|

@@ -178,7 +178,7 @@ def run(ctx):
 
     config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model().to(ctx.device)
-    patch_moe_model_for_ep(model, config.create_ep_config())
+    patch_moe_model_for_ep(model, config.ep_config())
 
     trainer = trainer_cls(
         model=model,

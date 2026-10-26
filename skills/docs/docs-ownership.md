@@ -35,15 +35,15 @@ changes.
 
 | `src/` area | Owning doc page(s) |
 |---|---|
-| `src/distributed/parallelism_config.py` (ParallelismConfig, validation) | `agent-docs/parallelism/*` (all; the combination table in `agent-docs/parallelism/README.md#supported-combinations`), `agent-docs/reference/configuration-reference.md`, the parallelism matrix in `CLAUDE.md` |
-| `src/distributed/expert_parallel/` (EP topology, per-family layers, expert compute) | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md` |
+| `src/distributed/parallelism_config.py` (ParallelismConfig), `parallelism_rules.py` (axis allowlist, refusals) | `agent-docs/parallelism/*` (all; the combination table in `agent-docs/parallelism/README.md#supported-combinations`), `agent-docs/reference/configuration-reference.md`, the parallelism matrix in `CLAUDE.md` |
+| `src/distributed/expert_parallel/` (EP topology, per-family layers; `moe_layer/`: `EPMoELayerBase` and its compute, routing, grad-sync, expert-LoRA and balancing-bias mixins, `named_ep_layers`) | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md`, `agent-docs/models/adding-a-model.md` (the `_adopt_*` construction hooks), `agent-docs/reference/architecture.md` |
 | `src/distributed/expert_parallel/deepep/` (DeepEP knobs, buffer sizing and the capacity scope, buffer backends, dispatcher), `src/distributed/rank_uniform_env.py` (the job-wide env agreement) | `agent-docs/infrastructure/deepep.md`, `agent-docs/reference/configuration-reference.md` (DeepEP environment variables) |
 | `src/models/moe/expert_lora_spec.py` (native expert-LoRA vocabulary) | `agent-docs/optimization/peft.md`, `agent-docs/models/adding-a-model.md` |
 | `src/distributed/context_parallel/` (Ulysses) | `agent-docs/parallelism/context-parallelism.md` |
 | `src/distributed/tensor_parallel/` (DTensor) | `agent-docs/parallelism/tensor-parallelism.md` |
 | `src/distributed/pipeline_parallel/` (stage split + stage module, losses, P2P groups, stage loader, the `PipelineRuntime` schedule engine) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` (stage shards) |
 | `src/model_loading/lazy_safetensors/` (safetensors lazy-load core shared by the EP + PP loaders) | `agent-docs/parallelism/expert-parallelism.md` (lazy loading), `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
-| `src/distributed/group_layout.py`, `mesh.py` (rank math, DeviceMesh + the typed group view) | `agent-docs/parallelism/multi-node.md`, `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/architecture.md` |
+| `src/distributed/group_layout.py`, `mesh.py` (EP/CP rank layouts, DeviceMesh + the typed group view) | `agent-docs/parallelism/multi-node.md`, `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/architecture.md` |
 | `src/subclass_registry.py` (class-claim maps over a subclass tree: HF class → EP/CP wrapper, PP split spec, head transform) | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
 | `src/distributed/nccl/_nccl_wrapper.py` (the `ncclUniqueId` binding the vLLM image unpickles from this path) | `agent-docs/infrastructure/docker.md` (the `ncclUniqueId` ABI assert), `agent-docs/infrastructure/rollout-servers.md` |
 | `src/distributed/grad_reduce.py` (bucketed gradient all-reduce — EP cross-replica, TP replicated, QLoRA sweeps) | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/configuration-reference.md` (`HALO_GRAD_BUCKET_MB`) |
@@ -95,18 +95,17 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | EP layer wrappers `src/distributed/expert_parallel/layers/<family>.py` | the per-family page under `agent-docs/models/` + `agent-docs/parallelism/expert-parallelism.md` (supported-models table) + `agent-docs/optimization/grouped-gemm.md` (supported-models table) |
-| `src/distributed/expert_parallel/layers/zaya.py`, `src/models/patches/zaya.py` | `agent-docs/models/zaya.md` |
-| `src/distributed/loading/model_loading.py`, `src/distributed/loading/warmup.py`, `src/model_loading/model_preparation.py`, `src/models/patches/remote_code_compat.py`, `src/models/patches/remote_code_hooks.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md`, the affected per-family page; `agent-docs/optimization/flash-attention.md` (the FA4 and flex warm-up) |
+| `src/distributed/expert_parallel/layers/zaya.py`, `src/models/zaya.py` | `agent-docs/models/zaya.md` |
+| `src/distributed/loading/model_loading.py`, `src/distributed/loading/warmup.py`, `src/model_loading/model_preparation.py` (`apply_family_patches`, `apply_run_model_policies`), `src/model_loading/remote_code.py` (remote-class funnel, v4 shims, whole-file module-cache copies, the list-tie refusal) | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md`, the affected per-family page; `agent-docs/optimization/flash-attention.md` (the FA4 and flex warm-up) |
 | `src/models/seq_cls_heads.py` (Gemma 4 + MoE Qwen3.5/3.6 seq-cls heads, registered by an import in `src/model_loading/model_preparation.py`, and the multimodal seq-cls roster) | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/preference/reward-modeling.md` |
 | `src/model_loading/tokenizer_setup.py` (processing class, chat template, special tokens, the `model_max_length` pin, `resolve_peft_processing_class`), `src/models/context_window.py` (the context window `max_length: null` resolves to, `is_bounded_length`, `bounded_row_length`) | `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
-| `src/models/patches/buffer_fixes.py` (`finalize_loaded_model`: the non-persistent buffer repair every load path ends in) | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md` |
+| `src/model_loading/buffer_repair.py` (`finalize_loaded_model`: the non-persistent buffer repair every load path ends in) | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md` |
 | `src/kernels/hub_kernel_dispatch.py` (device-aware repair of transformers' kernel-fallback dispatch, installed at package import by `src/__init__.py`) | `agent-docs/models/README.md`, `agent-docs/models/qwen3_5.md` |
 | `src/model_loading/checkpoint_coverage.py` (random-init load gate) | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md` |
 | `src/model_loading/dtype.py` (run dtype, the loaded-parameter cast: fp32 pins → run dtype, fp8 refused; fp32-matmul precision) | `agent-docs/models/README.md` (Load precision), `agent-docs/reference/configuration-reference.md` (`HALO_FP32_MATMUL_PRECISION`) |
 | `src/models/config_access.py` (composite-config field access, run-scoped writes, `config_export_ready`, the embedding-tie readers) | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |
 | `src/models/modality.py` (pure multimodal verdict off a config or a name) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
-| `src/models/attention_geometry.py` (head-dim and KV-head resolution across composite/per-layer configs) | `agent-docs/models/README.md`, `agent-docs/optimization/flash-attention.md` |
-| `src/models/attention_layout.py` (per-layer attention cost rules off `layer_types` + head geometry — the MFU attention term), `src/callbacks/model_flops.py` (the per-token training FLOPs behind MFU / S-MFU) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `src/models/attention/layout.py` (head-dim and KV-head resolution across composite/per-layer configs, and the per-layer attention cost rules off `layer_types` — the MFU attention term), `src/callbacks/model_flops.py` (the per-token training FLOPs behind MFU / S-MFU) | `agent-docs/models/README.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/models/segment_markers.py` (per-family conv / linear-attention segment markers, the GatedDeltaNet kernel refusal) | `agent-docs/data/collators.md` (Document isolation under packing), `agent-docs/optimization/padding-free-collator.md`, `agent-docs/training-methods/preference/smpo.md` |
 | new model support | new `agent-docs/models/<family>.md` + every family roster listed in step 7 (*Wire the docs*) of `agent-docs/models/adding-a-model.md` |
 
@@ -129,7 +128,7 @@ changes.
 
 | `src/` area | Owning doc page(s) |
 |---|---|
-| `src/kernels/liger/` (orchestrator + appliers) | `agent-docs/optimization/liger-kernels.md` |
+| `src/model_loading/liger/` (dispatch, family specs, appliers, fused modules, the fused-loss forward) | `agent-docs/optimization/liger-kernels.md` |
 | `src/optimizers/` (AdamWBF16, Muon, FlashAdamW; `stochastic_rounding.py`, the SR seeds and rounding step AdamWBF16 and Muon share) | `agent-docs/optimization/{bf16-optimizer,muon-optimizer,flash-adamw}.md` |
 | `src/kernels/lowp/` (spec: `LowpSpec`, `QuantFormat`, `LOWP_RECIPES`; quantization, linear, deepgemm) | `agent-docs/optimization/low-precision-moe-kernels.md`, `agent-docs/reference/configuration-reference.md` (`lowp`) |
 | `src/model_loading/parallel/lowp_compute.py` (`apply_lowp_compute`) | `agent-docs/optimization/low-precision-moe-kernels.md` |
@@ -138,9 +137,9 @@ changes.
 | `src/kernels/fused_glu.py` (`GluCombine`, activation probes, the `HALO_FUSED_GLU` switch) | `agent-docs/models/glm4.md` (gate), `agent-docs/models/gpt-oss.md` (clamped variant), `agent-docs/optimization/liger-kernels.md` (Fused GLU under an EP wrapper), `agent-docs/reference/configuration-reference.md` (`HALO_FUSED_GLU`), `agent-docs/reference/troubleshooting.md` (Turning off a fused kernel), `agent-docs/optimization/grouped-gemm.md` (packed GLU), `agent-docs/optimization/torch-compile.md`, `agent-docs/parallelism/expert-parallelism.md` (the EP warm-up) |
 | `src/kernels/moe_permute.py` (atomic-free token permute: `build_inv_map`, `MoEGatherPermute`, the fused weighted un-permute, `MoEExpertBiasGather`, `warm_permute_kernels`) | `agent-docs/optimization/grouped-gemm.md`, `agent-docs/parallelism/expert-parallelism.md` (the EP warm-up) |
 | `src/kernels/logprobs.py` (chunked fp32 log-probs: `selective_logprobs` and the logit chunk budget, shared by the PP last-stage losses and SMPO's loss paths in `src/distributed/pipeline_parallel/losses.py`, and by the DPO/KTO loss paths) | `agent-docs/training-methods/preference/dpo.md` (Log-prob precision), `agent-docs/training-methods/preference/smpo.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
-| attention selection (`src/models/patches/attention.py`, `_detect_attention_impl`) | `agent-docs/optimization/flash-attention.md` |
-| `src/models/patches/flex_sliding_attention.py` (FlexAttention on SDPA sliding-window and wide-head layers) | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/gemma4.md` |
-| GptOss sink policy (`src/models/patches/gpt_oss_sinks.py`) | `agent-docs/models/gpt-oss.md` (Attention sinks), the `reset_sinks`/`train_sinks` rows of `agent-docs/reference/configuration-reference.md` |
+| attention selection (`src/models/attention/selection.py`: `flash_kernel`, `_detect_attention_impl`, the resolver and validator), `src/models/attention/backend_setup.py` (process-wide backend fixes, FA4 warm-up), `src/models/attention/packed_position_ids.py`, `src/kernels/jit_cache.py` (FA4 / Triton JIT caches, CuTe DSL warning filter) | `agent-docs/optimization/flash-attention.md`; `packed_position_ids.py` also `agent-docs/models/mistral4.md`, `agent-docs/models/zaya.md` |
+| `src/models/attention/sdpa_flex_sliding.py` (FlexAttention on SDPA sliding-window and wide-head layers) | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/gemma4.md` |
+| GptOss sink policy (`src/models/attention/gpt_oss_sinks.py`) | `agent-docs/models/gpt-oss.md` (Attention sinks), the `reset_sinks`/`train_sinks` rows of `agent-docs/reference/configuration-reference.md` |
 | `torch.compile` paths | `agent-docs/optimization/torch-compile.md` |
 | LoRA/QLoRA (`src/distributed/loading/peft_setup.py`) | `agent-docs/optimization/peft.md` |
 
@@ -243,7 +242,7 @@ what a user sets, runs or can combine there, update the page with its owner. A n
 | `human-docs/cli.md` | `src/cli.py`; `agent-docs/reference/scripts-reference.md` |
 | `human-docs/configuration.md` | `src/training/parser.py`, `src/configs/`, `src/args/`; `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
 | `human-docs/environment-variables.md` | `src/env.py` and every toolkit knob; `agent-docs/reference/configuration-reference.md` (Environment variables) |
-| `human-docs/parallelism.md` | `src/distributed/parallelism_config.py`, `src/training/parallelism_args.py`; `agent-docs/parallelism/` |
+| `human-docs/parallelism.md` | `src/distributed/parallelism_config.py`, `parallelism_rules.py`, `src/training/parallelism_args.py`; `agent-docs/parallelism/` |
 | `human-docs/supported-matrix.md` | every support verdict: version pins, attention backends, trainer × mode, the rollout-engine roster (`src/weight_sync/clients/`), families, parallelism modes, PEFT and quantization |
 | `human-docs/clusters.md` | multi-node launch, `launcher-configs/**`; `agent-docs/parallelism/{multi-node,launch-recipes}.md`, `agent-docs/infrastructure/{skypilot,runpod,nomad}.md` |
 | `human-docs/checkpoints.md` | `src/distributed/checkpoint/`, `src/checkpoint/`, `scripts/after_training/**`; `agent-docs/reference/{checkpoints,model-merging}.md` |

@@ -115,7 +115,7 @@ class _StoppableTrainer:
 
 _RUNTIME = types.SimpleNamespace(
     parallelism_config=types.SimpleNamespace(
-        is_ep_mode=False, is_cp_mode=False, is_tp_mode=False, is_expert_tp_mode=False, data_parallel_size=1
+        has_ep_group=False, is_cp_mode=False, is_tp_mode=False, is_expert_tp_mode=False, data_parallel_size=1
     ),
     mode_suffix="ddp",
     resume_checkpoint=None,

@@ -23,7 +23,7 @@ from transformers import CONFIG_MAPPING
 from src.checkpoint.format import TRAINING_PROVENANCE_FILE
 from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_provenance, write_training_provenance
 from src.distributed.checkpoint.peft import PeftAdapterSaver
-from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
+from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 
 # The sinks policy logs through accelerate's logger, which requires an initialized state.
 PartialState()

@@ -20,9 +20,9 @@ from transformers.models.zaya import ZayaConfig
 from transformers.models.zaya.modeling_zaya import ZayaForCausalLM
 
 from src.model_loading import model_preparation
+from src.model_loading.remote_code import apply_remote_code_compat_shims
 from src.models.moe_balancing import resolve_balancing_mode
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
-from src.models.patches.zaya import (
+from src.models.zaya import (
     patch_zaya_flash_packed_position_ids,
     patch_zaya_gradient_checkpointing_refusal,
     patch_zaya_router_load_recording,
@@ -181,17 +181,17 @@ def test_cca_crosses_packed_documents_by_construction():
 
 
 def test_loader_seam_dispatches_the_zaya_patches(monkeypatch):
-    """``apply_family_attention_patches`` is the seam both production loaders call; if its zaya
+    """``apply_family_patches`` is the seam both production loaders call; if its zaya
     gate is dropped, training silently loses bias-update balancing, accepts GC into the cuDNN
     fault, and leaks across packed documents on flash — with every direct-call test still green."""
     calls = []
     monkeypatch.setattr(model_preparation, "apply_zaya_patches", calls.append)
 
-    model_preparation.apply_family_attention_patches(ZayaConfig(**TINY_ZAYA_CONFIG), "flash_attention_2")
+    model_preparation.apply_family_patches(ZayaConfig(**TINY_ZAYA_CONFIG), "flash_attention_2")
     assert calls == ["flash_attention_2"]
 
     calls.clear()
-    model_preparation.apply_family_attention_patches(CONFIG_MAPPING["qwen3"](), "flash_attention_2")
+    model_preparation.apply_family_patches(CONFIG_MAPPING["qwen3"](), "flash_attention_2")
     assert calls == []
 
 

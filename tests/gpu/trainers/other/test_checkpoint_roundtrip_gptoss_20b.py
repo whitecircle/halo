@@ -131,7 +131,7 @@ def train_and_save(
             parallelism_config=parallelism_config,
         )
 
-        assert trainer.parallelism_config.is_ep_mode, f"Trainer should be in EP mode for {mode_name}"
+        assert trainer.parallelism_config.has_ep_group, f"Trainer should be in EP mode for {mode_name}"
         if parallelism_config.is_tp_mode:
             assert trainer.parallelism_config.is_tp_mode, f"Trainer should be in TP mode for {mode_name}"
         log("  Parallelism modes confirmed")

@@ -24,7 +24,7 @@ import pytest
 import torch
 import torch.utils.checkpoint as torch_checkpoint
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.models.gradient_checkpointing import scoped_checkpoint_func
 
 _INDICES = torch.tensor([0, 1, 1, 3])

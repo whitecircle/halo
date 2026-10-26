@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """CPU test for native EP expert-LoRA disable + fail-loud resume guard
-(``src/distributed/expert_parallel/base_layer.py``).
+(``src/distributed/expert_parallel/moe_layer/layer.py``).
 
 Native grouped LoRA on EP experts is NOT peft-managed. For a correct KL reference pass the delta must
 be removed; for resume the saved adapter keys must match the rebuilt layer exactly. This pins:
 
   * :func:`disable_expert_adapters` — context manager that truly removes the LoRA delta (output equals
     the base-only matmul) and restores each layer's PRIOR per-layer enabled flag, with re-entrancy.
-  * :func:`make_disable_adapter_ep_aware` — wraps ``PeftModel.disable_adapter`` so it ALSO flips the
+  * :func:`install_ep_aware_disable_adapter` — wraps ``PeftModel.disable_adapter`` so it ALSO flips the
     EP layers' ``_expert_adapters_enabled``; idempotent; both flags restored on exit.
   * :meth:`EPMoELayerBase.load_expert_lora_state_dict` — RAISES on a key-set mismatch (the GptOss
     gate_up_proj-vs-gate_proj rename, or an empty state handed to a layer carrying adapters) and
@@ -28,9 +28,9 @@ import pytest
 import torch
 from torch import nn
 
-from src.distributed.expert_parallel.base_layer import (
+from src.distributed.expert_parallel.moe_layer.expert_lora import (
     disable_expert_adapters,
-    make_disable_adapter_ep_aware,
+    install_ep_aware_disable_adapter,
 )
 from tests.common.ep_stubs import StubEPLayerBase
 
@@ -142,7 +142,7 @@ def test_disable_reentrant_inner_exit_does_not_reenable():
 
 
 # --------------------------------------------------------------------------- #
-# make_disable_adapter_ep_aware
+# install_ep_aware_disable_adapter
 # --------------------------------------------------------------------------- #
 
 
@@ -166,7 +166,7 @@ class _StubPeftModel(nn.Module):
 
 def test_ep_aware_disable_flips_both_flags_and_restores():
     pm = _StubPeftModel()
-    make_disable_adapter_ep_aware(pm)
+    install_ep_aware_disable_adapter(pm)
 
     assert pm.peft_adapter_active is True
     assert pm.ep._expert_adapters_enabled is True
@@ -180,9 +180,9 @@ def test_ep_aware_disable_flips_both_flags_and_restores():
 def test_ep_aware_is_idempotent():
     """Calling twice must not double-wrap: the marker is set and the second call returns early."""
     pm = _StubPeftModel()
-    make_disable_adapter_ep_aware(pm)
+    install_ep_aware_disable_adapter(pm)
     wrapped_once = pm.disable_adapter
-    make_disable_adapter_ep_aware(pm)
+    install_ep_aware_disable_adapter(pm)
     assert pm.disable_adapter is wrapped_once, "double-wrapped — idempotence broken"
     assert pm._ep_disable_adapter_patched is True
     # And it still works after the second call.

@@ -34,7 +34,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase, EPSharedExpertsMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
@@ -42,6 +41,8 @@ from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELa
 from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
 from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
@@ -189,7 +190,7 @@ def _build_all(fsdp_shard_ep1_experts: bool = False):
         EPBailingMoELayer(_BailingBlock(), cfg),
         EPLfm2MoELayer(_Lfm2Block(), cfg),
     ]
-    # _to_device targets CUDA when the dev box exposes one; this is a CPU test.
+    # Construction places the layers on CUDA when the dev box exposes one; this is a CPU test.
     return [layer.cpu() for layer in layers]
 
 
@@ -262,7 +263,7 @@ def test_expert_fp32_upcast_preserves_frozen_requires_grad():
 
     layer.gate_proj.requires_grad_(False)
     layer.up_proj.requires_grad_(True)
-    layer._upcast_experts_to_fp32(layer.expert_named_params())
+    layer._upcast_experts_to_fp32()
     assert layer.gate_proj.dtype == torch.float32
     assert layer.gate_proj.requires_grad is False, "frozen expert base re-enabled by the fp32 upcast"
     assert layer.up_proj.requires_grad is True, "trainable expert param frozen by the fp32 upcast"
@@ -278,7 +279,7 @@ def test_expert_fp32_upcast_skipped_when_fsdp_manages_ep1_experts():
     assert layer.gate_proj.dtype == torch.float32 or layer.gate_proj.dtype == torch.get_default_dtype()
     # Stub weights are fp32 already; prove the skip with a bf16 param instead.
     layer.down_proj = nn.Parameter(layer.down_proj.data.to(torch.bfloat16), requires_grad=False)
-    layer._upcast_experts_to_fp32(layer.expert_named_params())
+    layer._upcast_experts_to_fp32()
     assert layer.down_proj.dtype == torch.bfloat16, "ep1 FSDP-managed experts must not be upcast"
     assert layer.down_proj.requires_grad is False
 

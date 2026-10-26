@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
 from src.kernels.fused_glu import GluCombine
 
 
@@ -62,7 +62,7 @@ class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
     _SHARED_EXPERT_ATTRS = ("shared_experts",)
     _SHARED_EXPERT_REQUIRED = True
 
-    def _init_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
+    def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
         """``Glm5NextTextExperts._apply_gate`` implements clamp-then-SiLU with no act_fn on the module
         and no config branch, so the combine latched into the base seam is unconditional; only the
         clamp bound comes off the live experts module, read as an attribute so a rename raises."""

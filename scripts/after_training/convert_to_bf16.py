@@ -37,11 +37,11 @@ from src.checkpoint.offline_export import (
 from src.checkpoint.reading import header_numel, iter_checkpoint_shard_entries, reject_partial_checkpoint
 from src.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
 from src.log import configure_cli_logging
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.model_preparation import auto_load_model, sanitize_generation_config
 from src.model_loading.tokenizer_setup import load_processing_class, resolve_peft_processing_class
 from src.models.param_roles import is_normalization_module
-from src.models.patches.buffer_fixes import finalize_loaded_model
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

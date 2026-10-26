@@ -20,15 +20,15 @@ from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.checkpoint.reading import load_full_state_dict
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches.attention import model_has_sinks
-from src.models.patches.gpt_oss_sinks import (
+from src.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
     is_sink_key,
     neutralized_sink_value,
     stamped_sinks_policy,
+    uses_gpt_oss_sinks,
 )
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
@@ -175,7 +175,7 @@ def _eager_oracle(source, device="cpu"):
 
 
 def _sink_checks(model, checkpoint=None):
-    if not model_has_sinks(model.config):
+    if not uses_gpt_oss_sinks(model.config):
         return {}
     checks = {"gptoss_sink_policy_neutralized": stamped_sinks_policy(model) is SinksPolicy.NEUTRALIZED}
     if checkpoint is not None:

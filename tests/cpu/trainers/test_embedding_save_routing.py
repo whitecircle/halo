@@ -21,7 +21,7 @@ from peft import LoraConfig, inject_adapter_in_model
 from sentence_transformers import SentenceTransformerTrainer
 
 import src.trainers.mixins.checkpointing as checkpointing_mod
-from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.trainers.embedding import trainer as embedding_module
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.ep_stubs import StubEPLayerBase
@@ -77,8 +77,7 @@ class _ParallelismStub:
     is_pp_mode = False
     is_cp_mode = False
     is_tp_mode = False
-    is_ep_tp_mode = False
-    is_ep_mode = False
+    has_ep_group = False
     tp_size = 1
     merge_expert_lora_on_save = False
 
@@ -187,7 +186,7 @@ def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():
     backbone = _Backbone()
     backbone.add_module("moe", layer)
     inject_adapter_in_model(LoraConfig(r=2, lora_alpha=4, target_modules=["shared_experts"]), backbone)
-    assert find_ep_layers(backbone) == [("moe", layer)], "premise: the adapters sit inside an EP layer"
+    assert named_ep_layers(backbone) == [("moe", layer)], "premise: the adapters sit inside an EP layer"
 
     assert EmbeddingTrainer._has_injected_lora(None, backbone)
 

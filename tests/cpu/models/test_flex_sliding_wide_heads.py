@@ -10,8 +10,8 @@ import pytest
 from transformers import Gemma4ForCausalLM, Gemma4TextConfig, MistralConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
 
-from src.models.patches.attention import FLASH_MAX_HEAD_DIM, head_dim_exceeds_flash
-from src.models.patches.flex_sliding_attention import sliding_attention_calls
+from src.models.attention.sdpa_flex_sliding import sliding_attention_calls
+from src.models.attention.selection import FLASH_MAX_HEAD_DIM, has_head_dim_beyond_flash
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 
 
@@ -31,17 +31,17 @@ def test_a_per_layer_head_dim_is_read_per_layer():
     config = _gemma4(head_dim=256, global_head_dim=2 * FLASH_MAX_HEAD_DIM)
     with pytest.raises(RuntimeError):  # premise: the global attribute is ambiguous on this config
         _ = config.head_dim
-    assert head_dim_exceeds_flash(config) is True
+    assert has_head_dim_beyond_flash(config) is True
 
 
 def test_narrow_per_layer_heads_are_not_wide():
     config = _gemma4(head_dim=64, global_head_dim=FLASH_MAX_HEAD_DIM)
-    assert head_dim_exceeds_flash(config) is False
+    assert has_head_dim_beyond_flash(config) is False
 
 
 def test_a_uniform_config_reads_its_single_head_dim():
-    assert head_dim_exceeds_flash(MistralConfig(head_dim=FLASH_MAX_HEAD_DIM)) is False
-    assert head_dim_exceeds_flash(MistralConfig(head_dim=2 * FLASH_MAX_HEAD_DIM)) is True
+    assert has_head_dim_beyond_flash(MistralConfig(head_dim=FLASH_MAX_HEAD_DIM)) is False
+    assert has_head_dim_beyond_flash(MistralConfig(head_dim=2 * FLASH_MAX_HEAD_DIM)) is True
 
 
 def test_the_warmup_compiles_what_the_sliding_layers_call_with():

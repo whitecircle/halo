@@ -19,12 +19,12 @@ from src.distributed.checkpoint.ep_save import (
     _check_ep_sharded_save_supported,
     validate_ep_sharded_save,
 )
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_layer_class
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.runtime import filesystem
 
 
@@ -45,7 +45,7 @@ def _fake_ep_layers(world_size, expert_tp_size=1):
 
 
 class _FakeEPLayer(EPMoELayerBase):
-    """A real ``EPMoELayerBase`` instance, which is what ``find_ep_layers`` keys on.
+    """A real ``EPMoELayerBase`` instance, which is what ``named_ep_layers`` keys on.
 
     The validator reads only ``ep_config`` and the expert-LoRA predicate, so the heavy base
     ``__init__`` (process groups, DeepEP buffers) is deliberately skipped.

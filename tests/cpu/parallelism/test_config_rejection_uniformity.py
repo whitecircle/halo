@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from src.distributed import parallelism_rules
 from tests.common.parallelism import make_parallelism_config
 
 _MOD = "src.distributed.parallelism_config"
@@ -101,11 +102,11 @@ def test_a_legacy_backend_this_topology_cannot_drive_is_rejected_at_config_time(
     # A width DeepEP V1 ships no Config for: it asserts at the first dispatch otherwise.
     config.ep_size = 6  # past __post_init__, as the racy-topology tests do
     with pytest.raises(ValueError, match="no tuned Config"):
-        config._validate_ep_buffer_backend()
+        parallelism_rules._reject_ep_buffer_backend(config)
 
     config.ep_size = 16  # a legal V1 table width, but more NVLink peers than V1 drives
     with pytest.raises(ValueError, match="intranode CUDA-IPC"):
-        config._validate_ep_buffer_backend()
+        parallelism_rules._reject_ep_buffer_backend(config)
 
 
 def _build_multinode(**kwargs):

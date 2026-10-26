@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """Every toolkit Liger family patch is numerically equivalent to the module it replaces.
 
-The CPU coverage suite (``tests/cpu/kernels/test_liger_family_coverage.py``) proves each family's own
+The CPU coverage suite (``tests/cpu/model_loading/test_liger_family_coverage.py``) proves each family's own
 forward is the FUNCTION the declared kernel computes; this proves the kernel then computes it — the
 Triton path, forward and backward, against the family's unpatched module.
 
-Three layers, one per role a :class:`~src.kernels.liger.builder.LigerFamilySpec` can fill:
+Three layers, one per role a :class:`~src.model_loading.liger.applier.LigerFamilySpec` can fill:
 
 * the fused head, whole-model: the fused loss must reproduce the family's own head, including a
   declared ``logit_scale`` (Cohere folds it onto the hidden states, which is exact only because
@@ -34,8 +34,8 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.kernels.liger.families import LIGER_FAMILY_SPECS
-from src.kernels.liger.orchestrator import resolve_liger_applier
+from src.model_loading.liger.dispatch import resolve_liger_applier
+from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from tests.common.ep_reference import compare_grad, ep_layers
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG, TINY_QWEN35_MOE_CONFIG

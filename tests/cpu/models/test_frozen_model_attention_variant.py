@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """A frozen reference or teacher is built with the attention implementation its policy is, picked by one seam.
 
-``apply_family_attention_patches`` keys the family patches on the resolved backend (``sdpa`` for Gemma 4, whose
+``apply_family_patches`` keys the family patches on the resolved backend (``sdpa`` for Gemma 4, whose
 wide heads need the SDPA pin) and returns the implementation to build with (its variant, ``sdpa_flex_sliding``).
 The policy loader and the frozen reference/teacher loader both build and finalize the model with that return
 value. A frozen model built on plain ``sdpa`` would score every logprob of the objective's other half through a
@@ -22,7 +22,7 @@ from transformers import Gemma4TextConfig
 
 from src.distributed.loading import frozen_models, model_loading
 from src.model_loading import model_preparation
-from src.models.patches.flex_sliding_attention import FLEX_SLIDING
+from src.models.attention.sdpa_flex_sliding import SDPA_FLEX_SLIDING
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
@@ -35,7 +35,7 @@ def _wide_gemma4_config() -> Gemma4TextConfig:
     return Gemma4TextConfig(**TINY_GEMMA4_WIDE_HEAD_CONFIG, layer_types=["sliding_attention", "full_attention"])
 
 
-@pytest.mark.parametrize(("opt_out", "built"), [(False, FLEX_SLIDING), (True, "sdpa")])
+@pytest.mark.parametrize(("opt_out", "built"), [(False, SDPA_FLEX_SLIDING), (True, "sdpa")])
 def test_the_seam_pins_the_backend_and_returns_the_build_implementation(opt_out, built):
     """A wide-head model resolved to ``sdpa`` on a CUDA host gets the SDPA pin, keyed on the backend, and is built
     with the flex-sliding variant; ``HALO_FLEX_SLIDING=0`` keeps the pin and builds plain ``sdpa``."""
@@ -46,7 +46,7 @@ def test_the_seam_pins_the_backend_and_returns_the_build_implementation(opt_out,
         patch.object(torch.cuda, "is_available", lambda: True),
         patch.object(model_preparation, "patch_sdpa_for_wide_heads", lambda: pins.append(1)),
     ):
-        assert model_preparation.apply_family_attention_patches(_wide_gemma4_config(), "sdpa") == built
+        assert model_preparation.apply_family_patches(_wide_gemma4_config(), "sdpa") == built
     assert pins == [1], "the wide-head SDPA pin must apply whatever the model is built with"
 
 
@@ -69,10 +69,10 @@ def _load_policy(config, seam, seen) -> None:
         patch.object(model_loading, "resolve_model_source", lambda path, revision, **kwargs: revision),
         patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
         patch.object(model_loading, "resolve_attn_implementation", lambda *a, **k: "sdpa"),
-        patch.object(model_loading, "apply_family_attention_patches", seam),
+        patch.object(model_loading, "apply_family_patches", seam),
         patch.object(model_loading, "AutoTokenizer", SimpleNamespace(from_pretrained=lambda *a, **k: MagicMock())),
         patch.object(model_loading, "_dispatch_model_loading", dispatch),
-        patch.object(model_loading, "finalize_run_model", finalize),
+        patch.object(model_loading, "apply_run_model_policies", finalize),
         pytest.raises(_Finalized),
     ):
         model_loading.load_distributed_model(
@@ -85,12 +85,12 @@ def _load_frozen(config, seam, seen) -> None:
         patch.object(frozen_models, "apply_remote_code_compat_shims"),
         patch.object(frozen_models, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
         patch.object(frozen_models, "resolve_attn_implementation", lambda *a, **k: "sdpa"),
-        patch.object(frozen_models, "apply_family_attention_patches", seam),
+        patch.object(frozen_models, "apply_family_patches", seam),
         patch.object(frozen_models, "auto_load_model", lambda *a, **k: seen.update(build=k["attn_implementation"])),
         patch.object(frozen_models, "cast_parameters_to_run_dtype"),
         patch.object(frozen_models, "finalize_loaded_model"),
         patch.object(
-            frozen_models, "finalize_run_model", lambda *a, **k: seen.update(finalize=k["attn_implementation"])
+            frozen_models, "apply_run_model_policies", lambda *a, **k: seen.update(finalize=k["attn_implementation"])
         ),
         patch.object(frozen_models, "warm_attention_kernels"),
     ):

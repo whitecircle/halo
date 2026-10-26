@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Single-EP-group hook regime: the /world divide must survive a zero-token sync microbatch.
 
-``create_expert_grad_hook`` divides the ACCUMULATED expert gradient on the sync microbatch, but a
+``build_expert_grad_hook`` divides the ACCUMULATED expert gradient on the sync microbatch, but a
 post-accumulate hook fires only for params in that backward's graph. A rank whose expert bank
 receives tokens in an early accumulation microbatch and ZERO dispatched tokens in the final one
 must still end at accumulated/world — not at the raw sum (``_expert_hook_grad_edge`` keeps the
@@ -24,7 +24,7 @@ from accelerate.state import GradientState
 from transformers import AutoModelForCausalLM
 from transformers.models.qwen3_moe import Qwen3MoeConfig
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
@@ -78,7 +78,7 @@ def run(ctx):
     model = AutoModelForCausalLM.from_config(config).to(device=device, dtype=torch.bfloat16)
 
     pc = ParallelismConfig(ep_size=ctx.world_size)
-    model = patch_moe_model_for_ep(model, pc.create_ep_config())
+    model = patch_moe_model_for_ep(model, pc.ep_config())
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPMoELayerBase)]
     ep_cfg = ep_layers[0].ep_config

@@ -63,6 +63,7 @@ import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers e
 import src.models.peft_adapters as peft_adapters
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes, has_ep_lora
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.peft_adapters import lora_fold_targets
@@ -73,7 +74,6 @@ from src.trainers.grpo.rollout.weight_sync import (
     sync_trainer_weights,
     validate_weight_sync_support,
 )
-from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.sft import DistributedSFTTrainer
 from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.checkpoint_io import fixed_text_batch
@@ -176,7 +176,7 @@ def _expert_bases_and_merges(peft_model) -> tuple[dict[str, torch.Tensor], dict[
     """Every EP layer's experts gathered as the push gathers them, without and with the native delta,
     under their live names. Collective within the EP group; empty on a dense model."""
     bases, merges = {}, {}
-    for layer_name, layer in named_ep_layers(peft_model).items():
+    for layer_name, layer in named_ep_layers(peft_model):
         for merge, out in ((False, bases), (True, merges)):
             for key, tensor in layer.gather_expert_state_dict("cuda", merge_lora=merge).items():
                 out[f"{layer_name}.{key}"] = tensor.detach().clone()
@@ -308,7 +308,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
     """The roster, the gate and the sharding the row names, read off the live tree (rank-local)."""
     params = dict(unwrapped.named_parameters())
     lora_bases = [name for name in params if ".base_layer." in name]
-    layers = named_ep_layers(unwrapped)
+    layers = dict(named_ep_layers(unwrapped))
     experts = [
         param for layer in layers.values() for attr, param in layer.expert_named_params() if not _is_adapter(attr)
     ]

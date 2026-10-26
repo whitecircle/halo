@@ -13,7 +13,7 @@ import types
 from unittest.mock import patch
 
 import src.distributed.loading.frozen_models as frozen_loader
-import src.models.patches.gpt_oss_sinks as sink_patches
+import src.models.attention.gpt_oss_sinks as sink_patches
 
 STUB_CONFIG = "AUXILIARY_CONFIG"
 STUB_RESOLVED_ATTN = "flex_attention"
@@ -24,15 +24,13 @@ def stub_frozen_loader():
     """Patch every hub call, fetch-coordination scope and sink patch the loader reaches; yields the captures."""
     resolver_calls: list[dict] = []
 
-    # No default for sinks_reset: the real resolver defaults it to True, so a stub that did the same
-    # would let a caller drop the argument entirely and still satisfy the reset_sinks=True cases.
-    def fake_resolve(model_config, attn_implementation, dtype, *, sinks_reset):
+    def fake_resolve(model_config, attn_implementation, dtype, *, sinks_policy):
         resolver_calls.append(
             {
                 "model_config": model_config,
                 "attn_implementation": attn_implementation,
                 "dtype": dtype,
-                "sinks_reset": sinks_reset,
+                "sinks_policy": sinks_policy,
             }
         )
         return STUB_RESOLVED_ATTN

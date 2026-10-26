@@ -175,7 +175,7 @@ def test_self_distill_refuses_a_loss_type_its_own_cross_entropy_is_not(tmp_path)
 def test_self_distill_checks_a_separate_reference_tokenizer_before_any_load(tmp_path):
     """Only tokenizer files are read, so a mismatched anchor repo is refused before the dataset and
     both model loads."""
-    parallelism = SimpleNamespace(is_ep_mode=False, is_tp_mode=False)
+    parallelism = SimpleNamespace(has_ep_group=False, is_tp_mode=False)
     vocabs = {"stub/qwen3-4b": {"a": 0, "b": 1}, "org/other-reference": {"a": 1, "b": 0}}
     tokenizers = SimpleNamespace(
         from_pretrained=lambda path, **_: SimpleNamespace(get_vocab=lambda: dict(vocabs[path]))
@@ -199,7 +199,7 @@ def test_self_distill_checks_a_separate_reference_tokenizer_before_any_load(tmp_
 def test_self_distill_refuses_confidence_weighting_over_a_presharded_load(tmp_path):
     """The weights divide by the train split's mean confidence; per-rank shards would each divide by
     their own, so a row's weight would depend on the rank that drew it."""
-    parallelism = SimpleNamespace(is_ep_mode=False, is_tp_mode=False)
+    parallelism = SimpleNamespace(has_ep_group=False, is_tp_mode=False)
     runtime = SimpleNamespace(parallelism_config=parallelism)
     with pytest.raises(ValueError, match="presharded dataset"):
         _run_main(

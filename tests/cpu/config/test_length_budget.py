@@ -116,7 +116,7 @@ def test_resolve_length_to_context_keeps_explicit_value():
 
 
 def _setup_tokenizer() -> SimpleNamespace:
-    """A tokenizer whose special tokens are already settled, so ``setup_model_and_tokenizer``
+    """A tokenizer whose special tokens are already settled, so ``configure_run_tokenizer``
     changes nothing but ``model_max_length``.
 
     ``pad_token_id`` accompanies ``pad_token`` because no real tokenizer can carry one without the

@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from src.distributed.expert_parallel import expert_gather
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 WORLD = 4
 GROUP = "fake-ep-group"

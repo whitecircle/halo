@@ -66,7 +66,7 @@ def build_dispatchers(ep_config, num_experts: int) -> list:
 
 
 def run(ctx) -> dict:
-    ep_config = ParallelismConfig(ep_size=ctx.world_size).create_ep_config()
+    ep_config = ParallelismConfig(ep_size=ctx.world_size).ep_config()
     dispatchers = build_dispatchers(ep_config, EXPERTS_PER_RANK * ctx.world_size)
 
     arenas = live_arenas()

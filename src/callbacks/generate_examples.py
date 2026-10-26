@@ -21,7 +21,7 @@ from transformers import (
 )
 
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
-from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.mesh import has_tp_dim
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
 from src.models.unwrapping import unwrap_framework_wrappers
@@ -77,7 +77,7 @@ def _uses_collective_forward(model) -> bool:
     """
     return (
         hasattr(model, "_is_fsdp_managed_module")
-        or bool(find_ep_layers(model))
+        or bool(named_ep_layers(model))
         or any(isinstance(param.data, DTensor) for param in model.parameters())
     )
 

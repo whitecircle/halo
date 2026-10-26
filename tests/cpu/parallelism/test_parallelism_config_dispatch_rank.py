@@ -18,7 +18,7 @@ shapes across both layouts, and asserts the two agree.
 import pytest
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.group_layout import etp_dispatch_coords
+from src.distributed.group_layout import ep_layout
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.parallelism import make_parallelism_config, stubbed_process_groups
 
@@ -64,8 +64,8 @@ def test_dispatch_rank_agreement_across_layouts():
                 expert_tp_size=expert_tp_size,
                 ep_scope="node" if node_local else "global",
             )
-            assert pc.get_ep_rank() == ep.ep_rank, (rank, world_size, ep_size, expert_tp_size, node_local)
-            assert pc.get_ep_group_idx() == ep.ep_group_idx
+            coords = pc.ep_layout.rank_and_group(pc.stage_local_rank)
+            assert coords == (ep.ep_rank, ep.ep_group_idx), (rank, world_size, ep_size, expert_tp_size, node_local)
             # DP rank keys on EPConfig's dispatch layout: partners sharing dispatch_ep_rank share a batch.
             expected_dp = ep.dispatch_ep_rank * ep.num_ep_groups + ep.ep_group_idx
             assert pc.get_data_parallel_rank() == expected_dp, (
@@ -80,11 +80,9 @@ def test_dispatch_rank_agreement_across_layouts():
 
 
 def test_expert_replica_ranks_agree_with_ep_config():
-    """``ParallelismConfig.get_expert_replica_ranks`` has no production caller — it is the deliberate
-    independent oracle for ``EPConfig.expert_replica_ranks``, the membership the deferred
-    cross-replica expert-grad sweep reduces over. Nothing pinned the two against each other, so the
-    oracle could drift into agreeing with nothing. A divergence averages expert grads over the wrong
-    ranks: silently wrong weights, no error."""
+    """``EPConfig.expert_replica_ranks``, the membership the deferred cross-replica expert-grad sweep
+    reduces over, is the replica set of ``ParallelismConfig.ep_layout``. A divergence averages expert
+    grads over the wrong ranks: silently wrong weights, no error."""
     for world_size, gpus_per_node, ep_size, expert_tp_size, node_local in SHAPES:
         for rank in range(world_size):
             ep = _make_ep_config(
@@ -98,7 +96,8 @@ def test_expert_replica_ranks_agree_with_ep_config():
                 expert_tp_size=expert_tp_size,
                 ep_scope="node" if node_local else "global",
             )
-            assert sorted(pc.get_expert_replica_ranks()) == sorted(ep.expert_replica_ranks), (
+            replicas = pc.ep_layout.replica_ranks(ep.ep_rank) if pc.num_ep_groups > 1 else [rank]
+            assert sorted(replicas) == sorted(ep.expert_replica_ranks), (
                 rank,
                 world_size,
                 ep_size,
@@ -134,12 +133,18 @@ def test_ep_config_dispatch_formulas_pinned():
 
 
 def test_leaf_function_matches_group_construction():
-    """``etp_dispatch_coords`` must agree with the INDEPENDENT indexing the real group construction
-    uses: the ranks ``_create_expert_tp_groups`` put in this rank's expert-TP group (captured via
-    the stubbed ``new_group``) are exactly the EP-group members the leaf assigns this rank's
-    dispatch coordinate. EPConfig assigns its own coords THROUGH the leaf, so comparing those would
-    certify nothing — the constructed membership is the only independent spelling."""
+    """``etp_partition`` must agree with the INDEPENDENT indexing the real group construction uses:
+    the ranks ``_create_expert_tp_groups`` put in this rank's expert-TP group (captured via the
+    stubbed ``new_group``) are exactly the EP-group members the layout assigns this rank's dispatch
+    coordinate. EPConfig assigns its own coords THROUGH the layout, so comparing those would certify
+    nothing — the constructed membership is the only independent spelling."""
     for world_size, gpus_per_node, ep_size, expert_tp_size, node_local in EP_SHAPES:
+        layout = ep_layout(
+            world_size=world_size,
+            group_size=ep_size * expert_tp_size,
+            domain_size=gpus_per_node,
+            node_local=node_local,
+        )
         for rank in range(world_size):
             ep = _make_ep_config(
                 rank, world_size, gpus_per_node, ep_size=ep_size, expert_tp_size=expert_tp_size, node_local=node_local
@@ -148,7 +153,7 @@ def test_leaf_function_matches_group_construction():
             expected = sorted(
                 group_ranks[k]
                 for k in range(len(group_ranks))
-                if etp_dispatch_coords(k, ep_size, expert_tp_size, node_local)[0] == ep.dispatch_ep_rank
+                if layout.etp_partition(k, ep_size, expert_tp_size)[0] == ep.dispatch_ep_rank
             )
             shape = (rank, world_size, ep_size, expert_tp_size, node_local)
             assert len(expected) == expert_tp_size, shape

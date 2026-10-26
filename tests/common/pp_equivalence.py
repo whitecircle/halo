@@ -35,9 +35,9 @@ from transformers import (
 )
 from trl import SFTConfig
 
-from src.distributed.expert_parallel import base_layer
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.moe_layer import compute
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
@@ -76,7 +76,7 @@ class UnsplitReference:
     ``expert_grads`` / ``router_grads`` / ``expert_param_names`` are populated only when the
     reference model carries EP wrappers: expert parameters have no sharding-independent name (ETP
     splits the fused ``gate_up_proj``, grouped-GEMM splits it again), so they are compared through
-    :meth:`~src.distributed.expert_parallel.base_layer.EPMoELayerBase.gather_expert_grads` — the
+    :meth:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase.gather_expert_grads` — the
     same canonical layout on either side — and excluded from the name-keyed comparison.
     """
 
@@ -127,7 +127,7 @@ def build_moe_model(dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
 def build_patched_moe_model(config: ParallelismConfig, dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
     """The MoE model carrying the config's EP wrappers + prepared (non-collective) EP buffers."""
     model = build_moe_model(dtype)
-    patch_moe_model_for_ep(model, config.create_ep_config())
+    patch_moe_model_for_ep(model, config.ep_config())
     return model
 
 
@@ -270,7 +270,7 @@ def _pin_unfused_expert_sum(ctx) -> None:
     backward needs no pin: it sums gradient rows that are already bf16, which two-way commutes the same.
     The fused kernels' own numerics are gated by ``test_moe_permute`` and the family kernel-stack numerics.
     """
-    patcher = mock.patch.object(base_layer, "MoEWeightedUnpermute", _UnfusedWeightedUnpermute)
+    patcher = mock.patch.object(compute, "MoEWeightedUnpermute", _UnfusedWeightedUnpermute)
     patcher.start()
     ctx.on_teardown(patcher.stop)
 

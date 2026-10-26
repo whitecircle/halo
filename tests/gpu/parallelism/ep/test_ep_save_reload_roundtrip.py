@@ -41,7 +41,7 @@ from safetensors import safe_open
 from transformers import AutoTokenizer
 
 from src.distributed.checkpoint.ep_save import save_ep_model
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_int, env_str

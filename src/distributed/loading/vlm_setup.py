@@ -24,7 +24,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.loading.model_source import probe_checkpoint
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
-from src.model_loading.model_preparation import finalize_liger_after_direct_load
+from src.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from src.models.modality import is_vlm_model
 from src.models.seq_cls_heads import multimodal_sequence_classification_model_types
 from src.runtime.consensus import rank_consensus

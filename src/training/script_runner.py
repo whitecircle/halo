@@ -31,7 +31,7 @@ from src.distributed.loading.vlm_setup import load_model_consuming_init_kwargs
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
 from src.models.context_window import get_model_context_window, is_bounded_length, resolve_length_to_context
 from src.runtime.consensus import raise_rank0_failure
 from src.runtime.filesystem import verify_output_filesystem_sharing
@@ -110,7 +110,7 @@ def init_training_script(
     agree_rank_uniform_env()
 
     # Peeled before the config is built: __post_init__ validates expert_lora (PP rejects it) and
-    # create_ep_config caches its EPConfig, so a later assignment would not reach the layers.
+    # ep_config caches its EPConfig, so a later assignment would not reach the layers.
     parallelism_config = parallelism_config_from_args(
         dist_args,
         training_config=training_config,
@@ -338,7 +338,7 @@ def apply_max_length(
     :func:`apply_prompt_completion_window` or :func:`apply_context_window` instead.
     """
     training_config.max_length = resolve_length_to_context(training_config.max_length, model, tokenizer)
-    return setup_model_and_tokenizer(
+    return configure_run_tokenizer(
         args, model, tokenizer, training_config.max_length, embeddings_sharded=input_embeddings_tp_sharded
     )
 
@@ -351,7 +351,7 @@ def apply_context_window(args, model: PreTrainedModel, tokenizer: PreTrainedToke
     Returns the tokenizer resolved through ``args.tokenizer_backend`` — callers must use it in place
     of the one passed in.
     """
-    return setup_model_and_tokenizer(
+    return configure_run_tokenizer(
         args,
         model,
         tokenizer,
@@ -417,9 +417,7 @@ def apply_prompt_completion_window(
     window = None
     if is_bounded_length(max_prompt_length) and is_bounded_length(max_completion_length):
         window = max_prompt_length + max_completion_length
-    tokenizer = setup_model_and_tokenizer(
-        args, model, tokenizer, window, embeddings_sharded=input_embeddings_tp_sharded
-    )
+    tokenizer = configure_run_tokenizer(args, model, tokenizer, window, embeddings_sharded=input_embeddings_tp_sharded)
     return tokenizer, window
 
 
@@ -560,7 +558,7 @@ def apply_distributed_trainer_config(training_config, parallelism_config: Parall
     """Trainer-config knobs every distributed trainer requires: disable HF's own FSDP wiring (the
     mixin handles sharding) and let DDP tolerate the EP layers' externally-synced parameters."""
     training_config.fsdp = ""
-    if parallelism_config.is_ep_mode:
+    if parallelism_config.has_ep_group:
         training_config.ddp_find_unused_parameters = True
 
 
@@ -580,7 +578,7 @@ def run_trainer(
     parallelism_config = runtime.parallelism_config
     if is_global_main_process():
         logger.info(f"Starting {method_name} training (mode: {runtime.mode_suffix})...")
-        if parallelism_config.is_ep_mode:
+        if parallelism_config.has_ep_group:
             logger.info(f"  EP size: {parallelism_config.ep_size}")
         if parallelism_config.is_cp_mode:
             logger.info(f"  CP size: {parallelism_config.cp_size}")

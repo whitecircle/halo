@@ -1,4 +1,4 @@
-"""What ``setup_model_and_tokenizer`` may change about the tokenizer a run then EXPORTS.
+"""What ``configure_run_tokenizer`` may change about the tokenizer a run then EXPORTS.
 
 The seam mutates the tokenizer for the run's benefit, and both mutations otherwise reach the
 checkpoint:
@@ -35,7 +35,7 @@ from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.model_loading.tokenizer_setup import pristine_model_max_length, setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import configure_run_tokenizer, pristine_model_max_length
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -76,7 +76,7 @@ def _saved_config(tokenizer, tmp_path) -> dict:
 
 
 def test_the_export_carries_the_tokenizers_own_bound(tmp_path):
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
     )
     with pristine_model_max_length(tokenizer):
@@ -88,10 +88,10 @@ def test_a_second_pin_does_not_overwrite_the_snapshot(tmp_path):
     """A preference or distillation script runs the seam once per model against one tokenizer; the
     second pass must not record the first pass's budget as the tokenizer's own bound."""
     tokenizer = _tokenizer()
-    setup_model_and_tokenizer(
+    configure_run_tokenizer(
         CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
     )
-    setup_model_and_tokenizer(
+    configure_run_tokenizer(
         CommonScriptArguments(), None, tokenizer, RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
     )
     with pristine_model_max_length(tokenizer):
@@ -101,7 +101,7 @@ def test_a_second_pin_does_not_overwrite_the_snapshot(tmp_path):
 def test_a_processor_reaches_its_nested_tokenizer():
     """A VLM run hands the trainer the processor, whose save delegates to the tokenizer the seam
     pinned — so the restore has to reach through it."""
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
     )
     processor = types.SimpleNamespace(tokenizer=tokenizer)
@@ -143,7 +143,7 @@ class _Fsdp2SaveTrainer:
             is_pp_mode=False,
             is_cp_mode=False,
             is_tp_mode=False,
-            is_ep_tp_mode=False,
+            has_ep_group=False,
             tp_size=1,
             merge_expert_lora_on_save=False,
             expert_lora=None,
@@ -171,7 +171,7 @@ def test_a_trainer_save_exports_the_models_own_bound(tmp_path):
     Driven through a real save and read back off disk: the claim is about the number in the file the
     run ships, which a check that ``save_model``'s source mentions the context manager cannot make —
     it holds just as well when the manager is applied to the wrong object or after the write."""
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), None, _tokenizer(), RUN_BUDGET, embeddings_sharded=input_embeddings_tp_sharded
     )
     # Premise: there IS a pin to keep off disk, so the assertion below is not the tokenizer's default.
@@ -189,7 +189,7 @@ def test_a_trainer_save_exports_the_models_own_bound(tmp_path):
 
 
 def test_added_special_tokens_keep_the_checkpoints_own(tmp_path):
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(added_special_tokens=["<newtok>"]),
         None,
         _tokenizer(),
@@ -206,7 +206,7 @@ def test_added_special_tokens_keep_the_checkpoints_own(tmp_path):
 
 
 def test_re_adding_an_existing_special_token_does_not_duplicate_it():
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(added_special_tokens=[CONTROL_TOKENS[0]]),
         None,
         _tokenizer(),
@@ -231,7 +231,7 @@ def test_growing_the_vocabulary_under_tp_is_refused():
             distribute_tensor(embedding.weight.detach(), mesh, [Shard(0)], src_data_rank=None)
         )
         with pytest.raises(ValueError, match="patch_vocab.py"):
-            setup_model_and_tokenizer(
+            configure_run_tokenizer(
                 CommonScriptArguments(added_special_tokens=["<newtok>"]),
                 model,
                 tokenizer,
@@ -251,11 +251,11 @@ def test_every_production_caller_passes_the_sharding_predicate():
     for path in sorted((*(REPO_ROOT / "src").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"))):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == setup_model_and_tokenizer.__name__:
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == configure_run_tokenizer.__name__:
                 calls += 1
                 if "embeddings_sharded" not in {kw.arg for kw in node.keywords}:
                     missing.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
-    assert calls, f"the sweep found no call to {setup_model_and_tokenizer.__name__}"
+    assert calls, f"the sweep found no call to {configure_run_tokenizer.__name__}"
     assert not missing, "these call sites lose the TP vocab-grow refusal: " + ", ".join(missing)
 
 

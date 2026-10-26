@@ -82,7 +82,7 @@ def run(ctx) -> dict:
     log(f"\n{'=' * 70}\n  Self-distill (SDPG) adapter test — mode={mode}, world={ctx.world_size}, ep={ep}\n{'=' * 70}")
     checks: dict[str, bool] = {}
     parallelism_config = ParallelismConfig(ep_size=ep) if mode in ("lora_ep", "expert_lora") else ParallelismConfig()
-    attn = "flex_attention" if parallelism_config.is_ep_mode else "sdpa"
+    attn = "flex_attention" if parallelism_config.has_ep_group else "sdpa"
     model, tokenizer, peft_config = load_peft_model(mode, parallelism_config, attn_implementation=attn)
     expert_lora = is_expert_lora_active(model)
     log(f"  expert_lora_active={expert_lora}, peft_config={'set' if peft_config else 'None'}")
@@ -117,7 +117,7 @@ def run(ctx) -> dict:
         remove_unused_columns=False,
         dataset_kwargs={"skip_prepare_dataset": True},
         fsdp="",
-        ddp_find_unused_parameters=parallelism_config.is_ep_mode,
+        ddp_find_unused_parameters=parallelism_config.has_ep_group,
     )
     trainer = DistributedSelfDistillationTrainer(
         model,

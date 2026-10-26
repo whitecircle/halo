@@ -8,25 +8,14 @@ multi-group topology guards.
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
 from accelerate.logging import get_logger
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase, find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.models.moe_balancing import config_has_experts
 from src.runtime.ranks import is_global_main_process
 
 logger = get_logger(__name__, log_level="info")
-
-
-def named_ep_layers(model: nn.Module) -> dict[str, EPMoELayerBase]:
-    """FQN → EP MoE layer for every EP-wrapped module in ``model``, over :func:`find_ep_layers`' walk.
-
-    That walk matches by ``isinstance`` rather than an ``ep_config`` probe: a PEFT ``modules_to_save``
-    wrapper forwards ``__getattr__`` to the EP layer it holds, so a probe would match the wrapper too,
-    and the wrapper's own type declares neither the family gather nor its export renames.
-    """
-    return dict(find_ep_layers(model))
 
 
 def forces_reentrant_checkpointing(parallelism_config, model_config) -> bool:
@@ -41,7 +30,7 @@ def forces_reentrant_checkpointing(parallelism_config, model_config) -> bool:
     """
     if parallelism_config.is_pp_mode:
         return False
-    return parallelism_config.is_ep_mode or parallelism_config.is_cp_mode or config_has_experts(model_config)
+    return parallelism_config.has_ep_group or parallelism_config.is_cp_mode or config_has_experts(model_config)
 
 
 def require_ep_config(ep_config):
@@ -64,7 +53,7 @@ class EpIntrospectionMixin:
 
     def _find_ep_modules(self) -> list[EPMoELayerBase]:
         """Every EP-patched module of the model, in ``named_modules`` order."""
-        return [module for _name, module in find_ep_layers(self.model)]
+        return [module for _name, module in named_ep_layers(self.model)]
 
     def _capture_ep_config(self) -> None:
         """Record the ``EPConfig`` the model's EP layers were built with (``None`` without any).
@@ -82,7 +71,7 @@ class EpIntrospectionMixin:
         Asked of the model directly, so it also answers before :meth:`_capture_ep_config` has run.
         This property selects the checkpoint saver and the resume path, and gates the EP clip's install.
         """
-        return bool(find_ep_layers(self.model))
+        return bool(named_ep_layers(self.model))
 
     def _get_ep_param_ids(self) -> set:
         """Parameter ids belonging to EP modules, by module membership (not name matching).
@@ -188,7 +177,7 @@ class EpIntrospectionMixin:
             # Outside the logging gate, so a missing EP config raises on every rank rather than rank 0 alone.
             deferred_dp = require_ep_config(self._ep_config).is_deferred_dp
             if deferred_dp and is_global_main_process():
-                scope = "node-local across domains" if config.is_node_local_ep else "cross-node"
+                scope = "node-local across domains" if config.ep_scope == "node" else "cross-node"
                 logger.info(
                     f"Multi-group EP ({scope}, {config.num_ep_groups} EP groups, "
                     f"ep_group_size={config.ep_group_size}): cross-replica DP average deferred to a "

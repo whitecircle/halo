@@ -50,7 +50,6 @@ from src.distributed.checkpoint.ep_save import (
 )
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.checkpoint.tp_save import save_tp_model
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_classes,
     experts_container_attrs,
@@ -59,6 +58,7 @@ from src.distributed.expert_parallel.expert_weights import (
     to_hub_layer_key,
 )
 from src.distributed.expert_parallel.lazy_loader import build_family_key_mapping
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.model_loading.lazy_safetensors.conversion import Concat
 from src.models.param_roles import persistent_buffers

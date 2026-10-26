@@ -59,7 +59,7 @@ def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     parallelism_config = parallelism_config_for(mode, ep)
     # gpt-oss needs flex_attention under EP; dense qwen uses the auto default.
-    attn = "flex_attention" if parallelism_config.is_ep_mode else None
+    attn = "flex_attention" if parallelism_config.has_ep_group else None
     model, tokenizer, peft_config = load_peft_model(mode, parallelism_config, attn_implementation=attn)
     expert_lora = is_expert_lora_active(model)
     log(f"  expert_lora_active={expert_lora}, peft_config={'set' if peft_config else 'None'}")
@@ -81,7 +81,7 @@ def run(ctx) -> dict:
         max_completion_length=512,
         dataloader_drop_last=True,
         fsdp="",
-        ddp_find_unused_parameters=parallelism_config.is_ep_mode,
+        ddp_find_unused_parameters=parallelism_config.has_ep_group,
     )
     trainer = OfflineGRPOTrainer(
         model=model,

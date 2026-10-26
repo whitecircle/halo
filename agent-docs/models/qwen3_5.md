@@ -25,7 +25,7 @@ Each decoder layer is *either* full softmax attention *or* a linear-attention bl
 | RoPE | Partial — only the first `head_dim * partial_rotary_factor` channels rotate (default `0.25`) |
 | Heads | 16 Q heads, 2 KV heads (GQA factor 8), which caps TP at `tp_size=2` |
 
-> **FlashAttention-4 is unsupported for this family on Blackwell.** FA4's backward emits NaN gradients for the combination head_dim 256 + partial RoPE + output gate + GQA 16:2. `model_fa4_backward_nan_prone` (`src/models/patches/attention.py`) demotes the load to SDPA, keyed on the `qwen3_5*` / `qwen3_next*` `model_type` prefixes. Qwen3.6 is covered by those: it reuses the 3.5 classes and ships under the 3.5 types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower).
+> **FlashAttention-4 is unsupported for this family on Blackwell.** FA4's backward emits NaN gradients for the combination head_dim 256 + partial RoPE + output gate + GQA 16:2. `is_fa4_backward_nan_prone` (`src/models/attention/selection.py`) demotes the load to SDPA, keyed on the `qwen3_5*` / `qwen3_next*` `model_type` prefixes. Qwen3.6 is covered by those: it reuses the 3.5 classes and ships under the 3.5 types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower).
 
 On Hopper the standard detector picks FA3 when installed, else FA2.
 

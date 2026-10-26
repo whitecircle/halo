@@ -7,7 +7,7 @@ Both decide something a run then EXPORTS, and both fail quietly when wrong:
     tokenizer write — so a tokenizer that exists but fails to import (a remote-code class, a missing
     backend package) lets a tool ship a resized model beside the directory's stale tokenizer and
     report success. Only "there is no tokenizer here" may yield ``None``.
-  * ``resolve_model_dtype`` must not resolve names through ``getattr(torch, ...)`` alone: the
+  * ``normalize_model_init_dtype`` must not resolve names through ``getattr(torch, ...)`` alone: the
     short spellings ``DTYPE_BY_NAME`` defines — the ones every ``--dtype`` CLI advertises through
     ``choices=list(DTYPE_BY_NAME)`` — then raise when the same string arrives via
     ``model_init_kwargs``. It must also keep accepting the pre-v5 ``torch_dtype`` spelling a user
@@ -94,7 +94,7 @@ def test_every_advertised_dtype_spelling_resolves(name, expected):
     """Each ``DTYPE_BY_NAME`` key is a value the CLIs offer; all must resolve from model_init_kwargs too."""
     kwargs = {"dtype": name}
 
-    dtype_mod.resolve_model_dtype(kwargs)
+    dtype_mod.normalize_model_init_dtype(kwargs)
 
     assert kwargs["dtype"] is expected
 
@@ -103,7 +103,7 @@ def test_torch_attribute_names_outside_the_map_still_resolve():
     """The getattr fallback survives: a valid torch.dtype name the map does not list still works."""
     kwargs = {"dtype": "float64"}
 
-    dtype_mod.resolve_model_dtype(kwargs)
+    dtype_mod.normalize_model_init_dtype(kwargs)
 
     assert kwargs["dtype"] is torch.float64
 
@@ -113,7 +113,7 @@ def test_legacy_torch_dtype_spelling_is_folded_into_dtype():
     ``from_pretrained`` under the deprecated alias."""
     kwargs = {"torch_dtype": "bf16"}
 
-    dtype_mod.resolve_model_dtype(kwargs)
+    dtype_mod.normalize_model_init_dtype(kwargs)
 
     assert kwargs == {"dtype": torch.bfloat16}
 
@@ -122,7 +122,7 @@ def test_explicit_dtype_wins_over_the_legacy_spelling():
     """Mirrors transformers' own precedence when a config carries both."""
     kwargs = {"dtype": "float32", "torch_dtype": "bfloat16"}
 
-    dtype_mod.resolve_model_dtype(kwargs)
+    dtype_mod.normalize_model_init_dtype(kwargs)
 
     assert kwargs == {"dtype": torch.float32}
 
@@ -131,13 +131,13 @@ def test_pass_through_values_are_untouched():
     """ "auto", ``None`` and real dtypes are not names to resolve."""
     for value in ("auto", None, torch.bfloat16):
         kwargs = {"dtype": value}
-        assert dtype_mod.resolve_model_dtype(kwargs)["dtype"] is value
+        assert dtype_mod.normalize_model_init_dtype(kwargs)["dtype"] is value
 
 
 def test_invalid_dtype_name_still_raises():
     """A typo must not silently become a dtype — the widened lookup keeps the refusal."""
     with pytest.raises(ValueError, match="Invalid dtype"):
-        dtype_mod.resolve_model_dtype({"dtype": "bfloat8"})
+        dtype_mod.normalize_model_init_dtype({"dtype": "bfloat8"})
 
 
 if __name__ == "__main__":

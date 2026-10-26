@@ -23,7 +23,7 @@ from types import SimpleNamespace
 
 import torch
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log
 

@@ -13,7 +13,7 @@ import torch.distributed as dist
 
 from src.args.distributed_args import DistributedArguments
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.group_layout import cross_node_rank_and_group, node_local_rank_and_group
+from src.distributed.group_layout import NodeLocalLayout
 from src.kernels.lowp.spec import LowpSpec
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -177,14 +177,14 @@ def test_validate_ep_node_scope_too_large():
         create_config(ep_size=16, world_size=16, gpus_per_node=8, ep_scope="node")
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
-        # _validate_ep_group node branch — not the global branch, not _validate_ep_tp_locality.
+        # _reject_ep_group node branch, not the global branch.
         assert "Node-local EP group size (16) cannot exceed the NVLink domain (8)" in str(e), e
 
 
 def test_validate_ep_node_scope_divisibility():
     """Node-local EP: ep_group_size must divide the NVLink domain (gpus_per_node)."""
     # ep_group(3) <= domain(8) but 8 % 3 != 0; world(8) is divisible by the domain so the earlier
-    # world/domain guard passes and _validate_ep_group's node-divisibility branch is what fires.
+    # world/domain guard passes and _reject_ep_group's node-divisibility branch is what fires.
     try:
         create_config(ep_size=3, world_size=8, gpus_per_node=8, ep_scope="node")
         raise AssertionError("Should have raised ValueError")
@@ -348,7 +348,7 @@ def test_validate_expert_tp_plus_cp():
 
 
 def test_validate_ep_cp_node_scope_mismatch():
-    """Node-local EP+CP: ep_group_size must equal the NVLink domain (the _validate_ep_cp message)."""
+    """Node-local EP+CP: ep_group_size must equal the NVLink domain (the _reject_ep_cp message)."""
     try:
         create_config(ep_size=4, cp_size=4, world_size=16, gpus_per_node=8, ep_scope="node")
         raise AssertionError("Should have raised ValueError")
@@ -537,20 +537,20 @@ def test_no_ep_wrappers_disabled():
 
 
 def test_boolean_mode_properties():
-    """Test is_ep_mode, is_cp_mode, is_tp_mode, is_ep_tp_mode, is_ep_cp_mode."""
+    """Test has_ep_group, is_cp_mode and is_tp_mode, alone and combined."""
     cfg = create_config(ep_size=8, tp_size=4, world_size=8, gpus_per_node=8)
-    assert cfg.is_ep_mode is True
+    assert cfg.has_ep_group is True
     assert cfg.is_tp_mode is True
-    assert cfg.is_ep_tp_mode is True
+    assert (cfg.has_ep_group and cfg.is_tp_mode) is True
     assert cfg.is_cp_mode is False
-    assert cfg.is_ep_cp_mode is False
+    assert (cfg.has_ep_group and cfg.is_cp_mode) is False
 
 
 def test_default_sizes_and_mode_flags():
     """Default config: every axis at 1, no mode flag set, grouped GEMM (and so the EP wrappers) on."""
     cfg = create_config(world_size=8, gpus_per_node=8)
     assert (cfg.ep_size, cfg.cp_size, cfg.tp_size, cfg.expert_tp_size) == (1, 1, 1, 1)
-    assert not (cfg.is_ep_mode or cfg.is_cp_mode or cfg.is_tp_mode)
+    assert not (cfg.has_ep_group or cfg.is_cp_mode or cfg.is_tp_mode)
     assert cfg.use_grouped_gemm is True
     assert cfg.needs_ep_wrappers is True
 
@@ -565,14 +565,14 @@ def test_default_sizes_and_mode_flags():
 )
 def test_a_single_axis_sets_only_its_own_mode_flag(axis, ep_cp_tp_flags):
     cfg = create_config(world_size=8, gpus_per_node=8, **axis)
-    assert (cfg.is_ep_mode, cfg.is_cp_mode, cfg.is_tp_mode) == ep_cp_tp_flags
+    assert (cfg.has_ep_group, cfg.is_cp_mode, cfg.is_tp_mode) == ep_cp_tp_flags
 
 
 def test_ep_cp_mode_flags():
     """EP+CP sets both axis flags and the combined one, and not the EP+TP one."""
     cfg = create_config(ep_size=8, cp_size=8, world_size=16, gpus_per_node=8, ep_scope="node")
-    assert cfg.is_ep_mode and cfg.is_cp_mode and cfg.is_ep_cp_mode
-    assert not (cfg.is_tp_mode or cfg.is_ep_tp_mode)
+    assert cfg.has_ep_group and cfg.is_cp_mode and (cfg.has_ep_group and cfg.is_cp_mode)
+    assert not (cfg.is_tp_mode or (cfg.has_ep_group and cfg.is_tp_mode))
 
 
 def test_num_ep_groups_node():
@@ -606,21 +606,13 @@ def test_num_ep_groups_global():
 def test_num_ep_groups_equals_the_groups_the_layout_actually_builds(topology):
     """``num_ep_groups`` must equal the number of DISTINCT groups ``EPConfig`` constructs.
 
-    ``EPConfig`` places each rank with the ``group_layout`` functions below; ``num_ep_groups`` is
-    read by the sharded-EP save guard, the deferred cross-replica divisor and the DP-rank math. A
-    count derived independently of the layout is a silent wrong answer at some topology — an
-    over-count divides expert grads by too much, an under-count lets a sharded save merge duplicated
-    experts — so this walks every rank and compares the two.
+    ``EPConfig`` places each rank with the layout's ``rank_and_group``; ``num_ep_groups`` is read by
+    the sharded-EP save guard, the deferred cross-replica divisor and the DP-rank math. A wrong count
+    divides expert grads by too much or lets a sharded save merge duplicated experts, so this walks
+    every rank and compares the two.
     """
     cfg = create_config(**topology)
-    ranks = range(cfg.stage_world_size)
-    if cfg.ep_scope == "node":
-        groups = {node_local_rank_and_group(r, cfg.nvlink_domain_size, cfg.ep_group_size)[1] for r in ranks}
-    else:
-        groups = {
-            cross_node_rank_and_group(r, cfg.stage_world_size, cfg.ep_group_size, cfg.nvlink_domain_size)[1]
-            for r in ranks
-        }
+    groups = {cfg.ep_layout.rank_and_group(r)[1] for r in range(cfg.stage_world_size)}
     assert len(groups) == cfg.num_ep_groups, f"{sorted(groups)} vs num_ep_groups={cfg.num_ep_groups}"
     assert groups == set(range(cfg.num_ep_groups)), sorted(groups)
 
@@ -646,8 +638,8 @@ def _ep_group_size_one_worker(rank: int, out_dir: str) -> None:
         failures.append(f"precondition: ep_group_size={ep.ep_group_size} sync={ep.needs_expert_grad_sync}")
     if pc.num_ep_groups != ep.num_ep_groups:
         failures.append(f"num_ep_groups {pc.num_ep_groups} != EPConfig's {ep.num_ep_groups}")
-    if sorted(pc.get_expert_replica_ranks()) != sorted(ep.expert_replica_ranks):
-        failures.append(f"replicas {pc.get_expert_replica_ranks()} != EPConfig's {ep.expert_replica_ranks}")
+    if ep.expert_replica_ranks != list(range(_GLOO_WORLD)):
+        failures.append(f"replicas {ep.expert_replica_ranks} != the whole block")
     if dist.get_world_size(ep.expert_replica_group) != _GLOO_WORLD:
         failures.append(f"replica group holds {dist.get_world_size(ep.expert_replica_group)} of {_GLOO_WORLD}")
     with open(os.path.join(out_dir, f"result_{rank}.txt"), "w") as fh:
@@ -655,14 +647,13 @@ def _ep_group_size_one_worker(rank: int, out_dir: str) -> None:
 
 
 def test_ep_group_size_one_agrees_with_a_real_eight_rank_ep_config(tmp_path):
-    """``num_ep_groups`` and ``get_expert_replica_ranks`` at ``ep_group_size == 1``, against the groups
-    a REAL 8-rank ``EPConfig`` builds over a live gloo world.
+    """``num_ep_groups`` and the expert-replica set at ``ep_group_size == 1``, against the groups a
+    REAL 8-rank ``EPConfig`` builds over a live gloo world.
 
-    The shape is the DEFAULT for every dense run and every ``ep_size=1`` MoE run, and it is the one
-    the layout helpers cannot express: ``cross_node_layout`` refuses a group of 1, so both spellings
-    take their own branch and nothing but this comparison holds them to what ``_create_ep_groups``
-    does — one singleton EP group per rank, and a single expert-replica group over the whole block.
-    A ``num_ep_groups`` of 1 there under-counts the replica set the deferred sweep divides by.
+    The shape is the DEFAULT for every dense run and every ``ep_size=1`` MoE run, and
+    ``num_ep_groups`` takes its own branch there: one singleton EP group per rank, and a single
+    expert-replica group over the whole block. A ``num_ep_groups`` of 1 there under-counts the
+    replica set the deferred sweep divides by.
     """
     out_dir = str(tmp_path)
     run_gloo_ranks(
@@ -677,7 +668,7 @@ def test_is_expert_tp_mode_property():
     """is_expert_tp_mode tracks expert_tp_size > 1; ep_group_size folds in the ETP factor."""
     etp = create_config(ep_size=1, expert_tp_size=2, world_size=8, gpus_per_node=8)
     assert etp.is_expert_tp_mode is True
-    assert etp.is_ep_mode is True  # ep_group_size = 1*2 = 2 > 1
+    assert etp.has_ep_group is True  # ep_group_size = 1*2 = 2 > 1
     plain = create_config(ep_size=8, world_size=8, gpus_per_node=8)
     assert plain.is_expert_tp_mode is False
 
@@ -810,10 +801,14 @@ def test_parallelism_config_from_args_lowp_allowed_for_sft():
 # Rank methods (mocked rank=0)
 
 
+def _ep_coords(cfg) -> tuple[int, int]:
+    return cfg.ep_layout.rank_and_group(cfg.stage_local_rank)
+
+
 def test_ep_rank_node():
     """Node-local EP rank = the rank's NVLink-domain coordinate % ep_group_size."""
     cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=5)
-    assert cfg.get_ep_rank() == 1  # 5 % 4
+    assert _ep_coords(cfg)[0] == 1  # 5 % 4
 
 
 def test_ep_rank_global():
@@ -821,7 +816,7 @@ def test_ep_rank_global():
     cfg = create_config(ep_size=8, world_size=16, gpus_per_node=8, rank=3, ep_scope="global")
     # 2 domains of 8, ep_group_size=8 → members_per_domain m=4, num_ep_groups=2.
     # rank 3: domain=0, pos=3, group_idx=3//4=0, ep_rank=0*4 + 3%4 = 3.
-    assert cfg.get_ep_rank() == 3
+    assert _ep_coords(cfg)[0] == 3
 
 
 def test_ep_group_idx_node():
@@ -829,20 +824,19 @@ def test_ep_group_idx_node():
     cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=12, ep_scope="node")
     # node_id = 12 // 8 = 1; local_ep_group_idx = 4 // 4 = 1
     # ep_groups_per_node = 8 // 4 = 2; result = 1 * 2 + 1 = 3
-    assert cfg.get_ep_group_idx() == 3
+    assert _ep_coords(cfg)[1] == 3
 
 
 def test_ep_group_idx_global():
     """Global (cross-node) EP group index under the column-block layout."""
     cfg = create_config(ep_size=8, world_size=16, gpus_per_node=8, rank=5, ep_scope="global")
     # m=4: rank 5 → pos 5, group_idx = 5 // 4 = 1.
-    assert cfg.get_ep_group_idx() == 1
+    assert _ep_coords(cfg)[1] == 1
 
 
 def test_cp_rank():
     """CP rank = the rank's NVLink-domain coordinate % cp_size."""
-    cfg = create_config(cp_size=4, world_size=8, gpus_per_node=8, rank=6)
-    assert cfg.get_cp_rank() == 2  # 6 % 4
+    assert NodeLocalLayout(world_size=8, group_size=4, domain_size=8).rank_and_group(6)[0] == 2  # 6 % 4
 
 
 def test_data_parallel_rank_tp():
@@ -852,60 +846,53 @@ def test_data_parallel_rank_tp():
 
 
 def test_data_parallel_rank_no_parallelism():
-    """DP rank without TP/CP falls through to get_cp_group_idx."""
+    """DP rank without TP/CP/ETP is the stage-local rank."""
     cfg = create_config(world_size=8, gpus_per_node=8, rank=3)
-    # cp_size=1 => dp_divisor = max(1,1) = 1 => falls to get_cp_group_idx
-    # cp_groups_per_node = 8/1 = 8; local_cp_group_idx = 3/1 = 3; node_id=0 => 0*8+3 = 3
     assert cfg.get_data_parallel_rank() == 3
 
 
 def test_ep_group_ranks_node():
     """EP group ranks for node-local EP."""
     cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=0, ep_scope="node")
-    ranks = cfg.get_ep_group_ranks()
-    assert ranks == [0, 1, 2, 3]
+    assert cfg.ep_layout.group_ranks(_ep_coords(cfg)[1]) == [0, 1, 2, 3]
 
 
 def test_ep_group_ranks_global():
     """EP group ranks for global EP — contiguous device block per domain (column-block)."""
     cfg = create_config(ep_size=8, world_size=16, gpus_per_node=8, rank=0, ep_scope="global")
-    ranks = cfg.get_ep_group_ranks()
     # m=4, group_idx=0: domain 0 block [0,1,2,3] + domain 1 block [8,9,10,11].
-    assert ranks == [0, 1, 2, 3, 8, 9, 10, 11]
+    assert cfg.ep_layout.group_ranks(_ep_coords(cfg)[1]) == [0, 1, 2, 3, 8, 9, 10, 11]
 
 
 def test_cp_group_ranks():
     """CP group ranks are contiguous within a node."""
-    cfg = create_config(cp_size=4, world_size=8, gpus_per_node=8, rank=4)
-    ranks = cfg.get_cp_group_ranks()
-    assert ranks == [4, 5, 6, 7]
+    layout = NodeLocalLayout(world_size=8, group_size=4, domain_size=8)
+    assert layout.group_ranks(layout.rank_and_group(4)[1]) == [4, 5, 6, 7]
 
 
 def test_expert_replica_ranks_single_group():
     """One EP group spanning the world: no other group holds this rank's experts."""
     cfg = create_config(ep_size=8, world_size=8, gpus_per_node=8, rank=3)
     assert cfg.num_ep_groups == 1
-    assert cfg.get_expert_replica_ranks() == [3]
+    assert cfg.ep_layout.replica_ranks(_ep_coords(cfg)[0]) == [3]
 
 
 def test_expert_replica_ranks_at_ep_group_size_one_span_the_stage():
     """``ep_group_size == 1``: every rank is a singleton EP group holding the FULL expert set, so the
     whole rank block is ONE replica set — which is exactly the single group ``EPConfig`` builds there
-    (``test_ep_group_size_one_agrees_with_a_real_eight_rank_ep_config``). Returning ``[global_rank]``
-    would say "nothing replicates my experts" for the default MoE shape, contradicting the group the
-    deferred sweep actually reduces over."""
+    (``test_ep_group_size_one_agrees_with_a_real_eight_rank_ep_config``)."""
     cfg = create_config(world_size=8, gpus_per_node=8, rank=3)
     assert cfg.ep_group_size == 1
-    assert cfg.get_expert_replica_ranks() == list(range(8))
-    # PP-confined: stage 1 of a 2-stage job replicates within its own block, never across stages.
+    assert cfg.ep_layout.replica_ranks(0) == list(range(8))
+    # Stage-local: stage 1 of a 2-stage job replicates within its own block, never across stages.
     staged = create_config(world_size=8, gpus_per_node=4, pp_size=2, rank=6)
-    assert staged.get_expert_replica_ranks() == [4, 5, 6, 7]
+    assert [staged.stage_base_rank + r for r in staged.ep_layout.replica_ranks(0)] == [4, 5, 6, 7]
 
 
 def test_expert_replica_ranks_node():
     """Node-local EP with multiple groups: replicas across groups."""
     cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=0, ep_scope="node")
-    replicas = cfg.get_expert_replica_ranks()
+    replicas = cfg.ep_layout.replica_ranks(_ep_coords(cfg)[0])
     # ep_rank = 0 % 4 = 0; ep_groups_per_node = 8/4 = 2; 2 nodes
     # For node 0: group 0 -> rank 0*8 + 0*4 + 0 = 0, group 1 -> 0*8 + 1*4 + 0 = 4
     # For node 1: group 0 -> 1*8 + 0*4 + 0 = 8, group 1 -> 1*8 + 1*4 + 0 = 12
@@ -1109,7 +1096,7 @@ def _all_global_group_ranks(ep_size, world_size, gpus_per_node):
             rank=rank,
             ep_scope="global",
         )
-        groups[cfg.get_ep_group_idx()] = cfg.get_ep_group_ranks()
+        groups[_ep_coords(cfg)[1]] = cfg.ep_layout.group_ranks(_ep_coords(cfg)[1])
     return groups
 
 
@@ -1134,7 +1121,7 @@ def test_cross_node_group_members_contiguous_per_domain():
 def test_cross_node_single_global_group_is_contiguous():
     """ep_group_size == world_size → one contiguous group spanning the whole job."""
     cfg = create_config(ep_size=16, world_size=16, gpus_per_node=8, rank=0, ep_scope="global")
-    assert cfg.get_ep_group_ranks() == list(range(16))
+    assert cfg.ep_layout.group_ranks(0) == list(range(16))
     assert cfg.num_ep_groups == 1
 
 
@@ -1149,18 +1136,17 @@ def test_cross_node_single_member_per_domain_is_strided():
     cfg = create_config(ep_size=2, world_size=16, gpus_per_node=8, rank=9, ep_scope="global")
     assert cfg.num_ep_groups == 8
     # rank 9 → domain 1, position 1 → EP group 1, which strides across domains as [1, 9].
-    assert cfg.get_ep_group_idx() == 1
-    assert cfg.get_ep_group_ranks() == [1, 9]
+    assert _ep_coords(cfg)[1] == 1
+    assert cfg.ep_layout.group_ranks(1) == [1, 9]
 
 
 def test_cross_node_replica_ranks_share_group_rank():
     """Expert-replica ranks all share the same group-rank across the EP groups."""
     cfg = create_config(ep_size=8, world_size=16, gpus_per_node=8, rank=0, ep_scope="global")
     # rank 0 → ep_rank 0; the other group's matching block-position rank is 4 (group 1 domain-0 block).
-    replicas = cfg.get_expert_replica_ranks()
+    replicas = cfg.ep_layout.replica_ranks(_ep_coords(cfg)[0])
     for r in replicas:
-        rcfg = create_config(ep_size=8, world_size=16, gpus_per_node=8, rank=r, ep_scope="global")
-        assert rcfg.get_ep_rank() == cfg.get_ep_rank()
+        assert cfg.ep_layout.rank_and_group(r)[0] == _ep_coords(cfg)[0]
     assert sorted(replicas) == [0, 4]
 
 
@@ -1175,45 +1161,33 @@ def test_cross_node_layout_rejects_indivisible_by_domains():
 
 
 def test_cross_node_layout_matches_layout_module():
-    """ParallelismConfig resolves cross-node EP membership to the column-block layout's CONCRETE ranks.
-
-    ``get_ep_group_ranks`` delegates to the shared column-block helper in
-    ``src.distributed.group_layout``, so this pins the END-TO-END result to hard-coded ranks. That
-    catches both a regression in the layout math and a wrong argument wired into the helper — a
-    self-comparison against the same helper the method calls could not fail on either.
-    """
+    """ParallelismConfig resolves cross-node EP membership to the column-block layout's CONCRETE ranks,
+    pinned to hard-coded ranks so a regression in the layout math or a wrong argument wired into
+    ``ParallelismConfig.ep_layout`` fails."""
     # world=16, 2 domains of 8, ep_group_size=8 → group 0 = [0,1,2,3, 8,9,10,11],
     # group 1 = [4,5,6,7, 12,13,14,15]. rank 10 sits in domain 1, block 0 → EP group 0.
     cfg = create_config(ep_size=8, world_size=16, gpus_per_node=8, rank=10, ep_scope="global")
-    assert cfg.get_ep_group_idx() == 0
-    assert cfg.get_ep_group_ranks() == [0, 1, 2, 3, 8, 9, 10, 11]
-    assert cfg.global_rank in cfg.get_ep_group_ranks()
+    assert _ep_coords(cfg)[1] == 0
+    assert cfg.ep_layout.group_ranks(0) == [0, 1, 2, 3, 8, 9, 10, 11]
 
 
 def test_node_local_layout_matches_group_layout_module():
-    """ParallelismConfig / CPConfig resolve node-local EP and CP membership to CONCRETE ranks.
-
-    Both delegate to the shared node-local helper in ``src.distributed.group_layout``, so pinning
-    the END-TO-END result to hard-coded ranks catches a regression in the helper AND a wrong-arg
-    delegation (a live self-comparison against that helper could not). Includes the NVL72 case
-    where the NVLink domain != the OS node (nvlink_domain_size=16 over two 8-GPU OS nodes), exactly
-    where an open-coded copy would drift.
-    """
+    """ParallelismConfig resolves node-local EP membership to CONCRETE ranks, including the NVL72 case
+    where the NVLink domain != the OS node (nvlink_domain_size=16 over two 8-GPU OS nodes)."""
     # EP: 2 NVLink domains of 8, ep_group_size=4 → 4 groups; rank 10 → domain 1, block 0 → group 2.
     cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=10, ep_scope="node")
-    assert cfg.get_ep_group_idx() == 2
-    assert cfg.get_ep_group_ranks() == [8, 9, 10, 11]
+    assert _ep_coords(cfg) == (2, 2)
+    assert cfg.ep_layout.group_ranks(2) == [8, 9, 10, 11]
     # ep_rank 2's replicas: the same block-position rank across all four groups.
-    assert cfg.get_ep_rank() == 2
-    assert cfg.get_expert_replica_ranks() == [2, 6, 10, 14]
+    assert cfg.ep_layout.replica_ranks(2) == [2, 6, 10, 14]
 
-    # CP uses the identical helper (group_size=cp_size): rank 10 → CP group [8, 9, 10, 11].
-    cpcfg = create_config(cp_size=4, world_size=16, gpus_per_node=8, rank=10)
-    assert cpcfg.get_cp_group_ranks() == [8, 9, 10, 11]
+    # CP takes the same layout with group_size=cp_size: rank 10 → CP group [8, 9, 10, 11].
+    cp = NodeLocalLayout(world_size=16, group_size=4, domain_size=8)
+    assert cp.group_ranks(cp.rank_and_group(10)[1]) == [8, 9, 10, 11]
 
     # NVL72: one 16-GPU NVLink domain across two OS nodes → a single contiguous EP group [0..15].
     nvl = create_config(ep_size=16, world_size=16, gpus_per_node=8, nvlink_domain_size=16, rank=3, ep_scope="node")
-    assert nvl.get_ep_group_ranks() == list(range(16))
+    assert nvl.ep_layout.group_ranks(0) == list(range(16))
 
 
 def test_node_local_groups_partition_the_world():
@@ -1221,7 +1195,7 @@ def test_node_local_groups_partition_the_world():
     groups = {}
     for rank in range(16):
         cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=rank, ep_scope="node")
-        groups[cfg.get_ep_group_idx()] = cfg.get_ep_group_ranks()
+        groups[_ep_coords(cfg)[1]] = cfg.ep_layout.group_ranks(_ep_coords(cfg)[1])
     assert sorted(r for ranks in groups.values() for r in ranks) == list(range(16))
     # Each group is a contiguous block within one domain.
     assert groups[0] == [0, 1, 2, 3] and groups[1] == [4, 5, 6, 7]

@@ -134,7 +134,7 @@ expert intermediates (`6·k·I_moe·b·S` — gate_up, SiLU product, down input 
 `64 × 128 × 128 × 4 B ≈ 4 MB` per sequence per layer (≈190 MB at `b=1`).
 
 **ZeRO-3 would remove the 19 GB resident term but is rejected** under EP and under TP+DP
-(`_validate_fsdp_settings`) — every layout on this page is EP, so
+(`_reject_fsdp_settings`) — every layout on this page is EP, so
 `fsdp_reshard_after_forward: false` is mandatory, not a choice.
 
 **Budget.** 288 GB HBM per B300; the CUDA context, NCCL buffers and allocator fragmentation take the
@@ -167,7 +167,7 @@ memory argument.
 The EP lazy loader slices by **`ep_size`, not `X`** — ETP partners share `dispatch_ep_rank` and load
 the same experts at full intermediate width. The intermediate dim is split later, at EP patching
 (`_init_fused_glu_params` / `_store_separate_glu_params`,
-`src/distributed/expert_parallel/base_layer.py`), which also holds one layer's transposed full-width
+`src/distributed/expert_parallel/moe_layer/layer.py`), which also holds one layer's transposed full-width
 copy alongside the new shard. So `ep2 + etp8` has the same steady state as `ep16` and a **407 GB**
 load peak.
 
@@ -194,7 +194,7 @@ NVLink.
 | **3** (24) | `ep3/6/12/24` global | 3–24 | 24 | — | — | — | — | — | ✗ `512 % ep_size ≠ 0` at load ([The 3-node case](#the-3-node-case)) |
 | 3 | `ep2/4/8` node | ≤8 | 24 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
 | 3 | `ep3` + `etp8` global | 24 | 3 | 129 | 29 | 162 | 176 | **278** | ✗ `512 % 3 ≠ 0`, and the `ep_size`-governed load peak would not fit either |
-| 3 | `ep2/4/8/16` global | — | — | — | — | — | — | — | ✗ rejected at config (`_validate_ep_group`) |
+| 3 | `ep2/4/8/16` global | — | — | — | — | — | — | — | ✗ rejected at config (`_reject_ep_group`) |
 | **4** (32) | **`ep32` global** | 32 | 32 | 97 | 28 | **129** | 143 | 45 | ✓ |
 | 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 129 | 143 | **214** | ⚠ load peak, experimental axis |
 | 4 | `ep32` global + `tp8` | 32 | 4 | 97 | 39 | 140 | 154 | 45 | ✓ but strictly worse than `ep32` |
@@ -245,20 +245,20 @@ and `chunk_gated_delta_rule` is a recurrent scan. Long context comes from the ac
 nvlink_domain_size == 0` passes and `ParallelismConfig` validates world 24 exactly as it does world
 16. The model is what fails, in two independent ways.
 
-**Global-scope EP on 24 must be a multiple of 3.** `cross_node_layout` (called from
-`_validate_ep_group`) requires `ep_group_size % num_domains == 0` with `num_domains = 3`, and
+**Global-scope EP on 24 must be a multiple of 3.** `CrossNodeLayout` (built by
+`_reject_ep_group`) requires `ep_group_size % num_domains == 0` with `num_domains = 3`, and
 `nvlink_domain_size % members_per_domain == 0`, leaving exactly `ep_size ∈ {3, 6, 12, 24}`. `512` is
 `2⁹`, so **every one of them fails `512 % ep_size == 0`**.
 
 `validate_against_model_config` raises that off `config.json`, at the top of the model load and
-before any process group. `_validate_ep_group` refuses the rest at global scope in order:
+before any process group. `_reject_ep_group` refuses the rest at global scope in order:
 `ep_size=16` first, on `reject_cross_node_ep_group` (`24 % 16 ≠ 0`), then `ep_size ∈ {2, 4, 8}` on
-`cross_node_layout`, because they cannot tile 3 domains equally.
+`CrossNodeLayout`, because they cannot tile 3 domains equally.
 
 The single EP+ETP shape at world 24 is `ep_size=3, expert_tp_size=8`, which dies on the same
 divisor.
 
-**Node-scope EP caps `X` at 8.** `_validate_ep_group` requires `nvlink_domain_size % ep_group_size ==
+**Node-scope EP caps `X` at 8.** `_reject_ep_group` requires `nvlink_domain_size % ep_group_size ==
 0`, so `ep_size ∈ {2, 4, 8}` — and `8·P_e/8 = 386 GB` of experts per rank before anything else. The
 same ceiling makes node-scope EP useless at 2, 4 and 8 nodes too.
 
@@ -277,7 +277,7 @@ and narrow the dispatch group (EP+ETP) when the fabric is latency-bound.
 | 4 | **`ep32 --ep_scope=global`** | RDMA all-to-all | 129 GB | first comfortable point on memory — but the binding limit is the 8192 tokens/rank cross-node dispatch ceiling, not the 120 GB spare |
 | 8 | **`ep64 --ep_scope=global`** | RDMA all-to-all | 80 GB | memory headroom to spare, same 8192 tokens/rank ceiling on `b × max_length`; `ep8 + etp8` if the fabric is EFA |
 
-**On NVL72, declare a 64-GPU domain, not 72.** `_validate_ep_group` requires
+**On NVL72, declare a 64-GPU domain, not 72.** `_reject_ep_group` requires
 `nvlink_domain_size % ep_group_size == 0`, and `72 % 64 = 8`.
 
 At `NVLINK_DOMAIN_SIZE=72` the only EP widths that survive validation are `ep2` and `ep72`:
@@ -304,7 +304,7 @@ Cross-node EP over EFA is proxy-Gin latency-bound
 ([DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).
 
 `ep64` gives each rank 56 cross-node dispatch partners; `ep8 + expert_tp_size=8` gives the same `X=64` with **7**,
-because `_validate_expert_tp` forces exactly one ETP group per NVLink domain
+because `_reject_expert_tp` forces exactly one ETP group per NVLink domain
 (`expert_tp_size == members_per_domain`, `ep_size == num_domains`). EP+ETP is an experimental axis —
 its expert-TP reduce runs in token space outside the DeepEP dispatch→combine span.
 

@@ -335,7 +335,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         mixin's LoRA gate. Runs after wrapping, on the live model.
         """
         config = self.parallelism_config
-        if not config.is_ep_mode or not self._has_injected_lora():
+        if not config.has_ep_group or not self._has_injected_lora():
             return
         raise ValueError(
             "LoRA for embedding training is not supported with Expert Parallelism (EP or expert-TP): the "
@@ -369,7 +369,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                 f"and the resume state. Inject into model[0].auto_model, as the embedding script does."
             )
         config = self.parallelism_config
-        if not (self._fsdp_wrapped or config.is_tp_mode or config.is_ep_mode):
+        if not (self._fsdp_wrapped or config.is_tp_mode or config.has_ep_group):
             return
         backbone_params = {id(param) for param in backbone.parameters()}
         outside = [
@@ -600,7 +600,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         accelerate-managed FSDP take the mixin's payload, whose base fallback is ST's writer.
         """
         config = self.parallelism_config
-        if config.is_ep_mode or config.is_tp_mode or self._fsdp_wrapped or self._has_injected_lora():
+        if config.has_ep_group or config.is_tp_mode or self._fsdp_wrapped or self._has_injected_lora():
             self._save_distributed_embedding_model(ctx, output_dir, _internal_call=_internal_call)
         else:
             super()._write_model_payload(ctx, output_dir, _internal_call)

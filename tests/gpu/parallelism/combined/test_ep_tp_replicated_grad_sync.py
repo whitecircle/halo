@@ -100,7 +100,7 @@ def run(ctx):
         parallelism_config=parallelism_config,
     )
     ctx.on_teardown(trainer.cleanup_ep)
-    assert trainer.parallelism_config.is_ep_tp_mode, "expected EP+TP mode"
+    assert trainer.parallelism_config.has_ep_group and trainer.parallelism_config.is_tp_mode, "expected EP+TP mode"
 
     train_result = trainer.train()
     log(f"Final loss: {train_result.training_loss:.6f}")

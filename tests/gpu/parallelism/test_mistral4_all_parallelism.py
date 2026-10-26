@@ -196,7 +196,7 @@ def run_mode(
     # parallelism config. Validates that gathered EP weights are bit-exact
     # enough to reproduce the forward loss.
     saved_loss = float("nan")
-    if pc.is_ep_mode and not (pc.is_cp_mode or pc.is_tp_mode):
+    if pc.has_ep_group and not (pc.is_cp_mode or pc.is_tp_mode):
         save_dir = Path(reload_dir)
         # Same set of save ranks each iteration — clear stale state first.
         dist.barrier()

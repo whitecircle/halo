@@ -16,8 +16,8 @@ import torch
 import torch.nn as nn
 
 from src.checkpoint.adapters import is_expert_lora_key
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import apply_ep_lora_adapters
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class _StubEPLoraLayer(EPMoELayerBase):

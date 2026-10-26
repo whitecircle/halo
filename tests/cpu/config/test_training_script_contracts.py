@@ -391,7 +391,7 @@ _TOKENIZER_SEAMS = (
     "apply_max_length",
     "apply_prompt_completion_window",
     "apply_context_window",
-    "setup_model_and_tokenizer",
+    "configure_run_tokenizer",
 )
 
 # SentenceTransformers owns its own tokenizer pipeline end to end, so embedding.py resolves the

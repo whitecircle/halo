@@ -89,7 +89,7 @@ def run(ctx):
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME, num_labels=1, dtype=torch.bfloat16, attn_implementation="sdpa"
     )
-    # The script path (apply_max_length → setup_model_and_tokenizer) records the pad id on
+    # The script path (apply_max_length → configure_run_tokenizer) records the pad id on
     # EVERY config level; transformers' pooling reads config.get_text_config().pad_token_id,
     # so a top-level write alone leaves a composite checkpoint refusing batches > 1.
     sync_special_token_id(model, "pad_token_id", tokenizer.pad_token_id)

@@ -35,7 +35,7 @@ from transformers import AutoTokenizer, GptOssConfig, GptOssForCausalLM, default
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches.gpt_oss_sinks import _reset_gpt_oss_sinks
+from src.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG

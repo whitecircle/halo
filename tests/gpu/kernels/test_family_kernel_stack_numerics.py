@@ -4,7 +4,7 @@ gradients.
 
 The per-kernel suites pin each kernel against its own reference: ``test_fused_glu.py`` (the GLU
 combines), ``test_moe_permute.py`` (the fused un-permute), ``test_liger_family_kernels.py`` and
-``tests/cpu/kernels/test_native_rms_norm.py`` (each Liger role and norm casting mode). This file checks
+``tests/cpu/model_loading/test_native_rms_norm.py`` (each Liger role and norm casting mode). This file checks
 that nothing breaks where they meet, per family: the family's Liger applier as the loader calls it and
 the EP wrapper with grouped GEMM (ep_size 1, so every expert is local and the fused weighted un-permute
 runs). A family whose wrapper latched the wrong combine, whose packed GLU read the wrong half, or whose
@@ -52,11 +52,11 @@ import tempfile
 import torch
 from safetensors.torch import save_file
 
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.config import get_num_experts
 from src.distributed.expert_parallel.layers import roster  # noqa: F401  (registers the EP families)
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.kernels.liger.orchestrator import apply_liger_kernel
+from src.model_loading.liger.dispatch import apply_liger_kernel
 from src.models.config_access import text_config
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.harness import gpu_test_main, record_check
@@ -179,7 +179,7 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
     result = {"model_type": model_type, "ref_loss": ref_loss, "round_off_spread": spread}
     for label, dtype in (("fp32", torch.float32), ("bf16", torch.bfloat16)):
         model = _stack_model(model_cls, config, state, dtype)
-        layers = find_ep_layers(model)
+        layers = named_ep_layers(model)
         loss, grads = _loss_and_grads(model, input_ids)
         named, not_loaded, unexpected = _hf_named_grads(model_type, model_cls, config, grads)
         missing = sorted((set(ref_grads) - set(named)) | (set(not_loaded) & set(ref_grads)))

@@ -1,6 +1,6 @@
 """Model-side evidence that each parallel axis a run asked for took effect.
 
-A trainer's ``is_ep_mode`` / ``is_tp_mode`` / ``is_cp_mode`` return the ``ParallelismConfig`` it was
+A trainer's ``has_ep_group`` / ``is_tp_mode`` / ``is_cp_mode`` return the ``ParallelismConfig`` it was
 handed, so a check on them passes on a run whose loader silently skipped the axis. These probes read
 what the loader and the trainer's wrap left on the model instead: the EP wrappers and the expert
 weights they hold, the TP-sharded parameters, the Ulysses attention layers.

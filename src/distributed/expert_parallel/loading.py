@@ -25,6 +25,7 @@ from src.distributed.expert_parallel.lazy_loader import (
 )
 from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
 from src.distributed.expert_parallel.patching import ep_claimed_blocks, patch_moe_model_for_ep
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.dtype import cast_parameters_to_run_dtype
 from src.model_loading.lazy_safetensors.weights import (
@@ -32,8 +33,7 @@ from src.model_loading.lazy_safetensors.weights import (
     resolve_run_dtype,
 )
 from src.model_loading.parallel.whole_model import move_model_to_local_device
-from src.models.patches.attention import revalidate_attn_kwarg
-from src.models.patches.buffer_fixes import finalize_loaded_model
+from src.models.attention.selection import revalidate_attn_kwarg
 from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.load_coordination import joined_node_load, log_global_load_duration_seconds

@@ -22,7 +22,7 @@ Diagnose a hang / OOM / NaN-loss / DeepEP fault / NCCL timeout. Every helper and
 env var below matches its owner **exactly** — `src/runtime/consensus.py` (`assert_rank_uniform` consistency
 check), `src/diagnostics/py_spy.py` (py-spy capture), `src/diagnostics/profiling.py`
 (`cuda_memory_history`, `log_cuda_memory`), `src/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`),
-`src/models/patches/attention.py` (`model_fa4_backward_nan_prone`) — do not invent flags. The full
+`src/models/attention/selection.py` (`is_fa4_backward_nan_prone`) — do not invent flags. The full
 symptom→cause→fix table and helper-enable recipes are in **[playbook.md](playbook.md)**; read it
 before giving a verdict on anything non-trivial. User-facing guide: `agent-docs/reference/debugging.md`.
 
@@ -61,8 +61,8 @@ the others never reach.
 
 1. **Which model + attention impl?** qwen3.5/3.6/Qwen3-Next and GLM-4 MoE Lite under FA4 NaN the
    first backward (head_dim-256 + partial rotary) — the fix is the auto FA4→SDPA fallback
-   (`model_fa4_backward_nan_prone`, applied in `resolve_attn_implementation` in
-   `src/models/patches/attention.py`); confirm it engaged, don't force FA4.
+   (`is_fa4_backward_nan_prone`, applied in `resolve_attn_implementation` in
+   `src/models/attention/selection.py`); confirm it engaged, don't force FA4.
 2. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
    makes tiny LRs converge; a NaN right after an optimizer step suggests SR/precision —
    check `fp32_grad_reduce` / `fp32_non_ep_params`.
@@ -76,7 +76,7 @@ the others never reach.
   (`ep_size > 2` with `nvlink_domain_size > ep_group_size`, e.g. ep4 on an 8-GPU domain): startup
   raises `ValueError: parallelism config failed on … First (rank 0): expert_parallel_size=N on a
   single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` before any model load
-  (`_validate_single_domain_multigroup_ep`, `parallelism_config.py`), hand-built configs included. Run anyway,
+  (`_reject_single_domain_multigroup_ep`, `parallelism_rules.py`), hand-built configs included. Run anyway,
   their combine barriers race FSDP2's DP-wide NCCL (`elastic` faults, `legacy` deadlocks). **Fix: use
   ep_size=2 or ep_size = nvlink_domain_size** (one group per domain). For finer sharding
   combine EP with **ETP** (`ep4+etp2`) — TP leaves `ep_group_size` untouched.

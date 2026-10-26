@@ -242,7 +242,7 @@ def test_ep_tp_lazy_resolution_uses_revision():
         data_parallel_size=1,
         pp_size=1,
         fp32_non_ep_params=False,
-        create_ep_config=_make_ep_config,
+        ep_config=_make_ep_config,
     )
     with (
         patch(f"{_MODEL_LOADING}.resolve_hub_or_local_dir", fake_resolve),

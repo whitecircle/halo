@@ -6,7 +6,7 @@ import io
 import numpy as np
 from torch import nn
 
-from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
 
 
 class BareEPLayer(EPGroupLimitedMoELayerBase):

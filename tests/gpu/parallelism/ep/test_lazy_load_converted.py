@@ -28,8 +28,8 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditio
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint, load_ep_model_lazy
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
@@ -129,7 +129,7 @@ def run(ctx):
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = load_ep_model_lazy(
         ckpt,
-        pc.create_ep_config(),
+        pc.ep_config(),
         AutoConfig.from_pretrained(ckpt),
         dtype=torch.bfloat16,
         model_class=model_class,
@@ -153,7 +153,7 @@ def run(ctx):
     pc = ParallelismConfig(ep_size=1, expert_tp_size=2)
     model = load_ep_model_lazy(
         ckpt,
-        pc.create_ep_config(),
+        pc.ep_config(),
         AutoConfig.from_pretrained(ckpt),
         dtype=torch.bfloat16,
         model_class=model_class,

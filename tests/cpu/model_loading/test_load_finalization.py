@@ -5,7 +5,7 @@ transformers 5 builds every model on meta and re-materializes each non-persisten
 ``torch.empty_like`` (uninitialized); the only upstream repair is ``_init_weights``' RotaryEmbedding
 branch, which a remote-code family overriding ``_init_weights`` without ``super()`` (Bailing/Ling V3)
 never runs — a zero/garbage ``inv_freq`` degenerates RoPE to NoPE and trains with a plausible loss.
-``finalize_loaded_model`` (src/models/patches/buffer_fixes.py) is the single post-load seam:
+``finalize_loaded_model`` (src/model_loading/buffer_repair.py) is the single post-load seam:
 buffer recompute + re-tie, run by EVERY load path once weights sit on their device.
 
 These tests pin (1) the seam's three legs — a seam that drops one silently breaks every path that
@@ -28,7 +28,7 @@ import torch.nn as nn
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
-from src.models.patches.buffer_fixes import finalize_loaded_model
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.repo import REPO_ROOT
 from tests.common.source_sweep import (

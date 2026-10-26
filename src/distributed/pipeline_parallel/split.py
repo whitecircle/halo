@@ -20,7 +20,7 @@ from types import MethodType
 import torch.nn as nn
 
 from src.distributed.pipeline_parallel.stage_adapters import deepseek_v4_stream_forward, glm5_next_stream_forward
-from src.models.attention_geometry import resolve_head_dim, resolve_num_key_value_heads
+from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
 from src.models.config_access import get_config_field, text_config
 from src.models.head_transform import resolve_head_transform
 from src.models.module_tree import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers

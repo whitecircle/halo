@@ -12,7 +12,7 @@ reference. Fails if the kernel's lse contract, its ``dlse`` backward path, or th
 
 import torch
 
-from src.models.patches.gpt_oss_sinks import install_fa4_trainable_sink_rescale
+from src.models.attention.gpt_oss_sinks import install_fa4_trainable_sink_rescale
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log, max_abs_rel_err
 

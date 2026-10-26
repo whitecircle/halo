@@ -15,13 +15,13 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from transformers import CONFIG_MAPPING, PretrainedConfig
 
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.env import env_int, env_str
 from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.dtensor import materialize_dtensor, to_local
 from src.trainers.grpo.rollout.weight_sync import _HubForwarder
-from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.weight_sync.clients.base import WeightSyncClientBase
 from tests.common.ports import free_port
 
@@ -221,7 +221,7 @@ def as_pushed(model: nn.Module, tensors: dict[str, torch.Tensor]) -> dict[str, t
     recorder = RecordingSender(keep_values=True)
     guard = DeferredRankFailure("expected push")
     prefix = model.prefix if is_peft_model(model) else None
-    forwarder = _HubForwarder(recorder, model, named_ep_layers(model), prefix, guard)
+    forwarder = _HubForwarder(recorder, model, dict(named_ep_layers(model)), prefix, guard)
     for name, tensor in tensors.items():
         forwarder.send(name, tensor)
     forwarder.flush()

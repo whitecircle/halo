@@ -35,7 +35,7 @@ Coverage: `tests/gpu/parallelism/test_mistral4_all_parallelism.py` (one node per
 Packed documents stay isolated on both paths, but flash needs a toolkit patch:
 `Mistral4Attention.forward` takes `position_ids` as an explicit parameter and forwards only
 `**kwargs` to the attention interface, so the varlen detection never sees them.
-`patch_mistral4_flash_packed_position_ids` (`src/models/patches/attention.py`) re-injects them
+`patch_mistral4_flash_packed_position_ids` (`src/models/attention/packed_position_ids.py`) re-injects them
 and is applied at load whenever the resolved implementation is a flash one. The dense path builds the
 packed mask itself and is clean to grouped-GEMM reduction noise.
 
@@ -71,13 +71,13 @@ On save, gate/up shards are all-gathered, concatenated back into contiguous halv
 
 ## Liger kernel
 
-Liger upstream ships no `mistral4` applier; the toolkit covers `mistral4` from its own spec in `src/kernels/liger/families.py`. A `mistral3` checkpoint resolves through its text tower: this spec for a `mistral4` tower, upstream's `mistral` applier for a Mistral Small 3.x one.
+Liger upstream ships no `mistral4` applier; the toolkit covers `mistral4` from its own spec in `src/model_loading/liger/family_specs.py`. A `mistral3` checkpoint resolves through its text tower: this spec for a `mistral4` tower, upstream's `mistral` applier for a Mistral Small 3.x one.
 
 With `use_liger_kernel: true` it swaps `Mistral4RMSNorm` for Liger's fused RMSNorm, `Mistral4MLP` for the toolkit's fused SwiGLU (the shared expert's `(config, intermediate_size=None)` constructor is inherited, not restated), routes cross-entropy through Liger, and offers the fused loss on `Mistral4ForCausalLM` for text-only checkpoints (off by default).
 
-`mistral3` checkpoints load as `Mistral3ForConditionalGeneration`, whose own head runs, so the orchestrator forces the fused loss off for them and keeps CE ([Liger Kernels](../optimization/liger-kernels.md#fused-loss-under-a-multimodal-wrapper)).
+`mistral3` checkpoints load as `Mistral3ForConditionalGeneration`, whose own head runs, so the Liger dispatch forces the fused loss off for them and keeps CE ([Liger Kernels](../optimization/liger-kernels.md#fused-loss-under-a-multimodal-wrapper)).
 
-RoPE stays unfused — Mistral4 combines YARN with the llama-4 logarithmic scale, which Liger's `liger_rotary_pos_emb` doesn't model. The spec declares `rope=False`, and the orchestrator honors an applier's own `rope` default over its generic default-on, so `rope` stays off unless the user explicitly pins `rope: true` in `liger_kernel_config` — which the applier then refuses with `NotImplementedError`.
+RoPE stays unfused — Mistral4 combines YARN with the llama-4 logarithmic scale, which Liger's `liger_rotary_pos_emb` doesn't model. The spec declares `rope=False`, and the Liger dispatch honors an applier's own `rope` default over its generic default-on, so `rope` stays off unless the user explicitly pins `rope: true` in `liger_kernel_config` — which the applier then refuses with `NotImplementedError`.
 
 ## Model loading
 

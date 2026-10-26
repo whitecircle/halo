@@ -28,10 +28,10 @@ from src.distributed.checkpoint.ep_save import validate_ep_sharded_save
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.context_parallel.validation import validate_trainer_args_for_cp
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, find_cp_wrapper
-from src.distributed.expert_parallel.base_layer import make_disable_adapter_ep_aware
 from src.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import install_ep_aware_disable_adapter
 from src.distributed.fsdp import (
     IdentityParamSet,
     make_disable_adapter_fsdp2_safe,
@@ -42,19 +42,20 @@ from src.distributed.fsdp import (
 )
 from src.distributed.mesh import ParallelDims
 from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.parallelism_rules import reject_cross_domain_determinism
 from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
-from src.kernels.liger.orchestrator import (
+from src.log import KEY_PREVIEW_COUNT
+from src.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
+from src.model_loading.liger.dispatch import (
     sanitize_liger_config,
     trl_reapplication_config,
     warn_if_flce_unreachable,
 )
-from src.log import KEY_PREVIEW_COUNT
-from src.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
+from src.models.attention.sdpa_flex_sliding import reject_full_determinism_after_warmup
 from src.models.config_access import config_sources, snapshot_special_token_ids
 from src.models.moe_balancing import ep_wraps_experts
-from src.models.patches.flex_sliding_attention import reject_full_determinism_after_warmup
 from src.models.peft_adapters import lora_fold_targets
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.models.unwrapping import unwrap_framework_wrappers
@@ -343,7 +344,7 @@ class DistributedTrainerMixin(
         full_determinism = getattr(training_args, "full_determinism", False)
         # Here, before HF's Trainer.__init__ turns on the deterministic mode the warmed graphs were compiled without.
         reject_full_determinism_after_warmup(full_determinism)
-        parallelism_config.reject_cross_domain_determinism(full_determinism)
+        reject_cross_domain_determinism(parallelism_config, full_determinism)
         kwargs = self._maybe_prepare_pipeline_model(kwargs, training_args, ctor_args)
 
         # Force use_reentrant before super().__init__ enables GC. Not under PP, which requires non-reentrant.
@@ -504,15 +505,15 @@ class DistributedTrainerMixin(
         # TP/CP before needs_ep_wrappers (defaults True), else a TP-only dense model shards FSDP2 over world.
         if config.is_pp_mode:
             self._setup_pipeline_parallel()
-        elif config.is_ep_tp_mode:
+        elif config.has_ep_group and config.is_tp_mode:
             self._setup_ep_tp()
-        elif config.is_ep_cp_mode:
+        elif config.has_ep_group and config.is_cp_mode:
             self._setup_ep_cp()
         elif config.is_cp_mode:
             self._setup_cp_only()
         elif config.is_tp_mode:
             self._setup_tp_only()
-        elif config.is_ep_mode:
+        elif config.has_ep_group:
             self._setup_ep_only()
         elif self._accelerate_manages_fsdp or self._accelerate_manages_ddp:
             # Before needs_ep_wrappers, whose branch would hijack an accelerate launch into mixin FSDP2.
@@ -547,11 +548,11 @@ class DistributedTrainerMixin(
                 logger.info("=" * 60)
         elif config.needs_ep_wrappers:
             # Grouped-GEMM-only: a reorder letting TP/CP/ETP/EP fall through here mis-shards FSDP2.
-            if config.is_tp_mode or config.is_cp_mode or config.is_expert_tp_mode or config.is_ep_mode:
+            if config.is_tp_mode or config.is_cp_mode or config.is_expert_tp_mode or config.has_ep_group:
                 raise RuntimeError(
                     "Dispatch ordering broken: needs_ep_wrappers branch reached while a dedicated "
                     f"mode is active (tp={config.is_tp_mode}, cp={config.is_cp_mode}, "
-                    f"etp={config.is_expert_tp_mode}, ep={config.is_ep_mode}). This would mis-shard FSDP2."
+                    f"etp={config.is_expert_tp_mode}, ep={config.has_ep_group}). This would mis-shard FSDP2."
                 )
             if self._find_ep_modules():
                 self._setup_ep_only()
@@ -592,7 +593,7 @@ class DistributedTrainerMixin(
         peft_model = find_peft_model(self.model)
         if peft_model is not None:
             if has_ep_lora(self.model):
-                make_disable_adapter_ep_aware(peft_model)
+                install_ep_aware_disable_adapter(peft_model)
             make_disable_adapter_fsdp2_safe(peft_model, self.model)
 
         self._validate_merge_expert_lora_save()
@@ -609,7 +610,7 @@ class DistributedTrainerMixin(
         self._disable_trl_liger_loss_under_fsdp2()
 
         # TRL's SyncRefModelCallback zips policy/ref params with plain .data ops — crashes on a DTensor/EP policy.
-        wrapped = self._fsdp_wrapped or self.parallelism_config.is_ep_mode or self.parallelism_config.is_tp_mode
+        wrapped = self._fsdp_wrapped or self.parallelism_config.has_ep_group or self.parallelism_config.is_tp_mode
         if wrapped and getattr(self.args, "sync_ref_model", False):
             raise ValueError(
                 "sync_ref_model is not supported under FSDP2/EP/TP: TRL's SyncRefModelCallback "
@@ -946,7 +947,7 @@ class DistributedTrainerMixin(
             compute_metrics=getattr(self, "compute_metrics", None),
             preprocess_logits_for_metrics=getattr(self, "preprocess_logits_for_metrics", None),
         )
-        self.cp_config = self.parallelism_config.create_cp_config()
+        self.cp_config = self.parallelism_config.cp_config()
 
         cp_wrapper = self._find_cp_wrapper()
         if cp_wrapper is None:
@@ -1295,9 +1296,9 @@ class DistributedTrainerMixin(
         config = self.parallelism_config
         logs["parallelism/dp_size"] = config.data_parallel_size
 
-        if config.is_ep_tp_mode:
+        if config.has_ep_group and config.is_tp_mode:
             logs["parallelism/ep_tp_mode"] = 1.0
-        elif config.is_ep_cp_mode:
+        elif config.has_ep_group and config.is_cp_mode:
             logs["parallelism/ep_cp_mode"] = 1.0
 
         if config.is_tp_mode:
@@ -1305,7 +1306,7 @@ class DistributedTrainerMixin(
         if self._has_ep_layers:
             logs["parallelism/ep_size"] = config.ep_size
             logs["parallelism/num_ep_groups"] = getattr(self._ep_config, "num_ep_groups", 1)
-            if config.use_grouped_gemm and not config.is_ep_mode:
+            if config.use_grouped_gemm and not config.has_ep_group:
                 logs["parallelism/grouped_gemm_only"] = 1.0
         if config.is_expert_tp_mode:
             logs["parallelism/expert_tp_size"] = config.expert_tp_size
@@ -1434,7 +1435,7 @@ class DistributedTrainerMixin(
     def _needs_custom_accelerator(self) -> bool:
         """Check if we need custom accelerator (any parallelism or multi-GPU without accelerate management)."""
         config = self.parallelism_config
-        has_parallelism = config.is_ep_mode or config.is_cp_mode or config.is_tp_mode or self._mixin_manages_gmm()
+        has_parallelism = config.has_ep_group or config.is_cp_mode or config.is_tp_mode or self._mixin_manages_gmm()
         accelerate_manages = self._accelerate_manages_fsdp or self._accelerate_manages_ddp
         multi_gpu_no_accelerate = get_global_world_size() > 1 and not accelerate_manages
         return has_parallelism or multi_gpu_no_accelerate

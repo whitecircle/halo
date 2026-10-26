@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
 

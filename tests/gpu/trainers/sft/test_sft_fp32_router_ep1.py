@@ -35,8 +35,8 @@ from transformers import TrainerCallback
 from trl import SFTConfig
 
 from src.checkpoint.reading import load_full_state_dict
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
@@ -69,7 +69,7 @@ PROBE_TEXT = "User: Which dtype does the router train in?\nAssistant: fp32, as i
 
 
 def _parallelism_config() -> ParallelismConfig:
-    """A fresh config per phase (``create_ep_config`` caches its ``EPConfig`` on the config); the defaults
+    """A fresh config per phase (``ep_config`` caches its ``EPConfig`` on the config); the defaults
     keep ``fsdp_shard_ep1_experts`` on, which is the point."""
     return ParallelismConfig(ep_size=1, ep_fp32_router=True)
 
@@ -89,7 +89,7 @@ def _router_params(model) -> dict[str, torch.nn.Parameter]:
     copy under LoRA)."""
     ids = {
         id(param)
-        for _, layer in find_ep_layers(unwrap(model))
+        for _, layer in named_ep_layers(unwrap(model))
         for param in layer._live_router_module().parameters()
         if param.requires_grad
     }

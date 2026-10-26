@@ -23,10 +23,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import src.distributed.expert_parallel.moe_layer.layer as layer_module
 from src.diagnostics import ep_span_timing
 from src.diagnostics.ep_span_timing import get_ep_span_timer
-from src.distributed.expert_parallel import base_layer
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class _PerfProbeLayer(EPMoELayerBase):
@@ -46,7 +46,7 @@ def _ep_layer(monkeypatch: pytest.MonkeyPatch) -> EPMoELayerBase:
     The dispatcher is the one constructor dependency needing live EP process groups; the ``_perf``
     branch under test sits after it and reads nothing from it.
     """
-    monkeypatch.setattr(base_layer, "DeepEPDispatcher", lambda *args, **kwargs: object())
+    monkeypatch.setattr(layer_module, "DeepEPDispatcher", lambda *args, **kwargs: object())
     ep_config = SimpleNamespace(
         num_experts=8,
         experts_per_rank=8,

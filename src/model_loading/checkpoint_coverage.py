@@ -1,13 +1,7 @@
 """Checkpoint-coverage gate: refuse a load that leaves live weights randomly initialized.
 
-``from_pretrained`` re-initializes every key it could not find and reports the set through the
-transformers logger only, which ``setup_logging`` silences off the logging rank, so a truncated or
-key-mismatched directory would train from random weights without an exception.
-:func:`from_pretrained_verified` reads that report off the return value instead; the lazy EP/PP
-loaders bypass ``from_pretrained`` and reach the same gate with the absent set they computed.
-
-Which absences are legitimate is derived from the model class, not from a key list. Depends on
-torch, transformers and :mod:`src.env` only, so any loader may import it.
+``from_pretrained`` reports the keys it re-initialized only through the transformers logger, which
+``setup_logging`` silences off the logging rank. Which absences are legitimate is read off the model class.
 """
 
 from __future__ import annotations
@@ -20,6 +14,7 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 
 from src.env import env_flag
+from src.model_loading.remote_code import reject_untieable_list_ties
 
 logger = logging.getLogger(__name__)
 
@@ -106,15 +101,7 @@ def from_pretrained_verified(
     survives the ``set_verbosity_error`` that ``setup_logging`` applies off the logging rank.
     """
     model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
-    if getattr(type(model), "_halo_tied_keys_were_list", False) and getattr(
-        model.config.get_text_config(), "tie_word_embeddings", False
-    ):
-        raise RuntimeError(
-            f"{type(model).__name__} declares tie_word_embeddings=True but shipped the legacy "
-            "list-form _tied_weights_keys, which transformers cannot tie (the compat shim "
-            "converts it to {}) — the head would silently train untied. Fix the remote modeling "
-            "file's _tied_weights_keys to the dict form."
-        )
+    reject_untieable_list_ties(model)
     verify_checkpoint_coverage(
         model, loading_info["missing_keys"], source=model_name_or_path, excuse_task_head=excuse_task_head
     )

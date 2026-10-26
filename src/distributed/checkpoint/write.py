@@ -23,9 +23,9 @@ from src.checkpoint.writing import (
     normalize_gathered_state_dict,
     reconcile_tie_word_embeddings,
 )
+from src.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
 from src.models.param_roles import persistent_buffers
-from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.dtensor import resolve_retained
 

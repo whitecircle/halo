@@ -171,7 +171,7 @@ def pp_ep_coverage_reason(config: ParallelismConfig, ep_modules) -> str | None:
     so the verdict is joined across ranks by the caller; a lone raise would leave the MoE stages in
     the chain broadcast that follows, waiting out the NCCL timeout with no diagnostic.
     """
-    if not config.is_ep_mode or ep_modules:
+    if not config.has_ep_group or ep_modules:
         return None
     return (
         f"PP stage {config.pp_rank}/{config.pp_size} carries no EP-patched modules. Either the model "
@@ -596,7 +596,7 @@ class PipelineTrainerMixin:
     @property
     def _pp_last_stage_rank(self) -> int:
         """Global rank of this chain's last stage: the source of every chain broadcast."""
-        return self.parallelism_config.get_pp_group_ranks()[-1]
+        return self.parallelism_config.pp_chain_ranks()[-1]
 
     def _pp_broadcast_loss_from_last_stage(self, tensor) -> torch.Tensor:
         """The last stage's scalar loss, broadcast down the chain so every rank logs the same value."""

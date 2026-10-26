@@ -55,7 +55,7 @@ from trl import SFTConfig
 import src.distributed.checkpoint.optimizer as optimizer_store_mod
 from src.checkpoint.reading import load_full_state_dict
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
-from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
@@ -209,7 +209,7 @@ def _configured_master_checks(model, mode: str) -> dict[str, bool]:
     """Live parameter identities separate routers, experts and the remaining parameters; each group
     :data:`FP32_MASTER_GROUPS` names for ``mode`` must hold fp32 masters carrying more than bf16 precision."""
     reshard_fsdp2_modules(model)
-    layers = list(find_ep_layers(model))
+    layers = list(named_ep_layers(model))
     experts = {id(parameter) for _, layer in layers for _, parameter in layer.expert_named_params()}
     routers = {
         id(parameter)

@@ -20,7 +20,7 @@ from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeSt
 from transformers import AutoConfig, AutoTokenizer
 
 from src.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
-from src.models.patches.attention import ensure_fa4_kernel_cache_env
+from src.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from src.runtime.collectives import barrier, broadcast_from_rank0
 from tests.common.scratch import SCRATCH_DIR_TAG
 

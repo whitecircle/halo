@@ -25,7 +25,7 @@ the YAML key that sets it. Legal combinations:
 | **Pipeline Parallel (PP)** | Splits the layer stack into `pp_size` sequential stages, each a `torchrun` rank group; only P2P boundary activations cross a stage. Outermost axis — it carves the world first (`stage_world_size = world_size / pp_size`). See [Pipeline Parallelism](../parallelism/pipeline-parallelism.md). |
 
 Which axis combinations may run is an **allowlist** (`SUPPORTED_AXIS_SETS` in
-`parallelism_config.py`), checked before any rank math — anything unlisted is
+`parallelism_rules.py`), checked before any rank math — anything unlisted is
 rejected by default. Tabulated in the
 [parallelism matrix](../parallelism/README.md).
 

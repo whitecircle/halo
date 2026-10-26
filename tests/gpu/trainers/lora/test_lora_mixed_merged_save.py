@@ -261,7 +261,7 @@ def run(ctx) -> dict:
     device = next(trainer.model.parameters()).device
     batch = _probe_batch(tokenizer, device)
     trained_logits = _logits(trainer.model, batch)
-    # 2. Adapters off (EP-aware: make_disable_adapter_ep_aware drops the expert half too).
+    # 2. Adapters off (EP-aware: install_ep_aware_disable_adapter drops the expert half too).
     with peft_model.disable_adapter():
         base_logits = _logits(trainer.model, batch)
     adapter_effect = (trained_logits - base_logits).abs().max().item()

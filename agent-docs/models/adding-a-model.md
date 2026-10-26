@@ -17,7 +17,7 @@ Multimodal models work too: the loaders resolve the class through `resolve_auto_
 
 Auto-detection covers a family whose attention the installed kernels already run. It falls short on a head dim no flash kernel accepts, a NaN-prone backward, attention sinks, or position IDs the modeling never forwards.
 
-Two seams handle those. `resolve_attn_implementation` (`src/models/patches/attention.py`) narrows the backend from the family's own capabilities; `apply_family_attention_patches` (`src/model_loading/model_preparation.py`) applies the family's patches, keyed on that backend, to trainable and frozen loads alike, and returns the implementation both loaders build with (the backend, or a variant of it such as Gemma 4's `sdpa_flex_sliding`).
+Two seams handle those. `resolve_attn_implementation` (`src/models/attention/selection.py`) narrows the backend from the family's own capabilities; `apply_family_patches` (`src/model_loading/model_preparation.py`) applies the family's patches, keyed on that backend, to trainable and frozen loads alike, and returns the implementation both loaders build with (the backend, or a variant of it such as Gemma 4's `sdpa_flex_sliding`).
 
 Add the family predicate beside the existing ones and wire it into whichever seam applies. The per-family matrix is in [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
@@ -49,17 +49,17 @@ EP mechanics are in the [Expert Parallelism guide](../parallelism/expert-paralle
 | Top-k on raw logits then activate selected, averaged shared expert | `EPCohere2MoELayer` |
 | Identical to a shipped family bar a routing default or a key spelling | subclass that wrapper — `EPLagunaMoELayer(EPGlm4MoELayer)` |
 
-The base owns dispatch→compute→combine, GC dispatch replay, grad-sync hooks, grouped-GEMM/loop compute, fused-GLU param init — and `__init__` itself. That template resolves the router and the expert container off the declarations below, builds the EP state, adopts the router, then calls one hook per construction step. A family overrides a hook, never the sequence.
+The base (`moe_layer/layer.py`, with its compute, routing, grad-sync, expert-LoRA and balancing-bias mixins) owns dispatch→compute→combine, GC dispatch replay, grad-sync hooks, grouped-GEMM/loop compute, fused-GLU param init — and `__init__` itself. That template resolves the router and the expert container off the declarations below, builds the EP state, adopts the router, then calls one hook per construction step. A family overrides a hook, never the sequence.
 
 `self.top_k` and the shared expert are set for you. The wrapper supplies `forward` (FP32 `topk_weights` — a DeepEP requirement) plus whichever hooks differ:
 
 | Hook | Default | Overridden by |
 |---|---|---|
 | `_detect_hidden_dim(router, experts)` | the router projection's input width, else `gate_up_proj`'s | nothing — Gemma4 and Zaya reach the fallback by having no bare router projection |
-| `_init_routing(block)` | `self.top_k = self._find_top_k(block)` | every family with more knobs: a selection function, a correction-bias buffer. Group-limited families inherit `EPGroupLimitedMoELayerBase`, whose `_init_routing` resolves the six DeepSeek-V3 knobs off block → gate → config |
-| `_init_shared_experts(block)` | adopt `_SHARED_EXPERT_ATTRS` | Cohere2 (combination strategy), Qwen3.5/3.6 (a second gate module) |
-| `_init_expert_compute(block, experts)` | `_resolve_activation` off the container | families owning their combine: GptOss (`alpha`/`limit`), DeepSeek-V4, GLM-5, Step-3.7 (clamp bounds), Bailing (activation on the per-expert module) |
-| `_init_expert_params(experts, weights_already_sharded)` | `_init_fused_glu_params` | Qwen3 (split), Bailing (stack), GptOss (interleave) |
+| `_adopt_routing(block)` | `self.top_k = self._find_top_k(block)` | every family with more knobs: a selection function, a correction-bias buffer. Group-limited families inherit `EPGroupLimitedMoELayerBase`, whose `_adopt_routing` resolves the six DeepSeek-V3 knobs off block → gate → config |
+| `_adopt_shared_experts(block)` | adopt `_SHARED_EXPERT_ATTRS` | Cohere2 (combination strategy), Qwen3.5/3.6 (a second gate module) |
+| `_adopt_expert_compute(block, experts)` | `_resolve_activation` off the container | families owning their combine: GptOss (`alpha`/`limit`), DeepSeek-V4, GLM-5, Step-3.7 (clamp bounds), Bailing (activation on the per-expert module) |
+| `_adopt_expert_params(experts, weights_already_sharded)` | `_init_fused_glu_params` | Qwen3 (split), Bailing (stack), GptOss (interleave) |
 | `_init_summary_extras(block)` | `()` | any family with a field worth printing at construction |
 
 A hook may read only the wrapped module and the `EPConfig`. **No hook may issue a collective**: some load paths patch layers before every rank has reached group setup, so a collective here deadlocks the job rather than failing it (DeepEP builds its buffer lazily, at the first dispatch, for that reason).
@@ -128,11 +128,11 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - `_fused_glu_mul` — the single seam for the GLU combine. `_resolve_activation` latches it from the resolved activation.
 
-    A family with a non-standard combine (DeepSeek-V4 and GLM-5 Next's clamped SwiGLU, Step-3.7's post-activation clamp) rebinds it in `_init_expert_compute`: a `functools.partial` over the kernel with the family's bound, or a bound method for a gate no kernel implements.
+    A family with a non-standard combine (DeepSeek-V4 and GLM-5 Next's clamped SwiGLU, Step-3.7's post-activation clamp) rebinds it in `_adopt_expert_compute`: a `functools.partial` over the kernel with the family's bound, or a bound method for a gate no kernel implements.
 
     Latch it rather than overriding `_glu_combine`. The construction summary names the latched callable, so an override makes the reported combine and the running one two declarations that can disagree, and the fused `[gate | up]` path runs a latch's packed form without calling `_glu_combine` at all.
 
-- `_OPTIONAL_ROUTING_KNOBS` — for a `EPGroupLimitedMoELayerBase` family only: the routing knobs (any spelling) its block, router and config genuinely do not declare, so the shared `_init_routing` may substitute a neutral default.
+- `_OPTIONAL_ROUTING_KNOBS` — for a `EPGroupLimitedMoELayerBase` family only: the routing knobs (any spelling) its block, router and config genuinely do not declare, so the shared `_adopt_routing` may substitute a neutral default.
 
     Everything else is required — an upstream rename raises instead of silently under-scaling every routed weight. Laguna and Step-3.7 carry no group limiting and no `norm_topk_prob`; no family opts out of `routed_scaling_factor`.
 
@@ -142,7 +142,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 The merge itself is `merge_shards_to_hf` on the class. The base fused-GLU implementation covers families that keep the base gather; a family with a distinct layout overrides it **alongside** `gather_expert_state_dict`, since they are inverses and `__init_subclass__` raises if only one is overridden. Add a roundtrip test in `tests/cpu/checkpoint/test_merge_ep_shards.py`.
 
-**5. Buffers.** `finalize_loaded_model()` (`src/models/patches/buffer_fixes.py`) is the post-load repair every load path runs: it walks two fixer chains — `_ROTARY_FIXERS` for `inv_freq`, `_NON_PERSISTENT_FIXERS` for the rest — and re-ties shared weights. transformers 5 re-materializes every non-persistent buffer as `torch.empty_like`, so add a fixer to the matching chain for any the family carries; an uncovered one reaches device placement still on meta, where the trainer raises rather than training on uninitialized memory.
+**5. Buffers.** `finalize_loaded_model()` (`src/model_loading/buffer_repair.py`) is the post-load repair every load path runs: it walks two fixer chains — `_ROTARY_FIXERS` for `inv_freq`, `_NON_PERSISTENT_FIXERS` for the rest — and re-ties shared weights. transformers 5 re-materializes every non-persistent buffer as `torch.empty_like`, so add a fixer to the matching chain for any the family carries; an uncovered one reaches device placement still on meta, where the trainer raises rather than training on uninitialized memory.
 
 **6. Tests.** The DeepSeek-V4 trio is the template: an EP-vs-FSDP equivalence test (`tests/gpu/parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py`), a trainer test that saves via the gathered EP path and reloads the checkpoint as a plain HF model (`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`, a thin subclass of `EPSftRoundTrip` in `tests/common/ep_sft_roundtrip.py` — copy it and override only the family hooks), both registered in `tests/gpu/manifest.py`, plus a CPU test covering registration, gather/merge layout, and balancing resolution (`tests/cpu/models/test_deepseek_v4_support.py`). The family's tiny model also goes into `TINY_MOE_FAMILIES` (`tests/common/tiny_models.py`), keyed by its `model_type`, and its name into `_TINY_MOE_FAMILIES` in the manifest: the merge-on-save and precompute-resume sweeps run every entry, and `tests/cpu/conventions/test_tiny_family_roster.py` fails on a registered EP family missing from either. `tests/cpu/parallelism/test_ep_family_instantiation.py` builds every registered family's EP layer on its tiny model, and `tests/cpu/parallelism/test_ep_gc_replay.py` replays its dispatch under gradient checkpointing for every family whose layer supports it.
 
@@ -189,26 +189,26 @@ If a model isn't in transformers yet, or its `trust_remote_code` conflicts with 
 
 3. **Trigger registration** by adding a module-level side-effect import of that module to `src/model_loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `src/models/seq_cls_heads.py` register).
 
-    `apply_remote_code_compat_shims()` restores removed transformers APIs (`is_torch_fx_available`, `ROPE_INIT_FUNCTIONS['default']`), binds names remote files call without importing (`DynamicLayer`), and patches every loaded remote module for dispatchless eager attention and legacy tied-weight keys.
+    `apply_remote_code_compat_shims()` restores removed transformers APIs (`is_torch_fx_available`, `ROPE_INIT_FUNCTIONS['default']`), binds names remote files call without importing (`DynamicLayer`), and patches every loaded remote module for dispatchless eager attention and legacy list-form tied-weight keys, which convert to the v5 dict form; `reject_untieable_list_ties` refuses a tied config that carried one, since `{}` ties nothing.
 
 4. **Add a CPU test** — `tests/cpu/models/test_<name>_registration.py` verifying `AutoModelForCausalLM.from_pretrained` resolves to your class.
 5. **Remove the vendoring** once upstream lands — the directory, its registration import, and the registration test all go, and the EP wrapper, Liger spec and any patches re-key to the upstream module.
 
 HF models that only need `trust_remote_code=True` (Bailing/Ling, Laguna) take the shims path with no vendoring.
 
-A node's ranks share the module cache transformers copies remote code into (`HF_MODULES_CACHE`), and transformers rewrites a module there in place. `src/models/patches/remote_code_hooks.py`, which every loader and training entry point imports, makes each copy land whole (the remote code a save writes beside a checkpoint too), so a rank never imports a module a peer is still writing.
+A node's ranks share the module cache transformers copies remote code into (`HF_MODULES_CACHE`), and transformers rewrites a module there in place. `src/model_loading/remote_code.py`, which every loader, training entry point and `from_pretrained_verified` caller imports, makes each copy land whole through the checkpoint staging writes (the remote code a save writes beside a checkpoint too), so a rank never imports a module a peer is still writing.
 
 ## Declare Liger coverage
 
-Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported model, and covers some only in part. A family that neither registry covers warns at model load that the run trains unfused, and refuses an explicit `liger_kernel_config` key. Add one `LigerFamilySpec` to `src/kernels/liger/families.py` — there is no per-family applier module:
+Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported model, and covers some only in part. A family that neither registry covers warns at model load that the run trains unfused, and refuses an explicit `liger_kernel_config` key. Add one `LigerFamilySpec` to `src/model_loading/liger/family_specs.py` — there is no per-family applier module:
 
 1. **Name the classes that fill each role** — `rms_norm`, `gated_rms_norm` (a linear-attention block's `norm(x) * w * act(gate)`, served by `fla`), `glu_mlp`, `causal_lm`.
 
-    Then the variant parameters: `rms_norm_offset` / `rms_norm_casting_mode` for a Gemma-style `(1 + w)` norm or an fp32 weight multiply, `rms_norm_kernel="native"` to serve an offset-free norm with torch's fused `F.rms_norm` instead of Liger's, `logit_scale_attr` for a head that scales its logits, `router_aux_loss_in_head` for a head that adds the router aux loss after the projection, `rope=True` only for a full-width `rotate_half` rotary.
+    Then the variant parameters: `rms_norm_offset` / `rms_norm_casting_mode` for a Gemma-style `(1 + w)` norm or an fp32 weight multiply, `rms_norm_kernel="native"` to serve an offset-free norm with torch's fused `F.rms_norm` instead of Liger's, `router_aux_loss_in_head` for a head that adds the router aux loss after the projection, `rope=True` only for a full-width `rotate_half` rotary.
 
     A `trust_remote_code` family sets `remote_classes` (every class a role names) instead of `modeling_module`; its patch fires when transformers loads the modeling file. A native family whose hub repos also ship their own modeling file through `auto_map` (Laguna) sets both.
 
-    List a multimodal wrapper's `model_type` only when its text tower can be nothing but this family. Otherwise the orchestrator resolves it through `text_config`, and the fused loss is forced off there because the wrapper's own head runs.
+    List a multimodal wrapper's `model_type` only when its text tower can be nothing but this family. Otherwise the dispatch resolves it through `text_config`, and the fused loss is forced off there because the wrapper's own head runs.
 
 2. **Declare a role only where the kernel is EXACT.** A clamped GLU, a trained output scale, a weightless or gated norm, a partial or interleaved rotary, a head that truncates the vocab — each would compute a different function silently.
 
@@ -217,7 +217,7 @@ Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported mo
 3. **Set `flce_default=True`** only when the `[seq, vocab]` logits plane is the family's binding memory limit; the generic default keeps logits for metrics.
 4. **Set `delegates_to_upstream=True`** when upstream already covers the family and the spec only ADDS to it (dense Qwen3.5/3.6), or takes over a role upstream gets wrong (GptOss's norm casting, Gemma 4's EP-surviving dense MLP, the Qwen MoE `swiglu` that would also swap the routed experts — the withheld flag goes in `upstream_off` and the spec must fill that role).
 
-    A MoE family's routed experts never run Liger's fused MoE kernel (`LigerExperts`): where upstream's `swiglu` could swap them and the spec does not withhold it, the orchestrator forces the flag off whenever Halo does not wrap the experts ([Routed experts](../optimization/liger-kernels.md#routed-experts)).
+    A MoE family's routed experts never run Liger's fused MoE kernel (`LigerExperts`): where upstream's `swiglu` could swap them and the spec does not withhold it, the dispatch forces the flag off whenever Halo does not wrap the experts ([Routed experts](../optimization/liger-kernels.md#routed-experts)).
 
     Upstream's applier runs first with every other flag it declares; the spec names only the roles it leaves eager or takes over.
 
@@ -227,6 +227,6 @@ Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported mo
 
     `cross_entropy` is never handed to upstream (its branch rebinds `F.cross_entropy` process-wide): the toolkit's scoped patch serves it for every family.
 
-5. **The CPU suite gates it.** `tests/cpu/kernels/test_liger_family_coverage.py` checks every roster family resolves an applier, that each declared class exists, that each declared norm is what the chosen Liger variant computes, and that each declared MLP and head is the canonical body.
+5. **The CPU suite gates it.** `tests/cpu/model_loading/test_liger_family_coverage.py` checks every roster family resolves an applier, that each declared class exists, that each declared norm is what the chosen Liger variant computes, and that each declared MLP and head is the canonical body.
 
     `test_liger_upstream_delegation.py` pins the delegation seam. Add the GPU numerics case to `tests/gpu/kernels/test_liger_family_kernels.py`.

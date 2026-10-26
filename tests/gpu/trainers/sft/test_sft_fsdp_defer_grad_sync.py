@@ -117,7 +117,7 @@ def _exercises_mode(mode: str, pc: ParallelismConfig, model) -> bool:
         )
     if mode in ("ep", "ep2"):
         # ep: in-backward expert/router hooks; ep2: the post-backward sweep over EP-group shards.
-        ep_config = pc.create_ep_config()
+        ep_config = pc.ep_config()
         sweep = mode == "ep2"
         return ep_config.defer_grad_sync == sweep and ep_config.is_deferred_dp == sweep
     return pc.data_parallel_size > 1

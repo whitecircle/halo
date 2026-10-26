@@ -167,7 +167,7 @@ class _SaveRoutingTrainer(_StubTrainer):
         self.parallelism_config.is_pp_mode = False
         self.parallelism_config.is_cp_mode = False
         self.parallelism_config.is_tp_mode = False
-        self.parallelism_config.is_ep_tp_mode = False
+        self.parallelism_config.has_ep_group = False
         self.parallelism_config.tp_size = 1
         self.args = SimpleNamespace(output_dir=output_dir, save_max_shard_size=None)
         self.parallel_dims = SimpleNamespace(tp_local_rank=lambda: 0)

@@ -35,6 +35,7 @@ from src.distributed.loading.frozen_models import (
     load_reference_model_for_on_policy_grpo,
 )
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.grpo import online
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
@@ -176,7 +177,7 @@ def test_the_scripts_reference_takes_the_policys_pin_dtype_attention_and_sinks()
     assert captured.config["revision"] == captured.load["revision"] == "abc123"
     assert captured.load["dtype"] is torch.bfloat16
     assert captured.resolver["attn_implementation"] == "sdpa"
-    assert captured.resolver["sinks_reset"] is False
+    assert captured.resolver["sinks_policy"] is SinksPolicy.LIVE
     captured.freeze_sinks.assert_called_once()
 
 

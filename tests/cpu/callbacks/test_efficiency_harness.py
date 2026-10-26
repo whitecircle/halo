@@ -11,7 +11,7 @@ from dataclasses import replace
 import pytest
 
 from src.callbacks import efficiency, model_flops
-from src.models.attention_layout import attention_layout_from_config
+from src.models.attention.layout import attention_layout_from_config
 from tests.common.equivalence import efficiency_callback
 from tests.common.equivalence.efficiency_callback import (
     CASES,

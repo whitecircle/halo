@@ -39,7 +39,7 @@ from src.checkpoint import offline_export
 from src.checkpoint.atomic import PUBLISH_STAGING_SUFFIX
 from src.checkpoint.format import SAFETENSORS_METADATA
 from src.checkpoint.reading import checkpoint_shard_files
-from src.models.patches import gpt_oss_sinks
+from src.models.attention import gpt_oss_sinks
 from tests.common.checkpoint_io import weight_files
 
 INDEX = "model.safetensors.index.json"

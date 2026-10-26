@@ -41,7 +41,7 @@ def _fake_self(**args_overrides):
         args=args,
         compute_metrics=None,
         preprocess_logits_for_metrics=None,
-        parallelism_config=types.SimpleNamespace(create_cp_config=lambda: types.SimpleNamespace()),
+        parallelism_config=types.SimpleNamespace(cp_config=lambda: types.SimpleNamespace()),
     )
     me._find_cp_wrapper = lambda: wrapper
     return me

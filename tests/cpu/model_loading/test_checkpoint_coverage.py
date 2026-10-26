@@ -18,12 +18,13 @@ Both directions are pinned here, because a gate that over-rejects is as bad as o
 from __future__ import annotations
 
 import os
+import types
 
 import pytest
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
-from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceClassification
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceClassification, Qwen3ForCausalLM
 
 from src.model_loading.checkpoint_coverage import (
     ALLOW_MISSING_CHECKPOINT_KEYS_ENV,
@@ -32,6 +33,8 @@ from src.model_loading.checkpoint_coverage import (
     verify_checkpoint_coverage,
 )
 from src.model_loading.model_preparation import auto_load_model
+from src.model_loading.remote_code import TIED_KEYS_WERE_LIST_ATTR, _fix_legacy_tied_weights_keys
+from tests.common.repo import probe_findings
 
 
 def _tiny_config(tie_word_embeddings: bool = False):
@@ -212,6 +215,36 @@ def test_gate_runs_on_the_reference_and_teacher_model_path(tmp_path):
     path = _write_checkpoint(tmp_path / "trunc", drop="layers.0.self_attn")
     with pytest.raises(RuntimeError, match="absent from the checkpoint"):
         auto_load_model(path, dtype=torch.float32)
+
+
+def _legacy_list_tie_class() -> type:
+    """A remote-style class shipping the v4 list-form ``_tied_weights_keys``, converted as a remote load converts it."""
+    module = types.ModuleType("legacy_list_tie_remote")
+    module.LegacyListTie = type(
+        "LegacyListTie", (Qwen3ForCausalLM,), {"__module__": module.__name__, "_tied_weights_keys": ["lm_head.weight"]}
+    )
+    _fix_legacy_tied_weights_keys(module)
+    return module.LegacyListTie
+
+
+def test_a_tied_config_on_a_legacy_list_tie_is_refused(tmp_path):
+    """The list-form tie converts to ``{}``, which ties nothing; a tied config must not train the head untied."""
+    legacy = _legacy_list_tie_class()
+    assert legacy._tied_weights_keys == {} and getattr(legacy, TIED_KEYS_WERE_LIST_ATTR)
+    with pytest.raises(RuntimeError, match="declares tie_word_embeddings=True but shipped the legacy list-form"):
+        from_pretrained_verified(legacy, _write_checkpoint(tmp_path / "tied", tie_word_embeddings=True))
+    model = from_pretrained_verified(legacy, _write_checkpoint(tmp_path / "untied"))
+    assert model.lm_head.weight.data_ptr() != model.model.embed_tokens.weight.data_ptr()
+
+
+def test_importing_the_gate_makes_module_cache_copies_whole():
+    """Every tool loading through ``from_pretrained_verified`` gets transformers' module-cache copies made whole."""
+    script = """
+import transformers.dynamic_module_utils as dynamic_module_utils
+import src.model_loading.checkpoint_coverage
+print("FINDINGS:" + ("" if getattr(dynamic_module_utils.shutil, "_halo_whole_copy", False) else "copies not whole"))
+"""
+    assert not probe_findings(script, "FINDINGS:")
 
 
 if __name__ == "__main__":

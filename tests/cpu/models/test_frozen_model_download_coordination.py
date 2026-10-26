@@ -44,11 +44,11 @@ def test_the_source_is_resolved_before_the_first_fetch_and_pins_every_read(monke
     monkeypatch.setattr(frozen_models, "apply_remote_code_compat_shims", lambda: events.append("shims"))
     monkeypatch.setattr(frozen_models, "AutoConfig", MagicMock(from_pretrained=fetch_config))
     monkeypatch.setattr(frozen_models, "resolve_attn_implementation", lambda *a, **k: "sdpa")
-    monkeypatch.setattr(frozen_models, "apply_family_attention_patches", lambda config, attn: attn)
+    monkeypatch.setattr(frozen_models, "apply_family_patches", lambda config, attn: attn)
     monkeypatch.setattr(frozen_models, "auto_load_model", fetch_weights)
     with (
         patch.object(frozen_models, "finalize_loaded_model"),
-        patch.object(frozen_models, "finalize_run_model"),
+        patch.object(frozen_models, "apply_run_model_policies"),
         patch.object(frozen_models, "warm_attention_kernels"),
     ):
         frozen_models.load_frozen_auxiliary_model("org/teacher", dtype=torch.float32, download_tag="teacher_model")

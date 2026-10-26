@@ -85,16 +85,16 @@ def _pp_groups(rank: int, *, world_size: int, pp_size: int):
 
 @pytest.mark.parametrize(("world_size", "pp_size"), [(16, 2), (32, 4)])
 def test_pipeline_groups_match_the_config_rank_math(world_size, pp_size):
-    """The chain groups PP builds must be exactly ``ParallelismConfig.get_pp_group_ranks``.
+    """The chain groups PP builds must be exactly ``ParallelismConfig.pp_chain_ranks``.
 
     The two are computed independently — ``groups.py`` from the stage rank blocks, the config from
     ``stage_local_rank + s * stage_world_size`` — and the trainer mixes them: it broadcasts the last
-    stage's loss to ``get_pp_group_ranks()[-1]`` OVER the group built here. A drift would name a rank
+    stage's loss to ``pp_chain_ranks()[-1]`` OVER the group built here. A drift would name a rank
     outside the group and hang the chain, so this pins them against each other on every rank.
     """
     for rank in range(world_size):
         chain, stage, _, config = _pp_groups(rank, world_size=world_size, pp_size=pp_size)
-        assert chain == tuple(config.get_pp_group_ranks()), (rank, chain)
+        assert chain == tuple(config.pp_chain_ranks()), (rank, chain)
         assert rank in chain, (rank, chain)
         assert len(chain) == pp_size, (rank, chain)
         base, width = config.stage_base_rank, config.stage_world_size
@@ -335,36 +335,16 @@ def test_cp_groups_under_pp():
         assert len(reference) == 2 * groups_per_stage, (cp_size, reference)
 
 
-def test_cp_rank_math_agrees_with_parallelism_config():
-    """``ParallelismConfig.get_cp_group_ranks``/``get_cp_rank`` have no production caller — they are
-    the independent oracle for the membership ``CPConfig`` actually builds its process group from.
-    An oracle nothing pins against the implementation certifies only itself; a divergence would send
-    the Ulysses all-to-all over a different rank set than the one the config reports."""
-    for cp_size in (2, 4, 8):
-        for rank in range(8):
-            cfg, _ = _make_config(
-                CPConfig,
-                rank,
-                world_size=8,
-                stage_world_size=8,
-                cp_size=cp_size,
-                gpus_per_node=8,
-            )
-            pc = make_parallelism_config(world_size=8, gpus_per_node=8, rank=rank, cp_size=cp_size)
-            assert pc.get_cp_rank() == cfg.cp_rank, (cp_size, rank)
-            assert pc.get_cp_group_ranks() == list(cfg._cp_group_ranks), (cp_size, rank)
-
-
 def _make_parallelism_config(rank: int, **kwargs) -> ParallelismConfig:
     """Two 8-GPU nodes (one NVLink domain each) — the smallest world a pipeline can span."""
     return make_parallelism_config(world_size=16, gpus_per_node=8, rank=rank, **kwargs)
 
 
 def test_parallelism_config_passes_stage_base_rank_to_ep_config():
-    """``create_ep_config`` must hand EPConfig this stage's base rank, not just its width.
+    """``ep_config`` must hand EPConfig this stage's base rank, not just its width.
 
     Without the offset a stage-1 rank builds stage-0's group list and EPConfig raises; with it, the
-    EPConfig membership matches ``ParallelismConfig.get_ep_group_ranks`` exactly.
+    EPConfig membership is this stage's block.
     """
     for rank in (0, 5, 8, 12):
         pc = _make_parallelism_config(rank, pp_size=2, ep_size=8, ep_scope="node")
@@ -372,11 +352,10 @@ def test_parallelism_config_passes_stage_base_rank_to_ep_config():
 
         calls: list = []
         with stubbed_process_groups(16, rank, calls):
-            ep = pc.create_ep_config()
+            ep = pc.ep_config()
 
         assert ep.stage_base_rank == pc.stage_base_rank, rank
         assert ep.stage_world_size == pc.stage_world_size == 8
-        assert ep._my_ep_group_ranks == pc.get_ep_group_ranks(), (rank, ep._my_ep_group_ranks)
         assert ep._my_ep_group_ranks == list(range(pc.stage_base_rank, pc.stage_base_rank + 8)), rank
         # EP routing groups (one per stage), then the per-block DP-scope groups (same rank sets).
         assert calls == [tuple(range(8)), tuple(range(8, 16))] * 2, (rank, calls)

@@ -33,7 +33,6 @@ from src.checkpoint.format import (
     SCHEDULER_STATE_FILE,
 )
 from src.checkpoint.writing import StreamingShardWriter
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, resolve_ep_merge_layer_class
 
 # The transform lives ON the EP layer class (inverse of that class's own gather).
@@ -50,6 +49,7 @@ from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.training.environment import _classify_resume_checkpoint
 
 # The whole-dict oracle the streamed merge is pinned against (test-only; see its module docstring).

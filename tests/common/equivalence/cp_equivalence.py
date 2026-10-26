@@ -28,7 +28,7 @@ from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
+from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.ep_reference import random_token_batch
 from tests.common.equivalence.revisions import (
@@ -268,7 +268,7 @@ def record_rank(output: Path, families, levels, *, tier: str, device, perturb: b
     group; the tier's controls are the caller's. Accelerate's process state comes first: the GPT-OSS sinks
     policy logs through it."""
     PartialState()
-    cp_config = ParallelismConfig(cp_size=CP_SIZE).create_cp_config()
+    cp_config = ParallelismConfig(cp_size=CP_SIZE).cp_config()
     rank = dist.get_rank()
     for name in families:
         for level in levels:

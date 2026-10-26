@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPSharedExpertsMoELayerBase
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
 from src.hardware import current_device
 
 
@@ -38,11 +38,11 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
 
     _SHARED_EXPERT_ATTRS = ("shared_experts",)
 
-    def _init_routing(self, original_layer: nn.Module) -> None:
+    def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Top-k plus the sigmoid-routing knobs, read off ``Lfm2MoeTopKRouter`` (the gate) rather than
         the block, and without defaults: these change the routing math, so a moved attribute must
         raise here rather than route with a substituted constant."""
-        super()._init_routing(original_layer)
+        super()._adopt_routing(original_layer)
         self.norm_topk_prob = self.gate.norm_topk_prob
         self.routed_scaling_factor = self.gate.routed_scaling_factor
         self.use_expert_bias = self.gate.use_expert_bias
@@ -73,7 +73,7 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
         """``use_expert_bias: false`` registers no buffer, which is a configuration, not a rename.
 
         Read off the wrapper's own flag, which routing and slot materialization both key on;
-        :meth:`_init_routing` rejects the one state that would make it inaccurate (a router asking
+        :meth:`_adopt_routing` rejects the one state that would make it inaccurate (a router asking
         for a bias its block does not carry).
         """
         return not self.use_expert_bias

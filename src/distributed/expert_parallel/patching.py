@@ -6,9 +6,9 @@ import logging
 
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.runtime.ranks import is_global_main_process
 from src.subclass_registry import build_class_claim_map, swap_registered_modules
 

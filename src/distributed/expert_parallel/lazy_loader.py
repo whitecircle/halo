@@ -51,6 +51,7 @@ from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys,
 from src.distributed.expert_parallel.hub_conversion import resolve_conversion_steps, resolve_loaded_conversion_steps
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.log import KEY_PREVIEW_COUNT
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import reject_fp8_tensor
 from src.model_loading.lazy_safetensors.conversion import Concat
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
@@ -65,9 +66,8 @@ from src.model_loading.lazy_safetensors.weights import (
     resolve_safetensors_index,
     verify_loaded_shape,
 )
+from src.models.attention.selection import revalidate_attn_kwarg
 from src.models.config_access import text_config
-from src.models.patches.attention import revalidate_attn_kwarg
-from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.filesystem import fs_aware_main_first
 from src.runtime.ranks import get_local_rank
@@ -413,7 +413,7 @@ class ExpertFuser:
 
                 # No fused target: legitimate only when the model itself stores one module per expert,
                 # in which case EPWeightPlanner already covers these keys. Anything else would leave the
-                # experts on meta with no error until the first _to_device.
+                # experts on meta with no error until the EP layer moves to its device.
                 unresolved = sorted(
                     disk_key
                     for suffixes in expert_dict.values()

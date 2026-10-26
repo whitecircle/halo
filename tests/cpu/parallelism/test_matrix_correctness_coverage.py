@@ -17,7 +17,7 @@ Usage:
 
 import pytest
 
-from src.distributed.parallelism_config import SUPPORTED_AXIS_SETS, _render_axis_set
+from src.distributed.parallelism_rules import SUPPORTED_AXIS_SETS, render_axis_set
 from tests.gpu.manifest import MANIFEST
 
 # Axis set -> GPU tests comparing it to an UNDISTRIBUTED reference; smoke tests do not count.
@@ -65,7 +65,7 @@ CORRECTNESS_GATES: dict[frozenset[str], tuple[str, ...]] = {
 
 def test_every_supported_combination_has_a_correctness_gate():
     """An allowlisted combination with no reference-equivalence test is an unproven combination."""
-    missing = sorted(_render_axis_set(axes) for axes in SUPPORTED_AXIS_SETS if not CORRECTNESS_GATES.get(axes))
+    missing = sorted(render_axis_set(axes) for axes in SUPPORTED_AXIS_SETS if not CORRECTNESS_GATES.get(axes))
     assert not missing, (
         f"These parallelism combinations are in SUPPORTED_AXIS_SETS but no test compares them to an "
         f"undistributed reference: {missing}. Add the combination's equivalence test and register it "
@@ -85,7 +85,7 @@ def test_gates_reference_tests_that_actually_exist():
 
 def test_no_gate_is_registered_for_a_rejected_combination():
     """A gate for a combination the allowlist refuses is dead weight that reads as coverage."""
-    stale = sorted(_render_axis_set(axes) for axes in CORRECTNESS_GATES if axes not in SUPPORTED_AXIS_SETS)
+    stale = sorted(render_axis_set(axes) for axes in CORRECTNESS_GATES if axes not in SUPPORTED_AXIS_SETS)
     assert not stale, (
         f"CORRECTNESS_GATES still claims coverage for combinations that are no longer supported: "
         f"{stale}. Drop the entry along with the combination."

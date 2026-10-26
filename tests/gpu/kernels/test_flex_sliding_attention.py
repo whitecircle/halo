@@ -21,15 +21,16 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import flex_attention
 from transformers import Gemma4ForCausalLM, Gemma4TextConfig, GptOssConfig, MistralConfig, MistralForCausalLM
 
-from src.models.patches import flex_sliding_attention
-from src.models.patches.attention import head_dim_exceeds_flash, patch_sdpa_for_wide_heads
-from src.models.patches.flex_sliding_attention import (
-    FLEX_SLIDING,
+from src.models.attention import sdpa_flex_sliding
+from src.models.attention.backend_setup import patch_sdpa_for_wide_heads
+from src.models.attention.sdpa_flex_sliding import (
+    SDPA_FLEX_SLIDING,
     register_flex_sliding_attention,
     reject_full_determinism_after_warmup,
     resolve_flex_sliding_attn_implementation,
-    warmup_flex_sliding_kernels,
+    warm_flex_sliding_kernels,
 )
+from src.models.attention.selection import has_head_dim_beyond_flash
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import fro_rel_err
 
@@ -122,7 +123,7 @@ def test_flex_sliding_wiring_matches_sdpa(lengths):
     """Exact check of what the sliding layers attend to: with the uncompiled (fp32-exact) FlexAttention
     the model must reproduce the SDPA model's loss and every gradient to fp32 round-off."""
     calls = []
-    with patch.object(flex_sliding_attention, "_compiled_flex", _counting(flex_attention, calls)):
+    with patch.object(sdpa_flex_sliding, "_compiled_flex", _counting(flex_attention, calls)):
         patch_sdpa_for_wide_heads()
         name = register_flex_sliding_attention()
         torch.manual_seed(0)
@@ -144,7 +145,7 @@ def test_compiled_flex_kernel_matches_fp64_reference():
     k = torch.randn(1, kv_heads, seq, dim, device="cuda", requires_grad=True)
     v = torch.randn(1, kv_heads, seq, dim, device="cuda", requires_grad=True)
     grad = torch.randn(1, seq, heads, dim, device="cuda")
-    out, _ = flex_sliding_attention.flex_sliding_attention(
+    out, _ = sdpa_flex_sliding.flex_sliding_attention(
         _causal_module(), q, k, v, dense[None, None], scaling=1.0, sliding_window=WINDOW
     )
     out.backward(grad)
@@ -171,7 +172,7 @@ def test_tuned_tiles_match_sdpa_at_gemma4_shapes():
     v = torch.randn(2, 8, seq, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     grad = torch.randn_like(q)
     dense = torch.stack([_sliding_mask([seq], window), _sliding_mask([1500, 548], window)])[:, None]
-    out, _ = flex_sliding_attention.flex_sliding_attention(
+    out, _ = sdpa_flex_sliding.flex_sliding_attention(
         _causal_module(), q, k, v, dense, scaling=1.0, sliding_window=window
     )
     out.backward(grad.transpose(1, 2))
@@ -199,9 +200,7 @@ def test_bf16_model_error_is_within_the_sdpa_noise_floor():
     for attn in ("sdpa", name):
         model = Gemma4ForCausalLM(_config(attn)).cuda()
         model.load_state_dict(reference.state_dict())
-        with patch.object(
-            flex_sliding_attention, "_compiled_flex", _counting(flex_sliding_attention._compiled_flex, calls)
-        ):
+        with patch.object(sdpa_flex_sliding, "_compiled_flex", _counting(sdpa_flex_sliding._compiled_flex, calls)):
             loss, grads = _loss_and_grads(model.to(torch.bfloat16), ids, position_ids)
         assert len(calls) == (2 if attn == name else 0), f"{attn}: {len(calls)} FlexAttention calls"
         errors[attn] = (
@@ -225,12 +224,12 @@ def test_global_layers_fall_back_to_sdpa_past_the_budget():
     candidate.load_state_dict(reference.state_dict())
     ids, position_ids = _packed_batch([100, 7, 45])
     calls = []
-    real = flex_sliding_attention._matmul_global_attention
+    real = sdpa_flex_sliding._matmul_global_attention
     with (
-        patch.object(flex_sliding_attention, "_compiled_flex", flex_attention),
-        patch.object(flex_sliding_attention, "_matmul_global_attention", lambda *a: calls.append(1) or real(*a)),
+        patch.object(sdpa_flex_sliding, "_compiled_flex", flex_attention),
+        patch.object(sdpa_flex_sliding, "_matmul_global_attention", lambda *a: calls.append(1) or real(*a)),
     ):
-        with patch.object(flex_sliding_attention, "EAGER_GLOBAL_BUDGET_BYTES", 0):
+        with patch.object(sdpa_flex_sliding, "MATMUL_GLOBAL_BUDGET_BYTES", 0):
             loss, _ = _loss_and_grads(candidate, ids, position_ids)
         assert calls == []
         torch.testing.assert_close(loss, _loss_and_grads(reference, ids, position_ids)[0], rtol=1e-5, atol=1e-6)
@@ -268,11 +267,9 @@ def test_global_logits_stay_fp32_at_gemma4_scale():
         return errs
 
     calls = []
-    matmul_path = _counting(flex_sliding_attention._matmul_global_attention, calls)
-    with patch.object(flex_sliding_attention, "_matmul_global_attention", matmul_path):
-        matmul = errors(
-            flex_sliding_attention.flex_sliding_attention(_causal_module(group), q, k, v, None, scaling=1.0)[0]
-        )
+    matmul_path = _counting(sdpa_flex_sliding._matmul_global_attention, calls)
+    with patch.object(sdpa_flex_sliding, "_matmul_global_attention", matmul_path):
+        matmul = errors(sdpa_flex_sliding.flex_sliding_attention(_causal_module(group), q, k, v, None, scaling=1.0)[0])
     assert calls == [1], "the call must take the matmul path"
     with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
         sdpa = errors(
@@ -285,7 +282,7 @@ def test_global_logits_stay_fp32_at_gemma4_scale():
 
 
 def test_global_matmul_saves_the_budgeted_bytes():
-    """``EAGER_GLOBAL_BUDGET_BYTES`` is spent at ``_SAVED_BYTES_PER_SCORE`` per score (the fp32 softmax output
+    """``MATMUL_GLOBAL_BUDGET_BYTES`` is spent at ``_SAVED_BYTES_PER_SCORE`` per score (the fp32 softmax output
     and the 16-bit probabilities): any other score-sized save, such as the fp32 logits, would let a layer the
     budget admits hold more than it."""
     seq, heads, kv_heads, dim = 2048, 16, 2, 512
@@ -299,10 +296,10 @@ def test_global_matmul_saves_the_budgeted_bytes():
         return tensor
 
     with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
-        flex_sliding_attention._matmul_global_attention(q, k, v, None, 1.0, True)
+        sdpa_flex_sliding._matmul_global_attention(q, k, v, None, 1.0, True)
     scores = heads * seq * seq
     score_sized = sum(nbytes for nbytes in saved.values() if nbytes >= scores)  # q, k, v save under a byte/score
-    assert score_sized == flex_sliding_attention._SAVED_BYTES_PER_SCORE * scores, score_sized / scores
+    assert score_sized == sdpa_flex_sliding._SAVED_BYTES_PER_SCORE * scores, score_sized / scores
 
 
 def test_global_layers_without_a_mask_attend_as_sdpa():
@@ -332,12 +329,12 @@ def test_global_layers_without_a_mask_attend_as_sdpa():
         v = torch.randn(1, kv_heads, kv_len, dim, **shape).requires_grad_()
         grad = torch.randn(1, q_len, heads, dim, **shape)
         q2, k2, v2 = (t.detach().clone().requires_grad_() for t in (q, k, v))
-        matmul_path = _counting(flex_sliding_attention._matmul_global_attention, calls)
-        with patch.object(flex_sliding_attention, "_matmul_global_attention", matmul_path):
-            out, _ = flex_sliding_attention.flex_sliding_attention(module, q, k, v, None, is_causal=is_causal)
+        matmul_path = _counting(sdpa_flex_sliding._matmul_global_attention, calls)
+        with patch.object(sdpa_flex_sliding, "_matmul_global_attention", matmul_path):
+            out, _ = sdpa_flex_sliding.flex_sliding_attention(module, q, k, v, None, is_causal=is_causal)
         out.backward(grad)
         with sdpa_kernel([SDPBackend.MATH]):
-            expected, _ = flex_sliding_attention.ALL_ATTENTION_FUNCTIONS["sdpa"](
+            expected, _ = sdpa_flex_sliding.ALL_ATTENTION_FUNCTIONS["sdpa"](
                 module, q2, k2, v2, None, is_causal=is_causal
             )
         expected.backward(grad)
@@ -356,16 +353,16 @@ def test_global_score_gemm_follows_autocast():
     q = torch.randn(1, 4, 64, 512, device="cuda")
     k = torch.randn(1, 2, 64, 512, device="cuda")
     seen = []
-    real = flex_sliding_attention._Fp32ScoreMatmul.apply
+    real = sdpa_flex_sliding._Fp32ScoreMatmul.apply
 
     def spy(*inputs):
         seen.append({t.dtype for t in inputs})
         return real(*inputs)
 
-    with patch.object(flex_sliding_attention._Fp32ScoreMatmul, "apply", spy):
+    with patch.object(sdpa_flex_sliding._Fp32ScoreMatmul, "apply", spy):
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            flex_sliding_attention.flex_sliding_attention(_causal_module(), q, k, k, None, scaling=1.0)
-        flex_sliding_attention.flex_sliding_attention(_causal_module(), q, k, k, None, scaling=1.0)
+            sdpa_flex_sliding.flex_sliding_attention(_causal_module(), q, k, k, None, scaling=1.0)
+        sdpa_flex_sliding.flex_sliding_attention(_causal_module(), q, k, k, None, scaling=1.0)
     assert seen == [{torch.bfloat16}, {torch.float32}], seen
 
 
@@ -375,7 +372,7 @@ def test_bidirectional_modules_keep_sdpa():
     k = torch.randn(1, 4, 16, 32, device="cuda")
     tower = torch.nn.Module()
     tower.is_causal = False
-    out, _ = flex_sliding_attention.flex_sliding_attention(tower, q, k, k, None, scaling=1.0)
+    out, _ = sdpa_flex_sliding.flex_sliding_attention(tower, q, k, k, None, scaling=1.0)
     expected = torch.nn.functional.scaled_dot_product_attention(q, k, k, scale=1.0).transpose(1, 2)
     torch.testing.assert_close(out, expected)
 
@@ -386,18 +383,16 @@ def test_block_masks_live_and_die_with_their_mask():
     its own entries; and a mask's block masks, with their padded copies of it, are freed with the mask
     rather than held until the next forward."""
     first = _sliding_mask([200])[None, None]
-    a = flex_sliding_attention.sliding_block_masks(first)
-    assert flex_sliding_attention.sliding_block_masks(first) is a
+    a = sdpa_flex_sliding.sliding_block_masks(first)
+    assert sdpa_flex_sliding.sliding_block_masks(first) is a
     a_alive = weakref.ref(a[0])
     del first, a
     assert a_alive() is None, "the block masks outlived their mask"
     # split at the 128-token tile boundary, so the second tile's key blocks differ from the first mask's
     second = _sliding_mask([128, 72])[None, None]
-    b = flex_sliding_attention.sliding_block_masks(second)
-    expected = flex_sliding_attention.interval_block_mask(*flex_sliding_attention.key_intervals(second[0, 0]), 200)
-    stale = flex_sliding_attention.interval_block_mask(
-        *flex_sliding_attention.key_intervals(_sliding_mask([200])), 200
-    )
+    b = sdpa_flex_sliding.sliding_block_masks(second)
+    expected = sdpa_flex_sliding.interval_block_mask(*sdpa_flex_sliding.key_intervals(second[0, 0]), 200)
+    stale = sdpa_flex_sliding.interval_block_mask(*sdpa_flex_sliding.key_intervals(_sliding_mask([200])), 200)
     assert not torch.equal(stale.kv_num_blocks, expected.kv_num_blocks)  # premise: a stale mask would show
     assert torch.equal(b[0].kv_num_blocks, expected.kv_num_blocks)
     assert torch.equal(b[0].full_kv_num_blocks, expected.full_kv_num_blocks)
@@ -412,7 +407,7 @@ def test_building_block_masks_holds_no_copy_of_the_mask():
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
     base = torch.cuda.memory_allocated()
-    assert flex_sliding_attention.sliding_block_masks(dense) is not None
+    assert sdpa_flex_sliding.sliding_block_masks(dense) is not None
     torch.cuda.synchronize()
     added = torch.cuda.max_memory_allocated() - base
     assert added < 0.25 * seq * seq, f"building block masks took {added / 2**20:.0f} MiB"
@@ -427,8 +422,8 @@ def test_a_mask_with_a_non_contiguous_row_keeps_sdpa():
     q = torch.randn(1, 4, seq, 32, device="cuda")
     k = torch.randn(1, 2, seq, 32, device="cuda")
     calls = []
-    with patch.object(flex_sliding_attention, "_compiled_flex", _counting(flex_attention, calls)):
-        out, _ = flex_sliding_attention.flex_sliding_attention(
+    with patch.object(sdpa_flex_sliding, "_compiled_flex", _counting(flex_attention, calls)):
+        out, _ = sdpa_flex_sliding.flex_sliding_attention(
             _causal_module(), q, k, k, dense[None, None], scaling=1.0, sliding_window=WINDOW
         )
     assert calls == []
@@ -454,7 +449,7 @@ def test_a_non_gemma_sliding_model_matches_sdpa(lengths):
         candidate.load_state_dict(reference.state_dict())
         calls = []
         with patch.object(
-            flex_sliding_attention, "_compiled_flex", lambda *a, **k: calls.append(1) or flex_attention(*a, **k)
+            sdpa_flex_sliding, "_compiled_flex", lambda *a, **k: calls.append(1) or flex_attention(*a, **k)
         ):
             _assert_model_matches(reference, candidate, lengths)
     finally:
@@ -474,8 +469,8 @@ def test_a_call_carrying_attention_sinks_keeps_sdpa():
 
     q = torch.randn(1, 4, 200, 32, device="cuda")  # long enough for FlexAttention but for the sinks
     sinks = torch.zeros(4, device="cuda")
-    with patch.dict(flex_sliding_attention.ALL_ATTENTION_FUNCTIONS._global_mapping, {"sdpa": spy}):
-        flex_sliding_attention.flex_sliding_attention(
+    with patch.dict(sdpa_flex_sliding.ALL_ATTENTION_FUNCTIONS._global_mapping, {"sdpa": spy}):
+        sdpa_flex_sliding.flex_sliding_attention(
             _causal_module(), q, q, q, _sliding_mask([200])[None, None], sliding_window=WINDOW, s_aux=sinks
         )
     assert seen.get("s_aux") is sinks
@@ -485,11 +480,11 @@ def test_the_resolver_picks_wide_head_models():
     """Heads wider than flash runs select the flex-sliding implementation on an SDPA run; a sliding model
     with narrow heads, a sinks model, a non-SDPA run and the opt-out keep what the run resolved."""
     wide = _config("sdpa", global_head_dim=512)
-    assert resolve_flex_sliding_attn_implementation(wide, "sdpa") == FLEX_SLIDING
+    assert resolve_flex_sliding_attn_implementation(wide, "sdpa") == SDPA_FLEX_SLIDING
     assert resolve_flex_sliding_attn_implementation(_config("sdpa"), "sdpa") == "sdpa"
     assert resolve_flex_sliding_attn_implementation(_mistral_config("sdpa"), "sdpa") == "sdpa"
     wide_sinks = GptOssConfig(head_dim=512)
-    assert head_dim_exceeds_flash(wide_sinks)  # premise: only the sinks keep it off
+    assert has_head_dim_beyond_flash(wide_sinks)  # premise: only the sinks keep it off
     assert resolve_flex_sliding_attn_implementation(wide_sinks, "sdpa") == "sdpa"
     assert resolve_flex_sliding_attn_implementation(wide, "flash_attention_4") == "flash_attention_4"
     with patch.dict(os.environ, {"HALO_FLEX_SLIDING": "0"}):
@@ -508,7 +503,7 @@ def test_one_warmup_serves_every_later_call():
     torch._dynamo.reset()
     counters = torch._dynamo.utils.counters
     counters.clear()
-    warmup_flex_sliding_kernels(model, dtype=torch.bfloat16)
+    warm_flex_sliding_kernels(model, dtype=torch.bfloat16)
     heads, kv_heads, dim = 4, 2, 64
     # (packed documents per row, rows, trainable inputs: "qkv", "q", "" under grad mode or None under no_grad,
     # autocast on)
@@ -539,7 +534,7 @@ def test_one_warmup_serves_every_later_call():
                 torch.set_grad_enabled(trainable is not None),
                 torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast),
             ):
-                out, _ = flex_sliding_attention.flex_sliding_attention(
+                out, _ = sdpa_flex_sliding.flex_sliding_attention(
                     _causal_module(), q, k, v, dense, scaling=1.0, sliding_window=WINDOW
                 )
             if trainable:
@@ -567,13 +562,13 @@ def test_a_warmed_gemma4_model_runs_without_compiling():
     torch.manual_seed(0)
     model = Gemma4ForCausalLM(_config(name)).cuda().to(torch.bfloat16)
     torch._dynamo.reset()
-    warmup_flex_sliding_kernels(model, dtype=torch.bfloat16)
+    warm_flex_sliding_kernels(model, dtype=torch.bfloat16)
     ids, position_ids = _packed_batch([300, 150, 40])
     calls = []
-    compiled = _counting(flex_sliding_attention._compiled_flex, calls)
+    compiled = _counting(sdpa_flex_sliding._compiled_flex, calls)
     with (
         patch.object(torch._dynamo.config, "error_on_recompile", True),
-        patch.object(flex_sliding_attention, "_compiled_flex", compiled),
+        patch.object(sdpa_flex_sliding, "_compiled_flex", compiled),
     ):
         _loss_and_grads(model, ids, position_ids)
         with torch.no_grad():
@@ -591,10 +586,10 @@ def test_fp32_parameters_under_autocast_run_the_warmed_graphs():
     torch.manual_seed(0)
     model = Gemma4ForCausalLM(_config(name)).cuda().float()
     torch._dynamo.reset()
-    warmup_flex_sliding_kernels(model, dtype=torch.bfloat16)
+    warm_flex_sliding_kernels(model, dtype=torch.bfloat16)
     ids, position_ids = _packed_batch([300, 150, 40])
     arrived, compiled_dtypes = [], []
-    sliding, compiled = flex_sliding_attention._sliding_flex_attention, flex_sliding_attention._compiled_flex
+    sliding, compiled = sdpa_flex_sliding._sliding_flex_attention, sdpa_flex_sliding._compiled_flex
 
     def sliding_spy(query, key, value, *args):
         arrived.append({query.dtype, key.dtype, value.dtype})
@@ -606,8 +601,8 @@ def test_fp32_parameters_under_autocast_run_the_warmed_graphs():
 
     with (
         patch.object(torch._dynamo.config, "error_on_recompile", True),
-        patch.object(flex_sliding_attention, "_sliding_flex_attention", sliding_spy),
-        patch.object(flex_sliding_attention, "_compiled_flex", compiled_spy),
+        patch.object(sdpa_flex_sliding, "_sliding_flex_attention", sliding_spy),
+        patch.object(sdpa_flex_sliding, "_compiled_flex", compiled_spy),
         torch.autocast("cuda", dtype=torch.bfloat16),
     ):
         _loss_and_grads(model, ids, position_ids)
@@ -625,7 +620,7 @@ def test_full_determinism_after_the_warmup_is_refused():
     name = register_flex_sliding_attention()
     model = Gemma4ForCausalLM(_config(name))
     torch._dynamo.reset()
-    warmup_flex_sliding_kernels(model, dtype=torch.bfloat16)
+    warm_flex_sliding_kernels(model, dtype=torch.bfloat16)
     reject_full_determinism_after_warmup(False)
     try:
         reject_full_determinism_after_warmup(True)
@@ -639,7 +634,7 @@ def test_full_determinism_after_the_warmup_is_refused():
 
     def sliding_call():
         with torch.no_grad(), patch.object(torch._dynamo.config, "error_on_recompile", True):
-            flex_sliding_attention.flex_sliding_attention(
+            sdpa_flex_sliding.flex_sliding_attention(
                 _causal_module(), q, k, k, _sliding_mask([200])[None, None], scaling=1.0, sliding_window=WINDOW
             )
 
@@ -669,7 +664,7 @@ def test_rows_past_46k_tokens_match_sdpa():
         v = torch.randn(1, kv_heads, seq, dim, **shape).requires_grad_()
         dense = _sliding_mask(lengths, window)[None, None]
         grad = torch.randn(1, seq, heads, dim, **shape)
-        out, _ = flex_sliding_attention.flex_sliding_attention(
+        out, _ = sdpa_flex_sliding.flex_sliding_attention(
             _causal_module(heads // kv_heads), q, k, v, dense, scaling=1.0, sliding_window=window
         )
         out.backward(grad)

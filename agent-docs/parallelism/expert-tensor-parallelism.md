@@ -46,7 +46,7 @@ wait and the barrier times out.
 
 The Megatron-LM scatter-gather pattern, a matched autograd pair — the scatter half is the toolkit-wide
 `SumGradAcrossGroup` (`src/distributed/grad_reduce.py`, shared with TP), the gather half
-`ReduceFromExpertTP` (`src/distributed/expert_parallel/base_layer.py`):
+`ReduceFromExpertTP` (`src/distributed/expert_parallel/moe_layer/layer.py`):
 
 - **`SumGradAcrossGroup`** — identity forward; `all_reduce(SUM)` backward over `expert_tp_group`. It is
   applied to **both** the layer input tokens **and** the routing weights.
@@ -60,7 +60,7 @@ The Megatron-LM scatter-gather pattern, a matched autograd pair — the scatter 
   expert outputs; identity backward, correct because `SumGradAcrossGroup` owns the input-gradient
   reduction and each shard's weight gradient is independently correct.
 
-Gradient divisors (`create_expert_grad_hook` / `create_router_grad_hook`, `src/distributed/expert_parallel/grad_sync.py`):
+Gradient divisors (`build_expert_grad_hook` / `build_router_grad_hook`, `src/distributed/expert_parallel/moe_layer/grad_sync.py`):
 
 | Parameter | Divisor | Rationale |
 |---|---|---|
@@ -85,7 +85,7 @@ torchrun --nproc_per_node=2 \
 
 ## Validation rules
 
-Enforced in `src/distributed/parallelism_config.py` before model loading:
+Enforced in `src/distributed/parallelism_rules.py` before model loading:
 
 - `expert_tp_size` must divide the NVLink domain (= `gpus_per_node` on a standard node, the rack on
   NVL72).
@@ -159,7 +159,7 @@ EP=16 throughput. Validate convergence on your own config before a long run.
 ## Weight sharding
 
 ETP shards the intermediate dimension `M` of expert FFN weights; the recipe is keyed on the model's
-expert layout (`src/distributed/expert_parallel/base_layer.py` + `layers/`).
+expert layout (`src/distributed/expert_parallel/moe_layer/compute.py` + `layers/`).
 
 - **GptOss (fused interleaved GLU)** — `gate_up_proj [E, H, 2M]` is `[g0,u0,g1,u1,…]`. De-interleave
   (`gate = [...,::2]`, `up = [...,1::2]`), shard each along dim 2 to `[E, H, M/tp]`; shard
@@ -211,14 +211,14 @@ layer that does the split cannot disagree on which config spelling carries the p
 **Axis combinations.** ETP composes with EP. Pure ETP and EP+ETP are supported shapes; TP+ETP,
 ETP+CP and EP+TP+ETP are refused by the [allowlist](README.md#supported-combinations).
 
-**Knobs.** ETP inherits every [EP knob rule](expert-parallelism.md#limitations) (`is_ep_mode` is
+**Knobs.** ETP inherits every [EP knob rule](expert-parallelism.md#limitations) (`has_ep_group` is
 `ep_group_size > 1`, which pure ETP satisfies). On top of those:
 
 | Knob | Under ETP | Gate |
 |---|---|---|
 | expert LoRA | rejected at config time — the replicated adapter half would receive partial gradients and drift across ranks. `EPConfig` repeats the identical raise at group construction, and every `merge_lora=True` gather (weight sync, merge-on-save) guards it once more, unreachably | `ParallelismConfig` |
 | `save_sharded_ep` | rejected — the merge script cannot reconstruct TP-sharded expert weights | `validate_ep_sharded_save` |
-| `use_hsdp` | rejected — ETP builds its own `(dp, tp)` mesh | `_validate_hsdp` |
+| `use_hsdp` | rejected — ETP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
 | `use_peft` / attention LoRA | supported — pure ETP leaves attention unsharded, so the adapter is a genuine replica | — |
 | `use_grouped_gemm` on GptOss | runs the per-expert loop, reported in the layer's init summary (`grouped_mm=False`) — ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads | `EPGptOssMoELayer._grouped_mm_enabled` |
 

@@ -1,9 +1,8 @@
 """Pluggable text→ids backend for dataset tokenization.
 
 "hf" (default) encodes with the HuggingFace tokenizer itself; "gigatoken" (optional extra
-`halo[gigatoken]`) wraps it in a proxy that encodes through gigatoken's Rust encoder, after
-verifying on a probe set that both produce identical ids. Resolved centrally in
-``setup_model_and_tokenizer``, so every training method honors ``tokenizer_backend``.
+``halo[gigatoken]``) wraps it in a proxy that encodes through gigatoken's Rust encoder, after verifying
+on a probe set that both produce identical ids.
 """
 
 from __future__ import annotations

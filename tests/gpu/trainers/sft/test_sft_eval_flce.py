@@ -30,7 +30,7 @@ from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLite
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.liger.orchestrator import resolve_liger_applier
+from src.model_loading.liger.dispatch import resolve_liger_applier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log

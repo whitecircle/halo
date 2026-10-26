@@ -20,18 +20,18 @@ from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.log import warn_once
+from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from src.model_loading.model_preparation import (
-    apply_family_attention_patches,
+    apply_family_patches,
+    apply_run_model_policies,
     auto_load_model,
-    finalize_run_model,
 )
-from src.model_loading.tokenizer_setup import setup_model_and_tokenizer
-from src.models.patches.attention import resolve_attn_implementation
-from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.patches.gpt_oss_sinks import SinksPolicy
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.model_loading.remote_code import apply_remote_code_compat_shims
+from src.model_loading.tokenizer_setup import configure_run_tokenizer
+from src.models.attention.gpt_oss_sinks import SinksPolicy
+from src.models.attention.selection import resolve_attn_implementation
 from src.runtime.load_coordination import joined_node_load
 
 # Stdlib, not accelerate's adapter: warn_once marks a message seen on every rank, so each rank must emit it.
@@ -85,7 +85,7 @@ def warn_unparallelized_reference(parallelism_config: ParallelismConfig, avoid: 
     which nothing refuses. The cost is memory and time: every rank holds the full model the parallelism
     shards, experts included, and runs the per-expert forward. ``avoid`` is the caller's way around it.
     """
-    if parallelism_config.is_ep_mode or parallelism_config.is_tp_mode:
+    if parallelism_config.has_ep_group or parallelism_config.is_tp_mode:
         message = (
             f"A frozen, unparallelized reference beside a policy sharded by EP/ETP/TP "
             f"(expert_parallel_size={parallelism_config.ep_size}, "
@@ -128,7 +128,7 @@ def load_frozen_auxiliary_model(
     * the backend is resolved by the same :func:`resolve_attn_implementation` the policy loader runs,
       against this model's config and the run's dtype, so the per-family limits (DeepSeek-V4
       eager-only, Gemma4 head_dim-512, fp32 vs FlashAttention) apply, and the model is built with what
-      the shared :func:`apply_family_attention_patches` returns for it (Gemma 4's ``sdpa_flex_sliding``).
+      the shared :func:`apply_family_patches` returns for it (Gemma 4's ``sdpa_flex_sliding``).
       Auto-detection is the widest gap: an unset request pins the reference to SDPA while the policy
       takes FA4 on Blackwell.
     * the sinks policy is applied here rather than by the caller, since ``reset_sinks=True`` is what
@@ -152,8 +152,9 @@ def load_frozen_auxiliary_model(
     if download_tag:
         revision = resolve_model_source(model_name_or_path, revision, tag=download_tag)
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
-    backend = resolve_attn_implementation(config, attn_implementation, dtype, sinks_reset=reset_sinks)
-    resolved_attn = apply_family_attention_patches(config, backend)
+    sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks)
+    backend = resolve_attn_implementation(config, attn_implementation, dtype, sinks_policy=sinks_policy)
+    resolved_attn = apply_family_patches(config, backend)
     load_kwargs = {
         "revision": revision,
         "dtype": dtype,
@@ -178,10 +179,10 @@ def load_frozen_auxiliary_model(
 
     # Repairs non-persistent buffers; an uninitialized inv_freq biases every logprob this model scores.
     finalize_loaded_model(model)
-    finalize_run_model(
+    apply_run_model_policies(
         model,
         config,
-        sinks_policy=SinksPolicy.from_flags(reset_sinks=reset_sinks),
+        sinks_policy=sinks_policy,
         attn_implementation=resolved_attn,
     )
     # Same attention warm-up as the policy loader: the first scoring forward would otherwise JIT-compile its
@@ -241,7 +242,7 @@ def load_frozen_reference_model(
         # so every rank would otherwise fetch at once.
         download_tag="reference_model",
     )
-    setup_model_and_tokenizer(args, model_ref, tokenizer, embeddings_sharded=input_embeddings_tp_sharded)
+    configure_run_tokenizer(args, model_ref, tokenizer, embeddings_sharded=input_embeddings_tp_sharded)
     return model_ref
 
 
@@ -297,7 +298,7 @@ def load_reference_model_for_preference(
 
     Under PEFT the reference is the adapter-free base → ``None``: TRL scores it inside the
     ``PeftModel``'s ``disable_adapter()``, which also drops the native EP expert adapters
-    (``make_disable_adapter_ep_aware``). Expert-only LoRA has no ``PeftModel``, so it must set
+    (``install_ep_aware_disable_adapter``). Expert-only LoRA has no ``PeftModel``, so it must set
     ``precompute_ref_log_probs``. Full finetune loads an unparallelized copy, under EP/TP with the
     replica's cost reported (:func:`warn_unparallelized_reference`), or precomputes where the
     parallelism shards the policy. ``reset_sinks`` and ``attn_default`` must mirror the policy load so
@@ -318,7 +319,7 @@ def load_reference_model_for_preference(
             )
         return None
 
-    sharded = parallelism_config.is_ep_mode or parallelism_config.is_tp_mode or parallelism_config.is_pp_mode
+    sharded = parallelism_config.has_ep_group or parallelism_config.is_tp_mode or parallelism_config.is_pp_mode
     # Precomputed log-probs come from the untrained policy; a resume restores them from the checkpoint.
     if sharded and training_config.precompute_ref_log_probs:
         return None

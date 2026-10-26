@@ -124,7 +124,7 @@ def _worker(rank: int, ragged_prompts: bool) -> None:
     parallelism_config = ParallelismConfig(
         cp_size=CP_WORLD_SIZE, world_size=CP_WORLD_SIZE, gpus_per_node=CP_WORLD_SIZE
     )
-    cp_config = parallelism_config.create_cp_config()
+    cp_config = parallelism_config.cp_config()
     cp_model.cp_config = cp_config
     cp_outputs, cp_loss, cp_grad, cp_metrics, cp_warnings = _loss_and_grad(
         _trainer(parallelism_config, cp_config), cp_model, batch

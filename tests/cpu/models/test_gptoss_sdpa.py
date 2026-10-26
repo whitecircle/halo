@@ -4,7 +4,7 @@ GptOss sets ``_supports_sdpa = False`` because SDPA computes the softmax interna
 per-head sink logit. But fine-tuning resets sinks to dtype min (``_reset_gpt_oss_sinks``), so the
 dropped sink column contributes ``exp(dtype_min) == 0`` — SDPA then matches eager/flex exactly (the
 same reasoning that makes FA2 valid). ``validate_attn_implementation`` keeps an explicit ``sdpa``
-request for GptOss ONLY when ``sinks_reset=True``; with live sinks every sink-dropping impl
+request for GptOss ONLY under a neutralized ``SinksPolicy``; with live sinks every sink-dropping impl
 (sdpa, FA2) raises — silent fallback would still drop the sinks. Non-sinks models are unaffected.
 
     python tests/cpu/models/test_gptoss_sdpa.py
@@ -16,21 +16,19 @@ import types
 import pytest
 import torch
 from accelerate import PartialState
-from transformers import AutoModelForCausalLM, GptOssConfig, LlamaConfig
+from transformers import AutoModelForCausalLM, GptOssConfig, LlamaConfig, PreTrainedModel
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 from trl import ModelConfig
 
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.liger.orchestrator import LIGER_APPLIED_CONFIG_ATTR
+from src.model_loading.liger.dispatch import LIGER_APPLIED_CONFIG_ATTR
+from src.models.attention import gpt_oss_sinks
+from src.models.attention.gpt_oss_sinks import SinksPolicy, install_sdpa_for_reset_sinks
+from src.models.attention.selection import _attn_impl_handles_sinks, validate_attn_implementation
 from src.models.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
-)
-from src.models.patches.attention import (
-    _attn_impl_handles_sinks,
-    _enable_sink_model_sdpa,
-    validate_attn_implementation,
 )
 
 PartialState()  # the loader's logger needs accelerate state initialized
@@ -57,7 +55,7 @@ def _llama():
 
 
 def test_sdpa_kept_for_gptoss_when_sinks_reset():
-    assert validate_attn_implementation(_gptoss(), "sdpa", sinks_reset=True) == "sdpa"
+    assert validate_attn_implementation(_gptoss(), "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
     # The class guard was flipped so transformers' _sdpa_can_dispatch will accept it at model build.
     assert AutoModelForCausalLM._model_mapping[GptOssConfig]._supports_sdpa is True
 
@@ -67,11 +65,11 @@ def test_sink_dropping_impls_rejected_for_gptoss_without_reset():
     logprob shift on gpt-oss-20b. Must raise, never silently fall back (a fallback to FA2 drops the
     sinks just the same); the sink-carrying impls (eager, flex) stay allowed."""
     with pytest.raises(ValueError, match="sink"):
-        validate_attn_implementation(_gptoss(), "sdpa", sinks_reset=False)
+        validate_attn_implementation(_gptoss(), "sdpa", SinksPolicy.LIVE)
     with pytest.raises(ValueError, match="sink"):
-        validate_attn_implementation(_gptoss(), "flash_attention_2", sinks_reset=False)
-    assert validate_attn_implementation(_gptoss(), "eager", sinks_reset=False) == "eager"
-    assert validate_attn_implementation(_gptoss(), "flex_attention", sinks_reset=False) == "flex_attention"
+        validate_attn_implementation(_gptoss(), "flash_attention_2", SinksPolicy.LIVE)
+    assert validate_attn_implementation(_gptoss(), "eager", SinksPolicy.LIVE) == "eager"
+    assert validate_attn_implementation(_gptoss(), "flex_attention", SinksPolicy.LIVE) == "flex_attention"
 
 
 @pytest.mark.parametrize("backend", ["flash_attention_2", "flash_attention_3"])
@@ -81,20 +79,20 @@ def test_a_local_flash_build_is_not_swapped_for_the_hub_kernel(monkeypatch, back
     monkeypatch.setattr(
         GptOssPreTrainedModel, "_compatible_flash_implementations", ["kernels-community/vllm-flash-attn3"]
     )
-    assert validate_attn_implementation(_gptoss(), backend, sinks_reset=True) == backend
+    assert validate_attn_implementation(_gptoss(), backend, SinksPolicy.NEUTRALIZED) == backend
     assert GptOssPreTrainedModel._compatible_flash_implementations is None
 
 
-def test_enable_sink_model_sdpa_idempotent():
+def test_install_sdpa_for_reset_sinks_is_idempotent():
     cfg = _gptoss()
-    _enable_sink_model_sdpa(cfg)  # ensure flipped
-    assert _enable_sink_model_sdpa(cfg) is False  # already enabled → no-op
+    install_sdpa_for_reset_sinks(cfg)  # ensure flipped
+    assert install_sdpa_for_reset_sinks(cfg) is False  # already enabled → no-op
     assert AutoModelForCausalLM._model_mapping[GptOssConfig]._supports_sdpa is True
 
 
 def test_non_sinks_model_sdpa_passthrough():
-    # A non-sinks model keeps sdpa regardless of sinks_reset (the gate only affects sinks models).
-    assert validate_attn_implementation(_llama(), "sdpa", sinks_reset=False) == "sdpa"
+    # A non-sinks model keeps sdpa regardless of the sinks policy (the gate only affects sinks models).
+    assert validate_attn_implementation(_llama(), "sdpa", SinksPolicy.LIVE) == "sdpa"
 
 
 def test_sinks_reset_state_is_per_config_instance():
@@ -103,16 +101,16 @@ def test_sinks_reset_state_is_per_config_instance():
     reset-sinks reference load then disarms the live-sinks guard the policy load established."""
     live = _gptoss()
     with pytest.raises(ValueError, match="sink"):
-        validate_attn_implementation(live, "sdpa", sinks_reset=False)
+        validate_attn_implementation(live, "sdpa", SinksPolicy.LIVE)
     reset = _gptoss()
-    assert validate_attn_implementation(reset, "sdpa", sinks_reset=True) == "sdpa"
+    assert validate_attn_implementation(reset, "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
 
     # State lives on each instance, never on the shared class.
     assert "_halo_sinks_reset" not in type(live).__dict__
     assert live._halo_sinks_reset is False
     assert reset._halo_sinks_reset is True
 
-    # Re-validation contexts (EP/CP/lazy loaders pass sinks_reset=None) enforce per-instance state:
+    # Re-validation contexts (EP/CP/lazy loaders pass no sinks_policy) enforce per-instance state:
     # the live-sinks config still raises even though a reset-sinks config validated after it.
     with pytest.raises(ValueError, match="sink"):
         validate_attn_implementation(live, "sdpa")
@@ -124,12 +122,12 @@ def test_a_fresh_config_inherits_no_sdpa_approval():
     INSTANCE, never on the model CLASS.
 
     A class-level flag is flipped for the whole process by one reset-sinks load, so any later
-    re-validation with nothing of its own to go on (EP/CP/lazy loaders pass ``sinks_reset=None``, and
+    re-validation with nothing of its own to go on (EP/CP/lazy loaders pass no ``sinks_policy``, and
     a loader that built its own config carries no record) reads that stale approval and accepts sdpa
     for a model whose sinks were never reset. sdpa drops the sink column from the softmax silently.
     """
     approved = _gptoss()
-    assert validate_attn_implementation(approved, "sdpa", sinks_reset=True) == "sdpa"
+    assert validate_attn_implementation(approved, "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
 
     fresh = _gptoss()
     assert validate_attn_implementation(fresh, "sdpa") != "sdpa"
@@ -183,6 +181,25 @@ def test_fa3_sink_probe_falls_back_to_flash_attn_3(monkeypatch):
     assert _attn_impl_handles_sinks("flash_attention_3") is True
     monkeypatch.setitem(sys.modules, "flash_attn_3", _fake_fa3_module("flash_attn_3", with_s_aux=False))
     assert _attn_impl_handles_sinks("flash_attention_3") is False
+
+
+def test_the_sdpa_flip_stops_at_pretrained_model(monkeypatch):
+    """The flip clears a family's own ``_supports_sdpa = False`` up the MRO and never the base default on
+    ``PreTrainedModel``, which would admit sdpa for every architecture loaded later in the process."""
+
+    class FamilyBase(PreTrainedModel):
+        _supports_sdpa = False
+
+    class FamilyForCausalLM(FamilyBase):
+        pass
+
+    monkeypatch.setattr(
+        gpt_oss_sinks, "AutoModelForCausalLM", types.SimpleNamespace(_model_mapping={GptOssConfig: FamilyForCausalLM})
+    )
+    assert PreTrainedModel.__dict__["_supports_sdpa"] is False  # premise: the base default the flip must keep
+    assert install_sdpa_for_reset_sinks(_gptoss()) is True
+    assert FamilyBase._supports_sdpa is True
+    assert PreTrainedModel.__dict__["_supports_sdpa"] is False
 
 
 @pytest.fixture(scope="module")
@@ -305,7 +322,7 @@ def test_toolkit_run_state_never_reaches_the_exported_config():
     run keeps reading them afterwards.
     """
     cfg = _gptoss()
-    validate_attn_implementation(cfg, "sdpa", sinks_reset=True)
+    validate_attn_implementation(cfg, "sdpa", SinksPolicy.NEUTRALIZED)
     set_config_field_run_scoped(cfg, LIGER_APPLIED_CONFIG_ATTR, {"rope": True})
     assert cfg._halo_sinks_reset is True and getattr(cfg, LIGER_APPLIED_CONFIG_ATTR) == {"rope": True}
 

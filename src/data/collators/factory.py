@@ -12,8 +12,12 @@ from src.data.collators.packing import (
     DataCollatorWithPacking,
 )
 from src.data.spans import require_rendered_response_marker, resolve_eos_token_ids
+from src.models.attention.selection import (
+    VARLEN_ATTN_IMPLEMENTATIONS,
+    effective_attn_implementation,
+    is_flash_attn_implementation,
+)
 from src.models.config_access import model_type_matches
-from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from src.models.segment_markers import (
     DENSE_PACKING_LEAK_MODEL_TYPES,
     reject_compressed_kv_rows,
@@ -70,7 +74,7 @@ def _validate_collator_options(
     # The DECODER's backend: a VLM wrapper records it on its text sub-config, so a top-level-only
     # read would report None and refuse padding_free on a model that does run flash attention.
     attn_impl = effective_attn_implementation(model_config)
-    if model_config is not None and attn_impl not in VARLEN_ATTN_IMPLEMENTATIONS:
+    if model_config is not None and not is_flash_attn_implementation(attn_impl):
         if padding_free:
             raise ValueError(
                 f"padding_free requires a varlen attention kernel, but this model resolved to "

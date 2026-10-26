@@ -5,7 +5,7 @@ Each of these decides something silent when it is wrong — a NaN-producing atte
 recompute dtype mismatch, a norm quantized to bf16, a RoPE table left as load garbage — so the pins
 here are on the derivation itself, not on a call reaching some branch:
 
-* ``model_fa4_backward_nan_prone`` stays a per-family verdict, and the config numbers show why a
+* ``is_fa4_backward_nan_prone`` stays a per-family verdict, and the config numbers show why a
   ``head_dim == 256`` derivation cannot replace it;
 * the FSDP2 ``cast_forward_inputs`` policy reads a CLASS attribute the Zaya load patch stamps,
   with no model_type list in the wrap;
@@ -27,9 +27,9 @@ from transformers.models.zaya import modeling_zaya
 
 from src.distributed.fsdp import _should_cast_forward_inputs
 from src.distributed.loading.peft_setup import _peft_module_casting_to_bf16
-from src.models.patches.attention import model_fa4_backward_nan_prone
-from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.patches.zaya import patch_zaya_fp32_interlayer_residual
+from src.model_loading.buffer_repair import finalize_loaded_model
+from src.models.attention.selection import is_fa4_backward_nan_prone
+from src.models.zaya import patch_zaya_fp32_interlayer_residual
 
 
 def _config(model_type: str):
@@ -43,13 +43,13 @@ def test_the_fa4_nan_families_are_all_refused(model_type):
     Missing one is silent: the run trains, the loss goes to NaN some steps later, and the cause is a
     kernel choice nothing logged.
     """
-    assert model_fa4_backward_nan_prone(_config(model_type)) is True
+    assert is_fa4_backward_nan_prone(_config(model_type)) is True
 
 
 @pytest.mark.parametrize("model_type", ["qwen3", "llama", "gpt_oss"])
 def test_clean_families_keep_fa4(model_type):
     """The refusal must stay narrow — it costs 2-3x on the attention kernel for every model it hits."""
-    assert model_fa4_backward_nan_prone(_config(model_type)) is False
+    assert is_fa4_backward_nan_prone(_config(model_type)) is False
 
 
 def test_the_nan_trigger_is_not_derivable_from_the_declared_head_dim():

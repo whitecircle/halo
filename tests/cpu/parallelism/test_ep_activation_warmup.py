@@ -25,8 +25,8 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from src.distributed.expert_parallel.base_layer import _WARMUP_TOKENS
 from src.distributed.expert_parallel.layers import gpt_oss as gpt_oss_layer
+from src.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
 from src.kernels import fused_glu, moe_permute
 from src.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
 from tests.common.ep_stubs import StubEPLayerBase

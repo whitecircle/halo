@@ -78,7 +78,7 @@ def group_order_record(shape: LayoutShape) -> dict:
             config = shape.config_as_rank(rank)
             calls: list[StubGroup] = []
             with stubbed_process_groups(shape.world_size, rank, calls):
-                ep_config = config.create_ep_config()
+                ep_config = config.ep_config()
             orders.append([_call(group) for group in calls])
             for field in GROUP_FIELDS:
                 built_by[field].append(_call_index(calls, getattr(ep_config, field)))

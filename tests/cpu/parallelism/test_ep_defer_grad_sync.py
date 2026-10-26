@@ -30,11 +30,11 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.grad_sync import create_router_grad_hook
+from src.distributed.expert_parallel.moe_layer.grad_sync import build_router_grad_hook
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.parallelism import stubbed_process_groups
 
-_GS_MOD = "src.distributed.expert_parallel.grad_sync"
+_GS_MOD = "src.distributed.expert_parallel.moe_layer.grad_sync"
 # The trainer-side sweep, whose globals the deferred-sync tests patch.
 _MIXIN_MOD = "src.trainers.mixins.grad_sync"
 
@@ -217,7 +217,7 @@ def _router_hook_from(**ep_attrs):
     ep = SimpleNamespace(**{**defaults, **ep_attrs})
     fake_dist = types.SimpleNamespace(is_available=lambda: True, is_initialized=lambda: True, ReduceOp=dist.ReduceOp)
     with patch(f"{_GS_MOD}.dist", fake_dist):
-        return create_router_grad_hook(ep)
+        return build_router_grad_hook(ep)
 
 
 def test_router_hook_reduces_over_dp_scope_group():

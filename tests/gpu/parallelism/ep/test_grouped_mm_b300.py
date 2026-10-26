@@ -120,7 +120,7 @@ def test_jagged_backward_correctness():
 
 def test_swiglu_moe_forward_backward():
     """Test the full MoE FFN: gate_proj, up_proj, down_proj with grouped_mm,
-    matching the compute path of EPMoELayerBase._separate_glu_experts_gmm."""
+    matching the compute path of EPMoELayerBase._compute_experts_gmm."""
     G = N_ROUTED_EXPERTS
     M = 16
     # Weights in matmul convention [E, K, N], as the EP MoE layers store them

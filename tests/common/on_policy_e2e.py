@@ -32,8 +32,8 @@ from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.attention.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.models.patches.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
 from tests.common.ep_reference import ep_layers
 from tests.common.peft_helpers import (
     LORA_ALPHA,
@@ -155,7 +155,7 @@ def record_served_baseline(server_url: str, model_name: str, checks: dict[str, b
 
 
 def fresh_parallelism_config(ep_size: int, tp_size: int = 1, expert_tp_size: int = 1) -> ParallelismConfig:
-    """A fresh config per phase: ``create_ep_config`` caches the ``EPConfig`` it builds, so a resumed
+    """A fresh config per phase: ``ep_config`` caches the ``EPConfig`` it builds, so a resumed
     phase reusing phase 1's object would rebuild its model against phase 1's expert groups."""
     return ParallelismConfig(ep_size=ep_size, tp_size=tp_size, expert_tp_size=expert_tp_size)
 

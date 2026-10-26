@@ -19,7 +19,7 @@ import torch
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
@@ -110,7 +110,7 @@ def _rank_local_param_names(model: torch.nn.Module) -> frozenset[str]:
     weights and expert adapters of every EP layer whose experts are distributed (``ep_group_size > 1``)."""
     local = {
         id(param)
-        for _, layer in find_ep_layers(model)
+        for _, layer in named_ep_layers(model)
         if layer.ep_config.ep_group_size > 1
         for _, param in layer.expert_named_params()
     }

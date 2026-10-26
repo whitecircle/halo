@@ -28,7 +28,8 @@ Read it before giving a verdict on any non-trivial combo.
 ## Source of truth
 
 - `src/distributed/parallelism_config.py` — the dataclass + `__post_init__` →
-  `_validate()` sub-validators. Every config-time `raise` lives here or in
+  `_resolve_and_validate`, which applies the refusals in `src/distributed/parallelism_rules.py`
+  (`reject_unsupported_axes`, then `reject_invalid_composition`). Every config-time `raise` lives there or in
   `parallelism_config_from_args` (`src/training/parallelism_args.py`): `lowp_*` knobs or
   `init_from_scratch` outside SFT, a trainer's `_supports_cp` / `_supports_pp`.
 - `CLAUDE.md` "## Parallelism" table + DeepEP / trainer-support notes.
@@ -98,7 +99,7 @@ Read it before giving a verdict on any non-trivial combo.
 - **Multi-group >2-rank EP on one NVLink domain** — the predicate is
   `num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size`
   (`is_racy_single_domain_multigroup_ep`): DeepEP combine barriers race FSDP2's DP-wide NCCL.
-  **Rejected at config time** (`_validate_single_domain_multigroup_ep`), hand-built configs
+  **Rejected at config time** (`_reject_single_domain_multigroup_ep`), hand-built configs
   included. Use `ep_size=2`, `ep_size = nvlink_domain_size` (the **domain**, not the
   node — they differ on NVL72), or `ep4 + etp2` — the supported 4-way expert split across 8 GPUs,
   since `ep_group_size = ep_size * expert_tp_size` fills the domain. `ep4 + tp2` lands on the same
@@ -115,8 +116,8 @@ Read it before giving a verdict on any non-trivial combo.
   attention; `validate_against_model_config` raises from `config.json` before any weight is read.
   The same gate rejects `num_experts % ep_size != 0`, an `expert_tp_size` not dividing the expert
   FFN width, and a declared per-rank token budget past DeepEP's dispatch ceiling (matrix.md).
-- **HSDP with TP / ETP / EP** — `_validate_hsdp` rejects all three; **PP+HSDP** is
-  refused by `_validate_pipeline_parallel`. HSDP wraps the standard DP path only:
+- **HSDP with TP / ETP / EP** — `_reject_hsdp` rejects all three; **PP+HSDP** is
+  refused by `_reject_pipeline_parallel`. HSDP wraps the standard DP path only:
   **pure DP or CP**. (EP already shards over the EP group; PP cannot restrict a 2-D mesh
   to a stage's rank block.)
 - **Every PP pairing outside the expert axes** — `PP+TP`, `PP+CP`, `PP+EP+TP`, `PP+EP+CP`, `PP+EP+ETP`
@@ -131,13 +132,13 @@ Read it before giving a verdict on any non-trivial combo.
   missing `max_length`, an image-bearing VLM run, and `per_device_eval_batch_size !=
   per_device_train_batch_size`. Full list: `matrix.md`.
 - **`fsdp_shard_ep1_experts=False` with TP or CP**, and **`fsdp_reshard_after_forward=True`
-  wherever an expert-distribution group exists** — the gate is `is_ep_mode`
+  wherever an expert-distribution group exists** — the gate is `has_ep_group`
   (`ep_group_size > 1`), so pure ETP (`ep_size=1`, `expert_tp_size>1`) is rejected alongside EP —
   **or with TP at `dp_size>1`**; **`fsdp_defer_grad_sync=True` under PP, with TP at `dp_size==1`**
   (no FSDP2 wrap to defer) **or with `fsdp_reshard_after_forward=True`** (the held unsharded gradient
-  is the state ZeRO-3 shards — defer under ZeRO-2). `_validate_fsdp_settings` raises; QLoRA refuses
+  is the state ZeRO-3 shards — defer under ZeRO-2). `_reject_fsdp_settings` raises; QLoRA refuses
   every FSDP shaping knob at trainer construction.
-- **Expert LoRA with ETP** (`expert_tp_size > 1` + `expert_lora`) — `_validate_expert_tp` raises:
+- **Expert LoRA with ETP** (`expert_tp_size > 1` + `expert_lora`) — `_reject_expert_tp` raises:
   the replicated adapter half would take a partial, never-synced gradient.
 - **LoRA/PEFT with TP** (`tp_size > 1`) — adapters are plain tensors outside the TP graph, so the
   replicated matrix diverges per rank and the sharded one is corrupted by the TP grad sync.
@@ -160,7 +161,7 @@ ep4+etp2; EP+TP does not help — attention TP leaves `ep_group_size` at 4").
 ## Sources of truth
 
 `matrix.md` + `agent-docs/parallelism/` document the supported/rejected combos. The code is the **ultimate**
-authority: `src/distributed/parallelism_config.py` (the validators) and
+authority: `src/distributed/parallelism_rules.py` (the refusals), `src/distributed/parallelism_config.py` and
 `src/trainers/mixins/ep_introspection.py` (the runtime EP-GC setup guard) decide what actually raises or
 deadlocks — when a doc, this skill, or memory disagrees, or you are unsure, read those files before
 advising. (`CLAUDE.md`: docs-first, the code wins.) Related skill: `data` (sharded dataset ↔

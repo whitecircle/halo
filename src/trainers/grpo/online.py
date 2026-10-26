@@ -516,7 +516,7 @@ class DistributedGRPOTrainer(
         config = self.parallelism_config
         logger.info(
             "Installed distributed-aware vLLM weight sync "
-            f"(ep={config.is_ep_mode}, tp={config.is_tp_mode}, "
+            f"(ep={config.has_ep_group}, tp={config.is_tp_mode}, "
             f"expert_tp={config.is_expert_tp_mode})"
         )
 

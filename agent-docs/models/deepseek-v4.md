@@ -20,7 +20,7 @@ Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel resid
 
 ## Attention: eager-only
 
-Every non-eager backend is off (`_supports_flash_attn/_supports_sdpa/_supports_flex_attn = False` upstream): FA2/3/4 cap head_dim at 256 (V4 is 512), SDPA drops the learnable sink column, and the compressors concatenate KV entries after the mask is built (no BlockMask resize). `load_distributed_model` forces `attn_implementation="eager"` with a warning (`_model_is_deepseek_v4` in `src/models/patches/attention.py`).
+Every non-eager backend is off (`_supports_flash_attn/_supports_sdpa/_supports_flex_attn = False` upstream): FA2/3/4 cap head_dim at 256 (V4 is 512), SDPA drops the learnable sink column, and the compressors concatenate KV entries after the mask is built (no BlockMask resize). `load_distributed_model` forces `attn_implementation="eager"` with a warning (`_model_is_deepseek_v4` in `src/models/attention/selection.py`).
 
 Consequences:
 

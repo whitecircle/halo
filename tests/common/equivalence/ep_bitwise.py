@@ -23,9 +23,9 @@ from accelerate.state import GradientState
 from peft import LoraConfig, get_peft_model
 from transformers.trainer_utils import enable_full_determinism
 
-from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -230,7 +230,7 @@ def _replay_mask(injector, seq: int, device) -> torch.Tensor:
 
 def _enable_bias_update(model: torch.nn.Module) -> None:
     generator = torch.Generator().manual_seed(SEED)
-    for _, layer in find_ep_layers(model):
+    for _, layer in named_ep_layers(model):
         if layer.enable_bias_balancing():
             bias = torch.randn(layer.num_experts, generator=generator) * BIAS_SCALE
             layer.balancing_biases = bias.to(layer.balancing_biases.device)
@@ -240,7 +240,7 @@ def _forward_backward(model: torch.nn.Module, variant: str, seq: int, device, ba
     """One forward and backward on batch ``batch_index`` of the fixed seed, armed with the replay mask for the
     ``routing_replay`` variant and capturing the dispatched routing wherever the family supports replay."""
     model.train()
-    layers = find_ep_layers(model)
+    layers = named_ep_layers(model)
     replays = variant == "routing_replay"
     injector = (
         build_routing_replay_injector(model)
@@ -285,11 +285,11 @@ def _forward_case(family: str, variant: str, *, tier: str, perturb: bool, device
 def _save_router(model: torch.nn.Module) -> torch.nn.Module:
     """``model`` under token-mixer LoRA with each EP layer's router in ``modules_to_save``, its routers
     re-hooked as the trainer re-hooks them."""
-    routers = [f"{path}.{layer._ROUTER_ATTR}" for path, layer in find_ep_layers(model) if layer._ROUTER_ATTR]
+    routers = [f"{path}.{layer._ROUTER_ATTR}" for path, layer in named_ep_layers(model) if layer._ROUTER_ATTR]
     targets = mixer_linear_leaves(model)
     torch.manual_seed(ADAPTER_SEED)
     model = get_peft_model(model, LoraConfig(r=LORA_RANK, target_modules=targets, modules_to_save=routers))
-    for _, layer in find_ep_layers(model):
+    for _, layer in named_ep_layers(model):
         layer.reattach_router_grad_sync()
     return model
 
@@ -326,7 +326,7 @@ def _cpu_case(family: str, variant: str, *, perturb: bool):
 def _gpu_ep_case(family: str, mode: str, *, perturb: bool, device):
     parallelism = ParallelismConfig(**GPU_EP_MODES[mode])
     model = _model(family, torch.bfloat16, device)
-    _wrap(model, parallelism.create_ep_config(), perturb=perturb)
+    _wrap(model, parallelism.ep_config(), perturb=perturb)
     # The expert-TP partners share a data-parallel batch.
     batch_index = parallelism.get_data_parallel_rank()
     return _forward_backward(model, "defaults", SEQ["gpu"], device, batch_index), _orders(model)

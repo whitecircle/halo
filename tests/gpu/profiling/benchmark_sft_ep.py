@@ -58,7 +58,7 @@ from trl import SFTConfig
 from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.torch_profiler import TorchProfilerCallback
 from src.diagnostics.ep_span_timing import get_ep_span_timer
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase, find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_float, torch_trace_dir
@@ -410,7 +410,7 @@ def main() -> int:
         log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
 
         if EP_FORWARD_DELAY_MS:
-            for _, layer in find_ep_layers(model):
+            for _, layer in named_ep_layers(model):
                 layer.register_forward_pre_hook(_stall_before_forward)
             log(f"  Negative control: every EP layer holds the GPU idle {EP_FORWARD_DELAY_MS} ms before its forward")
 

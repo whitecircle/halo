@@ -9,8 +9,8 @@ import torch
 
 from src.checkpoint.format import EXPORT_SIDECAR_FILES, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
 from src.checkpoint.reading import checkpoint_shard_files, iter_checkpoint_tensors
+from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 from src.models.moe_balancing import apply_router_balancing_sidecar, is_balancing_state_key
-from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 
 # The provenance key recording the GptOss sink policy an adapter trained under.
 PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"

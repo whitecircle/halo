@@ -22,8 +22,8 @@ from types import MethodType, SimpleNamespace
 import torch
 import torch.nn as nn
 
-import src.distributed.expert_parallel.base_layer as base_layer_mod
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+import src.distributed.expert_parallel.moe_layer.compute as compute_mod
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.kernels.lowp.quantization import fake_quant
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
@@ -78,17 +78,17 @@ def test_adapter_gemms_stay_bf16():
     x, offs = make_inputs()
 
     recorded = []
-    real_expert_gemm = base_layer_mod.expert_gemm
+    real_expert_gemm = compute_mod.expert_gemm
 
     def recording(mat_a, mat_b, **kwargs):
         recorded.append(kwargs["quant_format"])
         return real_expert_gemm(mat_a, mat_b, **kwargs)
 
-    base_layer_mod.expert_gemm = recording
+    compute_mod.expert_gemm = recording
     try:
         out = layer._expert_proj(x, "gate_proj", offs, torch.bfloat16)
     finally:
-        base_layer_mod.expert_gemm = real_expert_gemm
+        compute_mod.expert_gemm = real_expert_gemm
 
     expected = ["mxfp8", None, None]
     assert recorded == expected, f"GEMM precisions {recorded} != {expected} (base lowp, adapters bf16)"

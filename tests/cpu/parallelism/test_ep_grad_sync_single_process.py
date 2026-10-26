@@ -17,12 +17,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.grad_sync import (
-    create_expert_grad_hook,
-    create_router_grad_hook,
+from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
+from src.distributed.expert_parallel.moe_layer.grad_sync import (
+    build_expert_grad_hook,
+    build_router_grad_hook,
     has_grad_sync_peers,
 )
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
@@ -41,14 +41,14 @@ def test_router_hook_noop_without_process_group():
 
     param = _param_with_grad()
     before = param.grad.clone()
-    create_router_grad_hook(ep_config)(param)  # a live collective: ValueError from all_reduce(group=None)
+    build_router_grad_hook(ep_config)(param)  # a live collective: ValueError from all_reduce(group=None)
     assert torch.equal(param.grad, before), "single-process router hook must leave the grad untouched"
 
 
 def test_expert_hook_noop_without_process_group():
     param = _param_with_grad()
     before = param.grad.clone()
-    create_expert_grad_hook(single_process_ep_config(E, experts_fsdp_managed=False))(param)
+    build_expert_grad_hook(single_process_ep_config(E, experts_fsdp_managed=False))(param)
     assert torch.equal(param.grad, before), "single-process expert hook must leave the grad untouched"
 
 

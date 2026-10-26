@@ -93,7 +93,7 @@ def run(ctx):
         world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, ep_size=EP_SIZE
     )
     model = build_model()
-    patch_moe_model_for_ep(model, config.create_ep_config())
+    patch_moe_model_for_ep(model, config.ep_config())
 
     # The production balancing seam: build_perf_callbacks applies the bias_update side effects
     # (creates balancing_biases + expert_load_counter on the EP layers) and returns the callback.

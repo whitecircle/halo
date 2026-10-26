@@ -40,7 +40,7 @@ def test_the_embedding_backbone_loads_at_the_agreed_revision(monkeypatch, tmp_pa
     monkeypatch.setattr(embedding_script, "resolve_model_source", resolve)
     monkeypatch.setattr(embedding_script, "SentenceTransformer", build)
     runtime = SimpleNamespace(
-        parallelism_config=SimpleNamespace(is_ep_mode=False, is_tp_mode=False, max_concurrent_loading=None),
+        parallelism_config=SimpleNamespace(has_ep_group=False, is_tp_mode=False, max_concurrent_loading=None),
         model_source=REPO,
     )
     with pytest.raises(_BackboneBuilt):

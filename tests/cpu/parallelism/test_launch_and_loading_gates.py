@@ -41,10 +41,10 @@ from transformers.models.qwen3_vl import Qwen3VLConfig
 from src.distributed.context_parallel.loading import load_model_for_cp, load_model_for_ep_cp
 
 _CP_LOADING = "src.distributed.context_parallel.loading"
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.expert_parallel.loading import load_ep_model
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.loading import model_loading
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import (
@@ -60,7 +60,7 @@ from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.lazy_safetensors.weights import resolve_run_dtype
-from src.models.patches.attention import resolve_attn_implementation
+from src.models.attention.selection import resolve_attn_implementation
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import ParallelismValidationMixin
 from tests.common.distributed import fake_process_group_mesh
@@ -123,13 +123,13 @@ def test_trainer_gate_passes_under_torchrun():
 def test_pure_etp_is_not_swept_up_by_the_fp32_refusal():
     """``ep_size=1`` + expert-TP never reaches the transport the refusal is about.
 
-    ``is_ep_mode`` is true there — ``ep_group_size = ep_size * expert_tp_size`` — so keying the guard
+    ``has_ep_group`` is true there — ``ep_group_size = ep_size * expert_tp_size`` — so keying the guard
     on it would refuse a shape whose dispatcher short-circuits at ``ep_size <= 1`` and whose
     ``dispatch_ep_group`` is left None. A guard must refuse what its stated mechanism governs and no
     more; if fp32 breaks pure ETP elsewhere, that needs its own message naming its own cause.
     """
     pc = _pc(ep_size=1, expert_tp_size=2)
-    assert pc.is_ep_mode, "premise: expert-TP folds into is_ep_mode, which is why the guard cannot use it"
+    assert pc.has_ep_group, "premise: expert-TP folds into has_ep_group, which is why the guard cannot use it"
     with patch.dict(os.environ, _env({}), clear=True), pytest.raises(Exception) as excinfo:
         load_distributed_model("org/x", parallelism_config=pc, dtype=torch.float32)
     assert "fp32 training" not in str(excinfo.value)
@@ -493,7 +493,7 @@ def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
     with (
         patch(f"{_CP_LOADING}.load_through_cpu", fake_load_through_cpu),
         patch(f"{_CP_LOADING}.patch_model_for_cp", lambda model, cp_config: model),
-        patch("src.models.patches.attention.validate_attn_implementation", return_value="sdpa") as validator,
+        patch("src.models.attention.selection.validate_attn_implementation", return_value="sdpa") as validator,
     ):
         load_model_for_cp(
             "org/repo",

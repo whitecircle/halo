@@ -25,8 +25,9 @@ from collections import Counter
 
 import pytest
 
-from src.distributed.group_layout import etp_dispatch_coords
-from src.distributed.parallelism_config import SUPPORTED_AXIS_SETS, ParallelismConfig
+from src.distributed.group_layout import NodeLocalLayout
+from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.parallelism_rules import SUPPORTED_AXIS_SETS
 from tests.common.parallelism import make_parallelism_config
 
 # (world_size, gpus_per_node); the 2-GPU-node boxes make PP and multi-domain layouts reachable.
@@ -102,7 +103,12 @@ def test_ranks_that_must_share_a_batch_do(world, gpn, kwargs):
 
     for rank, c in enumerate(configs):
         if c.cp_size > 1:
-            partners = c.get_cp_group_ranks()
+            cp_layout = NodeLocalLayout(
+                world_size=c.stage_world_size, group_size=c.cp_size, domain_size=c.nvlink_domain_size
+            )
+            partners = [
+                c.stage_base_rank + r for r in cp_layout.group_ranks(cp_layout.rank_and_group(c.stage_local_rank)[1])
+            ]
             assert {dp_of[r] for r in partners} == {dp_of[rank]}, ("cp", rank, partners, dp_of)
         if c.tp_size > 1:
             # TP groups are contiguous rank blocks inside a stage (the (dp, tp) mesh is row-major).
@@ -110,10 +116,13 @@ def test_ranks_that_must_share_a_batch_do(world, gpn, kwargs):
             partners = range(base, base + c.tp_size)
             assert {dp_of[r] for r in partners} == {dp_of[rank]}, ("tp", rank, list(partners), dp_of)
         if c.expert_tp_size > 1:
-            # Partners derived from the layout leaf, never from DP equality (which would self-prove).
-            group = c.get_ep_group_ranks()
+            # Partners derived from the layout, never from DP equality (which would self-prove).
+            layout = c.ep_layout
+            group = [c.stage_base_rank + r for r in layout.group_ranks(layout.rank_and_group(c.stage_local_rank)[1])]
             dispatch_of = {
-                r: etp_dispatch_coords(configs[r].get_ep_rank(), c.ep_size, c.expert_tp_size, c.is_node_local_ep)[0]
+                r: layout.etp_partition(layout.rank_and_group(r - c.stage_base_rank)[0], c.ep_size, c.expert_tp_size)[
+                    0
+                ]
                 for r in group
             }
             partners = [r for r in group if dispatch_of[r] == dispatch_of[rank]]
@@ -123,7 +132,7 @@ def test_ranks_that_must_share_a_batch_do(world, gpn, kwargs):
             others = [r for r in group if dispatch_of[r] != dispatch_of[rank]]
             assert dp_of[rank] not in {dp_of[r] for r in others}, ("etp-distinct", rank, others, dp_of)
         if c.pp_size > 1:
-            chain = c.get_pp_group_ranks()
+            chain = c.pp_chain_ranks()
             assert {dp_of[r] for r in chain} == {dp_of[rank]}, ("pp", rank, chain, dp_of)
 
     # EP is orthogonal to DP: it must not reduce the batch count (an EP group may still share one).

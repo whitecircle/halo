@@ -33,8 +33,8 @@ from liger_kernel.ops.geglu import LigerGELUMulFunction
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 
-from src.distributed.expert_parallel import base_layer
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer import compute
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.kernels.expert_gemm import expert_gemm
 from src.kernels.fused_glu import GluCombine
 from src.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
@@ -113,7 +113,7 @@ def _sort(x: torch.Tensor, idx: torch.Tensor, w: torch.Tensor):
 
 
 # The sort's own permute swapped for the padded one, so the baseline differs from ``halo`` in the permute alone.
-padded_permute = partial(patch.object, base_layer, "MoEGatherPermute", _PaddedGatherPermute)
+padded_permute = partial(patch.object, compute, "MoEGatherPermute", _PaddedGatherPermute)
 
 
 def padded_gather_block():

@@ -25,9 +25,9 @@ from src.checkpoint.reading import has_whole_model_weight_file, is_ep_sharded_ch
 from src.data.pipeline.processing import ensure_cache_dir
 from src.distributed.checkpoint.coordination import resolve_resume_checkpoint
 from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
+from src.kernels.jit_cache import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
 from src.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME
 from src.model_loading.dtype import configure_float32_matmul_precision
-from src.models.patches.attention import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
 from src.runtime.collectives import barrier, broadcast_from_rank0
 from src.runtime.consensus import reject_across_ranks
 from src.runtime.filesystem import OUTPUT_FS_PROBE_PREFIX, is_fs_load_rank, is_fs_save_rank

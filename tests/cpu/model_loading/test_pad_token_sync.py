@@ -33,7 +33,7 @@ from transformers.trainer_utils import align_special_tokens
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.model_loading import model_preparation
-from src.model_loading.tokenizer_setup import setup_model_and_tokenizer, sync_special_token_id
+from src.model_loading.tokenizer_setup import configure_run_tokenizer, sync_special_token_id
 from src.trainers.reward.pooling import sequence_classification_pad_id
 
 PartialState()  # the loader's logger needs accelerate state initialized
@@ -116,14 +116,14 @@ def test_sync_still_writes_the_generation_config_when_the_head_has_one():
     assert model.generation_config.pad_token_id == SPECIAL_TOKEN_IDS["<pad>"]
 
 
-# setup_model_and_tokenizer — the production entry point
+# configure_run_tokenizer — the production entry point
 
 
 def test_setup_records_the_pad_id_the_tokenizer_already_had():
     """Nothing changes here, and the id still has to land: this is the shipped reward / classification
     configs' exact case."""
     model = _seq_cls_model()
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
     )
     assert model.config.get_text_config().pad_token_id == tokenizer.pad_token_id
@@ -131,7 +131,7 @@ def test_setup_records_the_pad_id_the_tokenizer_already_had():
 
 def test_setup_records_a_pad_token_the_args_changed():
     model = _seq_cls_model()
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(pad_token="<other_pad>"),
         model,
         _Tokenizer(),
@@ -152,7 +152,7 @@ def test_a_pad_token_the_args_ADD_is_recorded_too():
     """
     model = _seq_cls_model()
     args = CommonScriptArguments(pad_token="<new_pad>", added_special_tokens=["<new_pad>"])
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         args, model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
     )
 
@@ -169,7 +169,7 @@ def test_an_eos_token_the_args_ADD_is_not_recorded_as_None():
     """
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     args = CommonScriptArguments(eos_token="<new_eos>", added_special_tokens=["<new_eos>"])
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         args, model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
     )
 
@@ -192,10 +192,10 @@ def test_the_second_setup_call_records_the_ids_on_its_own_model():
     reference = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     policy = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
 
-    setup_model_and_tokenizer(args, reference, tokenizer, MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded)
+    configure_run_tokenizer(args, reference, tokenizer, MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded)
     assert reference.config.get_text_config().eos_token_id == SPECIAL_TOKEN_IDS["<other_pad>"]
 
-    setup_model_and_tokenizer(args, policy, tokenizer, MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded)
+    configure_run_tokenizer(args, policy, tokenizer, MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded)
     assert policy.config.get_text_config().eos_token_id == SPECIAL_TOKEN_IDS["<other_pad>"]
     assert policy.config.get_text_config().bos_token_id == SPECIAL_TOKEN_IDS["<pad>"]
     assert policy.generation_config.eos_token_id == SPECIAL_TOKEN_IDS["<other_pad>"]
@@ -210,7 +210,7 @@ def test_setup_records_the_eos_fallback_too():
     pooled heads refusing a batch until the first ``train()`` call.
     """
     model = _seq_cls_model()
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(),
         model,
         _Tokenizer(pad_token=None),
@@ -238,7 +238,7 @@ def test_an_eos_pad_states_the_cost_it_carries(caplog):
     gradient is masked, so the line has to name both the cost and the way out."""
     model = _seq_cls_model()
     with caplog.at_level(logging.INFO, logger=model_preparation.logger.name):
-        setup_model_and_tokenizer(
+        configure_run_tokenizer(
             CommonScriptArguments(),
             model,
             _Tokenizer(pad_token=None),
@@ -256,7 +256,7 @@ def test_a_real_pad_token_says_nothing_about_eos(caplog):
     """Anti-noise, and the control for the test above: the ordinary case must not emit that line."""
     model = _seq_cls_model()
     with caplog.at_level(logging.INFO, logger=model_preparation.logger.name):
-        setup_model_and_tokenizer(
+        configure_run_tokenizer(
             CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
         )
 
@@ -268,7 +268,7 @@ def test_a_borrowed_eos_still_satisfies_the_pp_pooling_seam():
     config; the two must agree, and an eos-padding tokenizer is no exception — with nothing recorded
     the seam would refuse a run that pools perfectly well on the id it pads with."""
     model = _seq_cls_model()
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(),
         model,
         _Tokenizer(pad_token=None),
@@ -291,7 +291,7 @@ def test_setup_is_a_no_op_where_the_ids_already_agree():
     model.config.pad_token_id = SPECIAL_TOKEN_IDS["<pad>"]
     before = {name: tensor.clone() for name, tensor in model.state_dict().items()}
 
-    setup_model_and_tokenizer(
+    configure_run_tokenizer(
         CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
     )
 
@@ -306,7 +306,7 @@ def test_recording_the_id_cannot_retro_affect_the_embedding():
     model = _seq_cls_model()
     assert model.model.embed_tokens.padding_idx is None
 
-    setup_model_and_tokenizer(
+    configure_run_tokenizer(
         CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
     )
 
@@ -324,7 +324,7 @@ def test_the_recorded_id_binds_padding_idx_on_the_next_load(tmp_path):
     pinned here so the cost is a chosen one.
     """
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
-    setup_model_and_tokenizer(
+    configure_run_tokenizer(
         CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
     )
     model.save_pretrained(tmp_path)
@@ -353,7 +353,7 @@ def test_padded_batch_pools_at_the_last_content_token():
     could still pass.
     """
     model = _seq_cls_model().eval()
-    tokenizer = setup_model_and_tokenizer(
+    tokenizer = configure_run_tokenizer(
         CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
     )
     pad_id = tokenizer.pad_token_id

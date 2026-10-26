@@ -38,7 +38,7 @@ RL weight sync is refused at construction on both engines, each for its own load
 
 ## Limitations
 
-**Gradient checkpointing** is unavailable in every mode. Upstream declares support, but `patch_zaya_gradient_checkpointing_refusal` (`src/models/patches/zaya.py`) clears `ZayaPreTrainedModel.supports_gradient_checkpointing`, so `gradient_checkpointing_enable` raises rather than failing deep in the first backward. The underlying fault is environmental: on the CUDA 13.2 image, backward recompute through CCA's `nn.Conv1d` pair (`conv_qk_depthwise`, `conv_qk_grouped`) hits `cuDNN error: CUDNN_STATUS_INTERNAL_ERROR`.
+**Gradient checkpointing** is unavailable in every mode. Upstream declares support, but `patch_zaya_gradient_checkpointing_refusal` (`src/models/zaya.py`) clears `ZayaPreTrainedModel.supports_gradient_checkpointing`, so `gradient_checkpointing_enable` raises rather than failing deep in the first backward. The underlying fault is environmental: on the CUDA 13.2 image, backward recompute through CCA's `nn.Conv1d` pair (`conv_qk_depthwise`, `conv_qk_grouped`) hits `cuDNN error: CUDNN_STATUS_INTERNAL_ERROR`.
 
 **EP + per-layer GC** is refused separately, by `EPZayaMoELayer._supports_gradient_checkpointing = False`: the cross-layer `prev_router_hidden_states` plus a per-layer checkpoint re-wrap produce a polynomial backward recompute cascade.
 
@@ -52,7 +52,7 @@ RL weight sync is refused at construction on both engines, each for its own load
 
 ## Document isolation under packing
 
-Attention is isolated: the dense backends build a packed mask from `position_ids`, and on flash `patch_zaya_flash_packed_position_ids` (`src/models/patches/zaya.py`) re-injects them — `ZayaModel.forward` declares `position_ids` but never forwards them to the layers, so without the patch a packed row would run as one dense causal sequence.
+Attention is isolated: the dense backends build a packed mask from `position_ids`, and on flash `patch_zaya_flash_packed_position_ids` (`src/models/zaya.py`) re-injects them — `ZayaModel.forward` declares `position_ids` but never forwards them to the layers, so without the patch a packed row would run as one dense causal sequence.
 
 The CCA convolution and the delayed-value recurrence still carry state **across packed document boundaries on every backend**, and the effect amplifies with depth. This is the same accepted class as the linear-attention mixers ([Collators](../data/collators.md#document-isolation-under-packing)) — pack Zaya only where a small amount of cross-document mixing is acceptable.
 
@@ -64,7 +64,7 @@ The CCA convolution and the delayed-value recurrence still carry state **across 
 
 `count_i` is tokens routed to expert *i* over the last optimizer step, summed across DP/EP ranks. The gate masks discarded picks to index 0 with zero weight, and the load recorder re-points them to the counter's last slot, so discards inflate neither expert 0 nor the real-expert mean. `mean_count` averages over the real experts, the discard-slot bias is clamped, and γ is sign-only and tiny.
 
-The counts come from `patch_zaya_router_load_recording` (`src/models/patches/zaya.py`), which scatter-adds the router's own indices inside `ZayaRouter.forward` — one mechanism for EP and plain FSDP2, since both keep the gate intact.
+The counts come from `patch_zaya_router_load_recording` (`src/models/zaya.py`), which scatter-adds the router's own indices inside `ZayaRouter.forward` — one mechanism for EP and plain FSDP2, since both keep the gate intact.
 
 ```yaml
 moe_balancing: auto              # resolves to bias_update for Zaya
@@ -75,7 +75,7 @@ router_balancing_rate: 1.0e-3    # gamma; only used when bias_update is active
 
 - **Attention** — FA2/FA3/FA4 all supported; FA4 is the Blackwell default, the shipped configs pin `flash_attention_2`.
 - **Grouped GEMM** (`F.grouped_mm`) — default on SM90+; disable with `use_grouped_gemm: false`.
-- **Liger** — upstream has no `zaya` applier; the toolkit covers it from its own spec (`src/kernels/liger/families.py`). It defaults to the fused loss plus Liger RMSNorm; CE is off when the fused loss is on.
+- **Liger** — upstream has no `zaya` applier; the toolkit covers it from its own spec (`src/model_loading/liger/family_specs.py`). It defaults to the fused loss plus Liger RMSNorm; CE is off when the fused loss is on.
 
     The fused loss skips the `[B*S, 262272]` logits plane (~17 GB at batch 1, `S=32k`), which fits `b=1,S=32k` / `b=2,S=16k`. RoPE is not swapped (partial rotary: `rope_parameters` carries `partial_rotary_factor: 0.5` per layer type), and no GLU is swapped (the EP wrapper replaces the whole MoE block).
 

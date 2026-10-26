@@ -29,7 +29,6 @@ from transformers.core_model_loading import rename_source_key
 
 from src.checkpoint.hub_layout import reversed_export_transforms, revert_conversions
 from src.diagnostics.profiling import log_cuda_memory
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
     config_model_types,
     ep_layer_classes_for_config,
@@ -37,6 +36,7 @@ from src.distributed.expert_parallel.expert_weights import (
     to_hub_layer_key,
 )
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.tensor_parallel.state_dict import (
     iter_tp_sharded_non_dtensor_full,
@@ -44,18 +44,17 @@ from src.distributed.tensor_parallel.state_dict import (
 )
 from src.env import env_flag
 from src.model_loading.dtype import has_packed_quantized_params
+from src.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from src.models.moe_balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     is_transient_balancing_router,
     iter_balancing_routers,
 )
-from src.models.patches.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from src.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
 from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
 from src.runtime.collectives import barrier_on_exit
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.dtensor import materialize_dtensor
-from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES
 from src.weight_sync.registry import resolve_weight_sync_client
 
@@ -110,7 +109,7 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
             "corrupt the served policy. Use plain LoRA (use_peft without load_in_4bit/load_in_8bit) "
             "or full fine-tuning."
         )
-    ep_layers = named_ep_layers(model)
+    ep_layers = dict(named_ep_layers(model))
     _reject_unpushed_folds(
         model, lora_fold_targets(model), {id(param) for _name, param in _dense_params(model, ep_layers)}
     )
@@ -195,9 +194,8 @@ def _sync_contract_classes(model: torch.nn.Module) -> list[tuple[str, type[EPMoE
     stock HF module tree, so a gate that only walked live modules would admit the families it exists
     to refuse.
     """
-    instances = named_ep_layers(model)
-    if instances:
-        return [(name, type(module)) for name, module in instances.items()]
+    if instances := named_ep_layers(model):
+        return [(name, type(module)) for name, module in instances]
     config = getattr(unwrap_framework_wrappers(model), "config", None)
     return [(f"model_type registry for {type(model).__name__}", cls) for cls in ep_layer_classes_for_config(config)]
 
@@ -489,9 +487,9 @@ def gather_and_send_weights(model: torch.nn.Module, sender: Any | None) -> None:
     # and carry on and let the reject decide.
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
     peft = is_peft_model(model)
-    # Live EP layers, not is_ep_mode: ep_size==1 is still EP-wrapped and the dense path ships an
+    # Live EP layers, not has_ep_group: ep_size==1 is still EP-wrapped and the dense path ships an
     # unloadable layout.
-    ep_layers = named_ep_layers(model)
+    ep_layers = dict(named_ep_layers(model))
     forwarder = (
         guard.run(partial(_HubForwarder, sender, model, ep_layers, model.prefix if peft else None, guard))
         if sender
@@ -536,6 +534,6 @@ def sync_trainer_weights(trainer, client: Any | None) -> None:
 
     logger.debug(
         f"Synced distributed weights to the rollout engine at step {trainer.state.global_step} "
-        f"(ep={config.is_ep_mode}, tp={config.is_tp_mode}, "
+        f"(ep={config.has_ep_group}, tp={config.is_tp_mode}, "
         f"expert_tp={config.is_expert_tp_mode}, peft={is_peft_model(model)})"
     )

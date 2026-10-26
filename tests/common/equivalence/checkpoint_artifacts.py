@@ -29,7 +29,7 @@ from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.checkpoint.save import save_checkpoint, save_resume_adapter
-from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create_mixed_precision_policy_v2
 from src.model_loading.dtype import cast_parameters_to_run_dtype
@@ -183,7 +183,7 @@ def _save_case(case: ArtifactCase, directory: Path, mesh: DeviceMesh) -> None:
         if expert_lora is not None:
             torch.manual_seed(ADAPTER_SEED)
             randomize_adapters(model)
-        ep_params = [param for _, layer in find_ep_layers(model) for param in layer.parameters()]
+        ep_params = [param for _, layer in named_ep_layers(model) for param in layer.parameters()]
         _shard(model, mesh, dtype, ignored=() if case.mode == "ep1" else ep_params)
         flags = {
             "has_ep_layers": True,
