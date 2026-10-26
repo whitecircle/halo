@@ -1,9 +1,8 @@
-"""Chunked log-probs over a logits plane, in at least fp32.
+"""Chunked log-probs over a logits plane, in at least fp32, and the next-token label math they score.
 
 Whole, the fp32 upcast of a logits plane and the ``log_softmax`` output saved for backward are two
 fp32 planes, ~26 GB at ``V=201088``, ``S=8192``. The pipeline-parallel last-stage losses, SMPO's
-loss paths and the DPO/KTO loss paths (``src/trainers/preference/logprobs.py``) all chunk under the
-one budget below.
+loss paths and the DPO/KTO loss paths all chunk under the one budget below.
 """
 
 from collections.abc import Callable, Iterator
@@ -16,6 +15,9 @@ from torch.utils.checkpoint import checkpoint
 # row count would scale the held state with the vocabulary. 128M elements = 512 MB fp32, i.e. 4096
 # rows at V=32k.
 LOGIT_CHUNK_ELEMENTS = 128 * 1024 * 1024
+
+# The HF cross_entropy ignore_index: every label plane marks its unscored positions with it.
+LABEL_IGNORE_INDEX = -100
 
 
 def logit_chunk_rows(vocab_size: int) -> int:
@@ -70,3 +72,67 @@ def selective_logprobs(logits: torch.Tensor, index: torch.Tensor) -> torch.Tenso
             for row_logits, row_index in zip(logits, index, strict=True)
         ]
     )
+
+
+def shift_labels_left(labels: torch.Tensor) -> torch.Tensor:
+    """Next-token targets: ``labels`` rolled one position left, the last position ignored.
+
+    Shifting the labels rather than slicing the logits keeps the caller's ``reshape`` a view instead
+    of a ``[B, S, V]`` copy.
+    """
+    shifted = torch.full_like(labels, LABEL_IGNORE_INDEX)
+    shifted[:, :-1] = labels[:, 1:]
+    return shifted
+
+
+def next_token_targets(labels: torch.Tensor, start: int = 0, length: int | None = None) -> torch.Tensor:
+    """The next-token targets of positions ``[start, start + length)`` of the full ``[B, S]`` labels."""
+    return shift_labels_left(labels)[:, start : None if length is None else start + length]
+
+
+def next_token_logprobs(
+    logits: torch.Tensor, labels: torch.Tensor, start: int = 0
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Log-prob each position of ``logits`` gives its next token in ``labels``, plus the non-ignored mask.
+
+    ``logits`` covers positions ``[start, start + logits.size(1))`` of the full ``[B, S]`` ``labels``,
+    so a sequence chunk (a CP rank's) is scored against the labels it was cut from, its last
+    position against the next chunk's first token. Returns two ``[B, logits.size(1)]`` tensors, the
+    log-probs in fp32 (fp64 logits keep fp64); the sequence's final position has no next token and
+    is masked. The log-probs are not pre-masked: ignored positions carry the (finite) log-prob of
+    label 0, so callers that clamp or reweight per token do so before applying the mask.
+    """
+    if logits.size(0) != labels.size(0) or start < 0 or start + logits.size(1) > labels.size(1):
+        raise ValueError(
+            f"logits {tuple(logits.shape[:2])} at start={start} do not lie inside labels "
+            f"{tuple(labels.shape)}: the rows must match and positions [start, start + "
+            f"{logits.size(1)}) must fall within the labels' {labels.size(1)}."
+        )
+    targets = next_token_targets(labels, start, logits.size(1))
+    mask = targets != LABEL_IGNORE_INDEX
+    return selective_logprobs(logits, targets.masked_fill(~mask, 0)), mask
+
+
+def token_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shifted ``[B, S-1]`` per-token log-probs of ``labels`` under ``logits`` plus the non-ignored mask.
+
+    The final, ignore-only position is dropped from the ``[B, S]`` result rather than sliced off the
+    logits, whose backward would rebuild a full plane.
+    """
+    logps, mask = next_token_logprobs(logits, labels)
+    return logps[:, :-1], mask[:, :-1]
+
+
+def sequence_logprobs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Per-sequence summed log-probability of ``labels`` under ``logits`` (ignore_index aware)."""
+    logps, mask = token_logprobs(logits, labels)
+    return (logps * mask).sum(dim=-1)
+
+
+def loss_token_counts_per_row(labels: torch.Tensor) -> torch.Tensor:
+    """Per-row ``[rows]`` count of non-ignored next-token targets in ``labels``.
+
+    Raw labels lose position 0 to the next-token shift, so counting them unshifted mis-scales a
+    token-normalized loss by a token per row.
+    """
+    return (labels[:, 1:] != LABEL_IGNORE_INDEX).sum(dim=-1)

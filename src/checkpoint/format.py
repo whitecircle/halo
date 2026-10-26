@@ -85,8 +85,6 @@ WEIGHT_DUMP_DIRS = ("original", "consolidated", "metal")
 WEIGHT_FILE_IGNORE_PATTERNS = tuple(
     f"*{suffix}" for suffix in (*WEIGHT_FILE_SUFFIXES, *FOREIGN_EXPORT_SUFFIXES)
 ) + tuple(f"{name}/*" for name in WEIGHT_DUMP_DIRS)
-# A model load fetches the repo's top-level files only (fnmatch's ``*`` crosses ``/``).
-HUB_SUBFOLDER_IGNORE_PATTERNS = ("*/*",)
 
 
 def ep_shard_filename(rank: int, world_size: int) -> str:

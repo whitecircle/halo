@@ -290,7 +290,7 @@ def run_merged_resume(
 
     def make_trainer(model_source: str, phase_dir: str, *, save: bool):
         """The production load (``split_expert_lora_targets`` → ``load_distributed_model`` →
-        ``setup_peft_model``) and trainer, and the attention modules PEFT adapts. Ulysses CP runs flash
+        ``configure_adapter_training``) and trainer, and the attention modules PEFT adapts. Ulysses CP runs flash
         attention (auto-selected, or through its own probe under the family's
         ``cp_attn_implementation``); the rest stay on eager."""
         parallelism_config = _parallelism_config(ep_size, cp_size, fp32_masters)

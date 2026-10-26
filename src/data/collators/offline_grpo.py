@@ -11,7 +11,7 @@ import torch
 from accelerate.logging import get_logger
 from trl.trainer.utils import pad
 
-from src.data.spans import LABEL_IGNORE_INDEX
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 
 logger = get_logger(__name__, log_level="INFO")
 

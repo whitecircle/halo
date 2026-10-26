@@ -5,7 +5,7 @@ Five topologies at world=8, simulated as small NVLink domains (``gpus_per_node``
 ``ep4``'s 4 — see MOE_MODES), so the pipeline always crosses domain boundaries — the placement PP
 is designed for. Each mode covers a shape no other GPU test exercises:
 
-  dense_pp2_dp4 — pp2 × dense FSDP dp4 at runtime level: per-parameter fp32 grad exactness vs the
+  dense_pp2_dp4 — pp2 × dense FSDP dp4 at runner level: per-parameter fp32 grad exactness vs the
                   unsplit model (the dual of test_pp_vs_single_gpu's 8-GPU pp4 × dp2 run).
   ep4           — pp2 × ep4: one stage-wide 4-rank dispatch group per stage (NVLink domain ==
                   node == stage; the 2-GPU-domain spellings are asserted at config time —
@@ -40,9 +40,10 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import create_pipeline_group
-from src.distributed.pipeline_parallel.runtime import PipelineRuntime
+from src.distributed.pipeline_parallel.groups import build_pipeline_group
+from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from src.distributed.pipeline_parallel.stage_losses import TokenLoss
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
@@ -53,7 +54,7 @@ MODE = ""  # set from --mode before the harness runs
 
 GLOBAL_BATCH = 8  # dp × per-device batch is 8 in every mode
 DENSE_SEQ_LEN = 32
-DENSE_GRAD_TOLERANCE = 2e-3  # fp32 runtime-level exactness
+DENSE_GRAD_TOLERANCE = 2e-3  # fp32 runner-level exactness
 DENSE_LOSS_TOLERANCE = 1e-4
 EP1_GRAD_REL_TOL = 5e-2  # bf16 same-parametrization reference (matches the 4-GPU ep1 gate)
 EP1_CLIP_NORM_REL_TOL = 2e-2
@@ -100,7 +101,7 @@ MOE_MODES = {
 }
 
 
-# ── dense_pp2_dp4: runtime-level fp32 grad exactness ────────────────────────────────────────────
+# ── dense_pp2_dp4: runner-level fp32 grad exactness ────────────────────────────────────────────
 
 
 def build_dense_model(device):
@@ -113,7 +114,7 @@ def build_dense_model(device):
 def run_dense_pp2_dp4(ctx):
     """pp2 × dp4: every stage-local grad must equal the unsplit fp32 model's, per parameter.
 
-    No ignore_index anywhere: every DP replica holds the same token count, so the runtime's
+    No ignore_index anywhere: every DP replica holds the same token count, so the runner's
     rank-local loss normalizer equals the reference's global G/dp and losses compare exactly.
     """
     checks, metrics = {}, {}
@@ -127,17 +128,17 @@ def run_dense_pp2_dp4(ctx):
     reference = ppeq.run_unsplit_reference(build_dense_model(device), rows, labels, device, dp_size=4)
 
     mesh = init_device_mesh("cuda", (2, 4), mesh_dim_names=("pp", "dp"))
-    pp_group = create_pipeline_group(config)
+    pp_group = build_pipeline_group(config)
     model = build_dense_model(device)
     stage_module = build_pipeline_stage(model, config.pp_rank, config.pp_size)
     for layer in stage_module.model.layers:
         fully_shard(layer, mesh=mesh["dp"], reshard_after_forward=False)
     fully_shard(stage_module, mesh=mesh["dp"], reshard_after_forward=False)
-    runtime = PipelineRuntime(stage_module, config, pp_group, device, n_microbatches=2)
+    runner = PipelineRunner(stage_module, config, pp_group, device, 2, TokenLoss())
 
     dp_rank = config.get_data_parallel_rank()
     batch = ppeq.dp_slice_batch(rows, labels, dp_rank, GLOBAL_BATCH // 4)
-    loss = runtime.step(batch["input_ids"].to(device), batch["labels"].to(device))
+    loss = runner.step(batch["input_ids"].to(device), batch["labels"].to(device))
 
     # Only last-stage ranks hold a loss; reduce the error so every rank asserts it.
     loss_err_t = torch.zeros(1, device=device)

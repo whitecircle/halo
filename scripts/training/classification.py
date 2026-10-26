@@ -30,9 +30,9 @@ from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rendered import tokenize_rendered
 from src.data.sources.loading import reject_image_columns
 from src.data.sources.paths import EVAL_SPLIT_NAMES
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import require_multimodal_sequence_classification_head
 from src.model_loading.model_preparation import log_model_info
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.runtime.consensus import reject_across_ranks
 from src.runtime.ranks import get_global_world_size, is_global_main_process
@@ -286,7 +286,7 @@ def main():
     model.config.label2id = label_to_id
     model.config.id2label = {id: label for label, id in label_to_id.items()}
 
-    peft_config = setup_peft_model(args, model, model_config, "SEQ_CLS")
+    peft_config = configure_adapter_training(args, model, model_config, "SEQ_CLS")
 
     log_model_info(model, tokenizer)
 

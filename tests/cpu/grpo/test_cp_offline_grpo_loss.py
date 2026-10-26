@@ -15,7 +15,7 @@ from src.data.collators.offline_grpo import (
     REF_PER_TOKEN_LOGPS_COLUMN,
     OfflineGRPOCPDataCollatorWithPadding,
 )
-from src.data.spans import LABEL_IGNORE_INDEX
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks

@@ -5,12 +5,12 @@ from typing import Any
 from transformers import DataCollatorForLanguageModeling
 
 from src.data.spans import (
-    LABEL_IGNORE_INDEX,
     mask_batch_to_completion_spans,
     resolve_eos_token_ids,
     tokenize_response_template,
     warn_if_pad_equals_eos,
 )
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 
 
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):

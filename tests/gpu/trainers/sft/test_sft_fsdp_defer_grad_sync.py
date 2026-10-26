@@ -48,8 +48,8 @@ from transformers import (
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir

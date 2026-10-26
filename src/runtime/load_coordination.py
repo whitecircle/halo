@@ -1,6 +1,8 @@
 """Weight-load coordination: the per-node throttle, its world join and the global load span."""
 
 import logging
+import time
+from collections.abc import Callable
 from contextlib import contextmanager
 
 import torch
@@ -105,3 +107,15 @@ def log_global_load_duration_seconds(*, tag: str, method: str, t_start_wall: flo
             f"(world_size={dist.get_world_size()} wall span min_start→max_end across ranks)"
         )
     return global_sec
+
+
+def timed_global_load[T](tag: str, method: str, load_fn: Callable[[], T]) -> T:
+    """Run ``load_fn`` and log its global wall span, earliest start to latest end across ranks. COLLECTIVE.
+
+    The log is no ``finally``: a collective entered while one rank unwinds an exception turns that
+    rank's traceback into a timeout on every other rank.
+    """
+    t_start_wall = time.time()
+    loaded = load_fn()
+    log_global_load_duration_seconds(tag=tag, method=method, t_start_wall=t_start_wall, t_end_wall=time.time())
+    return loaded

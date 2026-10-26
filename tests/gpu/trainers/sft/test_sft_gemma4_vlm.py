@@ -26,9 +26,9 @@ from PIL import Image
 from transformers import AutoProcessor
 
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
+from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.models import GEMMA4_26B_A4B_PATCHED

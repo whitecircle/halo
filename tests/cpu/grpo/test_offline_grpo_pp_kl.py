@@ -19,8 +19,7 @@ import torch
 from accelerate import PartialState
 
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPODataCollatorWithPadding
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.pipeline_parallel.losses import token_logprobs
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, token_logprobs
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 
@@ -267,7 +266,7 @@ def test_reference_batch_uses_the_shared_pp_pass_and_keeps_only_real_completion_
         passes.append(1)
         return OfflineGRPOTrainer._pp_reference_sweep_pass(me, inputs)
 
-    me._pp_runtime = types.SimpleNamespace(eval_loss=eval_loss)
+    me._pp_runner = types.SimpleNamespace(eval_loss=eval_loss)
     me._pp_broadcast_output_from_last_stage = broadcast
     me._pp_reference_sweep_pass = observed_pass
     actual = me._pp_score_reference_batch(batch)

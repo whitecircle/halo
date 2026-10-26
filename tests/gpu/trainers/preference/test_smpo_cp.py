@@ -33,8 +33,8 @@ import torch.distributed as dist
 from transformers import AutoTokenizer
 
 from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.first_step import (

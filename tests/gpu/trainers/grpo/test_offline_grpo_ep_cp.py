@@ -20,11 +20,11 @@ from transformers import TrainerCallback
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPOCPDataCollatorWithPadding
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.base_layer import get_flash_attn_func
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.cp_grpo import (

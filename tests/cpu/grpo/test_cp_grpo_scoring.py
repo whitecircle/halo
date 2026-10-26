@@ -11,9 +11,9 @@ import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.config import cp_boundary_shift
 from src.distributed.context_parallel.wrapper import find_cp_wrapper
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
 from src.trainers.grpo.objective.offline import offline_loss
 from tests.common.cp_grpo import full_row_loss

@@ -52,11 +52,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.environments.envs.protocols.react import ReActEnvironment
 from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
+from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.rewards.graders.matching import extract_last_boxed
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
@@ -427,7 +427,7 @@ def test_environmental_grpo_e2e():
             parallelism_config=ParallelismConfig(),
             # beta != 0 on a full fine-tune holds a frozen reference, loaded as the policy is.
             ref_model=load_frozen_auxiliary_model(
-                MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="sdpa"
+                MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="sdpa", download_tag=None
             ),
         )
 

@@ -22,8 +22,8 @@ from datasets import Dataset
 from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
 from src.checkpoint.writing import save_dtype_caster
-from src.distributed.loading.peft_setup import _reject_layer_indexed_patterns_under_pp as guard
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
+from src.model_loading.parallel.freeze_patterns import _reject_layer_indexed_patterns_under_pp as guard
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.pipeline import PipelineTrainerMixin, wrapper_state_outside_stages
 from src.trainers.mixins.validation import ParallelismValidationMixin
@@ -232,7 +232,7 @@ def test_image_bearing_vlm_run_is_rejected_under_pp(evidence):
 
     The split keeps the backbone and head, and the backbone probe descends to ``language_model`` —
     the tower and projector are its siblings, in no stage: images would never reach the model
-    (``pixel_values`` is pruned by the runtime's column pin) while their placeholder tokens train as
+    (``pixel_values`` is pruned by the runner's column pin) while their placeholder tokens train as
     text. Silent, so the gate is a raise; every declaration the VLM data path accepts must trip it.
 
     Driven through ``_maybe_prepare_pipeline_model`` itself. Asserting on ``is_vlm_model`` instead

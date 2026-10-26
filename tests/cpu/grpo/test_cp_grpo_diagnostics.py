@@ -21,7 +21,7 @@ def _trainer(*, cp_size=1, cp_rank=0, training=True):
     trainer.model = nn.Linear(1, 1).train(training)
     trainer.parallelism_config = SimpleNamespace(is_cp_mode=cp_size > 1)
     trainer.cp_config = SimpleNamespace(cp_size=cp_size, cp_rank=cp_rank, process_group=dist.group.WORLD)
-    trainer._pp_runtime = None
+    trainer._pp_runner = None
     trainer._sign_metric_buffer = {"train": defaultdict(list), "eval": defaultdict(list)}
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     trainer.accelerator = SimpleNamespace(gather=lambda values: values)

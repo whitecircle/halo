@@ -20,8 +20,10 @@ import pytest
 import torch
 from transformers import Gemma4TextConfig
 
-from src.distributed.loading import frozen_models, model_loading
 from src.model_loading import model_preparation
+from src.model_loading.parallel import frozen_models
+from src.model_loading.parallel import loader as model_loading
+from src.model_loading.parallel.model_source import ModelSource
 from src.models.attention.sdpa_flex_sliding import SDPA_FLEX_SLIDING
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 from tests.common.parallelism import make_parallelism_config
@@ -55,8 +57,8 @@ class _Finalized(Exception):
 
 
 def _load_policy(config, seam, seen) -> None:
-    def dispatch(name, parallelism_config, model_class, common_kwargs):
-        seen["build"] = common_kwargs["attn_implementation"]
+    def dispatch(source, parallelism_config, model_class, from_pretrained_kwargs, **kwargs):
+        seen["build"] = from_pretrained_kwargs["attn_implementation"]
         return MagicMock()
 
     def finalize(model, model_config, **kwargs):
@@ -66,7 +68,9 @@ def _load_policy(config, seam, seen) -> None:
     with (
         patch.object(model_loading, "configure_float32_matmul_precision"),
         patch.object(model_loading, "apply_remote_code_compat_shims"),
-        patch.object(model_loading, "resolve_model_source", lambda path, revision, **kwargs: revision),
+        patch.object(
+            model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
+        ),
         patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
         patch.object(model_loading, "resolve_attn_implementation", lambda *a, **k: "sdpa"),
         patch.object(model_loading, "apply_family_patches", seam),
@@ -76,7 +80,9 @@ def _load_policy(config, seam, seen) -> None:
         pytest.raises(_Finalized),
     ):
         model_loading.load_distributed_model(
-            "org/policy", parallelism_config=make_parallelism_config(world_size=1, gpus_per_node=1)
+            "org/policy",
+            parallelism_config=make_parallelism_config(world_size=1, gpus_per_node=1),
+            trust_remote_code=True,
         )
 
 
@@ -94,7 +100,9 @@ def _load_frozen(config, seam, seen) -> None:
         ),
         patch.object(frozen_models, "warm_attention_kernels"),
     ):
-        frozen_models.load_frozen_auxiliary_model("org/reference", dtype=torch.bfloat16)
+        frozen_models.load_frozen_auxiliary_model(
+            "org/reference", dtype=torch.bfloat16, trust_remote_code=False, download_tag=None
+        )
 
 
 @pytest.mark.parametrize("load", [_load_policy, _load_frozen], ids=["policy", "frozen"])

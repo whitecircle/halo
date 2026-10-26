@@ -2,7 +2,7 @@
 
 Every unparallelized frozen model the toolkit scores a policy against (the DPO/KTO reference, the
 SDPG KL anchor, the offline-GRPO KL reference, both distillation teacher paths) loads through
-:func:`~src.distributed.loading.frozen_models.load_frozen_auxiliary_model`, so its module namespace is
+:func:`~src.model_loading.parallel.frozen_models.load_frozen_auxiliary_model`, so its module namespace is
 where a test intercepts the hub fetches. That also makes these stubs a consolidation check: a call
 site that re-implemented the load would fetch through its own names, and :func:`captured_load` would
 find no recorded fetch.
@@ -12,8 +12,9 @@ import contextlib
 import types
 from unittest.mock import patch
 
-import src.distributed.loading.frozen_models as frozen_loader
+import src.model_loading.parallel.frozen_models as frozen_loader
 import src.models.attention.gpt_oss_sinks as sink_patches
+from src.model_loading.parallel.model_source import ModelSource
 
 STUB_CONFIG = "AUXILIARY_CONFIG"
 STUB_RESOLVED_ATTN = "flex_attention"
@@ -48,8 +49,10 @@ def stub_frozen_loader():
         patch.object(sink_patches, "_set_gpt_oss_sinks_trainable") as freeze_sinks,
     ):
         auto_config.from_pretrained.return_value = STUB_CONFIG
-        # The source agreement hands back the revision every rank then reads at; unchanged here.
-        fetch_scope.side_effect = lambda model_name_or_path, revision, *, tag: revision
+        # The source agreement hands back the source every rank then reads at its revision; unchanged here.
+        fetch_scope.side_effect = lambda model_name_or_path, revision, *, tag: ModelSource(
+            model_name_or_path, revision, model_name_or_path
+        )
         # The real live branch returns the layer count, which apply_sinks_policy compares (> 0) to
         # stamp the model live-sinks; a bare MagicMock return would TypeError on that comparison.
         freeze_sinks.return_value = 1

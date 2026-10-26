@@ -23,20 +23,12 @@ from transformers import GenerationConfig, PretrainedConfig
 
 from src.checkpoint.config_export import save_model_config
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
+from tests.common.pp_fakes import hand_built_stage
 
 
 def _stage() -> PipelineStageModule:
     """A minimal stage; the split logic is covered elsewhere — this pins the config-carrying seam."""
-    return PipelineStageModule(
-        nn.Linear(4, 4),
-        None,
-        is_first=True,
-        is_last=False,
-        backbone_prefix="model",
-        head_attr="lm_head",
-        layer_attr="layers",
-        layer_offset=0,
-    )
+    return hand_built_stage(nn.Linear(4, 4), None, is_first=True, is_last=False, layer_offset=0)
 
 
 def test_stage_without_generation_config_is_not_generative():

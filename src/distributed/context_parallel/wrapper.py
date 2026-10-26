@@ -15,7 +15,6 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
 from src.distributed.context_parallel.config import (
     CPConfig,
@@ -26,6 +25,7 @@ from src.distributed.context_parallel.key_mapping import strip_cp_attention_pref
 from src.distributed.context_parallel.patching import patch_attention_for_ulysses
 from src.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.models.config_access import get_config_field
 from src.models.unwrapping import base_transformers_model, unwrap_framework_wrappers
 

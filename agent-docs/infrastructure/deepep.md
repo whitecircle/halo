@@ -297,7 +297,7 @@ it; at high `ep_size` the symmetric buffer OOMs at the build around the same poi
 trajectories.
 
 Both this ceiling and the cross-node Gin one are applied **at config time** as well, before any weight
-is read. `ParallelismConfig.validate_against_model_config` sizes the run's declared budget
+is read. `reject_unsupported_model` sizes the run's declared budget
 (`per_device_train_batch_size` × the declared row length, divided by `cp_size`, doubled for DPO, SMPO
 and reward, which forward chosen and rejected together) through the same `ep_dispatch_capacity`
 alignment the dispatcher uses and refuses it there, naming the budget, the capacity and the EP group.

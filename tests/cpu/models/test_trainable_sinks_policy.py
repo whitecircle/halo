@@ -20,7 +20,7 @@ from transformers import GptOssConfig, GptOssForCausalLM
 PartialState()  # the sinks policy logs through accelerate's logger, which requires live state
 
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.loading.peft_setup import setup_peft_model
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
@@ -125,7 +125,7 @@ def test_adapter_run_refuses_trainable_sinks():
         lora_modules_to_save=None,
     )
     with pytest.raises(ValueError, match="full fine-tuning"):
-        setup_peft_model(args, model, model_config)
+        configure_adapter_training(args, model, model_config)
 
 
 def test_weight_sync_refuses_trainable_sinks():

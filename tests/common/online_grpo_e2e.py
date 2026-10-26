@@ -39,8 +39,8 @@ from transformers.trainer_callback import TrainerCallback
 from trl import GRPOConfig
 
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.training.environment import resolve_resume_weights_source
@@ -223,7 +223,7 @@ def _build_trainer(
     if spec.beta and not spec.adapter:
         # As the entry scripts load it: from the configured model, as the policy loads (load_policy).
         kwargs["ref_model"] = load_frozen_auxiliary_model(
-            model_name, dtype=torch.bfloat16, trust_remote_code=True, reset_sinks=False
+            model_name, dtype=torch.bfloat16, trust_remote_code=True, reset_sinks=False, download_tag=None
         )
     if trainer_kind == "sdpg":
         trainer = DistributedSDPGTrainer(

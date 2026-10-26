@@ -28,8 +28,8 @@ from transformers import Trainer
 
 import scripts.training.distillation.teacher_distill as teacher_distill_script
 import src.trainers.distillation.teacher_distillation as teacher_distillation
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.distillation.losses import get_divergence
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from src.training.script_runner import ScriptRuntime
@@ -136,7 +136,7 @@ def _construct(args, *, peft_config=None):
         return {**kwargs, "model": explicit["model"]}
 
     with (
-        mock.patch.object(teacher_distillation, "load_model_from_pretrained", lambda model, *a, **k: (model, None)),
+        mock.patch.object(teacher_distillation, "resolve_trainer_model", lambda model, *a, **k: model),
         mock.patch.object(DistributedDistillationTrainer, "_init_distributed_config", init_config),
         mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: setattr(self, "model", model)),
         mock.patch.object(nn.Linear, "add_model_tags", create=True),
@@ -208,7 +208,7 @@ def test_the_hard_label_gate_is_refused_beside_a_loss_that_weights_gold_tokens_i
 
 
 def test_a_casted_peft_student_forwards_under_bf16_autocast():
-    """``prepare_peft_model`` leaves a QLoRA student's adapters bf16 over fp32 activations; every
+    """``build_peft_model`` leaves a QLoRA student's adapters bf16 over fp32 activations; every
     sibling trainer feeds its cast flag to the autocast, so this one must too."""
     seen = []
 
@@ -223,10 +223,10 @@ def test_a_casted_peft_student_forwards_under_bf16_autocast():
     assert seen == [True]
 
 
-def test_the_trainer_wraps_peft_through_prepare_peft_model_and_keeps_its_cast_flag():
+def test_the_trainer_wraps_peft_through_build_peft_model_and_keeps_its_cast_flag():
     """The PEFT wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss."""
     peft_config, wrapped = LoraConfig(), nn.Linear(2, 2)
-    with mock.patch.object(teacher_distillation, "prepare_peft_model", return_value=(wrapped, True)) as prepare:
+    with mock.patch.object(teacher_distillation, "build_peft_model", return_value=(wrapped, True)) as prepare:
         trainer = _construct(
             types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False), peft_config=peft_config
         )
@@ -301,7 +301,7 @@ def _run_teacher_script(tmp_path, teacher_tokens):
         "apply_max_length": lambda config, args, model, tokenizer: tokenizer,
         "install_resolved_tokenizer": lambda processing_class, tokenizer: tokenizer,
         "enforce_text_path_padding_side": lambda *a, **k: None,
-        "setup_peft_model": lambda *a, **k: None,
+        "configure_adapter_training": lambda *a, **k: None,
         "AutoTokenizer": types.SimpleNamespace(from_pretrained=lambda *a, **k: _Tokenizer(teacher_tokens)),
         "AutoConfig": types.SimpleNamespace(from_pretrained=lambda *a, **k: student.config),
         "_load_distill_teacher": mock.Mock(side_effect=_TeacherWeightsLoaded),

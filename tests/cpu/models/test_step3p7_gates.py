@@ -23,14 +23,9 @@ from transformers.models.step3p7.modeling_step3p7 import Step3p7TextModel
 from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
 from src.distributed.context_parallel.validation import UlyssesConfigError, validate_model_for_ulysses
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
-from src.distributed.pipeline_parallel.split import (
-    MTP_LAYER_COUNT_FIELDS,
-    PP_SPEC_MAP,
-    compute_layer_partition,
-    layer_types_period,
-    validate_model_supports_pp,
-)
-from src.distributed.pipeline_parallel.stage import reject_layer_type_rebase
+from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
+from src.distributed.pipeline_parallel.partition import compute_layer_partition, layer_types_period, validate_partition
 from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
 from src.distributed.tensor_parallel.parallelize_attention import (
     apply_tp_to_attention_only,
@@ -182,7 +177,7 @@ def test_pp_accepts_a_loaded_step3p7_text_model():
     assert "num_nextn_predict_layers" in MTP_LAYER_COUNT_FIELDS
     model = _tiny_text_model()
     assert model.config.num_nextn_predict_layers == 0
-    validate_model_supports_pp(model)
+    reject_unsupported_pp_model(model)
 
 
 def test_pp_partition_respects_the_layer_types_period():
@@ -208,11 +203,10 @@ def test_pp_rebase_gate_judges_shift_invariance_on_the_real_truncated_pattern():
         }
     )
     shell = _ConfigOnlyShell(config)
-    reject_layer_type_rebase(shell, 0, 0)
-    reject_layer_type_rebase(shell, 24, 1)
-    reject_layer_type_rebase(shell, 44, 1)
+    validate_partition(shell, [(0, 24), (24, 45)])
+    validate_partition(shell, [(0, 44), (44, 45)])
     with pytest.raises(ValueError, match="not a whole number of periods"):
-        reject_layer_type_rebase(shell, 23, 1)
+        validate_partition(shell, [(0, 23), (23, 45)])
 
 
 # Balancing config-field registries

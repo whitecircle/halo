@@ -33,12 +33,12 @@ from src.config_validation import reject_unsupported_args
 from src.configs.reward import RewardScriptArguments
 from src.data.sources.loading import alias_images_column, alias_tools_column
 from src.data.vlm import is_vlm_run
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import (
     load_vlm_processor,
     require_multimodal_sequence_classification_head,
 )
 from src.model_loading.model_preparation import log_model_info
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from src.training.environment import run_training
@@ -98,7 +98,7 @@ def main():
     )
     tokenizer = apply_max_length(reward_config, args, model, tokenizer)
 
-    peft_config = setup_peft_model(args, model, model_config, "SEQ_CLS")
+    peft_config = configure_adapter_training(args, model, model_config, "SEQ_CLS")
 
     log_model_info(model, tokenizer)
 

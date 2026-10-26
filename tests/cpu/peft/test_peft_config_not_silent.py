@@ -20,8 +20,9 @@ import torch.nn as nn
 from peft import LoraConfig
 from trl import ModelConfig
 
-from src.distributed.loading import peft_setup as model_info
-from src.distributed.loading.peft_setup import setup_peft_model, split_expert_lora_targets
+from src.model_loading.parallel import model_source
+from src.model_loading.parallel import peft_setup as model_info
+from src.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 
@@ -30,7 +31,7 @@ from tests.common.ep_stubs import StubEPLayerBase
 def _as_moe(is_moe: bool = True):
     """The peel loads the model's AutoConfig to gate on MoE — stub it so these stay pure-logic."""
     with (
-        patch.object(model_info.AutoConfig, "from_pretrained", return_value=object()),
+        patch.object(model_source.AutoConfig, "from_pretrained", return_value=object()),
         patch.object(model_info, "config_has_experts", return_value=is_moe),
     ):
         yield
@@ -136,7 +137,7 @@ def test_lora_target_parameters_raises_under_ep():
     config = _model_config(lora_target_parameters=["gate_up_proj"])
 
     with pytest.raises(ValueError, match="lora_target_parameters"):
-        setup_peft_model(_args(), _model_with_ep_layer(), config)
+        configure_adapter_training(_args(), _model_with_ep_layer(), config)
 
 
 def test_lora_target_parameters_allowed_without_ep_wrappers():
@@ -144,10 +145,10 @@ def test_lora_target_parameters_allowed_without_ep_wrappers():
     ordinary modules and this is stock PEFT working as designed — rejecting it would be a regression."""
     config = _model_config(lora_target_modules=["q_proj"], lora_target_parameters=["gate_up_proj"])
 
-    assert setup_peft_model(_args(), _Dense(), config) is not None
+    assert configure_adapter_training(_args(), _Dense(), config) is not None
 
 
-# setup_peft_model: no adapter is an error, not a full fine-tune
+# configure_adapter_training: no adapter is an error, not a full fine-tune
 
 
 def test_use_peft_with_no_resulting_adapter_raises():
@@ -157,7 +158,7 @@ def test_use_peft_with_no_resulting_adapter_raises():
     model = _Dense()
 
     with pytest.raises(ValueError, match="no adapter would be created"):
-        setup_peft_model(_args(), model, config)
+        configure_adapter_training(_args(), model, config)
 
 
 def test_use_peft_false_still_full_finetunes():
@@ -165,7 +166,7 @@ def test_use_peft_false_still_full_finetunes():
     config = ModelConfig(model_name_or_path="dummy/moe", use_peft=False, lora_target_modules=[])
     model = _Dense()
 
-    assert setup_peft_model(_args(), model, config) is None
+    assert configure_adapter_training(_args(), model, config) is None
     assert all(p.requires_grad for p in model.parameters())
 
 
@@ -178,7 +179,7 @@ def test_expert_only_run_rejects_modules_to_save():
         patch.object(model_info, "has_ep_lora", return_value=True),
         pytest.raises(ValueError, match="lora_modules_to_save"),
     ):
-        setup_peft_model(_args(), model, config)
+        configure_adapter_training(_args(), model, config)
 
 
 def test_expert_only_run_without_modules_to_save_is_fine():
@@ -186,7 +187,7 @@ def test_expert_only_run_without_modules_to_save_is_fine():
     model = _Dense()
 
     with patch.object(model_info, "has_ep_lora", return_value=True):
-        assert setup_peft_model(_args(), model, config) is None
+        assert configure_adapter_training(_args(), model, config) is None
     assert not any(p.requires_grad for p in model.parameters()), "the base must be frozen"
 
 

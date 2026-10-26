@@ -19,11 +19,11 @@ from transformers import (
 from transformers.trainer_callback import TrainerCallback
 
 from src.configs.distillation import DistillationConfig
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.loading.frozen_models import place_and_freeze
-from src.distributed.loading.model_loading import load_model_from_pretrained
-from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
+from src.model_loading.parallel.frozen_models import place_and_freeze
+from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
+from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.distillation.losses import (
     call_divergence,
@@ -98,8 +98,10 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
             )
 
         # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.
-        student_model, _ = load_model_from_pretrained(
-            student_model, args, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params
+        student_model = resolve_trainer_model(
+            student_model,
+            args,
+            keep_fp32_non_ep=parallelism_config is not None and parallelism_config.fp32_non_ep_params,
         )
         dist_kwargs = self._init_distributed_config(
             kwargs,
@@ -113,7 +115,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
 
         self._peft_has_been_casted_to_bf16 = False
         if peft_config is not None:
-            student_model, self._peft_has_been_casted_to_bf16 = prepare_peft_model(student_model, peft_config, args)
+            student_model, self._peft_has_been_casted_to_bf16 = build_peft_model(student_model, peft_config, args)
 
         # The method knobs live on ``args`` (DistillationConfig) and are read there; only the
         # resolved loss callable is worth holding.

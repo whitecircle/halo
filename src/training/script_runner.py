@@ -25,12 +25,12 @@ from src.data.pipeline.preferences import prepare_generative_dataset, prepare_pr
 from src.data.pipeline.processing import log_dataset_examples, resolve_map_num_proc
 from src.data.sources.loading import is_presharded_dataset_load, load_datasets, reject_image_columns
 from src.data.vlm import dataset_declares_images, is_vlm_run
-from src.distributed.loading.model_source import probe_checkpoint
-from src.distributed.loading.peft_setup import split_expert_lora_targets
 from src.distributed.loading.vlm_setup import load_model_consuming_init_kwargs
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.model_loading.parallel.model_source import probe_checkpoint
+from src.model_loading.parallel.peft_setup import split_expert_lora_targets
 from src.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
 from src.models.context_window import get_model_context_window, is_bounded_length, resolve_length_to_context
 from src.runtime.consensus import raise_rank0_failure
@@ -188,7 +188,7 @@ def resolve_vlm_run(
 
     Called once the dataset is in hand and before the model load, which requires the checkpoint's
     processor for an image run. Without a ``vlm_checkpoint`` verdict the script already probed,
-    :func:`~src.distributed.loading.model_source.probe_checkpoint` reads ``model_config``'s
+    :func:`~src.model_loading.parallel.model_source.probe_checkpoint` reads ``model_config``'s
     checkpoint at its ``model_revision`` under its ``trust_remote_code``, as the load does, since hub
     ``main`` can name a different modality than the pinned commit.
     """

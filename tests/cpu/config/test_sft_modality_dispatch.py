@@ -24,7 +24,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.distributed.loading import model_source
+from src.model_loading.parallel import model_source
 from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
@@ -115,7 +115,7 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
         mock.patch.object(module, "load_model_for_training", side_effect=load_model),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
-        mock.patch.object(module, "setup_peft_model", return_value=None),
+        mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=((dataset, False), False)),
         mock.patch.object(module, "_prepare_text_data", side_effect=fail_text),
@@ -177,7 +177,7 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
         mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
         mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
-        mock.patch.object(module, "setup_peft_model", return_value=None),
+        mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         # The preference prep and the example log both live in the shared script_runner helper the

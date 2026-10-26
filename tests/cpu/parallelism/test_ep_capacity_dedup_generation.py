@@ -40,6 +40,7 @@ from src.distributed.expert_parallel.deepep import capacity as capacity_mod
 from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
 from src.distributed.expert_parallel.deepep import settings as settings_mod
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
+from tests.common.pp_fakes import hand_built_stage
 
 
 class _TwoLayerModel(nn.Module):
@@ -74,16 +75,7 @@ class _StubBackbone(nn.Module):
 
 def _mid_pipeline_stage() -> PipelineStageModule:
     """A stage holding neither the embedding nor the head — the plainest module the schedule runs."""
-    return PipelineStageModule(
-        _StubBackbone(),
-        None,
-        is_first=False,
-        is_last=False,
-        backbone_prefix="model",
-        head_attr="lm_head",
-        layer_attr="layers",
-        layer_offset=8,
-    )
+    return hand_built_stage(_StubBackbone(), None, is_first=False, is_last=False, layer_offset=8)
 
 
 class _StubDispatcher:

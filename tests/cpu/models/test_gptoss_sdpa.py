@@ -20,9 +20,9 @@ from transformers import AutoModelForCausalLM, GptOssConfig, LlamaConfig, PreTra
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 from trl import ModelConfig
 
-from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.liger.dispatch import LIGER_APPLIED_CONFIG_ATTR
+from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
 from src.models.attention import gpt_oss_sinks
 from src.models.attention.gpt_oss_sinks import SinksPolicy, install_sdpa_for_reset_sinks
 from src.models.attention.selection import _attn_impl_handles_sinks, validate_attn_implementation
@@ -242,7 +242,15 @@ def test_reference_model_load_applies_sink_reset(tiny_gptoss_checkpoint):
     reference's sinks are neutralized to dtype min, matching the policy forward."""
     args, model_config, training_config, parallelism_config, tokenizer = _ref_load_stubs(tiny_gptoss_checkpoint)
     model_ref = load_reference_model_for_preference(
-        args, model_config, training_config, parallelism_config, tokenizer, is_vlm=False, method="DPO"
+        args,
+        model_config,
+        training_config,
+        parallelism_config,
+        tokenizer,
+        is_vlm=False,
+        method="DPO",
+        reset_sinks=True,
+        attn_default=None,
     )
     sinks = model_ref.model.layers[0].self_attn.sinks
     assert torch.all(sinks == torch.finfo(sinks.dtype).min)
@@ -269,6 +277,7 @@ def test_reference_model_load_rejects_sink_dropping_impl_with_live_sinks(tiny_gp
             is_vlm=False,
             method="DPO",
             reset_sinks=False,
+            attn_default=None,
         )
 
 
@@ -290,6 +299,7 @@ def test_reference_model_auto_resolves_to_a_sink_carrying_impl(tiny_gptoss_check
         is_vlm=False,
         method="DPO",
         reset_sinks=False,
+        attn_default=None,
     )
     resolved = model_ref.config._attn_implementation
     assert _attn_impl_handles_sinks(resolved), (
@@ -310,6 +320,7 @@ def test_reference_model_load_freezes_live_sinks(tiny_gptoss_checkpoint):
         is_vlm=False,
         method="DPO",
         reset_sinks=False,
+        attn_default=None,
     )
     sinks = model_ref.model.layers[0].self_attn.sinks
     assert sinks.requires_grad is False  # live sinks kept but frozen, mirroring the policy load

@@ -21,8 +21,8 @@ import pytest
 from accelerate import PartialState
 from trl import ModelConfig, SFTTrainer
 
-import src.distributed.loading.frozen_models as frozen_models
-from src.distributed.loading.frozen_models import (
+import src.model_loading.parallel.frozen_models as frozen_models
+from src.model_loading.parallel.frozen_models import (
     ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
     PREFERENCE_REFERENCE_ALTERNATIVES,
     load_reference_model_for_on_policy_grpo,
@@ -41,7 +41,7 @@ PartialState()  # the gate warns through accelerate's logger, which requires an 
 @pytest.fixture(autouse=True)
 def _fresh_reports(monkeypatch):
     """Each test re-arms the once-per-message report."""
-    monkeypatch.setattr(frozen_models, "_REPORTED_REFERENCES", set())
+    monkeypatch.setattr(frozen_models, "_reported_references", set())
 
 
 SHARDED = {
@@ -150,6 +150,8 @@ def _preference_reference(config, *, precompute=False):
             tokenizer=None,
             is_vlm=False,
             method="DPO",
+            reset_sinks=True,
+            attn_default=None,
         )
     return result, loaded
 
@@ -272,7 +274,7 @@ def test_the_dpo_script_hands_the_loaded_reference_to_the_trainer(tmp_path):
         "alias_images_column": lambda ds, *a, **k: ds,
         "resolve_vlm_run": mock.Mock(return_value=False),
         "load_model_for_training": mock.Mock(return_value=(object(), tokenizer, tokenizer, False)),
-        "setup_peft_model": mock.Mock(return_value=None),
+        "configure_adapter_training": mock.Mock(return_value=None),
         "apply_max_length": lambda cfg, args, model, tok: tok,
         "install_resolved_tokenizer": lambda processing_class, tok: processing_class,
         "log_model_info": mock.Mock(),

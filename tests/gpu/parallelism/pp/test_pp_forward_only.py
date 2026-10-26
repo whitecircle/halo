@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Pipeline forward-only pass: correct logits, and no damage to the stage's backward state.
 
-``PipelineRuntime.forward_only`` is the scoring path (RL reference log-probs, eval metrics) — no
+``PipelineRunner.forward_only`` is the scoring path (RL reference log-probs, eval metrics) — no
 rank holds the whole model, so it must drive the schedule instead of calling ``model(...)``. torch
 defers the stage's shape inference and recv-buffer allocation to the schedule's first call and
 latches it, taking ``requires_grad`` from ``has_backward`` at that moment, so a forward-only pass
@@ -12,7 +12,7 @@ It fails when:
   * the merged last-stage logits stop matching the unsplit model
   * a forward-only pass leaves the stage unable to produce input gradients — the later ``step()``
     then trains on wrong (or no) gradients
-  * a forward-only pass populates or perturbs the shards' ``.grad`` (the runtime suppresses torch's
+  * a forward-only pass populates or perturbs the shards' ``.grad`` (the runner suppresses torch's
     trailing FSDP post_backward on forward-only drives, leaving the stage gathered; the shards are
     re-registered with ``reshard_fsdp2_modules`` before anything reads parameters by identity)
 
@@ -35,9 +35,10 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import create_pipeline_group
-from src.distributed.pipeline_parallel.runtime import PipelineRuntime
+from src.distributed.pipeline_parallel.groups import build_pipeline_group
+from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from src.distributed.pipeline_parallel.stage_losses import TokenLoss
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.utils import log, max_or_nan
@@ -64,7 +65,7 @@ def make_batch(device, vocab_size):
 
 
 def causal_lm_loss(logits, labels):
-    """The same shifted, token-count-normalized CE the pipeline runtime computes."""
+    """The same shifted, token-count-normalized CE the pipeline runner computes."""
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = labels[:, 1:].contiguous()
     n_tokens = (shift_labels != -100).sum().clamp(min=1)
@@ -132,7 +133,7 @@ def run(ctx):
 
     mesh = init_device_mesh("cuda", (PP_SIZE, config.stage_world_size), mesh_dim_names=("pp", "dp"))
     dp_mesh = mesh["dp"]
-    pp_group = create_pipeline_group(config)
+    pp_group = build_pipeline_group(config)
 
     model = build_model(device)
     stage_module = build_pipeline_stage(model, config.pp_rank, PP_SIZE)
@@ -140,7 +141,7 @@ def run(ctx):
         fully_shard(layer, mesh=dp_mesh, reshard_after_forward=False)
     fully_shard(stage_module, mesh=dp_mesh, reshard_after_forward=False)
 
-    runtime = PipelineRuntime(stage_module, config, pp_group, device, N_MICROBATCHES)
+    runner = PipelineRunner(stage_module, config, pp_group, device, N_MICROBATCHES, TokenLoss())
 
     # This DP replica's slice of the global batch; every rank of a chain gets the same slice.
     dp_rank = config.get_data_parallel_rank()
@@ -150,7 +151,7 @@ def run(ctx):
     checks, metrics = {}, {}
 
     # ── (a) Forward-only before any step: the ordering that corrupts a stage holding stale state ─
-    logits = runtime.forward_only(input_ids[sl])
+    logits = runner.forward_only(input_ids[sl])
     # A forward-only drive leaves the FSDP2 stage gathered (transient params registered); every
     # parameter read below is by identity, so re-register the shards first — the trainer does the
     # same at the end of an eval loop and before building the optimizer.
@@ -179,12 +180,12 @@ def run(ctx):
     # Checked as state first: without it the step() below deadlocks (the last stage raises on its
     # None input grads while the previous stage waits forever on the grad recv) instead of failing.
     backward_capable = config.is_first_pp_stage or all(
-        info.buffer.requires_grad for info in runtime.stage.args_recv_info[0]
+        info.buffer.requires_grad for info in runner.stage.args_recv_info[0]
     )
     checks["recv_buffers_stay_backward_capable"] = all_ranks(backward_capable, device)
 
     if checks["recv_buffers_stay_backward_capable"]:
-        runtime.step(input_ids[sl], labels[sl])
+        runner.step(input_ids[sl], labels[sl])
 
         grads = stage_grads(stage_module)
         expected = {stage_module.global_parameter_name(n) for n, _ in stage_module.named_parameters()}
@@ -211,7 +212,7 @@ def run(ctx):
         # ── (d) A scoring pass interleaved with training must not disturb pending gradients ────
         # The pending gradients live on the shards; a forward-only drive that ran FSDP's post_backward
         # or the grad scaling would reduce or halve them before the optimizer steps.
-        runtime.forward_only(input_ids[sl])
+        runner.forward_only(input_ids[sl])
         reshard_fsdp2_modules(stage_module)
         after = stage_grads(stage_module)
         drift = max_or_nan((after[fqn] - grads[fqn]).abs().max().item() for fqn in grads)

@@ -20,15 +20,15 @@ import pytest
 import torch
 from torch.distributed.pipelining.microbatch import split_args_kwargs_into_chunks
 
-from src.data.collators.fixed_shape import FixedShapeCollator
+from src.data.collators.fixed_shape import FixedShapeCollator, pad_to_fixed_length
 from src.data.collators.packing import (
     PAD_TAIL_SEGMENT_CHUNK,
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithPacking,
     pad_tail_positions,
 )
-from src.distributed.pipeline_parallel.losses import loss_token_count
-from src.trainers.mixins.pipeline import pp_pad_values
+from src.distributed.pipeline_parallel.runner import resolve_batch_pad_values
+from src.kernels.logprobs import loss_token_counts_per_row
 
 PAD = 0
 IGNORE = -100
@@ -93,7 +93,7 @@ def test_ragged_bins_pad_to_one_fixed_shape():
     """
     inner = DataCollatorWithPacking(tokenizer=make_tokenizer())
     inner.flatten_to_single_row = False
-    fixed = FixedShapeCollator(inner, MAX_LENGTH, pp_pad_values(PAD))
+    fixed = FixedShapeCollator(inner, MAX_LENGTH, resolve_batch_pad_values(PAD))
 
     narrow = fixed([dict(row) for row in packed_rows([2, 3], [4, 1])])
     wide = fixed([dict(row) for row in packed_rows([5, 6], [7, 4])])
@@ -115,7 +115,7 @@ def test_pad_tail_is_an_inert_document():
     """
     inner = DataCollatorWithPacking(tokenizer=make_tokenizer())
     inner.flatten_to_single_row = False
-    fixed = FixedShapeCollator(inner, MAX_LENGTH, pp_pad_values(PAD))
+    fixed = FixedShapeCollator(inner, MAX_LENGTH, resolve_batch_pad_values(PAD))
 
     batch = fixed([dict(row) for row in packed_rows([3, 4], [5, 2])])
 
@@ -140,7 +140,7 @@ def test_pad_tail_is_an_inert_document():
 def test_row_form_and_flat_form_score_the_same_tokens():
     """The pipeline's loss normalizer must not change because the rows were kept.
 
-    ``loss_token_count`` drops one target per row; in the kept-rows form that extra dropped target
+    ``loss_token_counts_per_row`` drops one target per row; in the kept-rows form that extra dropped target
     is the next row's first token, which is already ignored (it sits at ``position_ids == 0``). So
     both forms must count identically — if they diverge, PP packing silently rescales the loss.
     """
@@ -155,7 +155,7 @@ def test_row_form_and_flat_form_score_the_same_tokens():
     kept_collator.flatten_to_single_row = False
     kept = collate(kept_collator, rows)
 
-    assert loss_token_count(kept["labels"]) == loss_token_count(flat["labels"])
+    assert loss_token_counts_per_row(kept["labels"]).sum() == loss_token_counts_per_row(flat["labels"]).sum()
 
 
 @pytest.mark.parametrize("collator_cls", [DataCollatorWithPacking, DataCollatorForCompletionOnlyLMWithPacking])
@@ -179,7 +179,9 @@ def test_the_column_survives_the_pipeline_wrapper(collator_cls):
     kwargs = {"tokenizer": make_tokenizer()}
     if collator_cls is DataCollatorForCompletionOnlyLMWithPacking:
         kwargs["response_prompt_template"] = [1, 2]  # required; irrelevant to the column contract
-    wrapped = FixedShapeCollator(inner=collator_cls(**kwargs), max_length=MAX_LENGTH, pad_values=pp_pad_values(PAD))
+    wrapped = FixedShapeCollator(
+        inner=collator_cls(**kwargs), max_length=MAX_LENGTH, pad_values=resolve_batch_pad_values(PAD)
+    )
     pinned = getattr(wrapped, "required_dataset_columns", ())
     assert "seq_lengths" in pinned, (
         "the pipeline's fixed-shape wrapper hid the packing collator's column requirement; "
@@ -190,8 +192,19 @@ def test_the_column_survives_the_pipeline_wrapper(collator_cls):
 def test_the_wrapper_reports_nothing_extra_for_a_plain_collator():
     """Anti-over-fitting: forwarding must not invent columns a non-packing collator never declared,
     which would keep dead columns alive through HF's pruning and into the runtime contract."""
-    wrapped = FixedShapeCollator(inner=object(), max_length=MAX_LENGTH, pad_values=pp_pad_values(PAD))
+    wrapped = FixedShapeCollator(inner=object(), max_length=MAX_LENGTH, pad_values=resolve_batch_pad_values(PAD))
     assert wrapped.required_dataset_columns == ()
+
+
+def test_over_length_raises_in_each_callers_words():
+    """An over-length tensor raises rather than being truncated: the collator says the frozen shape,
+    the trainers' own pre-padding the pipeline's fixed shape, each followed by its caller's remedy."""
+    batch = {"input_ids": torch.ones(1, MAX_LENGTH + 1, dtype=torch.long)}
+    fixed = FixedShapeCollator(lambda features: dict(batch), MAX_LENGTH, resolve_batch_pad_values(PAD))
+    with pytest.raises(ValueError, match=rf"tokens but the frozen shape is max_length={MAX_LENGTH};.*Truncate in"):
+        fixed([])
+    with pytest.raises(ValueError, match=rf"tokens, over the pipeline's fixed shape max_length={MAX_LENGTH};.*remedy"):
+        pad_to_fixed_length({"labels": (torch.zeros(2, MAX_LENGTH + 3), IGNORE)}, MAX_LENGTH, "remedy")
 
 
 if __name__ == "__main__":

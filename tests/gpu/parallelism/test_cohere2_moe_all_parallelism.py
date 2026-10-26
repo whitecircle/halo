@@ -35,8 +35,8 @@ from transformers import AutoTokenizer
 from transformers.models.cohere2_moe import Cohere2MoeConfig, Cohere2MoeForCausalLM
 
 from src.distributed.checkpoint.ep_save import save_ep_model
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main
@@ -131,6 +131,7 @@ def run_mode(
         dtype=torch.bfloat16,
         attn_implementation=attn_implementation,
         use_liger_kernel=False,
+        trust_remote_code=True,
     )
     log(f"  GPU memory after load: {gpu_mem_gb():.2f}GB")
 
@@ -231,6 +232,7 @@ def run_mode(
             dtype=torch.bfloat16,
             attn_implementation="eager",
             use_liger_kernel=False,
+            trust_remote_code=True,
         )
         reloaded.eval()
         with torch.no_grad():

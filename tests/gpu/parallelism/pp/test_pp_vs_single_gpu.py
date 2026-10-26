@@ -30,9 +30,10 @@ from torch.distributed.fsdp import fully_shard
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import create_pipeline_group
-from src.distributed.pipeline_parallel.runtime import PipelineRuntime
+from src.distributed.pipeline_parallel.groups import build_pipeline_group
+from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from src.distributed.pipeline_parallel.stage_losses import TokenLoss
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -67,12 +68,12 @@ def make_batch(device, vocab_size):
     g = torch.Generator(device="cpu").manual_seed(99)
     input_ids = torch.randint(0, vocab_size, (GLOBAL_BATCH, SEQ_LEN), generator=g).to(device)
     # No ignore_index anywhere: every DP replica then holds the same token count, so the
-    # per-replica normalization the runtime applies averages to the exact full-batch loss.
+    # per-replica normalization the runner applies averages to the exact full-batch loss.
     return input_ids, input_ids.clone()
 
 
 def causal_lm_loss(logits, labels):
-    """The same shifted, token-count-normalized CE the pipeline runtime computes."""
+    """The same shifted, token-count-normalized CE the pipeline runner computes."""
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = labels[:, 1:].contiguous()
     n_tokens = (shift_labels != -100).sum().clamp(min=1)
@@ -115,7 +116,7 @@ def run(ctx):
 
     mesh = init_device_mesh("cuda", (pp_size, config.stage_world_size), mesh_dim_names=("pp", "dp"))
     dp_mesh = mesh["dp"]
-    pp_group = create_pipeline_group(config)
+    pp_group = build_pipeline_group(config)
 
     model = build_model(device)
     stage_module = build_pipeline_stage(model, config.pp_rank, pp_size, pp_split=PP_SPLIT)
@@ -140,13 +141,13 @@ def run(ctx):
         fully_shard(layer, mesh=dp_mesh, reshard_after_forward=False)
     fully_shard(stage_module, mesh=dp_mesh, reshard_after_forward=False)
 
-    runtime = PipelineRuntime(stage_module, config, pp_group, device, n_microbatches)
+    runner = PipelineRunner(stage_module, config, pp_group, device, n_microbatches, TokenLoss())
 
     # This DP replica's slice of the global batch; every rank of a chain gets the same slice.
     dp_rank = config.get_data_parallel_rank()
     local_bs = GLOBAL_BATCH // config.data_parallel_size
     sl = slice(dp_rank * local_bs, (dp_rank + 1) * local_bs)
-    loss = runtime.step(input_ids[sl], labels[sl])
+    loss = runner.step(input_ids[sl], labels[sl])
 
     # Loss check: average the last stage's per-replica losses over DP -> the full-batch loss. Only
     # last-stage ranks hold a loss, so the result is reduced over the world (non-last ranks

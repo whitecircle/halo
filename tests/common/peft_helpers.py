@@ -1,7 +1,7 @@
 """Shared LoRA / QLoRA / native-expert-LoRA helpers for the adapter GPU tests.
 
 These drive the same production path the training scripts use (``split_expert_lora_targets`` →
-``load_distributed_model(quantization_config=...)`` → ``setup_peft_model``), so the tests exercise the
+``load_distributed_model(quantization_config=...)`` → ``configure_adapter_training``), so the tests exercise the
 real adapter wiring (attention PEFT, native grouped expert-LoRA, QLoRA 4-bit base) as the GRPO
 scripts drive it rather than a hand-rolled approximation. The trainer families differ (offline GRPO,
 teacher-distill, self-distill), so each test file builds its own dataset and trainer; this module
@@ -42,10 +42,10 @@ from src.checkpoint.reading import read_checkpoint_index
 from src.checkpoint.writing import cast_to_save_dtype
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.loading.peft_setup import setup_peft_model, split_expert_lora_targets
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.buffer_repair import finalize_loaded_model
+from src.model_loading.parallel.loader import load_distributed_model
+from src.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
 from src.models.unwrapping import strip_peft_adapter_segment
 from src.runtime.collectives import barrier
 from tests.common.ep_reference import ep_layers
@@ -59,7 +59,7 @@ MOE_MODEL = GPT_OSS_20B
 LORA_R = 8
 LORA_ALPHA = 16
 
-# setup_peft_model only reads these two attrs off ``args``; no freeze/unfreeze patterns in tests.
+# configure_adapter_training only reads these two attrs off ``args``; no freeze/unfreeze patterns in tests.
 _PEFT_ARGS = SimpleNamespace(unfreeze_layers_patterns=None, freeze_layers_patterns=None)
 
 
@@ -230,7 +230,7 @@ def load_peft_model_from_config(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    peft_config = setup_peft_model(_PEFT_ARGS, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(_PEFT_ARGS, model, model_config, "CAUSAL_LM")
     return model, tokenizer, peft_config
 
 
@@ -315,7 +315,7 @@ def assert_only_adapters_trainable(model) -> tuple[bool, str]:
     """Static invariant: every trainable param is an adapter (or a modules_to_save head), and at
     least one ``lora_*`` adapter is trainable.
 
-    This is the frozen-base guarantee: setup_peft_model / get_peft_model freeze the base (the 4-bit
+    This is the frozen-base guarantee: configure_adapter_training / get_peft_model freeze the base (the 4-bit
     QLoRA weights included) and leave only adapters (plus any modules_to_save) trainable, so the
     optimizer can only move adapters."""
     trainable_non_adapter = [
@@ -387,9 +387,9 @@ def assert_adapter_checkpoint(trainer, output_dir: str, rank: int, *, expert_lor
 
 
 def freeze_base_keep_expert_adapters(model) -> None:
-    """Replicate setup_peft_model's adapter-run freeze: only the native expert adapters stay trainable.
+    """Replicate configure_adapter_training's adapter-run freeze: only the native expert adapters stay trainable.
 
-    Used by the tests that build the grouped expert adapters directly (no ``setup_peft_model`` call),
+    Used by the tests that build the grouped expert adapters directly (no ``configure_adapter_training`` call),
     so the optimizer sees the same parameter set a production expert-LoRA run does.
     """
     for p in model.parameters():

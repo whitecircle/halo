@@ -26,11 +26,11 @@ from src.checkpoint.model_card import HUB_TAGS
 from src.config_validation import reject_non_default_args, reject_unsupported_args
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.data.sources.loading import reject_image_columns
-from src.distributed.loading.model_source import resolve_model_source
-from src.distributed.loading.peft_setup import build_peft_config
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from src.model_loading.model_preparation import apply_run_model_policies
+from src.model_loading.parallel.model_source import resolve_model_source
+from src.model_loading.parallel.peft_setup import build_peft_config
 from src.model_loading.remote_code import apply_remote_code_compat_shims
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.context_window import resolve_length_to_context
@@ -121,7 +121,7 @@ def build_sentence_transformer(
         apply_remote_code_compat_shims()
         revision = resolve_model_source(
             runtime.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
-        )
+        ).revision
         with joined_node_load(
             f"Embedding model load from {runtime.model_source}", parallelism_config.max_concurrent_loading
         ):

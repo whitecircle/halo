@@ -38,8 +38,8 @@ from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.training.environment import resolve_resume_weights_source
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import QWEN3_0_6B

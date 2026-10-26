@@ -11,11 +11,6 @@ from typing import Optional, get_args
 from src.distributed import group_layout
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.expert_parallel.config import EPBufferBackend, EPConfig
-from src.distributed.expert_parallel.deepep.capacity import (
-    ep_dispatch_capacity,
-    padded_wire_hidden,
-    reject_oversized_dispatch,
-)
 from src.distributed.nvlink import (
     check_mnnvl_prerequisites,
     get_nvlink_domain_size,
@@ -29,31 +24,12 @@ from src.distributed.parallelism_rules import (
     reject_invalid_composition,
     reject_unsupported_axes,
 )
-from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
 from src.kernels.lowp.spec import LowpPrecision, LowpSpec
-from src.models.config_access import text_config
-from src.models.context_window import context_window_from_config
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.models.moe_balancing import (
-    ROUTER_EXPERT_COUNT_FIELDS,
-    get_first_router_field,
-    resolve_expert_ffn_shard_width,
-    resolve_router_topk,
-)
 from src.runtime.consensus import reject_across_ranks, reject_divergent_settings
 from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
-
-
-def _divisors_up_to(value: int, ceiling: int) -> list[int]:
-    """Divisors of ``value`` in ``2..ceiling`` — the sizes a rejection may suggest.
-
-    1 is excluded because it means "no expert parallelism", which is not an answer to "pick a
-    working ep_size". Whether a suggestion also survives the topology gates is the caller's to
-    filter: this is arithmetic about the model, not about the job's rank layout.
-    """
-    return [d for d in range(2, min(value, ceiling) + 1) if value % d == 0]
 
 
 @dataclass
@@ -291,119 +267,6 @@ class ParallelismConfig:
                 "lowp_* tuning options are set but lowp_precision='bf16' (low precision is OFF) — "
                 f"keep_blocks/apply_* have no effect until lowp_precision is one of {enabled}."
             )
-
-    def validate_against_model_config(self, model_config) -> None:
-        """Reject expert-sharding shapes this model cannot take, before any weight is read.
-
-        ``ParallelismConfig`` is model-blind by construction, so the expert-divisibility rules are
-        otherwise reached only once the shapes are in hand — ``EPConfig.finalize_expert_assignment`` after the EP
-        process groups exist, and the expert-TP split during layer construction. Both are minutes and
-        several collectives into a job. The arithmetic needs nothing but ``config.json``, so it runs
-        here too, off the same registry the rest of the toolkit reads expert fields through.
-        """
-        if self.ep_size > 1:
-            num_experts = get_first_router_field(model_config, ROUTER_EXPERT_COUNT_FIELDS)
-            if num_experts and num_experts % self.ep_size != 0:
-                raise ValueError(
-                    f"expert_parallel_size={self.ep_size} does not divide this model's {num_experts} "
-                    f"routed experts: DeepEP dispatch maps tokens to ranks by a uniform expert-to-rank "
-                    f"division, so an uneven assignment would route tokens to the wrong experts or "
-                    f"drop them. expert_parallel_size values dividing {num_experts} that fit this job: "
-                    f"{', '.join(str(e) for e in _divisors_up_to(num_experts, self.stage_world_size))} "
-                    f"(the topology gates narrow this further — a single-domain job takes 2 or the "
-                    f"domain width)."
-                )
-        if self.expert_tp_size > 1:
-            width = resolve_expert_ffn_shard_width(model_config)
-            if width and width % self.expert_tp_size != 0:
-                raise ValueError(
-                    f"expert_tensor_parallel_size={self.expert_tp_size} does not divide this model's "
-                    f"expert FFN width ({width}): expert-TP shards that dimension, so the shards would "
-                    f"be ragged. Use an expert_tensor_parallel_size dividing {width}."
-                )
-        if (
-            self.fp32_non_ep_params
-            and self.experts_fsdp_managed
-            and get_first_router_field(model_config, ROUTER_EXPERT_COUNT_FIELDS)
-        ):
-            # Config-time and rank-symmetric on purpose: under PP a hybrid stack can give one stage
-            # no MoE layer, so the equivalent check on the trainer's per-rank module walk would
-            # raise on MoE stages while dense stages walked into the wrap and hung the job.
-            remedy = (
-                "drop fp32_non_ep_params (fsdp_shard_ep1_experts=false is refused under PP/TP/CP)"
-                if self.pp_size > 1 or self.tp_size > 1 or self.cp_size > 1
-                else "set fsdp_shard_ep1_experts: false (see agent-docs/models/bailing.md#ling-30) or drop fp32_non_ep_params"
-            )
-            raise ValueError(
-                f"fp32_non_ep_params=True cannot combine with fsdp_shard_ep1_experts=True at "
-                f"expert_parallel_size=1 on a MoE model: dense params go fp32 while the "
-                f"FSDP-managed experts stay bf16 in the same shard group, and FSDP2 asserts "
-                f"'uniform original parameter dtype' at the first forward. Remedy: {remedy}."
-            )
-        # Dense TP goes through HF's tp_plan="auto", which validates no head count of its own, so
-        # without this it fails on the first forward's reshape — after the full load.
-        validate_tp_head_divisibility(text_config(model_config), self.tp_size)
-        self._validate_ep_token_budget(model_config)
-
-    def _validate_ep_token_budget(self, model_config) -> None:
-        """Refuse a per-rank token budget the first MoE dispatch would refuse, before any weight is read.
-
-        The dispatcher sizes its arena from the all-reduced MAX tokens/rank of the EP group, aligned
-        by :func:`ep_dispatch_capacity`, and refuses a capacity past DeepEP's 32-bit wire index or
-        past the validated cross-node Gin ceiling. That MAX is knowable here: every rank of a group
-        carries the same declared per-device shape, so the group max IS
-        ``per_device_train_batch_size × max_length``. Left to the dispatcher, the same verdict lands
-        after the whole multi-hundred-GB load — and, for a corpus whose early batches are short, only
-        at the step whose batch first reaches ``max_length``.
-
-        ``max_length: null`` resolves here against ``config.json`` (:func:`context_window_from_config`,
-        the window ``apply_max_length`` writes back after the load). It is the documented "use the
-        model's own limit" spelling and therefore the LARGEST budget a run can declare, so treating it
-        as undeclared would switch the gate off exactly where it binds.
-
-        Keyed on ``ep_size``, not ``is_ep_mode``: pure ETP folds into the latter but never reaches the
-        transport. The inter-node question is the NVLink DOMAIN's, not the OS node's
-        (:attr:`requires_rdma`), so an NVL72 rack-wide group stays on MNNVL and is not Gin-bound.
-        """
-        if self.ep_size <= 1 or self.ep_rows_per_device <= 0:
-            return
-        text = text_config(model_config)
-        hidden = getattr(text, "hidden_size", 0)
-        num_topk = resolve_router_topk(text)
-        if not hidden or not num_topk:
-            return
-        max_length = self.ep_declared_max_length or context_window_from_config(model_config)
-        if not max_length:
-            # max_length: null on a config that states no window — nothing to judge against.
-            return
-        # CP is the one axis that shrinks a rank's token count (it holds one sequence chunk). EP is
-        # orthogonal to DP, TP replicates the batch, and a PP microbatch is a fraction of it — so
-        # dividing by none of them keeps this an upper bound.
-        budget = self.ep_rows_per_device * max_length
-        tokens_per_rank = budget // self.cp_size
-        capacity = ep_dispatch_capacity(tokens_per_rank)
-        try:
-            reject_oversized_dispatch(
-                capacity,
-                num_topk=num_topk,
-                padded_hidden=padded_wire_hidden(hidden),
-                spans_domains=self.requires_rdma,
-            )
-        except ValueError as exc:
-            cp_note = f" ({budget} / context_parallel_size={self.cp_size})" if self.cp_size > 1 else ""
-            length_note = "" if self.ep_declared_max_length else " (no length cap → the model's context window)"
-            raise ValueError(
-                f"Lower per_device_train_batch_size or the row-length cap (max_length, or "
-                f"max_prompt_length + max_completion_length where those two bound a row) — or, for the "
-                f"cross-node Gin ceiling only, raise HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK. This run's "
-                f"declared token budget cannot be dispatched: {self.ep_rows_per_device} row(s)/device × "
-                f"{max_length} tokens/row{length_note} gives {tokens_per_rank} tokens/rank"
-                f"{cp_note}, sized to a {capacity}-token DeepEP arena on an EP group of "
-                f"{self.ep_group_size} rank(s) (ep_scope={self.ep_scope}, nvlink_domain_size="
-                f"{self.nvlink_domain_size}, "
-                f"{'cross-domain — Gin/RDMA' if self.requires_rdma else 'within one NVLink domain'}). "
-                f"{exc}"
-            ) from exc
 
     @property
     def experts_fsdp_managed(self) -> bool:

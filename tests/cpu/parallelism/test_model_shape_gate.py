@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``ParallelismConfig.validate_against_model_config`` — expert sharding vs the model, at config time.
+"""``reject_unsupported_model`` — expert sharding vs the model, at config time.
 
 ``ParallelismConfig`` is model-blind, so an ``ep_size`` that does not divide the expert count would
 otherwise survive until ``EPConfig.finalize_expert_assignment`` — after the checkpoint download and
@@ -28,7 +28,9 @@ import pytest
 import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
-from src.distributed.parallelism_config import ParallelismConfig, _divisors_up_to
+from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.load_rules import _divisors_up_to, reject_unsupported_model
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.moe_balancing import EXPERT_FFN_WIDTH_FIELDS, resolve_expert_ffn_shard_width
 from src.trainers.mixins.base import DistributedTrainerMixin, FsdpExclusions
 from tests.common.parallelism import make_parallelism_config
@@ -55,17 +57,21 @@ class _Cfg:
             self.text_config = text
 
 
+def _reject_unsupported_model(config: ParallelismConfig, model_config) -> None:
+    reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False)
+
+
 def test_expert_count_not_divisible_by_ep_size_is_rejected():
     """512 experts over ep_size=3: DeepEP's uniform expert-to-rank division cannot express it."""
     config = _config(8, ep_size=2)
     config.ep_size = 3  # past __post_init__: the gate must not depend on the topology validators
     with pytest.raises(ValueError, match="does not divide this model's 512 routed experts"):
-        config.validate_against_model_config(_Cfg(num_experts=512))
+        _reject_unsupported_model(config, _Cfg(num_experts=512))
 
 
 def test_divisible_expert_count_passes():
     """Anti-over-rejection: the shape the 397B model actually wants must not raise."""
-    _config(8, ep_size=8).validate_against_model_config(_Cfg(num_experts=512))
+    _reject_unsupported_model(_config(8, ep_size=8), _Cfg(num_experts=512))
 
 
 def test_expert_count_is_read_through_the_composite_text_config():
@@ -81,7 +87,7 @@ def test_expert_count_is_read_through_the_composite_text_config():
     config = _config(8, ep_size=2)
     config.ep_size = 3
     with pytest.raises(ValueError, match="512 routed experts"):
-        config.validate_against_model_config(composite)
+        _reject_unsupported_model(config, composite)
 
 
 def test_rejection_names_the_ep_sizes_that_divide_the_model():
@@ -93,9 +99,9 @@ def test_rejection_names_the_ep_sizes_that_divide_the_model():
     config = _config(8, ep_size=2)
     config.ep_size = 3
     with pytest.raises(ValueError, match=r"dividing 512 that fit this job: 2, 4, 8"):
-        config.validate_against_model_config(_Cfg(num_experts=512))
+        _reject_unsupported_model(config, _Cfg(num_experts=512))
     with pytest.raises(ValueError, match="topology gates narrow this further"):
-        config.validate_against_model_config(_Cfg(num_experts=512))
+        _reject_unsupported_model(config, _Cfg(num_experts=512))
 
 
 def test_expert_tp_size_must_divide_the_expert_ffn_width():
@@ -103,18 +109,18 @@ def test_expert_tp_size_must_divide_the_expert_ffn_width():
     config = _config(8, expert_tp_size=2)
     config.expert_tp_size = 3
     with pytest.raises(ValueError, match="expert FFN width"):
-        config.validate_against_model_config(_Cfg(num_experts=512, moe_intermediate_size=1024))
+        _reject_unsupported_model(config, _Cfg(num_experts=512, moe_intermediate_size=1024))
 
 
 def test_dense_and_unknown_shapes_are_left_alone():
     """No expert fields → nothing to judge. Raising here would block every dense EP-less run."""
-    _config(8, ep_size=8).validate_against_model_config(_Cfg(hidden_size=4096))
-    _config(8, ep_size=8).validate_against_model_config(_Cfg(text_config=_Cfg(hidden_size=4096)))
+    _reject_unsupported_model(_config(8, ep_size=8), _Cfg(hidden_size=4096))
+    _reject_unsupported_model(_config(8, ep_size=8), _Cfg(text_config=_Cfg(hidden_size=4096)))
 
 
 def test_gate_is_inert_without_expert_parallelism():
     """ep_size == 1 shards no experts, so an odd expert count is not this gate's business."""
-    _config(8).validate_against_model_config(_Cfg(num_experts=7))
+    _reject_unsupported_model(_config(8), _Cfg(num_experts=7))
 
 
 def test_divisors_helper_bounds_by_the_job_width_and_skips_one():
@@ -155,7 +161,7 @@ def test_the_shipped_defaults_are_what_make_the_dtype_triple_reachable():
 def test_the_dtype_triple_is_refused_before_anything_loads():
     config = _config(8, ep_size=1, fp32_non_ep_params=True)
     with pytest.raises(ValueError, match="uniform original parameter dtype") as excinfo:
-        config.validate_against_model_config(_Cfg(**_MOE))
+        _reject_unsupported_model(config, _Cfg(**_MOE))
     message = str(excinfo.value)
     assert "set fsdp_shard_ep1_experts: false" in message, "the single-stage remedy must be the actionable one"
     assert "drop fp32_non_ep_params" in message
@@ -171,7 +177,7 @@ def test_the_remedy_drops_the_knob_on_every_axis_that_refuses_the_alternative(pc
     axes would send the user around a loop between two raises."""
     config = _config(world, local=local, ep_size=1, fp32_non_ep_params=True, **pc_kwargs)
     with pytest.raises(ValueError, match="uniform original parameter dtype") as excinfo:
-        config.validate_against_model_config(_Cfg(**_MOE))
+        _reject_unsupported_model(config, _Cfg(**_MOE))
     message = str(excinfo.value)
     assert "Remedy: drop fp32_non_ep_params" in message
     assert "set fsdp_shard_ep1_experts: false" not in message
@@ -180,23 +186,23 @@ def test_the_remedy_drops_the_knob_on_every_axis_that_refuses_the_alternative(pc
 def test_distributed_experts_keep_the_upcast():
     """``ep_size > 1``: the experts are FSDP-ignored and sync themselves, so nothing shares a shard
     group with the upcast dense parameters. Refusing here would ban the validated EP fp32 shape."""
-    _config(8, ep_size=8, fp32_non_ep_params=True).validate_against_model_config(_Cfg(**_MOE))
+    _reject_unsupported_model(_config(8, ep_size=8, fp32_non_ep_params=True), _Cfg(**_MOE))
 
 
 def test_opting_the_experts_out_of_fsdp_is_the_documented_escape_hatch():
     """The remedy the message prints must actually work — otherwise the raise is a dead end."""
     config = _config(8, ep_size=1, fp32_non_ep_params=True, fsdp_shard_ep1_experts=False)
-    config.validate_against_model_config(_Cfg(**_MOE))
+    _reject_unsupported_model(config, _Cfg(**_MOE))
 
 
 def test_a_dense_model_may_still_upcast_its_parameters():
     """No experts ⇒ no mixed-dtype shard group. A gate keyed on the flags alone would ban
     ``fp32_non_ep_params`` for every dense run that left the ep1 default alone."""
-    _config(8, ep_size=1, fp32_non_ep_params=True).validate_against_model_config(_Cfg())
+    _reject_unsupported_model(_config(8, ep_size=1, fp32_non_ep_params=True), _Cfg())
 
 
 def test_the_dtype_gate_is_inert_without_the_knob():
-    _config(8, ep_size=1).validate_against_model_config(_Cfg(**_MOE))
+    _reject_unsupported_model(_config(8, ep_size=1), _Cfg(**_MOE))
 
 
 # The wrap-time counterpart: ``_fsdp_exclusions`` must stay silent

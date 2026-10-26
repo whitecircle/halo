@@ -32,9 +32,9 @@ from safetensors import safe_open
 
 from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
+from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
 from tests.common.utils import log
@@ -136,6 +136,7 @@ def run(ctx) -> dict:
         dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         use_liger_kernel=True,
+        trust_remote_code=True,
     )
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token

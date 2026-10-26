@@ -9,8 +9,8 @@ never runs — a zero/garbage ``inv_freq`` degenerates RoPE to NoPE and trains w
 buffer recompute + re-tie, run by EVERY load path once weights sit on their device.
 
 These tests pin (1) the seam's three legs — a seam that drops one silently breaks every path that
-relies on it; (2) that every load path reaches the seam, swept from the dispatcher's own
-``_load_*`` roots so a NEW loader that forgets it fails here rather than in a silently-NoPE run; and
+relies on it; (2) that every load path reaches the seam, swept from the per-mode loaders the dispatcher
+calls so a NEW loader that forgets it fails here rather than in a silently-NoPE run; and
 (3) the trainer backstop: a buffer still meta at device placement is uninitialized memory and must
 raise, not be allocated as ``torch.empty``; (4) the ``scripts/`` tool surface, where a loader
 that hands its model to a forward must finalize it and the save-only ones are pinned as such; and
@@ -20,6 +20,7 @@ Run: python tests/cpu/model_loading/test_load_finalization.py  (or pytest)
 """
 
 import functools
+import re
 import types
 
 import pytest
@@ -42,21 +43,21 @@ from tests.common.source_sweep import (
 
 SEAM = finalize_loaded_model.__name__
 
-DISPATCHER = "src/distributed/loading/model_loading.py"
+DISPATCHER = "src/model_loading/parallel/loader.py"
 # The sharding-agnostic model-construction package, swept whole beside src/distributed.
 LOADING_PACKAGE = "src/model_loading"
 
-# The dispatcher's own load surface. Discovered by the sweep below; pinned here as an exact set so a
-# renamed, removed or added ``_load_*`` is a deliberate edit rather than a silently shrunk sweep.
+# The per-mode loaders the dispatcher calls. Discovered by the sweep below; pinned here as an exact set
+# so a renamed, removed or added loader is a deliberate edit rather than a silently shrunk sweep.
 DISPATCHED_LOADERS = frozenset(
     {
         "_load_pp_stage_model",
-        "_load_ep_tp_model",
-        "_load_tp_model",
-        "_load_tp_moe_model",
-        "_load_ep_cp_model",
+        "load_ep_tp_model",
+        "load_tp_model",
+        "load_tp_moe_model",
+        "load_ep_cp_model",
         "_load_ep_model",
-        "_load_cp_model",
+        "load_cp_model",
         "_load_undistributed_model",
     }
 )
@@ -66,11 +67,11 @@ DISPATCHED_LOADERS = frozenset(
 # lost its call could still "reach" the seam through a sibling branch. Closed-world by assumption —
 # a new terminal loader belongs here, and the reachability sweep is what catches one that is missing.
 TERMINAL_LOADERS = (
-    (DISPATCHER, "_from_pretrained_on_local_gpu"),
-    (DISPATCHER, "_load_tp_model"),
-    ("src/distributed/loading/frozen_models.py", "load_frozen_auxiliary_model"),
-    ("src/distributed/loading/model_loading.py", "load_model_from_pretrained"),
-    ("src/distributed/expert_parallel/loading.py", "load_through_cpu"),
+    (DISPATCHER, "_build_random_init"),
+    ("src/model_loading/parallel/tp.py", "load_tp_model"),
+    ("src/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
+    ("src/model_loading/parallel/whole_model.py", "resolve_trainer_model"),
+    ("src/model_loading/parallel/whole_model.py", "load_whole_model"),
     ("src/distributed/expert_parallel/lazy_loader.py", "load_ep_model_lazy"),
     ("src/distributed/pipeline_parallel/lazy_loader.py", "load_pp_stage_model"),
 )
@@ -221,17 +222,19 @@ def test_the_sweep_sees_the_loading_package():
 
 
 def test_every_dispatched_load_path_reaches_the_seam():
-    """Roots are DISCOVERED (every ``_load_*`` in model_loading.py — the dispatcher's own naming),
-    not enumerated: a missing repair is precisely the omission a hand-list ships.
-    A new per-mode loader that never finalizes fails here."""
+    """Roots are DISCOVERED (every ``load_*_model`` the dispatcher calls), not enumerated: a missing
+    repair is precisely the omission a hand-list ships. A new per-mode loader that never finalizes
+    fails here."""
     graph = _call_graph()
-    roots = {name for (rel, name) in graph if rel == DISPATCHER and name.startswith("_load_")}
+    called = graph[(DISPATCHER, "_dispatch_model_loading")]
+    roots = {name for name in called if re.fullmatch(r"_?load_\w+_model", name)}
     assert roots == DISPATCHED_LOADERS, (
         f"the dispatcher's load surface changed: {sorted(roots ^ DISPATCHED_LOADERS)}. Update "
         f"DISPATCHED_LOADERS deliberately — a shrinking sweep proves nothing."
     )
 
-    unfinalized = sorted(name for name in roots if not _reaches_seam((DISPATCHER, name), graph))
+    homes = {name: rel for (rel, name) in graph if name in roots}
+    unfinalized = sorted(name for name in roots if not _reaches_seam((homes[name], name), graph))
     assert not unfinalized, (
         f"{unfinalized} never reach {SEAM}: models on these load paths keep transformers-5's "
         f"uninitialized non-persistent buffers (zero inv_freq = NoPE with a plausible loss). Call "
@@ -301,7 +304,7 @@ def test_conversion_tools_still_run_no_forward():
 
 def test_no_trainer_loads_a_model_itself():
     """A trainer holds the models its caller loaded: the policy through the distributed loaders or
-    ``load_model_from_pretrained``, a frozen reference or teacher through ``load_frozen_auxiliary_model``
+    ``resolve_trainer_model``, a frozen reference or teacher through ``load_frozen_auxiliary_model``
     in its script. A load inside ``src/trainers`` skips the buffer repair, the sinks policy and the
     family attention patches those loaders own, and takes none of the run's load flags."""
     offenders = sorted(f"{rel}:{name}" for rel, name in functions_calling(("src/trainers",), builds_a_model))

@@ -13,9 +13,8 @@ import torch.nn.functional as F
 from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.pipeline_parallel.losses import next_token_logprobs
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_logprobs
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 from tests.common.gloo import run_gloo_ranks

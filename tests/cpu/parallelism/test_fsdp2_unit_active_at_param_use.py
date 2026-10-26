@@ -77,7 +77,7 @@ from trl import ModelConfig
 
 import src.distributed.fsdp as fsdp
 from src.distributed.fsdp import IdentityParamSet
-from src.distributed.loading.peft_setup import build_peft_config
+from src.model_loading.parallel.peft_setup import build_peft_config
 from tests.common.models import (
     TINY_COHERE2_MOE_CONFIG,
     TINY_DSV4_CONFIG,

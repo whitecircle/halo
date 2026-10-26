@@ -34,6 +34,7 @@ from trl import SFTConfig
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.loading import load_ep_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.model_source import resolve_model_source
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.sft import DistributedSFTTrainer
@@ -72,7 +73,7 @@ def test_full_training(output_dir: str) -> bool:
     log("Loading model with EP...")
     ep_config = EPConfig(ep_size=EP_SIZE, experts_fsdp_managed=False)
     model = load_ep_model(
-        MODEL_PATH,
+        resolve_model_source(MODEL_PATH, None, tag="policy"),
         ep_config,
         AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),
         dtype=torch.bfloat16,
@@ -201,7 +202,7 @@ def test_lora_training(output_dir: str) -> bool:
     log("Loading model with EP...")
     ep_config = EPConfig(ep_size=EP_SIZE, experts_fsdp_managed=False)
     model = load_ep_model(
-        MODEL_PATH,
+        resolve_model_source(MODEL_PATH, None, tag="policy"),
         ep_config,
         AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),
         dtype=torch.bfloat16,

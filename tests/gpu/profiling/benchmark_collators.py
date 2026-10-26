@@ -37,9 +37,9 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.liger.dispatch import apply_liger_kernel, finalize_liger_after_direct_load
+from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.benchmark_args import create_benchmark_parser, resolve_benchmark_attn

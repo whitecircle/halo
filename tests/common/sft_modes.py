@@ -21,8 +21,8 @@ from trl import SFTConfig
 
 from src.data.collators.factory import select_data_collator
 from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.script_runner import apply_distributed_trainer_config

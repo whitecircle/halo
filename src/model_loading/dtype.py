@@ -88,7 +88,7 @@ def has_packed_quantized_params(model: torch.nn.Module) -> bool:
 
 
 def is_kbit_quantized(model: torch.nn.Module) -> bool:
-    """Whether ``model`` was loaded quantized, the condition ``prepare_peft_model`` runs peft's k-bit
+    """Whether ``model`` was loaded quantized, the condition ``build_peft_model`` runs peft's k-bit
     preparation on: bitsandbytes sets the 8/4-bit pair, torchao/quanto only ``is_quantized``."""
     return any(getattr(model, flag, False) for flag in ("is_loaded_in_8bit", "is_loaded_in_4bit", "is_quantized"))
 

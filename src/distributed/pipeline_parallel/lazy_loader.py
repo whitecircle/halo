@@ -33,23 +33,13 @@ from src.distributed.expert_parallel.lazy_loader import (
     lazy_load_prologue,
 )
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.distributed.pipeline_parallel.split import (
-    TIE_WORD_EMBEDDINGS_FLAG,
-    resolve_layer_partition,
-    resolve_module_attr,
-    resolve_pp_spec,
-    tie_flag_configs,
-    validate_model_structure_supports_pp,
-)
+from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_structure
+from src.distributed.pipeline_parallel.partition import resolve_layer_partition, validate_partition
 from src.distributed.pipeline_parallel.stage import (
     PP_STAGE_PARTITION_ATTR,
-    input_embedding_module,
-    module_path,
+    StageLayout,
     rebase_layer_index,
-    reject_layer_type_rebase,
-    resolve_layer_root,
     slice_backbone_to_stage,
-    split_layer_path,
 )
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.buffer_repair import finalize_loaded_model
@@ -61,7 +51,8 @@ from src.model_loading.lazy_safetensors.weights import (
     init_checkpoint_absent_modules,
     materialize_empty_like,
 )
-from src.models.module_tree import backbone_with_layers
+from src.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, tie_flag_configs
+from src.models.module_tree import split_layer_path
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from src.runtime.ranks import get_global_rank, get_local_rank
 
@@ -138,7 +129,7 @@ def load_pp_stage_model(
 
     Raises:
         ValueError: the model's structure cannot be split (see
-            :func:`~src.distributed.pipeline_parallel.split.validate_model_structure_supports_pp`).
+            :func:`~src.distributed.pipeline_parallel.model_rules.reject_unsupported_pp_structure`).
         RuntimeError: a planned key does not exist on the sliced stage, a live tensor was never
             assigned, a resume would leave a configured master unrestored, or this stage carries no
             EP MoE layer. Each is a STAGE-local verdict routed through
@@ -178,18 +169,14 @@ def load_pp_stage_model(
 
     # On the meta shell, before a single weight is read: a model that cannot be split must fail here
     # rather than after every rank has paid the load.
-    validate_model_structure_supports_pp(model)
+    reject_unsupported_pp_structure(model)
 
     partition = resolve_layer_partition(model, pp_size, pp_split)
     lo, hi = partition[pp_rank]
-    # Validate EVERY stage's offset on EVERY rank: a rank-local raise strands its peers at the
-    # first collective below. The family's own boundary constraints get the same treatment, and
-    # both run on the meta shell — before any rank pays for a weight.
-    for stage_rank, (stage_lo, _) in enumerate(partition):
-        reject_layer_type_rebase(model, stage_lo, stage_rank)
-    resolve_pp_spec(backbone_with_layers(model)).validate_partition(model, partition)
+    # On the meta shell, before any rank pays for a weight.
+    validate_partition(model, partition)
 
-    planner = PPWeightPlanner(lo, hi, resolve_layer_root(model))
+    planner = PPWeightPlanner(lo, hi, StageLayout.of(model).layer_root)
     plans = planner.filter(base.plans)
 
     plans, dropped_keys, missing_reason = _split_missing_shard_plans(
@@ -300,7 +287,7 @@ def _instantiate_untied_on_meta(model_path: str, model_class, config, **model_kw
     ``from_pretrained`` resolves the tie during the load and, when the checkpoint carries BOTH tied
     keys, decides whether to honour it by comparing their VALUES with ``torch.equal`` — an op with no
     meta kernel, so a tied checkpoint dies with ``NotImplementedError: aten::equal`` one line before
-    :func:`~src.distributed.pipeline_parallel.split.validate_model_structure_supports_pp` would have
+    :func:`~src.distributed.pipeline_parallel.model_rules.reject_unsupported_pp_structure` would have
     explained the real problem. Whether the shell's two weights share storage is irrelevant to PP:
     the gate rules on the declared flag and on the presence of an output embedding (which is what
     permits a tie-declaring reward/classification head), and that verdict is unchanged by building
@@ -331,35 +318,6 @@ def _instantiate_untied_on_meta(model_path: str, model_class, config, **model_kw
     return model
 
 
-def _cross_stage_droppable_prefixes(model: nn.Module, pp_rank: int, pp_size: int) -> tuple[str, ...]:
-    """Module paths this stage materializes only to DROP at the stage build.
-
-    Mirrors :func:`~src.distributed.pipeline_parallel.stage.build_pipeline_stage`: a non-first stage
-    drops the input embedding and the spec's input modules, a non-last stage replaces the final norm
-    with ``Identity`` and sheds the task head. Their checkpoint values are never consumed on this
-    stage, so a per-node pipeline checkpoint that does not carry them locally is still complete for
-    this stage. Resolved by the same identity/spec probes the stage build uses — never by hardcoded
-    attribute names.
-    """
-    prefixes: list[str] = []
-    backbone = backbone_with_layers(model)
-    spec = resolve_pp_spec(backbone)
-    backbone_prefix = module_path(model, backbone)
-    if pp_rank > 0:
-        prefixes.append(module_path(model, input_embedding_module(model)))
-        for input_attr in spec.INPUT_MODULE_ATTRS:
-            resolved = resolve_module_attr(backbone, (input_attr,), "input module")
-            prefixes.append(f"{backbone_prefix}.{resolved}" if backbone_prefix else resolved)
-    if pp_rank < pp_size - 1:
-        norm_attr = resolve_module_attr(backbone, spec.FINAL_NORM_ATTRS, "final norm")
-        prefixes.append(f"{backbone_prefix}.{norm_attr}" if backbone_prefix else norm_attr)
-        for tail_attr in spec.TAIL_MODULE_ATTRS:
-            resolved = resolve_module_attr(backbone, (tail_attr,), "tail module")
-            prefixes.append(f"{backbone_prefix}.{resolved}" if backbone_prefix else resolved)
-        prefixes.append(resolve_module_attr(model, spec.HEAD_ATTRS, "task head"))
-    return tuple(prefixes)
-
-
 def _split_missing_shard_plans(
     model: nn.Module,
     plans: list[WeightPlan],
@@ -372,7 +330,7 @@ def _split_missing_shard_plans(
 
     Returns ``(loadable_plans, dropped_keys, reason)``. A per-node pipeline save leaves only this
     node's stage shard, so the sole keys a stage may plan out of an absent file are the cross-stage
-    modules it drops at the stage build (:func:`_cross_stage_droppable_prefixes`). Anything else
+    modules it drops at the stage build (:meth:`StageLayout.dropped_prefixes`). Anything else
     means the checkpoint genuinely lacks state this stage trains — ``reason`` carries the stage-local
     rejection for ``reject_across_ranks`` (returned, not raised: a lone raise would strand the peers
     in that gather).
@@ -383,7 +341,7 @@ def _split_missing_shard_plans(
     from_missing = [plan for plan in plans if plan.shard_file in missing]
     if not from_missing:
         return plans, [], None
-    droppable = _cross_stage_droppable_prefixes(model, pp_rank, pp_size)
+    droppable = StageLayout.of(model).dropped_prefixes(pp_rank == 0, pp_rank == pp_size - 1)
     undroppable = sorted(
         plan.model_key
         for plan in from_missing

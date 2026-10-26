@@ -232,13 +232,13 @@
   "Mistral4Attention": "Mistral4UlyssesAttention",
   "Glm4MoeLiteAttention": "Glm4MoeLiteUlyssesAttention"
  },
- "pp backbone claims": {
-  "Glm5NextTextModel": "Glm5NextPPSpec",
-  "Gemma4TextModel": "Gemma4PPSpec",
-  "InklingTextModel": "InklingPPSpec",
-  "DeepseekV4Model": "DeepSeekV4PPSpec",
-  "ZayaModel": "ZayaPPSpec"
- },
+ "pp backbone claims": [
+  "ZayaModel",
+  "DeepseekV4Model",
+  "InklingTextModel",
+  "Gemma4TextModel",
+  "Glm5NextTextModel"
+ ],
  "head transform claims": {
   "MiniCPM3ForCausalLM": "MiniCPM3HeadTransform",
   "FalconH1ForCausalLM": "FalconH1HeadTransform",

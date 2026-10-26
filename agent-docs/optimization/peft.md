@@ -66,7 +66,7 @@ Both are reachable by an ordinary target list — target names are matched by su
 module tree, so a multimodal tower is matched by the language model's `q_proj`…`o_proj` spelling — and
 by `all-linear`, which reaches every `nn.Linear` subclass a family defines.
 
-`build_peft_config` (`src/distributed/loading/peft_setup.py`) scans the live model with PEFT's own
+`build_peft_config` (`src/model_loading/parallel/peft_setup.py`) scans the live model with PEFT's own
 matcher and puts those modules in the `LoraConfig`'s `exclude_modules` by full path (PEFT also honors
 an entry as a dotted suffix), so an identically named leaf elsewhere keeps its adapter. A warning names
 the count and one example path per reason. If it leaves no adaptable target at all, the run is rejected
@@ -126,7 +126,7 @@ Ready configs: `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` (and its `-qlor
 MoE experts are fused `nn.Parameter` tensors (`GptOssExperts.gate_up_proj` / `down_proj`, and the
 equivalents on other families), not `nn.Linear`, so PEFT's `all-linear` cannot reach them; on gpt-oss it
 resolves to the attention `q/k/v/o_proj` only. Name the expert projections explicitly instead.
-`split_expert_lora_targets` (`src/distributed/loading/peft_setup.py`) peels those entries out of the list and
+`split_expert_lora_targets` (`src/model_loading/parallel/peft_setup.py`) peels those entries out of the list and
 routes them to native grouped-LoRA built inside each EP layer (`_init_expert_lora` in
 `src/distributed/expert_parallel/moe_layer/layer.py`); the remaining attention names stay on stock PEFT.
 
@@ -171,9 +171,9 @@ Weights PEFT can't LoRA are **full-trained** (a trainable copy, not a low-rank a
 `lora_modules_to_save`: `embed_tokens` (an `nn.Embedding`), `lm_head` (excluded by `all-linear`), and the
 MoE `router` / `gate`. An **expert-only** run builds no `PeftModel`, so `lora_modules_to_save` raises there
 rather than leaving those modules silently frozen — add an attention target, or drop the field.
-`unfreeze_layers_patterns` / `freeze_layers_patterns` are refused on any adapter run (attention LoRA or
-native expert LoRA): it freezes every base parameter and trains only the adapters, so a pattern would select
-nothing. Use `lora_modules_to_save` for a fully trained module.
+`unfreeze_layers_patterns` / `freeze_layers_patterns` (`src/model_loading/parallel/freeze_patterns.py`) are
+refused on any adapter run (attention LoRA or native expert LoRA): it freezes every base parameter and trains
+only the adapters, so a pattern would select nothing. Use `lora_modules_to_save` for a fully trained module.
 
 ### Router training under EP
 

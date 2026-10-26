@@ -157,7 +157,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset):
     trainer.eval_dataset = perturb_column(trainer.eval_dataset, PERTURB_SEED + 1)
 
     captured: dict = {}
-    real_step = trainer._pp_runtime.step
+    real_step = trainer._pp_runner.step
 
     def spying_step(input_ids, labels, **kw):
         if "input_ids" not in captured:
@@ -167,10 +167,10 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset):
             captured.update({k: v.clone() for k, v in kw["extra_targets"].items()})
         return real_step(input_ids, labels, **kw)
 
-    trainer._pp_runtime.step = spying_step
+    trainer._pp_runner.step = spying_step
 
     eval_calls: list[dict] = []
-    real_eval = trainer._pp_runtime.eval_loss
+    real_eval = trainer._pp_runner.eval_loss
 
     def spying_eval(input_ids, labels, **kw):
         eval_calls.append(
@@ -183,7 +183,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset):
         )
         return real_eval(input_ids, labels, **kw)
 
-    trainer._pp_runtime.eval_loss = spying_eval
+    trainer._pp_runner.eval_loss = spying_eval
     init_eval_metrics = trainer.evaluate()
     init_eval_calls = list(eval_calls)
     trainer.train()

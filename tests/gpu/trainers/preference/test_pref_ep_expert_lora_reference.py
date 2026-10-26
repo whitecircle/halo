@@ -45,9 +45,9 @@ from trl.trainer.utils import use_adapter
 from src.configs.preference import DPOScriptArguments
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
+from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.distributed import ensure_model_downloaded, world_all, world_min
 from tests.common.harness import gpu_test_main
@@ -169,6 +169,7 @@ def run(ctx) -> dict:
         is_vlm=False,
         method="DPO",
         attn_default=ATTN_IMPL,
+        reset_sinks=True,
     )
     trainer = DistributedDPOTrainer(
         model=model,

@@ -37,9 +37,9 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
 from src.configs.distillation import DistillationConfig
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import supports_grouped_mm
+from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded

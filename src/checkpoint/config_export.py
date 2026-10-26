@@ -20,7 +20,7 @@ from src.checkpoint.reading import read_checkpoint_config
 from src.checkpoint.weights_source import config_schema_source
 from src.log import info_logger
 from src.models.config_access import config_export_ready
-from src.models.model_classes import transformers_model_class
+from src.models.model_classes import remote_code_model_class, transformers_model_class
 from src.models.moe_balancing import ep_roster_registered, exports_source_config_schema, legacy_per_layer_config_keys
 
 logger = info_logger(__name__)
@@ -338,10 +338,7 @@ def save_model_config(model, output_dir: str) -> None:
     # configure this run rather than the artifact: serialize with the pre-mutation values restored.
     with config_export_ready(config):
         config.save_pretrained(output_dir)
-    # The MRO, not ``type(model)``: FSDP2 rewrites ``model.__class__`` in place.
-    remote_code_cls = getattr(model, "_remote_code_model_class", None) or next(
-        (cls for cls in type(model).__mro__ if cls.__module__.startswith("transformers_modules")), None
-    )
+    remote_code_cls = getattr(model, "_remote_code_model_class", None) or remote_code_model_class(model)
     if remote_code_cls is not None:
         custom_object_save(remote_code_cls, output_dir)
     finalize_exported_config(config, output_dir, source=config_schema_source(model))

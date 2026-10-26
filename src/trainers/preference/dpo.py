@@ -30,16 +30,8 @@ import torch
 import torch.nn.functional as F
 from trl import DPOTrainer
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.pipeline_parallel.losses import (
-    PPLossAdapter,
-    completion_labels,
-    interleave_pairs,
-    pair_count_normalizer,
-    rows_with_labels,
-    sequence_logprobs,
-    split_pairs,
-)
+from src.data.spans import completion_labels
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.pp_gates import (
     reject_pp_compute_metrics,
@@ -49,6 +41,13 @@ from src.trainers.mixins.pp_gates import (
 )
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
+from src.trainers.parallelism.pipeline_loss_adapter import (
+    PipelineLossAdapter,
+    interleave_pairs,
+    pair_count_normalizer,
+    rows_with_labels,
+    split_pairs,
+)
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 
@@ -226,24 +225,22 @@ class DistributedDPOTrainer(
             "ld_alpha": self.ld_alpha,
         }
 
-    def _pp_loss_adapter(self) -> PPLossAdapter:
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """DPO's pipeline-loss contract: interleaved pairs + dataset-precomputed reference log-probs.
 
         ``completion_mask`` rides ``pad_spec`` so the batch transform sees full-length tensors; the
         reference log-probs ship interleaved as a per-example extra target, keeping them row-aligned
-        with their pairs across the microbatch split. ``pin_runtime_columns=False`` because DPO's
+        with their pairs across the microbatch split. ``pin_runner_columns=False`` because DPO's
         dataset columns feed TRL's preference collator, which needs TRL's own signature set.
         """
-        return PPLossAdapter(
+        return PipelineLossAdapter(
             token_loss_fn=self._pp_dpo_token_loss,
-            paired_examples=True,
             batch_transform=self._pp_dpo_batch_transform,
             normalizer=pair_count_normalizer,
             extra_target_keys=("ref_logps",),
             pad_spec={"completion_mask": 0},
-            rows_per_example=2,
             eval_normalizer=pair_count_normalizer,
-            pin_runtime_columns=False,
+            pin_runner_columns=False,
         )
 
     def _pp_dpo_batch_transform(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -266,7 +263,7 @@ class DistributedDPOTrainer(
         }
 
     def _pp_dpo_token_loss(self, logits: torch.Tensor, target: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Summed per-pair DPO losses over one interleaved microbatch (÷ pair count by the runtime).
+        """Summed per-pair DPO losses over one interleaved microbatch (÷ pair count by the runner).
 
         Reproduces TRL's ``_compute_loss`` for the supported subset: reverse-KL scores against the
         precomputed reference, then the weighted sum over the configured loss types of their

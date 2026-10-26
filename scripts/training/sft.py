@@ -35,10 +35,10 @@ from src.data.pipeline.processing import (
 from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
 from src.data.sources.loading import load_datasets_auto
-from src.distributed.loading.model_source import probe_checkpoint
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.model_loading.model_preparation import log_model_info
+from src.model_loading.parallel.model_source import probe_checkpoint
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.models.context_window import is_bounded_length
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.runtime.collectives import barrier
@@ -306,7 +306,7 @@ def main():
     processing_class = install_resolved_tokenizer(processing_class, tokenizer)
     enforce_text_path_padding_side(tokenizer, is_vlm)
 
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
     if is_vlm:

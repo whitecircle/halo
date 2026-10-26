@@ -17,9 +17,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
+from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
+from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 
 LAST_STAGE_RANK = 1
 
@@ -56,7 +57,7 @@ class _Stage(PipelineTrainerMixin):
     """One pipeline rank: the mixin's metric plumbing over a fake adapter and a metric store."""
 
     def __init__(self, metrics_fn, is_last: bool):
-        self._pp_adapter = PPLossAdapter(token_loss_fn=causal_lm_token_loss, metrics_fn=metrics_fn)
+        self._pp_adapter = PipelineLossAdapter(token_loss_fn=causal_lm_token_loss, metrics_fn=metrics_fn)
         self._is_last = is_last
         self._pp_chain_group = "chain"
         self.stored: list[tuple[dict, str]] = []
@@ -167,19 +168,22 @@ class _Runtime:
         return torch.zeros(*input_ids.shape, 5)
 
 
+class _PairedStage(_Stage):
+    _forward_rows_per_example = 2
+
+
 def _eval_stage(real_examples: int, compute_metrics=None, pairs: int = 2) -> _Stage:
     """A last-stage rank evaluating a ``pairs``-pair interleaved batch, frozen at that many pairs."""
     seen = {}
-    stage = _Stage(_metrics(m=1.0), is_last=True)
-    stage._pp_adapter = PPLossAdapter(
+    stage = _PairedStage(_metrics(m=1.0), is_last=True)
+    stage._pp_adapter = PipelineLossAdapter(
         token_loss_fn=causal_lm_token_loss,
-        rows_per_example=2,
         step_state_fn=lambda inputs: seen.update(state_rows=inputs["input_ids"].size(0)),
         eval_normalizer=lambda inputs: seen.setdefault("normalizer_rows", inputs["labels"].size(0)),
         metrics_fn=_metrics(m=1.0),
     )
     stage.seen = seen
-    stage._pp_runtime = _Runtime()
+    stage._pp_runner = _Runtime()
     stage.args = SimpleNamespace(per_device_train_batch_size=pairs)
     stage.data_collator = SimpleNamespace(pad_values={"input_ids": 0, "labels": LABEL_IGNORE_INDEX})
     stage.compute_metrics = compute_metrics
@@ -201,7 +205,7 @@ def test_an_eval_split_s_padding_examples_leave_the_step_as_inert_rows(chain):
     stage._pp_prediction_step(batch, prediction_loss_only=True)
 
     assert stage.seen == {"state_rows": 2, "normalizer_rows": 2}
-    runtime = stage._pp_runtime
+    runtime = stage._pp_runner
     assert runtime.input_ids.shape == (4, 3), "the frozen batch shape is kept"
     torch.testing.assert_close(runtime.labels[:2], labels[:2])
     assert (runtime.labels[2:] == LABEL_IGNORE_INDEX).all(), "the padding pair must score as inert rows"
@@ -235,8 +239,8 @@ def test_a_step_of_padding_alone_divides_by_one(chain):
         {"input_ids": torch.zeros(4, 3), "labels": torch.arange(1, 13).view(4, 3)}, prediction_loss_only=True
     )
 
-    assert stage._pp_runtime.count == 1.0
-    assert (stage._pp_runtime.labels == LABEL_IGNORE_INDEX).all()
+    assert stage._pp_runner.count == 1.0
+    assert (stage._pp_runner.labels == LABEL_IGNORE_INDEX).all()
     assert stage.stored_rows == 0
 
 
@@ -248,7 +252,7 @@ def test_a_round_without_padding_reaches_the_schedule_whole(chain):
     stage._pp_prediction_step({"input_ids": torch.zeros(4, 3), "labels": labels}, prediction_loss_only=True)
 
     assert stage.seen == {"state_rows": 4, "normalizer_rows": 4}
-    torch.testing.assert_close(stage._pp_runtime.labels, labels)
+    torch.testing.assert_close(stage._pp_runner.labels, labels)
     assert stage.stored_rows == 2
 
 

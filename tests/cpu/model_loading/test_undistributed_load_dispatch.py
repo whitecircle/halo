@@ -20,8 +20,10 @@ import torch.nn as nn
 from accelerate import PartialState
 from transformers import CONFIG_MAPPING
 
-import src.distributed.loading.model_loading as model_loading
+import src.model_loading.parallel.loader as model_loading
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.model_source import ModelSource
+from src.models.moe_balancing import config_has_experts
 from tests.common.parallelism import make_parallelism_config
 
 PartialState()  # the loader's accelerate logger needs accelerate state initialized
@@ -40,13 +42,20 @@ def _dispatch(pc: ParallelismConfig, model_type: str) -> list:
     wrapped: list = []
     loaded = nn.Linear(2, 2)
 
+    config = CONFIG_MAPPING[model_type]()
     with (
         patch.object(model_loading, "get_local_rank", return_value=0),
-        patch.object(model_loading, "_from_pretrained_on_local_gpu", return_value=loaded),
+        patch.object(model_loading, "load_whole_model", return_value=loaded),
         patch.object(model_loading, "patch_moe_model_for_ep", side_effect=lambda m, cfg: wrapped.append(cfg) or m),
     ):
         model = model_loading._dispatch_model_loading(
-            "stub/checkpoint", pc, SimpleNamespace(), {"config": CONFIG_MAPPING[model_type]()}
+            ModelSource("stub/checkpoint", None, "stub/checkpoint"),
+            pc,
+            SimpleNamespace(),
+            {"config": config},
+            preserve_checkpoint_precision=False,
+            wraps_experts=pc.needs_ep_wrappers and config_has_experts(config),
+            init_from_scratch=False,
         )
 
     assert model is loaded, "the undistributed path must return the loaded model itself"

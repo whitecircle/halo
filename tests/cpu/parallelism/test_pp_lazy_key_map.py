@@ -24,7 +24,7 @@ import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 
 from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner
-from src.distributed.pipeline_parallel.split import resolve_layer_partition
+from src.distributed.pipeline_parallel.partition import resolve_layer_partition
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage, slice_backbone_to_stage
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -144,7 +144,7 @@ def test_claimed_keys_equal_what_the_stage_re_exports_globally(pp_size):
         exported = {
             stage.global_parameter_name(local)
             for local in stage.state_dict()
-            if local.startswith(stage.local_layer_root)
+            if local.startswith(f"model.{stage.layout.layer_attr}.")
         }
         assert exported == claimed, sorted(exported ^ claimed)
 

@@ -194,7 +194,7 @@ def _call_lines(fn, name: str) -> list[int]:
 
 def _offline_host(*, pp: bool = False, max_completion_length: int | None = 256):
     return types.SimpleNamespace(
-        _pp_runtime=object() if pp else None,
+        _pp_runner=object() if pp else None,
         max_completion_length=max_completion_length,
     )
 

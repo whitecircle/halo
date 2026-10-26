@@ -2,7 +2,7 @@
 """LoRA / QLoRA / native-expert-LoRA on the off-policy teacher-distillation trainer (+ adapter ckpt).
 
 ``DistributedDistillationTrainer`` takes ``peft_config`` and wraps the student through
-``prepare_peft_model`` (k-bit prep, the QLoRA bf16 cast and its autocast), as the script passes it.
+``build_peft_model`` (k-bit prep, the QLoRA bf16 cast and its autocast), as the script passes it.
 The test asserts the adapter-only invariant, that the adapters move, and that an adapter checkpoint
 round-trips. Liger is left on (toolkit default) so the LoRA path is exercised with fused kernels.
 

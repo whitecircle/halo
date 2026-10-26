@@ -52,13 +52,13 @@ from trl import GRPOConfig
 
 from src.configs.environment_config import EnvironmentConfig
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from src.environments.envs.protocols.react import ReActEnvironment
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.envs.tasks.qa import ExamQAEnvironment
 from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
+from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
@@ -329,7 +329,11 @@ def run_env_grpo_training(
             parallelism_config=ParallelismConfig(),
             # beta != 0 on a full fine-tune holds a frozen reference, loaded as the policy is.
             ref_model=load_frozen_auxiliary_model(
-                MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="flash_attention_2"
+                MODEL_NAME,
+                dtype=torch.bfloat16,
+                trust_remote_code=True,
+                attn_implementation="flash_attention_2",
+                download_tag=None,
             ),
             **env_selector,
         )

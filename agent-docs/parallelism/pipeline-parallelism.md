@@ -37,22 +37,33 @@ microbatch.
   models, `compute_metrics`, activation offloading, precomputed-reference-column requirements);
   `PipelineTrainerMixin` (`src/trainers/mixins/pipeline.py`) is the trainer-side seam and stays
   inert at `pp_size == 1`.
-- **Stage, split, and loss seams.** `src/distributed/pipeline_parallel/` holds the stage module and
-  stage↔global naming contract (`stage.py`), the per-family `PPModelSpec` registry with the
-  layer-partition math and the model-structure gates — tied embeddings, live MTP tail layers,
-  `layer_types`-period split offsets, a head path the last stage cannot reproduce (`split.py`) —
-  the mid-chain stream forwards for the hyper-connection families, whose inter-layer activation is
-  the `hc_mult`-widened `[batch, seq, hc_mult, hidden]` stream (DeepSeek-V4, GLM-5 Next — `stage_adapters.py`), the
-  pure-tensor loss/label helpers and the `PPLossAdapter` contract (`losses.py`), the group
-  constructors (`groups.py`), and the stage-aware safetensors lazy loader (`lazy_loader.py`). The
-  batch contract (`PP_BATCH_PAD_VALUES` in `runtime.py`) pins the keys and pad values a pipeline
-  consumes.
-- **Schedule engine.** `PipelineRuntime` (`src/distributed/pipeline_parallel/runtime.py`) drives one
+- **Stage, split, and loss seams.** `src/distributed/pipeline_parallel/` holds one module per
+  concern: the per-family `PPFamilySpec` constants, among them the mid-chain stream forwards of the
+  hyper-connection families, whose inter-layer activation is the `hc_mult`-widened
+  `[batch, seq, hc_mult, hidden]` stream (DeepSeek-V4, GLM-5 Next) (`families.py`); the
+  model-structure gates — tied embeddings, live MTP tail layers, aux-loss balancing, a head path the
+  last stage cannot reproduce (`model_rules.py`); the layer partition and `validate_partition`, the
+  one gate every boundary passes on every rank (`layer_types`-period offsets, then the family's
+  `reject_severed_boundaries`) (`partition.py`); the `StageLayout` and the stage module with its
+  stage↔global naming contract (`stage.py`); the last-stage losses (`stage_losses.py`); the group
+  constructors (`groups.py`); and the stage-aware safetensors lazy loader (`lazy_loader.py`). A
+  trainer declares its objective as a `PipelineLossAdapter`
+  (`src/trainers/parallelism/pipeline_loss_adapter.py`); the next-token label math the losses share
+  lives in `src/kernels/logprobs.py`.
+- **Schedule engine.** `PipelineRunner` (`src/distributed/pipeline_parallel/runner.py`) drives one
   optimizer step's microbatches through the FSDP2-wrapped stage with torch's `Schedule1F1B` or
-  `ScheduleGPipe`. Each microbatch loss is divided by the step's token count, so the microbatch
-  losses sum to the unsplit loss; per-example side tensors reach the last stage's loss split with
-  their rows; loss-only and forward-only drives skip the schedule's trailing gradient reduction.
-  Construction verifies the private torch members the engine relies on.
+  `ScheduleGPipe`. It is built with the last stage's loss: `TokenLoss(fn)`, which scores the stage's
+  output, or `FusedHeadLoss()`, which runs the causal-LM head and CE inside the last stage's forward
+  one token chunk at a time (`HALO_PP_FUSED_HEAD_LOSS`, default on for the causal-LM contract). At
+  `V=201088`, `S=8192` and one microbatch row that drops 3.29 GB of bf16 logits plus 3.29 GB of
+  logit gradient; the loss and activation gradients are unchanged, while the head weight's gradient
+  is reassociated per chunk (~7e-7 relative in fp32, ~1e-2 in bf16). Each microbatch loss is divided
+  by the step's token count, so the microbatch losses sum to the unsplit loss; per-example side
+  tensors reach the last stage's loss split with their rows; loss-only and forward-only drives skip
+  the schedule's trailing gradient reduction. Construction verifies the private torch members the
+  runner relies on. The batch contract (`PP_BATCH_PAD_VALUES`) pins the keys and pad values a
+  pipeline consumes, and `resolve_microbatch_count` turns the user's accumulation into the
+  microbatch count.
 - **Head transform.** The last stage applies what the family's `*ForCausalLM.forward` does around
   `lm_head` — Cohere's `logit_scale`, Gemma's softcap, Inkling's μP division and vocabulary cut — to
   the logits it returns and inside the fused head loss. It is the transform the chunked GRPO
@@ -66,6 +77,6 @@ microbatch.
   writing the namespace the EP-gathered save writes
   ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)), and the stage reload maps
   those names back through `ModuleLayoutView`. A module the backbone applies to the token embedding
-  alone (Inkling's `embed_norm`, the spec's `INPUT_MODULE_ATTRS`) stays on stage 0 with the
+  alone (Inkling's `embed_norm`, the spec's `input_module_attrs`) stays on stage 0 with the
   embedding, so no two stages write it. The writer-set and axis guards (`is_pp_shard_writer`,
   `reject_unhandled_pp_axes`) ship with it.

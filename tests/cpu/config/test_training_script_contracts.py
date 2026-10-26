@@ -16,7 +16,7 @@
   null-marker raise and ``verify_marker_renders_in_chat_template`` live in ``select_data_collator``,
   and a direct build trains on every token while the log still says completion-only masking.
 - PEFT wrapping: no script may call bare ``get_peft_model`` — a self-wrapping script must route
-  through ``prepare_peft_model`` (k-bit prep) — and none may call bare ``get_peft_config``, which
+  through ``build_peft_model`` (k-bit prep) — and none may call bare ``get_peft_config``, which
   would skip ``build_peft_config``'s exclusion of target-name matches PEFT cannot adapt.
 
 Run: pytest tests/cpu/config/test_training_script_contracts.py
@@ -352,7 +352,7 @@ def test_smpo_refuses_a_vlm_run_under_cp_or_pp_before_the_model_load(tmp_path, a
             _run_main_with_yaml(module, yaml_body, tmp_path)
 
 
-# PEFT wrapping: scripts must route through prepare_peft_model (k-bit prep)
+# PEFT wrapping: scripts must route through build_peft_model (k-bit prep)
 
 
 @pytest.mark.parametrize(
@@ -361,13 +361,13 @@ def test_smpo_refuses_a_vlm_run_under_cp_or_pp_before_the_model_load(tmp_path, a
     ids=[str(p.relative_to(_TRAINING_DIR)) for p in _TRAINING_SCRIPTS],
 )
 def test_no_script_calls_bare_get_peft_model(script: Path):
-    """A bare ``get_peft_model`` skips ``prepare_peft_model``'s k-bit prep (layernorm fp32 upcast,
+    """A bare ``get_peft_model`` skips ``build_peft_model``'s k-bit prep (layernorm fp32 upcast,
     gradient-checkpointing input hooks) that every sibling trainer applies — QLoRA would silently
-    mis-train. Scripts that wrap PEFT themselves must call ``prepare_peft_model``."""
+    mis-train. Scripts that wrap PEFT themselves must call ``build_peft_model``."""
     source = script.read_text(encoding="utf-8")
     assert not _named_calls(ast.parse(source), "get_peft_model"), (
-        f"{script}: calls bare get_peft_model — route through prepare_peft_model "
-        f"(src/distributed/loading/peft_setup.py) like SMPO/classification/offline-GRPO."
+        f"{script}: calls bare get_peft_model — route through build_peft_model "
+        f"(src/model_loading/parallel/peft_setup.py) like SMPO/classification/offline-GRPO."
     )
 
 
@@ -383,7 +383,7 @@ def test_no_script_calls_bare_get_peft_config(script: Path):
     source = script.read_text(encoding="utf-8")
     assert not _named_calls(ast.parse(source), "get_peft_config"), (
         f"{script}: calls bare get_peft_config — route through build_peft_config "
-        f"(src/distributed/loading/peft_setup.py), directly or via setup_peft_model."
+        f"(src/model_loading/parallel/peft_setup.py), directly or via configure_adapter_training."
     )
 
 

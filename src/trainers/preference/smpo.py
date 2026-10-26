@@ -45,6 +45,7 @@ from trl.trainer.utils import disable_dropout_in_model
 
 from src.callbacks.variable_scheduler import VariableSchedulerCallback
 from src.configs.preference import SmoothMarginPOConfig
+from src.data.collators.fixed_shape import pad_to_fixed_length
 from src.data.collators.smpo import (
     PREFERENCE_BATCH_KEYS,
     DataCollatorForSMPO,
@@ -53,24 +54,15 @@ from src.data.collators.smpo import (
 )
 from src.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
-from src.data.spans import LABEL_IGNORE_INDEX, resolve_eos_token_ids
+from src.data.spans import completion_labels, resolve_eos_token_ids
 from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS
 from src.distributed.context_parallel.autograd import cp_sum_rows
 from src.distributed.context_parallel.config import cp_chunk_bounds
-from src.distributed.loading.model_loading import load_model_from_pretrained
-from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.losses import (
-    PPLossAdapter,
-    interleave_pairs,
-    loss_token_counts_per_row,
-    next_token_logprobs,
-    pad_to_pipeline_length,
-    rows_with_labels,
-    split_pairs,
-    token_logprobs,
-)
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row, next_token_logprobs, token_logprobs
 from src.model_loading.dtype import is_kbit_quantized
+from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
+from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from src.models.segment_markers import (
@@ -85,6 +77,12 @@ from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.dataloader import split_rows_head, split_rows_mean
 from src.trainers.mixins.pp_gates import reject_pp_peft
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
+from src.trainers.parallelism.pipeline_loss_adapter import (
+    PipelineLossAdapter,
+    interleave_pairs,
+    rows_with_labels,
+    split_pairs,
+)
 
 logger = get_logger(__name__, log_level="info")
 
@@ -201,8 +199,8 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
             )
         self._reject_pp_explicit_options(parallelism_config, peft_config)
 
-        model, _ = load_model_from_pretrained(
-            model, args, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params
+        model = resolve_trainer_model(
+            model, args, keep_fp32_non_ep=parallelism_config is not None and parallelism_config.fp32_non_ep_params
         )
 
         # After the load: the ctor accepts a model id, and the config is where a family that closes
@@ -217,7 +215,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         if peft_config is not None:
             if not is_kbit_quantized(model) and args.gradient_checkpointing:
                 model.enable_input_require_grads()
-            model, self._peft_has_been_casted_to_bf16 = prepare_peft_model(model, peft_config, args)
+            model, self._peft_has_been_casted_to_bf16 = build_peft_model(model, peft_config, args)
         elif args.gradient_checkpointing:
             model.enable_input_require_grads()
 
@@ -490,14 +488,14 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         chosen_labels = torch.cat(
             [
                 torch.full_like(batch["prompt_input_ids"], LABEL_IGNORE_INDEX),
-                torch.where(chosen_mask == 1, chosen_padded, LABEL_IGNORE_INDEX),
+                completion_labels(chosen_padded, chosen_mask),
             ],
             dim=1,
         )
         rejected_labels = torch.cat(
             [
                 torch.full_like(batch["prompt_input_ids"], LABEL_IGNORE_INDEX),
-                torch.where(rejected_mask == 1, rejected_padded, LABEL_IGNORE_INDEX),
+                completion_labels(rejected_padded, rejected_mask),
             ],
             dim=1,
         )
@@ -848,24 +846,22 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         self._pp_step_state = _PPStepState(target_margin=self.target_margin)
         super()._setup_pipeline_parallel()
 
-    def _pp_loss_adapter(self) -> PPLossAdapter:
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """SMPO's pipeline-loss contract: interleaved pairs, closure loss over per-step constants.
 
-        ``pin_runtime_columns=False``: SMPO's dataset columns feed the pair transform, so HF's
+        ``pin_runner_columns=False``: SMPO's dataset columns feed the pair transform, so HF's
         column pruning must keep its own signature set (prompt/chosen/rejected token ids), not the
-        runtime contract. Eval runs loss-only through the same closure — ``_PPStepState`` is
+        runner contract. Eval runs loss-only through the same closure — ``_PPStepState`` is
         refreshed from every step's batch, eval's real pairs included, before the inert row padding,
         so eval_loss equals the non-PP ``get_batch_loss_metrics`` value.
         """
-        return PPLossAdapter(
+        return PipelineLossAdapter(
             token_loss_fn=self._pp_token_loss,
-            paired_examples=True,
             batch_transform=self._pp_batch_transform,
             step_state_fn=self._pp_refresh_step_state,
             normalizer=self._pp_normalizer,
-            rows_per_example=2,  # the pair transform doubles rows: B pairs -> 2B interleaved sequences
             eval_normalizer=self._pp_normalizer,
-            pin_runtime_columns=False,
+            pin_runner_columns=False,
             predictions_fn=self._pp_smpo_predictions,
             eval_labels_fn=self._pp_smpo_eval_labels,
             metrics_fn=self._pp_step_metrics,
@@ -914,7 +910,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         """
         concat = self.concatenated_inputs(batch, pad_token_id=self.pad_token_id)
         num_chosen = concat["num_chosen"]
-        return pad_to_pipeline_length(
+        return pad_to_fixed_length(
             {
                 key: (interleave_pairs(concat[key][:num_chosen], concat[key][num_chosen:]), fill)
                 for key, fill in (
@@ -939,10 +935,10 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         state.target_margin = self._get_current_margin()
 
     def _pp_normalizer(self, inputs: dict) -> float:
-        """Pin the runtime's per-step divisor to 1 — SMPO normalizes inside the loss closure.
+        """Pin the runner's per-step divisor to 1 — SMPO normalizes inside the loss closure.
 
         The objective carries three normalizers (pair count for the margin mean, chosen and
-        rejected token counts for the SFT term), which cannot ride the runtime's single divisor;
+        rejected token counts for the SFT term), which cannot ride the runner's single divisor;
         ``_pp_token_loss`` divides each term by the full-batch constants instead. They are
         rank-local: the non-PP loss is a rank-local mean whose gradients FSDP averages over the DP
         group, and the PP stage wrap averages over the same group.
@@ -1211,7 +1207,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Evaluation prediction step: the per-pair ``[pairs, 2]`` (chosen, rejected) rewards, one
         row per pair so the evaluation gather cuts the final round's padding pairs."""
-        if self._pp_runtime is not None:
+        if self._pp_runner is not None:
             # No pipeline rank holds the full model the path below needs; the mixin drives the
             # schedule instead (loss-only, or loss plus adapter-reduced predictions for metrics).
             return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)

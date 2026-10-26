@@ -58,8 +58,8 @@ class Mistral4UlyssesAttention(MLAUlyssesAttentionBase):
             raise ValueError(
                 "Mistral4UlyssesAttention needs the FULL sequence's position_ids for the llama-4 "
                 "attention scale. UlyssesCPModelWrapper publishes them on every patched attention "
-                "layer once per forward — run Mistral4 CP through it (load_model_for_cp / "
-                "load_model_for_ep_cp)."
+                "layer once per forward — run Mistral4 CP through it (load_cp_model / "
+                "load_ep_cp_model)."
             )
         scale = get_llama_4_attn_scale(position_ids, self._llama_4_scaling_beta, self._llama_4_original_max_pe)
         return q * scale.to(q.dtype), k

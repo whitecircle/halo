@@ -32,9 +32,9 @@ from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCa
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 from trl import ModelConfig
 
-import src.distributed.loading.peft_setup as peft_setup
-from src.distributed.loading.peft_setup import build_peft_config, setup_peft_model
+import src.model_loading.parallel.peft_setup as peft_setup
 from src.kernels.lowp.linear import LowPrecisionLinear
+from src.model_loading.parallel.peft_setup import build_peft_config, configure_adapter_training
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_DSV4_CONFIG
 
@@ -280,12 +280,12 @@ def test_an_exclusion_list_that_differs_between_ranks_raises_on_every_rank(tmp_p
     )
 
 
-def test_setup_peft_model_applies_the_exclusion():
+def test_configure_adapter_training_applies_the_exclusion():
     """The production seam every training script reaches, not just the helper under it."""
     model = _Multimodal(_ClippableAttention())
     args = types.SimpleNamespace(unfreeze_layers_patterns=None, freeze_layers_patterns=None)
 
-    peft_config = setup_peft_model(args, model, _model_config())
+    peft_config = configure_adapter_training(args, model, _model_config())
 
     assert set(peft_config.exclude_modules) == {"vision_tower.q_proj", "vision_tower.o_proj"}
 

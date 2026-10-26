@@ -22,8 +22,8 @@ import torch
 from transformers import AutoTokenizer
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.trainers.grpo.rollout.routing_replay import build_routing_replay_injector
 from tests.common.distributed import ensure_model_downloaded

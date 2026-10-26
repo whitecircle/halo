@@ -43,6 +43,7 @@ from src.distributed.checkpoint.coordination import all_ranks_ok, joined_streami
 from src.distributed.checkpoint.peft import find_peft_model, restore_adapters
 from src.distributed.checkpoint.save import reject_unhandled_pp_axes
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.pipeline_parallel.lazy_loader import PER_NODE_PLACEMENT_REMEDY
 from src.log import KEY_PREVIEW_COUNT
@@ -530,11 +531,11 @@ class CheckpointLoader:
         # EP experts only load at construction, so a model not built from the checkpoint resumes base
         # experts. The signal is ``weights_read_from`` (None for a from-config init), not
         # ``config._name_or_path``, which survives a build that read no weights. Both inputs are
-        # rank-local (``ep_moe_layers()`` is stage-dependent, ``realpath`` resolves per node), so
+        # rank-local (``named_ep_layers`` is stage-dependent, ``realpath`` resolves per node), so
         # every rank joins the verdict before acting rather than raising inside the gate.
         live_source = weights_read_from(stage)
         reason = None
-        if stage.ep_moe_layers() and not built_from_checkpoint(live_source, checkpoint):
+        if named_ep_layers(stage) and not built_from_checkpoint(live_source, checkpoint):
             whence = _construction_whence(live_source, "stage")
             reason = (
                 f"a stage's EP expert weights only load at construction, so resume requires the model "

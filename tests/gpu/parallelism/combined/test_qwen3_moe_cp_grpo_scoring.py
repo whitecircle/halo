@@ -15,13 +15,12 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.base_layer import get_flash_attn_func
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.losses import loss_token_counts_per_row
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
 from src.trainers.grpo.objective.offline import offline_loss
 from tests.common.cp_grpo import (

@@ -15,8 +15,8 @@ import pytest
 import torch.nn as nn
 from trl import ModelConfig
 
-from src.distributed.loading import peft_setup
-from src.distributed.loading.peft_setup import setup_peft_model
+from src.model_loading.parallel import peft_setup
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 
 _PATTERN_ARGS = ("unfreeze_layers_patterns", "freeze_layers_patterns")
 
@@ -41,7 +41,7 @@ def test_attention_lora_refuses_layer_patterns(pattern_arg):
     config = ModelConfig(model_name_or_path="dummy/dense", use_peft=True, lora_target_modules=["q_proj"])
 
     with pytest.raises(ValueError, match=f"{pattern_arg} cannot combine with adapters"):
-        setup_peft_model(_args(**{pattern_arg: ["q_proj*"]}), _Dense(), config)
+        configure_adapter_training(_args(**{pattern_arg: ["q_proj*"]}), _Dense(), config)
 
 
 @pytest.mark.parametrize("pattern_arg", _PATTERN_ARGS)
@@ -52,14 +52,14 @@ def test_expert_only_lora_refuses_layer_patterns(pattern_arg):
         patch.object(peft_setup, "has_ep_lora", return_value=True),
         pytest.raises(ValueError, match=f"{pattern_arg} cannot combine with adapters"),
     ):
-        setup_peft_model(_args(**{pattern_arg: ["q_proj*"]}), _Dense(), config)
+        configure_adapter_training(_args(**{pattern_arg: ["q_proj*"]}), _Dense(), config)
 
 
 def test_full_finetune_still_applies_the_patterns():
     config = ModelConfig(model_name_or_path="dummy/dense", use_peft=False)
     model = _Dense()
 
-    assert setup_peft_model(_args(freeze_layers_patterns=["q_proj.weight"]), model, config) is None
+    assert configure_adapter_training(_args(freeze_layers_patterns=["q_proj.weight"]), model, config) is None
     assert not model.q_proj.weight.requires_grad
     assert model.q_proj.bias.requires_grad
 

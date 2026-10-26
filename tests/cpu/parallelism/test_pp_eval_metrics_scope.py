@@ -21,7 +21,7 @@ from accelerate import PartialState
 from accelerate.data_loader import prepare_data_loader
 from torch.utils.data import DataLoader
 
-from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
+from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss
 from src.trainers.mixins.dataloader import (
     DataParallelDataLoaderMixin,
     dp_representative_ranks,
@@ -29,6 +29,7 @@ from src.trainers.mixins.dataloader import (
     select_gathered_chunks,
 )
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
+from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 
 PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
 
@@ -45,8 +46,8 @@ class _HoistStage(PipelineTrainerMixin):
         self.preprocess_logits_for_metrics = preprocess
 
 
-def _adapter(**kwargs) -> PPLossAdapter:
-    return PPLossAdapter(token_loss_fn=causal_lm_token_loss, **kwargs)
+def _adapter(**kwargs) -> PipelineLossAdapter:
+    return PipelineLossAdapter(token_loss_fn=causal_lm_token_loss, **kwargs)
 
 
 def test_compute_metrics_without_any_reduction_is_refused_naming_the_remedy():

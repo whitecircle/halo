@@ -14,9 +14,9 @@ import pytest
 import torch
 import transformers
 
-from src.distributed.pipeline_parallel.losses import causal_lm_token_loss, fused_causal_lm_token_loss
-from src.distributed.pipeline_parallel.split import validate_model_supports_pp
+from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss, fused_causal_lm_token_loss
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from tests.common.models import (
     TINY_COHERE2_MOE_CONFIG,
@@ -106,7 +106,7 @@ def test_cohere_logit_scale_is_applied_rather_than_refused():
     """Cohere's non-unit ``logit_scale`` passes the PP gate: the stage applies it."""
     model = _build("cohere2_moe")
     assert model.config.logit_scale != 1.0
-    validate_model_supports_pp(model, "none")
+    reject_unsupported_pp_model(model, "none")
     assert resolve_head_transform(model) == HeadTransform(logit_scale=model.config.logit_scale)
 
 
@@ -116,7 +116,7 @@ def test_an_undeclared_head_transform_is_refused_by_the_pp_gate():
     config = transformers.HyperCLOVAXConfig(**{**TINY_GRANITE_CONFIG, "logits_scaling": 0.5})
     model = transformers.HyperCLOVAXForCausalLM(config)
     with pytest.raises(ValueError, match="HyperCLOVAXForCausalLM's forward transforms its head path"):
-        validate_model_supports_pp(model, "none")
+        reject_unsupported_pp_model(model, "none")
     with pytest.raises(ValueError, match="HyperCLOVAXForCausalLM's forward transforms its head path"):
         build_pipeline_stage(model, 0, 2, moe_balancing="none")
 

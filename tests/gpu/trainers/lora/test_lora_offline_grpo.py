@@ -2,7 +2,7 @@
 """LoRA / QLoRA / native-expert-LoRA training on the Offline GRPO trainer (+ adapter checkpoint).
 
 One file, five adapter modes (selected by ``--mode``); each drives the production adapter path
-(``split_expert_lora_targets`` → ``load_distributed_model`` → ``setup_peft_model``) into
+(``split_expert_lora_targets`` → ``load_distributed_model`` → ``configure_adapter_training``) into
 ``OfflineGRPOTrainer`` and asserts, each of which FAILS when the wiring breaks:
 
   - only adapters are trainable (frozen base, incl. the 4-bit QLoRA weights);

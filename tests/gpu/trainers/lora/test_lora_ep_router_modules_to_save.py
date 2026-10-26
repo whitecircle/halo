@@ -36,10 +36,10 @@ from transformers import AutoTokenizer
 from trl import ModelConfig, SFTConfig
 
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.loading.peft_setup import setup_peft_model, split_expert_lora_targets
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
+from src.model_loading.parallel.loader import load_distributed_model
+from src.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
@@ -131,7 +131,7 @@ def run(ctx) -> dict:
         attn_implementation=ATTN_IMPL,
         use_liger_kernel=True,
     )
-    peft_config = setup_peft_model(_PEFT_ARGS, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(_PEFT_ARGS, model, model_config, "CAUSAL_LM")
     log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
 
     log("\n[3/5] Building trainer (runs reattach + loud safety-net validation)...")

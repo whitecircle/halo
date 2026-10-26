@@ -53,12 +53,12 @@ from src.data.pipeline.processing import (
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
-from src.distributed.loading.frozen_models import load_reference_model_for_on_policy_grpo
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.environments.base import ANSWER_KEY
 from src.environments.episode import bind_episode_effort
 from src.environments.registry import create_environment
 from src.model_loading.model_preparation import log_model_info
+from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
@@ -307,7 +307,7 @@ def main():
     # The trainer raises on a trajectory past the window rather than truncating.
     tokenizer = apply_context_window(args, model, tokenizer)
 
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
     # Pre-sharded datasets are split per DP rank at load; the trainer gets dataset_presharded so it

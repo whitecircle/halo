@@ -19,7 +19,6 @@ from transformers import DataCollatorForLanguageModeling, PreTrainedTokenizerBas
 from transformers.data.data_collator import DefaultDataCollator
 
 from src.data.spans import (
-    LABEL_IGNORE_INDEX,
     PACKED_SPAN_POLICY,
     mask_batch_to_completion_spans,
     require_response_marker,
@@ -28,6 +27,7 @@ from src.data.spans import (
     tokenize_response_template,
     warn_if_pad_equals_eos,
 )
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.models.segment_markers import SegmentMarkers, segment_marker_kwargs
 
 # transformers turns every position-0 reset into a varlen segment boundary, and the FA4 backward

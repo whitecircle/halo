@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the load-time refusals in ``model_loading`` and loader default parity.
+"""CPU tests for the load-time refusals in ``model_loading.parallel`` and loader default parity.
 
 EP/CP/TP require torchrun; the gates must reject EVERY ``accelerate launch`` distributed_type —
 including MULTI_GPU/DDP, which sets ``ACCELERATE_MIXED_PRECISION`` but not ``ACCELERATE_USE_FSDP``
@@ -7,12 +7,13 @@ including MULTI_GPU/DDP, which sets ``ACCELERATE_MIXED_PRECISION`` but not ``ACC
 ``_should_accelerate_manage_ddp`` semantics over the ``src.env`` helpers, and the ``reset_sinks``
 default parity between the two model-loading entry points.
 
-Three more refusals raised from the same module are pinned here, each of which replaces a failure
-that lands far from its cause: ``_load_tp_model``'s zero-shard check (an architecture with no
+Three more refusals raised from the same package are pinned here, each of which replaces a failure
+that lands far from its cause: ``load_tp_model``'s zero-shard check (an architecture with no
 ``base_model_tp_plan`` silently trains ``tp_size`` full replicas at ``1/tp_size`` throughput), its
 plan-vs-materialization check (a plan-sharded param that came back a plain tensor is a bare slice
-the gradient sync averages against its peers' disjoint slices), and ``_validate_fp32_non_ep_params``
-(otherwise a raw DeepEP C++ assert at the first dispatch, naming neither fp32 nor the knob).
+the gradient sync averages against its peers' disjoint slices), and ``reject_unsupported_model``'s
+``fp32_non_ep_params`` refusal (otherwise a raw DeepEP C++ assert at the first dispatch, naming
+neither fp32 nor the knob).
 
 The TP-load tests run against a model transformers itself materialized on a device mesh: the
 materialization check reads the loaded parameters, not only the plan.
@@ -38,21 +39,10 @@ from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 from transformers.models.qwen3 import Qwen3Config
 from transformers.models.qwen3_vl import Qwen3VLConfig
 
-from src.distributed.context_parallel.loading import load_model_for_cp, load_model_for_ep_cp
-
-_CP_LOADING = "src.distributed.context_parallel.loading"
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.expert_parallel.loading import load_ep_model
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.loading import model_loading
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
-from src.distributed.loading.model_loading import (
-    _load_tp_model,
-    _validate_fp32_non_ep_params,
-    _validate_launch_method_for_parallelism,
-    load_distributed_model,
-)
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.mesh import MeshDim
 from src.distributed.parallelism_config import ParallelismConfig
@@ -60,6 +50,15 @@ from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.lazy_safetensors.weights import resolve_run_dtype
+from src.model_loading.parallel import loader as model_loading
+from src.model_loading.parallel import tp as tp_loading
+from src.model_loading.parallel import whole_model
+from src.model_loading.parallel.cp import load_cp_model
+from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from src.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
+from src.model_loading.parallel.loader import load_distributed_model
+from src.model_loading.parallel.model_source import ModelSource
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.attention.selection import resolve_attn_implementation
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import ParallelismValidationMixin
@@ -67,6 +66,9 @@ from tests.common.distributed import fake_process_group_mesh
 from tests.common.parallelism import make_parallelism_config
 
 PartialState()  # the loader's accelerate logger refuses to emit without an initialized state
+
+_CP_LOADING = "src.model_loading.parallel.cp"
+_SOURCE = ModelSource("org/x", None, "org/x")
 
 # accelerate MULTI_GPU (DDP) launch: MIXED_PRECISION set, USE_FSDP unset.
 _MULTI_GPU_ENV = {"ACCELERATE_MIXED_PRECISION": "bf16"}
@@ -98,14 +100,14 @@ class _Validating(ParallelismValidationMixin):
 def test_loader_gate_rejects_ep_under_any_accelerate_launch(launch_env):
     with patch.dict(os.environ, _env(launch_env), clear=True):
         with pytest.raises(ValueError, match="torchrun"):
-            _validate_launch_method_for_parallelism(_pc(ep_size=2))
+            reject_unsupported_run(_pc(ep_size=2), torch.bfloat16)
 
 
 def test_loader_gate_passes_under_torchrun_and_for_plain_dp():
     with patch.dict(os.environ, _env({}), clear=True):
-        _validate_launch_method_for_parallelism(_pc(ep_size=2))  # torchrun: no accelerate env
+        reject_unsupported_run(_pc(ep_size=2), torch.bfloat16)  # torchrun: no accelerate env
     with patch.dict(os.environ, _env(_MULTI_GPU_ENV), clear=True):
-        _validate_launch_method_for_parallelism(_pc())  # accelerate DDP without EP/CP/TP is fine
+        reject_unsupported_run(_pc(), torch.bfloat16)  # accelerate DDP without EP/CP/TP is fine
 
 
 @pytest.mark.parametrize("launch_env", [_MULTI_GPU_ENV, _FSDP_ENV])
@@ -131,7 +133,7 @@ def test_pure_etp_is_not_swept_up_by_the_fp32_refusal():
     pc = _pc(ep_size=1, expert_tp_size=2)
     assert pc.has_ep_group, "premise: expert-TP folds into has_ep_group, which is why the guard cannot use it"
     with patch.dict(os.environ, _env({}), clear=True), pytest.raises(Exception) as excinfo:
-        load_distributed_model("org/x", parallelism_config=pc, dtype=torch.float32)
+        load_distributed_model("org/x", parallelism_config=pc, dtype=torch.float32, trust_remote_code=True)
     assert "fp32 training" not in str(excinfo.value)
 
 
@@ -145,10 +147,12 @@ def test_loader_allows_fp32_without_expert_parallelism():
     (measured 699 tok/s on qwen3-8b), so a blanket fp32 rejection would break it."""
     with patch.dict(os.environ, _env({}), clear=True):
         with pytest.raises(ValueError, match="fp32 training"):
-            load_distributed_model("org/x", parallelism_config=_pc(ep_size=2), dtype=torch.float32)
+            load_distributed_model(
+                "org/x", parallelism_config=_pc(ep_size=2), dtype=torch.float32, trust_remote_code=True
+            )
         # Same call without EP must get past the guard (it fails later, on the absent repo).
         with pytest.raises(Exception) as excinfo:
-            load_distributed_model("org/x", parallelism_config=_pc(), dtype=torch.float32)
+            load_distributed_model("org/x", parallelism_config=_pc(), dtype=torch.float32, trust_remote_code=True)
         assert "fp32 training" not in str(excinfo.value)
 
 
@@ -189,15 +193,15 @@ def _load_collaborators(model):
         throttled.pop()
 
     def _load(*_args, **_kwargs):
-        assert not throttled, "_load_tp_model must not rank-serialize its load"
+        assert not throttled, "load_tp_model must not rank-serialize its load"
         return model
 
     with (
-        patch.object(model_loading, "create_dp_tp_mesh", return_value=_DP_TP_MESH),
-        patch.object(model_loading, "get_tp_submesh", return_value="tp-mesh"),
-        patch.object(model_loading, "joined_node_load", _throttle),
-        patch.object(model_loading, "from_pretrained_verified", _load),
-        patch.object(model_loading, "retarget_hf_replicated_grad_hooks", lambda _model: None),
+        patch.object(tp_loading, "create_dp_tp_mesh", return_value=_DP_TP_MESH),
+        patch.object(tp_loading, "get_tp_submesh", return_value="tp-mesh"),
+        patch.object(tp_loading, "joined_node_load", _throttle),
+        patch.object(tp_loading, "from_pretrained_verified", _load),
+        patch.object(tp_loading, "retarget_hf_replicated_grad_hooks", lambda _model: None),
     ):
         yield
 
@@ -212,7 +216,13 @@ def test_tp_load_never_rank_serializes_its_load(tp_materialized_model):
     rather than failing. The stub above turns a re-added throttle into this assertion.
     """
     with _load_collaborators(tp_materialized_model):
-        _load_tp_model("org/x", _pc(tp_size=_TP_SIZE), AutoModelForCausalLM, {"config": tp_materialized_model.config})
+        tp_loading.load_tp_model(
+            _SOURCE,
+            _pc(tp_size=_TP_SIZE),
+            AutoModelForCausalLM,
+            {"config": tp_materialized_model.config},
+            preserve_checkpoint_precision=False,
+        )
 
 
 def test_the_tp_fp32_master_restore_is_node_batched(tp_materialized_model):
@@ -229,14 +239,15 @@ def test_the_tp_fp32_master_restore_is_node_batched(tp_materialized_model):
 
     with (
         _load_collaborators(tp_materialized_model),
-        patch.object(model_loading, "joined_node_load", throttle),
-        patch.object(model_loading, "restore_fp32_master_parameters", lambda *a, **k: events.append("restore")),
+        patch.object(tp_loading, "joined_node_load", throttle),
+        patch.object(tp_loading, "restore_fp32_master_parameters", lambda *a, **k: events.append("restore")),
     ):
-        _load_tp_model(
-            "org/x",
+        tp_loading.load_tp_model(
+            _SOURCE,
             _pc(tp_size=_TP_SIZE, max_concurrent_loading=1),
             AutoModelForCausalLM,
             {"config": tp_materialized_model.config},
+            preserve_checkpoint_precision=False,
         )
     assert events == [("batched", 1), "restore", "released"], events
 
@@ -267,7 +278,7 @@ def sharding_model():
 def tp_materialized_model(sharding_model):
     """``sharding_model`` as a real TP load hands it back: every plan-sharded param a DTensor.
 
-    ``_load_tp_model`` reads the loaded PARAMETERS, not just the plan — its post-load guard refuses
+    ``load_tp_model`` reads the loaded PARAMETERS, not just the plan — its post-load guard refuses
     a plan-sharded param that materialized plain, because a bare rank-local slice is
     indistinguishable downstream from a replica and the gradient sync averages it against its peers'
     DIFFERENT slices. So an unsharded stand-in is not a stub for a TP load; it is exactly the
@@ -329,15 +340,25 @@ def test_tp_load_refuses_an_architecture_whose_plan_shards_nothing(planless_mode
     """Silent otherwise: ``tp_size`` identical replicas, at ``1/tp_size`` throughput, with
     ``data_parallel_size`` already divided by ``tp_size`` — a run that trains and looks fine."""
     with _load_collaborators(planless_model), pytest.raises(ValueError, match="sharded ZERO parameters"):
-        _load_tp_model("org/x", _pc(tp_size=_TP_SIZE), AutoModelForImageTextToText, {"config": planless_model.config})
+        tp_loading.load_tp_model(
+            _SOURCE,
+            _pc(tp_size=_TP_SIZE),
+            AutoModelForImageTextToText,
+            {"config": planless_model.config},
+            preserve_checkpoint_precision=False,
+        )
 
 
 def test_tp_load_accepts_an_architecture_that_does_shard(tp_materialized_model):
     """Anti-vacuity: an architecture whose plan does shard, materialized the way HF materializes it,
     must pass every post-load gate and come back stamped with the mesh."""
     with _load_collaborators(tp_materialized_model):
-        model = _load_tp_model(
-            "org/x", _pc(tp_size=_TP_SIZE), AutoModelForCausalLM, {"config": tp_materialized_model.config}
+        model = tp_loading.load_tp_model(
+            _SOURCE,
+            _pc(tp_size=_TP_SIZE),
+            AutoModelForCausalLM,
+            {"config": tp_materialized_model.config},
+            preserve_checkpoint_precision=False,
         )
     assert model is tp_materialized_model
     assert model._device_mesh is _DP_TP_MESH
@@ -355,13 +376,25 @@ def test_tp_load_refuses_a_plainly_materialized_load(sharding_model):
         "premise: this fixture is the un-materialized load"
     )
     with _load_collaborators(sharding_model), pytest.raises(ValueError, match="materialized as plain"):
-        _load_tp_model("org/x", _pc(tp_size=_TP_SIZE), AutoModelForCausalLM, {"config": sharding_model.config})
+        tp_loading.load_tp_model(
+            _SOURCE,
+            _pc(tp_size=_TP_SIZE),
+            AutoModelForCausalLM,
+            {"config": sharding_model.config},
+            preserve_checkpoint_precision=False,
+        )
 
 
 def test_tp_load_is_inert_at_tp_size_one(planless_model):
     """``tp_size=1`` is not a TP run; refusing there would ban the model outright."""
     with _load_collaborators(planless_model):
-        loaded = _load_tp_model("org/x", _pc(), AutoModelForImageTextToText, {"config": planless_model.config})
+        loaded = tp_loading.load_tp_model(
+            _SOURCE,
+            _pc(),
+            AutoModelForImageTextToText,
+            {"config": planless_model.config},
+            preserve_checkpoint_precision=False,
+        )
     assert loaded is planless_model
 
 
@@ -380,12 +413,16 @@ class _ModelConfig:
         return self._text
 
 
+def _reject_unsupported_model(pc: ParallelismConfig, model_config) -> None:
+    reject_unsupported_model(pc, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False)
+
+
 @pytest.mark.parametrize("model_type", ["gemma4", "gemma4_text"])
 def test_fp32_non_ep_params_is_refused_for_a_family_that_declares_it_unsupported(model_type):
     """Both spellings resolve to ``EPGemma4MoELayer``, which declares the opt-out; the alternative
     is DeepEP's raw C++ assert at the first dispatch, after the whole multi-GPU load."""
     with pytest.raises(ValueError, match="fp32_non_ep_params") as excinfo:
-        _validate_fp32_non_ep_params(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig(model_type))
+        _reject_unsupported_model(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig(model_type))
     assert model_type in str(excinfo.value), "the refusal must name the model_type that triggered it"
 
 
@@ -394,14 +431,14 @@ def test_the_text_tower_is_consulted_for_a_composite_config():
     family through under any VLM checkpoint."""
     composite = _ModelConfig("some_multimodal_wrapper", text=_ModelConfig("gemma4_text"))
     with pytest.raises(ValueError, match="gemma4_text"):
-        _validate_fp32_non_ep_params(_pc(ep_size=2, fp32_non_ep_params=True), composite)
+        _reject_unsupported_model(_pc(ep_size=2, fp32_non_ep_params=True), composite)
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_moe", "qwen3"])
 def test_families_that_support_the_upcast_and_dense_models_are_left_alone(model_type):
     """``qwen3_moe`` resolves to an EP layer that declares support; ``qwen3`` resolves to nothing at
     all. A guard that refused either would ban a validated production shape."""
-    _validate_fp32_non_ep_params(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig(model_type))
+    _reject_unsupported_model(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig(model_type))
 
 
 @pytest.mark.parametrize("pc_kwargs", [{"ep_size": 1}, {"ep_size": 2, "fp32_non_ep_params": False}])
@@ -409,7 +446,7 @@ def test_the_refusal_needs_both_conjuncts(pc_kwargs):
     """No experts distributed (``ep_size=1``) means no DeepEP dispatch to break, and without the
     knob there is nothing to refuse — the guard must fire on the pair, not on either half."""
     kwargs = {"fp32_non_ep_params": True, **pc_kwargs}
-    _validate_fp32_non_ep_params(_pc(**kwargs), _ModelConfig("gemma4"))
+    _reject_unsupported_model(_pc(**kwargs), _ModelConfig("gemma4"))
 
 
 def test_the_class_declaration_is_what_drives_the_refusal(monkeypatch):
@@ -418,10 +455,10 @@ def test_the_class_declaration_is_what_drives_the_refusal(monkeypatch):
     list in the loader — only the former lets a new family declare its own answer."""
     assert EPMoELayerBase._supports_fp32_non_ep_params is True, "the roster default must be permissive"
     with pytest.raises(ValueError):
-        _validate_fp32_non_ep_params(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig("gemma4"))
+        _reject_unsupported_model(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig("gemma4"))
 
     monkeypatch.setattr(EPGemma4MoELayer, "_supports_fp32_non_ep_params", True)
-    _validate_fp32_non_ep_params(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig("gemma4"))
+    _reject_unsupported_model(_pc(ep_size=2, fp32_non_ep_params=True), _ModelConfig("gemma4"))
 
 
 def test_the_family_gate_is_wired_into_the_loader_right_after_the_config_read():
@@ -431,11 +468,15 @@ def test_the_family_gate_is_wired_into_the_loader_right_after_the_config_read():
     config = _ModelConfig("gemma4")
     with (
         patch.dict(os.environ, _env({}), clear=True),
-        patch.object(model_loading, "resolve_model_source", lambda path, revision, **kwargs: revision),
+        patch.object(
+            model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
+        ),
         patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
         pytest.raises(ValueError, match="fp32_non_ep_params"),
     ):
-        load_distributed_model("org/x", parallelism_config=_pc(ep_size=2, fp32_non_ep_params=True))
+        load_distributed_model(
+            "org/x", parallelism_config=_pc(ep_size=2, fp32_non_ep_params=True), trust_remote_code=True
+        )
 
 
 def test_should_accelerate_manage_ddp_semantics():
@@ -460,9 +501,11 @@ def test_the_run_dtype_reaches_transformers_under_its_own_key(tp_materialized_mo
     common = {"config": tp_materialized_model.config, "dtype": torch.bfloat16, "trust_remote_code": True}
     with (
         _load_collaborators(tp_materialized_model),
-        patch.object(model_loading, "from_pretrained_verified", return_value=tp_materialized_model) as loader,
+        patch.object(tp_loading, "from_pretrained_verified", return_value=tp_materialized_model) as loader,
     ):
-        _load_tp_model("org/x", _pc(tp_size=_TP_SIZE), AutoModelForCausalLM, common)
+        tp_loading.load_tp_model(
+            _SOURCE, _pc(tp_size=_TP_SIZE), AutoModelForCausalLM, common, preserve_checkpoint_precision=False
+        )
 
     passed = loader.call_args.kwargs
     assert passed["dtype"] is torch.bfloat16
@@ -474,33 +517,42 @@ def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
     """Every ``attn_implementation`` the CP loader forwards must have been through
     ``validate_attn_implementation``.
 
-    ``config`` is REQUIRED and the install reads only the validated value — both pinned here. An
+    The config is REQUIRED and the install reads only the validated value — both pinned here. An
     optional config with a second, unconditional install branch hands ``from_pretrained`` the RAW
     request whenever the caller omits the config; GPT-OSS with live sinks is exactly the case the
     validator rejects, so the run would train on a silently different attention kernel.
     """
-    assert inspect.signature(load_model_for_cp).parameters["config"].default is inspect.Parameter.empty, (
-        "config must stay REQUIRED: an optional one lets an unvalidated impl through"
-    )
-
     seen = {}
 
-    def fake_load_through_cpu(model_class, path, **kwargs):
+    def fake_load_whole_model(model_class, path, **kwargs):
         seen.update(kwargs)
         return torch.nn.Linear(2, 2)
 
+    pc = SimpleNamespace(
+        cp_config=lambda: SimpleNamespace(cp_size=2), max_concurrent_loading=None, fp32_non_ep_params=False
+    )
     config = Qwen3Config(num_hidden_layers=1, hidden_size=8, intermediate_size=8, num_attention_heads=2)
     with (
-        patch(f"{_CP_LOADING}.load_through_cpu", fake_load_through_cpu),
+        patch(f"{_CP_LOADING}.load_whole_model", fake_load_whole_model),
         patch(f"{_CP_LOADING}.patch_model_for_cp", lambda model, cp_config: model),
         patch("src.models.attention.selection.validate_attn_implementation", return_value="sdpa") as validator,
     ):
-        load_model_for_cp(
-            "org/repo",
-            SimpleNamespace(cp_size=2),
-            config,
-            model_class=AutoModelForCausalLM,
-            attn_implementation="flash_attention_2",
+        with pytest.raises(KeyError, match="config"):
+            load_cp_model(
+                _SOURCE,
+                pc,
+                AutoModelForCausalLM,
+                {"attn_implementation": "flash_attention_2"},
+                preserve_checkpoint_precision=False,
+                wraps_experts=False,
+            )
+        load_cp_model(
+            _SOURCE,
+            pc,
+            AutoModelForCausalLM,
+            {"config": config, "attn_implementation": "flash_attention_2"},
+            preserve_checkpoint_precision=False,
+            wraps_experts=False,
         )
 
     validator.assert_called_once_with(config, "flash_attention_2")
@@ -519,8 +571,6 @@ def test_every_loader_names_the_run_dtype_dtype():
         load_ep_model,
         load_ep_model_lazy,
         load_pp_stage_model,
-        load_model_for_cp,
-        load_model_for_ep_cp,
         load_frozen_auxiliary_model,
         instantiate_on_meta,
         resolve_run_dtype,
@@ -538,7 +588,8 @@ def test_no_transformers_call_in_the_loader_passes_the_deprecated_dtype_alias():
     boundary = ("from_pretrained_verified", "from_pretrained", "from_config")
     offenders = [
         f"{callee}() at line {node.lineno}"
-        for node in ast.walk(ast.parse(inspect.getsource(model_loading)))
+        for module in (model_loading, tp_loading, whole_model)
+        for node in ast.walk(ast.parse(inspect.getsource(module)))
         if isinstance(node, ast.Call)
         for callee in [node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")]
         if callee in boundary

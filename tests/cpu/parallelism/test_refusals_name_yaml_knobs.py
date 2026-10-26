@@ -19,6 +19,8 @@ import pytest
 from src.distributed.context_parallel.config import CPConfig, cp_chunk_bounds
 from src.distributed.parallelism_rules import reject_accelerate_launch
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
+from src.model_loading.parallel.load_rules import reject_unsupported_model
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.moe.expert_lora_spec import reject_expert_lora_with_expert_tp
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
@@ -160,7 +162,7 @@ def test_config_refusal_names_the_yaml_knobs(shape, knobs):
 def test_model_shape_refusal_names_the_yaml_knobs(shape, model_config, knob):
     config = make_parallelism_config(world_size=2, gpus_per_node=2, **shape)
     with pytest.raises(ValueError) as err:
-        config.validate_against_model_config(model_config)
+        reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False)
     _assert_names_knobs(str(err.value), (knob,))
 
 

@@ -20,8 +20,8 @@ from src.checkpoint.reading import load_full_state_dict
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.loading.model_loading import load_distributed_model
 from src.model_loading.liger.dispatch import apply_liger_kernel
+from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.models import TINY_QWEN3_MOE_CONFIG

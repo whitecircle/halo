@@ -25,19 +25,16 @@ from transformers import (
 )
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 
-from src.distributed.pipeline_parallel import split
-from src.distributed.pipeline_parallel.lazy_loader import _cross_stage_droppable_prefixes
-from src.distributed.pipeline_parallel.split import (
-    MTP_LAYER_COUNT_FIELDS,
-    PP_SPEC_MAP,
-    PPModelSpec,
+from src.distributed.pipeline_parallel import model_rules
+from src.distributed.pipeline_parallel.families import GENERIC_PP, PP_SPEC_MAP, resolve_pp_spec
+from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
+from src.distributed.pipeline_parallel.partition import (
     compute_layer_partition,
     head_cost_layer_equivalents,
     layer_types_period,
-    resolve_pp_spec,
-    validate_model_supports_pp,
+    validate_partition,
 )
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage, module_path, reject_layer_type_rebase
+from src.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from src.models.moe_balancing import ROUTER_TOPK_FIELDS
 from src.models.param_roles import persistent_buffers
@@ -159,7 +156,7 @@ def test_head_weighted_partition_respects_the_layer_types_period():
     assert [hi - lo for lo, hi in part] == [16, 8], part
     # Indivisible layer count: boundaries stay whole periods and the ragged tail rides the LAST
     # stage — an un-snapped 13/13 "uniform" here puts the boundary mid-period, which
-    # reject_layer_type_rebase then refuses, so the default partition would be a dead end.
+    # validate_partition then refuses, so the default partition would be a dead end.
     part = compute_layer_partition(26, 2, head_layer_equivalents=3.0, boundary_period=4)
     assert [hi - lo for lo, hi in part] == [16, 10], part
     assert part[1][0] % 4 == 0, part
@@ -257,7 +254,7 @@ def test_layer_type_gate_and_the_boundary_period_read_one_seam():
     """Both halves of the ``layer_types`` contract must see the same field on the same config.
 
     ``layer_types_period`` snaps the automatic partition to whole periods and
-    ``reject_layer_type_rebase`` refuses the offsets that snapping does not produce — a manual
+    ``validate_partition`` refuses the offsets that snapping does not produce — a manual
     ``pp_split`` is checked by the gate alone. A config the two read differently (``get_text_config``
     returning nothing while the fields sit on the wrapper) would leave that split un-snapped AND
     un-gated: every stage after the first silently swaps sliding-window and full causal masks.
@@ -268,8 +265,8 @@ def test_layer_type_gate_and_the_boundary_period_read_one_seam():
     model = _model()
     model.config = config
     with pytest.raises(ValueError, match="layer_types"):
-        reject_layer_type_rebase(model, 1, 1)
-    reject_layer_type_rebase(model, 2, 1)  # a whole period re-bases to a no-op
+        validate_partition(model, [(0, 1), (1, 8)])
+    validate_partition(model, [(0, 2), (2, 8)])  # a whole period re-bases to a no-op
 
 
 def test_head_cost_survives_per_layer_heterogeneous_attention():
@@ -289,7 +286,7 @@ def test_ragged_layer_types_snap_to_whole_period_boundaries():
     no period tiles it exactly — period detection must use the same shift-invariance criterion the
     rebase gate enforces, and the automatic partition must put every boundary on a whole period
     with the ragged tail on the last stage. An even 23/22 pp2 split would start stage 1 at offset 23,
-    which ``reject_layer_type_rebase`` refuses with no config knob to route around it."""
+    which ``validate_partition`` refuses with no config knob to route around it."""
     period = ["full_attention", "sliding_attention", "sliding_attention", "sliding_attention"]
     config = _TextlessConfig((period * 12)[:45])
     assert layer_types_period(config) == 4
@@ -298,18 +295,7 @@ def test_ragged_layer_types_snap_to_whole_period_boundaries():
     assert part[-1][1] == 45 and all(lo % 4 == 0 for lo, _ in part), part
     model = _model()
     model.config = config
-    for stage_rank, (lo, _) in enumerate(part):
-        reject_layer_type_rebase(model, lo, stage_rank)  # every default boundary passes the gate
-
-
-def test_module_path_rejects_a_module_outside_the_tree():
-    """The identity lookup behind global naming and the loader's droppable prefixes must fail loud.
-
-    A bare ``next(...)`` would raise ``StopIteration`` here, which reads as an exhausted iterator rather
-    than as "this model does not contain that module".
-    """
-    with pytest.raises(ValueError, match="is not a module of"):
-        module_path(_model(), torch.nn.Linear(4, 4))
+    validate_partition(model, part)  # every default boundary passes the gate
 
 
 def test_stage_build_rejects_a_model_whose_input_embedding_cannot_be_located():
@@ -394,8 +380,8 @@ def test_input_modules_stay_on_stage_zero_with_the_embedding():
     s0, s1 = (build_pipeline_stage(_inkling_model(), rank, 2, moe_balancing="none") for rank in (0, 1))
     assert "model.embed_norm.weight" in s0.checkpoint_name_map()
     assert not any("embed_norm" in name for name in s1.checkpoint_name_map())
-    assert "model.embed_norm" in _cross_stage_droppable_prefixes(_inkling_model(), 1, 2)
-    assert "model.embed_norm" not in _cross_stage_droppable_prefixes(_inkling_model(), 0, 2)
+    assert "model.embed_norm" in StageLayout.of(_inkling_model()).dropped_prefixes(False, True)
+    assert "model.embed_norm" not in StageLayout.of(_inkling_model()).dropped_prefixes(True, False)
 
 
 def test_persistent_buffers_survive_the_split():
@@ -435,7 +421,7 @@ def test_tie_rejection_reads_the_weights_not_only_the_config():
     model = _model()
     model.lm_head.weight = model.model.embed_tokens.weight
     with pytest.raises(ValueError, match="tie_word_embeddings"):
-        validate_model_supports_pp(model)
+        reject_unsupported_pp_model(model)
 
 
 def test_head_that_cannot_be_tied_is_accepted():
@@ -443,14 +429,14 @@ def test_head_that_cannot_be_tied_is_accepted():
     config = Qwen3Config(**{**TINY_QWEN3_CONFIG, "tie_word_embeddings": True, "num_labels": 2})
     model = Qwen3ForSequenceClassification(config)
     assert model.get_output_embeddings() is None
-    validate_model_supports_pp(model)
+    reject_unsupported_pp_model(model)
 
 
 def test_untied_model_is_accepted():
     """The gate must not reject everything: an untied model splits normally."""
     model = _model()
     assert model.lm_head.weight is not model.model.embed_tokens.weight
-    validate_model_supports_pp(model)
+    reject_unsupported_pp_model(model)
 
 
 def test_aux_loss_balanced_moe_is_rejected():
@@ -470,13 +456,13 @@ def test_bias_update_balanced_moe_is_accepted():
     for layer in model.model.layers:
         layer.mlp.gate.balancing_biases = torch.zeros(model.config.num_experts)
         layer.mlp.gate.expert_load_counter = None
-    validate_model_supports_pp(model)
+    reject_unsupported_pp_model(model)
 
 
 def test_explicit_non_aux_loss_balancing_is_accepted():
     """The gate judges the run's resolved strategy, not the family in the abstract."""
     for requested in ("bias_update", "none"):
-        validate_model_supports_pp(_moe_model(), requested)
+        reject_unsupported_pp_model(_moe_model(), requested)
 
 
 def test_composite_vlm_moe_is_rejected():
@@ -492,7 +478,7 @@ def test_composite_vlm_moe_is_rejected():
     )
     assert getattr(config, "num_experts", None) is None, "top-level config must not carry the expert fields"
     with pytest.raises(ValueError, match="aux_loss"):
-        validate_model_supports_pp(Qwen3VLMoeForConditionalGeneration(config), "aux_loss")
+        reject_unsupported_pp_model(Qwen3VLMoeForConditionalGeneration(config), "aux_loss")
 
 
 def test_aux_loss_gate_sees_a_coefficient_only_the_wrapper_declares(monkeypatch):
@@ -512,48 +498,38 @@ def test_aux_loss_gate_sees_a_coefficient_only_the_wrapper_declares(monkeypatch)
     model.config = config
     # The stand-in config builds no model, so the head-path verification (its own test file) is
     # stubbed out of this gate's way.
-    monkeypatch.setattr(split, "resolve_head_transform", lambda _model: IDENTITY_HEAD_TRANSFORM)
+    monkeypatch.setattr(model_rules, "resolve_head_transform", lambda _model: IDENTITY_HEAD_TRANSFORM)
     with pytest.raises(ValueError, match="aux_loss"):
-        validate_model_supports_pp(model, "aux_loss")
+        reject_unsupported_pp_model(model, "aux_loss")
 
 
 def test_moe_sequence_classification_is_accepted():
     """Only the causal-LM forward adds the aux term; a score head never does, so PP drops nothing."""
     model = Qwen3MoeForSequenceClassification(Qwen3MoeConfig(**_PP_SPLIT_MOE_CONFIG, num_labels=2))
     assert model.config.router_aux_loss_coef > 0
-    validate_model_supports_pp(model)
+    reject_unsupported_pp_model(model)
 
 
 def test_moe_without_an_aux_loss_term_is_accepted():
     """coef=0 means no aux term is added at all, so a stage drops nothing."""
-    validate_model_supports_pp(_moe_model(router_aux_loss_coef=0.0))
+    reject_unsupported_pp_model(_moe_model(router_aux_loss_coef=0.0))
 
 
 def test_unsupported_families_are_rejected_with_a_mechanism():
     for backbone_name in ("ZayaModel", "Gemma4TextModel"):
         spec = PP_SPEC_MAP[backbone_name]
-        assert spec.SUPPORTS_PP is False
-        assert len(spec.UNSUPPORTED_REASON) > 40, f"{backbone_name} rejects PP without a reason"
+        assert len(spec.refusal or "") > 40, f"{backbone_name} rejects PP without a reason"
 
 
 def test_unclaimed_family_gets_the_permissive_generic_spec():
     """Absence of a spec means supported — new families cost no code."""
-    assert resolve_pp_spec(_model().model) is PPModelSpec
-    validate_model_supports_pp(_model())
-
-
-def test_spec_subclass_must_justify_disabling_pp():
-    """__init_subclass__ refuses a silent SUPPORTS_PP=False."""
-    with pytest.raises(TypeError, match="declares no UNSUPPORTED_REASON"):
-
-        class _Bad(PPModelSpec):
-            HF_MODULE_NAMES = ("SomeModel",)
-            SUPPORTS_PP = False
+    assert resolve_pp_spec(_model().model) is GENERIC_PP
+    reject_unsupported_pp_model(_model())
 
 
 def test_model_without_a_layer_list_is_rejected():
     with pytest.raises(ValueError, match="decoder-layer list"):
-        validate_model_supports_pp(torch.nn.Linear(4, 4))
+        reject_unsupported_pp_model(torch.nn.Linear(4, 4))
 
 
 # Written out rather than read from MTP_LAYER_COUNT_FIELDS: parametrizing over the constant under
@@ -579,7 +555,7 @@ def test_every_mtp_spelling_rejects_a_live_tail(field):
     setattr(model.config, field, 1)
     model.model.layers.append(model.model.layers[-1])  # the appended MTP tail a live family builds
     with pytest.raises(ValueError, match=field):
-        validate_model_supports_pp(model)
+        reject_unsupported_pp_model(model)
 
 
 @pytest.mark.parametrize("field", MTP_FIELDS_IN_THE_WILD)
@@ -593,7 +569,7 @@ def test_mtp_field_declared_but_not_built_is_accepted(field):
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     setattr(model.config, field, 3)
     assert len(model.model.layers) == model.config.num_hidden_layers, "premise: no tail was built"
-    validate_model_supports_pp(model)
+    reject_unsupported_pp_model(model)
 
 
 @pytest.mark.parametrize("field", MTP_FIELDS_IN_THE_WILD)
@@ -601,7 +577,7 @@ def test_mtp_field_declared_at_zero_is_accepted(field):
     """Anti-vacuity: the gate reads the COUNT, not the field's presence (Ling-mini-2.0 ships 0)."""
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     setattr(model.config, field, 0)
-    validate_model_supports_pp(model)
+    reject_unsupported_pp_model(model)
 
 
 if __name__ == "__main__":

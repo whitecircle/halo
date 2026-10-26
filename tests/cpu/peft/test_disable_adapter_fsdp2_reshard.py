@@ -32,7 +32,7 @@ from src.distributed.fsdp import (
     make_disable_adapter_fsdp2_safe,
     reshard_fsdp2_modules,
 )
-from src.distributed.loading.peft_setup import build_peft_config
+from src.model_loading.parallel.peft_setup import build_peft_config
 from tests.common.models import TINY_QWEN3_CONFIG
 
 TOKENS = torch.tensor([[6, 7, 8, 9, 10, 11]])

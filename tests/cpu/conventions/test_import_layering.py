@@ -1,9 +1,10 @@
 """The import layering of ``src/``, read off the import graph itself.
 
-Enforced: the sharding-agnostic trees (``src/checkpoint/``, ``src/model_loading/`` outside its
-``parallel/`` loaders, ``src/models/``) import no ``src.distributed`` or ``torch.distributed``; nothing
-else in ``src/distributed`` imports the loader dispatch (``src/distributed/loading/``); the members of
-``src/distributed`` import each other acyclically; every toolkit env knob is read through ``src/env.py``.
+Enforced: the sharding-agnostic trees (``src/checkpoint/``, ``src/model_loading/`` outside its ``parallel/``
+loaders, ``src/models/``) import no ``src.distributed``, ``torch.distributed`` or loader dispatch; nothing in
+``src/distributed`` imports the loader dispatch (``src/model_loading/parallel/``); the members of
+``src/distributed`` and of the dispatch import each other acyclically; every toolkit env knob is read through
+``src/env.py``.
 
 The final layer table (``_LAYERS`` and the rules beside it) is laid over today's tree, each module placed where
 it lands through ``_PENDING_MOVES``: a break outside ``_KNOWN_LAYER_BREAKS`` fails, a known one is reported, and
@@ -30,14 +31,13 @@ from tests.common.sample_tree import write_sample_tree
 _SRC = REPO_ROOT / PACKAGE
 _INDEX = RepoIndex(REPO_ROOT)
 
+# The package above every parallelism implementation, which nothing in src/distributed imports.
+_DISPATCH_PACKAGE = "model_loading.parallel"
+_DISPATCH_DIR = _SRC.joinpath(*_DISPATCH_PACKAGE.split("."))
+
 # The sharding-agnostic trees and what they may not reach.
 _AGNOSTIC_DIRS = ("checkpoint", "model_loading", "models")
-# The parallelism-aware loaders: inside model_loading/, above src/distributed.
-_AGNOSTIC_EXCLUDED_DIR = "model_loading/parallel"
-_FORBIDDEN_ROOTS = (f"{PACKAGE}.distributed", "torch.distributed")
-
-# The package above every parallelism implementation, which nothing else in src/distributed imports.
-_DISPATCH_PACKAGE = "distributed.loading"
+_FORBIDDEN_ROOTS = (f"{PACKAGE}.distributed", "torch.distributed", f"{PACKAGE}.{_DISPATCH_PACKAGE}")
 
 # EP_* stays out: EP_DISABLE_GIN / EP_SUPPRESS_NCCL_CHECK are DeepEP's own vars, read raw at
 # their owner by design (src/env.py docstring).
@@ -119,12 +119,10 @@ _PENDING_MOVES = {
     "training.parser": "configs.parser",
     "diagnostics.weight_sync_transport": "weight_sync.transport_check",
     "distributed.checkpoint": "checkpoint.parallel",
-    "distributed.loading": "model_loading.parallel",
     "distributed.loading.vlm_setup": "entrypoints.model_setup",
     "distributed.nccl": "weight_sync.transport",
     "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
     "distributed.context_parallel.key_mapping": "models.unwrapping",
-    "distributed.context_parallel.loading": "model_loading.parallel.cp",
     "distributed.pipeline_parallel.lazy_loader": "model_loading.parallel.pp",
     "distributed.expert_parallel.balancing_strategy": "callbacks.balancing",
     "distributed.expert_parallel.expert_gather": "distributed.expert_parallel.moe_layer.gather",
@@ -251,19 +249,24 @@ def _member(module: str, package: str) -> str | None:
     return module.removeprefix(f"{package}.").partition(".")[0]
 
 
+def _final_path(module: str, moves: Mapping[str, str]) -> str:
+    """Where ``module`` (dotted under the package root) lands, through the longest entry of ``moves`` naming
+    it or a package above it."""
+    parts = module.split(".")
+    for end in range(len(parts), 0, -1):
+        prefix = ".".join(parts[:end])
+        if prefix in moves:
+            return ".".join([moves[prefix], *parts[end:]])
+    return module
+
+
 _IMPORTS = _package_imports(_INDEX)
 _AGNOSTIC_FILES = sorted(
     path
     for directory in _AGNOSTIC_DIRS
     for path in (_SRC / directory).rglob("*.py")
-    if not path.is_relative_to(_SRC / _AGNOSTIC_EXCLUDED_DIR)
+    if not path.is_relative_to(_DISPATCH_DIR)
 )
-_BELOW_DISPATCH_FILES = [
-    path
-    for path in _package_files(_INDEX)
-    if _member(_module_name(_SRC, path), "distributed") is not None
-    and not _is_within(_module_name(_SRC, path), _DISPATCH_PACKAGE)
-]
 _ENV_SWEPT_FILES = _package_files(_INDEX) + sorted((REPO_ROOT / "scripts").rglob("*.py"))
 
 
@@ -322,17 +325,6 @@ def _cycles(graph: Mapping[str, Iterable[str]]) -> list[list[str]]:
     return sorted(sorted(component) for component in components if component)
 
 
-def _final_path(module: str, moves: Mapping[str, str]) -> str:
-    """Where ``module`` (dotted under the package root) lands, through the longest entry of ``moves`` naming
-    it or a package above it."""
-    parts = module.split(".")
-    for end in range(len(parts), 0, -1):
-        prefix = ".".join(parts[:end])
-        if prefix in moves:
-            return ".".join([moves[prefix], *parts[end:]])
-    return module
-
-
 def _unit(module: str) -> str:
     """The layer-table unit of the final path ``module``."""
     top, _, rest = module.partition(".")
@@ -354,6 +346,20 @@ def _misplaced(module: str) -> str | None:
         if member is not None and member not in rows:
             return f"{member!r} is in no row of the {package} order"
     return None
+
+
+def _lands_below_dispatch(path: Path) -> bool:
+    """Whether a ``src/distributed`` module lands at or below the dispatch's row, outside the dispatch."""
+    module = _module_name(_SRC, path)
+    final = _final_path(module, _PENDING_MOVES)
+    return (
+        _member(module, "distributed") is not None
+        and _LEVEL.get(_unit(final), 0) <= _LEVEL[_DISPATCH_PACKAGE]
+        and not _is_within(final, _DISPATCH_PACKAGE)
+    )
+
+
+_BELOW_DISPATCH_FILES = [path for path in _package_files(_INDEX) if _lands_below_dispatch(path)]
 
 
 def _edge_breaks(location: str, source: str, target: str) -> list[_Break]:
@@ -443,6 +449,7 @@ def _report(breaks: Iterable[_Break]) -> str:
 def test_the_sweep_sees_every_agnostic_tree():
     """Anti-vacuity: an empty or shrunken sweep would pass every assertion below."""
     assert len(_AGNOSTIC_FILES) > 10, f"the sharding-agnostic sweep collapsed to {len(_AGNOSTIC_FILES)} files"
+    assert _DISPATCH_DIR.is_dir(), f"src/{_DISPATCH_PACKAGE.replace('.', '/')} moved; the sweep excludes it by path"
     for directory in _AGNOSTIC_DIRS:
         assert any(path.is_relative_to(_SRC / directory) for path in _AGNOSTIC_FILES), directory
 
@@ -478,7 +485,7 @@ def test_no_distributed_package_imports_the_loader_dispatch(path):
         {found.module for found in _imports_of(path) if _is_within(_in_package(found.module) or "", _DISPATCH_PACKAGE)}
     )
     assert not offending, (
-        f"{path.relative_to(REPO_ROOT)} imports {offending}. src/distributed/loading/ dispatches to "
+        f"{path.relative_to(REPO_ROOT)} imports {offending}. src/model_loading/parallel/ dispatches to "
         f"every parallelism package, so an import back closes a package cycle — move what both sides "
         f"need into the lower package (the FP32-master selector and restore live in expert_parallel/)."
     )
@@ -521,13 +528,20 @@ def test_a_type_checking_import_adds_no_edge_and_a_runtime_one_does(tmp_path):
     assert _member_graph(_package_imports(RepoIndex(tmp_path)), "tree") == {"a": {"b", "d"}}
 
 
-def test_the_distributed_packages_import_each_other_acyclically():
-    graph = _member_graph(_IMPORTS, "distributed")
-    assert {"loading", "checkpoint", "expert_parallel", "pipeline_parallel"} <= set(graph), sorted(graph)
+@pytest.mark.parametrize(
+    ("package", "required"),
+    [
+        ("distributed", {"checkpoint", "expert_parallel", "pipeline_parallel"}),
+        (_DISPATCH_PACKAGE, {"loader", "frozen_models"}),
+    ],
+)
+def test_the_packages_import_their_members_acyclically(package, required):
+    graph = _member_graph(_IMPORTS, package)
+    assert required <= set(graph), sorted(graph)
     cycles = _cycles(graph)
     assert not cycles, (
-        f"src/distributed import cycles: {cycles}. Each package must sit at one layer — move what both sides "
-        f"need into the lower one rather than importing back up."
+        f"src/{package.replace('.', '/')} import cycles: {cycles}. Each member must sit at one layer — move what "
+        f"both sides need into the lower one rather than importing back up."
     )
 
 

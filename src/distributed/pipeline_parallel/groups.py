@@ -1,17 +1,8 @@
-"""Pipeline process groups (per-chain and per-stage) and the chain's last-stage broadcasts.
+"""Pipeline process groups and the chain's last-stage broadcasts.
 
-A chain is the set of ranks holding the same intra-stage position across every stage; it carries all
-of PP's point-to-point activation traffic. Members are ``stage_world_size`` apart, so on the intended
-placement each sits in a different NVLink domain and the chain is the traffic crossing EFA/IB. A
-stage group is one contiguous rank block: the FSDP data-parallel width under PP+FSDP, and the scope
-for collectives over ranks holding the same layers (loss-token counts, stage-local metrics,
-per-stage gathers).
-
-Group creation is collective: every rank calls ``dist.new_group`` for every group in the same fixed
-order and keeps only its own, as ``EPConfig._create_process_groups`` does.
-
-Only the last stage computes a loss or a prediction; the broadcasts below carry those to the rest of
-the chain, so every rank logs the same value and HF's rank-uniform eval path has something to gather.
+A chain holds the ranks at one intra-stage position across every stage and carries all P2P activation
+traffic (its members sit ``stage_world_size`` apart, in different NVLink domains); a stage group is one
+contiguous rank block, the FSDP data-parallel scope. Only the last stage holds a loss or a prediction.
 """
 
 from __future__ import annotations
@@ -29,28 +20,13 @@ from src.runtime.ranks import has_process_group
 logger = logging.getLogger(__name__)
 
 
-def _stage_rank_blocks(config: ParallelismConfig) -> list[list[int]]:
-    """Each stage's contiguous rank block, in stage order — the rank layout both groups slice.
-
-    Row ``s`` is stage ``s``'s ranks; column ``p`` is the chain of intra-stage position ``p``, so the
-    chain lists below are this matrix transposed rather than a second rank formula.
-    """
-    return [
-        list(range(stage * config.stage_world_size, (stage + 1) * config.stage_world_size))
-        for stage in range(config.pp_size)
-    ]
-
-
-def create_pipeline_group(config: ParallelismConfig) -> dist.ProcessGroup | None:
-    """Create every pipeline chain's process group; return the one containing this rank.
-
-    Returns ``None`` when PP is disabled.
-    """
+def build_pipeline_group(config: ParallelismConfig) -> dist.ProcessGroup | None:
+    """COLLECTIVE: create every pipeline chain's process group; this rank's, or ``None`` off PP."""
     if config.pp_size <= 1:
         return None
     if not has_process_group():
         raise RuntimeError("Pipeline parallelism requires an initialized process group (launch with torchrun).")
-    chains = [list(chain) for chain in zip(*_stage_rank_blocks(config), strict=True)]
+    chains = [list(chain) for chain in zip(*config.pp_stage_rank_blocks(), strict=True)]
     group = build_groups(chains, mine=config.stage_local_rank, what="pipeline chain")
     logger.info(
         "Pipeline chain for rank %d: %s (stage %d/%d)",
@@ -62,25 +38,20 @@ def create_pipeline_group(config: ParallelismConfig) -> dist.ProcessGroup | None
     return group
 
 
-def create_stage_group(config: ParallelismConfig) -> dist.ProcessGroup | None:
-    """Create every stage's process group; return the one containing this rank.
-
-    Returns ``None`` when PP is disabled.
-    """
+def build_stage_group(config: ParallelismConfig) -> dist.ProcessGroup | None:
+    """COLLECTIVE: create every stage's process group; this rank's, or ``None`` off PP."""
     if config.pp_size <= 1:
         return None
     if not has_process_group():
         raise RuntimeError("Pipeline parallelism requires an initialized process group (launch with torchrun).")
-    return build_groups(_stage_rank_blocks(config), mine=config.pp_rank, what="pipeline stage group")
+    return build_groups(config.pp_stage_rank_blocks(), mine=config.pp_rank, what="pipeline stage group")
 
 
 def broadcast_scalar_from_last_stage(tensor: torch.Tensor | None, src: int, group: dist.ProcessGroup) -> torch.Tensor:
-    """Broadcast the last stage's scalar down the chain so every rank holds the same value.
+    """COLLECTIVE over the chain: the last stage's scalar on every rank.
 
-    Non-last stages pass ``None`` and receive into a scalar fp32 buffer, so the source is cast to
-    that shape and dtype here — NCCL validates neither across ranks. The shape is fixed, so this
-    stays a single collective on the per-step path; :func:`broadcast_tensor_from_last_stage` adds a
-    metadata hop for tensors whose shape the receivers cannot know.
+    Non-last stages pass ``None`` and receive into a scalar fp32 buffer, so the source is cast to that
+    shape and dtype here (NCCL validates neither). One collective, for the per-step path.
     """
     tensor = tensor.detach().reshape(()).float() if tensor is not None else torch.zeros((), device=current_device())
     dist.broadcast(tensor, src=src, group=group)
@@ -88,11 +59,8 @@ def broadcast_scalar_from_last_stage(tensor: torch.Tensor | None, src: int, grou
 
 
 def broadcast_tensor_from_last_stage(tensor: torch.Tensor | None, src: int, group: dist.ProcessGroup) -> torch.Tensor:
-    """Broadcast a last-stage tensor down the chain, shape and dtype carried with it.
-
-    The receiving ranks cannot know the shape — it is whatever the last stage produced — so one
-    object hop carries the metadata. Used off the per-step path only.
-    """
+    """COLLECTIVE over the chain: a last-stage tensor on every rank, its shape and dtype carried by
+    one object hop first (off the per-step path only)."""
     meta = [(tuple(tensor.shape), tensor.dtype) if tensor is not None else None]
     dist.broadcast_object_list(meta, src=src, group=group)
     described = meta[0]

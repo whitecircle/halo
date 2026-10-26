@@ -60,7 +60,7 @@ from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispat
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
-from src.distributed.pipeline_parallel.split import resolve_layer_partition
+from src.distributed.pipeline_parallel.partition import resolve_layer_partition
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
 from src.model_loading.lazy_safetensors.weights import resolve_safetensors_index
 from tests.common.harness import gpu_test_main

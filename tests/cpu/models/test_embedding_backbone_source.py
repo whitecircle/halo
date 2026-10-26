@@ -17,6 +17,7 @@ from trl import ModelConfig
 
 import scripts.training.embedding as embedding_script
 from src.configs.embedding import EmbeddingConfig
+from src.model_loading.parallel.model_source import ModelSource
 
 REPO = "org/model"
 COMMIT_A = "a" * 40
@@ -31,7 +32,7 @@ def test_the_embedding_backbone_loads_at_the_agreed_revision(monkeypatch, tmp_pa
 
     def resolve(model_name_or_path, revision, *, tag, whole_repo=False):
         seen["resolve"] = (model_name_or_path, revision, tag, whole_repo)
-        return COMMIT_A
+        return ModelSource(model_name_or_path, COMMIT_A, model_name_or_path)
 
     def build(model_name_or_path, *, revision, **kwargs):
         seen["load"] = (model_name_or_path, revision)

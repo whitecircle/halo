@@ -21,8 +21,8 @@ from accelerate import PartialState
 from torch.nn.functional import log_softmax
 from trl import SFTTrainer
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.distillation.losses import privileged_teacher_pass, shifted_token_cross_entropy
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.sft import DistributedSFTTrainer

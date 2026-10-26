@@ -21,9 +21,9 @@ from src.data.pipeline.preferences import split_rendered_completion
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.row_processors import prepare_generative_row
 from src.data.sources.loading import reject_image_columns
-from src.distributed.loading.frozen_models import load_frozen_reference_model
-from src.distributed.loading.peft_setup import has_attention_lora_targets, setup_peft_model
 from src.model_loading.model_preparation import log_model_info
+from src.model_loading.parallel.frozen_models import load_frozen_reference_model
+from src.model_loading.parallel.peft_setup import configure_adapter_training, wraps_in_peft_model
 from src.runtime.collectives import barrier
 from src.trainers.grpo.mixins.offline_reference import reject_unsupported_reference_input
 from src.trainers.grpo.offline import OfflineGRPOTrainer
@@ -136,7 +136,7 @@ def main():
             model_config.model_name_or_path,
             offline_grpo_config.kl_beta,
             parallelism_config,
-            peft=has_attention_lora_targets(model_config),
+            peft=wraps_in_peft_model(model_config),
         ),
         presharded=dataset_presharded,
     )
@@ -159,7 +159,7 @@ def main():
         max_completion_length=offline_grpo_config.max_completion_length,
     )
 
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
 
     ref_model = _load_kl_reference(
         args,

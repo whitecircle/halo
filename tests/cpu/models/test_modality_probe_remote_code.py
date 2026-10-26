@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from src.distributed.loading.model_source import probe_checkpoint
+from src.model_loading.parallel.model_source import probe_checkpoint
 
 _CONFIG_MODULE = """
 from transformers import PretrainedConfig

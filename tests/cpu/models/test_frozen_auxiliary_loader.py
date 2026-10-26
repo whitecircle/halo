@@ -31,13 +31,14 @@ from trl import ModelConfig
 import scripts.training.distillation.self_distill as self_distill_script
 import scripts.training.distillation.teacher_distill as distill_script
 import scripts.training.offline_grpo as offline_grpo_script
-import src.distributed.loading.frozen_models as frozen_models
-from src.distributed.loading.frozen_models import (
+import src.model_loading.parallel.frozen_models as frozen_models
+from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.frozen_models import (
     load_frozen_auxiliary_model,
     load_reference_model_for_on_policy_grpo,
     load_reference_model_for_preference,
 )
-from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.model_source import ModelSource
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
@@ -57,7 +58,7 @@ FROZEN_LOAD_STEPS = ("resolve_attn_implementation", "apply_sinks_policy")
 
 # Allowlist, not a list of known offenders: the sweep below is over the whole tree, so a new copy is
 # caught by default. attention.py and gpt_oss_sinks.py define the two steps; the loaders and the
-# shared ``apply_run_model_policies`` apply them, with model_loading.py re-running the resolver AFTER the
+# shared ``apply_run_model_policies`` apply them, with loader.py re-running the resolver AFTER the
 # parallelism-specific overrides (CP's flex→FA switch, EP's flex-compile disable). The rest apply a
 # RECORDED or explicit policy to a checkpoint on disk rather than filling ``.sinks`` by name behind it.
 FROZEN_LOAD_STEP_OWNERS = frozenset(
@@ -65,8 +66,8 @@ FROZEN_LOAD_STEP_OWNERS = frozenset(
         "src/models/attention/selection.py",
         "src/models/attention/gpt_oss_sinks.py",
         "src/model_loading/model_preparation.py",
-        "src/distributed/loading/frozen_models.py",
-        "src/distributed/loading/model_loading.py",
+        "src/model_loading/parallel/frozen_models.py",
+        "src/model_loading/parallel/loader.py",
         "scripts/training/embedding.py",
         "src/checkpoint/sidecars.py",
         "scripts/before_training/patch_vocab.py",
@@ -330,7 +331,7 @@ def test_the_frozen_model_is_finalized_like_the_policy():
     with stub_frozen_loader() as caps:
         model = caps.auto_load.return_value
         model.generation_config = GenerationConfig(temperature=0.7, do_sample=False)
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16)
+        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
 
     assert model.generation_config.do_sample is True
 
@@ -385,7 +386,12 @@ def test_vlm_load_pins_the_image_text_class_and_placement():
     the vision tower for a wrapper the mapping does not name."""
     with stub_frozen_loader() as caps:
         load_frozen_auxiliary_model(
-            AUX_MODEL, dtype=torch.bfloat16, is_vlm=True, device_map={"": 2}, download_tag="aux"
+            AUX_MODEL,
+            dtype=torch.bfloat16,
+            is_vlm=True,
+            device_map={"": 2},
+            download_tag="aux",
+            trust_remote_code=False,
         )
     captured = captured_load(caps, is_vlm=True)
     assert captured.load_positional[0] is AutoModelForImageTextToText
@@ -402,7 +408,9 @@ def test_the_frozen_load_keeps_the_task_head(is_vlm):
     scorers already load this way (``scripts/inference/reward_model/_common.py``).
     """
     with stub_frozen_loader() as caps:
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, is_vlm=is_vlm)
+        load_frozen_auxiliary_model(
+            AUX_MODEL, dtype=torch.bfloat16, is_vlm=is_vlm, trust_remote_code=False, download_tag=None
+        )
     assert captured_load(caps, is_vlm=is_vlm).load["excuse_task_head"] is False
 
 
@@ -417,7 +425,7 @@ def test_the_frozen_load_applies_the_remote_code_shims_before_the_config_fetch()
         patch.object(frozen_models, "apply_remote_code_compat_shims", lambda: order.append("shims")),
     ):
         caps.auto_config.from_pretrained.side_effect = lambda *args, **kwargs: order.append("config") or STUB_CONFIG
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16)
+        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
     assert order == ["shims", "config"]
 
 
@@ -440,9 +448,11 @@ def test_the_frozen_load_warms_the_fa4_kernels_after_the_load():
             lambda model, *, dtype: order.append(("warmup", dtype)),
         ),
     ):
-        caps.fetch_scope.side_effect = lambda path, revision, *, tag: order.append(("resolve", tag)) or revision
+        caps.fetch_scope.side_effect = lambda path, revision, *, tag: order.append(("resolve", tag)) or ModelSource(
+            path, revision, path
+        )
         caps.auto_load.side_effect = lambda *args, **kwargs: order.append("weights") or caps.auto_load.return_value
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, download_tag="teacher")
+        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, download_tag="teacher", trust_remote_code=False)
 
     assert order == [("resolve", "teacher"), "weights", ("warmup", torch.bfloat16)]
 
@@ -451,7 +461,7 @@ def test_an_untagged_fetch_opens_no_coordination_scope():
     """``fs_aware_main_first`` demands every rank reach a tag equally often — an unconditional scope
     around a load only some ranks perform would hang the ones that do."""
     with stub_frozen_loader() as caps:
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16)
+        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
     caps.fetch_scope.assert_not_called()
 
 

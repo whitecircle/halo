@@ -47,7 +47,7 @@ Nearly every run takes the fp32 path. TRL's fused Liger DPO loss runs only when 
 
 ## Reference model
 
-Three shapes, decided by `load_reference_model_for_preference` (`src/distributed/loading/frozen_models.py`):
+Three shapes, decided by `load_reference_model_for_preference` (`src/model_loading/parallel/frozen_models.py`):
 
 - **PEFT** (`use_peft: true`) — no second model: the script passes a LoRA config, so the reference is the base with the adapter disabled. A trainer built by hand around an already-wrapped `PeftModel` gets a frozen `ref` adapter copy instead.
 - **EP / TP with `precompute_ref_log_probs: true`** — no reference is loaded either. Log-probs come from the untrained policy before step 1, and a resume restores them from the checkpoint ([below](#resuming-a-precompute-run)).

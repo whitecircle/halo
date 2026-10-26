@@ -26,7 +26,7 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Checkpoints | The per-mode saver ladder, weight resume, per-rank optimizer shards + LR scheduler, PEFT adapters, load-coverage gate — over the sharding-agnostic on-disk layer | `src/distributed/checkpoint/`, `src/checkpoint/`, `src/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
 | Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `src/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
 | Models | The sharding-agnostic model side: module-tree introspection, composite-config access, the context window, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, and the sequence-classification heads transformers does not ship (`src/models/seq_cls_heads.py`, registered by an import in `src/model_loading/model_preparation.py`) | `src/models/` | [Adding a Model](../models/adding-a-model.md) |
-| Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the family patches and run policies every loaded model takes, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, remote-code compatibility, the post-load buffer repair, Liger applied at load, and the lazy safetensors core the EP and PP loaders share | `src/model_loading/` | [Models](../models/README.md) |
+| Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the family patches and run policies every loaded model takes, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, remote-code compatibility, the post-load buffer repair, Liger applied at load, and the lazy safetensors core the EP and PP loaders share. Above it, `parallel/` holds the parallelism-aware loads: the `load_distributed_model` dispatcher (`loader.py`), the refusals it runs before any weight (`load_rules.py`), the `ModelSource` every rank agrees on (`model_source.py`), the whole-model load core (`whole_model.py`), the TP and CP loaders (`tp.py`, `cp.py`), the frozen reference and teacher loads, and the PEFT and freeze-pattern setup | `src/model_loading/` | [Models](../models/README.md) |
 | Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model, their catalog), the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards/README.md) |
 | Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/async-grpo/environments/README.md) |
 | Weight sync | Trainer-to-rollout-engine weight sync: one client per engine (`VLLMWeightSyncClient`, `SGLangWeightSyncClient`) and the backend registry, the chunking (the chunk budget, the co-load groups, the snapshots on the sync device), and the NCCL transport — the rendezvous listener and the group-address policy, the bounded broadcast waits, the vLLM pynccl communicator and packed broadcast, the SGLang c10d weight-update group, the send-stream buffers | `src/weight_sync/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
@@ -43,7 +43,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/models/param_roles.py` | parameter roles: embedding/head markers, normalization modules, persistent buffers, fp32 pins | every checkpoint writer, the FSDP2 wrap and the lazy loaders (fp32 pins), Muon and the PEFT setup |
 | `src/models/peft_adapters.py` | PEFT adapter parameters and the out-of-place LoRA fold, the value PEFT's merge would write | the weight sync, the merged EP and FSDP2 saves, the embedding trainer's save, the PEFT validation |
 | `src/models/gradient_checkpointing.py` | the recompute scope both passes of one checkpoint invocation share, expert-load counting off it, and the scoped gradient-checkpointing enable | the EP layers' dispatch replay, the router-bias load counters, the EP trainer setup |
-| `src/models/modality.py` | the multimodal verdict off a config in hand or a name; no hub read, no collective (the collective probe is `probe_checkpoint` in `src/distributed/loading/model_source.py`) | the loaders, the run-level `is_vlm_run`, the PP gate |
+| `src/models/modality.py` | the multimodal verdict off a config in hand or a name; no hub read, no collective (the collective probe is `probe_checkpoint` in `src/model_loading/parallel/model_source.py`) | the loaders, the run-level `is_vlm_run`, the PP gate |
 | `src/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` | the collator factory, the packing and padding-free collators, and SMPO's padding-free forward |
 | `src/models/attention/layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term | the token-metrics mixin and the efficiency callbacks |
 | `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell | the chunked GRPO log-prob sweep (and the PP stage seam), which apply the same verdict |
@@ -63,7 +63,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/data/pipeline/preprocessed_metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts | the training entry points and the loader, which read the stamp without importing the bake that wrote the rows |
 | `src/environments/rollout_config.py` | `RolloutConfig` | built by `AsyncTrainingConfig`, received pickled by the Ray rollout actors — keeping the Ray import out of `src.configs` |
 | `src/config_validation.py` | the value guards, the range-validation base, the declared-default comparison and the argument refusals — standard library only | the argument and config dataclasses, the reward terms, the training scripts and the Muon builder |
-| `src/subclass_registry.py` | the subclass-tree walk, the class-claim maps (a key claimed twice raises), the swap of claimed modules and the package import that registers every family — torch only | the EP and CP patchers, the PP splitter, the head-path contract, the EP `model_type` roster and the weight-sync backend registry, so a family registers by subclassing, with no list to edit |
+| `src/subclass_registry.py` | the subclass-tree walk, the class-claim maps (a key claimed twice raises), the swap of claimed modules and the package import that registers every family — torch only | the EP and CP patchers, the head-path contract, the EP `model_type` roster and the weight-sync backend registry, so a family registers by subclassing, with no list to edit |
 | `src/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `src/config_validation.py` guards are its only first-party imports | the argument dataclasses and `EnvironmentConfig`, which parse `rewards:` at config time without pulling in the scorers' SDK client |
 | `src/inference/endpoints.py` | the OpenAI-compatible endpoint defaults, key resolution and the loopback test (`is_loopback`) — `src/env.py` only | the reward terms, the CLI endpoint flag block (`scripts/_common.py`), the judge clients, the Ray rollout actors and the weight-sync group-address policy — none of them imports the SDK |
 
@@ -121,14 +121,14 @@ one mixin per concern; its `compute`, `routing`, `grad_sync` and `balancing_bias
 from inside `expert_parallel/`, and everything else reaches them through layer instances
 (`named_ep_layers`).
 
-A fifth, `loading/`, sits above all four: `load_distributed_model` picks the per-mode loader off a
-`ParallelismConfig`, so it is the one place that reaches into every implementation. That is why it
-lives here and not in the sharding-agnostic `src/model_loading/`. `checkpoint/` sits above them
-too: its saver ladder and the EP and TP savers (`ep_save.py`, `tp_save.py`) gather through each
-implementation. The packages of `src/distributed` import each other acyclically
+`src/model_loading/parallel/` sits above all four: `load_distributed_model` picks the per-mode loader
+off a `ParallelismConfig`, so it is the one place that reaches into every implementation, and the rest
+of `src/model_loading/` stays sharding-agnostic. `checkpoint/` sits above them too: its saver ladder
+and the EP and TP savers (`ep_save.py`, `tp_save.py`) gather through each implementation. The packages
+of `src/distributed` import each other acyclically
 (`tests/cpu/conventions/test_import_layering.py`).
 
-No parallelism package imports `loading/`, so
+No parallelism package imports `src/model_loading/parallel/`, so
 what both sides need sits in the parallelism packages: `expert_parallel/fp32_masters.py` selects
 configured FP32 parameter masters on the pre-wrapper HF tree off the EP layer registry, and
 `expert_parallel/master_weights.py` streams their stored values back for eager construction
@@ -161,7 +161,7 @@ YAML config
 ParallelismConfig  ── validate mode, build process groups
    │
    ▼
-load_distributed_model            src/distributed/loading/model_loading.py
+load_distributed_model            src/model_loading/parallel/loader.py
    │  • resolve_attn_implementation → FA4 (SM100+) / FA3 (SM90) / FA2; per-model SDPA/eager overrides
    │  • patch_moe_model_for_ep → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
    │  • UlyssesCPModelWrapper (when cp_size > 1)

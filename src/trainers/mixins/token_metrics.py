@@ -16,7 +16,7 @@ from collections.abc import Mapping
 
 import torch
 
-from src.data.spans import LABEL_IGNORE_INDEX
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.mixins.loss_masks import effective_loss_mask
 
 

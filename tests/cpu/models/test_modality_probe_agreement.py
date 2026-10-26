@@ -14,7 +14,7 @@ import os
 import pytest
 from transformers import AutoConfig, Qwen3Config
 
-from src.distributed.loading.model_source import probe_checkpoint
+from src.model_loading.parallel.model_source import probe_checkpoint
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN3_CONFIG
 

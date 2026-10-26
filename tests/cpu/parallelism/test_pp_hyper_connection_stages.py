@@ -26,9 +26,10 @@ from transformers import (
     Glm5NextForConditionalGeneration,
 )
 
-from src.distributed.pipeline_parallel.lazy_loader import _cross_stage_droppable_prefixes
-from src.distributed.pipeline_parallel.split import PP_SPEC_MAP, validate_model_supports_pp
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage, reject_layer_type_rebase
+from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
+from src.distributed.pipeline_parallel.partition import validate_partition
+from src.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
 from tests.common.models import TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
 
 # Kept verbatim — including the metadata-only ``num_nextn_predict_layers: 1`` the hub checkpoints
@@ -181,14 +182,14 @@ def test_rebase_safe_families_skip_the_layer_type_offset_gate():
         layer_types = model.config.get_text_config().layer_types
         assert len(set(layer_types)) > 1, "premise: heterogeneous layer_types"
         assert layer_types[1:] != layer_types[:-1], "premise: offset 1 is not shift-invariant"
-        reject_layer_type_rebase(model, 1, 1)  # must not raise
+        validate_partition(model, [(0, 1), (1, len(layer_types))])  # must not raise
 
 
 def test_loader_droppable_prefixes_cover_the_tail_module():
     """A per-node PP checkpoint carries no ``hc_head`` shard on non-last nodes; the loader must
     classify it droppable there (it is neutralized at the stage build) and NEVER on the last stage."""
-    non_last = _cross_stage_droppable_prefixes(_dsv4_model(), 0, 2)
-    last = _cross_stage_droppable_prefixes(_dsv4_model(), 1, 2)
+    non_last = StageLayout.of(_dsv4_model()).dropped_prefixes(True, False)
+    last = StageLayout.of(_dsv4_model()).dropped_prefixes(False, True)
     assert "model.hc_head" in non_last, non_last
     assert not any("hc_head" in p for p in last), last
 
@@ -198,11 +199,11 @@ def test_specs_declare_support_and_the_tail_module():
     to the generic contract, whose first symptom is a mid-schedule shape error."""
     for backbone_name in ("DeepseekV4Model", "Glm5NextTextModel"):
         spec = PP_SPEC_MAP[backbone_name]
-        assert spec.SUPPORTS_PP, backbone_name
-        assert spec.TAIL_MODULE_ATTRS == ("hc_head",), backbone_name
-        assert spec.LAYER_TYPES_REBASE_SAFE, backbone_name
-    validate_model_supports_pp(_dsv4_model(), "none")
-    validate_model_supports_pp(_glm5_model(), "none")
+        assert spec.refusal is None, backbone_name
+        assert spec.tail_module_attrs == ("hc_head",), backbone_name
+        assert spec.layer_types_rebase_safe, backbone_name
+    reject_unsupported_pp_model(_dsv4_model(), "none")
+    reject_unsupported_pp_model(_glm5_model(), "none")
 
 
 if __name__ == "__main__":

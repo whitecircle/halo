@@ -21,7 +21,7 @@ from typing import Any
 import torch
 from torch.nn.functional import cosine_similarity, cross_entropy, kl_div, log_softmax, mse_loss
 
-from src.data.spans import LABEL_IGNORE_INDEX
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 
 # Floor for a -inf logit (vocab padding, a top-k-truncated teacher). Its probability stays an exact 0
 # while its log-prob turns finite, so a term that probability weights is 0 instead of 0 * -inf = NaN.

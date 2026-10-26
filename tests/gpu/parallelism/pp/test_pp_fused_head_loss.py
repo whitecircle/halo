@@ -47,9 +47,10 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import create_pipeline_group
-from src.distributed.pipeline_parallel.runtime import PipelineRuntime
+from src.distributed.pipeline_parallel.groups import build_pipeline_group
+from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss
 from src.kernels import logprobs as logprob_kernels
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -129,28 +130,30 @@ def run_once(ctx, config, pp_group, dp_mesh, input_ids, labels, n_microbatches, 
         fully_shard(layer, mesh=dp_mesh, reshard_after_forward=False)
     fully_shard(stage_module, mesh=dp_mesh, reshard_after_forward=False)
 
-    runtime = PipelineRuntime(stage_module, config, pp_group, device, n_microbatches, fused_head_loss=fused)
+    runner = PipelineRunner(
+        stage_module, config, pp_group, device, n_microbatches, FusedHeadLoss() if fused else TokenLoss()
+    )
     assert (stage_module.fused_loss_fn is not None) == (fused and config.is_last_pp_stage)
 
     # ``eval_first`` puts the scoring passes before any training step, which is the order HF runs
-    # (``evaluate()`` at step 0) and the only one that reaches the fused runtime's shape-inference
+    # (``evaluate()`` at step 0) and the only one that reaches the fused runner's shape-inference
     # workaround: ``forward_only`` carries no labels of its own, so it injects a zero placeholder to
     # make the stage latch its fused scalar output form. Without that, the first real ``step`` would
     # return a scalar against latched logits metadata — and the recv buffers would have been latched
     # by a backward-less pass, leaving every later step with no input gradient to send upstream.
     if eval_first:
-        pre_eval_loss = runtime.eval_loss(input_ids, labels)
-        pre_logits = runtime.forward_only(input_ids)
+        pre_eval_loss = runner.eval_loss(input_ids, labels)
+        pre_logits = runner.forward_only(input_ids)
 
-    loss = runtime.step(input_ids, labels)
+    loss = runner.step(input_ids, labels)
     # Read the peak before gathering gradients: full_tensor() and the CPU copies below are the
     # test's own bookkeeping, identical for both paths, and would blur the number under measurement.
     peak = torch.cuda.max_memory_allocated()
 
     # Loss-only eval and forward-only scoring both run through the fused stage; the second must give
     # back real logits (the trainer's compute_metrics path depends on it).
-    eval_loss = runtime.eval_loss(input_ids, labels)
-    logits = runtime.forward_only(input_ids)
+    eval_loss = runner.eval_loss(input_ids, labels)
+    logits = runner.forward_only(input_ids)
     if eval_first:
         # The pre-step passes must agree with the post-step ones: nothing was trained in between, so
         # a difference means the latched form, not the weights, decided the answer.
@@ -186,7 +189,7 @@ def run_once(ctx, config, pp_group, dp_mesh, input_ids, labels, n_microbatches, 
         "logits_digest": logits.sum(dtype=torch.float64).item() if logits is not None else 0.0,
         "logits_slice": logits[0, ::128, ::4096].double().cpu() if logits is not None else None,
     }
-    del runtime, stage_module, loss, eval_loss, logits
+    del runner, stage_module, loss, eval_loss, logits
     gc.collect()
     torch.cuda.empty_cache()
     return result
@@ -221,7 +224,7 @@ def run(ctx):
     pp_size = ctx.world_size // 2
     n_microbatches = max(MIN_MICROBATCHES, pp_size)
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=pp_size)
-    pp_group = create_pipeline_group(config)
+    pp_group = build_pipeline_group(config)
     mesh = init_device_mesh("cuda", (pp_size, config.stage_world_size), mesh_dim_names=("pp", "dp"))
     dp_mesh = mesh["dp"]
 

@@ -13,7 +13,7 @@ from collections.abc import Iterator
 import trl.trainer.grpo_trainer as trl_grpo_trainer
 from trl import GRPOTrainer
 
-from src.distributed.loading.frozen_models import (
+from src.model_loading.parallel.frozen_models import (
     ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
     on_policy_grpo_holds_reference,
     place_and_freeze,
@@ -92,7 +92,7 @@ class OnPolicyGRPOInitMixin:
         TRL builds a reference at ``beta != 0`` on a policy no PEFT adapter wraps, by ``create_model_from_path``
         on the policy config's name: fp32, the hub's default revision, the default attention, no repair of the
         non-persistent buffers, no vocabulary resize. Here that call returns the ``ref_model`` passed
-        (:func:`~src.distributed.loading.frozen_models.load_reference_model_for_on_policy_grpo`), placed and
+        (:func:`~src.model_loading.parallel.frozen_models.load_reference_model_for_on_policy_grpo`), placed and
         frozen, and TRL's dropout, head cast and ``prepare_model`` then run on it. TRL's own rule decides when
         it asks, so the two refusals follow that rule: a reference it asks for with none passed (raised before
         the rollout client connects), and a passed one it never asks for (the backstop of the up-front check in

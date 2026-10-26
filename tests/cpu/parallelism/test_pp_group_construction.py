@@ -24,7 +24,7 @@ import pytest
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import create_pipeline_group, create_stage_group
+from src.distributed.pipeline_parallel.groups import build_pipeline_group, build_stage_group
 from tests.common.parallelism import make_parallelism_config, stubbed_process_groups
 
 
@@ -80,26 +80,41 @@ def _pp_groups(rank: int, *, world_size: int, pp_size: int):
     config = make_parallelism_config(world_size=world_size, gpus_per_node=8, rank=rank, pp_size=pp_size)
     calls: list = []
     with stubbed_process_groups(world_size, rank, calls):
-        return create_pipeline_group(config), create_stage_group(config), calls, config
+        return build_pipeline_group(config), build_stage_group(config), calls, config
 
 
-@pytest.mark.parametrize(("world_size", "pp_size"), [(16, 2), (32, 4)])
-def test_pipeline_groups_match_the_config_rank_math(world_size, pp_size):
-    """The chain groups PP builds must be exactly ``ParallelismConfig.pp_chain_ranks``.
+# Every chain of the job, by intra-stage position: one rank per stage, ``stage_world_size`` (8) apart.
+_EXPECTED_CHAINS = {
+    (16, 2): [(0, 8), (1, 9), (2, 10), (3, 11), (4, 12), (5, 13), (6, 14), (7, 15)],
+    (32, 4): [
+        (0, 8, 16, 24),
+        (1, 9, 17, 25),
+        (2, 10, 18, 26),
+        (3, 11, 19, 27),
+        (4, 12, 20, 28),
+        (5, 13, 21, 29),
+        (6, 14, 22, 30),
+        (7, 15, 23, 31),
+    ],
+}
 
-    The two are computed independently — ``groups.py`` from the stage rank blocks, the config from
-    ``stage_local_rank + s * stage_world_size`` — and the trainer mixes them: it broadcasts the last
-    stage's loss to ``pp_chain_ranks()[-1]`` OVER the group built here. A drift would name a rank
-    outside the group and hang the chain, so this pins them against each other on every rank.
+
+@pytest.mark.parametrize(("world_size", "pp_size"), sorted(_EXPECTED_CHAINS))
+def test_pipeline_groups_are_the_expected_chains_and_stage_blocks(world_size, pp_size):
+    """Each rank's chain group is the literal chain of its intra-stage position, and its stage group
+    its own contiguous block.
+
+    The trainer broadcasts the last stage's loss from ``pp_chain_ranks()[-1]`` OVER the group built
+    here, so the two must also agree on every rank: a drift would name a rank outside the group and
+    hang the chain.
     """
+    expected = _EXPECTED_CHAINS[(world_size, pp_size)]
     for rank in range(world_size):
         chain, stage, _, config = _pp_groups(rank, world_size=world_size, pp_size=pp_size)
+        assert chain == expected[rank % 8], (rank, chain)
         assert chain == tuple(config.pp_chain_ranks()), (rank, chain)
-        assert rank in chain, (rank, chain)
-        assert len(chain) == pp_size, (rank, chain)
-        base, width = config.stage_base_rank, config.stage_world_size
-        assert stage == tuple(range(base, base + width)), (rank, stage)
-        assert rank in stage, (rank, stage)
+        base = (rank // 8) * 8
+        assert stage == tuple(range(base, base + 8)), (rank, stage)
 
 
 def test_pipeline_group_creation_sequence_is_identical_on_every_rank():
@@ -121,8 +136,8 @@ def test_pipeline_group_creation_sequence_is_identical_on_every_rank():
 
 def test_pipeline_groups_are_absent_without_pp():
     config = make_parallelism_config(world_size=8, gpus_per_node=8, rank=0)
-    assert create_pipeline_group(config) is None
-    assert create_stage_group(config) is None
+    assert build_pipeline_group(config) is None
+    assert build_stage_group(config) is None
 
 
 # (ep_size, groups per stage) on world=16 = 2 stages x 8 ranks, NVLink domain 8.

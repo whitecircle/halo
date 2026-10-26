@@ -43,10 +43,10 @@ from src.data.collators.vlm import SelfDistillVLMDataCollator
 from src.data.pipeline.processing import coordinated_map, require_render_column, resolve_map_num_proc
 from src.data.pipeline.row_processors import text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
-from src.distributed.loading.frozen_models import load_frozen_reference_model
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.model_loading.model_preparation import log_model_info
+from src.model_loading.parallel.frozen_models import load_frozen_reference_model
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.runtime.filesystem import hub_metadata_main_first
 from src.runtime.ranks import is_global_main_process
@@ -247,8 +247,6 @@ def _load_sdpg_reference(
         is_vlm=is_vlm,
         reset_sinks=dist_args.reset_sinks,
         attn_default=None,
-        # The policy's pin names a commit in its own repo; a separate reference repo takes its main.
-        revision=model_config.model_revision if ref_path == model_config.model_name_or_path else None,
     )
     if is_global_main_process():
         logger.info(f"Loaded frozen reference model from '{ref_path}' (alpha={args.reference_kl_coef})")
@@ -352,7 +350,7 @@ def main():
     tokenizer = apply_max_length(sft_config, args, model, tokenizer)
     processing_class = install_resolved_tokenizer(processing_class, tokenizer)
     enforce_text_path_padding_side(tokenizer, is_vlm)
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
     # No teacher branch is built while the OPD term is off.

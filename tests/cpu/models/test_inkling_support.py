@@ -22,7 +22,7 @@ from src.distributed.context_parallel.validation import _UNSUPPORTED_SEQUENCE_AX
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
-from src.distributed.pipeline_parallel.split import PP_SPEC_MAP
+from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
 from src.models.moe_balancing import ROUTER_EXPERT_COUNT_FIELDS, get_first_router_field
 
 SEED = 1234
@@ -58,8 +58,8 @@ def test_capability_contracts():
     # is otherwise the generic split; the composite class goes through the generic multimodal
     # admission in the trainer mixin (text-only admitted, image-feeding refused).
     spec = PP_SPEC_MAP["InklingTextModel"]
-    assert spec.INPUT_MODULE_ATTRS == ("embed_norm",)
-    assert spec.SUPPORTS_PP and spec.STREAM_FORWARD is None and not spec.LAYER_TYPES_REBASE_SAFE
+    assert spec.input_module_attrs == ("embed_norm",)
+    assert spec.refusal is None and spec.stream_forward is None and not spec.layer_types_rebase_safe
     # CP: the short convolutions run over the sequence axis; the veto fires before the
     # attention-class scan so the refusal names the mechanism.
     assert "InklingShortConvolution" in _UNSUPPORTED_SEQUENCE_AXIS_LAYERS

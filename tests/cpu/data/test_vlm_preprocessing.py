@@ -29,8 +29,8 @@ from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDa
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset, tokenize_vlm_dataset
 from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_OUTPUT_FEATURES
-from src.distributed.loading import model_source
-from src.distributed.loading.model_source import probe_checkpoint
+from src.model_loading.parallel import model_source
+from src.model_loading.parallel.model_source import probe_checkpoint
 from src.models.modality import is_vlm_model
 from tests.common.models import QWEN2_5_VL_3B
 from tests.common.tokenizers import load_cached_processor

@@ -18,7 +18,8 @@ from accelerate import PartialState
 from transformers import AutoModelForCausalLM, GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 
-from src.distributed.loading import model_loading
+from src.model_loading.parallel import loader as model_loading
+from src.model_loading.parallel.model_source import ModelSource
 from src.models.attention.gpt_oss_sinks import RESOLVED_SINKS_RESET_ATTR
 from tests.common.parallelism import make_parallelism_config
 
@@ -103,7 +104,9 @@ def _resolve(requested, reset_sinks, train_sinks, init_from_scratch, context_par
     with (
         patch.object(model_loading, "configure_float32_matmul_precision"),
         patch.object(model_loading, "apply_remote_code_compat_shims"),
-        patch.object(model_loading, "resolve_model_source", lambda path, revision, **kwargs: revision),
+        patch.object(
+            model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
+        ),
         patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
         patch.object(model_loading, "AutoTokenizer", SimpleNamespace(from_pretrained=lambda *a, **k: MagicMock())),
         patch.object(model_loading, "is_blackwell_gpu", lambda: False),
@@ -119,6 +122,7 @@ def _resolve(requested, reset_sinks, train_sinks, init_from_scratch, context_par
                 reset_sinks=reset_sinks,
                 train_sinks=train_sinks,
                 init_from_scratch=init_from_scratch,
+                trust_remote_code=True,
             )
         except _Built:
             return built["backend"], getattr(config, RESOLVED_SINKS_RESET_ATTR, None)

@@ -13,12 +13,8 @@ from typing import Any
 import torch
 
 from src.data.pipeline.rendered import render_conversation, tokenize_rendered
-from src.data.spans import (
-    LABEL_IGNORE_INDEX,
-    build_completion_only_labels,
-    require_rendered_response_marker,
-    resolve_eos_token_ids,
-)
+from src.data.spans import build_completion_only_labels, require_rendered_response_marker, resolve_eos_token_ids
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 
 
 def format_field_names(template: str) -> set[str]:

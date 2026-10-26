@@ -20,11 +20,11 @@ from transformers import AutoConfig, AutoModelForSequenceClassification, AutoPro
 from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME
 from trl import ModelConfig
 
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.loading.model_source import probe_checkpoint
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
 from src.model_loading.liger.dispatch import finalize_liger_after_direct_load
+from src.model_loading.parallel.loader import load_distributed_model
+from src.model_loading.parallel.model_source import probe_checkpoint
 from src.models.modality import is_vlm_model
 from src.models.seq_cls_heads import multimodal_sequence_classification_model_types
 from src.runtime.consensus import rank_consensus
@@ -193,7 +193,7 @@ def load_vlm_model_and_processor(
     flags reach the loader exactly as on the text branch, so a contradictory pair is refused here too.
 
     The caller has already resolved the modality verdict; this function must not re-probe it:
-    :func:`~src.distributed.loading.model_source.probe_checkpoint` enters the ``vlm_probe`` store phase, and only
+    :func:`~src.model_loading.parallel.model_source.probe_checkpoint` enters the ``vlm_probe`` store phase, and only
     multimodal runs reach here — a phase entered from a branch some ranks do not take leaves the rest
     waiting on a key nobody writes.
     """

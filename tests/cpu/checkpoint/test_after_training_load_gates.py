@@ -37,8 +37,8 @@ from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassifi
 import scripts.after_training.convert_to_bf16 as convert_to_bf16
 import scripts.after_training.merge_peft_adapters as merge_peft_adapters
 from src.checkpoint import adapter_merge
-from src.distributed.loading import model_loading
 from src.model_loading import model_preparation
+from src.model_loading.parallel.whole_model import resolve_trainer_model
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
 from tests.common.utils import imports_name
@@ -246,7 +246,7 @@ def test_the_shared_loader_applies_the_remote_code_shims_before_the_config_fetch
 
 
 def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights(causal_lm_checkpoint):
-    """``load_model_from_pretrained`` is the seam SMPO / offline-GRPO / teacher-distillation reach
+    """``resolve_trainer_model`` is the seam SMPO / offline-GRPO / teacher-distillation reach
     when their ``model:`` is a path string, and a terminal loader there that skipped the shims would
     import a Bailing/Ling modeling file with the v4-era ``_tied_weights_keys`` list intact (``save_pretrained`` crashes) and without the
     SDPA dispatch shim (the ~190 GiB eager score plane). The shims must also precede the WEIGHT load,
@@ -264,9 +264,7 @@ def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights
         patch.object(model_preparation, REMOTE_CODE_SHIMS, lambda: order.append("shims")),
         patch.object(model_preparation, "from_pretrained_verified", recording_verified),
     ):
-        model_loading.load_model_from_pretrained(
-            causal_lm_checkpoint, args, model_cls=Qwen3ForCausalLM, keep_fp32=False
-        )
+        resolve_trainer_model(causal_lm_checkpoint, args, model_class=Qwen3ForCausalLM, keep_fp32_non_ep=False)
 
     assert order == ["shims", "load"], order
 
@@ -280,11 +278,11 @@ def _calls_name(func: ast.FunctionDef, name: str) -> bool:
 
 # Every module that owns a from-a-path loader: the Auto*-class seam on the utils side and the frozen
 # teacher/reference loader are the two that materialize weights themselves; the dispatcher and
-# ``load_model_from_pretrained`` reach the shims through the first.
+# ``resolve_trainer_model`` reach the shims through the first.
 LOADER_MODULES = [
     REPO_ROOT / "src/model_loading/model_preparation.py",
-    REPO_ROOT / "src/distributed/loading/model_loading.py",
-    REPO_ROOT / "src/distributed/loading/frozen_models.py",
+    REPO_ROOT / "src/model_loading/parallel/loader.py",
+    REPO_ROOT / "src/model_loading/parallel/frozen_models.py",
 ]
 # Public entry points only: the private per-mode helpers inside the dispatcher are reached through it,
 # and it applies the shims once for all of them.

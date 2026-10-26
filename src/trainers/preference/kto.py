@@ -32,15 +32,9 @@ ever runs. See ``_validate_pp_mode`` for each rejection and its mechanism.
 import torch
 from trl import KTOTrainer
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.pipeline_parallel.losses import (
-    PPLossAdapter,
-    completion_labels,
-    pad_to_pipeline_length,
-    row_count_normalizer,
-    rows_with_labels,
-    sequence_logprobs,
-)
+from src.data.collators.fixed_shape import pad_to_fixed_length
+from src.data.spans import completion_labels
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.pp_gates import (
     reject_pp_compute_metrics,
@@ -50,6 +44,7 @@ from src.trainers.mixins.pp_gates import (
 )
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
+from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, row_count_normalizer, rows_with_labels
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 
@@ -158,22 +153,22 @@ class DistributedKTOTrainer(
         """The collator's truncation, which keeps the start of each assembled sequence."""
         return {"max_length": self.args.max_length}
 
-    def _pp_loss_adapter(self) -> PPLossAdapter:
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """KTO's pipeline-loss contract: unpaired rows + dataset-precomputed reference log-probs.
 
         Rows are independent, so the microbatch split is safe at any size; ``ref_logps`` and the
         per-row desirability ``label`` ship as extra targets to stay row-aligned. The collator's
         ``completion_*`` keys are padded to the fixed shape in the batch transform, so no
-        ``pad_spec`` is needed. ``pin_runtime_columns=False`` because KTO's dataset columns feed
+        ``pad_spec`` is needed. ``pin_runner_columns=False`` because KTO's dataset columns feed
         TRL's unpaired-preference collator, which needs TRL's own signature set.
         """
-        return PPLossAdapter(
+        return PipelineLossAdapter(
             token_loss_fn=self._pp_kto_token_loss,
             batch_transform=self._pp_kto_batch_transform,
             normalizer=row_count_normalizer,
             extra_target_keys=("ref_logps", "label"),
             eval_normalizer=row_count_normalizer,
-            pin_runtime_columns=False,
+            pin_runner_columns=False,
         )
 
     def _pp_kto_batch_transform(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -189,7 +184,7 @@ class DistributedKTOTrainer(
         completion_mask = batch["completion_mask"]
         labels = completion_labels(input_ids, completion_mask)
         # Over-length is unreachable with TRL's collator; the helper's raise guards a custom one.
-        padded = pad_to_pipeline_length(
+        padded = pad_to_fixed_length(
             {
                 "input_ids": (input_ids, self._tokenizer.pad_token_id),
                 "attention_mask": (attention_mask, 0),
@@ -205,7 +200,7 @@ class DistributedKTOTrainer(
         }
 
     def _pp_kto_token_loss(self, logits: torch.Tensor, target: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Summed per-row apo_zero_unpaired losses over one microbatch (÷ row count by the runtime).
+        """Summed per-row apo_zero_unpaired losses over one microbatch (÷ row count by the runner).
 
         Reproduces TRL's ``_compute_loss`` for the PP subset: per-row log-ratio against the
         precomputed reference, then ``desirable_weight · (1 − σ(β·logratio))`` for desirable rows

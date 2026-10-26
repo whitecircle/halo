@@ -9,7 +9,10 @@ import contextlib
 import weakref
 from typing import Any
 
+from accelerate.logging import get_logger
 from transformers.integrations.heterogeneity import AmbiguousGlobalPerLayerAttributeError
+
+logger = get_logger(__name__)
 
 # The config field every family spells its input/output embedding tie with.
 TIE_WORD_EMBEDDINGS_FLAG = "tie_word_embeddings"
@@ -191,3 +194,39 @@ def restore_special_token_ids(snapshot: list[tuple[object, str, object]]) -> Non
                 delattr(level, field)
         else:
             setattr(level, field, list(value) if isinstance(value, list) else value)
+
+
+def apply_config_overrides(model_config, overrides: dict | None) -> None:
+    """Write ``model_config_overrides`` to every config level that declares each key; an unknown key raises,
+    since a skipped override would train with the stock config.
+
+    On a composite config the decoder knobs a run overrides (``output_router_logits``,
+    ``router_aux_loss_coef``) exist only on ``text_config``. The run's precision is refused rather than
+    written: every loader passes ``dtype=`` explicitly, which wins over the config.
+    """
+    if not overrides:
+        return
+    # Before any write, so a rejected key cannot leave the config half-overridden. Both spellings:
+    # transformers 5 keeps ``torch_dtype`` as an alias of ``dtype``, so a config declares both.
+    rejected = sorted(key for key in overrides if key in ("dtype", "torch_dtype"))
+    if rejected:
+        raise ValueError(
+            f"model_config_overrides may not set {rejected}. Every loader passes the run's dtype "
+            f"explicitly, resolved from the run's own precision flags, and that argument wins over "
+            f"the config — so the override would be silently discarded and the run would train in "
+            f"the precision it did not ask for. Set the run's dtype with `bf16: true` or "
+            f"`fp16: true` in the training config (bf16 is the toolkit default), and fp32 master "
+            f"weights with fp32_non_ep_params / fp32_experts."
+        )
+    logger.info(f"Applying model config overrides: {overrides}")
+    for key, value in overrides.items():
+        targets = configs_declaring(model_config, key)
+        if not targets:
+            raise ValueError(
+                f"model_config_overrides key '{key}' does not exist on this model's config "
+                f"({type(model_config).__name__}) or its text sub-config — a skipped override "
+                f"would silently train with the stock value. Fix or remove the key."
+            )
+        for target in targets:
+            setattr(target, key, value)
+        logger.info(f"  Set {key} = {value} on {', '.join(type(t).__name__ for t in targets)}")

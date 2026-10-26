@@ -33,8 +33,8 @@ from transformers import AutoTokenizer, default_data_collator
 from trl import SFTConfig
 
 from src.checkpoint.reading import StreamingCheckpointReader
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.models.unwrapping import unwrap_toolkit_wrappers
 from src.runtime.dtensor import full_cpu_tensor
 from src.trainers.sft import DistributedSFTTrainer
@@ -178,7 +178,12 @@ def run(ctx):
 
     # ── the scripts' resume construction: the stage is loaded from the checkpoint ──────────────
     resumed_model, _ = load_distributed_model(
-        ckpt, config, dtype=torch.float32, attn_implementation="sdpa", preserve_checkpoint_precision=True
+        ckpt,
+        config,
+        dtype=torch.float32,
+        attn_implementation="sdpa",
+        preserve_checkpoint_precision=True,
+        trust_remote_code=True,
     )
     stage_e = unwrap_toolkit_wrappers(make_trainer("runE", N_STEPS, model=resumed_model).model)
     built_ok, n_built = True, 0

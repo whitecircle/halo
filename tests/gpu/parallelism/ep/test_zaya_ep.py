@@ -19,9 +19,9 @@ import torch
 from trl import SFTConfig
 
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_int, env_str
+from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
@@ -64,6 +64,7 @@ def run(ctx):
         dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
         use_liger_kernel=True,
+        trust_remote_code=True,
     )
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token

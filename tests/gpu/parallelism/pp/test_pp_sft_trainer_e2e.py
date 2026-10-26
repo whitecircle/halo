@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """End-to-end pipeline parallelism through the real DistributedSFTTrainer.
 
-The runtime-level PP tests drive the engine directly; this one goes through the whole trainer
+The runner-level PP tests drive the engine directly; this one goes through the whole trainer
 stack — ``_maybe_prepare_pipeline_model`` splitting the model before TRL sees it, the stage-scoped
 FSDP wrap, the schedule-driven ``training_step`` with the loss broadcast, the PP-aware gradient
 clip, and the sharded save with global names. It fails when any of those seams breaks:
@@ -117,13 +117,13 @@ def run(ctx):
         args.gradient_accumulation_steps == 1 and trainer._pp_n_microbatches == 2
     )
 
-    # Spy on the runtime step to prove the loss normalizer is actually wired: it must equal the
+    # Spy on the runner step to prove the loss normalizer is actually wired: it must equal the
     # stage-summed loss-token count / stage_world_size (= G/dp) every step. An unwired normalizer
     # (None, or HF's never-computed num_items_in_batch) fails here even though the loss still
     # decreases.
     captured: list[tuple[float, float]] = []
     batch_sums: list[torch.Tensor] = []
-    real_step = trainer._pp_runtime.step
+    real_step = trainer._pp_runner.step
 
     def spying_step(input_ids, labels, **kwargs):
         local = float((labels[:, 1:] != -100).sum())
@@ -132,7 +132,7 @@ def run(ctx):
         batch_sums.append(input_ids.to(torch.float64).sum())
         return real_step(input_ids, labels, **kwargs)
 
-    trainer._pp_runtime.step = spying_step
+    trainer._pp_runner.step = spying_step
 
     trainer.train()
 

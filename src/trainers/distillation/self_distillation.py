@@ -15,9 +15,10 @@ import torch
 from accelerate.logging import get_logger
 
 from src.configs.distillation import SelfDistillScriptArguments
-from src.data.spans import LABEL_IGNORE_INDEX, resolve_eos_token_ids
+from src.data.spans import resolve_eos_token_ids
 from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS
-from src.distributed.loading.frozen_models import (
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
+from src.model_loading.parallel.frozen_models import (
     ReferenceAlternatives,
     place_and_freeze,
     warn_unparallelized_reference,
@@ -59,7 +60,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         "the privileged-teacher term needs a second, no-grad forward of the WHOLE model per batch on "
         "the hint-carrying sequence (and a third through the frozen reference when reference_kl_coef "
         "> 0), whose logits the student's loss then consumes; under PP no rank holds the whole model, "
-        "the schedule owns every forward, and the runtime's forward-only pass yields logits on the "
+        "the schedule owns every forward, and the runner's forward-only pass yields logits on the "
         "last stage only, with no channel to feed them into the same step's loss. The objective "
         "itself is per-row and microbatch-decomposable, so this is a pipeline-machinery gap (a "
         "second forward-only pass whose last-stage output becomes an extra target), not a loss one"

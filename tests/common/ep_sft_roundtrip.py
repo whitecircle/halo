@@ -19,8 +19,8 @@ from trl import SFTConfig
 from src.callbacks.wiring import build_perf_callbacks
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.models.module_tree import backbone_with_layers
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import fixed_batch_loss
@@ -131,6 +131,7 @@ class EPSftRoundTrip:
             dtype=torch.bfloat16,
             attn_implementation=self.attn_implementation,
             use_liger_kernel=self.load_liger_kernel,
+            trust_remote_code=True,
         )
         ep_layers = [m for m in model.modules() if isinstance(m, self.ep_layer_cls)]
         checks["ep_layers_patched"] = len(ep_layers) == self.num_ep_layers

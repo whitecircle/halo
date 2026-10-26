@@ -30,8 +30,8 @@ from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from src.checkpoint.reading import load_full_state_dict
 from src.distributed import rank_uniform_env
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
-from src.distributed.loading.model_loading import load_distributed_model
+from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime import load_coordination
 from tests.common.collective_recorder import CollectiveTrace, rebind_everywhere, recording_rank
 from tests.common.goldens import regen_main
@@ -256,11 +256,19 @@ def trace_rank(
     ):
         if case.frozen_reference:
             load_frozen_auxiliary_model(
-                source, dtype=torch.bfloat16, attn_implementation=ATTN_IMPLEMENTATION, download_tag="reference_model"
+                source,
+                dtype=torch.bfloat16,
+                attn_implementation=ATTN_IMPLEMENTATION,
+                download_tag="reference_model",
+                trust_remote_code=False,
             )
         else:
             load_distributed_model(
-                source, config, attn_implementation=ATTN_IMPLEMENTATION, init_from_scratch=case.init_from_scratch
+                source,
+                config,
+                attn_implementation=ATTN_IMPLEMENTATION,
+                init_from_scratch=case.init_from_scratch,
+                trust_remote_code=True,
             )
     return trace
 

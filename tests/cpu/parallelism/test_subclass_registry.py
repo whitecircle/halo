@@ -18,7 +18,6 @@ from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP, 
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, build_moe_layer_map
-from src.distributed.pipeline_parallel.split import build_pp_spec_map
 from src.models.head_transform import build_head_transform_spec_map
 from src.subclass_registry import build_class_claim_map, iter_subclasses
 
@@ -88,11 +87,10 @@ def _model_type_roster() -> dict[str, type]:
     [
         (build_moe_layer_map, "HF MoE class name"),
         (build_wrapper_class_map, "HF attention class name"),
-        (build_pp_spec_map, "HF backbone class name"),
         (build_head_transform_spec_map, "HF causal-LM head class name"),
         (_model_type_roster, "model_type"),
     ],
-    ids=["ep", "cp", "pp", "head-transform", "ep-model-type"],
+    ids=["ep", "cp", "head-transform", "ep-model-type"],
 )
 def test_each_real_registry_names_its_clash(monkeypatch, build, noun):
     """A second class claiming a key already taken fails the real registry with the noun of what clashed."""

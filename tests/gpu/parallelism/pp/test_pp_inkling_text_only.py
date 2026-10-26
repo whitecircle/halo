@@ -44,7 +44,7 @@ from tests.common.utils import cleanup_memory, log
 PP_SIZE = 2
 DTYPE = torch.bfloat16
 # 4 layers, sliding pattern [s, f, s, f] (period 2): the pp2 boundary at layer 2 is a whole
-# pattern period, which reject_layer_type_rebase requires for Inkling's enumerate-indexed masks.
+# pattern period, which validate_partition requires for Inkling's enumerate-indexed masks.
 TEXT_CONFIG = {**TINY_INKLING_CONFIG, "num_hidden_layers": 4, "local_layer_ids": [0, 2]}
 # The default vision config builds ~600k-wide projection layers (the upstream scale planner
 # fits real patch sizes) — the composite save needs this tiny tower, whose TM-namespace keys

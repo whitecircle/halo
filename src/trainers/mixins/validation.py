@@ -5,7 +5,7 @@ raise with an actionable message, or return. :func:`ctor_positions` / :func:`cto
 :func:`ctor_config` / :func:`ctor_model_and_config` read the argument a gate validates out of a
 trainer ``__init__``'s ``*args``, before the checks below run, :func:`disable_trl_liger` clears
 the TRL flag a gate rejects, :func:`evaluation_runs` says whether an eval-side gate applies, and
-``warn_unparallelized_reference`` (``src.distributed.loading.frozen_models``) reports the cost of a
+``warn_unparallelized_reference`` (``src.model_loading.parallel.frozen_models``) reports the cost of a
 dense frozen reference under EP/TP.
 """
 
@@ -21,13 +21,13 @@ from peft import PeftModel
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.loading.frozen_models import (
+from src.distributed.parallelism_rules import reject_accelerate_launch
+from src.log import KEY_PREVIEW_COUNT
+from src.model_loading.parallel.frozen_models import (
     PREFERENCE_REFERENCE_ALTERNATIVES,
     ReferenceAlternatives,
     warn_unparallelized_reference,
 )
-from src.distributed.parallelism_rules import reject_accelerate_launch
-from src.log import KEY_PREVIEW_COUNT
 from src.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from src.models.config_access import config_sources, set_config_field_run_scoped
 from src.models.moe_balancing import (
@@ -355,7 +355,7 @@ class ParallelismValidationMixin:
         never enters the graph while the run still pays for ``output_router_logits``. A trainer can
         also re-add the term itself (TRL's ``KTOTrainer`` does), so consumption is declared per
         trainer class (``_consumes_router_aux_loss``) rather than inferred from the forward
-        signature. Same contract :mod:`src.distributed.pipeline_parallel.split` enforces for a stage.
+        signature. Same contract :mod:`src.distributed.pipeline_parallel.model_rules` enforces for a stage.
         """
         if self._consumes_router_aux_loss:
             return

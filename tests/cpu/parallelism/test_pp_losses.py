@@ -14,9 +14,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import src.distributed.pipeline_parallel.losses as pp_losses
 import src.kernels.logprobs as logprob_kernels
-from src.distributed.pipeline_parallel.losses import causal_lm_token_loss, fused_causal_lm_token_loss
+from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss, fused_causal_lm_token_loss
+from src.kernels.logprobs import token_logprobs
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from tests.common.utils import autograd_nodes
 
@@ -75,49 +75,6 @@ def test_all_ignored_chunk_is_inert(monkeypatch):
     assert torch.count_nonzero(logits.grad) == 0
 
 
-def _unchunked_token_logprobs(logits, labels):
-    """The pre-chunking formulation: two full fp32 ``[B, S-1, V]`` planes, held at once."""
-    shift_logits = logits[:, :-1, :].float()
-    shift_labels = labels[:, 1:]
-    mask = shift_labels != -100
-    safe_labels = shift_labels.masked_fill(~mask, 0)
-    logps = torch.log_softmax(shift_logits, dim=-1).gather(-1, safe_labels.unsqueeze(-1)).squeeze(-1)
-    return logps, mask
-
-
-# The last case's budget exceeds every row: each row is one chunk.
-@pytest.mark.parametrize(("batch", "seq", "budget_rows"), [(2, 16, 4), (4, 33, 7), (2, 9, 1), (2, 16, 64)])
-def test_chunked_token_logprobs_match_the_full_plane(monkeypatch, batch, seq, budget_rows):
-    """Per-token log-probs must be BITWISE identical to the unchunked formulation, grads included.
-
-    ``token_logprobs`` feeds every preference/RL PP adapter (DPO, KTO, SMPO, offline GRPO). Building
-    the fp32 upcast and the ``log_softmax`` output as whole ``[B, S-1, V]`` planes costs ~26 GB per
-    microbatch at ``V=201088, S=8192``, on the one stage that also carries the head — which is why it
-    chunks, like the CE path above. Chunking is only legitimate if the numbers do not move, so this
-    asserts equality rather than closeness.
-    """
-    vocab = 37
-    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", budget_rows * vocab)
-    torch.manual_seed(batch * 100 + seq)
-    base = torch.randn(batch, seq, vocab, dtype=torch.bfloat16)
-    labels = torch.randint(0, vocab, (batch, seq))
-    labels[:, :2] = -100
-    labels[-1, :] = -100  # an inert all-ignore row, as the PP eval row-padding emits
-
-    chunked_in = base.clone().requires_grad_(True)
-    full_in = base.clone().requires_grad_(True)
-    got_lp, got_mask = pp_losses.token_logprobs(chunked_in, labels)
-    want_lp, want_mask = _unchunked_token_logprobs(full_in, labels)
-
-    assert got_lp.shape == want_lp.shape == (batch, seq - 1)
-    assert torch.equal(got_mask, want_mask)
-    assert torch.equal(got_lp, want_lp), f"max diff {(got_lp - want_lp).abs().max()}"
-
-    (got_lp * got_mask).sum().backward()
-    (want_lp * want_mask).sum().backward()
-    assert torch.equal(chunked_in.grad, full_in.grad), f"max grad diff {(chunked_in.grad - full_in.grad).abs().max()}"
-
-
 _VOCAB, _HIDDEN = 37, 11
 
 
@@ -133,7 +90,7 @@ _ROWS = 3
 _CHUNKED_LOSSES = {
     "causal_lm_token_loss": (causal_lm_token_loss, _VOCAB, 1),
     "fused_causal_lm_token_loss": (_fused_loss, _HIDDEN, 1),
-    "token_logprobs": (lambda rows, labels: torch.mul(*pp_losses.token_logprobs(rows, labels)).sum(), _VOCAB, _ROWS),
+    "token_logprobs": (lambda rows, labels: torch.mul(*token_logprobs(rows, labels)).sum(), _VOCAB, _ROWS),
 }
 
 
@@ -169,20 +126,6 @@ def test_chunked_losses_do_not_depend_on_the_chunk_count(name, monkeypatch):
         assert torch.equal(chunked_grad, whole_grad), f"max grad diff {(chunked_grad - whole_grad).abs().max()}"
 
 
-@pytest.mark.parametrize(
-    "logits_shape, start",
-    [((2, 4, _VOCAB), 0), ((3, 4, _VOCAB), -1), ((3, 4, _VOCAB), 5), ((3, 10, _VOCAB), 0)],
-    ids=["rows", "negative-start", "past-the-end", "longer-than-labels"],
-)
-def test_next_token_logprobs_refuses_a_window_outside_the_labels(logits_shape, start):
-    """A chunk that does not lie inside the labels would score against a clipped or misaligned target
-    slice — read off shapes alone, so no host sync."""
-    labels = torch.zeros(3, 8, dtype=torch.long)
-    with pytest.raises(ValueError, match="do not lie inside labels"):
-        pp_losses.next_token_logprobs(torch.zeros(logits_shape), labels, start)
-    pp_losses.next_token_logprobs(torch.zeros(3, 4, _VOCAB), labels, 4)
-
-
 @pytest.mark.parametrize("name", list(_CHUNKED_LOSSES))
 def test_the_chunks_share_one_split_backward(name, monkeypatch):
     """Each chunk is a view from ONE ``split`` of its input (the flattened plane, or one row of it),
@@ -200,29 +143,18 @@ def test_the_chunks_share_one_split_backward(name, monkeypatch):
     )
 
 
-def test_token_logprobs_drop_the_final_position_after_scoring():
-    """The ``[B, S-1]`` contract is cut from the ``[B, S]`` log-probs: slicing the logits instead would
-    make its backward zero-fill and copy a whole ``[B, S, V]`` gradient plane."""
-    logits = torch.randn(2, 9, _VOCAB, requires_grad=True)
-    logps, _ = pp_losses.token_logprobs(logits, torch.randint(0, _VOCAB, (2, 9)))
-    sliced = [
-        tuple(node._saved_self_sym_sizes) for node in autograd_nodes(logps) if type(node).__name__ == "SliceBackward0"
-    ]
-    assert sliced == [(2, 9)], f"slices in the graph, by input shape: {sliced}"
-
-
 def test_fp64_logits_keep_fp64_log_probs_and_cross_entropy():
     """The upcast is to fp32 at least: an fp64 oracle (the CPU parity tests) must not be rounded to
     fp32 inside the loss it checks, and a bf16 production plane pays exactly the fp32 it always did."""
     torch.manual_seed(5)
     logits = torch.randn(2, 9, _VOCAB, dtype=torch.float64)
     labels = torch.randint(0, _VOCAB, (2, 9))
-    logps, _ = pp_losses.token_logprobs(logits, labels)
+    logps, _ = token_logprobs(logits, labels)
     reference = torch.log_softmax(logits[:, :-1], dim=-1).gather(-1, labels[:, 1:, None]).squeeze(-1)
 
     assert logps.dtype is torch.float64
     torch.testing.assert_close(logps, reference, rtol=1e-12, atol=0)
-    assert pp_losses.token_logprobs(logits.bfloat16(), labels)[0].dtype is torch.float32
+    assert token_logprobs(logits.bfloat16(), labels)[0].dtype is torch.float32
 
     ce = causal_lm_token_loss(logits, labels)
     assert ce.dtype is torch.float64

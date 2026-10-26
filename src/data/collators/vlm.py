@@ -15,7 +15,6 @@ import torch
 from src.data.collators.self_distill import SelfDistillBranchMixin, require_aligned_responses
 from src.data.spans import (
     COLLATOR_SPAN_POLICY,
-    LABEL_IGNORE_INDEX,
     build_completion_only_labels,
     require_response_marker,
     resolve_eos_token_ids,
@@ -29,6 +28,7 @@ from src.data.vlm import (
     run_vlm_processor,
     vlm_row_tools,
 )
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)

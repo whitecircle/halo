@@ -56,6 +56,7 @@ from trl.trainer.utils import (
 
 from src.callbacks.variable_scheduler import VariableSchedulerCallback
 from src.configs.grpo_offline import OfflineGRPOConfig
+from src.data.collators.fixed_shape import pad_to_fixed_length
 from src.data.collators.offline_grpo import (
     REF_PER_TOKEN_LOGPS_COLUMN,
     OfflineGRPOCPDataCollatorWithPadding,
@@ -63,23 +64,16 @@ from src.data.collators.offline_grpo import (
 )
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rendered import lacks_emitted_bos
-from src.data.spans import LABEL_IGNORE_INDEX, lacks_terminator, resolve_eos_token_ids
+from src.data.spans import completion_labels, lacks_terminator, resolve_eos_token_ids
 from src.distributed.context_parallel.autograd import cp_sum_rows
 from src.distributed.context_parallel.config import cp_chunk_bounds
-from src.distributed.loading.frozen_models import place_and_freeze
-from src.distributed.loading.model_loading import load_model_from_pretrained
-from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.losses import (
-    PPLossAdapter,
-    completion_labels,
-    loss_token_counts_per_row,
-    pad_to_pipeline_length,
-    rows_with_labels,
-    token_logprobs,
-)
 from src.hardware import current_device
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row, token_logprobs
 from src.model_loading.dtype import resolve_training_dtype
+from src.model_loading.parallel.frozen_models import place_and_freeze
+from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
+from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.context_window import is_bounded_length
 from src.models.unwrapping import base_transformers_model
@@ -105,6 +99,7 @@ from src.trainers.mixins.dataloader import run_data_seed
 from src.trainers.mixins.pp_gates import reject_pp_compute_metrics, reject_pp_peft
 from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
 from src.trainers.mixins.validation import keep_all_dataset_columns
+from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, rows_with_labels
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -444,15 +439,15 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         self._reject_inert_max_length(args, parallelism_config)
         self._reject_pp_explicit_options(args, parallelism_config, peft_config, compute_metrics)
 
-        model, _ = load_model_from_pretrained(
-            model, args, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params
+        model = resolve_trainer_model(
+            model, args, keep_fp32_non_ep=parallelism_config is not None and parallelism_config.fp32_non_ep_params
         )
 
         # QLoRA's bf16 adapter cast leaves activations fp32, so every adapted linear's forward needs
         # the autocast region compute_loss opens.
         self._peft_has_been_casted_to_bf16 = False
         if peft_config is not None:
-            model, self._peft_has_been_casted_to_bf16 = prepare_peft_model(model, peft_config, args)
+            model, self._peft_has_been_casted_to_bf16 = build_peft_model(model, peft_config, args)
 
         if model.config.is_encoder_decoder:
             raise ValueError(
@@ -606,7 +601,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         the next-token shift. ``None`` under PP, where the last stage's plane is the pipeline's and
         use_chunked_grpo_logprobs cannot remove it, and with max_completion_length unset, which leaves
         the width to the stored completions."""
-        if self._pp_runtime is not None or not is_bounded_length(self.max_completion_length):
+        if self._pp_runner is not None or not is_bounded_length(self.max_completion_length):
             return None
         return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
 
@@ -887,7 +882,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         """Whether log-probs come from TRL's ``selective_log_softmax`` over full logits, which keeps the
         logits' dtype, the run's compute dtype. The chunked kernel (always on under CP) and the
         pipeline's last-stage loss score in fp32."""
-        return not self._use_chunked_grpo_logprobs and self._pp_runtime is None
+        return not self._use_chunked_grpo_logprobs and self._pp_runner is None
 
     def _get_per_token_logps(
         self,
@@ -1157,7 +1152,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         """Mode-specific scoring inside the shared reference-sweep lifecycle."""
         if self.parallelism_config.is_cp_mode:
             return self._cp_score_reference_batch(batch)
-        if self._pp_runtime is not None:
+        if self._pp_runner is not None:
             return self._pp_score_reference_batch(batch)
         ids = torch.cat([batch["prompt_input_ids"], batch["completion_input_ids"]], dim=1)
         mask = torch.cat([batch["prompt_attention_mask"], batch["completion_attention_mask"]], dim=1)
@@ -1231,7 +1226,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         # Under PP only the last stage's ranks buffer anything, and they are the DP replicas of the
         # whole sample set; a world gather would block the other stages in a collective they never
         # enter. The chain gets the drained scalars from ``log``.
-        gather = self._pp_stage_gather if self._pp_runtime is not None else self.accelerator.gather
+        gather = self._pp_stage_gather if self._pp_runner is not None else self.accelerator.gather
         positive = gather(torch.cat(buffer["positive_mask"]))
         for key, chunks in buffer.items():
             if key == "positive_mask":
@@ -1261,11 +1256,11 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         self._pp_min_log_prob: float | None = self.min_log_prob
         super()._setup_pipeline_parallel()
 
-    def _pp_loss_adapter(self) -> PPLossAdapter:
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """Offline GRPO's pipeline-loss contract.
 
         The per-token objective is microbatch-local and every whole-batch denominator is a pure
-        function of batch metadata, so it rides the runtime's single per-step normalizer and the
+        function of batch metadata, so it rides the runner's single per-step normalizer and the
         microbatch losses sum exactly to the full-batch loss. That normalizer is rank-local on
         purpose: the non-PP loss is a rank-local quotient whose gradients FSDP averages over the DP
         group, and the PP stage wrap averages over the same group. At ``kl_beta != 0`` the
@@ -1278,7 +1273,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         extra_target_keys = ("advantage", "group_size")
         if self.beta != 0.0:
             extra_target_keys += (REF_PER_TOKEN_LOGPS_COLUMN,)
-        return PPLossAdapter(
+        return PipelineLossAdapter(
             token_loss_fn=self._pp_token_loss,
             batch_transform=self._pp_batch_transform,
             normalizer=self._pp_normalizer,
@@ -1312,7 +1307,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
             [torch.full_like(prompt_ids, LABEL_IGNORE_INDEX), completion_labels(completion_ids, completion_mask)],
             dim=1,
         )
-        padded = pad_to_pipeline_length(
+        padded = pad_to_fixed_length(
             {
                 "input_ids": (input_ids, self.padding_value),
                 "attention_mask": (attention_mask, 0),
@@ -1360,7 +1355,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         Per-token log-probs of the completion labels, the negative-advantage ``min_log_prob`` clamp
         (on the policy and, as off PP, on the reference), then :func:`offline_token_objective` and
         :func:`offline_loss_numerator`, the objective and numerator ``compute_loss`` runs. The reference
-        arrives precomputed as a target column, and the runtime divides by ``_pp_normalizer``'s
+        arrives precomputed as a target column, and the runner divides by ``_pp_normalizer``'s
         full-batch denominator.
 
         While :meth:`_pp_score_reference_batch` drives the schedule, the same call scores the
@@ -1417,7 +1412,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         chain and the stage's replicas: the last stage's loss stashes its per-token log-probs instead of
         training on them (:meth:`_pp_token_loss`), and every rank receives them."""
         self._pp_ref_sweep = []
-        self._pp_runtime.eval_loss(
+        self._pp_runner.eval_loss(
             inputs["input_ids"],
             inputs["labels"],
             attention_mask=inputs["attention_mask"],
@@ -1435,7 +1430,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         prediction_loss_only,
         ignore_keys: list[str] | None = None,
     ):
-        if self._pp_runtime is not None:
+        if self._pp_runner is not None:
             # compute_loss (and its sign-metric buffering) needs the full model, so the mixin drives
             # the schedule instead.
             return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
@@ -1459,7 +1454,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         if current_min_log_prob is not None:  # None = no clipping configured
             metrics["min_log_prob_restriction"] = current_min_log_prob
 
-        if self._pp_runtime is not None:
+        if self._pp_runner is not None:
             metrics = self._pp_broadcast_log_metrics(metrics)
 
         if mode == "eval":

@@ -34,6 +34,7 @@ from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
 from src.runtime.consensus import RankConsensus
 from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.pp_fakes import hand_built_stage
 
 PP_SIZE = 2
 N_LAYERS = 4
@@ -74,17 +75,13 @@ class _Backbone(nn.Module):
 
 def _fake_stage(lo: int, hi: int, n_total: int = N_LAYERS) -> PipelineStageModule:
     is_first, is_last = lo == 0, hi == n_total
-    stage = PipelineStageModule(
+    return hand_built_stage(
         _Backbone(hi - lo, is_first, is_last),
         nn.Linear(HIDDEN, 16, bias=False) if is_last else None,
-        is_first,
-        is_last,
-        backbone_prefix="model",
-        head_attr="lm_head",
-        layer_attr="layers",
+        is_first=is_first,
+        is_last=is_last,
         layer_offset=lo,
     )
-    return stage
 
 
 def _ctx(model, optimizer=None, *, parallelism_config=None, fsdp_wrapped=True):
@@ -175,13 +172,13 @@ def test_load_pp_stage_missing_key_raises_naming_it(tmp_path):
         CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
 
 
-def test_pp_ep_guard_reads_where_weights_were_read_not_name_or_path(tmp_path):
+def test_pp_ep_guard_reads_where_weights_were_read_not_name_or_path(tmp_path, monkeypatch):
     """The PP+EP construction-identity guard keys on ``_loaded_weights_from`` — the same signal as
     the EP/CP guard in this file's module. ``config._name_or_path`` survives a build that read no
     weights, so a model merely NAMED after the checkpoint would resume base experts silently."""
     stage = _fake_stage(2, 4)
     _write_pp_checkpoint(tmp_path, stage)
-    stage.ep_moe_layers = lambda: [("model.nonexistent_moe_block", object())]
+    monkeypatch.setattr(loader_mod, "named_ep_layers", lambda module: [("model.nonexistent_moe_block", object())])
     stage.config = SimpleNamespace(_name_or_path=str(tmp_path))  # the weak signal: looks built-from
     setattr(stage, LOADED_WEIGHTS_FROM_ATTR, "/somewhere/else")  # the truth: weights read elsewhere
 
@@ -189,13 +186,13 @@ def test_pp_ep_guard_reads_where_weights_were_read_not_name_or_path(tmp_path):
         CheckpointLoader(_ctx(stage)).load_model(str(tmp_path))
 
 
-def test_pp_ep_guard_accepts_a_model_whose_weights_were_read_from_the_checkpoint(tmp_path):
+def test_pp_ep_guard_accepts_a_model_whose_weights_were_read_from_the_checkpoint(tmp_path, monkeypatch):
     """Anti-vacuity, and the inverse discrimination: weights genuinely read from the checkpoint pass
     even when ``_name_or_path`` points at the hub id the run was configured with. The best-model
     load reads past the constructed-from-checkpoint skip, so the copy proves the guard let it through."""
     stage = _fake_stage(2, 4)
     saved = _write_pp_checkpoint(tmp_path, stage)
-    stage.ep_moe_layers = lambda: [("model.nonexistent_moe_block", object())]
+    monkeypatch.setattr(loader_mod, "named_ep_layers", lambda module: [("model.nonexistent_moe_block", object())])
     stage.config = SimpleNamespace(_name_or_path="org/base-model")
     setattr(stage, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
 
@@ -221,7 +218,7 @@ def test_load_pp_stage_refuses_axes_it_cannot_unshard(tmp_path, axis):
 
 def test_pp_ep_guard_joins_the_world_even_on_a_moe_free_stage(tmp_path, monkeypatch):
     """The construction-identity verdict is joined on EVERY rank, not only inside ``if
-    stage.ep_moe_layers():``. A PP split can leave a whole stage without a MoE block, and both of the
+    named_ep_layers(stage):``. A PP split can leave a whole stage without a MoE block, and both of the
     verdict's inputs are rank-local (that module list, and a ``realpath`` on this node's filesystem),
     so a raise taken inside the gate would strand the MoE-free peers in the read consensus below."""
     stage = _fake_stage(0, 2)  # no EP layers on this stage

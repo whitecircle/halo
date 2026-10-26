@@ -23,7 +23,8 @@ import torch
 from transformers import AutoConfig, AutoModelForSequenceClassification, Qwen3Config, Qwen3ForCausalLM
 
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
-from src.distributed.pipeline_parallel.split import tie_flag_configs, validate_model_structure_supports_pp
+from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_structure
+from src.models.config_access import tie_flag_configs
 from tests.common.models import TINY_QWEN3_CONFIG
 
 PP_SIZE = 2
@@ -135,7 +136,7 @@ def test_a_tie_declared_only_on_a_sub_config_is_rejected():
     model.config = _composite_declaring_the_tie_on_text_only()
 
     with pytest.raises(ValueError, match="tie_word_embeddings"):
-        validate_model_structure_supports_pp(model)
+        reject_unsupported_pp_structure(model)
 
 
 def test_a_sub_config_tie_without_an_output_head_still_loads():
@@ -147,7 +148,7 @@ def test_a_sub_config_tie_without_an_output_head_still_loads():
     model.config = _composite_declaring_the_tie_on_text_only()
 
     assert model.get_output_embeddings() is None
-    validate_model_structure_supports_pp(model)
+    reject_unsupported_pp_structure(model)
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ import pytest
 from accelerate import PartialState
 from transformers import LlamaConfig
 
-from src.distributed.loading.model_loading import _apply_config_overrides
+from src.models.config_access import apply_config_overrides
 
 PartialState()  # the loader logs through accelerate's logger
 
@@ -39,7 +39,7 @@ def test_a_precision_override_is_refused(key):
         f"and the override reaches a config field the explicit dtype= then overrules"
     )
     with pytest.raises(ValueError, match="bf16"):
-        _apply_config_overrides(config, {key: "float16"})
+        apply_config_overrides(config, {key: "float16"})
 
 
 def test_a_refused_precision_key_leaves_the_config_untouched():
@@ -48,7 +48,7 @@ def test_a_refused_precision_key_leaves_the_config_untouched():
     config = LlamaConfig()
     original = config.max_position_embeddings
     with pytest.raises(ValueError):
-        _apply_config_overrides(config, {"max_position_embeddings": 12345, "dtype": "float16"})
+        apply_config_overrides(config, {"max_position_embeddings": 12345, "dtype": "float16"})
     assert config.max_position_embeddings == original
     assert config.dtype is None
 

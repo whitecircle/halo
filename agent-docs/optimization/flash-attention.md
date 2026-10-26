@@ -1,6 +1,6 @@
 # Flash Attention & Attention Backends
 
-`load_distributed_model` (`src/distributed/loading/model_loading.py`) auto-detects the backend per GPU and model: `flash_attention_4` on Blackwell, `flash_attention_3` on Hopper, `flash_attention_2` otherwise. Pass `attn_implementation` only to override it.
+`load_distributed_model` (`src/model_loading/parallel/loader.py`) auto-detects the backend per GPU and model: `flash_attention_4` on Blackwell, `flash_attention_3` on Hopper, `flash_attention_2` otherwise. Pass `attn_implementation` only to override it.
 
 FA2 is the detector's terminal default, with no availability probe — every shipped image carries it, and a host without it raises at model build. Context Parallelism hard-requires flash-attn and raises `ImportError` when it is missing.
 
@@ -225,7 +225,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 
 **FA4 first-use compile under multi-rank parallelism.** FA4 JIT-compiles each kernel on first use (~10 s) mid-forward. A cache-miss compile on one rank stalls it while peers race ahead to the next collective (a TP `o_proj` all-reduce, an EP DeepEP dispatch), desyncing the group into a deadlock.
 
-`warm_attention_kernels` (`src/distributed/loading/warmup.py`, called at the end of `load_distributed_model` and of the frozen reference/teacher loader) runs the rank-local compiles on every rank behind one barrier, so the training loop only hits warm kernels: `warm_fa4_kernels` (`src/models/attention/backend_setup.py`) when FA4 is active, and `warm_flex_sliding_kernels` when the model runs `sdpa_flex_sliding` ([below](#sliding-window-and-wide-head-layers-on-sdpa)). It is a no-op at `world_size == 1`, where no peer waits on a compiling rank and each kernel compiles at its first call.
+`warm_attention_kernels` (`src/model_loading/parallel/whole_model.py`, called at the end of `load_distributed_model` and of the frozen reference/teacher loader) runs the rank-local compiles on every rank behind one barrier, so the training loop only hits warm kernels: `warm_fa4_kernels` (`src/models/attention/backend_setup.py`) when FA4 is active, and `warm_flex_sliding_kernels` when the model runs `sdpa_flex_sliding` ([below](#sliding-window-and-wide-head-layers-on-sdpa)). It is a no-op at `world_size == 1`, where no peer waits on a compiling rank and each kernel compiles at its first call.
 
 It covers both entry points — dense `flash_attn_func` and varlen `flash_attn_varlen_func` over a two-document `cu_seqlens` — each in the variants the model can reach: sliding-window when the config declares one, and a learnable sink when the model carries sinks.
 

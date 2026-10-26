@@ -35,8 +35,8 @@ from torch.distributed.tensor import DTensor
 from transformers.models.mistral4 import modeling_mistral4
 
 from src.distributed.checkpoint.ep_save import save_ep_model
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main
@@ -105,9 +105,9 @@ def run_mode(
     # ── Sanity ─────────────────────────────────────────────────────────────
     # Mistral4 is MoE and ``use_grouped_gemm`` defaults on, so ``needs_ep_wrappers`` holds in every
     # mode: EP / EP+TP / EP+ETP / TP+MoE take the EP wrappers, and pure CP takes the
-    # ``ep_size == 1`` grouped-GEMM wrappers (``_load_cp_model`` hands ``load_model_for_cp`` an
-    # ep_config whenever ``needs_ep_wrappers`` holds, so its experts do not fall back to the stock
-    # per-expert loop while still paying the Liger swiglu/geglu force-off).
+    # ``ep_size == 1`` grouped-GEMM wrappers (``load_cp_model`` builds an ep_config whenever
+    # ``needs_ep_wrappers`` holds, so its experts do not fall back to the stock per-expert loop while
+    # still paying the Liger swiglu/geglu force-off).
     expected_layers = TINY_MISTRAL4_CONFIG["num_hidden_layers"]
     checks["ep_layers_present"] = len(moe_layers) == expected_layers
     log(f"  EP layers found: {len(moe_layers)} (expected {expected_layers})")

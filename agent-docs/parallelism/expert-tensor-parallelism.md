@@ -202,7 +202,7 @@ including Zaya). A dense model raises: pure ETP has `ep_group_size > 1`, so patc
 is an error.
 
 `expert_tp_size` must divide each expert's intermediate size, else the top units of every expert
-would be dropped silently. `ParallelismConfig.validate_against_model_config` checks it off
+would be dropped silently. `reject_unsupported_model` checks it off
 `config.json` at the top of the model load, through `resolve_expert_ffn_shard_width`.
 
 That helper is the one home for "what does ETP actually shard", so the config-time gate and the

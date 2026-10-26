@@ -23,7 +23,6 @@ from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY
 from trl.trainer.utils import disable_dropout_in_model
 
 from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.checkpoint.ep_save import validate_ep_sharded_save
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.context_parallel.validation import validate_trainer_args_for_cp
@@ -43,9 +42,10 @@ from src.distributed.fsdp import (
 from src.distributed.mesh import ParallelDims
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.parallelism_rules import reject_cross_domain_determinism
-from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
+from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
 from src.model_loading.liger.dispatch import (
@@ -82,6 +82,7 @@ from src.trainers.mixins.grad_sync import GradientSyncMixin
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.mixins.token_metrics import TokenMetricsMixin
 from src.trainers.mixins.validation import ParallelismValidationMixin, ctor_model_and_config, disable_trl_liger
+from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 
 register_custom_optimizers()
 
@@ -244,15 +245,15 @@ class DistributedTrainerMixin(
     # num_items_in_batch, and must keep its /gradient_accumulation_steps — see _setup_distributed_modes.
     _loss_is_own_mean: bool = False
 
-    def _pp_loss_adapter(self) -> PPLossAdapter:
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """This trainer's pipeline-loss contract; overridden by trainers that enable PP.
 
         The default is the causal-LM contract (summed shifted CE, token-count normalizer), which is
         what SFT needs. A trainer enabling ``_supports_pp`` with a different objective overrides
         this to declare its loss, pair layout, batch transform, normalizer and per-example side
-        tensors (see :class:`~src.distributed.pipeline_parallel.losses.PPLossAdapter`).
+        tensors (see :class:`~src.trainers.parallelism.pipeline_loss_adapter.PipelineLossAdapter`).
         """
-        return PPLossAdapter(token_loss_fn=causal_lm_token_loss)
+        return PipelineLossAdapter(token_loss_fn=causal_lm_token_loss)
 
     def _init_distributed_config(
         self,
@@ -953,7 +954,7 @@ class DistributedTrainerMixin(
         if cp_wrapper is None:
             raise ValueError(
                 f"CP mode requires model to be wrapped with UlyssesCPModelWrapper "
-                f"during loading (via load_model_for_cp / load_model_for_ep_cp / "
+                f"during loading (via load_cp_model / load_ep_cp_model / "
                 f"load_distributed_model). Got: {type(self.model).__name__}"
             )
 
@@ -1325,7 +1326,7 @@ class DistributedTrainerMixin(
         delegating the actual step."""
         self._accumulate_unmasked_output_tokens(self._extract_output_token_count(inputs))
         self._accumulate_attention_flops(inputs)
-        if self._pp_runtime is not None:
+        if self._pp_runner is not None:
             # The schedule drives forward and backward, so the inherited step must not also run them.
             return self._pp_training_step(inputs)
         self._warn_once_on_thin_memory_margin()
@@ -1358,7 +1359,7 @@ class DistributedTrainerMixin(
 
     def prediction_step(self, model, inputs, prediction_loss_only=True, ignore_keys=None):
         """Under PP the eval step must run through the schedule (no rank holds the whole model)."""
-        if self._pp_runtime is not None:
+        if self._pp_runner is not None:
             return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
         return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
 

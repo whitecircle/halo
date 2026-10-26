@@ -36,16 +36,15 @@ from src.configs.embedding import EmbeddingConfig
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
-from src.distributed.expert_parallel.loading import cast_loaded_parameters
 from src.distributed.expert_parallel.patching import ep_claimed_blocks
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
-from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner, load_pp_stage_model
-from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, resolve_layer_root
+from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, StageLayout
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import cast_parameters_to_run_dtype
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
+from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from src.model_loading.parallel.whole_model import cast_loaded_parameters, resolve_trainer_model
 from src.models.param_roles import fp32_pinned_names
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B
@@ -65,25 +64,27 @@ FINALIZE = finalize_loaded_model.__name__
 # Where a training or scoring load lives; every model build there inherits the fp32 pins.
 # ``src/model_loading/`` defines the entry points and is left out: conversion tools load through it
 # too and must keep the pins, so the cast belongs to each training loader rather than to the shared core.
+# Its ``parallel/`` dispatch holds the training loaders and is swept.
 SWEPT_ROOTS = ("src", "scripts/training")
 LOAD_CORE = "src/model_loading/"
+TRAINING_LOADERS = "src/model_loading/parallel/"
 
 # Every function the sweep below finds. Pinned exactly so a renamed or new loader is a deliberate
 # edit rather than a silently shrunk sweep.
 EAGER_LOADERS = frozenset(
     {
         ("scripts/training/embedding.py", "build_sentence_transformer"),
-        ("src/distributed/expert_parallel/loading.py", "load_through_cpu"),
-        ("src/distributed/loading/frozen_models.py", "load_frozen_auxiliary_model"),
-        ("src/distributed/loading/model_loading.py", "_from_pretrained_on_local_gpu"),
-        ("src/distributed/loading/model_loading.py", "load_model_from_pretrained"),
+        ("src/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
+        ("src/model_loading/parallel/loader.py", "_build_random_init"),
+        ("src/model_loading/parallel/whole_model.py", "load_whole_model"),
+        ("src/model_loading/parallel/whole_model.py", "resolve_trainer_model"),
     }
 )
 
 # The dense TP load materializes straight into DTensors, which the cast cannot re-dtype (it skips one
 # already at the run dtype and raises on any other). No dense family pins a parameter, and a mixed load
 # there would fail FSDP2's wrap loudly.
-UNCAST_LOADERS = frozenset({("src/distributed/loading/model_loading.py", "_load_tp_model")})
+UNCAST_LOADERS = frozenset({("src/model_loading/parallel/tp.py", "load_tp_model")})
 
 # Model builds that are no training or scoring load: the PEFT merge folds an adapter into the base a
 # conversion tool loaded (conversions keep the pins), and the head-transform probe builds an fp32 meta
@@ -263,7 +264,9 @@ def test_a_bf16_from_pretrained_keeps_the_family_pins(pinned_checkpoints, family
 
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_the_frozen_loader_scores_in_the_run_dtype(pinned_checkpoints, family):
-    model = load_frozen_auxiliary_model(pinned_checkpoints[family], dtype=torch.bfloat16, device_map="cpu")
+    model = load_frozen_auxiliary_model(
+        pinned_checkpoints[family], dtype=torch.bfloat16, device_map="cpu", trust_remote_code=False, download_tag=None
+    )
 
     assert params_off_dtype(model, torch.bfloat16) == []
 
@@ -274,7 +277,7 @@ def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_in
     and the pins are unified to it."""
     args = types.SimpleNamespace(model_init_kwargs=dict(model_init_kwargs), gradient_checkpointing=False)
 
-    model, _ = load_model_from_pretrained(pinned_checkpoints["deepseek_v4"], args, keep_fp32=False)
+    model = resolve_trainer_model(pinned_checkpoints["deepseek_v4"], args, keep_fp32_non_ep=False)
 
     assert params_off_dtype(model, torch.bfloat16) == []
 
@@ -359,7 +362,7 @@ def _load_with(
     tiny = TINY_MOE_FAMILIES[family]
     if loader == "path_string":
         args = types.SimpleNamespace(model_init_kwargs={"dtype": torch.bfloat16}, gradient_checkpointing=False)
-        model, _ = load_model_from_pretrained(path, args, tiny.load_class, keep_fp32=keep_fp32)
+        model = resolve_trainer_model(path, args, model_class=tiny.load_class, keep_fp32_non_ep=keep_fp32)
         return model
     for module in (ep_lazy_loader, pp_lazy_loader):
         monkeypatch.setattr(module, "patch_moe_model_for_ep", lambda model, *args, **kwargs: model)
@@ -444,7 +447,7 @@ def test_a_later_pp_stage_keeps_the_pins_of_its_own_layers(stored_fp32_checkpoin
     model = _load_with("pp_stage", "deepseek_v4", path, keep_fp32, monkeypatch, pp_rank=1, pp_size=2)
 
     lo, hi = getattr(model, PP_STAGE_PARTITION_ATTR)[1]
-    planner = PPWeightPlanner(lo, hi, resolve_layer_root(model))
+    planner = PPWeightPlanner(lo, hi, StageLayout.of(model).layer_root)
     stage_pins = {planner.stage_key(name): name for name in pinned if planner.owns(name)}
     stage_names = {name for name, _ in model.named_parameters()}
     assert lo > 0 and set(stage_pins) != pinned & stage_names
@@ -539,7 +542,7 @@ def _eager_loaders() -> dict[tuple[str, str], frozenset[str]]:
     return {
         loader: calls
         for loader, calls in functions_calling(SWEPT_ROOTS, builds_a_model).items()
-        if not loader[0].startswith(LOAD_CORE)
+        if not loader[0].startswith(LOAD_CORE) or loader[0].startswith(TRAINING_LOADERS)
     }
 
 

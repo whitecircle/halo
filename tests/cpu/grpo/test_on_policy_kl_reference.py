@@ -29,12 +29,12 @@ from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from trl import GRPOConfig, GRPOTrainer, ModelConfig
 
-import src.distributed.loading.frozen_models as frozen_models
-from src.distributed.loading.frozen_models import (
+import src.model_loading.parallel.frozen_models as frozen_models
+from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.frozen_models import (
     PREFERENCE_REFERENCE_ALTERNATIVES,
     load_reference_model_for_on_policy_grpo,
 )
-from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.grpo import online
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
@@ -226,7 +226,7 @@ def test_a_policy_passed_by_name_is_still_built_by_trl(tmp_path, base_dir):
 def test_the_replica_warning_names_the_on_policy_way_around_the_reference(trainer_cls, monkeypatch, caplog):
     """Under EP the reference is a dense replica per rank; the warning offers what these trainers honor,
     not DPO's precompute."""
-    monkeypatch.setattr(frozen_models, "_REPORTED_REFERENCES", set())
+    monkeypatch.setattr(frozen_models, "_reported_references", set())
     host = types.SimpleNamespace(
         model=None,
         ref_model=object(),

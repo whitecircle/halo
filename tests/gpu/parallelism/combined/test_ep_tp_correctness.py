@@ -35,9 +35,9 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import get_tp_mesh
+from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded, world_spread
 from tests.common.ep_reference import (
     broadcast_reference,

@@ -37,8 +37,8 @@ import torch
 import torch.distributed as dist
 from transformers.models.mistral4 import Mistral4ForCausalLM
 
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import shared_scratch_dir, world_spread
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main

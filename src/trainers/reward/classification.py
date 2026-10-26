@@ -61,11 +61,11 @@ from src.data.pipeline.processing import (
     report_rejected_rows,
     resolve_map_num_proc,
 )
-from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.losses import PPLossAdapter
 from src.hardware import current_device
+from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
 from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from src.trainers.reward.pooling import (
     decode_pooling_plane,
     encode_pooling_plane,
@@ -183,7 +183,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
     _loss_is_own_mean = True
 
     _pp_pool_pad_id: int | None = None
-    # Set from prepare_peft_model's result; False whenever no PEFT config was passed.
+    # Set from build_peft_model's result; False whenever no PEFT config was passed.
     _peft_has_been_casted_to_bf16: bool = False
 
     def __init__(
@@ -229,7 +229,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         peft_config = dist_kwargs.pop("peft_config")
 
         if peft_config is not None:
-            model, casted = prepare_peft_model(model, peft_config, args, merge_existing=False)
+            model, casted = build_peft_model(model, peft_config, args, merge_existing=False)
             self._peft_has_been_casted_to_bf16 = casted
 
         if args.disable_dropout:
@@ -391,7 +391,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         """Focal loss for single-label and multi-label classification.
 
         ``reduction="none"`` is the pipeline-parallel form: per-microbatch sums stay additive, and
-        the runtime divides by the full batch's element count to recover the mean, so the seam masks
+        the runner divides by the full batch's element count to recover the mean, so the seam masks
         the inert rows out of the per-element values before summing them itself.
 
         ``alpha`` is the RetinaNet balancing factor ``alpha_t = alpha*y + (1-alpha)*(1-y)``, so it is
@@ -549,7 +549,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
     ) -> torch.Tensor:
         """The configured objective on pooled logits, summed over ``valid_rows``.
 
-        The pipeline seam needs the sum form: per-microbatch sums are additive, and the runtime
+        The pipeline seam needs the sum form: per-microbatch sums are additive, and the runner
         divides by :meth:`_pooled_loss_normalizer` to recover exactly the non-PP per-batch mean.
         Covers every ``_build_loss_fn`` outcome: (weighted / label-smoothed) ``nn.CrossEntropyLoss``,
         (weighted) ``nn.BCEWithLogitsLoss``, and the focal partial (which accepts ``reduction``
@@ -616,10 +616,10 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         self._pp_pool_pad_id = pooling_pad_id_for(self)
         super()._setup_pipeline_parallel()
 
-    def _pp_loss_adapter(self) -> PPLossAdapter:
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """Pooled sequence classification as a last-stage pipeline loss.
 
-        The batch transform rewrites the collated ``labels`` into the runtime's ``[B, S]`` plane:
+        The batch transform rewrites the collated ``labels`` into the runner's ``[B, S]`` plane:
         ``-100`` everywhere except the pooled position (transformers' rightmost-non-pad rule), which
         carries the class id — so single-label needs no side tensors at all. Multi-hot targets are
         float ``[B, num_labels]`` and cannot ride a long plane; they ship as the ``class_targets``
@@ -627,7 +627,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         its sum form with a batch-level denominator (see ``_pooled_loss`` / ``_pooled_loss_normalizer``),
         so none is rejected.
         """
-        return PPLossAdapter(
+        return PipelineLossAdapter(
             token_loss_fn=self._pp_classification_token_loss,
             batch_transform=self._pp_classification_batch_transform,
             normalizer=self._pp_classification_normalizer,
@@ -648,7 +648,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         return pooled_outputs(logits, positions).float()
 
     def _pp_classification_eval_labels(self, inputs: dict) -> torch.Tensor:
-        """The real class targets, recovered from the runtime-shaped labels plane."""
+        """The real class targets, recovered from the runner-shaped labels plane."""
         if self.is_multi_label:
             return inputs["class_targets"]
         _valid, _positions, plane_values = decode_pooling_plane(inputs["labels"])
@@ -669,7 +669,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         return out
 
     def _pp_classification_token_loss(self, logits: torch.Tensor, target: torch.Tensor | dict) -> torch.Tensor:
-        """Summed pooled loss over the microbatch (the runtime divides by the batch normalizer).
+        """Summed pooled loss over the microbatch (the runner divides by the batch normalizer).
 
         Runs on every micro-batch, so it stays free of ``.item()``/``bool()``/boolean indexing: the
         inert rows are carried through the loss and masked out of the sum instead (:meth:`_pooled_loss`).
@@ -742,7 +742,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         ignore_keys: list[str] | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """Perform a prediction step (``ignore_keys`` is inert — the loss returns ``logits`` directly)."""
-        if self._pp_runtime is not None:
+        if self._pp_runner is not None:
             return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
         inputs = self._prepare_inputs(inputs)
 

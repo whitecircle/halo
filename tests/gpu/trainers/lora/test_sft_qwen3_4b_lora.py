@@ -29,9 +29,9 @@ import torch
 from transformers import AutoTokenizer
 from trl import ModelConfig, SFTConfig, get_quantization_config
 
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
@@ -121,7 +121,7 @@ def run_mode(
             sft_config.use_liger_kernel = False
 
         # Step 3: Setup PEFT
-        peft_config = setup_peft_model(PEFT_ARGS, model, model_config, "CAUSAL_LM")
+        peft_config = configure_adapter_training(PEFT_ARGS, model, model_config, "CAUSAL_LM")
         if peft_config is not None:
             log(f"  PEFT config: r={peft_config.r}, alpha={peft_config.lora_alpha}")
             trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)

@@ -165,7 +165,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
 
     captured: dict = {}
     normalizers: list[float] = []
-    real_step = trainer._pp_runtime.step
+    real_step = trainer._pp_runner.step
 
     def spying_step(input_ids, labels, **kw):
         normalizers.append(float(kw["num_items_in_batch"]))
@@ -177,12 +177,12 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
             captured["label"] = kw["extra_targets"]["label"].clone()
         return real_step(input_ids, labels, **kw)
 
-    trainer._pp_runtime.step = spying_step
+    trainer._pp_runner.step = spying_step
 
     eval_calls: list[dict] = []
     init_eval_metrics = None
     if eval_dataset is not None:
-        real_eval = trainer._pp_runtime.eval_loss
+        real_eval = trainer._pp_runner.eval_loss
 
         def spying_eval(input_ids, labels, **kw):
             eval_calls.append(
@@ -197,7 +197,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
             )
             return real_eval(input_ids, labels, **kw)
 
-        trainer._pp_runtime.eval_loss = spying_eval
+        trainer._pp_runner.eval_loss = spying_eval
         init_eval_metrics = trainer.evaluate()
 
     # Snapshot the init-weights captures under a new name: in-loop evals keep appending to
@@ -289,7 +289,7 @@ def run(ctx):
         args.gradient_accumulation_steps == 1 and trainer._pp_n_microbatches == MICROBATCHES
     )
     checks["batch_padded_to_fixed_shape"] = captured["input_ids"].shape == (ROWS_PER_RANK, SEQ_LEN)
-    checks["unpaired_rows_declared"] = trainer._pp_runtime.paired_examples is False
+    checks["unpaired_rows_declared"] = trainer._pp_runner.rows_per_example == 1
     checks["no_reference_model"] = trainer.ref_model is None
     checks["normalizer_is_row_count"] = len(normalizers) == N_STEPS and all(
         abs(value - ROWS_PER_RANK) < 1e-6 for value in normalizers

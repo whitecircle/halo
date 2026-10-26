@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 from datasets import Dataset
 
-import src.distributed.loading.model_source as model_source
+import src.model_loading.parallel.model_source as model_source
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 
 _VLM_REJECTION = "Vision-language training is not supported under pipeline parallelism"

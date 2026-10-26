@@ -6,7 +6,7 @@ loss only where it builds that loss from ``labels``. Preference / log-prob / dis
 head trainers forward without labels and assemble their own loss, so the aux term never enters the
 graph: routing collapses over training while the run still pays for ``output_router_logits``.
 ``_validate_router_aux_loss_consumable`` raises on an EXPLICIT ``moe_balancing=aux_loss`` there and
-warns when ``auto`` resolved to it — the non-PP counterpart of pipeline_parallel.split's rejection.
+warns when ``auto`` resolved to it — the non-PP counterpart of pipeline_parallel.model_rules' rejection.
 
 Run: python tests/cpu/trainers/test_router_aux_loss_gate.py
 """

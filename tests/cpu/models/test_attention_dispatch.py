@@ -22,7 +22,7 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src import hardware
 from src.distributed.context_parallel import base_layer as cp_base_layer
-from src.distributed.loading import model_loading
+from src.model_loading.parallel import loader as model_loading
 from src.models.attention import selection as attention_mod
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 

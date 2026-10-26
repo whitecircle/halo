@@ -26,13 +26,13 @@ The router-outside-wrapper layout changes how the precision flags behave:
 
 - `fp32_router` is a no-op — it controls the EP wrapper's internal router, and Gemma 4's lives outside it. Harmless, but it buys nothing: the shipped configs leave it unset and say why.
 - `fp32_experts: true` upcasts the precision-sensitive expert weights — use it.
-- `fp32_non_ep_params: true` is **refused at model load** under EP, off `config.json` and before the process groups (`_validate_fp32_non_ep_params` in `src/distributed/loading/model_loading.py`, driven by the EP layer's own `_supports_fp32_non_ep_params`). Train Gemma 4 experts-distributed in plain bf16.
+- `fp32_non_ep_params: true` is **refused at model load** under EP, off `config.json` and before the process groups (`reject_unsupported_model` in `src/model_loading/parallel/load_rules.py`, driven by the EP layer's own `_supports_fp32_non_ep_params`). Train Gemma 4 experts-distributed in plain bf16.
 
     Gemma 4's norms re-emit activations at weight dtype, so the upcast feeds fp32 tokens into DeepEP's 2-byte transport. Without the gate it surfaces as a raw C++ assert at the first dispatch, after the whole multi-GPU load. See [Precision control](../parallelism/expert-parallelism.md#precision-control).
 
 Gemma 4's softmax router has no native aux-loss term (no `router_aux_loss_coef` field, no aux term in the loss) and the EP wrapper has no bias-update path, so no load balancing is available. `auto` resolves to `none` with a warning; **set `moe_balancing: none` explicitly** to state that deliberately. An explicit `aux_loss` finds no coefficient, stays off, and stamps the config so `MoEMetricsCallback` declines to wire itself.
 
-Under `none` nothing is stamped, but `output_router_logits: true` in `model_init_kwargs` cannot buy the `moe/*` load metrics back either: no Gemma 4 config level declares that field, so `_apply_config_overrides` rejects the override at load. See [Gemma 4 has no balancing path](../training-methods/callbacks.md#gemma-4-has-no-balancing-path).
+Under `none` nothing is stamped, but `output_router_logits: true` in `model_init_kwargs` cannot buy the `moe/*` load metrics back either: no Gemma 4 config level declares that field, so `apply_config_overrides` rejects the override at load. See [Gemma 4 has no balancing path](../training-methods/callbacks.md#gemma-4-has-no-balancing-path).
 
 The router's top-k field is spelled `top_k_experts` (not `num_experts_per_tok`) and lives on the text sub-config, along with `num_experts`. Both are covered by the toolkit's shared detection, so `moe/*` metrics and the S-MFU sparsity factor use the real top-k.
 

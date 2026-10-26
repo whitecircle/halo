@@ -1,8 +1,8 @@
 """Assistant-completion span resolution shared by every completion-only masking path.
 
-Provides the loss ignore index, the assistant-turn terminator set, the marker-to-terminator span
-search, the span mask, the completion-only label builder and the construction-time chat-template
-probe. The runtime collators, the offline label bake and the PP losses all read them from here.
+Provides the assistant-turn terminator set, the marker-to-terminator span search, the span mask,
+the completion-only label builders and the construction-time chat-template probe. The runtime
+collators, the offline label bake and the trainers' batch transforms all read them from here.
 """
 
 import warnings
@@ -13,11 +13,9 @@ from accelerate import PartialState
 from accelerate.logging import get_logger
 from transformers import PreTrainedTokenizerBase
 
-logger = get_logger(__name__)
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 
-# The HF cross_entropy ignore_index, shared by the collators, the preprocessing label bake and the
-# PP losses.
-LABEL_IGNORE_INDEX = -100
+logger = get_logger(__name__)
 
 # A template-mismatch warning decodes the offending row; bounded on both axes so a wrong template
 # (which misses on every row) cannot flood the log or pay a full 32k-token decode per row.
@@ -562,3 +560,8 @@ def build_completion_only_labels(
         extra_ignore_token_ids=extra_ignore_token_ids,
     )
     return batch["labels"]
+
+
+def completion_labels(input_ids: torch.Tensor, completion_mask: torch.Tensor) -> torch.Tensor:
+    """Labels that score the completion only: token ids where ``completion_mask`` is set, ignore elsewhere."""
+    return torch.where(completion_mask.bool(), input_ids, LABEL_IGNORE_INDEX)

@@ -308,7 +308,7 @@ def is_vlm_run(
     Agreed across ranks once for the whole verdict rather than per term. The checkpoint's side comes
     from the already-loaded ``config`` (:func:`~src.models.modality.is_vlm_model`) or from
     ``vlm_checkpoint``, the verdict of
-    :func:`~src.distributed.loading.model_source.probe_checkpoint`; one of the two is required.
+    :func:`~src.model_loading.parallel.model_source.probe_checkpoint`; one of the two is required.
     """
     if vlm_checkpoint is None:
         if config is None:

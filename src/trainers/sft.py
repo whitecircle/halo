@@ -8,8 +8,8 @@ from transformers import Trainer
 from trl import SFTTrainer
 from trl.trainer.utils import entropy_from_logits
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.config import cp_chunk_bounds, cp_shift_against_full_labels
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import ctor_positions, ctor_value

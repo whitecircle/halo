@@ -30,7 +30,7 @@ from transformers import Qwen3Config, Qwen3ForSequenceClassification
 
 import src.trainers.mixins.base as mixin_base
 from src.configs.classification import ClassificationConfig
-from src.data.spans import LABEL_IGNORE_INDEX
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.reward.classification import ClassificationTrainer
 from src.trainers.reward.pooling import decode_pooling_plane, pooled_outputs
 
@@ -161,7 +161,7 @@ def test_weighted_ce_normalizer_matches_an_fp64_reference():
 
 
 def test_the_weighted_normalizer_never_divides_an_all_inert_batch_by_zero():
-    """An all-inert micro-batch sums to zero on both sides, and the runtime's ``sum / normalizer`` is
+    """An all-inert micro-batch sums to zero on both sides, and the runner's ``sum / normalizer`` is
     then NaN — carried into every stage's reported loss and into the nan/inf filter. The row-count
     branches floor at 1.0; the weight-sum branch owes the same floor, and only at zero, so a real
     batch's denominator (the sum of its rows' class weights) is untouched."""
@@ -274,7 +274,7 @@ def test_multi_label_bce_stays_fp32_against_a_bf16_target():
 )
 def test_every_loss_variant_returns_fp32(loss_fn, multi_label):
     """One dtype for every ``_build_loss_fn`` outcome — a variant reducing in bf16 would feed the PP
-    runtime a summand it then divides by an fp32 normalizer."""
+    runner a summand it then divides by an fp32 normalizer."""
     generator = torch.Generator().manual_seed(5)
     logits = (torch.randn(8, NUM_CLASSES, generator=generator) * 4.0).bfloat16()
     targets = (
@@ -352,7 +352,7 @@ def test_prediction_step_returns_the_head_logits_and_the_labels():
     model = _head(torch.bfloat16)
     inputs = _head_batch()
     trainer = _built_trainer(model)
-    trainer._pp_runtime = None
+    trainer._pp_runner = None
     trainer._prepare_inputs = lambda batch: batch
     trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
 

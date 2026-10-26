@@ -34,9 +34,10 @@ from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
 from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import create_pipeline_group
-from src.distributed.pipeline_parallel.runtime import PipelineRuntime
+from src.distributed.pipeline_parallel.groups import build_pipeline_group
+from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from src.distributed.pipeline_parallel.stage_losses import TokenLoss
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
 from tests.common.utils import log, log_all
@@ -143,20 +144,20 @@ def run(ctx):
 
     mesh = init_device_mesh("cuda", (pp_size, config.stage_world_size), mesh_dim_names=("pp", "dp"))
     dp_mesh = mesh["dp"]
-    pp_group = create_pipeline_group(config)
+    pp_group = build_pipeline_group(config)
 
     stage_module = build_pipeline_stage(build_model(device), config.pp_rank, pp_size)
     for layer in stage_module.model.layers:
         fully_shard(layer, mesh=dp_mesh, reshard_after_forward=False)
     fully_shard(stage_module, mesh=dp_mesh, reshard_after_forward=False)
-    runtime = PipelineRuntime(stage_module, config, pp_group, device, n_microbatches)
+    runner = PipelineRunner(stage_module, config, pp_group, device, n_microbatches, TokenLoss())
 
     # Ragged rows make DP replicas hold unequal counts — the exact case the rank-local default
     # normalizer gets wrong. Pass the trainer's G/dp so per-replica losses average to S_total/G.
     dp_rank = config.get_data_parallel_rank()
     local_bs = GLOBAL_BATCH // config.data_parallel_size
     sl = slice(dp_rank * local_bs, (dp_rank + 1) * local_bs)
-    loss = runtime.step(
+    loss = runner.step(
         input_ids[sl],
         labels[sl],
         attention_mask=attention_mask[sl],

@@ -18,8 +18,8 @@ import pytest
 import torch
 from trl.trainer.utils import entropy_from_logits
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.config import cp_boundary_shift
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers import sft as sft_trainer
 from src.trainers.sft import _CP_METRIC_COLUMNS, _CP_METRIC_DTYPE, DistributedSFTTrainer
 

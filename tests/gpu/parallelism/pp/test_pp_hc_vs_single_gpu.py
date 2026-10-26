@@ -2,7 +2,7 @@
 """Hyper-connection PP equivalence gate: DeepSeek-V4 / GLM-5 stages must reproduce single-GPU grads.
 
 These families' stage boundary is the ``hc_mult``-widened ``[B, S, hc_mult, D]`` stream — carried
-over torch pipelining's P2P by :class:`Glm5NextPPSpec`/:class:`DeepSeekV4PPSpec` (``hc_head``
+over torch pipelining's P2P by the ``GLM5_NEXT_PP``/``DEEPSEEK_V4_PP`` family specs (``hc_head``
 neutralized off non-last stages, the mirrored mid-chain forward bound on non-first stages). This
 runs the real schedule (recv buffers, shape inference, backward P2P for the 4-D activation) against
 an unsplit single-process baseline over the same global batch, so it fails when:
@@ -34,9 +34,10 @@ from transformers import (
 )
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import create_pipeline_group
-from src.distributed.pipeline_parallel.runtime import PipelineRuntime
+from src.distributed.pipeline_parallel.groups import build_pipeline_group
+from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from src.distributed.pipeline_parallel.stage_losses import TokenLoss
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
 from tests.common.utils import log
@@ -99,7 +100,7 @@ def make_batch(device, vocab_size):
 
 
 def causal_lm_loss(logits, labels):
-    """The same shifted, token-count-normalized CE the pipeline runtime computes."""
+    """The same shifted, token-count-normalized CE the pipeline runner computes."""
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = labels[:, 1:].contiguous()
     n_tokens = (shift_labels != -100).sum().clamp(min=1)
@@ -142,7 +143,7 @@ def run(ctx):
 
     mesh = init_device_mesh("cuda", (PP_SIZE, config.stage_world_size), mesh_dim_names=("pp", "dp"))
     dp_mesh = mesh["dp"]
-    pp_group = create_pipeline_group(config)
+    pp_group = build_pipeline_group(config)
 
     model = build_model(device)
     stage_module = build_pipeline_stage(model, config.pp_rank, PP_SIZE, moe_balancing="none", pp_split=pp_split)
@@ -153,13 +154,13 @@ def run(ctx):
         fully_shard(layer, mesh=dp_mesh, reshard_after_forward=False)
     fully_shard(stage_module, mesh=dp_mesh, reshard_after_forward=False)
 
-    runtime = PipelineRuntime(stage_module, config, pp_group, device, N_MICROBATCHES)
+    runner = PipelineRunner(stage_module, config, pp_group, device, N_MICROBATCHES, TokenLoss())
 
     # This DP replica's slice of the global batch; every rank of a chain gets the same slice.
     dp_rank = config.get_data_parallel_rank()
     local_bs = GLOBAL_BATCH // config.data_parallel_size
     sl = slice(dp_rank * local_bs, (dp_rank + 1) * local_bs)
-    loss = runtime.step(input_ids[sl], labels[sl])
+    loss = runner.step(input_ids[sl], labels[sl])
 
     checks, metrics = {}, {}
     loss_err_t = torch.zeros(1, device=device)

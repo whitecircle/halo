@@ -111,7 +111,7 @@ def base_args(output_dir: str, **overrides) -> ClassificationConfig:
 
 
 def make_spy(trainer, captured: dict, normalizers: list):
-    real_step = trainer._pp_runtime.step
+    real_step = trainer._pp_runner.step
 
     def spying_step(input_ids, labels, **kwargs):
         normalizers.append(float(kwargs.get("num_items_in_batch")))
@@ -122,7 +122,7 @@ def make_spy(trainer, captured: dict, normalizers: list):
             captured["extras"] = {k: v.clone() for k, v in (kwargs.get("extra_targets") or {}).items()}
         return real_step(input_ids, labels, **kwargs)
 
-    trainer._pp_runtime.step = spying_step
+    trainer._pp_runner.step = spying_step
 
 
 def decode_plane(plane: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

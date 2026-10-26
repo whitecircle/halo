@@ -124,7 +124,7 @@ For a shaped reward in `[0, 1]` (a grade plus small shaping terms) over a small 
 
 `beta` is the KL anchor to the base model; every online recipe runs `beta: 0`. Without a PEFT wrapper (a full fine-tune, or expert-only LoRA, which builds no `PeftModel`), `beta != 0` holds a frozen reference:
 
-- The script loads it as the policy loads (`load_reference_model_for_on_policy_grpo`, `src/distributed/loading/frozen_models.py`): run dtype, `model_revision`, the policy's attention request and `reset_sinks`, the non-persistent buffers repaired, the vocabulary grown with the tokenizer. The trainer hands it to TRL in place of the fp32 copy TRL would build from the hub's default revision.
+- The script loads it as the policy loads (`load_reference_model_for_on_policy_grpo`, `src/model_loading/parallel/frozen_models.py`): run dtype, `model_revision`, the policy's attention request and `reset_sinks`, the non-persistent buffers repaired, the vocabulary grown with the tokenizer. The trainer hands it to TRL in place of the fp32 copy TRL would build from the hub's default revision.
 - It is a dense replica on every rank, warned about under EP, ETP and TP. A resume loads it from `model_name_or_path`, never the checkpoint.
 - A trainer constructed with `beta != 0` and no `ref_model` raises, as does a `ref_model` the run never reads (`beta: 0`, or a PEFT policy, whose reference is the policy with its adapter disabled), both before the rollout client connects.
 - A reference whose sinks differ from the policy's is rejected in every mode, since the KL would be biased on every token. The script's reference takes the policy's `reset_sinks`, so live sinks (`reset_sinks: false`) score on both sides.

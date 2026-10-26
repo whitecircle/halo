@@ -130,7 +130,7 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
         mock.patch.object(module, "init_training_script", return_value=runtime),
         mock.patch.object(module, "load_script_model", return_value=(model, tokenizer)),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
-        mock.patch.object(module, "setup_peft_model", return_value=None),
+        mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "load_vlm_processor", processor_loader),

@@ -41,7 +41,7 @@ embedding/lm_head replicated):
 | Mistral4 | MLA — same as GLM-4 | [mistral4.md](../models/mistral4.md) |
 | Cohere2 MoE | Standard GQA pattern; the tied lm_head stays replicated | [cohere2-moe.md](../models/cohere2-moe.md) |
 
-Every MoE under **pure** TP routes to `_load_tp_moe_model` rather than `tp_plan="auto"`, because
+Every MoE under **pure** TP routes to `load_tp_moe_model` rather than `tp_plan="auto"`, because
 HF's auto plan wrongly shards MoE expert biases. Supported attention classes:
 `src/distributed/tensor_parallel/module_types.py`.
 
@@ -62,13 +62,13 @@ Behind the missing entries:
 
 ## Load paths
 
-Three paths in `load_distributed_model` (`src/distributed/loading/model_loading.py`):
+Three paths in `load_distributed_model` (`src/model_loading/parallel/loader.py`):
 
 | Path | When | Mechanism |
 |---|---|---|
-| `_load_tp_model` | Pure TP, dense, `ep_size=1` | `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))` — HF-native |
-| `_load_tp_moe_model` | Pure TP, MoE, `ep_size=1` | `apply_tp_to_attention_only()`; experts replicated |
-| `_load_ep_tp_model` | EP+TP | `apply_tp_to_attention_only()`; EP owns experts |
+| `load_tp_model` | Pure TP, dense, `ep_size=1` | `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))` — HF-native |
+| `load_tp_moe_model` | Pure TP, MoE, `ep_size=1` | `apply_tp_to_attention_only()`; experts replicated |
+| `load_ep_tp_model` | EP+TP | `apply_tp_to_attention_only()`; EP owns experts |
 
 The HF-native path validates the load's materialization, not just its plan: a plan that shards zero
 parameters raises (the run would be `tp_size` replicas), and a plan-sharded param that materialized
@@ -79,7 +79,7 @@ Hand-sliced params recorded in `_tp_sharded_non_dtensor` are exempt.
 
 ### Tied embeddings under HF-native TP
 
-`_load_tp_model` shards a tied embedding/head pair as **one vocab-parallel weight**. A tied config
+`load_tp_model` shards a tied embedding/head pair as **one vocab-parallel weight**. A tied config
 injects `embed_tokens: embedding_rowwise` into the backbone `base_model_tp_plan`, the ForCausalLM's
 `lm_head: colwise_gather_output` agrees with it on `Shard(0)` of the vocab dim, and transformers
 shards module by module and ties *afterwards* — so both ends land on the same DTensor: one weight,
@@ -104,7 +104,7 @@ For a checkpoint carrying **both** tied keys on disk (the Qwen3-0.6B/1.7B export
 compares them before tying, which on two DTensors is an **all-reduce on the default process group**:
 every rank must reach it.
 
-`_load_tp_model` therefore does not throttle the load with `max_concurrent_loading`. A
+`load_tp_model` therefore does not throttle the load with `max_concurrent_loading`. A
 rank-serialized load blocks the loading rank inside that collective while its peers wait their turn,
 and the job hangs until the NCCL watchdog fires.
 
@@ -223,7 +223,7 @@ unsharded single-GPU grad norm.
 ## EP+TP mode
 
 EP+TP shards attention with TP and distributes MoE experts with EP on the same GPU groups
-(`_load_ep_tp_model`). Router, `embed_tokens`/`lm_head`, and norms stay replicated. `ep_size` must be
+(`load_ep_tp_model`). Router, `embed_tokens`/`lm_head`, and norms stay replicated. `ep_size` must be
 a multiple of `tp_size`, TP stays NVLink-local, and DP = `world_size / tp_size`. Locality rules, the
 EP/TP/DP example shapes, and the gradient-sync groups: [multi-node.md](multi-node.md#eptp-mode).
 
@@ -256,7 +256,7 @@ per-rank memory falls by far less than `1/tp_size`.
 
 Head divisibility is checked first: `num_attention_heads % tp_size == 0` always,
 `num_key_value_heads % tp_size == 0` for non-MLA GQA. The dense HF-native `tp_plan="auto"` path gets
-the same gate: `ParallelismConfig.validate_against_model_config` runs `validate_tp_head_divisibility`
+the same gate: `reject_unsupported_model` runs `validate_tp_head_divisibility`
 on every load path, off `config.json` before any weight is read.
 
 Transformers validates no head count of its own, so without it the run dies on the first forward's
@@ -273,14 +273,14 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 |---|---|---|
 | `use_peft` / LoRA (incl. EP+TP) | rejected — PEFT adapters are plain tensors outside the TP graph, so the replicated half diverges and the sharded half is corrupted by the replicated-grad sync. Use LoRA with FSDP/DP, CP, or pure ETP | `_validate_lora_tp_compatibility` |
 | native EP expert LoRA | rejected — the grouped expert adapters ride the EP-distributed expert weights, which both TP gates skip by param identity, so no adapter shape under EP+TP is gradient- or save/merge-covered. Train expert LoRA under EP without TP | same |
-| QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading.py` |
+| QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading/parallel/loader.py` |
 | `fsdp_reshard_after_forward` | rejected at `data_parallel_size > 1` — a plain all-gather on TP-sharded DTensor params has no registered sharding strategy | `_reject_fsdp_settings` |
 | `fsdp_reshard_after_backward: false` | rejected — the TP setup shards through its own `fully_shard` calls | same |
 | `fsdp_defer_grad_sync` | rejected at `data_parallel_size == 1` — no FSDP2 wrap, so no reduce to defer | same |
 | `fsdp_shard_ep1_experts: false` | rejected — the TP path shards `ep1` experts unconditionally | same |
 | `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
-| `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
-| `accelerate launch` | rejected — TP requires `torchrun` | `model_loading.py`, `ParallelismValidationMixin` |
+| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/loader.py` |
+| `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `ParallelismValidationMixin` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `_validate_load_best_model_reloadable` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `src/model_loading/liger/dispatch.py` |

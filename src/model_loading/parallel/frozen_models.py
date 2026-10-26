@@ -1,9 +1,5 @@
-"""Loading for the frozen teacher / reference models a run holds beside its policy.
-
-These models are never sharded, but their load must match the policy's in everything that changes a
-logprob: attention backend, GptOss sink policy, pinned revision. The parallelism rules on holding a
-separate dense reference are here too.
-"""
+"""The frozen teacher / reference models a run holds beside its policy: never sharded, but loaded to
+match the policy in everything that changes a logprob, and the parallelism rules on holding one."""
 
 import contextlib
 import dataclasses
@@ -14,9 +10,6 @@ from accelerate.utils import is_peft_model
 from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedModel
 from trl import ModelConfig
 
-from src.distributed.loading.model_source import resolve_model_source
-from src.distributed.loading.peft_setup import has_attention_lora_targets
-from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.log import warn_once
@@ -28,6 +21,9 @@ from src.model_loading.model_preparation import (
     apply_run_model_policies,
     auto_load_model,
 )
+from src.model_loading.parallel.model_source import resolve_model_source
+from src.model_loading.parallel.peft_setup import wraps_in_peft_model
+from src.model_loading.parallel.whole_model import warm_attention_kernels
 from src.model_loading.remote_code import apply_remote_code_compat_shims
 from src.model_loading.tokenizer_setup import configure_run_tokenizer
 from src.models.attention.gpt_oss_sinks import SinksPolicy
@@ -37,16 +33,13 @@ from src.runtime.load_coordination import joined_node_load
 # Stdlib, not accelerate's adapter: warn_once marks a message seen on every rank, so each rank must emit it.
 logger = logging.getLogger(__name__)
 
-# ``load_frozen_reference_model``'s default ``revision``: the policy's own pin.
-_POLICY_REVISION = object()
-
 
 @dataclasses.dataclass(frozen=True)
 class ReferenceAlternatives:
     """A caller's ways around holding a frozen reference, named by every reference warning and refusal.
 
-    ``peft`` is named only where an adapter can train: tensor parallelism refuses every LoRA shape
-    (``_validate_lora_tp_compatibility``), so under TP the text is ``always`` alone.
+    ``peft`` is named only where an adapter can train: tensor parallelism refuses every LoRA shape, so
+    under TP the text is ``always`` alone.
     """
 
     always: str
@@ -73,17 +66,14 @@ ON_POLICY_GRPO_REFERENCE_ALTERNATIVES = ReferenceAlternatives(
 )
 
 # Messages already reported: the script loader and the trainer gate report one reference once.
-_REPORTED_REFERENCES: set[str] = set()
+_reported_references: set[str] = set()
 
 
 def warn_unparallelized_reference(parallelism_config: ParallelismConfig, avoid: ReferenceAlternatives) -> None:
     """Warn that a frozen reference beside a policy sharded by EP, ETP or TP is a whole dense replica per rank.
 
-    Its log-probs are still the policy's function on the reference weights. The model's own MoE forward is
-    what the EP layers are tested to reproduce (tests/gpu/parallelism/ep/test_ep_correctness.py), so the
-    two differ by kernel numerics only, as they do under the grouped-GEMM wrapper at ``ep_size == 1``,
-    which nothing refuses. The cost is memory and time: every rank holds the full model the parallelism
-    shards, experts included, and runs the per-expert forward. ``avoid`` is the caller's way around it.
+    Its log-probs differ from the policy's by kernel numerics only (the EP layers reproduce the model's own
+    MoE forward), so the cost is memory and time. ``avoid`` is the caller's way around it.
     """
     if parallelism_config.has_ep_group or parallelism_config.is_tp_mode:
         message = (
@@ -95,7 +85,7 @@ def warn_unparallelized_reference(parallelism_config: ParallelismConfig, avoid: 
             f"up to kernel numerics, but budget for its memory and its slower forward. "
             f"{avoid.under(parallelism_config)}"
         )
-        warn_once(logger, _REPORTED_REFERENCES, message, message)
+        warn_once(logger, _reported_references, message, message)
 
 
 def on_policy_grpo_holds_reference(beta: float, peft_config, model=None) -> bool:
@@ -111,38 +101,21 @@ def load_frozen_auxiliary_model(
     *,
     dtype: torch.dtype,
     revision: str | None = None,
-    trust_remote_code: bool = False,
+    trust_remote_code: bool,
     attn_implementation: str | None = None,
     reset_sinks: bool = True,
     is_vlm: bool = False,
     device_map: dict | str | int | torch.device | None = None,
-    download_tag: str | None = None,
+    download_tag: str | None,
 ) -> PreTrainedModel:
     """Load an unparallelized frozen model that scores the policy: a reference or a distillation teacher.
 
-    Each logprob here is one half of the objective (a DPO logratio, a distillation target), so a
-    mismatch against the policy biases the loss rather than raising. Hence:
-
-    * ``revision`` pins the config fetch as well as the weight fetch, and is this model's own pin —
-      a teacher and its student are normally different repos.
-    * the backend is resolved by the same :func:`resolve_attn_implementation` the policy loader runs,
-      against this model's config and the run's dtype, so the per-family limits (DeepSeek-V4
-      eager-only, Gemma4 head_dim-512, fp32 vs FlashAttention) apply, and the model is built with what
-      the shared :func:`apply_family_patches` returns for it (Gemma 4's ``sdpa_flex_sliding``).
-      Auto-detection is the widest gap: an unset request pins the reference to SDPA while the policy
-      takes FA4 on Blackwell.
-    * the sinks policy is applied here rather than by the caller, since ``reset_sinks=True`` is what
-      permits a sink-dropping backend; skipping the reset leaves GptOss running sdpa over live sinks.
-    * every floating parameter takes ``dtype``, as in the policy loaders: a family's fp32-pinned
-      modules would otherwise score in a different precision than the policy they anchor.
-    * ``excuse_task_head=False`` keeps the coverage gate on the task head: this model is only scored,
-      so an absent head means a randomly initialized one on one side of the objective.
-
-    ``is_vlm`` pins ``AutoModelForImageTextToText`` rather than resolving the class from the config;
-    ``download_tag`` fetches the source main-rank-first and agrees it across ranks before the first
-    read (:func:`~src.distributed.loading.model_source.resolve_model_source`; every rank must reach
-    it equally often, and an untagged load is a single-process one); ``device_map`` is forwarded to
-    the weight load.
+    Each logprob here is one half of the objective, so a mismatch against the policy biases the loss
+    rather than raising: the load resolves its attention backend, family patches, sinks policy and dtype
+    exactly as the policy loader does, against this model's own config at its own ``revision``, and keeps
+    the coverage gate on the task head. ``is_vlm`` pins ``AutoModelForImageTextToText``; a
+    ``download_tag`` makes the load COLLECTIVE-EQUIVALENT, agreeing the source across ranks first, while
+    ``None`` is a single-process load.
     """
     # Before the config fetch, which can already import a remote modeling file: a teacher preloaded
     # ahead of the policy would otherwise be the process's first remote-code load and miss the shims.
@@ -150,7 +123,7 @@ def load_frozen_auxiliary_model(
     # This path's first hub contact for the repo: on a cold cache every rank of every node would
     # otherwise hit the hub at once, and per-node caches could each hold a different commit.
     if download_tag:
-        revision = resolve_model_source(model_name_or_path, revision, tag=download_tag)
+        revision = resolve_model_source(model_name_or_path, revision, tag=download_tag).revision
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks)
     backend = resolve_attn_implementation(config, attn_implementation, dtype, sinks_policy=sinks_policy)
@@ -185,9 +158,6 @@ def load_frozen_auxiliary_model(
         sinks_policy=sinks_policy,
         attn_implementation=resolved_attn,
     )
-    # Same attention warm-up as the policy loader: the first scoring forward would otherwise JIT-compile its
-    # kernels mid-step on whichever rank reaches it first, while peers run ahead into the next
-    # collective.
     warm_attention_kernels(model, dtype=dtype)
     return model
 
@@ -216,21 +186,22 @@ def load_frozen_reference_model(
     is_vlm: bool,
     reset_sinks: bool,
     attn_default: str | None,
-    revision: str | None | object = _POLICY_REVISION,
 ) -> PreTrainedModel:
     """Load the frozen reference a policy is scored against, from ``model_name_or_path``, as the policy loaded.
 
-    The policy's revision pin, remote-code flag, attention request and sinks policy, then the same
-    tokenizer-driven vocabulary and special-token ids. ``model_name_or_path`` is the weights the
-    reference anchors to: the run's configured model (never a trained resume checkpoint) unless the
-    caller names a separate reference repo. A reference from another repo passes that repo's
-    own ``revision`` (``None`` for its main): the policy's pin names a commit in the policy's repo only.
+    The policy's remote-code flag, attention request and sinks policy, then the same tokenizer-driven
+    vocabulary and special-token ids. ``model_name_or_path`` is the run's configured model (never a
+    trained resume checkpoint), at the policy's revision pin, or a separate reference repo at its main.
     """
     model_ref = load_frozen_auxiliary_model(
         model_name_or_path,
         dtype=resolve_training_dtype(training_config),
-        # Unpinned, the reference loads hub main and shifts every logratio.
-        revision=getattr(model_config, "model_revision", None) if revision is _POLICY_REVISION else revision,
+        # Unpinned, the policy's own weights would load at hub main and shift every logratio.
+        revision=(
+            getattr(model_config, "model_revision", None)
+            if model_name_or_path == model_config.model_name_or_path
+            else None
+        ),
         trust_remote_code=model_config.trust_remote_code,
         # The policy's own request, resolved against the reference's config: a logratio is a
         # difference of two logprobs, so a kernel differing between them biases the objective. The
@@ -259,13 +230,10 @@ def load_reference_model_for_on_policy_grpo(
 ) -> PreTrainedModel | None:
     """Load the frozen KL reference of an on-policy GRPO run, or ``None`` where TRL's ``GRPOTrainer`` holds none.
 
-    TRL holds one at ``beta != 0`` on a policy no PEFT adapter wraps: a full fine-tune, or native expert-only
-    LoRA, which builds no ``PeftModel``. A PEFT policy is its own reference with the adapter disabled. The
-    trainer hands this model to TRL in place of the one TRL would build from the policy's name: fp32, the hub's
-    default revision, the default attention, no buffer repair. It loads from the run's configured model, never
-    a resume checkpoint, as the policy loaded, so ``reset_sinks`` and ``attn_default`` must be the policy's.
-    The class resolves from the config as the policy's does (the on-policy scripts refuse
-    ``text_only_model``), so a multimodal checkpoint gets its multimodal class on both sides.
+    TRL holds one at ``beta != 0`` on a policy no PEFT adapter wraps (a full fine-tune, or native
+    expert-only LoRA); a PEFT policy is its own reference with the adapter disabled. This model replaces
+    the one TRL would build from the policy's name (fp32, hub main, default attention, no buffer repair),
+    so ``reset_sinks`` and ``attn_default`` must be the policy's.
     """
     if not on_policy_grpo_holds_reference(training_config.beta, peft_config):
         return None
@@ -291,23 +259,20 @@ def load_reference_model_for_preference(
     *,
     is_vlm: bool,
     method: str,
-    reset_sinks: bool = True,
-    attn_default: str | None = None,
+    reset_sinks: bool,
+    attn_default: str | None,
 ):
     """Load the frozen reference model for a preference trainer (DPO/KTO), or ``None`` where none is held.
 
-    Under PEFT the reference is the adapter-free base → ``None``: TRL scores it inside the
-    ``PeftModel``'s ``disable_adapter()``, which also drops the native EP expert adapters
-    (``install_ep_aware_disable_adapter``). Expert-only LoRA has no ``PeftModel``, so it must set
-    ``precompute_ref_log_probs``. Full finetune loads an unparallelized copy, under EP/TP with the
-    replica's cost reported (:func:`warn_unparallelized_reference`), or precomputes where the
-    parallelism shards the policy. ``reset_sinks`` and ``attn_default`` must mirror the policy load so
-    the reference's logprobs come from the same kernel and the same sink semantics.
+    Under PEFT the reference is the adapter-free base (``None``), which expert-only LoRA lacks, so it
+    must precompute the reference log-probs. A full fine-tune loads an unparallelized copy, or
+    precomputes where the parallelism shards the policy. ``reset_sinks`` and ``attn_default`` must
+    mirror the policy load.
     """
     if model_config.use_peft:
         if (
             parallelism_config.expert_lora is not None
-            and not has_attention_lora_targets(model_config)
+            and not wraps_in_peft_model(model_config)
             and not training_config.precompute_ref_log_probs
         ):
             raise ValueError(

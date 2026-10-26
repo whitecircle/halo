@@ -2,12 +2,12 @@
 """End-to-end pipeline parallelism through the real OfflineGRPOTrainer (kl_beta == 0; the KL term
 has its own gate, test_pp_offline_grpo_kl.py).
 
-Offline GRPO under PP folds each loss type's whole-batch denominator into the runtime's per-step
+Offline GRPO under PP folds each loss type's whole-batch denominator into the runner's per-step
 normalizer while the microbatch loss produces the bare numerator — every seam yields a silently
 wrong number, not a crash, so the step-1 logged loss is pinned against the exact offline-GRPO
 objective computed on an unsplit copy of the model over the captured batches:
 
-  * the prompt|completion concat + labels derivation (split collator keys → runtime contract)
+  * the prompt|completion concat + labels derivation (split collator keys → runner contract)
   * the per-loss-type normalizer (grpo: Σ group weights; bnpo: group-weighted token count;
     dr_grpo: Σ group weights × max_completion_length) with heterogeneous group sizes, so the
     denominators genuinely differ across the microbatch split
@@ -165,7 +165,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
 
     captured: dict = {}
     normalizers: list[float] = []
-    real_step = trainer._pp_runtime.step
+    real_step = trainer._pp_runner.step
 
     def spying_step(input_ids, labels, **kw):
         normalizers.append(float(kw["num_items_in_batch"]))
@@ -176,13 +176,13 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
             captured.update({k: v.clone() for k, v in kw["extra_targets"].items()})
         return real_step(input_ids, labels, **kw)
 
-    trainer._pp_runtime.step = spying_step
+    trainer._pp_runner.step = spying_step
 
     eval_calls: list[dict] = []
     init_eval_metrics = None
     partial_loss = None
     if eval_dataset is not None:
-        real_eval = trainer._pp_runtime.eval_loss
+        real_eval = trainer._pp_runner.eval_loss
 
         def spying_eval(input_ids, labels, **kw):
             eval_calls.append(
@@ -196,7 +196,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
             )
             return real_eval(input_ids, labels, **kw)
 
-        trainer._pp_runtime.eval_loss = spying_eval
+        trainer._pp_runner.eval_loss = spying_eval
         init_eval_metrics = trainer.evaluate()
         # Direct partial-batch prediction step: 2 collated rows < the frozen 4. Collective — every
         # rank calls it with the same rows (eval_dataset is rank-identical).
@@ -294,7 +294,7 @@ def run(ctx):
     checks["ran_all_steps"] = trainer.state.global_step == N_STEPS and len(losses) == N_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
 
-    # The runtime's per-step divisor must be this loss type's whole-batch denominator.
+    # The runner's per-step divisor must be this loss type's whole-batch denominator.
     expected_normalizer = float((1.0 / captured["group_size"].float()).sum())
     checks["normalizer_is_group_weight_sum"] = abs(normalizers[0] - expected_normalizer) < 1e-6
 

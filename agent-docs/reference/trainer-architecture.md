@@ -124,7 +124,7 @@ every step); packing passes the gates, at one packed row per microbatch.
 wrappers add on top — a live `ref_model`, missing precomputed reference columns, and
 `compute_metrics` (no PP reduction reproduces their non-PP prediction convention). A tied-embedding
 checkpoint, live MTP tail layers, an unsupported model family, and aux-loss MoE balancing are
-rejected later, at the model split (`src/distributed/pipeline_parallel/split.py`). See
+rejected later, at the model split (`src/distributed/pipeline_parallel/model_rules.py`). See
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 
 ## Modality support
@@ -245,9 +245,9 @@ each rank clips by its own coefficient) and backstopped by a step-pre-hook for `
 | Mode | DP effect | Gradient sync | Model loader |
 |------|-----------|---------------|--------------|
 | EP | none (orthogonal) | non-expert via FSDP2 (`ignored_params`); expert via DeepEP backward hooks within the EP group, except at `ep_group_size == 1` where FSDP2 shards the experts too. **Any multi-EP-group topology** (`defer_grad_sync`, single-domain included) drops the in-backward hooks and averages in one post-backward sweep (`_sync_deferred_expert_grads`); **across nodes** (`is_deferred_dp`) the non-expert FSDP shards over the EP group as well | `load_ep_model()` / `load_distributed_model()` |
-| CP | `world / cp_size` | FSDP2 across all ranks (each holds a partial gradient from its chunk) | `load_model_for_cp()` |
-| TP | `world / tp_size` | FSDP2 `fully_shard` on the DP dimension (DTensor weights) | dense: `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))`; MoE: `_load_tp_moe_model` (attention-only TP — the auto plan mis-shards expert biases) |
-| EP+CP | `world / cp_size` | EP hooks for experts + FSDP2 for non-experts | `load_model_for_ep_cp()` |
+| CP | `world / cp_size` | FSDP2 across all ranks (each holds a partial gradient from its chunk) | `load_cp_model()` |
+| TP | `world / tp_size` | FSDP2 `fully_shard` on the DP dimension (DTensor weights) | dense: `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))`; MoE: `load_tp_moe_model` (attention-only TP — the auto plan mis-shards expert biases) |
+| EP+CP | `world / cp_size` | EP hooks for experts + FSDP2 for non-experts | `load_ep_cp_model()` |
 | EP+TP | `world / tp_size` | DTensor (TP) + EP hooks (experts) + FSDP2 per-TP-position DP groups | `load_distributed_model()` |
 | ETP (pure, `ep_size=1`) | `world / expert_tp_size` | EP hooks with expert-TP sub-group aggregation + FSDP2 | `load_distributed_model()` |
 | [PP](../parallelism/pipeline-parallelism.md) | `world / pp_size` | stage-scoped FSDP2 (EP-aware) inside each stage; P2P for boundary activations | `load_distributed_model()`, split per stage |

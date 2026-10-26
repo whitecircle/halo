@@ -25,7 +25,7 @@ def reject_pp_compute_metrics(compute_metrics, mechanism: str) -> None:
     cannot serve, naming why.
 
     The pipeline serves metrics by reducing the last stage's output through
-    ``PPLossAdapter.predictions_fn`` before broadcasting it down the chain. A trainer whose non-PP
+    ``PipelineLossAdapter.predictions_fn`` before broadcasting it down the chain. A trainer whose non-PP
     ``prediction_step`` hands metrics the raw logits plane, or nothing at all, has no reduction to
     reproduce. ``mechanism`` is that trainer's specific reason.
     """
@@ -91,7 +91,7 @@ def require_precomputed_columns(dataset, columns: tuple[str, ...], role: str = "
         f"precompute_ref_log_probs=True under pipeline parallelism requires {subject} to ALREADY "
         f"be in the {role} dataset: TRL's in-init precompute sweep forwards self.model over the "
         f"whole dataset, and under PP self.model is this rank's bare stage (its forward takes "
-        f"hidden_states, before the pipeline runtime even exists). Precompute the {noun} in a "
+        f"hidden_states, before the pipeline runner even exists). Precompute the {noun} in a "
         f"non-PP run first."
     )
 

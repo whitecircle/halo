@@ -42,9 +42,9 @@ from transformers import AutoTokenizer
 
 from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_int, env_str
+from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.runtime.ranks import is_global_main_process
 from tests.common.checkpoint_io import fixed_batch_loss, fixed_text_batch

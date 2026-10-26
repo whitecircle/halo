@@ -35,9 +35,9 @@ from trl import SFTConfig
 from src.distributed.expert_parallel.expert_weights import apply_ep_lora_adapters, gather_ep_lora_adapters, has_ep_lora
 from src.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
+from src.model_loading.parallel.loader import load_distributed_model
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer

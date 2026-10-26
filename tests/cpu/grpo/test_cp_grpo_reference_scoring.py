@@ -10,8 +10,8 @@ import torch.distributed as dist
 import torch.nn.functional as F
 
 from src.data.collators.offline_grpo import OfflineGRPOCPDataCollatorWithPadding
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.config import cp_shift_against_full_labels
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 

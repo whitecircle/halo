@@ -2,7 +2,7 @@
 """
 SFT Trainer test: Full Fine-Tune, LoRA, QLoRA, TP=2, CP=2 on Qwen3-0.6B.
 
-Mirrors the sft.py training pipeline: load_distributed_model → setup_peft_model
+Mirrors the sft.py training pipeline: load_distributed_model → configure_adapter_training
 → DistributedSFTTrainer → train → save_model. Tests all parameter modes
 and parallelism configurations with packing and checkpoint verification.
 
@@ -27,10 +27,10 @@ from transformers import AutoTokenizer
 from trl import ModelConfig, SFTConfig, get_quantization_config
 
 from src.data.collators.factory import select_data_collator
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import is_accelerate_fsdp_launch
+from src.model_loading.parallel.loader import load_distributed_model
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import model_save_checks
@@ -62,7 +62,7 @@ LORA_TARGET_MODULES = [
     "down_proj",
 ]
 
-# Minimal args stub for setup_peft_model (only needs freeze/unfreeze patterns)
+# Minimal args stub for configure_adapter_training (only needs freeze/unfreeze patterns)
 PEFT_ARGS = SimpleNamespace(
     unfreeze_layers_patterns=None,
     freeze_layers_patterns=None,
@@ -72,7 +72,7 @@ PEFT_ARGS = SimpleNamespace(
 # Helpers
 
 
-# Mode runner — mirrors sft.py: load_distributed_model → setup_peft_model
+# Mode runner — mirrors sft.py: load_distributed_model → configure_adapter_training
 #                                → DistributedSFTTrainer → train → save_model
 
 
@@ -118,7 +118,7 @@ def run_mode(
             sft_config.use_liger_kernel = False
 
         # --- Step 3: Setup PEFT ---
-        peft_config = setup_peft_model(PEFT_ARGS, model, model_config, "CAUSAL_LM")
+        peft_config = configure_adapter_training(PEFT_ARGS, model, model_config, "CAUSAL_LM")
         if peft_config is not None:
             log(f"  PEFT config: r={peft_config.r}, alpha={peft_config.lora_alpha}")
         else:

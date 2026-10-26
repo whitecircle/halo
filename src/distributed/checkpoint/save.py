@@ -46,6 +46,7 @@ from src.distributed.checkpoint.write import (
     stream_gathered_checkpoint,
 )
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.models.peft_adapters import lora_fold_targets
 from src.models.unwrapping import unwrap_toolkit_wrappers
@@ -416,7 +417,7 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     for chunk in chunks:
         hub = ((stage.global_parameter_name(local), cast(local, tensor)) for local, tensor in chunk.items())
         guard.run(partial(_write_hub_group, writer, stage, hub))
-    for layer_name, module in stage.ep_moe_layers():
+    for layer_name, module in named_ep_layers(stage):
         # Collective on every stage rank; only the writer retains (and pays the host copy). The
         # per-layer loop is the flush unit that bounds the writer's peak: one gathered layer,
         # not the whole stage.

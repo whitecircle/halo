@@ -376,7 +376,7 @@ def _anchor_trainer(*, checkpoint=None, trained=False, output_dir=None, chunked=
     trainer.temperature = 0.75
     trainer.beta = 0.2
     trainer._use_chunked_grpo_logprobs = chunked
-    trainer._pp_runtime = object() if pipeline else None
+    trainer._pp_runner = object() if pipeline else None
     trainer.args = types.SimpleNamespace(
         disable_dropout=True, resume_from_checkpoint=checkpoint, output_dir=output_dir or checkpoint, bf16=bf16
     )

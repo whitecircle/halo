@@ -175,7 +175,7 @@ load peak.
 
 `X = ep_size × expert_tp_size`. `Steady` = experts + replicated + FSDP non-expert + activations at
 `b1`. `Load` = the separate per-rank peak while weights stream in. All EP cells need
-`512 % ep_size == 0`, rejected by `ParallelismConfig.validate_against_model_config` off `config.json`
+`512 % ep_size == 0`, rejected by `reject_unsupported_model` off `config.json`
 at the top of the model load — after the checkpoint download, before the process groups, the meta
 shell or any weight read.
 
@@ -216,7 +216,7 @@ from 8 to 2 bytes/param. That is arithmetic, not a validated cell.
 
 **`Steady 32k` is not reachable on the `global` rows.** Cross-node EP dispatches
 `per_device_train_batch_size × max_length` tokens per rank in one MoE forward.
-`ParallelismConfig.validate_against_model_config` refuses a declared budget above
+`reject_unsupported_model` refuses a declared budget above
 `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` (8192) before any weight is read, and the dispatcher re-checks at
 buffer sizing; above it a proxy-GIN dispatch wedges in transit instead of erroring.
 
@@ -250,7 +250,7 @@ nvlink_domain_size == 0` passes and `ParallelismConfig` validates world 24 exact
 `nvlink_domain_size % members_per_domain == 0`, leaving exactly `ep_size ∈ {3, 6, 12, 24}`. `512` is
 `2⁹`, so **every one of them fails `512 % ep_size == 0`**.
 
-`validate_against_model_config` raises that off `config.json`, at the top of the model load and
+`reject_unsupported_model` raises that off `config.json`, at the top of the model load and
 before any process group. `_reject_ep_group` refuses the rest at global scope in order:
 `ep_size=16` first, on `reject_cross_node_ep_group` (`24 % 16 ≠ 0`), then `ep_size ∈ {2, 4, 8}` on
 `CrossNodeLayout`, because they cannot tile 3 domains equally.
@@ -403,7 +403,7 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 
 - `512 % ep_size == 0`, `expert_tp_size | moe_intermediate_size`, TP head divisibility and the
   declared tokens/rank budget are checked off `config.json` before any weight is read
-  (`ParallelismConfig.validate_against_model_config`, at the top of `load_distributed_model`, after
+  (`reject_unsupported_model`, at the top of `load_distributed_model`, after
   the checkpoint download). `validate_model_for_ulysses` fires only once the model is built.
 - Scratch: a single checkpoint is ~800 GB with `save_only_model: true` (as shipped), ~2.4 TB with
   optimizer shards (AdamWBF16 adds 4 B/param).

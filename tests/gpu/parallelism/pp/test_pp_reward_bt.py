@@ -8,7 +8,7 @@ when any of them breaks:
     unrelated examples. The step-1 loss is checked against the exact TRL objective (margin +
     centering) computed on the captured interleaved batch by transformers' own pooled forward —
     wrong pairing or wrong pooling both show as a loss mismatch, not a crash.
-  * the normalizer: the BT loss is a per-pair mean, so the runtime must divide by the chain-local
+  * the normalizer: the BT loss is a per-pair mean, so the runner must divide by the chain-local
     pair count (spied per step), not the SFT token count.
   * the pair-alignment guard: a batch that would split a pair across microbatches must raise.
 
@@ -170,7 +170,7 @@ def run(ctx):
         args.gradient_accumulation_steps == 1 and trainer._pp_n_microbatches == MICROBATCHES
     )
     checks["margin_shipped_as_extra_target"] = "margin" in trainer._pp_adapter.extra_target_keys
-    checks["paired_examples_declared"] = trainer._pp_runtime.paired_examples is True
+    checks["paired_examples_declared"] = trainer._pp_runner.rows_per_example == 2
 
     reference = build_model().to(ctx.device).float().eval()
 
@@ -243,10 +243,10 @@ def run(ctx):
     # Predictions and labels trim together or compute_metrics gets mismatched lengths.
     checks["partial_eval_batch_labels_trim_with_predictions"] = partial_labels.shape[0] == 1
 
-    # ── Spy on the runtime step: capture step 1's interleaved batch + extras + normalizer.
+    # ── Spy on the runner step: capture step 1's interleaved batch + extras + normalizer.
     captured: dict = {}
     normalizers: list[float] = []
-    real_step = trainer._pp_runtime.step
+    real_step = trainer._pp_runner.step
 
     def spying_step(input_ids, labels, **kwargs):
         normalizers.append(float(kwargs.get("num_items_in_batch")))
@@ -257,7 +257,7 @@ def run(ctx):
             captured["extras"] = {k: v.clone() for k, v in (kwargs.get("extra_targets") or {}).items()}
         return real_step(input_ids, labels, **kwargs)
 
-    trainer._pp_runtime.step = spying_step
+    trainer._pp_runner.step = spying_step
     trainer.train()
 
     checks["normalizer_is_chain_pair_count"] = len(normalizers) == N_STEPS and all(
@@ -299,12 +299,12 @@ def run(ctx):
     checks["losses_identical_across_ranks"] = all(torch.allclose(local, peer, atol=1e-6) for peer in gathered)
 
     # ── Negative check: a batch whose rows cannot be microbatched pair-aligned must raise. 6 rows
-    # (3 pairs) across 2 microbatches would split pair 1 — the runtime validates before any
+    # (3 pairs) across 2 microbatches would split pair 1 — the runner validates before any
     # collective, so every rank raises and catches locally with no desync.
     bad_ids = torch.full((6, SEQ_LEN), 5, dtype=torch.long, device=ctx.device)
     raised = False
     try:
-        trainer._pp_runtime.step(
+        trainer._pp_runner.step(
             bad_ids,
             torch.full_like(bad_ids, -100),
             attention_mask=torch.ones_like(bad_ids),

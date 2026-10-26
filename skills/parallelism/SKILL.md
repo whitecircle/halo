@@ -113,7 +113,7 @@ Read it before giving a verdict on any non-trivial combo.
   or `ep_group_size`) — "must divide" / "cannot exceed domain" raises.
 - **TP with indivisible attention heads** (`num_attention_heads % tp_size != 0`, or
   non-MLA GQA `num_key_value_heads % tp_size != 0`) — a split inside a head corrupts
-  attention; `validate_against_model_config` raises from `config.json` before any weight is read.
+  attention; `reject_unsupported_model` raises from `config.json` before any weight is read.
   The same gate rejects `num_experts % ep_size != 0`, an `expert_tp_size` not dividing the expert
   FFN width, and a declared per-rank token budget past DeepEP's dispatch ceiling (matrix.md).
 - **HSDP with TP / ETP / EP** — `_reject_hsdp` rejects all three; **PP+HSDP** is

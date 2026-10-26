@@ -53,7 +53,7 @@ def parallelism_config_from_args(
         dist_args: parsed ``DistributedArguments``.
         training_config: the parsed TRL/HF training config, read for the run's declared per-rank
             token budget (``rows × per_device_train_batch_size × max_length``) — what
-            :meth:`ParallelismConfig.validate_against_model_config` judges against DeepEP's dispatch
+            :func:`~src.model_loading.parallel.load_rules.reject_unsupported_model` judges against DeepEP's dispatch
             ceilings. ``None``, or a config declaring no ``max_length``, leaves that gate off. Its
             ``full_determinism`` is refused here on an EP group spanning NVLink domains.
         trainer_cls: the trainer class this script builds. Its ``_supports_cp`` / ``_supports_pp``

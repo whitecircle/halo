@@ -180,7 +180,7 @@ joins go permanently off-by-one on the equal-entry invariant.
 
 | Area | Side | File | Notes |
 |------|------|------|-------|
-| Model downloads | input | `src/distributed/loading/model_source.py` | `resolve_model_source()` runs the `snapshot_download` fetch in `fs_aware_main_first`, then joins every rank's view of the source over the store and agrees the commit; a source some ranks cannot see raises on every rank ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)) |
+| Model downloads | input | `src/model_loading/parallel/model_source.py` | `resolve_model_source()` runs the `snapshot_download` fetch in `fs_aware_main_first`, then joins every rank's view of the source over the store and agrees the commit; a source some ranks cannot see raises on every rank ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)) |
 | Dataset loading | input | `src/data/sources/loading.py` | `run_load_rank_first` around the source load (S3, Hub, or local) and the train/test split. The preprocessed-dataset probe runs once per filesystem scope (`agree_input_probe_across_ranks`) and its verdict is shared; a probe that raises raises its cause on every rank. A sharded dataset coordinates per shard with a file lock instead, and joins the world over the store so one rank's shard failure aborts every rank with the cause |
 | Dataset map / filter | input | `src/data/pipeline/processing.py` | `coordinated_map` / `coordinated_filter` — self-ordering, see the warning above |
 | Dataset packing | input | `pack_dataset_coordinated` (`processing.py`) | `run_load_rank_first` around a deterministic `cache_file_name`. Unguarded, `pack_dataset` materializes a full corpus copy **per rank** |

@@ -73,7 +73,7 @@ def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool |
     """Reject a head count TP cannot split evenly.
 
     Both loaders route here: the toolkit's selective-TP path with the module tree in hand, and
-    :meth:`ParallelismConfig.validate_against_model_config` before any weight is read. Without the
+    :func:`~src.model_loading.parallel.load_rules.reject_unsupported_model` before any weight is read. Without the
     second, dense TP (HF-native ``tp_plan="auto"``, which validates no head count of its own) gets a
     per-rank shard that is not a multiple of ``head_dim`` and dies on the first forward's reshape —
     after the whole checkpoint has been pulled and placed on every rank.

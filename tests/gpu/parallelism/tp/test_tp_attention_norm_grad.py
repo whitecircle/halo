@@ -34,9 +34,9 @@ import torch
 import torch.distributed as dist
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.mesh import get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.distributed import shared_scratch_dir, world_spread
 from tests.common.harness import gpu_test_main
@@ -156,6 +156,7 @@ def run(ctx):
         parallelism_config=pc,
         dtype=torch.bfloat16,
         attn_implementation=ATTN_IMPL,
+        trust_remote_code=True,
     )
     model.train()
 

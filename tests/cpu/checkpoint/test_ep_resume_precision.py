@@ -24,9 +24,10 @@ from safetensors.torch import save_file
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, Qwen3MoeForSequenceClassification
 
-import src.distributed.context_parallel.loading as cp_loading
-import src.distributed.expert_parallel.loading as eager_loading
-import src.distributed.loading.model_loading as model_loading
+import src.model_loading.parallel.cp as cp_loading
+import src.model_loading.parallel.loader as model_loading
+import src.model_loading.parallel.tp as tp_loading
+import src.model_loading.parallel.whole_model as whole_model
 from src.checkpoint.reading import StreamingCheckpointReader, load_full_state_dict
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.checkpoint.context import CheckpointLoadContext
@@ -34,19 +35,15 @@ from src.distributed.checkpoint.loader import CheckpointLoader, built_from_check
 from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, patch_model_for_cp
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks
-from src.distributed.loading.model_loading import (
-    _load_ep_cp_model,
-    _load_ep_model,
-    _load_ep_tp_model,
-    _load_pp_stage_model,
-    _load_tp_moe_model,
-    _load_undistributed_model,
-)
 from src.distributed.mesh import create_dp_tp_mesh
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
 from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
+from src.model_loading.parallel.cp import load_ep_cp_model
+from src.model_loading.parallel.loader import _load_ep_model, _load_pp_stage_model, _load_undistributed_model
+from src.model_loading.parallel.model_source import ModelSource
+from src.model_loading.parallel.tp import load_ep_tp_model, load_tp_moe_model
 from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import TINY_MOE_FAMILIES
@@ -141,14 +138,15 @@ def _checkpoint(tmp_path, family, *, stored_fp32=True, tied=False, legacy_bin=Fa
 def _patch_cpu_loading(monkeypatch):
     """No forward or distributed collective runs; the actual checkpoint materialization does."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(eager_loading, "move_model_to_local_device", lambda model: model)
-    verified = model_loading.from_pretrained_verified
+    monkeypatch.setattr(whole_model, "move_model_to_local_device", lambda model: model)
+    monkeypatch.setattr(model_loading, "get_local_rank", lambda: 0)
+    verified = whole_model.from_pretrained_verified
 
     def cpu_pretrained(model_class, source, **kwargs):
         kwargs["device_map"] = "cpu"
         return verified(model_class, source, **kwargs)
 
-    monkeypatch.setattr(model_loading, "from_pretrained_verified", cpu_pretrained)
+    monkeypatch.setattr(whole_model, "from_pretrained_verified", cpu_pretrained)
     monkeypatch.setattr(cp_loading, "patch_model_for_cp", _cpu_cp_wrap)
 
 
@@ -201,19 +199,15 @@ def _construct(
         ep_config=lambda: ep_config,
         cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
     )
-    loader = {"ep_cp": _load_ep_cp_model, "ep": _load_ep_model, "ep1": _load_undistributed_model}[mode]
+    loader = {"ep_cp": load_ep_cp_model, "ep": _load_ep_model, "ep1": _load_undistributed_model}[mode]
     config = AutoConfig.from_pretrained(path)
-    extra = {"local_rank": 0, "ep_wrappers": True} if mode == "ep1" else {}
+    extra = {"wraps_experts": True, "init_from_scratch": False} if mode == "ep1" else {}
     model = loader(
-        path,
+        ModelSource(path, None, path),
         pc,
         model_class or TINY_MOE_FAMILIES[config.model_type].load_class,
-        {
-            "config": config,
-            "dtype": torch.bfloat16,
-            "trust_remote_code": False,
-            "preserve_checkpoint_precision": preserve,
-        },
+        {"config": config, "dtype": torch.bfloat16, "trust_remote_code": False},
+        preserve_checkpoint_precision=preserve,
         **extra,
     )
     assert isinstance(model, UlyssesCPModelWrapper) == (mode == "ep_cp")
@@ -462,14 +456,13 @@ def _construct_pp_stage(
         ep_config=lambda: ep_config,
     )
     config = AutoConfig.from_pretrained(path)
-    common = {
-        "config": config,
-        "dtype": torch.bfloat16,
-        "trust_remote_code": False,
-        "preserve_checkpoint_precision": preserve,
-    }
     return _load_pp_stage_model(
-        path, pc, model_class or TINY_MOE_FAMILIES[config.model_type].load_class, common, is_moe=True
+        ModelSource(path, None, path),
+        pc,
+        model_class or TINY_MOE_FAMILIES[config.model_type].load_class,
+        {"config": config, "dtype": torch.bfloat16, "trust_remote_code": False},
+        preserve_checkpoint_precision=preserve,
+        wraps_experts=True,
     )
 
 
@@ -557,7 +550,7 @@ def test_pp_resume_reload_of_a_constructed_stage_writes_exactly_its_values(
     if fp32_non_ep:
         # The trainer's own upcast runs between construction and resume; a master construction read
         # at bf16 would reach the comparison as rounded FP32.
-        ep_param_ids = {id(param) for _, layer in stage.ep_moe_layers() for param in layer.parameters()}
+        ep_param_ids = {id(param) for _, layer in named_ep_layers(stage) for param in layer.parameters()}
         trainer = SimpleNamespace(_top_level_model=lambda: stage, _get_ep_param_ids=lambda: ep_param_ids)
         EpIntrospectionMixin._upcast_non_ep_params_to_fp32(trainer)
     constructed = {name: tensor.detach().clone() for name, tensor in stage.state_dict().items()}
@@ -622,7 +615,7 @@ def _patch_cpu_tp_loading(monkeypatch):
     """:func:`_patch_cpu_loading` for the TP loaders on gloo ranks, with the TP mesh laid on CPU devices."""
     _patch_cpu_loading(monkeypatch)
     monkeypatch.setattr(
-        model_loading,
+        tp_loading,
         "create_dp_tp_mesh",
         lambda tp_size, dp_size: create_dp_tp_mesh(tp_size, dp_size, device_type="cpu"),
     )
@@ -643,17 +636,15 @@ def _construct_tp(path, mode, *, fp32_router, fp32_experts, fp32_non_ep, preserv
         ep_config=lambda: ep_config,
     )
     config = AutoConfig.from_pretrained(path)
-    common = {
-        "config": config,
-        "dtype": torch.bfloat16,
-        "trust_remote_code": False,
-        "preserve_checkpoint_precision": preserve,
-    }
+    source = ModelSource(path, None, path)
+    kwargs = {"config": config, "dtype": torch.bfloat16, "trust_remote_code": False}
     load_class = model_class or TINY_MOE_FAMILIES[config.model_type].load_class
     if mode == "tp_moe":
-        model = _load_tp_moe_model(path, pc, load_class, common)
+        model = load_tp_moe_model(
+            source, pc, load_class, kwargs, preserve_checkpoint_precision=preserve, wraps_experts=pc.needs_ep_wrappers
+        )
     else:
-        model = _load_ep_tp_model(path, pc, load_class, common)
+        model = load_ep_tp_model(source, pc, load_class, kwargs, preserve_checkpoint_precision=preserve)
     assert any(isinstance(param, DTensor) for param in model.parameters()), "attention must be TP-sharded"
     return model
 

@@ -47,7 +47,7 @@ class _Trainer(OfflineGRPOReferenceMixin, _Base):
         self.model = nn.Linear(1, 1)
         self.ref_model = None
         self.parallelism_config = SimpleNamespace(is_cp_mode=False)
-        self._pp_runtime = None
+        self._pp_runner = None
         self._reference_settings = lambda: dict(_SETTINGS)
         dataset = _dataset()
         self.train_dataset = self._attach_scored_reference_logps(
@@ -126,7 +126,7 @@ def test_invalid_original_reference_is_rejected_before_scoring(tmp_path, kind):
     elif kind == "cp":
         trainer.parallelism_config.is_cp_mode = True
     else:
-        trainer._pp_runtime = object()
+        trainer._pp_runner = object()
     with pytest.raises(ValueError, match="trained/live|frozen|CP/PP"):
         trainer.evaluate(_dataset(), original_reference_model=reference)
 

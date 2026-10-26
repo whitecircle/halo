@@ -36,10 +36,9 @@ from huggingface_hub import constants as hub_constants
 from huggingface_hub.utils import filter_repo_objects
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-import src.distributed.loading.model_loading as model_loading
-from src.checkpoint.format import HUB_SUBFOLDER_IGNORE_PATTERNS
-from src.distributed.loading import model_source
-from src.distributed.loading.model_source import resolve_model_source
+import src.model_loading.parallel.whole_model as whole_model
+from src.model_loading.parallel import model_source
+from src.model_loading.parallel.model_source import HUB_SUBFOLDER_IGNORE_PATTERNS, ModelSource, resolve_model_source
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -122,7 +121,7 @@ def _fetching_stand_in(tmp_dir: str, rank: int, commit: str):
 
 def _record(tmp_dir: str, rank: int, path: str) -> None:
     try:
-        result = f"RETURNED {resolve_model_source(path, None, tag='policy')}"
+        result = f"RETURNED {resolve_model_source(path, None, tag='policy').revision}"
     except Exception as exc:  # the raise itself is the outcome under test
         result = f"{type(exc).__name__}: {exc}"
     Path(tmp_dir, f"rank{rank}.txt").write_text(result)
@@ -214,7 +213,7 @@ def test_a_checkpoint_directory_on_one_node_only_fails_every_rank(tmp_path):
 
 
 def test_a_local_directory_keeps_the_callers_revision(tmp_path):
-    assert resolve_model_source(str(tmp_path), "v1", tag="policy") == "v1"
+    assert resolve_model_source(str(tmp_path), "v1", tag="policy") == ModelSource(str(tmp_path), "v1", str(tmp_path))
 
 
 def test_the_model_fetch_rule_keeps_the_top_level_files_alone():
@@ -230,9 +229,10 @@ def test_the_fetch_leaves_the_subfolders_unless_the_loader_reads_them(tmp_path, 
     monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
     monkeypatch.setattr(model_source, "snapshot_download", _fetching_stand_in(str(tmp_path), 0, COMMIT_A))
 
-    assert resolve_model_source(REPO, None, tag="policy", whole_repo=whole_repo) == COMMIT_A
+    source = resolve_model_source(REPO, None, tag="policy", whole_repo=whole_repo)
 
     snapshot = tmp_path / "hub" / f"models--{REPO.replace('/', '--')}" / "snapshots" / COMMIT_A
+    assert source == ModelSource(REPO, COMMIT_A, str(snapshot)), "every rank reads its own verified snapshot"
     fetched = {str(path.relative_to(snapshot)) for path in snapshot.rglob("*") if path.is_file()}
     assert set(SHARDS) <= fetched
     assert sorted(name for name in fetched if "/" in name) == (sorted(NESTED_FILES) if whole_repo else [])
@@ -248,7 +248,7 @@ def test_a_trainer_model_path_loads_the_agreed_commit_inside_the_joined_load(tmp
 
     def agreed_source(path, revision, *, tag):
         events.append(("agree", path, revision, tag))
-        return COMMIT_A
+        return ModelSource(path, COMMIT_A, path)
 
     @contextlib.contextmanager
     def joined_load(what, max_concurrent):
@@ -256,18 +256,18 @@ def test_a_trainer_model_path_loads_the_agreed_commit_inside_the_joined_load(tmp
         yield
         events.append(("exit",))
 
-    real_auto_load = model_loading.auto_load_model
+    real_auto_load = whole_model.auto_load_model
 
     def recording_auto_load(path, **kwargs):
         events.append(("load", kwargs["revision"]))
         return real_auto_load(path, **kwargs)
 
-    monkeypatch.setattr(model_loading, "resolve_model_source", agreed_source)
-    monkeypatch.setattr(model_loading, "joined_node_load", joined_load)
-    monkeypatch.setattr(model_loading, "auto_load_model", recording_auto_load)
+    monkeypatch.setattr(whole_model, "resolve_model_source", agreed_source)
+    monkeypatch.setattr(whole_model, "joined_node_load", joined_load)
+    monkeypatch.setattr(whole_model, "auto_load_model", recording_auto_load)
     args = SimpleNamespace(model_init_kwargs={"revision": "v1", "dtype": torch.float32})
 
-    model_loading.load_model_from_pretrained(str(checkpoint), args, model_cls=Qwen3ForCausalLM, keep_fp32=False)
+    whole_model.resolve_trainer_model(str(checkpoint), args, model_class=Qwen3ForCausalLM, keep_fp32_non_ep=False)
 
     assert events == [
         ("agree", str(checkpoint), "v1", "trainer_model"),

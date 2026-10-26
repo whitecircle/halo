@@ -20,8 +20,8 @@ from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import group_max_abs_diff
@@ -65,6 +65,7 @@ def load_row_model(base_dir: str, mode: str, pc: ParallelismConfig):
             dtype=RUN_DTYPE,
             attn_implementation="eager",
             use_liger_kernel=False,
+            trust_remote_code=True,
         )
         return model, tokenizer, None
     return load_peft_model(mode, pc, model_name=base_dir, attn_implementation="eager", use_liger_kernel=False)

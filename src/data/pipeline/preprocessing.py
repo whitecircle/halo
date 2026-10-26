@@ -40,7 +40,6 @@ from src.data.shard_index import SHARD_INDEX_FILE, ShardIndex, ShardInfo
 from src.data.sources.paths import METADATA_FILE, TRAIN_TEST_SPLITS, eval_split_name
 from src.data.spans import (
     COLLATOR_SPAN_POLICY,
-    LABEL_IGNORE_INDEX,
     PACKED_SPAN_POLICY,
     build_completion_only_labels,
     mask_batch_to_completion_spans,
@@ -54,6 +53,7 @@ from src.data.vlm import (
     render_vlm_text,
     run_vlm_processor,
 )
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.model_loading.tokenizer_backend import resolve_processor_backend, resolve_tokenizer_backend
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.runtime.ranks import is_local_main_process

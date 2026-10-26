@@ -44,17 +44,17 @@ from src.data.pipeline.processing import (
     report_rejected_rows,
     resolve_map_num_proc,
 )
-from src.distributed.pipeline_parallel.losses import (
-    PPLossAdapter,
-    interleave_pairs,
-    pair_count_normalizer,
-    split_pairs,
-)
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.runtime.consensus import agree_probe_across_ranks
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions
+from src.trainers.parallelism.pipeline_loss_adapter import (
+    PipelineLossAdapter,
+    interleave_pairs,
+    pair_count_normalizer,
+    split_pairs,
+)
 from src.trainers.reward.pooling import (
     decode_pooling_plane,
     encode_pooling_plane,
@@ -211,23 +211,21 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
         self._pp_use_margins = "margin" in columns
         super()._setup_pipeline_parallel()
 
-    def _pp_loss_adapter(self) -> PPLossAdapter:
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """The Bradley-Terry objective as a last-stage pipeline loss.
 
         The collator's ``[chosen ⧺ rejected]`` is re-laid out interleaved so no microbatch split can
         separate a pair, and each row's pooled position is recorded as a marker in the synthesized
-        labels plane, the per-row channel the runtime already ships. The loss pools and reads row
+        labels plane, the per-row channel the runner already ships. The loss pools and reads row
         validity off that plane: no ``input_ids`` side tensor, no second pooling pass.
         ``eval_normalizer`` counts the marked rows, so eval_loss means over pairs;
         ``extra_signature_columns`` keeps the preference dataset's columns past HF's pruning.
         """
-        return PPLossAdapter(
+        return PipelineLossAdapter(
             token_loss_fn=self._pp_bt_token_loss,
-            paired_examples=True,
             batch_transform=self._pp_reward_batch_transform,
             normalizer=pair_count_normalizer,
             extra_target_keys=("margin",) if self._pp_use_margins else (),
-            rows_per_example=2,
             eval_normalizer=self._pp_bt_eval_pair_count,
             extra_signature_columns=("chosen_ids", "rejected_ids", "margin"),
             predictions_fn=self._pp_bt_predictions,
@@ -280,7 +278,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
         return out
 
     def _pp_bt_token_loss(self, logits: torch.Tensor, target: torch.Tensor | dict) -> torch.Tensor:
-        """Summed BT loss over the microbatch's pairs (the runtime divides by the pair count)."""
+        """Summed BT loss over the microbatch's pairs (the runner divides by the pair count)."""
         if isinstance(target, dict):
             plane, margin = target["labels"], target.get("margin")
         else:

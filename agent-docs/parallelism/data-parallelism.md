@@ -332,19 +332,19 @@ MoE.
 
 | Knob | Under plain DP | Gate |
 |---|---|---|
-| `use_grouped_gemm: true` + MoE + `accelerate launch` | rejected — the wrappers need the mixin-managed FSDP2 path. Use `torchrun`, or `use_grouped_gemm: false` | `_validate_gmm_launch_method` |
+| `use_grouped_gemm: true` + MoE + `accelerate launch` | rejected — the wrappers need the mixin-managed FSDP2 path. Use `torchrun`, or `use_grouped_gemm: false` | `reject_unsupported_model` |
 | multi-device `device_map` (e.g. `"auto"`) under `torchrun` | rejected — the FSDP2 setup cannot skip a rank-local bail-out before a collective mesh build | `src/distributed/fsdp.py` |
 | `bf16_optimizer: false` with a stock AdamW `optim` on a MoE with `fsdp_shard_ep1_experts: false` | rejected — fused AdamW cannot mix the unsharded plain expert tensors with FSDP2 DTensors. At the default `fsdp_shard_ep1_experts: true` the experts are DTensors too and it is allowed | `mixins/base.py` |
-| `fp32_non_ep_params` on a MoE at the default `fsdp_shard_ep1_experts: true` | rejected — the FSDP-managed experts stay bf16 beside fp32 dense params in one shard group, which FSDP2 refuses. Set `fsdp_shard_ep1_experts: false` | `validate_against_model_config` |
+| `fp32_non_ep_params` on a MoE at the default `fsdp_shard_ep1_experts: true` | rejected — the FSDP-managed experts stay bf16 beside fp32 dense params in one shard group, which FSDP2 refuses. Set `fsdp_shard_ep1_experts: false` | `reject_unsupported_model` |
 | `fsdp_defer_grad_sync: true` or `fsdp_reshard_after_backward: false` with `fsdp_reshard_after_forward: true` | rejected — each holds unsharded state across the window ZeRO-3 exists to shard; use them under ZeRO-2 | `_reject_fsdp_settings` |
 | `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward`, `fsdp_defer_grad_sync`, `fp32_grad_reduce` under `accelerate launch` | warned and ignored — accelerate owns the wrap | `_ACCELERATE_UNSUPPORTED_KNOBS` |
 | `bf16_optimizer` auto-enable under accelerate DDP | warned and skipped — replicated DDP is outside the validated stochastic-rounding matrix; set it explicitly to override | `mixins/base.py` |
 | accelerate FSDP v1 at `SHARD_GRAD_OP` / `FULL_SHARD` | warned — a known PyTorch bug can corrupt model state after a save. Use the FSDP2 configs or DDP | `mixins/base.py` |
 | `use_hsdp` on a single NVLink domain | warned — no-op; the replica axis engages once the job spans domains | `_reject_hsdp` |
-| QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher. QLoRA skips FSDP2, so `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` and `fsdp_defer_grad_sync` raise under it | `model_loading.py`, `mixins/base.py` |
+| QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher. QLoRA skips FSDP2, so `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` and `fsdp_defer_grad_sync` raise under it | `model_loading/parallel/loader.py`, `mixins/base.py` |
 | `use_peft` / LoRA, `packing`, `padding_free`, `torch_compile`, `gradient_checkpointing` | supported and ungated — plain DP is the mode with the widest knob surface | — |
 | `lowp_precision != "bf16"` | SFT only | `parallelism_config_from_args` |
-| `init_from_scratch` | SFT only; refuses QLoRA and every EP/CP/TP/ETP mode, so plain DP is the one mode it runs in | `parallelism_config_from_args`, `model_loading.py` |
+| `init_from_scratch` | SFT only; refuses QLoRA and every EP/CP/TP/ETP mode, so plain DP is the one mode it runs in | `parallelism_config_from_args`, `model_loading/parallel/loader.py` |
 
 ## Common issues
 

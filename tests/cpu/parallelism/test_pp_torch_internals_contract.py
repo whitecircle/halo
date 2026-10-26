@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""The pipeline runtime against real ``torch.distributed.pipelining``, on one CPU rank.
+"""The pipeline runner against real ``torch.distributed.pipelining``, on one CPU rank.
 
-The runtime steers private FSDP2 state, schedule and stage members, probes them at construction, and
+The runner steers private FSDP2 state, schedule and stage members, probes them at construction, and
 calls the schedule's private split, init and microbatch-step paths directly. These tests build the
 real engine over a ``fully_shard`` stage root on a single-rank gloo group, as the trainer wraps it:
 construction must fail naming any member torch lacks, and a one-stage chain's step, loss-only eval and
@@ -13,6 +13,7 @@ Run: python tests/cpu/parallelism/test_pp_torch_internals_contract.py
 
 import copy
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 import torch
@@ -22,17 +23,18 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.pipelining import Schedule1F1B, ScheduleGPipe
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.pipeline_parallel import runtime
-from src.distributed.pipeline_parallel.losses import causal_lm_token_loss, loss_token_count
+from src.distributed.parallelism_rules import PPSchedule
+from src.distributed.pipeline_parallel import runner
+from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss, causal_lm_token_loss
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 
 VOCAB = 16
 HIDDEN = 8
 ROWS = 6
 MICROBATCHES = 3
 ABSENT_MEMBER = "_member_no_torch_defines"
-SCHEDULES = sorted(runtime._SCHEDULES)
+SCHEDULES = sorted(runner._SCHEDULES)
 
 
 class _TinyCausalLM(nn.Module):
@@ -64,14 +66,16 @@ def models(single_rank_gloo):
     return stage_root, reference
 
 
-def _runtime(stage_root: nn.Module, schedule: str, **kwargs) -> runtime.PipelineRuntime:
+def _runner(stage_root: nn.Module, schedule: str, loss: object = None) -> runner.PipelineRunner:
     """The engine for a one-stage chain.
 
     A ``ParallelismConfig`` refuses a pipeline schedule at ``pp_size=1``, so a namespace carries the
-    five fields the runtime reads.
+    five fields the runner reads.
     """
     config = SimpleNamespace(pp_rank=0, pp_size=1, pp_schedule=schedule, is_first_pp_stage=True, is_last_pp_stage=True)
-    return runtime.PipelineRuntime(stage_root, config, dist.group.WORLD, torch.device("cpu"), MICROBATCHES, **kwargs)
+    return runner.PipelineRunner(
+        stage_root, config, dist.group.WORLD, torch.device("cpu"), MICROBATCHES, TokenLoss() if loss is None else loss
+    )
 
 
 def _batch() -> tuple[torch.Tensor, torch.Tensor]:
@@ -84,7 +88,7 @@ def _batch() -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _reference_loss_and_grads(reference: nn.Module, input_ids: torch.Tensor, labels: torch.Tensor):
-    loss = causal_lm_token_loss(reference(input_ids), labels) / loss_token_count(labels)
+    loss = causal_lm_token_loss(reference(input_ids), labels) / loss_token_counts_per_row(labels).sum()
     loss.backward()
     return loss.detach(), {name: param.grad for name, param in reference.named_parameters()}
 
@@ -98,8 +102,8 @@ def _assert_grads_match(stage_root: nn.Module, expected_grads: dict[str, torch.T
 
 
 @pytest.mark.parametrize("schedule,schedule_cls", [("1f1b", Schedule1F1B), ("gpipe", ScheduleGPipe)])
-def test_the_runtime_builds_the_configured_schedule_without_grad_scaling(schedule, schedule_cls, models):
-    engine = _runtime(models[0], schedule)
+def test_the_runner_builds_the_configured_schedule_without_grad_scaling(schedule, schedule_cls, models):
+    engine = _runner(models[0], schedule)
 
     assert type(engine.schedule) is schedule_cls
     # The loss already divides by the step's token count; torch's scaling would divide again.
@@ -110,15 +114,29 @@ def test_the_runtime_builds_the_configured_schedule_without_grad_scaling(schedul
     "required", ["_REQUIRED_FSDP_INTERNALS", "_REQUIRED_SCHEDULE_INTERNALS", "_REQUIRED_STAGE_INTERNALS"]
 )
 def test_construction_fails_naming_a_member_torch_lacks(required, models, monkeypatch):
-    monkeypatch.setattr(runtime, required, (*getattr(runtime, required), ABSENT_MEMBER))
+    monkeypatch.setattr(runner, required, (*getattr(runner, required), ABSENT_MEMBER))
 
     with pytest.raises(RuntimeError, match=ABSENT_MEMBER):
-        _runtime(models[0], "1f1b")
+        _runner(models[0], "1f1b")
+
+
+def test_every_configurable_schedule_has_an_engine():
+    assert set(runner._SCHEDULES) == set(get_args(PPSchedule))
+
+
+@pytest.mark.parametrize(
+    "loss", [causal_lm_token_loss, TokenLoss, FusedHeadLoss, "fused"], ids=["bare-fn", "class", "fused-class", "name"]
+)
+def test_construction_refuses_a_loss_that_is_not_a_loss_value(loss, models):
+    """Only a TokenLoss or FusedHeadLoss instance says which form every stage runs; a bare token
+    loss function or a class would otherwise reach the schedule unexamined."""
+    with pytest.raises(TypeError, match=r"TokenLoss\(fn\)"):
+        _runner(models[0], "1f1b", loss)
 
 
 def test_construction_refuses_a_stage_root_outside_fully_shard(single_rank_gloo):
     with pytest.raises(RuntimeError, match="not an FSDPModule"):
-        _runtime(_TinyCausalLM(), "1f1b")
+        _runner(_TinyCausalLM(), "1f1b")
 
 
 @pytest.mark.parametrize("eval_first", [False, True], ids=["step_first", "eval_first"])
@@ -132,7 +150,7 @@ def test_a_one_stage_chain_matches_the_unsplit_model(schedule, eval_first, model
     stage_root, reference = models
     input_ids, labels = _batch()
     expected_loss, expected_grads = _reference_loss_and_grads(reference, input_ids, labels)
-    engine = _runtime(stage_root, schedule)
+    engine = _runner(stage_root, schedule)
 
     def assert_eval_drives_match():
         torch.testing.assert_close(engine.eval_loss(input_ids, labels), expected_loss)
@@ -159,7 +177,7 @@ def test_dict_targets_reach_the_loss_with_their_own_rows(schedule, models):
         targets_seen.append(target)
         return causal_lm_token_loss(logits, target["labels"])
 
-    engine = _runtime(stage_root, schedule, token_loss_fn=token_loss_fn)
+    engine = _runner(stage_root, schedule, TokenLoss(token_loss_fn))
     extra_targets = {"row": torch.arange(ROWS)}
 
     torch.testing.assert_close(engine.eval_loss(input_ids, labels, extra_targets=extra_targets), expected_loss)

@@ -46,7 +46,7 @@ def _ranked_sweep(rank: int, siblings: int, mode: str, root: str, shared: bool) 
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = nn.Linear(1, 1)
     trainer.ref_model = None
-    trainer._pp_runtime = None
+    trainer._pp_runner = None
     trainer.parallelism_config = SimpleNamespace(is_cp_mode=mode == "cp", is_pp_mode=mode == "pp")
     trainer.cp_config = SimpleNamespace(cp_size=siblings)
     if not shared:
@@ -152,7 +152,7 @@ def _failure_trainer(output_dir):
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = nn.Linear(1, 1).train()
     trainer.ref_model = None
-    trainer._pp_runtime = None
+    trainer._pp_runner = None
     trainer.parallelism_config = SimpleNamespace(is_cp_mode=False, is_pp_mode=False)
     trainer.args = SimpleNamespace(per_device_train_batch_size=1, output_dir=output_dir)
     trainer.dp_shard_geometry = lambda: (1, 0)

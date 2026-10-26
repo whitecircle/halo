@@ -23,7 +23,7 @@ from torch import nn
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.model_flops import rank_attention_flops, resolve_attention_layout
-from src.distributed.pipeline_parallel.split import (
+from src.distributed.pipeline_parallel.partition import (
     compute_layer_partition,
     head_cost_layer_equivalents,
     layer_types_period,

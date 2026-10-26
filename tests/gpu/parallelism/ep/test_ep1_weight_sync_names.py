@@ -38,9 +38,9 @@ Requirements:
 
 import torch
 
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import supports_grouped_mm
+from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers

@@ -30,7 +30,7 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, GptOssConfig, GptOssForCausalLM
 
 import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
-import src.distributed.expert_parallel.loading as ep_loading
+import src.model_loading.parallel.model_source as model_source
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner, ExpertFuser, load_ep_model_lazy
 from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
@@ -44,7 +44,8 @@ LOADER_LOGGER = "src.distributed.expert_parallel.lazy_loader"
 # Loaders that open the lazy safetensors path and must reach it through the shared rank-0 gate.
 _LAZY_GATE_CALL_SITES = (
     REPO_ROOT / "src/distributed/expert_parallel/loading.py",
-    REPO_ROOT / "src/distributed/loading/model_loading.py",
+    REPO_ROOT / "src/model_loading/parallel/loader.py",
+    REPO_ROOT / "src/model_loading/parallel/tp.py",
 )
 
 
@@ -411,6 +412,14 @@ def test_a_rank_local_shard_failure_surfaces_through_the_consensus_seam(
 # --- The lazy-vs-fallback gate ------------------------------------------------------------------
 
 
+def _ungated(monkeypatch):
+    """The EP-sharded refusal ahead of the verdict, out of the way: its own tests pin it."""
+    monkeypatch.setattr(model_source, "reject_ep_sharded_checkpoint", lambda source: None)
+
+
+_SOURCE = model_source.ModelSource("org/model", None, "/dir")
+
+
 def test_the_lazy_gate_is_decided_by_rank_zero_alone(monkeypatch):
     """Every rank must take the branch RANK 0 chose, never the one its own filesystem suggests.
 
@@ -420,36 +429,44 @@ def test_the_lazy_gate_is_decided_by_rank_zero_alone(monkeypatch):
     diagnostic on either side, so the verdict is broadcast. The rule lives once rather than being
     spelled out at each of its three call sites (EP, EP+TP, PP stage).
     """
-    monkeypatch.setattr(ep_loading, "has_safetensors_checkpoint", lambda _dir: True)
-    monkeypatch.setattr(ep_loading, "broadcast_from_rank0", lambda _value: "rank0-verdict")
+    _ungated(monkeypatch)
+    monkeypatch.setattr(model_source, "has_safetensors_checkpoint", lambda _dir: True)
+    monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda _value: "rank0-verdict")
 
-    assert ep_loading.decide_lazy_loadable("/any/dir", lambda _dir: False) == "rank0-verdict"
-    assert ep_loading.decide_lazy_loadable("/any/dir", lambda _dir: True) == "rank0-verdict"
+    for layout_supported in (False, True):
+        verdict = model_source.resolve_lazy_checkpoint(
+            _SOURCE, lazy_requested=True, layout_supported=lambda _dir, supported=layout_supported: supported
+        )
+        assert verdict == "rank0-verdict"
 
 
 @pytest.mark.parametrize(
-    ("local_dir", "has_safetensors", "layout_supported", "expected"),
+    ("lazy_requested", "has_safetensors", "layout_supported", "expected"),
     [
-        ("/dir", True, True, True),
-        ("/dir", True, False, False),  # a layout the fuser would silently misload (pre-5.14 Zaya)
-        ("/dir", False, True, False),  # no safetensors to stream
-        (None, True, True, False),  # this rank never resolved a local snapshot
+        (True, True, True, True),
+        (True, True, False, False),  # a layout the fuser would silently misload (pre-5.14 Zaya)
+        (True, False, True, False),  # no safetensors to stream
+        (False, True, True, False),  # the run turned the lazy loader off
     ],
 )
-def test_the_lazy_gate_needs_a_resolved_dir_safetensors_and_a_supported_layout(
-    monkeypatch, local_dir, has_safetensors, layout_supported, expected
+def test_the_lazy_gate_needs_the_request_safetensors_and_a_supported_layout(
+    monkeypatch, lazy_requested, has_safetensors, layout_supported, expected
 ):
-    """All three conditions, and the layout probe is only asked about a directory that exists."""
+    """All three conditions, and the layout probe is only asked about a directory holding safetensors."""
+    _ungated(monkeypatch)
     asked: list[str] = []
-    monkeypatch.setattr(ep_loading, "has_safetensors_checkpoint", lambda _dir: has_safetensors)
-    monkeypatch.setattr(ep_loading, "broadcast_from_rank0", lambda value: value)
+    monkeypatch.setattr(model_source, "has_safetensors_checkpoint", lambda _dir: has_safetensors)
+    monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda value: value)
 
     def _layout(path):
         asked.append(path)
         return layout_supported
 
-    assert ep_loading.decide_lazy_loadable(local_dir, _layout) is expected
-    if local_dir is None or not has_safetensors:
+    assert (
+        model_source.resolve_lazy_checkpoint(_SOURCE, lazy_requested=lazy_requested, layout_supported=_layout)
+        is expected
+    )
+    if not (lazy_requested and has_safetensors):
         assert asked == [], "the layout probe was handed a directory that does not hold a checkpoint"
 
 
@@ -458,15 +475,15 @@ def test_a_lazy_loader_call_site_goes_through_the_one_gate(call_site):
     """One gate, read from the source — a re-inlined copy is how the rule drifts.
 
     Each loader that opens the lazy path would otherwise carry its own
-    ``broadcast_from_rank0(local_dir is not None and has_safetensors... and lazy_loader_supports...)``
-    line, restating the "rank 0 decides" reasoning at each and able to drop it at one.
+    ``broadcast_from_rank0(has_safetensors... and lazy_loader_supports...)`` line, restating the
+    "rank 0 decides" reasoning at each and able to drop it at one.
     """
     source = call_site.read_text(encoding="utf-8")
-    assert "decide_lazy_loadable" in source, f"{call_site.name} no longer routes its lazy gate through the helper"
+    assert "resolve_lazy_checkpoint" in source, f"{call_site.name} no longer routes its lazy gate through the helper"
     # The inlined shape, in every wrapping: the layout probe ANDed into the caller's own expression.
     assert "and lazy_loader_supports_checkpoint(" not in " ".join(source.split()), (
         f"{call_site.name} re-inlined the layout probe into its own gate expression instead of "
-        f"handing it to decide_lazy_loadable"
+        f"handing it to resolve_lazy_checkpoint"
     )
 
 

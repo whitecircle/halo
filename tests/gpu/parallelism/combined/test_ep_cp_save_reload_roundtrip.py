@@ -31,9 +31,9 @@ from transformers import AutoConfig, AutoTokenizer
 from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_str
+from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.models import GPT_OSS_20B_PATCHED

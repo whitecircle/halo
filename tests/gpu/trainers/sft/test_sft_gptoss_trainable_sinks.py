@@ -25,10 +25,10 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import iter_tp_sharded_non_dtensor_full
 from src.hardware import supports_grouped_mm
+from src.model_loading.parallel.loader import load_distributed_model
 from src.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
 from src.runtime.dtensor import materialize_dtensor
 from src.trainers.sft import DistributedSFTTrainer

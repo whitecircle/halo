@@ -30,8 +30,8 @@ from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.loader import load_distributed_model
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset

@@ -23,11 +23,11 @@ from src.data.pipeline.processing import process_dataset_with_map_and_filter, re
 from src.data.pipeline.rendered import render_generation_prompt
 from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
-from src.distributed.loading.frozen_models import load_reference_model_for_on_policy_grpo
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.environments.base import resolve_reasoning_effort
 from src.environments.rollout_config import VLLM_BACKEND
 from src.model_loading.model_preparation import log_model_info
+from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.rewards.functions import ScorerRewardFunction, reward_functions
 from src.rewards.graders.verifiable import RLVR_GRADERS
 from src.runtime.collectives import barrier
@@ -141,7 +141,7 @@ def main():
         completion_budget_required=True,
     )
 
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)
 
     # Pre-sharded datasets are split per DP rank at load; the trainer gets dataset_presharded so it

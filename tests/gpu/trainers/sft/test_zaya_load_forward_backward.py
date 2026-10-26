@@ -34,9 +34,9 @@ import torch
 from transformers import AutoConfig
 
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
+from src.model_loading.parallel.loader import load_distributed_model
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
 from tests.common.utils import log
@@ -78,6 +78,7 @@ def run(ctx):
         parallelism_config=ParallelismConfig(),
         dtype=torch.bfloat16,
         attn_implementation="flash_attention_2",
+        trust_remote_code=True,
     )
     n_params = sum(p.numel() for p in model.parameters())
     log(f"  Model loaded: {n_params / 1e9:.2f}B params, HBM {torch.cuda.memory_allocated() / 1e9:.2f} GB")

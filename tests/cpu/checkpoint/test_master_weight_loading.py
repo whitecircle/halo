@@ -24,15 +24,17 @@ from transformers import AutoConfig, BitsAndBytesConfig, Qwen3Config, Qwen3ForCa
 from transformers.core_model_loading import Chunk, WeightConverter, WeightRenaming
 from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 
-import src.distributed.context_parallel.loading as cp_loading
-import src.distributed.expert_parallel.loading as eager_loading
 import src.distributed.expert_parallel.master_weights as master_loading
-import src.distributed.loading.model_loading as loading
+import src.model_loading.parallel.cp as cp_loading
+import src.model_loading.parallel.loader as loading
+import src.model_loading.parallel.tp as tp_loading
+import src.model_loading.parallel.whole_model as whole_model
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
 from src.distributed.expert_parallel.hub_conversion import resolve_loaded_conversion_steps
 from src.distributed.expert_parallel.lazy_loader import ExpertFuser, build_family_key_mapping
+from src.model_loading.parallel.model_source import ModelSource
 from src.runtime import consensus, load_coordination
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import module_with_weight_keys
@@ -93,22 +95,27 @@ def _dense_pc(*, keep=True):
 def test_real_dense_and_cp_construction_retains_checkpoint_masters(tmp_path, monkeypatch, mode, strict, keep):
     expected = _dense_checkpoint(tmp_path / "source")
     source = str(tmp_path / "source")
-    monkeypatch.setattr(loading, "from_pretrained_verified", _cpu_pretrained(loading.from_pretrained_verified))
-    monkeypatch.setattr(eager_loading, "move_model_to_local_device", lambda model: model)
+    monkeypatch.setattr(whole_model, "from_pretrained_verified", _cpu_pretrained(whole_model.from_pretrained_verified))
+    monkeypatch.setattr(whole_model, "move_model_to_local_device", lambda model: model)
+    monkeypatch.setattr(loading, "get_local_rank", lambda: 0)
     monkeypatch.setattr(cp_loading, "patch_model_for_cp", _cpu_cp_wrap)
     kwargs = {
         "config": AutoConfig.from_pretrained(source),
         "dtype": torch.bfloat16,
         "attn_implementation": "eager",
         "trust_remote_code": False,
-        "preserve_checkpoint_precision": strict,
     }
-    if mode == "cp":
-        model = loading._load_cp_model(source, _dense_pc(keep=keep), Qwen3ForCausalLM, kwargs)
-    else:
-        model = loading._load_undistributed_model(
-            source, _dense_pc(keep=keep), Qwen3ForCausalLM, kwargs, 0, ep_wrappers=False
-        )
+    rung = cp_loading.load_cp_model if mode == "cp" else loading._load_undistributed_model
+    extra = {} if mode == "cp" else {"init_from_scratch": False}
+    model = rung(
+        ModelSource(source, None, source),
+        _dense_pc(keep=keep),
+        Qwen3ForCausalLM,
+        kwargs,
+        preserve_checkpoint_precision=strict,
+        wraps_experts=False,
+        **extra,
+    )
     actual = model.state_dict(keep_vars=True)
     for key, value in expected.items():
         oracle = value if keep else value.bfloat16()
@@ -121,13 +128,13 @@ def test_real_dense_and_cp_construction_retains_checkpoint_masters(tmp_path, mon
 def _native_tp_rank(rank, source, strict, keep):
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(
-            loading,
+            tp_loading,
             "create_dp_tp_mesh",
             lambda tp_size, dp_size: init_device_mesh("cpu", (tp_size,), mesh_dim_names=("tp",)),
         )
         pc = SimpleNamespace(tp_size=2, data_parallel_size=1, fp32_non_ep_params=keep, max_concurrent_loading=None)
-        model = loading._load_tp_model(
-            source,
+        model = tp_loading.load_tp_model(
+            ModelSource(source, None, source),
             pc,
             Qwen3ForCausalLM,
             {
@@ -135,8 +142,8 @@ def _native_tp_rank(rank, source, strict, keep):
                 "dtype": torch.bfloat16,
                 "attn_implementation": "eager",
                 "trust_remote_code": False,
-                "preserve_checkpoint_precision": strict,
             },
+            preserve_checkpoint_precision=strict,
         )
     oracle = Qwen3ForCausalLM.from_pretrained(source, dtype=torch.float32 if keep else torch.bfloat16)
     expected = oracle.state_dict(keep_vars=True)
@@ -207,7 +214,10 @@ def test_tp_replay_preserves_each_placement_and_all_tied_owners(tmp_path, stored
 
 def _read_failure_rank(rank, source, outcomes):
     with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(loading, "from_pretrained_verified", _cpu_pretrained(loading.from_pretrained_verified))
+        monkeypatch.setattr(
+            whole_model, "from_pretrained_verified", _cpu_pretrained(whole_model.from_pretrained_verified)
+        )
+        monkeypatch.setattr(loading, "get_local_rank", lambda: rank)
         monkeypatch.setattr(load_coordination, "store_timeout", lambda: datetime.timedelta(seconds=10))
         monkeypatch.setattr(consensus, "store_timeout", lambda: datetime.timedelta(seconds=10))
         original_get = master_loading.StreamingCheckpointReader.get
@@ -220,7 +230,7 @@ def _read_failure_rank(rank, source, outcomes):
         monkeypatch.setattr(master_loading.StreamingCheckpointReader, "get", get)
         try:
             loading._load_undistributed_model(
-                source,
+                ModelSource(source, None, source),
                 _dense_pc(),
                 Qwen3ForCausalLM,
                 {
@@ -228,10 +238,10 @@ def _read_failure_rank(rank, source, outcomes):
                     "dtype": torch.bfloat16,
                     "attn_implementation": "eager",
                     "trust_remote_code": False,
-                    "preserve_checkpoint_precision": True,
                 },
-                rank,
-                ep_wrappers=False,
+                preserve_checkpoint_precision=True,
+                wraps_experts=False,
+                init_from_scratch=False,
             )
         except RuntimeError as error:
             outcome = str(error)

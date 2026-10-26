@@ -24,7 +24,7 @@ from torch import nn
 from torch.nn.functional import cross_entropy
 
 import src.trainers.distillation.self_distillation as sd
-from src.data.spans import LABEL_IGNORE_INDEX
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.distillation.losses import reverse_kl_loss, unnormalized_kl_loss
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 

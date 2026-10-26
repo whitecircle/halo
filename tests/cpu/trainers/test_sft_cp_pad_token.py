@@ -16,7 +16,7 @@ import pytest
 import torch
 from transformers import Trainer
 
-from src.data.spans import LABEL_IGNORE_INDEX
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.sft import DistributedSFTTrainer
 
 

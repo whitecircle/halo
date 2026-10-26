@@ -26,9 +26,9 @@ from trl import ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.config_validation import reject_unsupported_args
 from src.configs.preference import SmoothMarginPOConfig, SMPOScriptArguments
-from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.model_loading.model_preparation import log_model_info
+from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from src.training.environment import run_training
@@ -95,7 +95,7 @@ def main():
     processing_class = install_resolved_tokenizer(processing_class, tokenizer)
     enforce_text_path_padding_side(tokenizer, is_vlm)
 
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
 
     log_model_info(model, tokenizer)
 

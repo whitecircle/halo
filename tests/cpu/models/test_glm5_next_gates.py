@@ -8,7 +8,7 @@ and ships only the composite ``Glm5NextForConditionalGeneration`` — no CausalL
 those facts closes a toolkit path, and each closure must refuse LOUDLY at config time; the silent
 alternative is cross-rank state corruption (CP), a replicated model on a sharded mesh (TP), or a
 crash deep inside transformers (flash, text_only). PP is the exception: the widened stream IS the
-stage boundary under ``Glm5NextPPSpec`` (tests/cpu/parallelism/test_pp_hyper_connection_stages.py),
+stage boundary under ``GLM5_NEXT_PP`` (tests/cpu/parallelism/test_pp_hyper_connection_stages.py),
 and only the generic gates (MTP metadata, tie) still apply here.
 
     python tests/cpu/models/test_glm5_next_gates.py
@@ -31,7 +31,8 @@ from src.distributed.context_parallel.validation import (
     UlyssesConfigError,
     validate_model_for_ulysses,
 )
-from src.distributed.pipeline_parallel.split import MTP_LAYER_COUNT_FIELDS, PP_SPEC_MAP, validate_model_supports_pp
+from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
 from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from src.models.attention.gpt_oss_sinks import SinksPolicy
@@ -130,18 +131,18 @@ def test_cp_config_only_gate_is_family_agnostic():
 
 
 def test_pp_accepts_the_family_including_the_hub_mtp_metadata_field():
-    """``Glm5NextPPSpec`` carries the widened-stream boundary (its own suite:
+    """``GLM5_NEXT_PP`` carries the widened-stream boundary (its own suite:
     tests/cpu/parallelism/test_pp_hyper_connection_stages.py), so the family passes structural
     validation — including with the hub config's metadata-only ``num_nextn_predict_layers: 1``
     (layer 45, dropped at load via ``_keys_to_ignore_on_load_unexpected``): the MTP gate judges the
     BUILT tree, and this one holds exactly ``num_hidden_layers`` layers."""
     spec = PP_SPEC_MAP["Glm5NextTextModel"]
-    assert spec.SUPPORTS_PP is True
+    assert spec.refusal is None
     assert "num_nextn_predict_layers" in MTP_LAYER_COUNT_FIELDS
     model = _tiny_text_model()
     model.config.num_nextn_predict_layers = 1
     assert len(model.layers) == model.config.num_hidden_layers, "premise: no MTP tail was built"
-    validate_model_supports_pp(model, "none")
+    reject_unsupported_pp_model(model, "none")
 
 
 # Tensor parallelism

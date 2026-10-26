@@ -16,8 +16,8 @@ import types
 import pytest
 from trl import ModelConfig
 
-from src.distributed.loading.frozen_models import load_reference_model_for_preference
-from src.distributed.loading.peft_setup import has_attention_lora_targets
+from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
+from src.model_loading.parallel.peft_setup import wraps_in_peft_model
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 
 # What split_expert_lora_targets leaves behind: the attention targets of a mixed run, none of an
@@ -37,6 +37,8 @@ def _reference(targets, *, precompute: bool, method: str):
         tokenizer=None,
         is_vlm=False,
         method=method,
+        reset_sinks=True,
+        attn_default=None,
     )
 
 
@@ -63,7 +65,7 @@ def test_an_expert_only_run_with_precompute_loads_no_reference():
 def test_attention_targets_distinguish_defaults_from_expert_only(use_peft, targets, expected):
     model_config = ModelConfig(model_name_or_path="org/moe", use_peft=use_peft)
     model_config.lora_target_modules = targets
-    assert has_attention_lora_targets(model_config) is expected
+    assert wraps_in_peft_model(model_config) is expected
 
 
 if __name__ == "__main__":

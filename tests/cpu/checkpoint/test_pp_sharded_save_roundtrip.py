@@ -54,7 +54,7 @@ from src.distributed.checkpoint.save import is_pp_shard_writer, save_pp_checkpoi
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
@@ -74,6 +74,7 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_QWEN3_CONFIG,
 )
+from tests.common.pp_fakes import hand_built_stage
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.utils import safetensors_state_dict
 
@@ -432,14 +433,11 @@ class _MoEBackbone(nn.Module):
 
 def _moe_stage(lo: int, hi: int, n_total: int) -> PipelineStageModule:
     is_first, is_last = lo == 0, hi == n_total
-    stage = PipelineStageModule(
+    stage = hand_built_stage(
         _MoEBackbone(hi - lo, is_first, is_last),
         nn.Linear(HIDDEN, 16, bias=False) if is_last else None,
-        is_first,
-        is_last,
-        backbone_prefix="model",
-        head_attr="lm_head",
-        layer_attr="layers",
+        is_first=is_first,
+        is_last=is_last,
         layer_offset=lo,
     )
     stage.config = Qwen3Config(**TINY_QWEN3_CONFIG)
@@ -764,7 +762,7 @@ def _stage_tensors(stage: PipelineStageModule) -> dict[str, torch.Tensor]:
     """A stage's tensors under the unsplit model's names: its own entries, and each EP layer's gather."""
     state = stage.state_dict()
     tensors = {name: state[local] for name, local in stage.checkpoint_name_map().items()}
-    for layer_name, module in stage.ep_moe_layers():
+    for layer_name, module in named_ep_layers(stage):
         for key, tensor in gather_ep_layer_weights(layer_name, module, merge_lora=False, retain=True).items():
             tensors[stage.global_parameter_name(key)] = tensor
     return tensors

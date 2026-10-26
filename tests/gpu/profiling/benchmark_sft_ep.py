@@ -59,10 +59,10 @@ from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.torch_profiler import TorchProfilerCallback
 from src.diagnostics.ep_span_timing import get_ep_span_timer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_float, torch_trace_dir
 from src.kernels.lowp.spec import LowpPrecision, LowpSpec
+from src.model_loading.parallel.loader import load_distributed_model
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.runtime.collectives import barrier, broadcast_from_rank0
 from src.trainers.sft import DistributedSFTTrainer

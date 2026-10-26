@@ -6,7 +6,7 @@ The dispatcher sizes its arena from the all-reduced MAX tokens/rank of the EP gr
 cross-node Gin ceiling. Both refusals are correct and both are late: they land after the whole
 multi-hundred-GB load, and — for a corpus whose early batches are short — only at the step whose batch
 first reaches ``max_length``. ``per_device_train_batch_size × max_length`` is that MAX, known before a
-weight is read, so ``ParallelismConfig.validate_against_model_config`` applies the same two ceilings
+weight is read, so ``reject_unsupported_model`` applies the same two ceilings
 through the same function the dispatcher calls.
 
 What the gate must get right at scale:
@@ -34,6 +34,8 @@ import pytest
 from src.args.distributed_args import DistributedArguments
 from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.load_rules import reject_unsupported_model
+from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.parallelism_args import (
     FORWARD_ROWS_PER_EXAMPLE_ATTR,
@@ -77,11 +79,15 @@ def _config(*, budget: int | None = None, **kwargs) -> ParallelismConfig:
     return make_parallelism_config(**kwargs)
 
 
+def _reject_unsupported_model(config: ParallelismConfig, model_config) -> None:
+    reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False)
+
+
 def test_a_budget_over_the_wire_index_ceiling_is_refused_with_its_numbers():
     """Single node, ep8: 32768 tokens/rank × top-8 × hidden 8192 reaches 2**31 exactly."""
     config = _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING)
     with pytest.raises(ValueError) as err:
-        config.validate_against_model_config(_wide())
+        _reject_unsupported_model(config, _wide())
     text = str(err.value)
     assert "32-bit wire-index limit" in text, text
     assert f"{_WIDE_INDEX_CEILING} tokens/rank" in text, "the refusal must name the budget it computed"
@@ -97,7 +103,7 @@ def test_the_refusal_leads_with_the_escape_hatches():
     """
     config = _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING)
     with pytest.raises(ValueError) as err:
-        config.validate_against_model_config(_wide())
+        _reject_unsupported_model(config, _wide())
     first_sentence = str(err.value).split(". ")[0]
     assert "max_length" in first_sentence, first_sentence
     assert "HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK" in first_sentence, first_sentence
@@ -106,8 +112,8 @@ def test_the_refusal_leads_with_the_escape_hatches():
 
 def test_a_budget_under_the_ceiling_passes():
     """Anti-over-rejection: half that budget is the shape a long-context run actually wants."""
-    _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING // 2).validate_against_model_config(
-        _wide()
+    _reject_unsupported_model(
+        _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING // 2), _wide()
     )
 
 
@@ -121,7 +127,7 @@ def test_the_gate_aligns_the_budget_the_way_the_dispatcher_does():
     assert ep_dispatch_capacity(budget) == _WIDE_INDEX_CEILING, "precondition: the alignment is what bites"
     config = _config(world_size=8, gpus_per_node=8, ep_size=8, budget=budget)
     with pytest.raises(ValueError, match="32-bit wire-index limit"):
-        config.validate_against_model_config(_wide())
+        _reject_unsupported_model(config, _wide())
 
 
 def test_context_parallelism_divides_the_per_rank_budget():
@@ -130,7 +136,7 @@ def test_context_parallelism_divides_the_per_rank_budget():
     Same budget the first test refuses without CP — the division is the whole difference.
     """
     config = _config(world_size=8, gpus_per_node=8, ep_size=8, cp_size=2, budget=_WIDE_INDEX_CEILING)
-    config.validate_against_model_config(_wide())
+    _reject_unsupported_model(config, _wide())
 
 
 def test_nvl72_rack_wide_ep_is_not_bound_by_the_cross_node_ceiling():
@@ -148,7 +154,7 @@ def test_nvl72_rack_wide_ep_is_not_bound_by_the_cross_node_ceiling():
         budget=2 * GIN_MAX_TOKENS_PER_RANK,
     )
     assert config.ep_scope == "node" and not config.requires_rdma, "precondition: the group is one rack"
-    config.validate_against_model_config(_Cfg(144, **_GPTOSS))
+    _reject_unsupported_model(config, _Cfg(144, **_GPTOSS))
 
 
 def test_cross_node_ep_over_four_nvl8_nodes_is_refused_above_the_gin_ceiling():
@@ -162,7 +168,7 @@ def test_cross_node_ep_over_four_nvl8_nodes_is_refused_above_the_gin_ceiling():
     )
     assert config.requires_rdma, "precondition: the group spans NVLink domains"
     with pytest.raises(ValueError) as err:
-        config.validate_against_model_config(_Cfg(128, **_GPTOSS))
+        _reject_unsupported_model(config, _Cfg(128, **_GPTOSS))
     text = str(err.value)
     assert "proxy-GIN ceiling" in text, text
     assert "cross-domain — Gin/RDMA" in text, "the refusal must say which ceiling applied and why"
@@ -170,21 +176,24 @@ def test_cross_node_ep_over_four_nvl8_nodes_is_refused_above_the_gin_ceiling():
 
 def test_cross_node_ep_at_the_validated_ceiling_passes():
     """The measured boundary is inclusive — the shipped Inkling recipe runs mbs 2 × 4096 exactly on it."""
-    _config(
-        world_size=32,
-        gpus_per_node=8,
-        ep_size=32,
-        ep_scope="global",
-        budget=GIN_MAX_TOKENS_PER_RANK,
-    ).validate_against_model_config(_Cfg(128, **_GPTOSS))
+    _reject_unsupported_model(
+        _config(
+            world_size=32,
+            gpus_per_node=8,
+            ep_size=32,
+            ep_scope="global",
+            budget=GIN_MAX_TOKENS_PER_RANK,
+        ),
+        _Cfg(128, **_GPTOSS),
+    )
 
 
 def test_a_512_gpu_job_is_judged_on_the_same_per_rank_budget():
     """The DeepEP arena is per-rank, so 64 nodes of node-local ep8 buy no headroom over one node."""
     shape = {"world_size": 512, "gpus_per_node": 8, "ep_size": 8}
-    _config(**shape, budget=_WIDE_INDEX_CEILING // 2).validate_against_model_config(_wide())
+    _reject_unsupported_model(_config(**shape, budget=_WIDE_INDEX_CEILING // 2), _wide())
     with pytest.raises(ValueError, match="32-bit wire-index limit"):
-        _config(**shape, budget=_WIDE_INDEX_CEILING).validate_against_model_config(_wide())
+        _reject_unsupported_model(_config(**shape, budget=_WIDE_INDEX_CEILING), _wide())
 
 
 def test_an_undeclared_budget_leaves_the_ceilings_to_the_dispatcher():
@@ -194,16 +203,17 @@ def test_an_undeclared_budget_leaves_the_ceilings_to_the_dispatcher():
     refuses — so a gate that resolved a window without a declared shape would raise on a run whose
     real per-rank token count nothing here knows.
     """
-    _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=0).validate_against_model_config(
-        _wide(max_position_embeddings=_WIDE_INDEX_CEILING)
+    _reject_unsupported_model(
+        _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=0),
+        _wide(max_position_embeddings=_WIDE_INDEX_CEILING),
     )
 
 
 def test_pure_expert_tp_never_reaches_the_transport():
     """ep_size=1 + expert_tp replicates the experts and dispatches nothing, whatever the budget."""
-    _config(
-        world_size=8, gpus_per_node=8, expert_tp_size=8, budget=8 * _WIDE_INDEX_CEILING
-    ).validate_against_model_config(_wide(num_experts=8))
+    _reject_unsupported_model(
+        _config(world_size=8, gpus_per_node=8, expert_tp_size=8, budget=8 * _WIDE_INDEX_CEILING), _wide(num_experts=8)
+    )
 
 
 # max_length: null — the largest budget a run can declare, resolved off config.json
@@ -219,7 +229,7 @@ def test_a_null_max_length_is_judged_against_the_models_own_context_window():
     """
     config = _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0)
     with pytest.raises(ValueError) as err:
-        config.validate_against_model_config(_wide(max_position_embeddings=_WIDE_INDEX_CEILING))
+        _reject_unsupported_model(config, _wide(max_position_embeddings=_WIDE_INDEX_CEILING))
     text = str(err.value)
     assert "32-bit wire-index limit" in text, text
     assert f"{_WIDE_INDEX_CEILING} tokens/row" in text, "the refusal must name the length it resolved"
@@ -232,17 +242,18 @@ def test_a_null_max_length_under_the_ceiling_still_passes():
     Same declaration as the test above with a model half as long — the resolved number is the whole
     difference, so a gate that refused every null budget would fail here.
     """
-    _config(
-        world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0
-    ).validate_against_model_config(_wide(max_position_embeddings=_WIDE_INDEX_CEILING // 2))
+    _reject_unsupported_model(
+        _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0),
+        _wide(max_position_embeddings=_WIDE_INDEX_CEILING // 2),
+    )
 
 
 def test_a_null_max_length_on_a_config_stating_no_window_is_not_guessed_at():
     """No ``max_position_embeddings``/``max_seq_length``/``n_positions`` means no window to resolve —
     silence, not a fabricated verdict. The dispatcher's runtime backstop still owns that run."""
-    _config(
-        world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0
-    ).validate_against_model_config(_wide())
+    _reject_unsupported_model(
+        _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0), _wide()
+    )
 
 
 def test_the_paired_row_count_multiplies_the_resolved_window_too():
@@ -250,9 +261,9 @@ def test_the_paired_row_count_multiplies_the_resolved_window_too():
     ``2 × context_window``, the same as it would be on an explicit one."""
     shape = {"world_size": 8, "gpus_per_node": 8, "ep_size": 8}
     model = _wide(max_position_embeddings=_WIDE_INDEX_CEILING // 2)
-    _config(**shape, ep_rows_per_device=1, ep_declared_max_length=0).validate_against_model_config(model)
+    _reject_unsupported_model(_config(**shape, ep_rows_per_device=1, ep_declared_max_length=0), model)
     with pytest.raises(ValueError, match="32-bit wire-index limit"):
-        _config(**shape, ep_rows_per_device=2, ep_declared_max_length=0).validate_against_model_config(model)
+        _reject_unsupported_model(_config(**shape, ep_rows_per_device=2, ep_declared_max_length=0), model)
 
 
 class _PairedTrainer(DistributedTrainerMixin):
@@ -305,12 +316,12 @@ def test_a_concatenated_preference_forward_declares_twice_the_rows():
     assert _budget(_PairedTrainer, batch_size, max_length) == 2 * GIN_MAX_TOKENS_PER_RANK
 
     shape = {"world_size": 32, "gpus_per_node": 8, "ep_size": 32, "ep_scope": "global"}
-    _config(**shape, budget=_budget(DistributedTrainerMixin, batch_size, max_length)).validate_against_model_config(
-        _Cfg(128, **_GPTOSS)
+    _reject_unsupported_model(
+        _config(**shape, budget=_budget(DistributedTrainerMixin, batch_size, max_length)), _Cfg(128, **_GPTOSS)
     )
     with pytest.raises(ValueError, match="proxy-GIN ceiling"):
-        _config(**shape, budget=_budget(_PairedTrainer, batch_size, max_length)).validate_against_model_config(
-            _Cfg(128, **_GPTOSS)
+        _reject_unsupported_model(
+            _config(**shape, budget=_budget(_PairedTrainer, batch_size, max_length)), _Cfg(128, **_GPTOSS)
         )
 
 
@@ -378,8 +389,9 @@ def test_every_trainer_states_the_rows_its_forward_carries(trainer):
 
 def test_a_config_that_declares_no_router_width_is_not_guessed_at():
     """No top-k spelling means no wire extent to compute — silence, not a fabricated verdict."""
-    _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING).validate_against_model_config(
-        _Cfg(128, hidden_size=_WIDE_HIDDEN)
+    _reject_unsupported_model(
+        _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING),
+        _Cfg(128, hidden_size=_WIDE_HIDDEN),
     )
 
 

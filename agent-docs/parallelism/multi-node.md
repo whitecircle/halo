@@ -310,7 +310,7 @@ with it so a missing plugin fails instead of falling back; that is what every mu
 Every rank reads the checkpoint itself, so every rank must find the same one. Before the first weight
 read, the policy load (the embedding backbone and the model-id load of SMPO, offline GRPO and the
 teacher-distillation student included) and every frozen reference or teacher load run
-`resolve_model_source` (`src/distributed/loading/model_source.py`):
+`resolve_model_source` (`src/model_loading/parallel/model_source.py`):
 
 - The fetch runs main-rank-first under the input-filesystem scope: global rank 0 on a shared input
   filesystem, each node's local rank 0 under `DIST_INPUT_SHARED_FILESYSTEM=0`. It takes the
@@ -332,6 +332,8 @@ teacher-distillation student included) and every frozen reference or teacher loa
   the safetensors index and its shards, or the single weight file. The config and tokenizer reads
   ahead of the load leave a weightless snapshot in every node's cache, which raises instead of
   passing for a fetched one.
+- The agreed source (`ModelSource`) carries the revision and the directory this rank reads: the lazy
+  loaders stream from that directory, and the eager loads read the agreed commit from the cache.
 - The text-vs-multimodal probe that names the run reads the config earlier, falling back per rank to
   the model name when the read fails. Its verdict is joined: ranks that disagree (a node missing the
   source among them) raise on every rank instead of building different model classes.
@@ -341,7 +343,7 @@ The weight load itself depends on the loader:
 | Loader | Ranks reading at once | A failure on one rank |
 |---|---|---|
 | Lazy EP (`ep_lazy_loading`) | all; each streams its own slice to its GPU, one tensor in host memory at a time | fenced: every rank raises the real reason |
-| Eager `from_pretrained` (DDP/FSDP2, CP, TP on a MoE, the EP fallback, the default embedding backbone) | `max_concurrent_loading` per OS node | joined over the store: the failing rank re-raises its own error, every peer names it; an FP32-master restore failure raises on every rank |
+| Eager `from_pretrained` (`load_whole_model`: DDP/FSDP2, CP, TP on a MoE, the EP fallback; the default embedding backbone) | `max_concurrent_loading` per OS node | joined over the store: the failing rank re-raises its own error, every peer names it; an FP32-master restore failure raises on every rank |
 | Native dense TP (`tp_plan`) | all; each places its own shards (its FP32-master restore: `max_concurrent_loading` per OS node, joined) | not fenced: the load runs DTensor collectives |
 | Frozen reference / teacher, a trainer's model id | all | joined over the store |
 

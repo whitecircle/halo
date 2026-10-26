@@ -17,7 +17,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from src.distributed.loading import frozen_models
+from src.model_loading.parallel import frozen_models
+from src.model_loading.parallel.model_source import ModelSource
 
 AGREED_COMMIT = "1111111111111111111111111111111111111111"
 
@@ -28,7 +29,7 @@ def test_the_source_is_resolved_before_the_first_fetch_and_pins_every_read(monke
 
     def resolve(model_name_or_path, revision, *, tag):
         events.append(f"resolve:{tag}")
-        return AGREED_COMMIT
+        return ModelSource(model_name_or_path, AGREED_COMMIT, model_name_or_path)
 
     def fetch_config(*args, **kwargs):
         events.append("config")
@@ -51,7 +52,9 @@ def test_the_source_is_resolved_before_the_first_fetch_and_pins_every_read(monke
         patch.object(frozen_models, "apply_run_model_policies"),
         patch.object(frozen_models, "warm_attention_kernels"),
     ):
-        frozen_models.load_frozen_auxiliary_model("org/teacher", dtype=torch.float32, download_tag="teacher_model")
+        frozen_models.load_frozen_auxiliary_model(
+            "org/teacher", dtype=torch.float32, download_tag="teacher_model", trust_remote_code=False
+        )
 
     assert events == ["shims", "resolve:teacher_model", "config", "weights"], (
         f"the remote-code shims, then the coordinated resolution, must precede every fetch: {events}"

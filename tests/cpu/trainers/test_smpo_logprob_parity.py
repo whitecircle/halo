@@ -2,7 +2,7 @@
 """CPU test: SMPO's PP and non-PP losses score a bf16 model's tokens identically.
 
 Both paths take their per-token log-probs from one fp32 primitive
-(:func:`~src.distributed.pipeline_parallel.losses.next_token_logprobs`), so the same batch must give
+(:func:`~src.kernels.logprobs.next_token_logprobs`), so the same batch must give
 the same loss and the same gradient whether it runs as one padded forward or as interleaved pipeline
 microbatches, up to fp32 summation order. Agreement alone would also hold if both paths went back to
 a bf16 ``log_softmax`` (TRL's ``selective_log_softmax`` on bf16 logits), which rounds every token's
@@ -180,7 +180,7 @@ def _eval_trainer(real_pairs: int) -> SmoothMarginPOTrainer:
     """An eval-mode SMPO whose batch's first ``real_pairs`` pairs are the split's own."""
     trainer = _trainer()
     trainer.eval_split_rows = lambda num_rows: real_pairs
-    trainer._pp_runtime = None
+    trainer._pp_runner = None
     trainer._peft_has_been_casted_to_bf16 = False
     trainer.accelerator = SimpleNamespace(device=torch.device("cpu"))
     return trainer

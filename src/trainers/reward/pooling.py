@@ -3,14 +3,14 @@
 Transformers scores a sequence-classification head at each row's rightmost non-pad token. Under
 pipeline parallelism the last stage emits per-token head outputs, so that pooling moves out of the
 model and into the trainer: the batch transform applies the rule and encodes the result into the
-labels plane the runtime already ships, and the last stage's loss decodes it back.
+labels plane the runner already ships, and the last stage's loss decodes it back.
 """
 
 import torch
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.pipeline_parallel.losses import rows_with_labels
+from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.trainers.parallelism.pipeline_loss_adapter import rows_with_labels
 
 
 def sequence_classification_pad_id(config, tokenizer_pad_id: int | None) -> int:
@@ -73,7 +73,7 @@ def last_non_pad_positions(input_ids: torch.Tensor, pad_token_id: int) -> torch.
 def encode_pooling_plane(input_ids: torch.Tensor, pad_token_id: int, values: int | torch.Tensor) -> torch.Tensor:
     """``[B, S]`` labels plane: ``LABEL_IGNORE_INDEX`` except ``values`` at each row's pooled position.
 
-    The plane is the only per-row channel the pipeline runtime ships unconditionally, so encoding
+    The plane is the only per-row channel the pipeline runner ships unconditionally, so encoding
     the pooling result into it hands the last stage both the position and the row's target with no
     side tensors, and makes the eval path's inert row padding self-identifying — which the raw
     ``input_ids`` are not, their filler carrying the tokenizer's pad id rather than the config's.

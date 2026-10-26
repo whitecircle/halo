@@ -62,7 +62,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTr
         "it inherits online GRPO's cross-stage weight-sync and rollout-phase blockers, and adds a "
         "second no-grad forward of the whole model per batch on the [teacher_prompt ⧺ completion] "
         "sequence — a differently-shaped pass whose last-stage logits the student's loss consumes, "
-        "which the pipeline's frozen P2P buffers cannot carry and its runtime has no channel to feed "
+        "which the pipeline's frozen P2P buffers cannot carry and its runner has no channel to feed "
         "back into the step. The advantage-gated token denominator is knowable before the step from "
         "the rollout batch and is not a blocker"
     )

@@ -5,10 +5,9 @@ from unittest.mock import patch
 import torch
 from torch.distributed.tensor import DTensor, distribute_tensor
 
-from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.config import cp_boundary_shift
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.pipeline_parallel.losses import loss_token_counts_per_row
+from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.grpo.objective.offline import offline_loss
 from tests.common.tolerances import TOL

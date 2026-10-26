@@ -37,9 +37,9 @@ import os
 import torch
 from trl import SFTConfig
 
-from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
+from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset

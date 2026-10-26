@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
-from src.distributed.loading.peft_setup import freeze_modules_by_patterns, unfreeze_modules_by_patterns
+from src.model_loading.parallel.freeze_patterns import freeze_modules_by_patterns, unfreeze_modules_by_patterns
 
 
 def _model() -> nn.Module:

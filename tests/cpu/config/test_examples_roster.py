@@ -26,8 +26,9 @@ import pytest
 import yaml
 
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
-from src.distributed.loading.peft_setup import split_expert_lora_targets
 from src.environments.episode import resolve_reasoning_end_ids
+from src.model_loading.parallel.load_rules import reject_unsupported_model
+from src.model_loading.parallel.peft_setup import split_expert_lora_targets
 from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from src.models.attention.selection import validate_attn_implementation
 from src.models.config_access import text_config
@@ -481,7 +482,9 @@ def test_example_parallelism_fits_the_model_shape(config):
     been booked and every rank has begun materializing weights.
     """
     parsed, parallelism = build_parallelism_config(config)
-    parallelism.validate_against_model_config(model_config_for(config, parsed))
+    reject_unsupported_model(
+        parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False
+    )
 
 
 # Knobs the VLM data path refuses outright (sft.py::_prepare_vlm_data, prepare_vlm_dataset).

@@ -205,7 +205,7 @@ def run(ctx):
     )
 
     captured: dict = {}
-    real_step = trainer._pp_runtime.step
+    real_step = trainer._pp_runner.step
 
     def spying_step(input_ids, labels, **kw):
         if "input_ids" not in captured:
@@ -219,7 +219,7 @@ def run(ctx):
             )
         return real_step(input_ids, labels, **kw)
 
-    trainer._pp_runtime.step = spying_step
+    trainer._pp_runner.step = spying_step
     trainer.train()
 
     losses = [e["loss"] for e in trainer.state.log_history if "loss" in e]

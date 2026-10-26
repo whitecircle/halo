@@ -14,8 +14,9 @@ from unittest.mock import patch
 
 import pytest
 
-from src.distributed.loading import peft_setup as model_info
-from src.distributed.loading.peft_setup import split_expert_lora_targets
+from src.model_loading.parallel import model_source
+from src.model_loading.parallel import peft_setup as model_info
+from src.model_loading.parallel.peft_setup import split_expert_lora_targets
 from src.models.moe.expert_lora_spec import LORA_PROJECTION_COVERAGE, ExpertLoraSpec, expert_target_projections
 
 
@@ -36,7 +37,7 @@ def _as_moe(is_moe: bool = True):
     """split_expert_lora_targets loads the model's AutoConfig to gate the peel on MoE — stub both
     the config load and the MoE check so these pure-logic tests need no real model."""
     with (
-        patch.object(model_info.AutoConfig, "from_pretrained", return_value=object()),
+        patch.object(model_source.AutoConfig, "from_pretrained", return_value=object()),
         patch.object(model_info, "config_has_experts", return_value=is_moe),
     ):
         yield

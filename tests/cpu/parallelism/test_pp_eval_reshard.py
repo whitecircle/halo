@@ -17,90 +17,11 @@ import pytest
 import torch
 from torch.distributed.pipelining import PipelineStage
 
-from src.distributed.pipeline_parallel.runtime import _REQUIRED_STAGE_INTERNALS, PipelineRuntime
+from src.distributed.pipeline_parallel.runner import _REQUIRED_STAGE_INTERNALS
+from tests.common.pp_fakes import fake_runner
 
-N_MICROBATCHES = 2
 ROWS = 4
 COLS = 6
-
-
-class _ReshardCountingStage:
-    """Stand-in for ``PipelineStage`` wrapping an FSDP2 module, counting reduce-grad's reshard.
-
-    ``perform_reduce_grad`` is defined on the class because the runtime suppresses it by shadowing the
-    attribute in the instance dict: an instance attribute would be overwritten rather than shadowed,
-    and a failed restore would go unnoticed.
-    """
-
-    def __init__(self):
-        self.reshards = 0
-        self.has_backward = True
-        self.cleared = 0
-
-    def clear_runtime_states(self):
-        self.cleared += 1
-
-    def perform_reduce_grad(self, grad_scale_factor):
-        del grad_scale_factor
-        self.reshards += 1
-
-
-class _FakeSchedule:
-    """Mirrors the real schedules' structure: ``step`` and ``eval`` both end in reduce-grad.
-
-    In torch both funnel through ``_step_microbatches``, whose last statement is
-    ``self._stage.perform_reduce_grad(...)``, and so do the fake's.
-    """
-
-    def __init__(self):
-        self._stage = _ReshardCountingStage()
-        self._n_microbatches = N_MICROBATCHES
-        self._has_backward = True
-        self._loss_fn = lambda output, target: output
-        self._stage_forward_initialized = True
-        self._stage_backward_initialized = True
-        self.eval_calls = 0
-        self.step_calls = 0
-
-    def _split_inputs(self, args, kwargs):
-        arg_mbs = [
-            tuple(torch.tensor_split(a, self._n_microbatches)[i] for a in args) for i in range(self._n_microbatches)
-        ]
-        kwarg_mbs = [
-            {k: torch.tensor_split(v, self._n_microbatches)[i] for k, v in (kwargs or {}).items()}
-            for i in range(self._n_microbatches)
-        ]
-        return arg_mbs, kwarg_mbs
-
-    def _step_microbatches(self, arg_mbs, kwarg_mbs, target_mbs, losses, return_outputs=False):
-        del arg_mbs, kwarg_mbs, target_mbs, return_outputs
-        losses.append(torch.tensor(1.0))
-        self._stage.perform_reduce_grad(1)
-
-    def step(self, *args, target=None, losses=None, return_outputs=False, **kwargs):
-        del args, target, return_outputs, kwargs
-        self.step_calls += 1
-        self._step_microbatches(None, None, None, losses)
-
-    def eval(self, *args, target=None, losses=None, return_outputs=False, **kwargs):
-        del args, target, return_outputs, kwargs
-        self.eval_calls += 1
-        self._step_microbatches(None, None, None, losses if losses is not None else [])
-
-
-def _runtime() -> PipelineRuntime:
-    """A runtime around the fake schedule; ``__init__`` needs dist + FSDP, the drive logic does not."""
-    rt = object.__new__(PipelineRuntime)
-    rt.schedule = _FakeSchedule()
-    rt.stage = rt.schedule._stage
-    rt.stage_module = None
-    rt.is_first = True
-    rt.is_last = True
-    rt.paired_examples = False
-    rt.n_microbatches = N_MICROBATCHES
-    rt._fused_head_loss = False
-    rt._num_items_in_batch = 1
-    return rt
 
 
 def _batch():
@@ -115,7 +36,7 @@ def test_a_training_step_still_reduces_gradients():
     Skipping reduce-grad on a training step would leave FSDP2's gradients unreduced across the DP
     mesh, so every replica would step on its own shard's gradient alone.
     """
-    rt = _runtime()
+    rt = fake_runner()
 
     rt.step(*_batch())
 
@@ -129,7 +50,7 @@ def test_eval_loss_never_reshards_the_stage(batches):
     A forward-only drive produces no gradients, so reduce-grad has nothing to reduce and its only
     effect would be the reshard, paid once per eval batch.
     """
-    rt = _runtime()
+    rt = fake_runner()
     input_ids, labels = _batch()
 
     with torch.no_grad():
@@ -142,7 +63,7 @@ def test_eval_loss_never_reshards_the_stage(batches):
 
 def test_forward_only_never_reshards_the_stage():
     """``forward_only`` drives the same schedule and must be suppressed on the same grounds."""
-    rt = _runtime()
+    rt = fake_runner()
     input_ids, _ = _batch()
 
     with torch.no_grad():
@@ -158,7 +79,7 @@ def test_the_dict_target_eval_path_is_suppressed_too():
     That branch bypasses ``schedule.eval``, so a suppression wired only around the ``schedule.eval``
     call would leave every preference and GRPO eval resharding per batch.
     """
-    rt = _runtime()
+    rt = fake_runner()
     input_ids, labels = _batch()
 
     with torch.no_grad():
@@ -174,7 +95,7 @@ def test_training_resumes_reducing_after_an_eval():
     A shadow left installed on the stage would disable gradient reduction for the rest of the run
     while losses stay finite and the model still moves, on unreduced gradients.
     """
-    rt = _runtime()
+    rt = fake_runner()
     input_ids, labels = _batch()
 
     with torch.no_grad():
@@ -188,7 +109,7 @@ def test_training_resumes_reducing_after_an_eval():
 
 def test_a_raising_drive_still_restores_the_stage():
     """A failure inside the schedule must not strand the stage with reduction disabled."""
-    rt = _runtime()
+    rt = fake_runner()
 
     def exploding(*args, **kwargs):
         raise RuntimeError("collective failed")
@@ -201,14 +122,14 @@ def test_a_raising_drive_still_restores_the_stage():
 
 
 def test_the_shadowed_torch_member_is_declared_in_the_contract():
-    """The runtime shadows a private torch member, so a rename must fail loud at construction.
+    """The runner shadows a private torch member, so a rename must fail loud at construction.
 
     ``_assert_pipelining_schedule_contract`` probes every name in ``_REQUIRED_STAGE_INTERNALS``. If
     ``perform_reduce_grad`` were missing from that tuple, a torch version that renamed it would leave
     the shadow on a dead attribute and the reshard would return unnoticed.
     """
     assert "perform_reduce_grad" in _REQUIRED_STAGE_INTERNALS
-    assert hasattr(PipelineStage, "perform_reduce_grad"), "torch renamed the member the runtime suppresses"
+    assert hasattr(PipelineStage, "perform_reduce_grad"), "torch renamed the member the runner suppresses"
 
 
 if __name__ == "__main__":

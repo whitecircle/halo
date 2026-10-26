@@ -163,7 +163,7 @@ def expect_construction_error(name: str, checks: dict, match: str, **trainer_kwa
 
 def stage_shards(trainer) -> dict[str, torch.Tensor]:
     """This rank's sharded parameter data — the tensors the optimizer must be updating."""
-    return {n: p.detach().to_local().clone() for n, p in trainer._pp_runtime.stage.submod.named_parameters()}
+    return {n: p.detach().to_local().clone() for n, p in trainer._pp_runner.stage.submod.named_parameters()}
 
 
 def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
@@ -186,7 +186,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
 
     captured: dict = {}
     margins: list[float] = []
-    real_step = trainer._pp_runtime.step
+    real_step = trainer._pp_runner.step
 
     def spying_step(input_ids, labels, **kw):
         if "batch" not in captured:
@@ -198,12 +198,12 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
         margins.append(float(trainer._pp_step_state.target_margin))
         return real_step(input_ids, labels, **kw)
 
-    trainer._pp_runtime.step = spying_step
+    trainer._pp_runner.step = spying_step
 
     eval_calls: list[dict] = []
     init_eval_metrics = None
     if eval_dataset is not None:
-        real_eval = trainer._pp_runtime.eval_loss
+        real_eval = trainer._pp_runner.eval_loss
 
         def spying_eval(input_ids, labels, **kw):
             eval_calls.append(
@@ -217,7 +217,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
             )
             return real_eval(input_ids, labels, **kw)
 
-        trainer._pp_runtime.eval_loss = spying_eval
+        trainer._pp_runner.eval_loss = spying_eval
         init_eval_metrics = trainer.evaluate()
 
     # Snapshot the init-weights captures under a new name: in-loop evals keep appending to
@@ -336,7 +336,7 @@ def run(ctx):
     metrics["init_eval_loss"], metrics["init_eval_reference"] = eval_loss, expected_eval
     checks["eval_loss_matches_reference"] = abs(eval_loss - expected_eval) / max(1.0, abs(expected_eval)) < REL_TOL
 
-    # SMPO normalizes inside the loss closure — the runtime's eval divisor must stay 1.
+    # SMPO normalizes inside the loss closure — the runner's eval divisor must stay 1.
     checks["eval_normalizer_is_one"] = all(abs(call["num_items"] - 1.0) < 1e-9 for call in eval_calls)
     # The partial batch genuinely occurred somewhere in the world (inert rows were padded in).
     had_partial = torch.tensor(

@@ -28,8 +28,8 @@ from transformers import GptOssConfig, GptOssForCausalLM
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 from trl.trainer.utils import create_model_from_path
 
-from src.distributed.loading.frozen_models import PREFERENCE_REFERENCE_ALTERNATIVES
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.frozen_models import PREFERENCE_REFERENCE_ALTERNATIVES
 from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, has_live_attention_sinks
 from src.trainers.mixins.validation import ParallelismValidationMixin
 from tests.common.models import TINY_GPTOSS_CONFIG

@@ -28,7 +28,7 @@ def test_string_policy_with_kl_reaches_the_model_loader_without_a_peft_probe_cra
         calls.append(source)
         raise RuntimeError("model loader reached")
 
-    monkeypatch.setattr(offline_mod, "load_model_from_pretrained", stop_at_loader)
+    monkeypatch.setattr(offline_mod, "resolve_trainer_model", stop_at_loader)
     args = OfflineGRPOConfig(
         output_dir=str(tmp_path), kl_beta=0.2, use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none"
     )
@@ -48,7 +48,7 @@ def test_constructor_passes_presharded_ownership_to_the_active_reference_gate(tm
     def stop_at_loader(*args, **kwargs):
         raise RuntimeError("model loader reached")
 
-    monkeypatch.setattr(offline_mod, "load_model_from_pretrained", stop_at_loader)
+    monkeypatch.setattr(offline_mod, "resolve_trainer_model", stop_at_loader)
     args = OfflineGRPOConfig(
         output_dir=str(tmp_path), kl_beta=0.2, use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none"
     )

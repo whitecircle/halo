@@ -114,7 +114,7 @@ def test_the_production_import_path_pulls_in_every_registration():
     because this file imports the heads itself — in-process the chain could be severed and every
     other test here would still pass."""
     probe = (
-        "import src.distributed.loading.model_loading\n"
+        "import src.model_loading.parallel.loader\n"
         "from transformers import AutoModelForSequenceClassification as A\n"
         "print(sorted(c.model_type for c in A._model_mapping._extra_content))\n"
     )

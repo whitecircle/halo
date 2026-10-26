@@ -25,7 +25,7 @@ import torch
 
 from src.distributed import rank_uniform_env
 from src.distributed.expert_parallel.deepep import settings as settings_mod
-from src.distributed.loading import model_loading
+from src.model_loading.parallel import loader as model_loading
 from src.runtime.consensus import divergent_settings, reject_divergent_settings
 from tests.common.parallelism import make_parallelism_config
 
@@ -143,9 +143,11 @@ def test_every_distributed_load_agrees_the_env_before_it_loads(monkeypatch, ep_s
         events.append("load")
         raise _LoadStarted
 
-    monkeypatch.setattr(model_loading, "_validate_launch_method_for_parallelism", first_load_step)
+    monkeypatch.setattr(model_loading, "reject_unsupported_run", first_load_step)
     with pytest.raises(_LoadStarted):
-        model_loading.load_distributed_model("unused", make_parallelism_config(ep_size=ep_size))
+        model_loading.load_distributed_model(
+            "unused", make_parallelism_config(ep_size=ep_size), trust_remote_code=True
+        )
     assert events == ["agree", "load"]
 
 
