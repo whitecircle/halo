@@ -6,7 +6,7 @@ What fusion buys and what it does not: [GPU Training Theory §5](../reference/gp
 
 ## Expert activations are not compiled
 
-**No expert activation is wrapped in `torch.compile`.** Every GLU combine on the roster is a Triton kernel taking its shape-dependent and numeric arguments at runtime (`src/kernels/fused_glu.py`): the plain SwiGLU / tanh-GELU pair, DeepSeek-V4 and GLM-5 Next's clamped SwiGLU (`fused_clamped_silu_mul`), Step-3.7 Flash's post-activation clamp (`fused_silu_then_clamp_mul`), and GptOss's `fused_gptoss_glu` on the loop, grouped-GEMM and ETP paths alike.
+**No expert activation is wrapped in `torch.compile`.** Every GLU combine on the roster is a Triton kernel taking its shape-dependent and numeric arguments at runtime (`src/kernels/fused_glu.py`): the plain SwiGLU / tanh-GELU pair, DeepSeek-V4 and GLM-5 Next's clamped SwiGLU (`GluCombine.clamped_silu`), Step-3.7 Flash's post-activation clamp (`GluCombine.clamped_silu(..., clamp_activated=True)`), and GptOss's `GluCombine.gptoss` on the loop, grouped-GEMM and ETP paths alike.
 
 A `torch.compile`d combine taking a bound (or `alpha`) as a Python float is re-traced as a symbolic input once the token count goes dynamic, and the inductor C++ backend then serves **every later value from the first graph**: a silently wrong clamp on every layer after the first.
 

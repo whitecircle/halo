@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from src.distributed.runtime import get_nccl_timeout
+from src.env import nccl_timeout
 from tests.common.goldens import regen_main
 from tests.common.goldens.shape_grid import GridGolden, LayoutShape
 from tests.common.parallelism import StubGroup, stubbed_process_groups
@@ -22,7 +22,7 @@ from tests.common.parallelism import StubGroup, stubbed_process_groups
 # The process groups EPConfig hands out.
 GROUP_FIELDS = ("process_group", "dispatch_ep_group", "expert_tp_group", "expert_replica_group", "dp_scope_group")
 # The knob off its default, so a timeout fixed in code or read once at import is written as its value;
-# only one read from get_nccl_timeout() as the group is built is written as that call.
+# only one read from nccl_timeout() as the group is built is written as that call.
 RECORD_ENV = {"DIST_NCCL_TIMEOUT_MINUTES": "7"}
 
 # Node-local and cross-node EP at expert TP 1, 2 and 4 on one pipeline stage, EP or expert TP alone on
@@ -47,9 +47,9 @@ LITERAL_SHAPES = (
 
 def _argument(name: str, value) -> str:
     """A ``new_group`` keyword argument as the golden writes it: the NCCL watchdog timeout as
-    ``get_nccl_timeout()`` when it is what that call returns under :data:`RECORD_ENV`."""
-    if name == "timeout" and value == get_nccl_timeout():
-        return "get_nccl_timeout()"
+    ``nccl_timeout()`` when it is what that call returns under :data:`RECORD_ENV`."""
+    if name == "timeout" and value == nccl_timeout():
+        return "nccl_timeout()"
     return repr(value)
 
 

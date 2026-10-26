@@ -17,6 +17,7 @@ from torch.utils.data import SequentialSampler
 
 import src.trainers.mixins.dataloader as dataloader_mod
 from src.distributed.parallelism_config import ParallelismConfig
+from src.runtime.consensus import RankConsensus
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
@@ -119,7 +120,7 @@ def test_a_split_cache_hit_rebuilds_in_lockstep_and_displaces_no_live_loader(mon
     live = _Prepared("a loader whose persistent workers are running")
     if held:
         trainer._eval_dataloaders["eval/fingerprint"] = live
-    monkeypatch.setattr(dataloader_mod, "rank_consensus", lambda local_ok: (False, True))
+    monkeypatch.setattr(dataloader_mod, "rank_consensus", lambda local_ok: RankConsensus(False, True))
     built = []
 
     def build(dataset):

@@ -22,28 +22,11 @@ import torch
 import torch.distributed as dist
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import get_nccl_timeout
 from src.hardware import current_device
+from src.runtime.collectives import build_groups
+from src.runtime.ranks import has_process_group
 
 logger = logging.getLogger(__name__)
-
-
-def _create_groups_fixed_order(rank_lists: list[list[int]], mine: int, what: str) -> dist.ProcessGroup:
-    """Create a process group for every rank list, in order; return the ``mine``-th.
-
-    Every rank must call this with the identical ``rank_lists`` — ``dist.new_group`` is collective,
-    and a rank skipping or reordering a creation deadlocks the job.
-    """
-    if not (dist.is_available() and dist.is_initialized()):
-        raise RuntimeError("Pipeline parallelism requires an initialized process group (launch with torchrun).")
-    my_group = None
-    for index, ranks in enumerate(rank_lists):
-        group = dist.new_group(ranks, timeout=get_nccl_timeout())
-        if index == mine:
-            my_group = group
-    if my_group is None:
-        raise RuntimeError(f"Rank {dist.get_rank()} was not assigned a pipeline {what} (index {mine}).")
-    return my_group
 
 
 def _stage_rank_blocks(config: ParallelismConfig) -> list[list[int]]:
@@ -65,8 +48,10 @@ def create_pipeline_group(config: ParallelismConfig) -> dist.ProcessGroup | None
     """
     if config.pp_size <= 1:
         return None
+    if not has_process_group():
+        raise RuntimeError("Pipeline parallelism requires an initialized process group (launch with torchrun).")
     chains = [list(chain) for chain in zip(*_stage_rank_blocks(config), strict=True)]
-    group = _create_groups_fixed_order(chains, config.stage_local_rank, "chain")
+    group = build_groups(chains, mine=config.stage_local_rank, what="pipeline chain")
     logger.info(
         "Pipeline chain for rank %d: %s (stage %d/%d)",
         config.global_rank,
@@ -84,7 +69,9 @@ def create_stage_group(config: ParallelismConfig) -> dist.ProcessGroup | None:
     """
     if config.pp_size <= 1:
         return None
-    return _create_groups_fixed_order(_stage_rank_blocks(config), config.pp_rank, "stage group")
+    if not has_process_group():
+        raise RuntimeError("Pipeline parallelism requires an initialized process group (launch with torchrun).")
+    return build_groups(_stage_rank_blocks(config), mine=config.pp_rank, what="pipeline stage group")
 
 
 def broadcast_scalar_from_last_stage(tensor: torch.Tensor | None, src: int, group: dist.ProcessGroup) -> torch.Tensor:

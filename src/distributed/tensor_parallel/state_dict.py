@@ -22,7 +22,8 @@ from transformers.distributed.tensor_parallel import (
 
 from src.checkpoint.writing import save_dtype_caster
 from src.distributed.mesh import get_tp_submesh, has_tp_dim
-from src.distributed.runtime import is_global_main_process, materialize_dtensor
+from src.runtime.dtensor import materialize_dtensor
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 

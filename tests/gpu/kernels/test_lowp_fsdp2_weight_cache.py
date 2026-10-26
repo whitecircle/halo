@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """FSDP2 pins the unsharded param's version counter — so the low-precision weight-quant cache must
-be bypassed for FSDP2-managed expert weights (``grouped_gemm(..., weight_cacheable=False)``).
+be bypassed for FSDP2-managed expert weights (``expert_gemm(..., weight_cacheable=False)``).
 
 ``cached_fake_quant`` keys its once-per-step round-trip on ``weight._version``. FSDP2 refreshes the
 unsharded param's data through ``_unsafe_preserve_version_counter``, so that key never advances and
@@ -11,7 +11,7 @@ a cache keyed on it serves the step-0 quantization for the whole run. Two halves
    FROZEN while its data moves; ``cached_fake_quant`` keeps serving the step-0 quantization while
    ``fake_quant`` tracks the live weight. If FSDP2 ever stops pinning the counter, this half fails
    and the ``weight_cacheable=False`` special-casing can be reconsidered.
-2. ``grouped_gemm`` contract ([E,K,N] FSDP2-managed expert weight, MXFP8): with
+2. ``expert_gemm`` contract ([E,K,N] FSDP2-managed expert weight, MXFP8): with
    ``weight_cacheable=False`` the output tracks the master (differs after an optimizer step); with
    ``weight_cacheable=True`` on the same frozen-version weight the output provably stays the stale
    step-0 result while the master moves underneath — the negative control for that special-casing.
@@ -31,7 +31,7 @@ import torch.nn as nn
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
-from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
+from src.kernels.expert_gemm import expert_gemm
 from src.kernels.lowp.quantization import cached_fake_quant, fake_quant
 from tests.common.harness import gpu_test_main
 
@@ -86,7 +86,7 @@ def _linear_version_pin(ctx) -> dict:
 
 
 class _Experts(nn.Module):
-    """Tiny [E, K, N] expert bank whose forward is exactly the grouped_gemm under test."""
+    """Tiny [E, K, N] expert bank whose forward is exactly the expert_gemm under test."""
 
     def __init__(self, device):
         super().__init__()
@@ -94,9 +94,7 @@ class _Experts(nn.Module):
         self.weight = nn.Parameter(torch.randn(4, 64, 32, device=device, dtype=torch.bfloat16) * 0.05)
 
     def forward(self, x, offs, cacheable):
-        return grouped_gemm(
-            x, self.weight, offs=offs, precision=GroupedGemmPrecision.MXFP8, weight_cacheable=cacheable
-        )
+        return expert_gemm(x, self.weight, offs=offs, quant_format="mxfp8", weight_cacheable=cacheable)
 
 
 def _local(w: torch.Tensor) -> torch.Tensor:
@@ -126,7 +124,7 @@ def _train_grouped(ctx, cacheable: bool) -> tuple[list, bool]:
     return outs, master_moved
 
 
-def _grouped_gemm_contract(ctx) -> dict:
+def _expert_gemm_contract(ctx) -> dict:
     """Half 2: weight_cacheable=False tracks the master; True serves the stale step-0 entry."""
     outs_fresh, moved_fresh = _train_grouped(ctx, cacheable=False)
     outs_cached, moved_cached = _train_grouped(ctx, cacheable=True)
@@ -145,7 +143,7 @@ def _grouped_gemm_contract(ctx) -> dict:
 def run(ctx):
     checks = {}
     checks.update(_linear_version_pin(ctx))
-    checks.update(_grouped_gemm_contract(ctx))
+    checks.update(_expert_gemm_contract(ctx))
     return {"checks": checks}
 
 

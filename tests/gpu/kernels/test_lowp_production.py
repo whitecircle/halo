@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Production-readiness: apply_mixed_precision_compute on a representative model, verifying that
+"""Production-readiness: apply_lowp_compute on a representative model, verifying that
 - only the dense MLP projections (gate/up/down) are converted to low precision; attention q/k/v/o stay bf16,
 - a forward->backward->optimizer loop converges with BOTH bf16 and fp32 master weights (the low-precision
   fake-quant path keeps the master unchanged — bf16 master, low-precision compute).
@@ -12,7 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.kernels.lowp.linear import LowPrecisionLinear
-from src.kernels.lowp.mixed_precision import apply_mixed_precision_compute
+from src.kernels.lowp.spec import LowpSpec
+from src.model_loading.parallel.lowp_compute import apply_lowp_compute
 from tests.common.harness import gpu_test_main, record_check
 
 DEV = "cuda"
@@ -65,7 +66,9 @@ class Model(nn.Module):
 def test_conversion_scope():
     """Only MLP gate/up/down are converted; attention q/k/v/o stay bf16."""
     m = Model(2048, 8192).to(DEV, torch.bfloat16)
-    summary = apply_mixed_precision_compute(m, precision="fp8", apply_dense_mlp=True, apply_moe_experts=False)
+    summary = apply_lowp_compute(
+        m, LowpSpec(precision="fp8", apply_dense_mlp=True, apply_moe_experts=False), expert_weight_cacheable=True
+    )
     for blk in m.layers:
         for p in ("gate_proj", "up_proj", "down_proj"):
             assert isinstance(getattr(blk.mlp, p), LowPrecisionLinear), f"mlp.{p} not converted"
@@ -88,7 +91,9 @@ def test_converges_both_masters():
     for master in (torch.bfloat16, torch.float32):
         torch.manual_seed(1)
         m = Model(H, I, n=1).to(DEV, master)
-        apply_mixed_precision_compute(m, precision="fp8", apply_dense_mlp=True, apply_moe_experts=False)
+        apply_lowp_compute(
+            m, LowpSpec(precision="fp8", apply_dense_mlp=True, apply_moe_experts=False), expert_weight_cacheable=True
+        )
         opt = torch.optim.Adam(m.parameters(), lr=1e-3)
         first = last = None
         for i in range(20):

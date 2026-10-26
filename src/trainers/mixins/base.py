@@ -35,7 +35,6 @@ from src.distributed.expert_parallel.dispatcher import (
     verify_rank_uniform_env,
 )
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
-from src.distributed.filesystem import verify_output_filesystem_sharing
 from src.distributed.fsdp import (
     IdentityParamSet,
     make_disable_adapter_fsdp2_safe,
@@ -47,18 +46,6 @@ from src.distributed.fsdp import (
 from src.distributed.mesh import ParallelDims
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
-from src.distributed.runtime import (
-    barrier,
-    collective_device,
-    get_global_rank,
-    get_global_world_size,
-    get_num_nodes,
-    is_global_main_process,
-    is_output_shared_filesystem,
-    nccl_safe_broadcast,
-    rank_consensus,
-    reject_across_ranks,
-)
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from src.kernels.liger.orchestrator import (
     sanitize_liger_config,
@@ -70,8 +57,8 @@ from src.model_loading.dtype import has_packed_quantized_params, resolve_trainin
 from src.models.config_access import config_sources, snapshot_special_token_ids
 from src.models.moe_balancing import ep_wraps_experts
 from src.models.patches.flex_sliding_attention import reject_full_determinism_after_warmup
+from src.models.peft_adapters import lora_fold_targets
 from src.models.segment_markers import reject_compressed_kv_rows
-from src.models.structure import lora_fold_targets
 from src.models.unwrapping import unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
@@ -81,6 +68,10 @@ from src.optimizers.registry import (
     optim_name,
     register_custom_optimizers,
 )
+from src.runtime.collectives import barrier, collective_device, nccl_safe_broadcast
+from src.runtime.consensus import rank_consensus, reject_across_ranks
+from src.runtime.filesystem import is_output_shared_filesystem, verify_output_filesystem_sharing
+from src.runtime.ranks import get_global_rank, get_global_world_size, get_num_nodes, is_global_main_process
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 from src.trainers.mixins.ep_introspection import (
@@ -180,7 +171,7 @@ def align_save_on_each_node(training_args) -> None:
 
     The base save writes ``trainer_state.json``, ``scheduler.pt`` and ``optimizer.pt`` and rotates
     old checkpoints on ``args.should_save``, while every toolkit writer follows the output
-    filesystem (:func:`~src.distributed.runtime.fs_aware_save_rank`). On per-node storage the flag
+    filesystem (:func:`~src.runtime.filesystem.is_fs_save_rank`). On per-node storage the flag
     must be on, or nodes 1..N hold no trainer state and no checkpoint resumes there. On shared storage across
     nodes it must be off, or every node's local rank 0 writes and rotates the same files at once.
     One node has one local rank 0, so either value is correct there.
@@ -714,7 +705,7 @@ class DistributedTrainerMixin(
         - **Accelerate-managed FSDP v1.** Params are flat-param shards the base Trainer's save
           serializes, so the gather would write shard views.
         - **A PEFT layer the out-of-place fold cannot reproduce** (trainable tokens, LoRA on
-          ``nn.MultiheadAttention``; :func:`~src.models.structure.lora_fold_targets`). The save
+          ``nn.MultiheadAttention``; :func:`~src.models.peft_adapters.lora_fold_targets`). The save
           builds its fold map with the same call and would raise at the first checkpoint; the check
           is structural, so every rank raises here before training.
         """
@@ -1620,7 +1611,7 @@ class DistributedTrainerMixin(
             local_batches, measurable = 0, False
 
         # Agree measurability first: a rank that early-returns leaves peers at the reduces below.
-        if not rank_consensus(measurable)[0]:
+        if not rank_consensus(measurable).all_ok:
             return True
 
         count = torch.tensor([local_batches], device=collective_device(), dtype=torch.long)

@@ -34,15 +34,17 @@ from src.data.pipeline.processing import (
 )
 from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
-from src.data.probe_consensus import agree_probe_across_ranks
 from src.data.sources.loading import load_datasets_auto
+from src.distributed.loading.model_source import probe_checkpoint
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
-from src.distributed.runtime import barrier, init_distributed, is_global_main_process
 from src.model_loading.model_preparation import log_model_info
 from src.models.context_window import is_bounded_length
-from src.models.modality import probe_checkpoint
 from src.models.segment_markers import reject_compressed_kv_rows
+from src.runtime.collectives import barrier
+from src.runtime.consensus import agree_probe_across_ranks
+from src.runtime.process_group import init_distributed
+from src.runtime.ranks import is_global_main_process
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser

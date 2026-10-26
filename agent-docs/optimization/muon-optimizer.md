@@ -83,7 +83,7 @@ Run `tests/gpu/optimizers/bench_muon.py` or `tests/gpu/optimizers/bench_muon_qwe
 
 ## Compatibility
 
-Works with FSDP2, gradient checkpointing, and all parallelism modes — the kernels operate on the local shard after `to_local` (`src/distributed/runtime.py`) unwraps DTensors.
+Works with FSDP2, gradient checkpointing, and all parallelism modes — the kernels operate on the local shard after `to_local` (`src/runtime/dtensor.py`) unwraps DTensors.
 
 That implies an approximation: Newton-Schulz orthogonalization runs on each rank's local shard, not the full matrix, so the Muon update depends on the sharding layout and world size. The same model sharded differently takes a different update.
 

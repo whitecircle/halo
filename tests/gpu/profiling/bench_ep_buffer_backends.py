@@ -20,8 +20,8 @@ from accelerate import PartialState
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.hardware import supports_grouped_mm
+from src.runtime.collectives import barrier
 from tests.common.distributed import (
     ensure_model_downloaded,
     init_distributed,

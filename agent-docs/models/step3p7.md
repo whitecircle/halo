@@ -61,7 +61,7 @@ Two tokenizer facts to hold:
 - Routing: fp32 sigmoid scores plus `gate.e_score_correction_bias` on **selection only**, plain top-8 (no group limiting); the combine weights are the unbiased scores renormalized, with the block's `routed_scaling_factor` folded into them (equivalent — the combine is linear in the expert outputs).
 - Experts: fused `Step3p7Experts.gate_up_proj [E, 2M, H]` / `down_proj [E, H, M]` in-module. Unclamped layers take the base fused-SiLU combine.
 
-    The clamped layers run a fused Triton **post-activation** clamped SwiGLU: SiLU first, then clamp the activated gate (`fused_silu_then_clamp_mul`, `src/kernels/fused_glu.py`; the bound is a runtime kernel argument, so per-layer limits share one kernel). It is the mirror of DeepSeek-V4/GLM-5's pre-activation clamp and not interchangeable with it.
+    The clamped layers run a fused Triton **post-activation** clamped SwiGLU: SiLU first, then clamp the activated gate (`GluCombine.clamped_silu(limit, clamp_activated=True)`, logged as `glu_combine=silu_then_clamp`, `src/kernels/fused_glu.py`; the bound is a runtime kernel argument, so per-layer limits share one kernel). It is the mirror of DeepSeek-V4/GLM-5's pre-activation clamp and not interchangeable with it.
 
 - Shared expert: the block's own `Step3p7MLP`, adopted by reference (it carries its own `swiglu_limits_shared` clamp), added after DeepEP combine. The 3 dense leading layers keep their plain MLP — EP swaps MoE blocks only.
 

@@ -35,8 +35,8 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 
 from src.distributed.expert_parallel import base_layer
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.kernels.fused_glu import PACKED_GLU_MULS, fused_gelu_tanh_mul
-from src.kernels.grouped_gemm import grouped_gemm
+from src.kernels.expert_gemm import expert_gemm
+from src.kernels.fused_glu import GluCombine
 from src.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
 
 HIDDEN, INTERMEDIATE, EXPERTS, TOP_K = 2816, 704, 128, 8
@@ -119,11 +119,11 @@ padded_permute = partial(patch.object, base_layer, "MoEGatherPermute", _PaddedGa
 def padded_gather_block():
     """:func:`halo_block` with the padded-gather permute (run under :data:`padded_permute`) and a separate
     routing-weight multiply."""
-    glu = PACKED_GLU_MULS[fused_gelu_tanh_mul]
+    glu = GluCombine.gelu_tanh().packed
 
     def run(x, idx, w, gate_up_w, down_w):
         tokens, offs, token_idx, weights, _, inv_map = _sort(x, idx, w)
-        y = grouped_gemm(glu(grouped_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
+        y = expert_gemm(glu(expert_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
         return _PaddedGatherUnpermute.apply(y * weights.unsqueeze(-1).to(y.dtype), token_idx, inv_map)
 
     return run
@@ -131,11 +131,11 @@ def padded_gather_block():
 
 def halo_block(combine=None):
     """This tree's grouped expert compute (``_compute_experts_with_grouped_mm`` at ``ep_size`` 1)."""
-    glu = combine or PACKED_GLU_MULS[fused_gelu_tanh_mul]
+    glu = combine or GluCombine.gelu_tanh().packed
 
     def run(x, idx, w, gate_up_w, down_w):
         tokens, offs, token_idx, weights, _, inv_map = _sort(x, idx, w)
-        y = grouped_gemm(glu(grouped_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
+        y = expert_gemm(glu(expert_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
         return MoEWeightedUnpermute.apply(y.contiguous(), weights.to(y.dtype), token_idx, inv_map)
 
     return run

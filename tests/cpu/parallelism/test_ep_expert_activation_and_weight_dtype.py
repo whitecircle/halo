@@ -63,7 +63,7 @@ from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
-from src.kernels.fused_glu import fused_silu_mul, is_silu_activation, silu_mul_eager
+from src.kernels.fused_glu import GluCombine, is_silu_activation, silu_mul_eager
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 16, 32, 2  # experts, hidden, moe intermediate, top_k
@@ -325,9 +325,9 @@ def test_every_silu_family_arms_the_fused_kernel(name, wrapper, factory, act_own
     direction and LFM2 — whose upstream pins ``F.silu`` regardless — asserts the armed one.
     """
     _block, layer = _build(factory, wrapper)
-    expected = fused_silu_mul if is_silu_activation(layer.act_fn) else None
+    expected = GluCombine.silu() if is_silu_activation(layer.act_fn) else None
 
-    assert layer._fused_glu_mul is expected, (
+    assert layer._fused_glu_mul == expected, (
         f"{name}: act_fn={layer.act_fn!r} wanted {expected} but latched {layer._fused_glu_mul}"
     )
 
@@ -346,8 +346,8 @@ def test_the_fused_swiglu_kernel_is_armed_exactly_when_the_block_gates_with_silu
     torch.manual_seed(0)
     layer = wrapper(factory(hidden_act=hidden_act), single_process_ep_config(E)).cpu()
 
-    expected = fused_silu_mul if fused else None
-    assert layer._fused_glu_mul is expected, f"{name} at hidden_act={hidden_act!r} armed the wrong combine"
+    expected = GluCombine.silu() if fused else None
+    assert layer._fused_glu_mul == expected, f"{name} at hidden_act={hidden_act!r} armed the wrong combine"
     # Why the gate cannot be nominal: this holds for the accepted row too.
     assert not isinstance(layer.act_fn, nn.SiLU) and layer.act_fn is not F.silu
 

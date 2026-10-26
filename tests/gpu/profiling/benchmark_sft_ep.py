@@ -46,6 +46,7 @@ import os
 import sys
 import time
 import traceback
+from typing import get_args
 
 import torch
 import torch.distributed as dist
@@ -56,13 +57,14 @@ from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.torch_profiler import TorchProfilerCallback
-from src.diagnostics.performance_monitor import get_performance_monitor
+from src.diagnostics.ep_span_timing import get_ep_span_timer
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase, find_ep_layers
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import LOWP_PRECISIONS, ParallelismConfig
-from src.distributed.runtime import barrier, broadcast_from_rank0
+from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_float, torch_trace_dir
+from src.kernels.lowp.spec import LowpPrecision, LowpSpec
+from src.runtime.collectives import barrier, broadcast_from_rank0
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.benchmark_args import axis_tags, create_benchmark_parser, pp_topology_kwargs
 from tests.common.datasets import create_benchmark_dataset
@@ -185,7 +187,7 @@ def main() -> int:
         "--lowp_precision",
         type=str,
         default="bf16",
-        choices=list(LOWP_PRECISIONS),
+        choices=get_args(LowpPrecision),
         help="Low-precision GEMM compute for the dense MLP and MoE experts; master weights and "
         "checkpoints stay bf16. 'bf16' = off, 'fp8' = mxfp8, 'fp4' = nvfp4, 'mxfp4' = fast fp4.",
     )
@@ -211,7 +213,7 @@ def main() -> int:
         "--comm_profile",
         action="store_true",
         help="Attribute EP step time to DeepEP all-to-all (dispatch+combine) vs "
-        "local expert compute via the PerformanceMonitor's per-phase CUDA "
+        "local expert compute via the EPSpanTimer's per-phase CUDA "
         "timers. Serialized/synchronized — measures the comm FRACTION, not "
         "throughput. Prints a dispatch/compute/combine breakdown on rank 0.",
     )
@@ -353,7 +355,7 @@ def main() -> int:
             ep_buffer_backend=args.ep_buffer_backend,
             fsdp_shard_ep1_experts=not args.no_fsdp_shard_ep1_experts,
             fsdp_reshard_after_forward=args.zero3,
-            lowp_precision=args.lowp_precision,
+            lowp=LowpSpec(precision=args.lowp_precision),
         )
         # Native grouped EP-LoRA on the expert FFNs — each EP layer reads this at construction.
         if want_experts:
@@ -580,7 +582,7 @@ def main() -> int:
             emit_save_benchmark(f"sft_ep_{args.model}_{layout}_gathered_save", save_seconds, peak_rss)
 
         if args.comm_profile and rank == 0:
-            stats = get_performance_monitor().stats
+            stats = get_ep_span_timer().stats
             disp = stats["ep.dispatch"].avg_time if "ep.dispatch" in stats else 0.0
             comp = stats["ep.expert_compute"].avg_time if "ep.expert_compute" in stats else 0.0
             comb = stats["ep.combine"].avg_time if "ep.combine" in stats else 0.0

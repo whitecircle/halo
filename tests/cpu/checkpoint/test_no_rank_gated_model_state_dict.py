@@ -34,8 +34,8 @@ _SCANNED = (REPO_ROOT / "src" / "distributed", REPO_ROOT / "src" / "checkpoint")
 _RANK_GATES = (
     "is_global_main_process",
     "is_local_main_process",
-    "fs_aware_save_rank",
-    "fs_aware_load_rank",
+    "is_fs_save_rank",
+    "is_fs_load_rank",
     "is_save_rank",
     "should_save",
     "is_writer",

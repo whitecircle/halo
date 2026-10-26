@@ -29,6 +29,7 @@ import src.distributed.checkpoint.optimizer as optimizer_mod
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
+from src.runtime.consensus import RankConsensus
 
 
 def _stub_consensus(patcher, fake) -> None:
@@ -334,7 +335,7 @@ def test_partial_shards_with_matching_fingerprint_raise_torn(tmp_path, monkeypat
     optimizer = _sgd(model)
     _write_checkpoint(tmp_path, shard=False, fingerprint=_live_fp(optimizer).to_dict())
     # Peer reports its shard present: consensus (all_ok=local, any_ok=True).
-    _stub_consensus(monkeypatch, lambda local: (local, True))
+    _stub_consensus(monkeypatch, lambda local: RankConsensus(local, True))
 
     with pytest.raises(RuntimeError, match="torn"):
         OptimizerShardStore(_ctx(model, optimizer)).load(str(tmp_path))
@@ -353,8 +354,8 @@ def test_partial_shards_without_a_meta_are_refused_as_torn(tmp_path, monkeypatch
     def fake_consensus(local):
         if not local and not seen_negative:
             seen_negative.append(True)
-            return (False, True)
-        return (local, local)
+            return RankConsensus(False, True)
+        return RankConsensus(local, local)
 
     _stub_consensus(monkeypatch, fake_consensus)
     restore = _Recorder()
@@ -532,7 +533,7 @@ def test_a_peer_without_the_fingerprint_raises_on_every_rank(tmp_path, monkeypat
         # Call 1 is the shard-presence probe; call 2 is the fingerprint question, the only one the
         # peer answers differently.
         asked.append(local)
-        return (False, True) if len(asked) == 2 else (local, local)
+        return RankConsensus(False, True) if len(asked) == 2 else RankConsensus(local, local)
 
     monkeypatch.setattr(optimizer_mod, "rank_consensus", peer_lacks_the_fingerprint)
     restore = _Recorder()

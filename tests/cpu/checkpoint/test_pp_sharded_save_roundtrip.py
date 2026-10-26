@@ -42,7 +42,6 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
-import src.distributed.runtime as runtime
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
 from src.checkpoint.format import is_sharded_checkpoint
 from src.checkpoint.hub_layout import revert_conversions
@@ -61,9 +60,10 @@ from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
-from src.distributed.runtime import fs_aware_save_rank
 from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import neutralized_sink_value
+from src.runtime import dtensor
+from src.runtime.filesystem import is_fs_save_rank
 from src.trainers.mixins.pipeline import stash_wrapper_state
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks
@@ -159,7 +159,7 @@ def _context(stage, config, max_shard_size: str = "5GB") -> CheckpointContext:
         has_ep_layers=any(isinstance(m, EPMoELayerBase) for m in stage.modules()),
         fsdp_wrapped=False,
         accelerate_manages_fsdp=False,
-        is_save_rank=fs_aware_save_rank(),
+        is_save_rank=is_fs_save_rank(),
         max_shard_size=max_shard_size,
         save_sharded_ep=False,
         has_expert_lora=False,
@@ -279,23 +279,21 @@ def _host_copy_worker(rank: int, out_dir: str, verdict_path: str) -> None:
         os.makedirs(out_dir, exist_ok=True)
     dist.barrier()
 
-    original = runtime.resolve_param_tensor
+    original = dtensor.full_cpu_tensor
     copies: list[torch.Size] = []
 
     def counting(tensor):
         copies.append(tensor.shape)
         return original(tensor)
 
-    bound = [
-        module for module in list(sys.modules.values()) if getattr(module, "resolve_param_tensor", None) is original
-    ]
+    bound = [module for module in list(sys.modules.values()) if getattr(module, "full_cpu_tensor", None) is original]
     for module in bound:
-        module.resolve_param_tensor = counting
+        module.full_cpu_tensor = counting
     try:
         save_pp_checkpoint(_context(stage, config), out_dir)
     finally:
         for module in bound:
-            module.resolve_param_tensor = original
+            module.full_cpu_tensor = original
 
     is_writer = is_pp_shard_writer(config, shared_fs=True)
     if is_writer and not copies:

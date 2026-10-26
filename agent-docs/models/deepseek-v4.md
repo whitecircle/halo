@@ -34,7 +34,7 @@ Consequences:
 
 - **Top-k layers**: fp32 scores via `sqrtsoftplus(logits)`, selection on `scores + e_score_correction_bias` (+ the balancing bias when enabled), weights gathered from the unbiased scores, normalized (`+1e-20`), scaled by `routed_scaling_factor` (1.5).
 - **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the wrapper validates at init and raises).
-- **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into `_fused_glu_mul`, the GLU-combine seam: one Triton kernel, `fused_clamped_silu_mul`, with the bound as a runtime argument. Every base GLU path (fused, grouped-GEMM, ETP separate) routes through it.
+- **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into `_fused_glu_mul`, the GLU-combine seam: one Triton kernel, `GluCombine.clamped_silu(limit)` (`glu_combine=clamped_silu`), with the bound as a runtime argument. Every base GLU path (fused, grouped-GEMM, ETP separate) routes through it.
 
     The fused form hardcodes SiLU, so it is armed by the same behavioral `is_silu_activation` gate as GLM-4 ([Fused SwiGLU](glm4.md#fused-swiglu)); any other `hidden_act` falls back to the generic clamp.
 

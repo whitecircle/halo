@@ -37,12 +37,9 @@ from accelerate.state import GradientState
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.expert_parallel.patching import (
-    create_ep_buffers,
-    enable_ep_gradient_checkpointing,
-    patch_moe_model_for_ep,
-)
+from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from tests.common.ep_reference import ep_layers, score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import freeze_base_keep_expert_adapters
@@ -206,7 +203,7 @@ def run(ctx):
             checks[f"{name}_every_layer_in_graph"] = signature == [1, n_layers, n_layers]
 
     if all(layer._supports_gradient_checkpointing for layer in layers):
-        enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+        enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
         run_scenario(ctx, model, reference, batches, "gc", set(range(n_layers)), checks, metrics)
     return {"checks": checks, "metrics": metrics}
 

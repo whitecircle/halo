@@ -16,7 +16,6 @@ import torch
 import torch.distributed as dist
 from transformers import TrainerCallback
 
-from src.distributed.runtime import get_global_world_size, is_global_main_process
 from src.hardware import current_device
 from src.kernels.histogram import accumulate_bincount
 from src.log import warn_once
@@ -29,6 +28,7 @@ from src.models.moe_balancing import (
     declared_routers,
     router_logits_forced_off,
 )
+from src.runtime.ranks import get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 

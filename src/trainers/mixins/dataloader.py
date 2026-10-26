@@ -25,8 +25,9 @@ from transformers.trainer_pt_utils import LengthGroupedSampler
 from transformers.trainer_utils import seed_worker
 from trl.trainer.utils import RepeatSampler
 
-from src.distributed.runtime import get_global_world_size, is_multi_rank_run, rank_consensus
 from src.hardware import current_device
+from src.runtime.consensus import rank_consensus
+from src.runtime.ranks import get_global_world_size, is_multi_rank_run
 
 logger = get_logger(__name__, log_level="info")
 
@@ -367,7 +368,7 @@ class DataParallelDataLoaderMixin:
             key = eval_dataset if isinstance(eval_dataset, str) else "eval"
             hit = persistent and key in self._eval_dataloaders
         else:
-            hit = persistent and rank_consensus(key in self._eval_dataloaders)[0]
+            hit = persistent and rank_consensus(key in self._eval_dataloaders).all_ok
         if hit:
             return self._eval_dataloaders[key]
 

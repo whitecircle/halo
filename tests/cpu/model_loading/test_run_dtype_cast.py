@@ -45,7 +45,7 @@ from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, res
 from src.model_loading.dtype import cast_parameters_to_run_dtype
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
-from src.models.param_roles import fp32_pinned_param_names
+from src.models.param_roles import fp32_pinned_names
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B
@@ -524,7 +524,7 @@ def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
         )
 
     backbone = st_model[0].auto_model
-    assert fp32_pinned_param_names(backbone)
+    assert fp32_pinned_names(backbone)
     assert params_off_dtype(backbone, torch.bfloat16) == []
     finalize.assert_called_once_with(backbone)
 

@@ -28,13 +28,7 @@ from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.kernels import fused_glu
-from src.kernels.fused_glu import (
-    fused_gelu_tanh_mul,
-    fused_silu_mul,
-    is_gelu_tanh_activation,
-    is_silu_activation,
-    resolve_fused_glu_mul,
-)
+from src.kernels.fused_glu import GluCombine, is_gelu_tanh_activation, is_silu_activation, resolve_fused_glu_mul
 from tests.common.parallelism import single_process_ep_config
 
 E, K, H, M = 4, 2, 8, 16
@@ -58,8 +52,8 @@ def test_gelu_tanh_gate_accepts_real_checkpoint_activations():
 def test_resolver_maps_each_activation_to_its_own_kernel():
     """The two probes feed ONE resolver, so a gate that answers right but is wired to the wrong
     kernel — tanh-GELU dispatched to the SiLU kernel — would change the activation silently."""
-    assert resolve_fused_glu_mul(ACT2FN["silu"]) is fused_silu_mul
-    assert resolve_fused_glu_mul(ACT2FN["gelu_pytorch_tanh"]) is fused_gelu_tanh_mul
+    assert resolve_fused_glu_mul(ACT2FN["silu"]) == GluCombine.silu()
+    assert resolve_fused_glu_mul(ACT2FN["gelu_pytorch_tanh"]) == GluCombine.gelu_tanh()
     assert resolve_fused_glu_mul(ACT2FN["gelu"]) is None  # exact GELU: no kernel implements it
     assert resolve_fused_glu_mul(ACT2FN["relu"]) is None
     assert resolve_fused_glu_mul("not-callable") is None
@@ -94,7 +88,7 @@ def _real_gemma4_experts() -> Gemma4TextExperts:
 def test_gemma4_layer_enables_fused_geglu_with_production_activation():
     """End of the wire: the layer must latch the tanh-GeGLU kernel, not merely recognize the gate."""
     layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
-    assert layer._fused_glu_mul is fused_gelu_tanh_mul
+    assert layer._fused_glu_mul == GluCombine.gelu_tanh()
 
 
 def test_gemma4_fused_combine_matches_the_eager_activation():
@@ -108,36 +102,28 @@ def test_gemma4_fused_combine_matches_the_eager_activation():
 
 
 def test_packed_combine_follows_the_latch(monkeypatch):
-    """The fused ``[gate | up]`` path runs the packed kernel of whatever combine is latched, including a
-    family's clamp-binding partial (with its bound keywords), and a latch with no packed form (a bound
-    method, or eager) keeps the chunked seam rather than silently switching activation."""
+    """The fused ``[gate | up]`` path runs the packed form of whichever ``GluCombine`` is latched, a
+    family's bound clamp included, and any other latch (a bound method, or eager) keeps the chunked seam
+    rather than silently switching activation."""
     layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
     gate_up = torch.randn(7, 2 * M)
-    calls = []
-    monkeypatch.setitem(
-        fused_glu.PACKED_GLU_MULS,
-        fused_gelu_tanh_mul,
-        lambda gu: calls.append("packed") or fused_glu.gelu_tanh_mul_eager(*gu.chunk(2, -1)),
-    )
+    packed = []
+    real_packed = GluCombine.packed
+    monkeypatch.setattr(GluCombine, "packed", lambda self, gu: packed.append(self) or real_packed(self, gu))
     expected = F.gelu(gate_up[:, :M], approximate="tanh") * gate_up[:, M:]
     torch.testing.assert_close(layer._glu_combine_packed(gate_up), expected)
-    assert calls == ["packed"]
+    assert packed == [GluCombine.gelu_tanh()]
 
-    limits = []
-    monkeypatch.setitem(
-        fused_glu.PACKED_GLU_MULS,
-        fused_glu.fused_clamped_silu_mul,
-        lambda gu, limit: limits.append(limit) or fused_glu.clamped_silu_mul_eager(*gu.chunk(2, -1), limit),
-    )
-    layer._fused_glu_mul = partial(fused_glu.fused_clamped_silu_mul, limit=7.0)
+    layer._fused_glu_mul = GluCombine.clamped_silu(7.0)
     torch.testing.assert_close(
         layer._glu_combine_packed(gate_up), fused_glu.clamped_silu_mul_eager(gate_up[:, :M], gate_up[:, M:], 7.0)
     )
-    assert limits == [7.0]
+    assert packed == [GluCombine.gelu_tanh(), GluCombine.clamped_silu(7.0)]
 
-    layer._fused_glu_mul = lambda gate, up: calls.append("chunked") or F.silu(gate) * up
+    chunked = []
+    layer._fused_glu_mul = lambda gate, up: chunked.append(gate.shape) or F.silu(gate) * up
     torch.testing.assert_close(layer._glu_combine_packed(gate_up), F.silu(gate_up[:, :M]) * gate_up[:, M:])
-    assert calls == ["packed", "chunked"]
+    assert len(packed) == 2 and chunked == [(7, M)]
 
 
 def test_real_mistral4_module_activation_passes_the_gate():
@@ -152,7 +138,7 @@ def test_real_mistral4_module_activation_passes_the_gate():
         n_routed_experts=E,
         num_experts_per_tok=K,
     )
-    assert resolve_fused_glu_mul(Mistral4Experts(config).act_fn) is fused_silu_mul
+    assert resolve_fused_glu_mul(Mistral4Experts(config).act_fn) == GluCombine.silu()
 
 
 def _families_forking_the_combine() -> list[str]:
@@ -203,13 +189,15 @@ def test_base_glu_combine_name_tracks_the_latch(monkeypatch):
     ``HALO_FUSED_GLU=0``, where the armed kernel runs its eager form."""
     layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
     monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)
-    assert layer._glu_combine_name() == fused_gelu_tanh_mul.__name__
-    layer._fused_glu_mul = partial(fused_glu.fused_clamped_silu_mul, limit=7.0)
-    assert layer._glu_combine_name() == fused_glu.fused_clamped_silu_mul.__name__
+    assert layer._glu_combine_name() == "gelu_tanh"
+    layer._fused_glu_mul = GluCombine.clamped_silu(7.0)
+    assert layer._glu_combine_name() == "clamped_silu"
+    layer._fused_glu_mul = partial(fused_glu.clamped_silu_mul_eager, limit=7.0)
+    assert layer._glu_combine_name() == "clamped_silu_mul_eager"
 
     monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", False)
     assert layer._glu_combine_name() == "eager"
-    layer._fused_glu_mul = fused_gelu_tanh_mul
+    layer._fused_glu_mul = GluCombine.gelu_tanh()
     assert layer._glu_combine_name() == "eager"
 
     monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)
@@ -221,8 +209,9 @@ def test_gptoss_glu_combine_name_follows_the_switch(monkeypatch):
     """GptOss names its own combine; under ``HALO_FUSED_GLU=0`` its paths run the eager form, and the
     summary must say so."""
     layer = object.__new__(EPGptOssMoELayer)
+    layer._gptoss_glu = GluCombine.gptoss(1.702, 7.0)
     monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)
-    assert layer._glu_combine_name() == fused_glu.fused_gptoss_glu.__name__
+    assert layer._glu_combine_name() == "gptoss"
     monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", False)
     assert layer._glu_combine_name() == "eager"
 

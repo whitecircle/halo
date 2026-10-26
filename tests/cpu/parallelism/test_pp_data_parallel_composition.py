@@ -23,6 +23,7 @@ import pytest
 from src.distributed import mesh as mesh_mod
 from src.distributed.checkpoint.save import is_pp_shard_writer
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.lowp.spec import LowpSpec
 from tests.common.parallelism import make_parallelism_config
 
 GPUS = 8
@@ -92,7 +93,7 @@ def test_one_rank_per_stage_is_rejected_honestly():
     [
         ({"use_hsdp": True}, "PP \\+ HSDP is not supported"),
         ({"fsdp_reshard_after_forward": True}, "FULL_SHARD / ZeRO-3"),
-        ({"lowp_precision": "fp8"}, "lowp_precision"),
+        ({"lowp": LowpSpec(precision="fp8")}, "lowp_precision"),
         ({"fsdp_shard_ep1_experts": False}, "fsdp_shard_ep1_experts=False"),
         ({"cp_size": 2}, "not a supported parallelism combination"),
         ({"tp_size": 2}, "not a supported parallelism combination"),

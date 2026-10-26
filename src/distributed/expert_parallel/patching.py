@@ -3,7 +3,6 @@
 checkpointing.
 """
 
-import functools
 import logging
 
 import torch.nn as nn
@@ -14,8 +13,7 @@ from src.distributed.expert_parallel.dispatcher import (
     register_forward_generation_hook,
     verify_rank_uniform_env,
 )
-from src.distributed.expert_parallel.gc_scope import install_ep_checkpoint_scopes
-from src.distributed.runtime import is_global_main_process
+from src.runtime.ranks import is_global_main_process
 from src.subclass_registry import build_class_claim_map, swap_registered_modules
 
 # Registers every EP wrapper as an ``EPMoELayerBase`` subclass for ``build_moe_layer_map()`` to discover.
@@ -129,73 +127,3 @@ def create_ep_buffers(model: nn.Module) -> int:
     if created > 0:
         logger.info(f"Created {created} DeepEP buffers")
     return created
-
-
-def _split_every_n_layers(
-    gradient_checkpointing_kwargs: dict | None, every_n_layers: int = 1
-) -> tuple[dict | None, int]:
-    """Lift ``every_n_layers`` out of the checkpoint kwargs, as HF's trainer does before enabling.
-
-    It is ``gradient_checkpointing_enable``'s own keyword (which decoder layers checkpoint); left in
-    the dict it reaches ``torch.utils.checkpoint`` and fails the first recompute. TRL's re-enable
-    passes the args dict unchanged, so the split happens at the enable seam rather than at the caller.
-    """
-    kwargs = dict(gradient_checkpointing_kwargs or {})
-    every_n_layers = kwargs.pop("every_n_layers", every_n_layers)
-    return kwargs or None, every_n_layers
-
-
-def enable_ep_gradient_checkpointing(model: nn.Module, *, gradient_checkpointing_kwargs: dict) -> None:
-    """Enable gradient checkpointing whose recompute replays EP's DeepEP dispatch/combine.
-
-    The model's own ``gradient_checkpointing_enable`` resolves HF's policy (input-grad requirement,
-    per-module flags, ``every_n_layers``), then every installed checkpoint function is re-pointed at
-    its scoped wrapper so both passes of each invocation share one :class:`EPCheckpointScope`, the
-    frame-local cache the EP layers replay from (:meth:`EPMoELayerBase._gc_dispatch`).
-    """
-    if not hasattr(model, "gradient_checkpointing_enable"):
-        raise RuntimeError(
-            f"gradient_checkpointing=True but {type(model).__name__} has no "
-            f"gradient_checkpointing_enable(): the EP path has already disabled HF Trainer's own GC "
-            f"setup, so returning here would train with NO gradient checkpointing at the memory "
-            f"profile of a run that asked for it. Disable gradient_checkpointing for this model."
-        )
-
-    kwargs, every_n_layers = _split_every_n_layers(gradient_checkpointing_kwargs)
-    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers)
-    scoped = install_ep_checkpoint_scopes(model)
-    if scoped == 0:
-        raise RuntimeError(
-            f"gradient_checkpointing=True but {type(model).__name__}.gradient_checkpointing_enable() "
-            f"installed no checkpoint function: EP's dispatch replay hangs off that function, so the "
-            f"run would issue a second DeepEP dispatch inside backward and corrupt every gradient."
-        )
-    _rescope_on_reenable(model)
-    logger.info(
-        f"Gradient checkpointing enabled on {scoped} modules (kwargs={kwargs}, every_n_layers={every_n_layers})"
-    )
-
-
-def _rescope_on_reenable(model: nn.Module) -> None:
-    """Bind the EP scopes to the model's ``gradient_checkpointing_enable`` for every later caller.
-
-    Anything that turns checkpointing back on calls that method, and it installs HF's bare checkpoint
-    function, dropping the scoped wrapper EP replays from. Online GRPO hits this every step: TRL
-    wraps generation in ``disable_gradient_checkpointing``, whose exit re-enables from the args. The
-    next backward would then re-enter an MoE forward with no scope, and the layer raises rather than
-    issue the second DeepEP dispatch that would corrupt every gradient. Restoring the kwargs is not
-    enough, since the scopes are not in them, so the wrapper is bound at the enable seam instead.
-    """
-    enable = model.gradient_checkpointing_enable
-    if getattr(enable, "_ep_scoped", False):
-        return
-
-    @functools.wraps(enable)
-    def enable_with_ep_scopes(gradient_checkpointing_kwargs=None, every_n_layers: int = 1):
-        kwargs, every_n_layers = _split_every_n_layers(gradient_checkpointing_kwargs, every_n_layers)
-        result = enable(gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers)
-        install_ep_checkpoint_scopes(model)  # idempotent: already-scoped functions are skipped
-        return result
-
-    enable_with_ep_scopes._ep_scoped = True
-    model.gradient_checkpointing_enable = enable_with_ep_scopes

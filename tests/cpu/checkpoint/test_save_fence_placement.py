@@ -29,7 +29,7 @@ from transformers import TrainerState
 
 import src.trainers.mixins.checkpointing as checkpointing_mod
 from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.runtime import DeferredRankFailure
+from src.runtime.consensus import DeferredRankFailure
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.repo import REPO_ROOT

@@ -49,9 +49,9 @@ from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapte
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.loading.peft_setup import setup_peft_model, split_expert_lora_targets
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.unwrapping import strip_peft_adapter_segment
+from src.runtime.collectives import barrier
 from tests.common.ep_reference import ep_layers
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
 from tests.common.tolerances import TOL

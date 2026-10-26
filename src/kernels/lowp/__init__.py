@@ -1,5 +1,2 @@
-"""Opt-in low-precision (fp8/fp4) compute: block-scale quantizers, fake-quant linear/GEMM, the native
-DeepGEMM backend, and the pre-FSDP apply layer. Master weights and checkpoints stay bf16/fp32; only GEMM
-operands are cast, as a QAT oracle for quantized serving.
-See ``agent-docs/optimization/low-precision-moe-kernels.md``.
-"""
+"""Opt-in fp8/fp4 GEMM compute: the vocabulary, block-scaled quantizers, the fake-quant linear and the
+native DeepGEMM backend. See ``agent-docs/optimization/low-precision-moe-kernels.md``."""

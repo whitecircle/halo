@@ -14,9 +14,9 @@ Run: ``pytest tests/cpu/parallelism/test_ep_checkpoint_scope.py``.
 import pytest
 import torch
 
-from src.distributed.expert_parallel.gc_scope import (
-    EPCheckpointScope,
-    active_checkpoint_scope,
+from src.models.gradient_checkpointing import (
+    RecomputeScope,
+    active_recompute_scope,
     scoped_checkpoint_func,
 )
 
@@ -26,19 +26,19 @@ class _Owner:
 
 
 def test_first_pass_is_not_recompute_second_is():
-    scope = EPCheckpointScope()
+    scope = RecomputeScope()
     with scope:
-        assert active_checkpoint_scope() is scope
+        assert active_recompute_scope() is scope
         assert not scope.is_recompute
     with scope:
         assert scope.is_recompute
-    assert active_checkpoint_scope() is None
+    assert active_recompute_scope() is None
 
 
 def test_recompute_signal_is_independent_of_grad_mode():
     # Non-reentrant checkpointing runs BOTH passes with grad enabled; the reentrant original forward
     # runs under no_grad. Neither may change the answer.
-    scope = EPCheckpointScope()
+    scope = RecomputeScope()
     with torch.enable_grad(), scope:
         assert not scope.is_recompute
     with torch.no_grad(), scope:
@@ -46,7 +46,7 @@ def test_recompute_signal_is_independent_of_grad_mode():
 
 
 def test_named_slots_are_independent():
-    owner, scope = _Owner(), EPCheckpointScope()
+    owner, scope = _Owner(), RecomputeScope()
     with scope:
         scope.slot(owner, "dispatch")["v"] = 1
         scope.slot(owner, "combine")["v"] = 2
@@ -58,7 +58,7 @@ def test_named_slots_are_independent():
 def test_concurrent_frames_do_not_share_slots():
     # The 1F1B case: microbatch 2's forward runs between microbatch 1's forward and its recompute.
     owner = _Owner()
-    frame1, frame2 = EPCheckpointScope(), EPCheckpointScope()
+    frame1, frame2 = RecomputeScope(), RecomputeScope()
     with frame1:
         frame1.slot(owner, "dispatch")["recv_x"] = "mb1"
     with frame2:
@@ -70,7 +70,7 @@ def test_concurrent_frames_do_not_share_slots():
 
 
 def test_repeated_calls_in_one_pass_replay_in_call_order():
-    owner, scope = _Owner(), EPCheckpointScope()
+    owner, scope = _Owner(), RecomputeScope()
     with scope:
         scope.slot(owner, "dispatch")["v"] = "call-1"
         scope.slot(owner, "dispatch")["v"] = "call-2"
@@ -80,7 +80,7 @@ def test_repeated_calls_in_one_pass_replay_in_call_order():
 
 
 def test_recompute_beyond_the_forwards_calls_raises():
-    owner, scope = _Owner(), EPCheckpointScope()
+    owner, scope = _Owner(), RecomputeScope()
     with scope:
         scope.slot(owner, "dispatch")
     with scope:
@@ -90,19 +90,19 @@ def test_recompute_beyond_the_forwards_calls_raises():
 
 
 def test_nested_scopes_resolve_to_the_innermost():
-    outer, inner = EPCheckpointScope(), EPCheckpointScope()
+    outer, inner = RecomputeScope(), RecomputeScope()
     with outer:
-        assert active_checkpoint_scope() is outer
+        assert active_recompute_scope() is outer
         with inner:
-            assert active_checkpoint_scope() is inner
-        assert active_checkpoint_scope() is outer
+            assert active_recompute_scope() is inner
+        assert active_recompute_scope() is outer
 
 
 def test_scope_pops_even_when_the_body_raises():
-    scope = EPCheckpointScope()
+    scope = RecomputeScope()
     with pytest.raises(ValueError, match="boom"), scope:
         raise ValueError("boom")
-    assert active_checkpoint_scope() is None
+    assert active_recompute_scope() is None
 
 
 def test_scoped_checkpoint_func_wraps_both_passes():
@@ -114,7 +114,7 @@ def test_scoped_checkpoint_func_wraps_both_passes():
         return function(*args, **kwargs)  # recompute
 
     def body():
-        scope = active_checkpoint_scope()
+        scope = active_recompute_scope()
         seen.append((id(scope), scope.is_recompute))
 
     scoped_checkpoint_func(fake_checkpoint)(body)

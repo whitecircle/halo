@@ -36,6 +36,7 @@ import torch
 import torch.distributed as dist
 
 from src.distributed.expert_parallel import dispatcher as dispatcher_mod
+from src.runtime.consensus import RankConsensus
 from tests.common.gloo import new_groups, run_gloo_ranks
 
 # One EP group per model, each serving its own buffer, built in this order on every rank.
@@ -139,10 +140,10 @@ def _consensus(peer_unclaimed: dict[str, bool], asked: list[tuple[str, bool]]):
     """``rank_consensus`` against a peer whose claims on each group's buffer are ``peer_unclaimed``,
     logging each question as ``(group, this rank's answer)``."""
 
-    def consensus(local_ok: bool, group=None) -> tuple[bool, bool]:
+    def consensus(local_ok: bool, group=None) -> RankConsensus:
         asked.append((group.name, local_ok))
         peer_ok = peer_unclaimed[group.name]
-        return local_ok and peer_ok, local_ok or peer_ok
+        return RankConsensus(local_ok and peer_ok, local_ok or peer_ok)
 
     return consensus
 

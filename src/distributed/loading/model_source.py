@@ -8,31 +8,48 @@ then has the world agree on what every rank found before any of them reads a wei
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
-from typing import NamedTuple
+import traceback
+from typing import Any, NamedTuple
 
 from huggingface_hub import constants as hub_constants
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
+from transformers import AutoConfig
 
 from src.checkpoint.format import (
     HUB_SUBFOLDER_IGNORE_PATTERNS,
     SAFETENSORS_INDEX_FILE,
     resolve_checkpoint_weights,
 )
-from src.distributed.filesystem import fs_aware_main_first, store_join_recorded_failure
-from src.distributed.runtime import (
-    broadcast_from_rank0,
-    fs_aware_load_rank,
-    is_input_shared_filesystem,
+from src.log import KEY_PREVIEW_COUNT, warn_once
+from src.models.modality import is_vlm_model, is_vlm_name
+from src.runtime.collectives import broadcast_from_rank0
+from src.runtime.consensus import (
+    rank_consensus,
     reject_across_ranks,
     reject_divergent_settings,
+    store_join_recorded_failure,
 )
-from src.log import KEY_PREVIEW_COUNT
+from src.runtime.filesystem import (
+    fs_aware_main_first,
+    hub_metadata_main_first,
+    is_fs_load_rank,
+    is_input_shared_filesystem,
+)
+
+logger = logging.getLogger(__name__)
+
+# transformers' gate refusing a config whose class is remote code the caller did not trust.
+_REMOTE_CODE_GATE = "resolve_trust_remote_code"
 
 # What a rank that finds the source as a directory reports to the agreement, in place of a commit.
 _LOCAL_DIRECTORY = "a local directory"
+
+# Warn once per model path, not once per call: the probe runs from several call sites per rank.
+_name_heuristic_warned: set[str] = set()
 
 
 class _SourceView(NamedTuple):
@@ -58,7 +75,7 @@ def resolve_model_source(
     in subfolders stay on the Hub. ``whole_repo`` is for a loader that reads subfolders too (a
     sentence-transformers pipeline keeps its modules in them).
 
-    The fetch is scoped like :func:`~src.distributed.filesystem.fs_aware_main_first`: global rank 0
+    The fetch is scoped like :func:`~src.runtime.filesystem.fs_aware_main_first`: global rank 0
     on a shared input filesystem, each node's local rank 0 on a per-node one. Every rank then
     resolves the source on its own node, and the verdicts are joined over the c10d store, which also
     absorbs the per-node fetch skew the next collective would otherwise wait out under the NCCL
@@ -73,7 +90,7 @@ def resolve_model_source(
     (:func:`_reject_incomplete_snapshots`), so every rank reads the weights at that commit from its
     own cache, with no hub request. A local directory returns ``revision`` unchanged.
     """
-    fetch = fs_aware_load_rank()
+    fetch = is_fs_load_rank()
     failure: BaseException | None = None
     view: _SourceView | None = None
     with fs_aware_main_first(f"model_source/{tag}"):
@@ -180,3 +197,57 @@ def _cache_remedy(fetched: bool) -> str:
         "The input filesystem is declared per-node, so this node's local rank 0 fetched into this cache; "
         "a local checkpoint must exist on every node."
     )
+
+
+def _probe_checkpoint_config(model_name_or_path: str, revision: str | None, trust_remote_code: bool):
+    """The checkpoint's config for the modality verdict, ``None`` when the hub read itself fails; a
+    remote-code config under ``trust_remote_code: false`` is refused, as the model load would refuse it.
+    Only the hub read is caught: a coordination failure must not resolve to a per-rank heuristic.
+    """
+    try:
+        return AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
+    except Exception as exc:  # unreachable or missing config: fall back to the name heuristic below
+        if any(frame.name == _REMOTE_CODE_GATE for frame in traceback.extract_tb(exc.__traceback__)):
+            raise ValueError(
+                f"'{model_name_or_path}' defines its architecture in remote code, which this run does not "
+                f"trust (trust_remote_code: false), so the model load would refuse it. Set "
+                f"trust_remote_code: true to run that code."
+            ) from exc
+        # The fallback can disagree with the config answer, so a rank that missed the hub says so.
+        warn_once(
+            logger,
+            _name_heuristic_warned,
+            model_name_or_path,
+            f"Could not load a config for '{model_name_or_path}' ({type(exc).__name__}: {exc}); "
+            "falling back to the model-name heuristic to decide text-vs-multimodal. A verdict that "
+            "differs across ranks fails the probe on every rank.",
+        )
+        return None
+
+
+def probe_checkpoint(
+    model_name_or_path: str, revision: str | None = None, *, trust_remote_code: bool = False
+) -> tuple[Any, bool]:
+    """The checkpoint's config and its :func:`~src.models.modality.is_vlm_model` verdict, from one hub read.
+
+    COLLECTIVE once the process group exists: every rank enters the ``vlm_probe`` phase, main rank
+    first (the run's first hub contact), at the pinned ``revision`` under the run's own
+    ``trust_remote_code``. A ``None`` config (the hub read failed) falls back to
+    :func:`~src.models.modality.is_vlm_name`. A verdict split across ranks raises on every rank, since
+    the ranks would otherwise build different model classes and hang in different store phases.
+    """
+    config = hub_metadata_main_first(
+        "vlm_probe", lambda: _probe_checkpoint_config(model_name_or_path, revision, trust_remote_code)
+    )
+    verdict = is_vlm_model(model_name_or_path, config) if config is not None else is_vlm_name(model_name_or_path)
+    vlm = rank_consensus(verdict)
+    if vlm.any_ok and not vlm.all_ok:
+        source = "read its config" if config is not None else "could not read its config and fell back to its name"
+        raise RuntimeError(
+            f"'{model_name_or_path}' probes as multimodal on some ranks and text-only on others (this "
+            f"rank {source}: {'multimodal' if verdict else 'text-only'}), so the ranks would build "
+            f"different model classes. Make the same checkpoint readable on every node — a local "
+            f"directory on a mount every node sees, or a Hub snapshot in every node's cache — and pin "
+            f"model_revision so per-node caches cannot hold different commits."
+        )
+    return config, verdict

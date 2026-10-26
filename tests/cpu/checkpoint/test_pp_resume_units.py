@@ -32,6 +32,7 @@ from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
+from src.runtime.consensus import RankConsensus
 from tests.common.models import TINY_QWEN3_CONFIG
 
 PP_SIZE = 2
@@ -459,7 +460,7 @@ def test_pp_torn_shard_subset_raises(tmp_path, monkeypatch):
     pc = _StubParallelismConfig(pp_rank=0)
     _write_optimizer_checkpoint(tmp_path, stage, optimizer, pc, shard=False)
     for module in (optimizer_mod, coordination_mod):  # the gates ask both
-        monkeypatch.setattr(module, "rank_consensus", lambda local: (local, True))
+        monkeypatch.setattr(module, "rank_consensus", lambda local: RankConsensus(local, True))
 
     with pytest.raises(RuntimeError, match="torn"):
         OptimizerShardStore(_ctx(stage, optimizer, parallelism_config=pc)).load(str(tmp_path))

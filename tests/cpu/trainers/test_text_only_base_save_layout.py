@@ -15,7 +15,7 @@ These tests pin the on-disk keys to what a fresh model of the saved config write
 from __future__ import annotations
 
 # Ahead of the Qwen3.5 modeling modules, which bind transformers' hub-kernel fallback at import.
-import src.models.patches.kernel_dispatch  # noqa: F401  # isort: skip
+import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 from pathlib import Path
 

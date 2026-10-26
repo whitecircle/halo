@@ -3,13 +3,13 @@
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
+from datetime import timedelta
 from math import isfinite
 from typing import Any, Literal
 
 from src.config_validation import require_finite, require_int, require_positive, require_positive_int
 from src.configs.grpo import AdvantageShapingArguments, ChunkedLogprobsArguments, GRPOEarlyStopArguments
-from src.distributed.runtime import is_global_main_process
-from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
+from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, nccl_timeout
 from src.environments.rollout_config import (
     DEFAULT_EPISODE_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
@@ -30,6 +30,7 @@ from src.environments.rollout_config import (
     RolloutBackend,
     RolloutConfig,
 )
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -732,10 +733,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
 
         A straggler rank holds its peers at the per-step FSDP collective for as long as its slowest
         episode runs; if ``episode_timeout`` or the retry budget reaches the watchdog, the peers'
-        collective aborts before the straggler is cancelled. Shares ``get_nccl_timeout()``'s
-        resolver, so the bound checked here is the one ``init_process_group`` installs.
+        collective aborts before the straggler is cancelled. Reads :func:`~src.env.nccl_timeout`, so the
+        bound checked here is the one ``init_process_group`` installs.
         """
-        nccl_minutes = resolve_nccl_timeout_minutes()
+        nccl_minutes = nccl_timeout() // timedelta(minutes=1)
         watchdog = nccl_minutes * 60
 
         # Above the watchdog, a straggler cannot be cancelled before the peers' collective aborts;

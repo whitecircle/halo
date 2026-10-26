@@ -51,7 +51,6 @@ from src.distributed.pipeline_parallel.stage import (
     slice_backbone_to_stage,
     split_layer_path,
 )
-from src.distributed.runtime import DeferredRankFailure, get_global_rank, get_local_rank, reject_across_ranks
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from src.model_loading.lazy_safetensors.weights import (
@@ -63,6 +62,8 @@ from src.model_loading.lazy_safetensors.weights import (
 )
 from src.models.module_tree import backbone_with_layers
 from src.models.patches.buffer_fixes import finalize_loaded_model
+from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
+from src.runtime.ranks import get_global_rank, get_local_rank
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +142,7 @@ def load_pp_stage_model(
         RuntimeError: a planned key does not exist on the sliced stage, a live tensor was never
             assigned, a resume would leave a configured master unrestored, or this stage carries no
             EP MoE layer. Each is a STAGE-local verdict routed through
-            :func:`~src.distributed.runtime.reject_across_ranks`, so the whole world raises together.
+            :func:`~src.runtime.consensus.reject_across_ranks`, so the whole world raises together.
     """
     rank = get_global_rank()
     device = f"cuda:{get_local_rank()}" if torch.cuda.is_available() else "cpu"
@@ -455,7 +456,7 @@ def _unresolved_plans_reason(model: nn.Module, plans: list[WeightPlan], pp_rank:
     Bypassing ``from_pretrained`` means nothing else reports a bad key: the assignment would raise a
     bare ``AttributeError`` deep in an attribute walk, or (for a stale name) never run at all. Note
     that stage 0 cannot fail this gate — its re-base is the identity — which is why the verdict is
-    routed through :func:`~src.distributed.runtime.reject_across_ranks` rather than raised
+    routed through :func:`~src.runtime.consensus.reject_across_ranks` rather than raised
     here.
     """
     stage_keys = set(model.state_dict().keys())

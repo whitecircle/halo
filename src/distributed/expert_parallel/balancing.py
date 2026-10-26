@@ -18,11 +18,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
-from src.distributed.expert_parallel.gc_scope import counts_toward_expert_load
-from src.distributed.runtime import is_global_main_process
 from src.hardware import current_device
 from src.kernels.histogram import accumulate_bincount
+from src.models.gradient_checkpointing import counts_toward_expert_load
 from src.models.moe_balancing import NATIVE_BALANCING_BIAS_ADOPTED_ATTR, resolve_balancing_slot
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 

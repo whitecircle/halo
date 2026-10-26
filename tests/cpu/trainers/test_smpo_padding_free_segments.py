@@ -8,7 +8,7 @@ reads from kwargs. So every document's mean log-prob from that one forward must 
 document run alone, and a family that reads no marker must get exactly the base kwargs.
 
 The CPU forward runs the torch fallbacks, which honor the markers through the device-aware dispatch
-fixups (``src/models/patches/kernel_dispatch.py``); the CUDA kernels are covered by
+fixups (``src/kernels/hub_kernel_dispatch.py``); the CUDA kernels are covered by
 ``tests/gpu/trainers/preference/test_smpo_padding_free_segments.py``.
 
     python tests/cpu/trainers/test_smpo_padding_free_segments.py

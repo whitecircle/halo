@@ -38,7 +38,6 @@ from src.distributed.expert_parallel.expert_weights import (
 )
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.runtime import DeferredRankFailure, barrier_on_exit, materialize_dtensor
 from src.distributed.tensor_parallel.state_dict import (
     iter_tp_sharded_non_dtensor_full,
     tp_sharded_non_dtensor_suffixes,
@@ -51,8 +50,11 @@ from src.models.moe_balancing import (
     iter_balancing_routers,
 )
 from src.models.patches.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
-from src.models.structure import LoraFolds, lora_fold_targets, lora_folded_data
+from src.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
 from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
+from src.runtime.collectives import barrier_on_exit
+from src.runtime.consensus import DeferredRankFailure
+from src.runtime.dtensor import materialize_dtensor
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES
 from src.weight_sync.registry import resolve_weight_sync_client
@@ -75,7 +77,7 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
     - **Quantized bases (QLoRA)**: ``_send_dense_weights`` forwards raw ``named_parameters`` storage
       under base-weight names, so a bnb-quantized base ships packed non-floating-point tensors
       (``Params4bit`` uint8) the server rejects.
-    - **PEFT layers the sync cannot fold** (:func:`~src.models.structure.lora_fold_targets`): the
+    - **PEFT layers the sync cannot fold** (:func:`~src.models.peft_adapters.lora_fold_targets`): the
       delta of an ``nn.MultiheadAttention`` LoRA, trainable tokens or another tuner layer would never
       reach the pushed weights; nor would one on a tensor the dense push does not send (an EP layer's
       expert weights, whose gather folds only the native expert LoRA).

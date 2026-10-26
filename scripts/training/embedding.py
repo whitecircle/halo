@@ -26,17 +26,18 @@ from src.checkpoint.model_card import HUB_TAGS
 from src.config_validation import reject_non_default_args, reject_unsupported_args
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.data.sources.loading import reject_image_columns
-from src.distributed.filesystem import joined_node_load
 from src.distributed.loading.model_source import resolve_model_source
 from src.distributed.loading.peft_setup import build_peft_config
-from src.distributed.runtime import barrier, is_global_main_process
 from src.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from src.model_loading.model_preparation import finalize_run_model
 from src.models.context_window import resolve_length_to_context
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
-from src.models.structure import tuner_adapter_param_ids
+from src.models.peft_adapters import tuner_adapter_param_ids
+from src.runtime.collectives import barrier
+from src.runtime.load_coordination import joined_node_load
+from src.runtime.ranks import is_global_main_process
 from src.trainers.embedding.sentence_transformers_compat import PreloadedTransformer
 from src.trainers.embedding.trainer import EmbeddingTrainer, reject_uneven_sentence_transformers_batches
 from src.trainers.mixins.dataloader import needs_dp_sharded_loader

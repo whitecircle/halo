@@ -22,9 +22,9 @@ import torch
 from transformers import AutoTokenizer
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.trainers.grpo.rollout.routing_replay import build_routing_replay_injector
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import fixed_chat_batch
@@ -136,7 +136,7 @@ def run(ctx) -> dict:
     model.zero_grad(set_to_none=True)
 
     # --- 4. Gradient checkpointing: armed backward completes, grads finite ---
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     injector.arm(masks)
     loss_gc = _forward_loss(model, batch, grad=True)
     loss_gc.backward()

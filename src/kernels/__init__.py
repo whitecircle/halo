@@ -1,3 +1,3 @@
-"""Compute kernels: the grouped-GEMM MoE path, fused GLU combines, sync-free routing histograms,
-chunked fp32 log-probs, the Liger integration (``liger/``) and the opt-in low-precision stack (``lowp/``).
-"""
+"""Compute kernels: MoE expert GEMMs, fused GLU combines and token permutes, routing histograms, chunked fp32
+log-probs, the hub kernel dispatch repair and the opt-in fp8/fp4 stack (``lowp/``); Liger's fused modules
+live under ``model_loading/liger/``."""

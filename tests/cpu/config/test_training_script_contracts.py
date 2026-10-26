@@ -125,7 +125,7 @@ def test_training_script_index_is_nonempty():
 
 # Modality detection must read the SAME commit the weights load from
 
-# script_runner.py holds the scripts' ``resolve_vlm_run``, whose ``is_vlm_run`` call is where their
+# script_runner.py holds the scripts' ``resolve_vlm_run``, whose ``probe_checkpoint`` call is where their
 # pin is threaded.
 _VLM_PROBE_CALL_SITES = [
     *_TRAINING_SCRIPTS,
@@ -135,9 +135,9 @@ _VLM_PROBE_CALL_SITES = [
 
 
 def _vlm_probe_calls(path: Path) -> list[ast.Call]:
-    """Every entry point into the modality probe — ``is_vlm_run`` forwards its pin to
-    ``is_vlm_model``, which reads through ``probe_checkpoint``, so an unpinned call to any of them
-    loads hub main's config."""
+    """Every entry point into the modality verdict: ``probe_checkpoint`` reads the config, and
+    ``is_vlm_model`` / ``is_vlm_run`` take one already loaded or the probe's verdict, so an unpinned
+    probe loads hub main's config."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     return sum((_named_calls(tree, name) for name in ("is_vlm_model", "is_vlm_run", "probe_checkpoint")), [])
 
@@ -145,7 +145,7 @@ def _vlm_probe_calls(path: Path) -> list[ast.Call]:
 def test_vlm_probe_contract_is_not_vacuous():
     """At least one probe must exist, else the parametrized test below passes by skipping."""
     assert [p for p in _VLM_PROBE_CALL_SITES if _vlm_probe_calls(p)], (
-        "No is_vlm_model call site found — the revision-pinning contract is no longer tested."
+        "No probe_checkpoint call site found — the revision-pinning contract is no longer tested."
     )
 
 
@@ -155,9 +155,9 @@ def test_vlm_probe_contract_is_not_vacuous():
     ids=[str(p.relative_to(REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
 )
 def test_is_vlm_model_probe_is_revision_pinned(path: Path):
-    """Every probe must pin the revision (or be handed an already-loaded config).
+    """Every probe must pin the revision (or be handed an already-loaded config or verdict).
 
-    ``is_vlm_model`` fetches ``AutoConfig`` when given no config, and hub ``main`` can name a
+    ``probe_checkpoint`` fetches ``AutoConfig``, and hub ``main`` can name a
     different modality — or a different tensor namespace — than the commit ``model_revision`` pins
     (Zaya). The answer picks the ``Auto*`` class, the processing class, the collator and the run
     prefix, so an unpinned probe routes a pinned run down the wrong path with no error.
@@ -167,8 +167,8 @@ def test_is_vlm_model_probe_is_revision_pinned(path: Path):
         pytest.skip("module does not probe the modality")
     for call in calls:
         kwargs = {kw.arg for kw in call.keywords}
-        assert "revision" in kwargs or "config" in kwargs, (
-            f"{path}: modality probe pins neither revision= nor an already-loaded config= — "
+        assert kwargs & {"revision", "config", "vlm_checkpoint"}, (
+            f"{path}: modality probe pins neither revision= nor an already-loaded config= or vlm_checkpoint= — "
             f"a model_revision-pinned run would be routed by hub main's config."
         )
 
@@ -187,7 +187,7 @@ def test_is_vlm_model_probe_threads_trust_remote_code(path: Path):
         pytest.skip("module does not probe the modality")
     for call in calls:
         kwargs = {kw.arg for kw in call.keywords}
-        assert "config" in kwargs or "trust_remote_code" in kwargs, (
+        assert kwargs & {"config", "vlm_checkpoint", "trust_remote_code"}, (
             f"{path}: modality probe fetches a config without the run's trust_remote_code="
         )
 

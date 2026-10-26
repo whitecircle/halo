@@ -36,18 +36,14 @@ from src.distributed.pipeline_parallel.losses import PPLossAdapter, loss_token_c
 from src.distributed.pipeline_parallel.runtime import PP_BATCH_PAD_VALUES, PipelineRuntime
 from src.distributed.pipeline_parallel.split import resolve_module_attr, resolve_pp_spec
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage, module_path
-from src.distributed.runtime import (
-    fs_aware_save_rank,
-    get_num_nodes,
-    is_global_main_process,
-    is_output_shared_filesystem,
-    reject_across_ranks,
-)
 from src.env import env_flag
 from src.hardware import current_device
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.modality import is_vlm_model
 from src.models.module_tree import backbone_with_layers
+from src.runtime.consensus import reject_across_ranks
+from src.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
+from src.runtime.ranks import get_num_nodes, is_global_main_process
 from src.trainers.mixins.grad_clip import (
     clip_parameters,
     clipping_enabled,
@@ -153,7 +149,7 @@ def admit_multimodal_wrapper(model, kwargs: dict) -> dict[str, torch.Tensor]:
     reject_across_ranks(reason, "Pipeline-parallel multimodal gate", exc_type=ValueError)
     # Every checkpoint re-emits these from the rank that writes the shared files; the other ranks
     # free them with the wrapper right after the split.
-    stash = stash_wrapper_state(model) if fs_aware_save_rank() else {}
+    stash = stash_wrapper_state(model) if is_fs_save_rank() else {}
     if is_global_main_process():
         params = sum(t.numel() for t in stash.values())
         logger.info(

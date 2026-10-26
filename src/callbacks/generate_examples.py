@@ -24,8 +24,9 @@ from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.mesh import has_tp_dim
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
-from src.distributed.runtime import barrier, get_global_rank, get_global_world_size, is_global_main_process
 from src.models.unwrapping import unwrap_framework_wrappers
+from src.runtime.collectives import barrier
+from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 

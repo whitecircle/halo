@@ -45,9 +45,10 @@ shared mount gives one authoritative copy with no post-hoc gather. That combinat
 
 ## Coordination primitives
 
-Owning files: `src/distributed/filesystem.py` (the store-coordinated primitives) and its
-one-way dependency `src/distributed/runtime.py` (the shared-FS flags, the writer/reader
-rank predicates, `fs_aware_makedirs` and `reject_across_ranks`).
+Owning files: `src/runtime/filesystem.py` (the shared-FS flags, the writer/reader rank predicates,
+main-first ordering, `fs_aware_makedirs`, the output-FS probe), `src/runtime/consensus.py` (the
+c10d-store phase, the store and collective rejection joins) and `src/runtime/load_coordination.py`
+(the per-node load throttle and its world join).
 
 - `fs_aware_main_first(tag, timeout=None)` — context manager that orders the body main-rank-first.
   **Every rank runs the body**: the main rank runs it alone first and populates a cache, then the
@@ -96,18 +97,18 @@ rank predicates, `fs_aware_makedirs` and `reject_across_ranks`).
 - `is_shared_filesystem()` / `is_input_shared_filesystem()` / `is_output_shared_filesystem()` — the
   resolved modes, for picking `is_global_main_process()` vs `is_local_main_process()` directly.
 
-- `fs_aware_load_rank()` — whether this rank performs shared read-side work (downloads, cache fill,
+- `is_fs_load_rank()` — whether this rank performs shared read-side work (downloads, cache fill,
   the coordinated dataset map). Follows the **input** flag.
 
-- `fs_aware_save_rank()` — whether this rank writes shared files. Follows the **output** flag: shared
+- `is_fs_save_rank()` — whether this rank writes shared files. Follows the **output** flag: shared
   → only global rank 0 writes (avoids the NFS write race); non-shared → each node's local rank 0
   writes its own copy.
 
     Every gathered/sharded save, the `run.log` tee, and `fs_aware_makedirs` by default route their
     writer choice through it.
 
-- `fs_aware_makedirs(path, writer_rank=fs_aware_save_rank)` — creates a directory with the correct
-  rank, then barriers. Pass `writer_rank=fs_aware_load_rank` for a read-side cache dir (what
+- `fs_aware_makedirs(path, writer_rank=is_fs_save_rank)` — creates a directory with the correct
+  rank, then barriers. Pass `writer_rank=is_fs_load_rank` for a read-side cache dir (what
   `src/training/environment.py` does for `HF_DATASETS_CACHE`).
 
 - `reject_across_ranks(local_reason, what, exc_type=RuntimeError)` — the collective that joins a
@@ -143,14 +144,14 @@ rank predicates, `fs_aware_makedirs` and `reject_across_ranks`).
     launcher's elastic agent usually reaps the group first.
 
 ```python
-from src.distributed.filesystem import fs_aware_main_first
+from src.runtime.filesystem import fs_aware_main_first
 
 with fs_aware_main_first("teacher_model"):
     snapshot_download(teacher_repo_id)   # one rank fetches; the rest read the populated cache
 ```
 
 - `run_load_rank_first(work, operation_name)` (`src/data/pipeline/processing.py`) — the ordering
-  for read-side data work: `work` runs on the `fs_aware_load_rank()` ranks, every rank joins on the
+  for read-side data work: `work` runs on the `is_fs_load_rank()` ranks, every rank joins on the
   store, then the peers run it against the cache and every rank joins again.
 
     Unlike `fs_aware_main_first`, a failed first run is never repeated by the peers: the join raises
@@ -185,12 +186,12 @@ joins go permanently off-by-one on the equal-entry invariant.
 | Dataset packing | input | `pack_dataset_coordinated` (`processing.py`) | `run_load_rank_first` around a deterministic `cache_file_name`. Unguarded, `pack_dataset` materializes a full corpus copy **per rank** |
 | TRL dataset preparation (DPO, KTO, BT reward) | input | `src/trainers/mixins/trl_dataset_prep.py` | `coordinated_dataset_transform` (`processing.py`): the load rank runs TRL's `_prepare_dataset` with its `main_process_first` barriers disabled and the map cache off, then publishes the result as `HF_DATASETS_CACHE/transform-<md5>`, keyed on the rows, the tokenizer and every training argument but the run's identity; the rest load it. Its intermediate maps write a staging directory beside that copy (`transform-<md5>.tmp-<uuid>`), removed when the preparation ends, rather than `$TMPDIR`. Unguarded, TRL holds the peers in an NCCL barrier for the whole tokenization and writes a full copy per rank per run |
 | EP lazy model loading | input | `src/distributed/expert_parallel/lazy_loader.py` | A shared prologue orders the meta-device instantiation main-rank-first; each rank then slices its expert range from the safetensors shards |
-| Checkpoint saves | output | `src/distributed/checkpoint/ep_save.py`, `src/distributed/checkpoint/tp_save.py`, `src/trainers/mixins/checkpointing.py` | Writer-rank selection via `fs_aware_save_rank()`, with HF's `save_on_each_node` aligned to it ([Checkpoints → Multi-node](../reference/checkpoints.md#multi-node)); a non-shared output FS also rejects a multi-node sharded-EP save (the per-rank expert shards are keyed by global rank and would scatter across nodes' local disks with no gather path) |
+| Checkpoint saves | output | `src/distributed/checkpoint/ep_save.py`, `src/distributed/checkpoint/tp_save.py`, `src/trainers/mixins/checkpointing.py` | Writer-rank selection via `is_fs_save_rank()`, with HF's `save_on_each_node` aligned to it ([Checkpoints → Multi-node](../reference/checkpoints.md#multi-node)); a non-shared output FS also rejects a multi-node sharded-EP save (the per-rank expert shards are keyed by global rank and would scatter across nodes' local disks with no gather path) |
 | Optimizer shards and meta | output | `src/distributed/checkpoint/optimizer.py` | Every rank writes its own `optimizer_shard_<rank>.pt` and the save rank(s) write `optimizer_meta.pt`, so each node's directory carries its own meta. A resume needs each rank's own shard on its node ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)). Multi-group EP replica dedup runs on a shared output FS only |
 | Trainer sidecars | output | `src/trainers/mixins/reference_logps.py`, `src/trainers/grpo/rollout/async_rollouts.py` | `reference_logps.pt` from the save rank(s), `prefetch_pending-<rank>-of-<world>.pt` from every rank. Each read is rank-joined (`consensus_read`), so a node without its copy fails the resume everywhere |
 | Offline GRPO reference scratch | output | `src/trainers/grpo/reference_cache.py` | `_reference_cache/<launch>/` under `output_dir`: the save rank(s) append and merge the scores, and every rank memory-maps the merged file from its own node's copy. Needs an output filesystem that appends and memory-maps; lifetime and cleanup: [Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model) |
-| `run.log` tee | output | `src/training/run_logging.py` | Same `fs_aware_save_rank()` predicate as the checkpoint writers, so two nodes can never both hold one `run.log` |
-| Directory creation | either | `fs_aware_makedirs()` | Output dirs by default; read-side cache dirs pass `writer_rank=fs_aware_load_rank` |
+| `run.log` tee | output | `src/training/run_logging.py` | Same `is_fs_save_rank()` predicate as the checkpoint writers, so two nodes can never both hold one `run.log` |
+| Directory creation | either | `fs_aware_makedirs()` | Output dirs by default; read-side cache dirs pass `writer_rank=is_fs_load_rank` |
 
 ## Storage layout
 

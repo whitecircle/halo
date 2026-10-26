@@ -14,7 +14,7 @@ import os
 import pytest
 from transformers import AutoConfig, Qwen3Config
 
-import src.models.modality as modality
+from src.distributed.loading.model_source import probe_checkpoint
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -29,7 +29,7 @@ def _probe_on_rank(rank: int, checkpoint: str, unreadable_rank: int | None, outc
 
         AutoConfig.from_pretrained = missing
     try:
-        _config, verdict = modality.probe_checkpoint(checkpoint)
+        _config, verdict = probe_checkpoint(checkpoint)
         outcome = {"verdict": verdict}
     except RuntimeError as exc:
         outcome = {"error": str(exc)}

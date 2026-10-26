@@ -73,10 +73,9 @@ def plain_module_name(name: str) -> str:
 def plain_peft_param_name(name: str, peft_prefix: str) -> str | None:
     """Map a ``PeftModel`` param name to its plain base-model name, or ``None`` to drop it.
 
-    Shared by the vLLM weight sync and the merged EP save. Adapter params are dropped rather than
-    renamed because both consumers write base weights with the delta already folded in
-    (:func:`~src.models.structure.lora_folded`), so emitting ``lora_A``/``lora_B`` too would apply
-    it a second time on any PEFT-aware reload.
+    Adapter params are dropped rather than renamed because the base weights are written with the
+    delta already folded in (:func:`~src.models.peft_adapters.lora_folded`), so emitting
+    ``lora_A``/``lora_B`` too would apply it a second time on any PEFT-aware reload.
     """
     if peft_prefix in name or "original_module" in name:
         return None

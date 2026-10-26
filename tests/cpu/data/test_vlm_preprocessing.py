@@ -28,8 +28,9 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_
 from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset, tokenize_vlm_dataset
-from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_OUTPUT_FEATURES, is_vlm_run
-from src.models import modality
+from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_OUTPUT_FEATURES
+from src.distributed.loading import model_source
+from src.distributed.loading.model_source import probe_checkpoint
 from src.models.modality import is_vlm_model
 from tests.common.models import QWEN2_5_VL_3B
 from tests.common.tokenizers import load_cached_processor
@@ -546,6 +547,12 @@ def test_is_vlm_model_name_fallback_for_unmapped_vlm():
     assert is_vlm_model("llava-hf/llava-1.5-7b-hf", config=SimpleNamespace(model_type="custom"))
 
 
+def test_is_vlm_model_refuses_a_missing_config_naming_the_probe():
+    """The verdict reads no hub: a caller without a config takes the collective probe instead."""
+    with pytest.raises(TypeError, match="probe_checkpoint"):
+        is_vlm_model("org/My-Custom-VL-7B", None)
+
+
 def test_a_registered_text_only_config_beats_a_name_hint_matching_mid_word():
     """A path substring must not override a config transformers can vouch for as text-only.
 
@@ -586,9 +593,9 @@ def test_a_coordination_failure_propagates_instead_of_degrading_to_the_name_heur
     def _timed_out(tag, fetch):
         raise RuntimeError(f"Store coordination 'main_first/hub_meta/{tag}/shared' timed out")
 
-    monkeypatch.setattr(modality, "hub_metadata_main_first", _timed_out)
+    monkeypatch.setattr(model_source, "hub_metadata_main_first", _timed_out)
     with pytest.raises(RuntimeError, match="timed out"):
-        is_vlm_model("org/My-Custom-VL-7B")
+        probe_checkpoint("org/My-Custom-VL-7B")
 
 
 def test_an_unreadable_config_still_falls_back_to_the_name_heuristic(monkeypatch):
@@ -599,9 +606,9 @@ def test_an_unreadable_config_still_falls_back_to_the_name_heuristic(monkeypatch
     def _unreachable(*_args, **_kwargs):
         raise OSError("hub unreachable")
 
-    monkeypatch.setattr(modality.AutoConfig, "from_pretrained", _unreachable)
-    assert is_vlm_model("org/My-Custom-VL-7B")
-    assert not is_vlm_model("Qwen/Qwen3-4B")
+    monkeypatch.setattr(model_source.AutoConfig, "from_pretrained", _unreachable)
+    assert probe_checkpoint("org/My-Custom-VL-7B")[1]
+    assert not probe_checkpoint("Qwen/Qwen3-4B")[1]
 
 
 @pytest.mark.parametrize("trust_remote_code", [False, True])
@@ -615,11 +622,10 @@ def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch,
         seen.append(kwargs["trust_remote_code"])
         return SimpleNamespace(model_type="qwen3")
 
-    monkeypatch.setattr(modality.AutoConfig, "from_pretrained", _record)
-    is_vlm_model("org/checkpoint", trust_remote_code=trust_remote_code)
-    is_vlm_run(SimpleNamespace(images_field="images"), "org/checkpoint", trust_remote_code=trust_remote_code)
-    is_vlm_model("org/checkpoint")
-    assert seen == [trust_remote_code, trust_remote_code, False]
+    monkeypatch.setattr(model_source.AutoConfig, "from_pretrained", _record)
+    probe_checkpoint("org/checkpoint", trust_remote_code=trust_remote_code)
+    probe_checkpoint("org/checkpoint")
+    assert seen == [trust_remote_code, False]
 
 
 if __name__ == "__main__":

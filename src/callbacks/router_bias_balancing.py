@@ -15,8 +15,8 @@ import torch
 import torch.distributed as dist
 
 from src.callbacks.moe_metrics import MoELoadMetricsCallback, compute_moe_load_metrics
-from src.distributed.runtime import get_global_world_size, is_global_main_process
 from src.models.moe_balancing import is_transient_balancing_router, iter_balancing_routers
+from src.runtime.ranks import get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 

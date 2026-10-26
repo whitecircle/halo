@@ -43,7 +43,7 @@ from transformers import AutoTokenizer
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
+from src.runtime.collectives import barrier
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import broadcast_reference, dense_reference, ep_layers, fixed_chat_batch
 from tests.common.harness import gpu_test_main

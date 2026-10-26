@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """The fused-GLU probes must recognize the activation a REAL transformers block carries.
 
-The activation-hardcoding kernels (`fused_silu_mul`, `fused_gelu_tanh_mul`, DeepSeek-V4's
-`fused_clamped_silu_mul`) are only valid where the wrapped block's activation really is the one they
+The activation-hardcoding kernels (`GluCombine.silu()`, `GluCombine.gelu_tanh()`, DeepSeek-V4's
+`GluCombine.clamped_silu`) are only valid where the wrapped block's activation really is the one they
 implement, so the gates deciding that are load-bearing for throughput: answering False everywhere is
 numerically invisible and silently drops every GLM-4 Lite / Laguna / DeepSeek-V4 / Gemma-4 MoE onto
 the eager combine. Answering True wrongly is worse — it changes the activation on every expert.

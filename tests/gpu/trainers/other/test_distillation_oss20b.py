@@ -39,8 +39,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLan
 from src.configs.distillation import DistillationConfig
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.hardware import supports_grouped_mm
+from src.runtime.collectives import barrier
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main

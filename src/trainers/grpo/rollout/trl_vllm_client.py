@@ -6,7 +6,7 @@ class in its place.
 
 import logging
 
-from src.env import env_positive_float, resolve_nccl_timeout_minutes, watchdog_bounded_seconds
+from src.env import env_positive_float, nccl_timeout, watchdog_bounded_seconds
 from src.weight_sync.clients.base import POST_TIMEOUT_S
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 
@@ -22,7 +22,7 @@ class TrlVLLMClient(VLLMWeightSyncClient):
         self._generation_timeout = env_positive_float(
             "HALO_VLLM_GENERATION_TIMEOUT_SECONDS", watchdog_bounded_seconds()
         )
-        watchdog = resolve_nccl_timeout_minutes() * 60
+        watchdog = nccl_timeout().total_seconds()
         if self._generation_timeout >= watchdog:
             logger.warning(
                 f"HALO_VLLM_GENERATION_TIMEOUT_SECONDS={self._generation_timeout:.0f}s is at or above the "

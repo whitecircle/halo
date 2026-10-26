@@ -16,7 +16,7 @@ Run: pytest tests/cpu/checkpoint/test_deferred_write_failure.py
 
 import pytest
 
-from src.distributed.runtime import DeferredRankFailure
+from src.runtime.consensus import DeferredRankFailure
 
 
 def test_failing_step_does_not_propagate():

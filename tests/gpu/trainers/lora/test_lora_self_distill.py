@@ -21,7 +21,7 @@ from trl import SFTConfig
 
 from src.data.collators.self_distill import SelfDistillTextCollator
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
+from src.runtime.collectives import barrier
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import (

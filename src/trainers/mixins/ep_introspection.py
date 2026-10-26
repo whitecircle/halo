@@ -12,9 +12,9 @@ import torch.nn as nn
 from accelerate.logging import get_logger
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase, find_ep_layers
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing
-from src.distributed.runtime import is_global_main_process
+from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.models.moe_balancing import config_has_experts
+from src.runtime.ranks import is_global_main_process
 
 logger = get_logger(__name__, log_level="info")
 
@@ -226,7 +226,7 @@ class EpIntrospectionMixin:
                 gc_kwargs["use_reentrant"],
             )
         gc_kwargs = {**gc_kwargs, "use_reentrant": use_reentrant}
-        enable_ep_gradient_checkpointing(self.model, gradient_checkpointing_kwargs=gc_kwargs)
+        enable_scoped_gradient_checkpointing(self.model, gradient_checkpointing_kwargs=gc_kwargs)
 
         # TRL's disable_gradient_checkpointing context manager re-enables GC from these kwargs on exit.
         self.args.gradient_checkpointing_kwargs = gc_kwargs

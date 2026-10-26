@@ -25,7 +25,7 @@ import torch
 import torch.utils.checkpoint as torch_checkpoint
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.gc_scope import scoped_checkpoint_func
+from src.models.gradient_checkpointing import scoped_checkpoint_func
 
 _INDICES = torch.tensor([0, 1, 1, 3])
 _EXPECTED = torch.tensor([1.0, 2.0, 0.0, 1.0])
@@ -45,7 +45,7 @@ def _checkpointed_step(stub, *, use_reentrant: bool) -> torch.Tensor:
     """Run one forward+backward through a checkpointed body that records a load, as training does.
 
     The body is wrapped with the toolkit's own :func:`scoped_checkpoint_func` — the same wrapper
-    ``install_ep_checkpoint_scopes`` installs on every module after ``gradient_checkpointing_enable``
+    ``install_recompute_scopes`` installs on every module after ``gradient_checkpointing_enable``
     — so both passes share one scope, exactly as they do in a real run.
     """
     checkpoint_func = scoped_checkpoint_func(

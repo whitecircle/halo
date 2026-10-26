@@ -160,7 +160,7 @@ def build_parallelism_config(config: Path):
     Goes through ``parallelism_config_from_args`` — the factory the entry scripts call — so the
     trainer-capability rejections (CP/PP on a script that supports neither) and every
     ``__post_init__`` rank rule are the ones under test. The world-size seams are the three
-    ``src.distributed.runtime`` readers the module imported; a CPU tier has no launcher to report them.
+    ``src.runtime.ranks`` readers the module imported; a CPU tier has no launcher to report them.
     """
     script = script_for(config)
     parsed = parser_for(script).parse_yaml_file(str(config))

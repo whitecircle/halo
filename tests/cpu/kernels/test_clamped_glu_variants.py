@@ -1,18 +1,18 @@
 #!/usr/bin/env python
-"""Three clamped-SwiGLU variants, one Triton kernel pair — this pins what still separates them.
+"""Three clamped-SwiGLU combines, one Triton kernel pair — this pins what still separates them.
 
-`fused_gptoss_glu`, `fused_clamped_silu_mul` and `fused_silu_then_clamp_mul` (and the packed forms of the
-last two) are thin wrappers over the shared `_FusedGLU` / `_FusedPackedGLU`, and a variant's whole identity
-is the `_GluVariant` its wrapper hands that Function: `alpha` and the bound at runtime, the clamp placement
-(`CLAMP_ACTIVATED`) and GptOss's `up + 1` (`UP_PLUS_ONE`) as `tl.constexpr`. Nothing downstream reads those back, so a flipped
-`UP_PLUS_ONE` or a clamp dropped from one variant is a silent numerical change on every expert of one
+`GluCombine.gptoss`, `GluCombine.clamped_silu` and `GluCombine.clamped_silu(..., clamp_activated=True)`
+all run the shared `_FusedGLU` / `_FusedPackedGLU`, and a combine's whole identity is the `GluCombine` it
+hands that Function: `alpha` and the bound at runtime, the clamp placement (`CLAMP_ACTIVATED`) and GptOss's
+`up + 1` (`UP_PLUS_ONE`) as `tl.constexpr`. Nothing downstream reads those back, so a flipped
+`UP_PLUS_ONE` or a clamp dropped from one combine is a silent numerical change on every expert of one
 family and invisible everywhere else. Two pins, both CPU-only (the Triton body itself is
 `tests/gpu/kernels/test_fused_glu.py`):
 
 * the three eager references — the contract the kernel reproduces — against each other on the identity
   the fold rests on, at the bound and on both sides of it;
-* the variant each wrapper hands the kernel, observed at the seam, plus a torch transcription
-  of the kernel body under that tuple reproducing the variant's own eager reference and its clamp
+* the combine each factory hands the kernel, observed at the seam, plus a torch transcription
+  of the kernel body under that tuple reproducing the combine's own eager reference and its clamp
   subgradients.
 
 Run: ``python tests/cpu/kernels/test_clamped_glu_variants.py`` (or ``pytest -m cpu``).
@@ -26,16 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from src.kernels import fused_glu
-from src.kernels.fused_glu import (
-    clamped_silu_mul_eager,
-    fused_clamped_silu_mul,
-    fused_clamped_silu_mul_packed,
-    fused_gptoss_glu,
-    fused_silu_then_clamp_mul,
-    fused_silu_then_clamp_mul_packed,
-    gptoss_glu_eager,
-    silu_then_clamp_mul_eager,
-)
+from src.kernels.fused_glu import GluCombine, clamped_silu_mul_eager, gptoss_glu_eager, silu_then_clamp_mul_eager
 
 ALPHA = 1.702  # GptOss's; the only variant whose sigmoid is scaled
 
@@ -123,7 +114,7 @@ def _kernel_math(
 
 
 class _Variant(NamedTuple):
-    wrapper: Callable[..., torch.Tensor]
+    combine: Callable[[float], GluCombine]  # the combine a family latches, at this bound
     eager: Callable[..., torch.Tensor]
     numeric_args: Callable[[float], tuple]  # what a caller passes after (gate, up), at this bound
     kernel_args: Callable[[float], tuple]  # (alpha, limit, CLAMP_ACTIVATED, UP_PLUS_ONE) it owes the kernel
@@ -131,18 +122,23 @@ class _Variant(NamedTuple):
 
 _VARIANTS = [
     pytest.param(
-        _Variant(fused_gptoss_glu, gptoss_glu_eager, lambda lim: (ALPHA, lim), lambda lim: (ALPHA, lim, False, True)),
+        _Variant(
+            lambda lim: GluCombine.gptoss(ALPHA, lim),
+            gptoss_glu_eager,
+            lambda lim: (ALPHA, lim),
+            lambda lim: (ALPHA, lim, False, True),
+        ),
         id="gptoss",
     ),
     pytest.param(
         _Variant(
-            fused_clamped_silu_mul, clamped_silu_mul_eager, lambda lim: (lim,), lambda lim: (1.0, lim, False, False)
+            GluCombine.clamped_silu, clamped_silu_mul_eager, lambda lim: (lim,), lambda lim: (1.0, lim, False, False)
         ),
         id="clamp_then_silu",
     ),
     pytest.param(
         _Variant(
-            fused_silu_then_clamp_mul,
+            lambda lim: GluCombine.clamped_silu(lim, clamp_activated=True),
             silu_then_clamp_mul_eager,
             lambda lim: (lim,),
             lambda lim: (1.0, lim, True, False),
@@ -153,73 +149,68 @@ _VARIANTS = [
 
 
 class _CudaLike(torch.Tensor):
-    """The wrappers branch on ``is_cuda`` alone, so shadowing it routes a CPU tensor down the fused
+    """A combine branches on ``is_cuda`` alone, so shadowing it routes a CPU tensor down the fused
     branch — the only way to observe the kernel arguments on a machine with no free GPU."""
 
     is_cuda = True
 
 
-def _expected_variant(kernel_args: tuple) -> fused_glu._GluVariant:
-    return fused_glu._GluVariant(fused_glu._CLAMPED_SILU, *kernel_args)
+def _expected_combine(kernel_args: tuple) -> GluCombine:
+    return GluCombine(fused_glu._CLAMPED_SILU, *kernel_args)
 
 
-def _variant_math(gate: torch.Tensor, up: torch.Tensor, variant: fused_glu._GluVariant) -> torch.Tensor:
-    assert variant.activation == fused_glu._CLAMPED_SILU
+def _combine_math(gate: torch.Tensor, up: torch.Tensor, combine: GluCombine) -> torch.Tensor:
+    assert combine.activation == fused_glu._CLAMPED_SILU
     gate, up = gate.as_subclass(torch.Tensor), up.as_subclass(torch.Tensor)
-    args = (variant.alpha, variant.limit, variant.clamp_activated, variant.up_plus_one)
+    args = (combine.alpha, combine.limit, combine.clamp_activated, combine.up_plus_one)
     return _kernel_math(gate, up, *args, dout=torch.ones_like(gate))[0]
 
 
 class _RecordedKernel:
-    """Stands in for ``_FusedGLU``: records the variant and computes the kernel body it selects, so one
+    """Stands in for ``_FusedGLU``: records the combine and computes the kernel body it selects, so one
     call proves both the plumbing and what it resolves to."""
 
     def __init__(self):
-        self.calls: list[fused_glu._GluVariant] = []
+        self.calls: list[GluCombine] = []
 
-    def apply(self, gate: torch.Tensor, up: torch.Tensor, variant) -> torch.Tensor:
-        self.calls.append(variant)
-        return _variant_math(gate, up, variant)
+    def apply(self, gate: torch.Tensor, up: torch.Tensor, combine) -> torch.Tensor:
+        self.calls.append(combine)
+        return _combine_math(gate, up, combine)
 
 
 class _RecordedPackedKernel(_RecordedKernel):
     """Stands in for ``_FusedPackedGLU``: the same record, over a ``[gate | up]`` input."""
 
-    def apply(self, gate_up: torch.Tensor, variant) -> torch.Tensor:
-        self.calls.append(variant)
-        return _variant_math(*gate_up.chunk(2, dim=-1), variant)
+    def apply(self, gate_up: torch.Tensor, combine) -> torch.Tensor:
+        self.calls.append(combine)
+        return _combine_math(*gate_up.chunk(2, dim=-1), combine)
 
 
 @pytest.mark.parametrize("limit", LIMITS)
 @pytest.mark.parametrize("variant", _VARIANTS)
-def test_wrapper_hands_the_kernel_the_argument_tuple_of_its_variant(variant, limit, monkeypatch):
-    """The seam itself: a wrapper that dropped its clamp, flipped `UP_PLUS_ONE` or lost `alpha` still
-    returns a plausible tensor on every eager path, and only this variant says which kernel it launched."""
+def test_combine_hands_the_kernel_the_argument_tuple_of_its_variant(variant, limit, monkeypatch):
+    """The seam itself: a combine that dropped its clamp, flipped `UP_PLUS_ONE` or lost `alpha` still
+    returns a plausible tensor on every eager path, and only this tuple says which kernel it launched."""
     recorder = _RecordedKernel()
     monkeypatch.setattr(fused_glu, "_FusedGLU", recorder)
     gate, up = _grid(limit)
-    fused = variant.wrapper(gate.as_subclass(_CudaLike), up.as_subclass(_CudaLike), *variant.numeric_args(limit))
-    assert recorder.calls == [_expected_variant(variant.kernel_args(limit))]
+    fused = variant.combine(limit)(gate.as_subclass(_CudaLike), up.as_subclass(_CudaLike))
+    assert recorder.calls == [_expected_combine(variant.kernel_args(limit))]
     torch.testing.assert_close(fused, variant.eager(gate, up, *variant.numeric_args(limit)), rtol=0, atol=1e-13)
 
 
-_PACKED = [
-    pytest.param(fused_clamped_silu_mul_packed, fused_clamped_silu_mul, id="clamp_then_silu"),
-    pytest.param(fused_silu_then_clamp_mul_packed, fused_silu_then_clamp_mul, id="silu_then_clamp"),
-]
-
-
 @pytest.mark.parametrize("limit", LIMITS)
-@pytest.mark.parametrize(("packed", "unpacked"), _PACKED)
-def test_packed_wrapper_hands_the_kernel_the_same_variant_as_its_unpacked_twin(packed, unpacked, limit, monkeypatch):
-    """The packed form reads ``[gate | up]`` in place; a packed wrapper that launched another variant than
-    its twin would change the activation only on layers storing a fused ``gate_up``."""
+@pytest.mark.parametrize("variant", _VARIANTS)
+def test_packed_form_hands_the_kernel_the_same_combine_as_the_separate_halves(variant, limit, monkeypatch):
+    """The packed form reads ``[gate | up]`` in place; one that launched another combine than the separate
+    halves would change the activation only on layers storing a fused ``gate_up``."""
     separate, fused_rec = _RecordedKernel(), _RecordedPackedKernel()
     monkeypatch.setattr(fused_glu, "_FusedGLU", separate)
     monkeypatch.setattr(fused_glu, "_FusedPackedGLU", fused_rec)
     gate, up = _grid(limit)
-    expected = unpacked(gate.as_subclass(_CudaLike), up.as_subclass(_CudaLike), limit)
-    got = packed(torch.cat([gate, up], dim=-1).as_subclass(_CudaLike), limit)
+    combine = variant.combine(limit)
+    expected = combine(gate.as_subclass(_CudaLike), up.as_subclass(_CudaLike))
+    got = combine.packed(torch.cat([gate, up], dim=-1).as_subclass(_CudaLike))
     assert fused_rec.calls == separate.calls and len(separate.calls) == 1
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
 

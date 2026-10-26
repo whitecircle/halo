@@ -29,18 +29,12 @@ from trl.data_utils import pack_dataset as _trl_pack_dataset
 from src.data.pipeline.row_processors import is_valid_example
 from src.data.sources.dataset_cache import publish_cached_download
 from src.data.sources.paths import eval_split_name
-from src.distributed.filesystem import store_join_recorded_failure
-from src.distributed.runtime import (
-    broadcast_from_rank0,
-    fs_aware_load_rank,
-    fs_aware_makedirs,
-    fs_aware_save_rank,
-    get_global_rank,
-    is_global_main_process,
-    is_local_main_process,
-)
 from src.env import env_int
 from src.log import RUN_LOG_DIR_NAME, warn_once
+from src.runtime.collectives import broadcast_from_rank0
+from src.runtime.consensus import store_join_recorded_failure
+from src.runtime.filesystem import fs_aware_makedirs, is_fs_load_rank, is_fs_save_rank
+from src.runtime.ranks import get_global_rank, is_global_main_process, is_local_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -406,7 +400,7 @@ def ensure_cache_dir(writer_rank: Callable[[], bool] = is_local_main_process) ->
     default), created by ``writer_rank``.
 
     Local rank 0 by default (the per-node cache write); the run's one-time setup passes
-    :func:`fs_aware_load_rank` so a shared input FS creates it once for the job. ``fs_aware_makedirs``
+    :func:`is_fs_load_rank` so a shared input FS creates it once for the job. ``fs_aware_makedirs``
     fences the write, else a read-only or full volume raises on one rank while its peers wait out the
     barrier instead of reporting the errno.
     """
@@ -655,7 +649,7 @@ def log_dataset_examples(
     single writer.
     """
     log_examples = is_global_main_process()
-    write_samples = write_decoded_samples and fs_aware_save_rank()
+    write_samples = write_decoded_samples and is_fs_save_rank()
     if not (log_examples or write_samples):
         return
 
@@ -748,7 +742,7 @@ def run_load_rank_first(work: Callable[[], Any], operation_name: str) -> Any:
 
     The ordering for read-side work whose first run fills a cache the others read back — a dataset
     map or filter, a pack, a whole-source load. The load rank follows the INPUT filesystem
-    (:func:`~src.distributed.runtime.fs_aware_load_rank`): global rank 0 on a shared one, each node's
+    (:func:`~src.runtime.filesystem.is_fs_load_rank`): global rank 0 on a shared one, each node's
     local rank 0 on per-node storage. Both joins ride the c10d store, so the peers wait out an
     hours-long first run under ``DIST_STORE_TIMEOUT_HOURS`` instead of the NCCL watchdog, and a
     failure raises its cause on every rank: a load rank that failed is never retried by its peers,
@@ -758,7 +752,7 @@ def run_load_rank_first(work: Callable[[], Any], operation_name: str) -> Any:
     block, which would hold the peers outside both joins.
     """
     global_rank = get_global_rank()
-    is_main = fs_aware_load_rank()
+    is_main = is_fs_load_rank()
     result, failure = None, None
     if is_main:
         result, failure = _run_or_record(work, f"[{operation_name}] Main (rank {global_rank})")

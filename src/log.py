@@ -1,9 +1,6 @@
 """Process logging: the root handler and third-party suppression installed at package import, CLI
-verbosity for standalone tools, the warn-once helper, list previews, and the run-log names under ``output_dir``.
-
-The body is stdlib-only, but importing this module executes ``src/__init__.py`` (torch,
-transformers) like any other module in the package.
-"""
+verbosity for standalone tools, the warn-once helper, list previews and the run-log names under
+``output_dir``."""
 
 import logging
 import sys
@@ -50,24 +47,16 @@ def configure_root_logging() -> None:
 
 
 def info_logger(name: str) -> logging.Logger:
-    """The module logger ``name`` with its own level at INFO, for a module whose INFO records matter.
-
-    :func:`configure_root_logging` pins the root to WARNING, so a plain child logger drops every INFO
-    record. Plain logging rather than accelerate's adapter: entry points that initialize no
-    accelerate state (the S3 CLI, ``scripts/inference/*``) reach these modules too.
-    """
+    """The logger ``name`` set to INFO, since the root is pinned to WARNING; plain logging, so entry
+    points without accelerate state can use it."""
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     return logger
 
 
 def configure_cli_logging(verbose: bool = False) -> None:
-    """Set the root logger level for a standalone ``scripts/`` entry point.
-
-    ``force=True`` is required: the package import already pinned the root logger to WARNING, and a
-    plain ``basicConfig`` would be a no-op against an existing configuration. Library code does not
-    call this.
-    """
+    """Set the root logger level for a standalone ``scripts/`` entry point (``force``: the package
+    import already configured the root)."""
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(message)s",
         level=logging.DEBUG if verbose else logging.INFO,
@@ -82,11 +71,8 @@ def warn_once(
     message: str,
     *args: Any,
 ) -> bool:
-    """Log ``message`` at WARNING the first time ``key`` is seen, and return whether it did.
-
-    ``seen`` is supplied by the caller, so the scope of "once" (per backend, per method, per shape)
-    sits next to the state it guards and a test can re-arm a single entry.
-    """
+    """Log ``message`` at WARNING the first time ``key`` enters the caller's ``seen``; return whether
+    it did."""
     if key in seen:
         return False
     seen.add(key)

@@ -17,18 +17,19 @@ from accelerate.logging import get_logger
 from huggingface_hub import hf_hub_download, is_offline_mode
 from huggingface_hub.errors import LocalEntryNotFoundError, RemoteEntryNotFoundError
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoProcessor, AutoTokenizer
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-from transformers.models.auto.modeling_auto import MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES
 from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME
 from trl import ModelConfig
 
-from src.distributed.filesystem import hub_metadata_main_first
 from src.distributed.loading.model_loading import load_distributed_model
+from src.distributed.loading.model_source import probe_checkpoint
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import is_global_main_process, rank_consensus
 from src.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
 from src.model_loading.model_preparation import finalize_liger_after_direct_load
-from src.models.modality import config_declares_multimodality, is_vlm_model
+from src.models.modality import is_vlm_model
+from src.models.seq_cls_heads import multimodal_sequence_classification_model_types
+from src.runtime.consensus import rank_consensus
+from src.runtime.filesystem import hub_metadata_main_first
+from src.runtime.ranks import is_global_main_process
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -107,7 +108,7 @@ def load_vlm_processor(model_config: ModelConfig, *, required: bool = True):
         shipped = hub_metadata_main_first("processor_probe", lambda: _ships_processor_config(model_path, revision))
         # A shipped config on any rank wins: ranks split between processor and tokenizer would enter
         # different hub phases and save different processing classes.
-        if not rank_consensus(shipped)[1]:
+        if not rank_consensus(shipped).any_ok:
             return None
     return hub_metadata_main_first(
         "vlm_processor",
@@ -136,25 +137,6 @@ def _ships_processor_config(model_path: str, revision: str | None) -> bool:
             if not is_offline_mode():
                 raise
     return False
-
-
-def multimodal_sequence_classification_model_types() -> list[str]:
-    """Model types that have BOTH a registered sequence-classification head and a vision tower.
-
-    Read off the live registry — the transformers mapping plus the ``_extra_content`` the toolkit's
-    own heads register into it (:mod:`src.models.seq_cls_heads`) — so a family added upstream or by
-    the toolkit appears here without anyone maintaining a list. The modality verdict comes from the
-    same :func:`~src.models.modality.config_declares_multimodality` the run-time probe uses,
-    read off the config CLASS (instantiating every registered config to ask would be slow and
-    fragile), so this roster cannot name a family that probe would call text-only, or omit one it
-    would call multimodal.
-    """
-    # ``_extra_content`` is the same storage src/models/seq_cls_heads.py writes the toolkit heads into.
-    config_classes = list(AutoModelForSequenceClassification._model_mapping._extra_content)
-    config_classes += [
-        CONFIG_MAPPING[name] for name in MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES if name in CONFIG_MAPPING
-    ]
-    return sorted({cls.model_type for cls in config_classes if config_declares_multimodality(cls)})
 
 
 def require_multimodal_sequence_classification_head(model_config: ModelConfig) -> None:
@@ -211,7 +193,7 @@ def load_vlm_model_and_processor(
     flags reach the loader exactly as on the text branch, so a contradictory pair is refused here too.
 
     The caller has already resolved the modality verdict; this function must not re-probe it:
-    :func:`~src.models.modality.is_vlm_model` enters the ``vlm_probe`` store phase, and only
+    :func:`~src.distributed.loading.model_source.probe_checkpoint` enters the ``vlm_probe`` store phase, and only
     multimodal runs reach here — a phase entered from a branch some ranks do not take leaves the rest
     waiting on a key nobody writes.
     """
@@ -277,8 +259,11 @@ def load_model_for_training(
     own reasons (sft.py's pre-load run-label probe) stays uniform too.
     """
     revision = getattr(model_config, "model_revision", None)
-    if not text_only_model and is_vlm_model(
-        model_config.model_name_or_path, revision=revision, trust_remote_code=model_config.trust_remote_code
+    if (
+        not text_only_model
+        and probe_checkpoint(
+            model_config.model_name_or_path, revision=revision, trust_remote_code=model_config.trust_remote_code
+        )[1]
     ):
         if init_from_scratch:
             raise ValueError("init_from_scratch is not supported for VLM models.")

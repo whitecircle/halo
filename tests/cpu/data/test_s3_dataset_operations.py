@@ -717,7 +717,7 @@ def test_non_positive_cache_lock_timeout_warns_and_falls_back(raw, caplog):
         importlib.reload(env_mod)
         with caplog.at_level(logging.WARNING):
             s3r = importlib.reload(s3_mod)
-        derived_default = s3r.resolve_store_timeout_hours() * 3600
+        derived_default = int(s3r.store_timeout().total_seconds())
         assert derived_default == s3r._CACHE_LOCK_TIMEOUT_SECONDS
         assert any("HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS" in message for message in caplog.messages), (
             f"{raw} was swallowed silently instead of being refused"

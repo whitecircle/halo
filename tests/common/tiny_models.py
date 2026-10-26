@@ -69,7 +69,7 @@ from transformers import (
 from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
 from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
-from src.models.param_roles import fp32_pinned_param_names
+from src.models.param_roles import fp32_pinned_names
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import (
@@ -441,7 +441,7 @@ def build_tiny_family_checkpoint(
     model = tiny_family_model(family, tokenizer)
     if edit is not None:
         edit(model)
-    pinned = fp32_pinned_param_names(model) if fp32_pins else frozenset()
+    pinned = fp32_pinned_names(model) if fp32_pins else frozenset()
     stored = {name: param.detach().clone() for name, param in model.named_parameters() if name in pinned}
     model.to(torch.bfloat16)
     for name, param in model.named_parameters():

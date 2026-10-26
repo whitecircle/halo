@@ -43,9 +43,9 @@ from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.env import env_flag, env_str
 from src.hardware import supports_grouped_mm
+from src.runtime.collectives import barrier
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset

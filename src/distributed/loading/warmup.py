@@ -11,9 +11,10 @@ import torch
 from accelerate.logging import get_logger
 from transformers import PreTrainedModel
 
-from src.distributed.runtime import barrier, get_global_world_size
 from src.models.patches.attention import warmup_fa4_kernels
 from src.models.patches.flex_sliding_attention import warmup_flex_sliding_kernels
+from src.runtime.collectives import barrier
+from src.runtime.ranks import get_global_world_size
 
 logger = get_logger(__name__)
 

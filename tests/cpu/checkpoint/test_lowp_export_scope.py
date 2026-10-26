@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 """The low-precision export must honour the training run's lowp SCOPE knobs.
 
-``apply_mixed_precision_compute`` quantizes a subset of the model: ``lowp_apply_dense_mlp`` /
+``apply_lowp_compute`` quantizes a subset of the model: ``lowp_apply_dense_mlp`` /
 ``lowp_apply_moe_experts`` choose which halves, and ``lowp_keep_first_blocks`` /
 ``lowp_keep_last_blocks`` hold the precision-sensitive blocks at the two ends in bf16. None of that
 is recoverable from a checkpoint, so ``quantize_to_lowp.py`` takes the four values back as flags:
 quantizing by name-regex alone ships protected blocks quantized while its docstring promises an
 exact reproduction of the QAT forward.
 
-The block window itself lives in one place (``src.kernels.lowp.mixed_precision.kept_block_indices``),
+The block window itself lives in one place (``src.kernels.lowp.spec.kept_block_indices``),
 read by the training conversion and the export alike, so the two cannot drift.
 
 Run: python tests/cpu/checkpoint/test_lowp_export_scope.py
@@ -22,7 +22,8 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from src.kernels.lowp.mixed_precision import block_index, kept_block_indices
+from src.kernels.lowp.spec import kept_block_indices
+from src.models.module_tree import decoder_layer_index
 from tests.common.repo import load_script_module
 
 quantize_checkpoint = load_script_module("scripts/after_training/quantize_to_lowp.py").quantize_checkpoint
@@ -66,7 +67,7 @@ def _packed_bases(tensors: dict) -> set[str]:
 
 
 def _quantized_blocks(tensors: dict) -> set[int | None]:
-    return {block_index(name) for name in _packed_bases(tensors)}
+    return {decoder_layer_index(name) for name in _packed_bases(tensors)}
 
 
 # The block window
@@ -126,7 +127,7 @@ def test_moe_experts_can_be_excluded_without_touching_the_dense_mlp():
 
 
 def test_kept_block_indices_is_the_one_home_for_the_window():
-    """Both ends, clamped: the export and apply_mixed_precision_compute read this same function, so a
+    """Both ends, clamped: the export and apply_lowp_compute read this same function, so a
     drift between what training kept and what the export skips is not expressible."""
     assert kept_block_indices(8, 2, 1) == {0, 1, 7}
     assert kept_block_indices(8, 0, 0) == set()

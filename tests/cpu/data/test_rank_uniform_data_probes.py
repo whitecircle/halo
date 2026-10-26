@@ -26,11 +26,12 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-import src.data.probe_consensus as probe_consensus_mod
 from src.data.pipeline.preprocessing import shard_dataset
 from src.data.shard_index import SHARD_INDEX_FILE
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 from src.data.vlm import dataset_declares_images, is_vlm_run
+from src.runtime import consensus
+from src.runtime.consensus import RankConsensus
 from tests.common.repo import load_script_module
 
 VLM_CONFIG = CONFIG_MAPPING["gemma3"]()
@@ -54,12 +55,12 @@ class _FakeWorld:
     def __init__(self, monkeypatch, peer: bool):
         self.calls = 0
 
-        def fake_rank_consensus(local_ok: bool) -> tuple[bool, bool]:
+        def fake_rank_consensus(local_ok: bool) -> RankConsensus:
             self.calls += 1
             votes = (bool(local_ok), peer)
-            return all(votes), any(votes)
+            return RankConsensus(all(votes), any(votes))
 
-        monkeypatch.setattr(probe_consensus_mod, "rank_consensus", fake_rank_consensus)
+        monkeypatch.setattr(consensus, "rank_consensus", fake_rank_consensus)
 
 
 def test_a_rank_whose_slice_shows_no_images_takes_the_peers_vlm_verdict(monkeypatch):

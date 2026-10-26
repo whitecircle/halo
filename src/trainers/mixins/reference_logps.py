@@ -16,14 +16,9 @@ from datasets import Dataset
 from src.checkpoint.atomic import atomic_torch_save
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    barrier_on_exit,
-    fs_aware_save_rank,
-    rank_consensus,
-    reject_across_ranks,
-    reject_divergent_settings,
-)
+from src.runtime.collectives import barrier_on_exit
+from src.runtime.consensus import DeferredRankFailure, rank_consensus, reject_across_ranks, reject_divergent_settings
+from src.runtime.filesystem import is_fs_save_rank
 
 logger = get_logger(__name__, log_level="info")
 
@@ -160,14 +155,14 @@ class ReferenceLogpsCheckpointMixin:
             self._reference_saved_path = os.path.join(checkpoint, REFERENCE_LOGPS_FILE)
             self._reference_saved_loaded = True
         entry = self._resumed_reference_logps.get(name)
-        present_all, present_any = rank_consensus(entry is not None)
-        if present_any and not present_all:
+        present = rank_consensus(entry is not None)
+        if present.any_ok and not present.all_ok:
             raise RuntimeError(
                 f"{REFERENCE_LOGPS_FILE} at {checkpoint} holds the '{name}' split on some ranks only — "
                 "the nodes' copies differ. Resume from a complete checkpoint."
             )
         required = self._reference_resume_required()
-        if not present_all:
+        if not present.all_ok:
             if required:
                 raise RuntimeError(self._missing_reference_split(checkpoint, name, needed))
             logger.info(f"No saved '{name}' reference in {checkpoint}; sweeping untrained reference weights.")
@@ -175,7 +170,7 @@ class ReferenceLogpsCheckpointMixin:
         guard = DeferredRankFailure(f"Validating the '{name}' reference payload", exc_type=ValueError)
         mismatch = guard.run(lambda: self._reference_entry_mismatch(entry, dataset, needed, identity))
         guard.reject()
-        if not required and not rank_consensus(mismatch is None)[0]:
+        if not required and not rank_consensus(mismatch is None).all_ok:
             logger.info(f"Saved '{name}' reference does not match ({mismatch or 'another rank'}); sweeping.")
             return None
         reject_across_ranks(
@@ -257,10 +252,10 @@ class ReferenceLogpsCheckpointMixin:
         """
         super()._persist_trainer_sidecars(checkpoint_dir)
         names = sorted(set(self._resumed_reference_logps) | set(self._reference_logps_by_split))
-        present_all, present_any = rank_consensus(bool(names))
-        if not present_any:
+        present = rank_consensus(bool(names))
+        if not present.any_ok:
             return
-        if not present_all:
+        if not present.all_ok:
             raise RuntimeError("Reference splits exist on only some ranks; refusing a partial checkpoint")
         reject_divergent_settings(
             {"splits": names}, "Checkpoint reference splits", "Every rank must save the same split names."
@@ -273,7 +268,7 @@ class ReferenceLogpsCheckpointMixin:
         path = os.path.join(checkpoint_dir, REFERENCE_LOGPS_FILE)
         guard = DeferredRankFailure(f"Writing {REFERENCE_LOGPS_FILE} to {checkpoint_dir}")
         with barrier_on_exit():
-            if fs_aware_save_rank():
+            if is_fs_save_rank():
                 guard.run(partial(atomic_torch_save, path, self._reference_checkpoint_payload, previous))
         guard.reject()
         self._reference_immutable_path = path

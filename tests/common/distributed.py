@@ -20,8 +20,8 @@ from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeSt
 from transformers import AutoConfig, AutoTokenizer
 
 from src.distributed.expert_parallel import dispatcher as ep_dispatcher
-from src.distributed.runtime import barrier, broadcast_from_rank0
 from src.models.patches.attention import ensure_fa4_kernel_cache_env
+from src.runtime.collectives import barrier, broadcast_from_rank0
 from tests.common.scratch import SCRATCH_DIR_TAG
 
 
@@ -122,7 +122,7 @@ def init_distributed() -> tuple[int, int, int]:
         if torch.cuda.is_available():
             # Bind this rank's device before init so the NCCL backend does not infer the device from
             # the global rank, which warns and can hang on heterogeneous mappings. Mirrors
-            # src.distributed.runtime.init_distributed.
+            # src.runtime.process_group.init_distributed.
             torch.cuda.set_device(local_rank)
             kwargs["device_id"] = torch.device("cuda", local_rank)
         dist.init_process_group(**kwargs)

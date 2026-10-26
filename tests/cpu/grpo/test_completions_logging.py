@@ -32,9 +32,9 @@ import torch
 
 import src.trainers.grpo.rollout.completions_logging as cl
 import src.trainers.grpo.rollout.rollout_metrics as rm
-from src.distributed import runtime
 from src.environments.base import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY, Message, Trajectory
 from src.rewards.samples import CUT_CALL_NOTE
+from src.runtime import filesystem, ranks
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -127,21 +127,21 @@ def test_console_only_without_save(tmp_path, monkeypatch) -> None:
 def test_non_writer_rank_writes_nothing(tmp_path, monkeypatch) -> None:
     """Only the elected writer persists artifacts (else N ranks race the same file).
 
-    The election is ``fs_aware_save_rank`` — the same predicate every other output artifact uses —
+    The election is ``is_fs_save_rank`` — the same predicate every other output artifact uses —
     not ``accelerator.is_main_process``: on a non-shared output filesystem each node must write its
     own completions, and gating on the accelerator flag would lose nodes 1..N entirely.
 
     Driven through the real flag chain (``is_global_main_process`` / ``is_local_main_process`` +
-    the env flags) rather than by patching ``fs_aware_save_rank`` itself, so the test pins WHICH
+    the env flags) rather than by patching ``is_fs_save_rank`` itself, so the test pins WHICH
     predicate is consulted, not merely that some boolean gates the write.
     """
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: False)
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.delenv("DIST_SHARED_FILESYSTEM", raising=False)
     monkeypatch.delenv("DIST_OUTPUT_SHARED_FILESYSTEM", raising=False)
-    runtime.reset_shared_filesystem_consensus()
+    filesystem.reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=True, save=True)
@@ -155,10 +155,10 @@ def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, mo
     filesystem this same non-global-main rank IS its node's writer — gating on global rank 0 would
     silently drop that node's completions."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: False)
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
-    runtime.reset_shared_filesystem_consensus()
+    filesystem.reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)
@@ -172,10 +172,10 @@ def test_a_per_node_writer_writes_its_record_but_leaves_the_console_table_to_ran
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
     monkeypatch.setattr(cl, "is_rich_available", lambda: True)
-    monkeypatch.setattr(runtime, "get_global_rank", lambda: 8)  # the second node's local rank 0
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setattr(ranks, "get_global_rank", lambda: 8)  # the second node's local rank 0
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
-    runtime.reset_shared_filesystem_consensus()
+    filesystem.reset_shared_filesystem_consensus()
 
     emit_completion_artifacts(_Trainer(str(tmp_path)), console=True, save=True)
 
@@ -222,11 +222,11 @@ def test_a_non_writer_rank_empties_its_buffer_too(tmp_path, monkeypatch) -> None
     """Non-writers hold nothing useful after the step; left alone, their unbounded slots would keep
     every row the online trainer's generation path appends on every process."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: False)
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.delenv("DIST_SHARED_FILESYSTEM", raising=False)
     monkeypatch.delenv("DIST_OUTPUT_SHARED_FILESYSTEM", raising=False)
-    runtime.reset_shared_filesystem_consensus()
+    filesystem.reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)
@@ -308,10 +308,10 @@ def _fake_world(monkeypatch, *, world, rank, shared_fs):
     monkeypatch.setattr(rm, "is_multi_rank_run", lambda: world > 1)
     # Driven through the REAL writer election, so the test pins that the gather lands where the
     # parquet is written rather than merely that some boolean picks a rank.
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: rank == 0)
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: rank == 0)
+    monkeypatch.setattr(filesystem, "is_global_main_process", lambda: rank == 0)
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: rank == 0)
     monkeypatch.setattr(rm, "is_output_shared_filesystem", lambda: shared_fs)
-    monkeypatch.setattr(runtime, "is_output_shared_filesystem", lambda: shared_fs)
+    monkeypatch.setattr(filesystem, "is_output_shared_filesystem", lambda: shared_fs)
     return calls
 
 

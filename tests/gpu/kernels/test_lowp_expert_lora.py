@@ -8,8 +8,8 @@ in a numerics regime no serving stack has. Pinned at the seam, on the real unbou
 minimal stub (the ``test_ep_sort_sync_free`` idiom — no dispatcher, no model):
 
 - ``fake_quant`` still refuses a sub-block axis (r=16 with mxfp8) — the quantizer gate is unchanged;
-- ``_expert_proj`` with ``_lowp_precision=MXFP8`` and r=16 adapters raises nothing, routes the base
-  GEMM through MXFP8 and BOTH adapter GEMMs through BF16 (asserted via a recording ``grouped_gemm``),
+- ``_expert_proj`` with ``_lowp_quant_format="mxfp8"`` and r=16 adapters raises nothing, routes the base
+  GEMM through MXFP8 and BOTH adapter GEMMs through BF16 (asserted via a recording ``expert_gemm``),
   and the adapter delta actually lands in the output;
 - forcing the adapter GEMMs back through the layer precision raises the r-not-divisible ValueError
   — the in-file non-vacuity control.
@@ -24,7 +24,6 @@ import torch.nn as nn
 
 import src.distributed.expert_parallel.base_layer as base_layer_mod
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.kernels.grouped_gemm import GroupedGemmPrecision
 from src.kernels.lowp.quantization import fake_quant
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
@@ -37,7 +36,7 @@ def make_layer():
     """Minimal stand-in carrying only what ``_expert_proj`` / ``_grouped_mm`` read off ``self``."""
     torch.manual_seed(0)
     stub = SimpleNamespace(
-        _lowp_precision=GroupedGemmPrecision.MXFP8,
+        _lowp_quant_format="mxfp8",
         _lowp_weight_cacheable=True,
         _expert_adapters_enabled=True,
         _expert_lora_attrs=frozenset({"gate_proj"}),
@@ -79,19 +78,19 @@ def test_adapter_gemms_stay_bf16():
     x, offs = make_inputs()
 
     recorded = []
-    real_grouped_gemm = base_layer_mod.grouped_gemm
+    real_expert_gemm = base_layer_mod.expert_gemm
 
     def recording(mat_a, mat_b, **kwargs):
-        recorded.append(kwargs["precision"])
-        return real_grouped_gemm(mat_a, mat_b, **kwargs)
+        recorded.append(kwargs["quant_format"])
+        return real_expert_gemm(mat_a, mat_b, **kwargs)
 
-    base_layer_mod.grouped_gemm = recording
+    base_layer_mod.expert_gemm = recording
     try:
         out = layer._expert_proj(x, "gate_proj", offs, torch.bfloat16)
     finally:
-        base_layer_mod.grouped_gemm = real_grouped_gemm
+        base_layer_mod.expert_gemm = real_expert_gemm
 
-    expected = [GroupedGemmPrecision.MXFP8, GroupedGemmPrecision.BF16, GroupedGemmPrecision.BF16]
+    expected = ["mxfp8", None, None]
     assert recorded == expected, f"GEMM precisions {recorded} != {expected} (base lowp, adapters bf16)"
     assert out.shape == (E * T_PER, N) and torch.isfinite(out).all()
 

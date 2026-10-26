@@ -21,8 +21,8 @@ from src.diagnostics.profiling import (
     start_memory_history,
     stop_memory_history,
 )
-from src.distributed.runtime import rank_tag
 from src.env import torch_trace_dir
+from src.runtime.ranks import rank_tag
 
 logger = logging.getLogger(__name__)
 

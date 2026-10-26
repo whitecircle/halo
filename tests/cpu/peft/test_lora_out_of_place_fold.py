@@ -22,7 +22,7 @@ import torch
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
-from src.models.structure import lora_fold_targets, lora_folded
+from src.models.peft_adapters import lora_fold_targets, lora_folded
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, validate_weight_sync_support
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.peft_helpers import adapter_param_items, randomize_adapters

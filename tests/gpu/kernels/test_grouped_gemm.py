@@ -2,9 +2,9 @@
 """GPU tests for the grouped-GEMM dispatch (bf16 correctness + precision dispatch).
 
 Validates:
-- bf16 ``grouped_gemm`` matches a per-expert reference loop, for EP-like (few experts)
+- bf16 ``expert_gemm`` matches a per-expert reference loop, for EP-like (few experts)
   and non-EP-like (many experts) group counts, including a variable-token routing.
-- low-precision ``grouped_gemm`` (mxfp8 / nvfp4) uses the SIMULATED fake-quant path by default
+- low-precision ``expert_gemm`` (mxfp8 / nvfp4) uses the SIMULATED fake-quant path by default
   (the native DeepGEMM kernel is opt-in and net-slower than bf16, so never auto-selected), producing
   the expected block-scaled error vs bf16 with finite grads flowing to the bf16 masters.
 
@@ -13,7 +13,7 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_grouped_gemm.py
 
 import torch
 
-from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
+from src.kernels.expert_gemm import expert_gemm
 from src.kernels.lowp.deepgemm import deepgemm_available
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import fro_rel_err, log
@@ -38,7 +38,7 @@ def test_bf16_grouped_matches_reference():
         x = torch.randn(num_experts * per_expert, K, device=DEV, dtype=torch.bfloat16) * 0.5
         w = torch.randn(num_experts, K, N, device=DEV, dtype=torch.bfloat16) * 0.02
         offs = torch.arange(per_expert, num_experts * per_expert + 1, per_expert, device=DEV, dtype=torch.int32)
-        out = grouped_gemm(x, w, offs=offs)
+        out = expert_gemm(x, w, offs=offs)
         ref = _reference(x, w, offs)
         diff = (out.float() - ref.float()).abs().max().item()
         assert diff < 1e-1, f"E={num_experts}: grouped vs reference maxdiff {diff:.3e}"
@@ -51,7 +51,7 @@ def test_bf16_grouped_backward():
     x = (torch.randn(E * M, K, device=DEV, dtype=torch.bfloat16) * 0.5).requires_grad_(True)
     w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * 0.02).requires_grad_(True)
     offs = torch.arange(M, E * M + 1, M, device=DEV, dtype=torch.int32)
-    out = grouped_gemm(x, w, offs=offs)
+    out = expert_gemm(x, w, offs=offs)
     (out * torch.randn_like(out)).sum().backward()
     assert torch.isfinite(x.grad).all() and torch.isfinite(w.grad).all()
     print("  bf16 grouped backward: finite grads PASS")
@@ -68,12 +68,12 @@ def test_simulated_lowprecision_matches_format_error():
     """
     torch.manual_seed(0)
     E, M, K, N = 8, 256, 2880, 2880
-    bands = {GroupedGemmPrecision.MXFP8: (0.01, 0.08), GroupedGemmPrecision.NVFP4: (0.04, 0.25)}
+    bands = {"mxfp8": (0.01, 0.08), "nvfp4": (0.04, 0.25)}
     for prec, (lo, hi) in bands.items():
         x = (torch.randn(E * M, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
         w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * 0.02).requires_grad_(True)
         offs = torch.arange(M, E * M + 1, M, device=DEV, dtype=torch.int32)
-        out = grouped_gemm(x, w, offs=offs, precision=prec)  # fine-grained shape -> simulated fake-quant
+        out = expert_gemm(x, w, offs=offs, quant_format=prec)  # fine-grained shape -> simulated fake-quant
         (out * torch.randn_like(out)).sum().backward()
         ref = _reference(x.detach(), w.detach(), offs).float()
         rel = fro_rel_err(out.detach(), ref)
@@ -94,9 +94,9 @@ def test_dispatch_contract():
 
     # bf16 always works; low precision (mxfp8 / nvfp4) at this fine-grained shape routes to the SIMULATED
     # fake-quant path (the DeepGEMM gate needs wide experts + large tokens/expert, so it stays off here).
-    assert grouped_gemm(x, w, offs=offs, precision=GroupedGemmPrecision.BF16).shape == (E * M, N)
-    for prec in (GroupedGemmPrecision.MXFP8, GroupedGemmPrecision.NVFP4):
-        out = grouped_gemm(x, w, offs=offs, precision=prec)
+    assert expert_gemm(x, w, offs=offs).shape == (E * M, N)
+    for prec in ("mxfp8", "nvfp4"):
+        out = expert_gemm(x, w, offs=offs, quant_format=prec)
         assert out.shape == (E * M, N), f"{prec.value} wrong shape"
     print(f"  dispatch contract PASS (lowp=simulated at this shape; deepgemm_available={deepgemm_available()})")
 

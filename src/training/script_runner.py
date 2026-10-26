@@ -26,19 +26,17 @@ from src.data.pipeline.processing import log_dataset_examples, resolve_map_num_p
 from src.data.sources.loading import is_presharded_dataset_load, load_datasets, reject_image_columns
 from src.data.vlm import dataset_declares_images, is_vlm_run
 from src.distributed.expert_parallel.dispatcher import verify_rank_uniform_env
-from src.distributed.filesystem import verify_output_filesystem_sharing
+from src.distributed.loading.model_source import probe_checkpoint
 from src.distributed.loading.peft_setup import split_expert_lora_targets
 from src.distributed.loading.vlm_setup import load_model_consuming_init_kwargs
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import (
-    get_local_rank,
-    init_distributed,
-    is_global_main_process,
-    raise_rank0_failure,
-)
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, setup_model_and_tokenizer
 from src.models.context_window import get_model_context_window, is_bounded_length, resolve_length_to_context
+from src.runtime.consensus import raise_rank0_failure
+from src.runtime.filesystem import verify_output_filesystem_sharing
+from src.runtime.process_group import init_distributed
+from src.runtime.ranks import get_local_rank, is_global_main_process
 from src.training.early_stopping import StopsTrainingEarly
 from src.training.environment import (
     TrainingStoppedEarly,
@@ -189,20 +187,19 @@ def resolve_vlm_run(
     image data a text-only load cannot take (:func:`_reject_images_under_text_only_model`).
 
     Called once the dataset is in hand and before the model load, which requires the checkpoint's
-    processor for an image run. The probe reads ``model_config``'s checkpoint at its
-    ``model_revision`` under its ``trust_remote_code``, as the load does, since hub ``main`` can name
-    a different modality than the pinned commit; ``vlm_checkpoint`` is a verdict the script already
-    probed, so the checkpoint config is not read twice.
+    processor for an image run. Without a ``vlm_checkpoint`` verdict the script already probed,
+    :func:`~src.distributed.loading.model_source.probe_checkpoint` reads ``model_config``'s
+    checkpoint at its ``model_revision`` under its ``trust_remote_code``, as the load does, since hub
+    ``main`` can name a different modality than the pinned commit.
     """
     _reject_images_under_text_only_model(args, datasets, text_only_model=text_only_model)
-    return is_vlm_run(
-        args,
-        model_config.model_name_or_path,
-        datasets,
-        revision=model_config.model_revision,
-        trust_remote_code=model_config.trust_remote_code,
-        vlm_checkpoint=vlm_checkpoint,
-    )
+    if vlm_checkpoint is None:
+        _, vlm_checkpoint = probe_checkpoint(
+            model_config.model_name_or_path,
+            revision=model_config.model_revision,
+            trust_remote_code=model_config.trust_remote_code,
+        )
+    return is_vlm_run(args, model_config.model_name_or_path, datasets, vlm_checkpoint=vlm_checkpoint)
 
 
 def load_script_datasets(

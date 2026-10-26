@@ -32,9 +32,10 @@ from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENT
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.models import moe_aux_loss
 from src.models.config_access import config_export_ready
+from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.models.moe_balancing import declared_routers, detect_moe_experts_topk, resolve_balancing_mode
 from tests.common.models import (
     TINY_GLM5_CONFIG,
@@ -101,7 +102,7 @@ def _build(family: str, *, balanced: bool, ep: bool = False):
 def _checkpoint(model, *, ep: bool = False, every_n_layers: int = 1) -> None:
     kwargs = {"use_reentrant": True}
     if ep:
-        enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs=kwargs)
+        enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs=kwargs)
     else:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers)
 

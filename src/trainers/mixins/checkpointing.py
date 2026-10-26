@@ -44,23 +44,15 @@ from src.distributed.checkpoint.save import (
 )
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    barrier,
-    barrier_on_exit,
-    broadcast_from_rank0,
-    fs_aware_makedirs,
-    fs_aware_save_rank,
-    get_global_rank,
-    get_global_world_size,
-    is_global_main_process,
-    rank_consensus,
-)
 from src.model_loading.tokenizer_setup import pristine_model_max_length
 from src.models.config_access import config_export_ready, restore_special_token_ids
 from src.models.moe_balancing import BALANCING_BIASES_ATTR
 from src.models.patches.gpt_oss_sinks import gpt_oss_sinks_restored
 from src.models.unwrapping import base_transformers_model
+from src.runtime.collectives import barrier, barrier_on_exit, broadcast_from_rank0
+from src.runtime.consensus import DeferredRankFailure, rank_consensus
+from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
+from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
 
 logger = get_logger(__name__, log_level="info")
 
@@ -253,7 +245,7 @@ class CheckpointingMixin:
         # neither. Both spellings, since the resume side checks both. FS-aware save rank, not rank
         # 0; fenced because a raise on one node's writer would block peers in the next collective.
         with barrier_on_exit():
-            if fs_aware_save_rank():
+            if is_fs_save_rank():
                 for name in OPTIMIZER_STATE_FILES:
                     incorrect_optim = os.path.join(output_dir, name)
                     if os.path.exists(incorrect_optim):
@@ -332,7 +324,7 @@ class CheckpointingMixin:
         if self.lr_scheduler is None or not self.args.save_only_model:
             return
         with barrier_on_exit():
-            if fs_aware_save_rank():
+            if is_fs_save_rank():
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 torch.save(self.lr_scheduler.state_dict(), os.path.join(checkpoint_dir, SCHEDULER_STATE_FILE))
                 if is_global_main_process():
@@ -374,11 +366,11 @@ class CheckpointingMixin:
             # FS, so the merge has to reach every node's save rank.
             merged = broadcast_from_rank0(merged)
             with barrier_on_exit():
-                if merged and fs_aware_save_rank():
+                if merged and is_fs_save_rank():
                     torch.save(merged, os.path.join(output_dir, ROUTER_BALANCING_BIASES_FILE))
             return
         with barrier_on_exit():
-            if biases and fs_aware_save_rank():
+            if biases and is_fs_save_rank():
                 torch.save(biases, os.path.join(output_dir, ROUTER_BALANCING_BIASES_FILE))
 
     def _restore_router_balancing_biases(self, checkpoint: str) -> None:
@@ -433,7 +425,7 @@ class CheckpointingMixin:
             restored += 1
         # Consensus'd, not raised where it was found: under PP the drift is stage-local, and a
         # rank-local raise here would leave the peers blocked in the next collective.
-        if not rank_consensus(not mismatched)[0]:
+        if not rank_consensus(not mismatched).all_ok:
             raise RuntimeError(
                 f"{ROUTER_BALANCING_BIASES_FILE} at {checkpoint} holds router balancing biases whose "
                 f"shape does not match the live routers — a different expert count or router layout. "
@@ -441,7 +433,7 @@ class CheckpointingMixin:
             )
         # A collective, entered by every rank: under PP a stage may legitimately hold no router, so
         # only a world-wide zero means the sidecar matched nothing.
-        any_restored = rank_consensus(restored > 0)[1]
+        any_restored = rank_consensus(restored > 0).any_ok
         if saved and not any_restored and not missing:
             # main_process_only=False: the balancing route is resolved per model, and under PP only
             # the router-holding stages could see it at all.
@@ -562,7 +554,7 @@ class CheckpointingMixin:
             has_ep_layers=self._has_ep_layers,
             fsdp_wrapped=self._fsdp_wrapped or isinstance(self.model, FSDP),
             accelerate_manages_fsdp=self._accelerate_manages_fsdp,
-            is_save_rank=fs_aware_save_rank(),
+            is_save_rank=is_fs_save_rank(),
             max_shard_size=getattr(self.args, "save_max_shard_size", None) or DEFAULT_MAX_SHARD_SIZE,
             save_sharded_ep=self.save_sharded_ep,
             has_expert_lora=has_ep_lora(model),

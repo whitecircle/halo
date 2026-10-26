@@ -70,10 +70,10 @@ from src.distributed.expert_parallel.expert_weights import (
     hf_fused_expert_keys,
     per_expert_layouts,
 )
-from src.kernels.lowp.linear import PRECISION_TO_FORMAT
-from src.kernels.lowp.mixed_precision import MLP_PROJECTIONS, block_index, block_numbering_root, kept_block_indices
 from src.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
+from src.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, kept_block_indices
 from src.log import configure_cli_logging
+from src.models.module_tree import decoder_layer_index, decoder_layer_stack_prefix
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ def _should_quantize(
         return False
     if not (name.endswith(".weight") or (tensor.dim() == 3 and name.endswith(_FUSED_EXPERT_SUFFIXES))):
         return False
-    if block_index(name) in kept_blocks:
+    if decoder_layer_index(name) in kept_blocks:
         return False
     if _is_expert_weight(name, tensor.dim()):
         return apply_moe_experts
@@ -176,7 +176,11 @@ def _reject_unexportable_experts(
         return
     expert_matches = 0
     for _shard, reader, name in iter_checkpoint_shard_entries(input_dir):
-        if include.search(name) is None or exclude.search(name) is not None or block_index(name) in kept_blocks:
+        if (
+            include.search(name) is None
+            or exclude.search(name) is not None
+            or decoder_layer_index(name) in kept_blocks
+        ):
             continue
         header = reader.get_slice(name)
         ndim = len(header.get_shape())
@@ -237,10 +241,10 @@ def _backbone_block_count(input_dir: str, include: re.Pattern, exclude: re.Patte
     for _shard, _reader, name in iter_checkpoint_shard_entries(input_dir):
         if include.search(name) is None or exclude.search(name) is not None:
             continue
-        idx = block_index(name)
+        idx = decoder_layer_index(name)
         if idx is not None:
             indices.add(idx)
-            roots.add(block_numbering_root(name))
+            roots.add(decoder_layer_stack_prefix(name))
     if len(roots) > 1:
         raise ValueError(
             f"--lowp_keep_first_blocks / --lowp_keep_last_blocks need one block numbering, but the "
@@ -423,7 +427,7 @@ def _write_manifest(
     quantization_config.json describing the block-scaled scheme."""
     copy_checkpoint_aux_files(input_dir, output_dir)
     # The ``lowp_precision`` spelling that trains this storage format.
-    lowp_precision = next(precision.value for precision, trained in PRECISION_TO_FORMAT.items() if trained == fmt)
+    lowp_precision = next(precision for precision, recipe in LOWP_RECIPES.items() if recipe.quant_format == fmt)
     manifest = {
         "quant_method": "block_scaled",
         "format": fmt,

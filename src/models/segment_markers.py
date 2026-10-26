@@ -1,15 +1,9 @@
 """Per-document segment markers for the conv / linear-attention mixers of a multi-document row.
 
-Attention isolates the documents of a packed or flattened row from its ``position_ids``, which
-restart at 0 at every document. Some families' conv and linear-attention mixers read their document
-boundaries from forward kwargs instead, and carry state across documents when those are absent. This
-module holds which families read which markers, the refusals for the families whose documents no
-marker can keep apart (a dense mask that drops ``position_ids``, KV windows cut by row index, torch
-fallbacks that drop the markers), and the markers themselves — shared by the SFT packing /
-padding-free collators and SMPO's padding-free forward — plus the positions and the left flush that
-put a padded row's real tokens where they sit unpadded. Per-family isolation matrix:
-``agent-docs/data/collators.md``.
-"""
+Attention isolates a row's documents from ``position_ids``, which restart at 0 at every document;
+some families' conv and linear-attention mixers read the boundaries from forward kwargs instead and
+carry state across documents without them. Held here: who reads which markers, the refusals for rows
+no marker can isolate, and the markers themselves."""
 
 from dataclasses import dataclass
 
@@ -24,15 +18,13 @@ from src.models.config_access import model_type_matches
 # segment-marker gates below and the FA4 backward gate in ``src/models/patches/attention.py``.
 GDN_MODEL_TYPE_PREFIXES = ("qwen3_5", "qwen3_next")
 
-# Families whose forward never passes ``position_ids`` into mask construction, so on a dense backend
-# (eager/SDPA/flex) a packed row runs as one causal sequence and documents attend across each other.
-# Packing is refused for them; a varlen kernel is their production path.
+# Families whose forward never passes ``position_ids`` into mask construction, so on a dense backend a
+# packed row runs as one causal sequence; packing is refused for them.
 DENSE_PACKING_LEAK_MODEL_TYPES = frozenset({"gpt_oss"})
 
-# Backends whose availability selects transformers' segment-aware GatedDeltaNet kernels; the torch
-# fallbacks ignore ``seq_idx``/``cu_seqlens`` and run a packed row as one document while attention
-# stays isolated. These are transformers' own fast-path predicates; re-spelling them as bare
-# ``find_spec`` checks would drop the ``fla>=0.2.2`` floor and the CUDA-capable-torch conjunct.
+# transformers' own predicates selecting its segment-aware GatedDeltaNet kernels (a bare ``find_spec``
+# would drop the ``fla>=0.2.2`` floor and the CUDA-capable-torch conjunct); the torch fallbacks ignore
+# the markers.
 GDN_SEGMENT_AWARE_BACKENDS = (
     ("causal_conv1d", is_causal_conv1d_available),
     ("fla>=0.2.2", is_flash_linear_attention_available),
@@ -41,12 +33,9 @@ GDN_SEGMENT_AWARE_BACKENDS = (
 
 @dataclass(frozen=True)
 class SegmentMarkers:
-    """Which segment markers a family's forward reads.
-
-    ``seq_idx`` is the per-token document index (LFM2 ShortConv, the GatedDeltaNet conv).
-    ``cu_seq_lens`` is the varlen set ``cu_seq_lens_q/k`` + ``max_length_q/k``: GatedDeltaNet's chunked
-    delta rule reads ``cu_seq_lens_q``, and flash attention consumes the set in place of re-deriving
-    it from ``position_ids``.
+    """Which segment markers a family's forward reads: ``seq_idx``, the per-token document index (LFM2
+    ShortConv, the GatedDeltaNet conv), and ``cu_seq_lens``, the varlen set ``cu_seq_lens_q/k`` +
+    ``max_length_q/k`` (GatedDeltaNet's chunked delta rule; flash attention consumes it too).
     """
 
     seq_idx: bool = False
@@ -54,12 +43,8 @@ class SegmentMarkers:
 
 
 def segment_markers_for(model_config) -> SegmentMarkers:
-    """The markers this model's mixers need to keep a multi-document row's documents apart.
-
-    Family-gated: every other family's forward reads neither, so emitting them universally would
-    push unread kwargs everywhere. Reads the text sub-config too, so a VLM wrapper resolves like its
-    decoder.
-    """
+    """The markers this model's mixers need to keep a multi-document row's documents apart; family-gated,
+    read through the text sub-config so a VLM wrapper resolves like its decoder."""
     if model_config is None:
         return SegmentMarkers()
     return SegmentMarkers(
@@ -85,10 +70,8 @@ def reject_compressed_kv_rows(model_config, mode: str) -> None:
 
 
 def require_segment_aware_kernels(model_config, mode: str) -> None:
-    """Refuse a multi-document row (``mode``) on a GatedDeltaNet family lacking its segment-aware kernels.
-
-    Emitting the markers is not enough on its own: only the fast-path kernels read them.
-    """
+    """Refuse a multi-document row (``mode``) on a GatedDeltaNet family lacking its segment-aware
+    kernels, the only ones that read the markers."""
     if model_config is None or not model_type_matches(model_config, *GDN_MODEL_TYPE_PREFIXES):
         return
     missing = ", ".join(name for name, is_available in GDN_SEGMENT_AWARE_BACKENDS if not is_available())
@@ -117,26 +100,9 @@ def flattened_document_positions(attention_mask: torch.Tensor) -> torch.Tensor:
     return (attention_mask.cumsum(dim=1) - 1)[attention_mask.bool()].unsqueeze(0)
 
 
-def flush_rows_left(attention_mask: torch.Tensor, *tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
-    """Roll each row left by its leading-pad count, so every pad trails its real tokens; ``tensors``
-    share the mask's shape and move with it. Returns the mask first.
-
-    Reads nothing back from the device: unlike TRL's ``flush_left``, the columns no row reaches are
-    kept rather than truncated.
-    """
-    width = attention_mask.size(1)
-    leading_pads = (attention_mask.cumsum(dim=1) == 0).sum(dim=1, keepdim=True)
-    index = (torch.arange(width, device=attention_mask.device) + leading_pads) % width
-    return tuple(tensor.gather(1, index) for tensor in (attention_mask, *tensors))
-
-
 def segment_marker_kwargs(position_ids: torch.Tensor, markers: SegmentMarkers) -> dict[str, torch.Tensor | int]:
     """The forward kwargs ``markers`` selects, built from rows whose ``position_ids`` restart at 0.
-
-    ``seq_idx`` is per row. The ``cu_seq_lens`` set is only defined on one flattened ``[1, total]``
-    row — the delta rule's varlen boundaries have no per-row convention — and refuses anything else.
-    Tensors land on ``position_ids``' device.
-    """
+    ``seq_idx`` is per row; the ``cu_seq_lens`` set exists only for one flattened ``[1, total]`` row."""
     kwargs: dict[str, torch.Tensor | int] = {}
     if markers.seq_idx:
         kwargs["seq_idx"] = document_ids(position_ids).to(torch.int32)

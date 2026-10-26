@@ -13,7 +13,8 @@ from typing import Any, Literal, Union, get_args, get_origin, get_type_hints
 from ruamel.yaml import YAML
 from transformers import HfArgumentParser
 
-from src.distributed.runtime import broadcast_from_rank0, init_distributed
+from src.runtime.collectives import broadcast_from_rank0
+from src.runtime.process_group import init_distributed
 from src.training.run_logging import install_log_tee
 
 _yaml = YAML(typ="safe")

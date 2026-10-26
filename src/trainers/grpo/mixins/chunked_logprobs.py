@@ -23,12 +23,13 @@ from trl.models.utils import _ForwardRedirection
 from src.distributed.context_parallel.config import cp_shift_against_full_labels
 from src.distributed.context_parallel.wrapper import find_cp_wrapper
 from src.distributed.expert_parallel.dispatcher import bump_forward_generation
-from src.distributed.runtime import materialize_dtensor, rank_consensus
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from src.models.modality import config_declares_multimodality
 from src.models.patches.attention import effective_attn_implementation
 from src.models.unwrapping import base_transformers_model
+from src.runtime.consensus import rank_consensus
+from src.runtime.dtensor import materialize_dtensor
 from src.trainers.mixins.validation import evaluation_runs
 
 logger = logging.getLogger(__name__)
@@ -447,7 +448,7 @@ class ChunkedLogprobsCore:
         free_bytes, _ = torch.cuda.mem_get_info(self.accelerator.device)
         verdict = full_logits_verdict(rows, rows_set_by, width, vocab, free_bytes)
         fatal = verdict is not None and verdict[0]
-        if not rank_consensus(not fatal)[0]:
+        if not rank_consensus(not fatal).all_ok:
             raise RuntimeError(
                 verdict[1]
                 if fatal
@@ -691,7 +692,7 @@ class ChunkedGRPOLogprobsMixin(ChunkedLogprobsCore):
         # Mixed full (image) / chunked (text) paths across ranks diverge FSDP2's collectives and deadlock
         # backward, so any multimodal batch routes all ranks to the full forward; text-only models skip this.
         if chunked and self._model_accepts_multimodal:
-            is_multimodal = rank_consensus(is_multimodal)[1]
+            is_multimodal = rank_consensus(is_multimodal).any_ok
         if not chunked or is_multimodal:
             with self._writable_logits(model):
                 return super()._get_per_token_logps_and_entropies(

@@ -24,15 +24,10 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from src.checkpoint.atomic import fsync_directory
 from src.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, StreamingCheckpointReader
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    broadcast_from_rank0,
-    fs_aware_save_rank,
-    get_global_rank,
-    is_global_main_process,
-    is_multi_rank_run,
-    rank_consensus,
-)
+from src.runtime.collectives import broadcast_from_rank0
+from src.runtime.consensus import DeferredRankFailure, rank_consensus
+from src.runtime.filesystem import is_fs_save_rank
+from src.runtime.ranks import get_global_rank, is_global_main_process, is_multi_rank_run
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +37,7 @@ CHECKPOINT_DIR_RE = re.compile(rf"^{PREFIX_CHECKPOINT_DIR}-(\d+)$")
 
 def all_ranks_ok(local_ok: bool) -> bool:
     """True when every rank succeeded — see :func:`rank_consensus`."""
-    return rank_consensus(local_ok)[0]
+    return rank_consensus(local_ok).all_ok
 
 
 def _torn_partial(what: str, checkpoint: str, remedy: str) -> str:
@@ -89,9 +84,9 @@ def consensus_read(
     # are what makes the pick below identical on every rank.
     candidates = (paths,) if isinstance(paths, str) else tuple(paths)
     presence = [rank_consensus(os.path.isfile(path)) for path in candidates]
-    local_path = next((path for path, (present_all, _) in zip(candidates, presence, strict=True) if present_all), None)
+    local_path = next((path for path, present in zip(candidates, presence, strict=True) if present.all_ok), None)
     if local_path is None:
-        if any(present_any for _present_all, present_any in presence):
+        if any(present.any_ok for present in presence):
             raise RuntimeError(_torn_partial(what, checkpoint, remedy))
         return None, None
 
@@ -176,7 +171,7 @@ def resolve_resume_checkpoint(output_dir: str, requested: str | None = None) -> 
 
 def _complete_on_every_rank(checkpoint: str) -> bool:
     """COLLECTIVE. On a non-shared FS each node reads its own copy, so the verdict is a world one."""
-    return rank_consensus(os.path.isfile(os.path.join(checkpoint, TRAINER_STATE_NAME)))[0]
+    return rank_consensus(os.path.isfile(os.path.join(checkpoint, TRAINER_STATE_NAME))).all_ok
 
 
 def _incomplete_reason(checkpoints: list[str]) -> str:
@@ -204,7 +199,7 @@ def _world_step_directories(output_dir: str, requested: str | None) -> list[str]
     same exception on every rank.
     """
     local: list[str] | Exception = []
-    if fs_aware_save_rank():
+    if is_fs_save_rank():
         try:
             local = _local_step_directories(output_dir)
         except OSError as e:
@@ -235,7 +230,7 @@ def _world_step_directories(output_dir: str, requested: str | None) -> list[str]
 def _set_aside_incomplete(output_dir: str, checkpoints: list[str]) -> None:
     """COLLECTIVE. Move each save rank's copies of ``checkpoints`` out of the step-directory namespace."""
     guard = DeferredRankFailure(f"Moving the incomplete checkpoints out of {output_dir}")
-    if fs_aware_save_rank():
+    if is_fs_save_rank():
         guard.run(partial(_move_into_holding, output_dir, checkpoints))
     guard.reject()
 

@@ -1,7 +1,7 @@
 """TP model checkpointing: every TP rank reconstructs its full tensors, one save rank writes a
 single HF-standard safetensors checkpoint.
 
-One global rank writes on a shared FS, one rank per node on a per-node FS (``fs_aware_save_rank``).
+One global rank writes on a shared FS, one rank per node on a per-node FS (``is_fs_save_rank``).
 Not ``tp_rank == 0``: several TP groups per node would then race on identical files.
 """
 
@@ -17,16 +17,13 @@ from src.distributed.checkpoint.write import (
     saveable_items,
     stream_gathered_checkpoint,
 )
-from src.distributed.runtime import (
-    barrier_on_exit,
-    fs_aware_makedirs,
-    fs_aware_save_rank,
-)
 from src.distributed.tensor_parallel.state_dict import (
     gather_tp_sharded_non_dtensor_params,
     tp_sharded_non_dtensor_suffixes,
 )
 from src.models.unwrapping import unwrap_toolkit_wrappers
+from src.runtime.collectives import barrier_on_exit
+from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +44,7 @@ def save_tp_model(
     """
     fs_aware_makedirs(output_dir)
 
-    is_save_rank = fs_aware_save_rank()
+    is_save_rank = is_fs_save_rank()
 
     if is_save_rank:
         logger.info(f"Saving TP model to {output_dir}...")

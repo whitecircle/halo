@@ -11,7 +11,8 @@ import torch
 from transformers import TrainerCallback
 from transformers.utils import logging
 
-from src.distributed.runtime import is_global_main_process, local_numel
+from src.runtime.dtensor import local_numel
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.get_logger(__name__)
 

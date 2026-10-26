@@ -31,10 +31,10 @@ from transformers import AutoConfig, GptOssConfig, GptOssForCausalLM
 
 import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
 import src.distributed.expert_parallel.loading as ep_loading
-import src.distributed.runtime as runtime
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner, ExpertFuser, load_ep_model_lazy
 from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
+from src.runtime import consensus
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.repo import REPO_ROOT
 
@@ -359,7 +359,7 @@ def rejections(monkeypatch) -> list[tuple[str | None, str]]:
         if local_reason:
             raise exc_type(f"{what}: {local_reason}")
 
-    monkeypatch.setattr(runtime, "reject_across_ranks", _record)
+    monkeypatch.setattr(consensus, "reject_across_ranks", _record)
     return calls
 
 

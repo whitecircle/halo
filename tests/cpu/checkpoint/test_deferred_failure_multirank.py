@@ -20,7 +20,7 @@ import os
 import pytest
 import torch.distributed as dist
 
-from src.distributed.runtime import DeferredRankFailure
+from src.runtime.consensus import DeferredRankFailure
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

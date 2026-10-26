@@ -24,7 +24,6 @@ from torch.distributed.fsdp import (
 from transformers.modeling_utils import PreTrainedModel
 
 from src.distributed.mesh import MeshDim, create_dp_mesh, create_dp_tp_mesh, mesh_dim_names
-from src.distributed.runtime import is_global_main_process
 from src.model_loading.dtype import resolve_training_dtype
 from src.models.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
@@ -32,8 +31,9 @@ from src.models.module_tree import (
     decoder_layers,
     input_embedding_backbone,
 )
-from src.models.param_roles import fp32_pinned_param_names
+from src.models.param_roles import fp32_pinned_names
 from src.models.unwrapping import base_transformers_model
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +190,7 @@ def _warn_fp32_pins_cast_by_policy(model: nn.Module, mp_policy: MixedPrecisionPo
     """
     if mp_policy.param_dtype in (None, torch.float32):
         return
-    pinned = fp32_pinned_param_names(model)
+    pinned = fp32_pinned_names(model)
     cast_params = [name for name, p in model.named_parameters() if p.dtype == torch.float32 and name in pinned]
     if not cast_params or not is_global_main_process():
         return

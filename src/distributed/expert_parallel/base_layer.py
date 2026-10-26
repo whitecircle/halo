@@ -24,30 +24,30 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
-from src.diagnostics.performance_monitor import get_performance_monitor
+from src.diagnostics.ep_span_timing import get_ep_span_timer
 from src.distributed.expert_parallel.autograd import ReplayCombineFunction, ReplayDispatchFunction
 from src.distributed.expert_parallel.balancing import EPRouterBalancingMixin
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.dispatcher import DeepEPDispatcher
 from src.distributed.expert_parallel.expert_gather import EPExpertGatherMixin
-from src.distributed.expert_parallel.gc_scope import (
-    active_checkpoint_scope,
-    in_backward_pass,
-)
 from src.distributed.expert_parallel.grad_sync import (
     create_expert_grad_hook,
     create_router_grad_hook,
     has_grad_sync_peers,
 )
 from src.distributed.grad_reduce import SumGradAcrossGroup
-from src.distributed.runtime import is_global_main_process
 from src.env import env_flag
 from src.hardware import current_device, supports_grouped_mm
-from src.kernels.fused_glu import FusedGluMul, fused_glu_enabled, packed_glu_mul, resolve_fused_glu_mul
-from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
-from src.kernels.grouped_mm_autograd import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
+from src.kernels.expert_gemm import expert_gemm
+from src.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
+from src.kernels.grouped_mm import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
 from src.kernels.histogram import sync_free_bincount
+from src.kernels.lowp.spec import QuantFormat
 from src.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map, warm_permute_kernels
+from src.models.gradient_checkpointing import (
+    active_recompute_scope,
+    in_backward_pass,
+)
 from src.models.moe_balancing import (
     ROUTER_TOPK_FIELDS,
     NativeBalancingSlot,
@@ -57,6 +57,7 @@ from src.models.moe_balancing import (
     register_native_balancing_slot,
     register_source_config_schema,
 )
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     """
 
     # Fused GLU-combine kernel, derived from the resolved activation by ``_resolve_activation``; None = eager.
-    _fused_glu_mul: FusedGluMul | None = None
+    _fused_glu_mul: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
 
     # False where routing replay is unimplementable: Gemma4 (external router) and Zaya (cross-layer state).
     _supports_routing_replay: bool = True
@@ -384,7 +385,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         # Low-precision expert compute, set per-layer through set_lowp_compute(). Not cacheable when
         # experts are FSDP2-managed: the unsharded param's version counter is pinned, so the per-step quant
         # cache would serve step-0 weights forever.
-        self._lowp_precision = GroupedGemmPrecision.BF16
+        self._lowp_quant_format: QuantFormat | None = None
         self._lowp_weight_cacheable = True
 
         # Built by _init_expert_lora; empty set = no LoRA, so the hot path is one set-membership check.
@@ -408,21 +409,24 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         # HALO_EP_PERF_PROFILE=1 → CUDA-event phase timers (per-phase syncs, diagnostic runs only); off → label.
         self._perf: Callable[[str], contextlib.AbstractContextManager]
         if env_flag("HALO_EP_PERF_PROFILE"):
-            self._perf = get_performance_monitor().time_operation
+            self._perf = get_ep_span_timer().time_operation
         else:
             self._perf = torch.profiler.record_function
 
     def _glu_combine_name(self) -> str:
         """The GLU combine this layer runs, for the construction-time summary.
 
-        Read off the latch itself, so the reported name matches what runs, including a family that binds
-        its own clamp into it (a ``functools.partial``, which carries no ``__name__``, or a bound
-        method), and is ``eager`` under ``HALO_FUSED_GLU=0``, where every latched kernel runs its eager
-        form. GptOss, whose interleaved-bias paths never reach :meth:`_glu_combine`, names its own.
+        Read off the latch itself, so the reported name matches what runs: a :class:`GluCombine`'s name, or
+        the name of a family's own latched callable (a ``functools.partial``'s function, a bound method),
+        and ``eager`` under ``HALO_FUSED_GLU=0``, where every latched kernel runs its eager form. GptOss,
+        whose interleaved-bias paths never reach :meth:`_glu_combine`, names its own.
         """
-        combine = getattr(self._fused_glu_mul, "func", self._fused_glu_mul)  # a partial → the kernel it binds
+        combine = self._fused_glu_mul
         if combine is None or not fused_glu_enabled():
             return "eager"
+        if isinstance(combine, GluCombine):
+            return combine.name
+        combine = getattr(combine, "func", combine)
         return getattr(combine, "__name__", type(combine).__name__)
 
     def _shared_expert_summary_field(self) -> tuple[str, ...]:
@@ -467,11 +471,11 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     def _in_gc_recompute() -> bool:
         """True during the gradient-checkpoint backward recompute of this layer.
 
-        The enclosing :class:`~src.distributed.expert_parallel.gc_scope.EPCheckpointScope` counts passes
+        The enclosing :class:`~src.models.gradient_checkpointing.RecomputeScope` counts passes
         through the checkpointed body, so this holds for both checkpoint modes; grad mode alone would
         not, since the non-reentrant checkpoint runs both passes with grad enabled.
         """
-        scope = active_checkpoint_scope()
+        scope = active_recompute_scope()
         return scope is not None and scope.is_recompute
 
     def _maybe_replace_selection(self, topk_indices: torch.Tensor) -> torch.Tensor:
@@ -487,7 +491,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         if forced_full is None:
             return topk_indices
         tokens = topk_indices.size(0)
-        scope = active_checkpoint_scope()
+        scope = active_recompute_scope()
         slot = scope.slot(self, "routing") if scope is not None else {}
         if scope is not None and scope.is_recompute:
             # The scope raises if this frame's original forward never made the matching call.
@@ -552,17 +556,17 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         invalidates the handle the original forward's backward node still holds, corrupting every
         gradient in the stage without raising. The first pass through the checkpointed body therefore
         caches detached results in its
-        :class:`~src.distributed.expert_parallel.gc_scope.EPCheckpointScope` and the recompute replays
+        :class:`~src.models.gradient_checkpointing.RecomputeScope` and the recompute replays
         them. Outside a checkpoint (and for the inert ep1 dispatcher) this is a plain dispatch.
         """
         if self.dispatcher._noop:  # ep1: no transport, nothing to protect
             return self.dispatcher.dispatch(flat, experts, weights)
-        scope = active_checkpoint_scope()
+        scope = active_recompute_scope()
         if scope is None:
             if self.training and in_backward_pass():
                 raise RuntimeError(
                     f"{type(self).__name__}: training forward inside backward with no EP checkpoint "
-                    f"scope — gradient checkpointing was re-enabled without install_ep_checkpoint_scopes "
+                    f"scope — gradient checkpointing was re-enabled without install_recompute_scopes "
                     f"(TRL's disable_gradient_checkpointing context manager re-installs a bare "
                     f"checkpoint on exit). A second DeepEP dispatch here corrupts every gradient."
                 )
@@ -596,7 +600,7 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     def _gc_combine(self, output, recv_topk_weights, handle):
         """Combine, replaying this checkpoint frame's cached result during recompute (see
         :meth:`_gc_dispatch` — the combine writes the same shared buffer)."""
-        scope = active_checkpoint_scope()
+        scope = active_recompute_scope()
         if scope is None or self.dispatcher._noop:
             return self.dispatcher.combine(output, recv_topk_weights, handle)
 
@@ -826,10 +830,10 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         """Combine the GLU halves into the activated intermediate: ``act_fn(gate) * up``.
 
         The seam every base GLU compute path (fused/separate loop, grouped-GEMM, ETP separate-GLU)
-        combines through. A family with a non-standard combine latches its kernel in ``_fused_glu_mul``
-        (DeepSeek-V4 and GLM-5 Next a clamp-binding ``functools.partial`` of the clamped SwiGLU) rather
-        than overriding this method, which :meth:`_glu_combine_packed` bypasses for a latch with a packed
-        form. GptOss's interleaved-bias compute paths never reach it.
+        combines through. A family with a non-standard combine latches it in ``_fused_glu_mul``
+        (DeepSeek-V4 and GLM-5 Next :meth:`GluCombine.clamped_silu`) rather than overriding this method,
+        which :meth:`_glu_combine_packed` bypasses for a :class:`GluCombine` latch. GptOss's
+        interleaved-bias compute paths never reach it.
 
         A fused kernel is used where the activation is one the kernels implement (SiLU, tanh-GELU),
         selected by :meth:`_resolve_activation` from the activation itself rather than a per-family flag.
@@ -841,14 +845,11 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
     def _glu_combine_packed(self, gate_up: torch.Tensor) -> torch.Tensor:
         """:meth:`_glu_combine` over a fused ``[gate | up]`` projection output.
 
-        When the latched combine has a packed form (:func:`~src.kernels.fused_glu.packed_glu_mul`, which
-        also sees through a clamp-binding ``functools.partial``), the kernel reads both halves in place
-        and returns one ``[..., 2M]`` gradient; any other combine takes the chunked path through
-        :meth:`_glu_combine`.
+        A :class:`GluCombine` latch reads both halves in place (:meth:`GluCombine.packed`) and returns one
+        ``[..., 2M]`` gradient; any other combine takes the chunked path through :meth:`_glu_combine`.
         """
-        packed = packed_glu_mul(self._fused_glu_mul)
-        if packed is not None:
-            return packed(gate_up)
+        if isinstance(self._fused_glu_mul, GluCombine):
+            return self._fused_glu_mul.packed(gate_up)
         gate, up = gate_up.chunk(2, dim=-1)
         return self._glu_combine(gate, up)
 
@@ -947,16 +948,16 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         lowp: bool = True,
     ) -> torch.Tensor:
         """Grouped GEMM for expert FFNs at this layer's compute precision (bf16 unless a low-precision
-        mode was enabled via :func:`~src.kernels.lowp.mixed_precision.apply_mixed_precision_compute`).
+        mode was enabled via :func:`~src.model_loading.parallel.lowp_compute.apply_lowp_compute`).
         ``lowp=False`` forces bf16 for operands that must not be fake-quantized (LoRA adapters).
 
         No fused bias: the families that carry expert biases add them through ``MoEExpertBiasGather``,
         whose backward is an atomic-free GEMM rather than a bf16 atomic scatter."""
-        return grouped_gemm(
+        return expert_gemm(
             mat_a,
             mat_b,
             offs=offs,
-            precision=self._lowp_precision if lowp else GroupedGemmPrecision.BF16,
+            quant_format=self._lowp_quant_format if lowp else None,
             weight_cacheable=self._lowp_weight_cacheable,
         )
 
@@ -1052,14 +1053,14 @@ class EPMoELayerBase(EPExpertGatherMixin, EPRouterBalancingMixin, nn.Module, ABC
         ``expert_tp_size <= 1`` (ETP stores gate/up under the plain loop names, not the ``*_gmm`` pair)."""
         return self._use_grouped_mm
 
-    def set_lowp_compute(self, precision: GroupedGemmPrecision, *, weight_cacheable: bool) -> bool:
-        """Set this layer's expert-compute precision; return whether the layer can apply it.
+    def set_lowp_compute(self, quant_format: QuantFormat, *, weight_cacheable: bool) -> bool:
+        """Set this layer's expert-compute quantization format; return whether the layer can apply it.
 
-        Written through by :func:`~src.kernels.lowp.mixed_precision.apply_mixed_precision_compute`.
+        Written through by :func:`~src.model_loading.parallel.lowp_compute.apply_lowp_compute`.
         False means this layer runs the per-expert loop, where the grouped kernels — and with them the
         fake-quant — never execute.
         """
-        self._lowp_precision = precision
+        self._lowp_quant_format = quant_format
         self._lowp_weight_cacheable = weight_cacheable
         return self._grouped_mm_enabled()
 

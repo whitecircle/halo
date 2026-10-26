@@ -19,13 +19,8 @@ from src.distributed.group_layout import (
     node_local_groups_per_domain,
     node_local_rank_and_group,
 )
-from src.distributed.runtime import (
-    get_global_rank,
-    get_global_world_size,
-    get_local_world_size,
-    get_nccl_timeout,
-    is_global_main_process,
-)
+from src.env import nccl_timeout
+from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +123,7 @@ class CPConfig:
         for base in range(0, get_global_world_size(), self.world_size):
             for group_idx in range(num_cp_groups):
                 cp_group_ranks = [base + r for r in node_local_group_ranks(group_idx, domain_size, self.cp_size)]
-                group = dist.new_group(cp_group_ranks, timeout=get_nccl_timeout())
+                group = dist.new_group(cp_group_ranks, timeout=nccl_timeout())
                 if base == self.rank_offset and group_idx == self.cp_group_idx:
                     self.process_group = group
                     self._cp_group_ranks = cp_group_ranks

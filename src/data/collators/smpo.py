@@ -114,3 +114,13 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
         for key, values in sequence_features.items():
             output[key] = pad(values, padding_value=0, padding_side="left")
         return output
+
+
+def flush_rows_left(attention_mask: torch.Tensor, *tensors: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Roll each row left by its leading-pad count, so every pad trails its real tokens; ``tensors``
+    share the mask's shape and move with it, and the mask returns first. Unlike TRL's ``flush_left``
+    no column is truncated, so nothing is read back from the device."""
+    width = attention_mask.size(1)
+    leading_pads = (attention_mask.cumsum(dim=1) == 0).sum(dim=1, keepdim=True)
+    index = (torch.arange(width, device=attention_mask.device) + leading_pads) % width
+    return tuple(tensor.gather(1, index) for tensor in (attention_mask, *tensors))

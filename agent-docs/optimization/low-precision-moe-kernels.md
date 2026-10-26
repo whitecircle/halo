@@ -14,7 +14,9 @@ The unconditional low-precision win is **inference memory**: convert the checkpo
 | **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Slower than bf16 (mxfp8 ≈8× a bf16 step, fp4 ≈17–19×) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
 | **DeepGEMM native** (fp8/fp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Net-slower than bf16 at every training shape (0.05–0.07× at production shapes) | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
 
-The apply layer is `src/kernels/lowp/mixed_precision.py`, called pre-FSDP in `load_distributed_model`: it converts the dense MLP `gate_proj`/`up_proj`/`down_proj` (attention, embeddings, `lm_head`, and norms stay bf16) and sets per-EP-layer precision from `lowp_precision` / `lowp_apply_*`. `lowp_keep_first_blocks` / `lowp_keep_last_blocks` exempt whole blocks, counted over the text backbone only so a vision tower's `layers.N` is not miscounted.
+The `lowp_*` keys build one `LowpSpec` (`src/kernels/lowp/spec.py`), carried as `ParallelismConfig.lowp` and validated there (`LowpSpec.validate`). `LOWP_RECIPES` maps each `lowp_precision` mode to its block-scaled `QuantFormat` and the peak-FLOPS key the MFU callback scores it against; the EP layers, the dense linear and the export tool all read it.
+
+The apply step is `apply_lowp_compute(model, lowp, *, expert_weight_cacheable)` (`src/model_loading/parallel/lowp_compute.py`), called pre-FSDP in `load_distributed_model`: it converts the dense MLP `gate_proj`/`up_proj`/`down_proj` (attention, embeddings, `lm_head`, and norms stay bf16) and sets each EP layer's expert quant format (`set_lowp_compute`) per `lowp_apply_*`. `lowp_keep_first_blocks` / `lowp_keep_last_blocks` exempt whole blocks, counted over the text backbone only so a vision tower's `layers.N` is not miscounted.
 
 **The dense conversion is in place, not a rebuild.** `LowPrecisionLinear.convert_` (`src/kernels/lowp/linear.py`) retypes the existing `nn.Linear` (`linear.__class__ = cls`) and attaches one attribute.
 
@@ -113,7 +115,7 @@ That bit-identity holds for any block whose amax is within `2^-16` of the tensor
 | DeepGEMM native fp8 | e4m3 | UE8M0 (pow-2) | act 1×128, weight 128×128 | — | (native kernel) |
 | DeepGEMM native fp4 | e2m1 (act fp8) | UE8M0 | weight 1×32 | — | (native kernel) |
 
-`lowp_precision` exposes three formats: **`fp8`** = mxfp8; **`fp4`** = nvfp4 (the accurate fp4; validate an nvfp4 deployment); **`mxfp4`** = OCP fp4, whose power-of-two scale lets its cached weight quant compile bit-identically (~6× cheaper than nvfp4's eager weight quant, helps at low gradient-accumulation). All three converge; pick by deployment target.
+`lowp_precision` exposes three formats (`LOWP_RECIPES`): **`fp8`** = mxfp8; **`fp4`** = nvfp4 (the accurate fp4; validate an nvfp4 deployment); **`mxfp4`** = OCP fp4, whose power-of-two scale lets its cached weight quant compile bit-identically (~6× cheaper than nvfp4's eager weight quant, helps at low gradient-accumulation). All three converge; pick by deployment target.
 
 In the cache-hit steady state both fp4 formats are bounded by the eager activation quant, so their per-microbatch cost is similar; fp8 is cheaper because its activation quant is lighter. DeepGEMM's native recipes (UE8M0 scales over 1×128 activation groups, and 128×128 blocks for the fp8 weight) are coarser still; use the simulated path when you need exact mx/nv numerics.
 
@@ -148,7 +150,7 @@ hit. Narrow `--include`/`--exclude` to the text backbone, or export without a wi
 
 This writes a compressed-tensors checkpoint for MLP/expert weights, copying attention/norm/embed/bias unchanged.
 
-Which names those are is **derived** from the two rosters that decide what QAT quantized — `MLP_PROJECTIONS` (the dense projections `apply_mixed_precision_compute` converts) and the EP layer classes' declared expert layouts, fused (`_HF_FUSED_EXPERT_KEYS`, the same declaration the sharded merge and the un-fuse tool read) and per-expert un-fused (`gate_proj`/`up_proj`/`down_proj`, `w1`/`w3`/`w2`) — so the export cannot quantize a weight the training forward left in bf16.
+Which names those are is **derived** from the two rosters that decide what QAT quantized — `MLP_PROJECTIONS` (the dense projections `apply_lowp_compute` converts) and the EP layer classes' declared expert layouts, fused (`_HF_FUSED_EXPERT_KEYS`, the same declaration the sharded merge and the un-fuse tool read) and per-expert un-fused (`gate_proj`/`up_proj`/`down_proj`, `w1`/`w3`/`w2`) — so the export cannot quantize a weight the training forward left in bf16.
 
 A dense projection spelled like a per-expert roster name but outside an expert container (LFM-2's dense `feed_forward.w1`) is left in bf16, as training left it. `--no-lowp_apply_moe_experts` declares the experts out of scope when training left them in bf16.
 
@@ -188,6 +190,6 @@ Rejected at config/load time, loudly: any trainer but SFT; a `quantization_confi
 
 `lowp_apply_moe_experts` reaches the experts only on the grouped-GEMM path (`EPMoELayerBase._grouped_mm`). A layer running the per-expert loop instead (`use_grouped_gemm: false`, e.g. `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml` at ep16, or ETP on gpt-oss) ignores the precision and stays bf16 on its experts. Set `use_grouped_gemm: true` to apply low precision to the experts.
 
-`apply_mixed_precision_compute` warns with the count of loop-path layers, and raises when the whole request converted zero modules (a fused-expert MoE with no EP wrappers would otherwise train pure bf16 with no signal).
+`apply_lowp_compute` warns with the count of loop-path layers, and raises when the whole request converted zero modules (a fused-expert MoE with no EP wrappers would otherwise train pure bf16 with no signal).
 
 Native expert-LoRA adapters always compute in bf16 under lowp: block-scale quantization along the rank axis is unrepresentable for common ranks and no serving stack quantizes adapters.

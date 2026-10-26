@@ -28,16 +28,11 @@ from datasets import Dataset
 
 from src.checkpoint.atomic import link_or_copy_file
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
-from src.distributed.filesystem import store_reject_across_ranks
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    broadcast_from_rank0,
-    collective_device,
-    fs_aware_save_rank,
-    get_global_rank,
-    get_global_world_size,
-    get_nccl_timeout,
-)
+from src.env import nccl_timeout
+from src.runtime.collectives import broadcast_from_rank0, collective_device
+from src.runtime.consensus import DeferredRankFailure, store_reject_across_ranks
+from src.runtime.filesystem import is_fs_save_rank
+from src.runtime.ranks import get_global_rank, get_global_world_size
 from src.trainers.mixins.reference_logps import REFERENCE_SCAN_ROWS
 
 logger = logging.getLogger(__name__)
@@ -159,7 +154,7 @@ def _create_launch_cache_directory(output_dir: str | os.PathLike) -> str:
         os.makedirs(directory)
 
     guard = DeferredRankFailure("Creating the offline GRPO reference cache")
-    if fs_aware_save_rank():
+    if is_fs_save_rank():
         guard.run(create)
     guard.reject()
     return directory
@@ -176,7 +171,7 @@ def stage_checkpoint_file(output_dir: str | os.PathLike, source: str) -> str:
     """
     staged = os.path.join(_create_launch_cache_directory(output_dir), os.path.basename(source))
     guard = DeferredRankFailure(f"Staging {source} into the reference scratch")
-    if fs_aware_save_rank() and os.path.isfile(source):
+    if is_fs_save_rank() and os.path.isfile(source):
         guard.run(lambda: link_or_copy_file(source, staged))
     guard.reject()
     return staged
@@ -184,7 +179,7 @@ def stage_checkpoint_file(output_dir: str | os.PathLike, source: str) -> str:
 
 def reference_cache_writers() -> tuple[int, ...]:
     """Gather actual filesystem owners once, sharing the checkpoint writer predicate."""
-    owner = torch.tensor([int(fs_aware_save_rank())], dtype=torch.int64, device=collective_device())
+    owner = torch.tensor([int(is_fs_save_rank())], dtype=torch.int64, device=collective_device())
     if get_global_world_size() == 1:
         return (0,) if bool(owner.item()) else ()
     gathered = [torch.empty_like(owner) for _ in range(get_global_world_size())]
@@ -246,7 +241,7 @@ class ReferenceScoreCache:
     def discard(self) -> None:
         """Remove this cache after a failure, without requiring a healthy process group. A transfer group
         is left to process teardown: the failure may have stranded a transfer on it."""
-        if fs_aware_save_rank() and os.path.isdir(self.directory):
+        if is_fs_save_rank() and os.path.isdir(self.directory):
             _remove_scratch(self.directory)
 
     def _append(self, shard: int, kind: str, values: torch.Tensor) -> None:
@@ -274,7 +269,7 @@ class ReferenceScoreCache:
             writer != source for writer in self.writers for source in representatives.values()
         ):
             members = sorted({*self.writers, *representatives.values()})
-            self._transfer_group = dist.new_group(members, timeout=get_nccl_timeout())
+            self._transfer_group = dist.new_group(members, timeout=nccl_timeout())
         return self._transfer_group
 
     def collect_batch(self, rows: list[torch.Tensor] | None, representatives: dict[int, int]) -> None:
@@ -373,7 +368,7 @@ class ReferenceScoreCache:
             if mismatch:
                 raise ValueError(f"Incomplete offline GRPO reference cache: {mismatch}")
 
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             guard.run(merge)
         store_reject_across_ranks(
             f"reference-cache/{os.path.basename(self.directory)}/merge", guard.reason, guard.what, exc_type=ValueError

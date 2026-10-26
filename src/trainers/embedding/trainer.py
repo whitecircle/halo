@@ -61,23 +61,18 @@ from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
 from src.distributed.checkpoint.save import mark_resume_adapter_complete, save_checkpoint
-from src.distributed.checkpoint.write import gather_saveable_tensors, resolve_retained
+from src.distributed.checkpoint.write import gather_saveable_tensors
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import (
-    barrier_on_exit,
-    broadcast_from_rank0,
-    copy_full_tensor,
-    fs_aware_makedirs,
-    fs_aware_save_rank,
-    is_global_main_process,
-    launcher_global_world_size,
-    reject_across_ranks,
-)
 from src.log import KEY_PREVIEW_COUNT
 from src.models.param_roles import persistent_buffers
-from src.models.structure import lora_fold_targets, lora_folded_data, tuner_adapter_param_ids
+from src.models.peft_adapters import lora_fold_targets, lora_folded_data, tuner_adapter_param_ids
 from src.models.unwrapping import strip_base_layer_segment
+from src.runtime.collectives import barrier_on_exit, broadcast_from_rank0
+from src.runtime.consensus import reject_across_ranks
+from src.runtime.dtensor import copy_full_tensor, resolve_retained
+from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
+from src.runtime.ranks import is_global_main_process, launcher_global_world_size
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import keep_all_dataset_columns
 
@@ -188,7 +183,7 @@ def _folded_backbone_items(backbone: nn.Module) -> Iterator[tuple[str, torch.Ten
 
     The injected model is not a ``PeftModel``, so a plain save would write the adapter keys verbatim
     and reload as random base weights. Each base tensor a LoRA layer adapts is folded out of place
-    with PEFT's merge (:func:`~src.models.structure.lora_folded`), the tensors the tuner layers own are
+    with PEFT's merge (:func:`~src.models.peft_adapters.lora_folded`), the tensors the tuner layers own are
     dropped (by identity, so a backbone's own ``lora_``-named parameters stay) and ``base_layer`` is
     spelled out, one tensor at a time. Under FSDP2 each fold is a DTensor collective, issued in
     ``named_parameters`` order on every rank.
@@ -393,7 +388,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             )
 
     def _validate_injected_lora_foldable(self) -> None:
-        """Refuse an injected adapter the save cannot fold (:func:`~src.models.structure.lora_fold_targets`:
+        """Refuse an injected adapter the save cannot fold (:func:`~src.models.peft_adapters.lora_fold_targets`:
         ``nn.MultiheadAttention`` LoRA, trainable tokens, a variant other than DoRA). Structural, so it
         raises here on every rank rather than on the save rank alone at the first checkpoint, where its
         peers would block in the save's next collective.
@@ -629,7 +624,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             return
         model = self._top_level_model()
         reshard_fsdp2_modules(model)
-        is_save_rank = fs_aware_save_rank()
+        is_save_rank = is_fs_save_rank()
         state = resolve_retained(_trainable_tensors(model).items(), retain=is_save_rank)
         # The scaling the adapters trained at, which the resume holds its own to.
         peft_config = self._injected_lora_config()
@@ -775,7 +770,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
 
             # Same FS-aware save rank, so each node's dir is complete on a non-shared filesystem.
             model = self._top_level_model()
-            if fs_aware_save_rank() and isinstance(model, SentenceTransformer):
+            if is_fs_save_rank() and isinstance(model, SentenceTransformer):
                 self._save_st_pipeline_config(model, output_dir)
 
     def _resolve_tokenizer(self, model: nn.Module) -> PreTrainedTokenizerBase | None:

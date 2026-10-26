@@ -26,9 +26,9 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 from src.distributed.expert_parallel.base_layer import _WARMUP_TOKENS
-from src.distributed.expert_parallel.gc_scope import active_checkpoint_scope, scoped_checkpoint_func
 from src.distributed.expert_parallel.layers import gpt_oss as gpt_oss_layer
 from src.kernels import fused_glu, moe_permute
+from src.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
 from tests.common.ep_stubs import StubEPLayerBase
 
 HIDDEN, INTER, LOCAL_EXPERTS = 6, 4, 2
@@ -227,7 +227,7 @@ class _ScopeCachingLayer(_RecordingLayer):
     """A layer whose dispatch takes a replay slot, the way ``EPMoELayerBase._gc_dispatch`` does."""
 
     def _gc_dispatch(self, flat, experts, weights):
-        active_checkpoint_scope().slot(self, "dispatch").setdefault("flat", flat.detach())
+        active_recompute_scope().slot(self, "dispatch").setdefault("flat", flat.detach())
         return super()._gc_dispatch(flat, experts, weights)
 
     def _compute_experts(self, tokens, experts, weights, output_dtype):
@@ -287,12 +287,10 @@ def test_warm_halves_carry_the_stride_the_compute_path_produces(layer_cls, expec
 
 
 def _gpt_oss_stub(*, grouped_mm: bool, expert_tp_size: int) -> gpt_oss_layer.EPGptOssMoELayer:
-    """A GptOss layer carrying only what its warm hook reads — its compute-path selection and constants."""
+    """A GptOss layer carrying only its compute-path selection; each test latches its own combine."""
     layer = object.__new__(gpt_oss_layer.EPGptOssMoELayer)
     layer._use_grouped_mm = grouped_mm
     layer.expert_tp_size = expert_tp_size
-    layer.alpha = 1.702
-    layer.limit = 7.0
     return layer
 
 
@@ -304,23 +302,16 @@ def _gpt_oss_stub(*, grouped_mm: bool, expert_tp_size: int) -> gpt_oss_layer.EPG
         (False, 2, True),  # ETP loop: the same de-interleaved storage
     ),
 )
-def test_gptoss_warms_the_activation_its_compute_path_calls(
-    monkeypatch, grouped_mm, expert_tp_size, contiguous_halves
-):
+def test_gptoss_warms_the_activation_its_compute_path_calls(grouped_mm, expert_tp_size, contiguous_halves):
     """GptOss's activation is not behind the base GLU seam, and its paths reach the same kernel with
     different operands — the loop path splits a strided view out of one interleaved projection output,
     the grouped and ETP paths hold the halves de-interleaved. Warming the wrong layout warms a
     different amount of work than the run does."""
     called = []
-    monkeypatch.setattr(
-        gpt_oss_layer,
-        "fused_gptoss_glu",
-        lambda gate, up, alpha, limit: called.append(("fused_gptoss_glu", gate.is_contiguous())) or gate,
-    )
-    _gpt_oss_stub(grouped_mm=grouped_mm, expert_tp_size=expert_tp_size)._warm_expert_activation(
-        torch.randn(4, 2 * INTER)
-    )
-    assert called == [("fused_gptoss_glu", contiguous_halves)]
+    layer = _gpt_oss_stub(grouped_mm=grouped_mm, expert_tp_size=expert_tp_size)
+    layer._gptoss_glu = lambda gate, up: called.append(gate.is_contiguous()) or gate
+    layer._warm_expert_activation(torch.randn(4, 2 * INTER))
+    assert called == [contiguous_halves]
 
 
 if __name__ == "__main__":

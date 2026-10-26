@@ -6,7 +6,7 @@ map/filter and have the others load its cache file. Two properties are asserted,
 cache directory that every rank SHARES — with a per-rank temp dir the calls degenerate to "every rank
 maps its own copy" and every assertion below still passes, testing nothing:
 
-1. writer election — exactly the ``fs_aware_load_rank()`` ranks execute the map/filter body (the
+1. writer election — exactly the ``is_fs_load_rank()`` ranks execute the map/filter body (the
    map fills a cache the peers then read, so it follows the INPUT flag: shared → global rank 0
    only; non-shared → each node's local rank 0);
 2. cache reuse — the non-writer ranks get byte-identical results without running the body.
@@ -35,12 +35,9 @@ from src.data.pipeline.processing import (
     coordinated_map,
     process_dataset_with_map_and_filter,
 )
-from src.distributed.runtime import (
-    barrier,
-    fs_aware_load_rank,
-    is_global_main_process,
-    is_input_shared_filesystem,
-)
+from src.runtime.collectives import barrier
+from src.runtime.filesystem import is_fs_load_rank, is_input_shared_filesystem
+from src.runtime.ranks import is_global_main_process
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log, log_all
 
@@ -181,7 +178,7 @@ def check_election(key: str, expected_rows: int) -> bool:
 
     Collective (it gathers), so every rank must reach it — never guard it behind an earlier failure.
     """
-    is_writer = fs_aware_load_rank()
+    is_writer = is_fs_load_rank()
     executed = EXEC_COUNTS[key]
     ok = executed == (expected_rows if is_writer else 0)
     if not ok:

@@ -7,9 +7,8 @@ nothing links the two defaults, so a default changed on one side alone fails sil
 loudly:
 
   * a default that drifts breaks ``parallelism_config_from_args``' non-SFT gate, which compares the
-    parsed ``DistributedArguments`` values against ``ParallelismConfig``'s DEFAULTS
-    (``_LOWP_SHAPE_DEFAULTS``) — a one-sided change makes EVERY non-SFT script reject a config
-    nobody touched;
+    ``LowpSpec`` built from the parsed ``DistributedArguments`` against ``LowpSpec()`` — a one-sided
+    change makes EVERY non-SFT script reject a config nobody touched;
   * ``ep_scope`` in particular must default to ``"auto"`` on both sides: a hand-built config (the
     documented pattern for tests and notebooks) otherwise silently gets a different scope than the
     identical YAML run, and e.g. ``ep_size=16`` on 16 GPUs is rejected instead of resolving global;
@@ -37,8 +36,9 @@ import pytest
 
 from src.args.distributed_args import DistributedArguments
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.lowp.spec import LowpSpec
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.training.parallelism_args import _LOWP_SHAPE_DEFAULTS, parallelism_config_from_args
+from src.training.parallelism_args import parallelism_config_from_args
 from src.training.parser import _literal_choices
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
@@ -57,12 +57,9 @@ _MIRRORED_DEFAULTS = {
     "ep_scope": "ep_scope",
     "ep_buffer_backend": "ep_buffer_backend",
     "pipeline_schedule": "pp_schedule",
-    "lowp_precision": "lowp_precision",
-    "lowp_apply_dense_mlp": "lowp_apply_dense_mlp",
-    "lowp_apply_moe_experts": "lowp_apply_moe_experts",
-    "lowp_keep_first_blocks": "lowp_keep_first_blocks",
-    "lowp_keep_last_blocks": "lowp_keep_last_blocks",
 }
+# The lowp_<field> knobs build ParallelismConfig.lowp, a LowpSpec.
+_LOWP_ARG_FIELDS = {f"lowp_{f.name}": f.name for f in fields(LowpSpec)}
 
 # DistributedArguments fields the builder deliberately never touches, each named with the consumer
 # that reads it instead. Adding an entry must be a decision, not an omission.
@@ -107,9 +104,9 @@ def _dist_args_names_read_by_builder() -> set[str]:
         and node.args[0].id == "dist_args"
         and isinstance(node.args[1], ast.Constant)
     }
-    # Plus the two dynamic reads the AST cannot see: the ``_LOWP_SHAPE_DEFAULTS`` loop, and the
-    # by-name forwarding, which reads every field the two dataclasses spell identically.
-    return names | set(_LOWP_SHAPE_DEFAULTS) | _SAME_NAME_FIELDS
+    # Plus the two dynamic reads the AST cannot see: the ``LowpSpec`` field loop, and the by-name
+    # forwarding, which reads every field the two dataclasses spell identically.
+    return names | set(_LOWP_ARG_FIELDS) | _SAME_NAME_FIELDS
 
 
 def _config_kwargs_built_by_builder() -> set[str]:
@@ -134,13 +131,24 @@ def test_mirrored_default_matches_the_config_field(arg_field, config_field):
     )
 
 
-def test_lowp_shape_gate_compares_against_the_argument_defaults():
-    """``parallelism_config_from_args`` rejects a non-default lowp shape knob outside SFT by
-    comparing the parsed ``DistributedArguments`` value against this table, which is derived from
-    ``ParallelismConfig``. If the two defaults ever diverge the gate fires on an untouched config
-    and every non-SFT script stops running."""
-    arg_defaults = _defaults(DistributedArguments)
-    assert {name: arg_defaults[name] for name in _LOWP_SHAPE_DEFAULTS} == _LOWP_SHAPE_DEFAULTS
+@pytest.mark.parametrize(("arg_field", "spec_field"), sorted(_LOWP_ARG_FIELDS.items()))
+def test_lowp_argument_default_matches_the_spec_field(arg_field, spec_field):
+    """``parallelism_config_from_args`` rejects a non-default lowp shape knob outside SFT by comparing
+    the spec built from the parsed arguments against ``LowpSpec()``. If the two defaults ever diverge
+    the gate fires on an untouched config and every non-SFT script stops running."""
+    assert _defaults(DistributedArguments)[arg_field] == _defaults(LowpSpec)[spec_field]
+
+
+@pytest.mark.parametrize(("arg_field", "spec_field"), sorted(_LOWP_ARG_FIELDS.items()))
+def test_every_lowp_knob_lands_on_the_built_spec(arg_field, spec_field):
+    """A ``lowp_*`` knob set away from its default reaches ``ParallelismConfig.lowp`` on the SFT path."""
+    requested = _non_default_value(arg_field)
+    # Under an enabled mode, so a shape knob is not the bf16 no-op.
+    dist_args = DistributedArguments(**{"lowp_precision": "fp8", arg_field: requested})
+
+    config = parallelism_config_from_args(dist_args, trainer_cls=DistributedTrainerMixin, allow_low_precision=True)
+
+    assert getattr(config.lowp, spec_field) == requested
 
 
 def test_ep_scope_auto_default_resolves_a_hand_built_cross_domain_config():
@@ -159,7 +167,7 @@ def test_ep_scope_auto_default_stays_node_local_within_one_domain():
 def test_every_declared_argument_reaches_the_builder():
     """A knob whose two declarations disagree on the NAME needs an explicit line in
     ``parallelism_config_from_args``; without one it parses, shows in ``--help``, and silently keeps
-    the runtime default — the failure mode the ``lowp_*`` branch already guards for its four knobs.
+    the runtime default.
     (Same-named fields are forwarded by construction — see ``same_name_arg_forwards``.)"""
     declared = {f.name for f in fields(DistributedArguments)}
     unforwarded = declared - _dist_args_names_read_by_builder() - set(_NOT_FORWARDED)

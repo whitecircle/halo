@@ -36,19 +36,11 @@ from src.distributed.expert_parallel.loading import (
 )
 from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
-from src.distributed.filesystem import joined_node_load
 from src.distributed.loading.model_source import resolve_model_source
 from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig, accelerate_launch_rejection
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    get_global_rank,
-    get_local_rank,
-    log_global_load_duration_seconds,
-    reject_across_ranks,
-)
 from src.distributed.tensor_parallel.parallelize_attention import (
     apply_tp_to_attention_only,
     retarget_hf_replicated_grad_hooks,
@@ -58,7 +50,6 @@ from src.distributed.tensor_parallel.tie_plan import consistent_tied_tp_plan, va
 from src.env import is_accelerate_launch
 from src.hardware import is_blackwell_gpu
 from src.kernels.liger.orchestrator import apply_liger_kernel
-from src.kernels.lowp.mixed_precision import apply_mixed_precision_compute
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.dtype import (
     cast_parameters_to_run_dtype,
@@ -71,10 +62,11 @@ from src.model_loading.model_preparation import (
     finalize_run_model,
     resolve_auto_model_class,
 )
+from src.model_loading.parallel.lowp_compute import apply_lowp_compute
 from src.models.config_access import (
-    config_ties_word_embeddings,
     configs_declaring,
     set_config_field_run_scoped,
+    ties_word_embeddings,
 )
 from src.models.moe_balancing import config_has_experts
 from src.models.patches.attention import (
@@ -86,6 +78,9 @@ from src.models.patches.attention import (
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
+from src.runtime.load_coordination import joined_node_load, log_global_load_duration_seconds
+from src.runtime.ranks import get_global_rank, get_local_rank
 
 logger = get_logger(__name__)
 
@@ -416,7 +411,7 @@ def load_distributed_model(
         sinks_pretrained=not init_from_scratch,
     )
 
-    if parallelism_config.lowp_precision != "bf16":
+    if parallelism_config.lowp.enabled:
         if quantization_config is not None:
             raise ValueError(
                 "lowp_precision (low-precision compute) is incompatible with a quantization_config "
@@ -428,14 +423,8 @@ def load_distributed_model(
                 "lowp_precision requires bf16/fp32 master weights, but dtype=float16. "
                 "Set bf16 (the toolkit default) — low precision affects only the GEMM operands."
             )
-        apply_mixed_precision_compute(
-            model,
-            precision=parallelism_config.lowp_precision,
-            apply_dense_mlp=parallelism_config.lowp_apply_dense_mlp,
-            apply_moe_experts=parallelism_config.lowp_apply_moe_experts,
-            keep_first_n_blocks=parallelism_config.lowp_keep_first_blocks,
-            keep_last_n_blocks=parallelism_config.lowp_keep_last_blocks,
-            expert_weight_cacheable=not parallelism_config.experts_fsdp_managed,
+        apply_lowp_compute(
+            model, parallelism_config.lowp, expert_weight_cacheable=not parallelism_config.experts_fsdp_managed
         )
 
     warm_attention_kernels(model, dtype=dtype)
@@ -767,7 +756,7 @@ def _load_tp_model(
         )
     if tp_size > 1:
         reject_plan_sharded_plain_params(model, applied_plan)
-    if config_ties_word_embeddings(model.config):
+    if ties_word_embeddings(model.config):
         validate_tied_pair_consistent(model, applied_plan)
         if tp_size > 1 and not isinstance(model.get_input_embeddings().weight, DTensor):
             logger.warning(

@@ -17,13 +17,13 @@ from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
 from src.callbacks.torch_profiler import TorchProfilerCallback
 from src.distributed.expert_parallel.balancing_strategy import agree_balancing_mode, apply_balancing_strategy
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import get_global_world_size
 from src.models.moe_balancing import (
     BIAS_UPDATE_MODES,
     detect_moe_experts_topk,
     has_discard_expert_slot,
     resolve_balancing_mode,
 )
+from src.runtime.ranks import get_global_world_size
 
 logger = logging.getLogger(__name__)
 

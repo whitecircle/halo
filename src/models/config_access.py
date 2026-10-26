@@ -1,11 +1,9 @@
 """Composite-config level access: read and write a field on every level that declares it.
 
-``PreTrainedConfig`` has no ``__getattr__``, so on a composite (VLM/multimodal) config a decoder
-field lives only on ``get_text_config()`` while others live only on the wrapper, and a one-level read
-returns the default instead. This module provides the level enumeration, the reads and writes built
-on it (plain and run-scoped), and the special-token-id snapshot/restore, so every consumer resolves
-a family's levels the same way.
-"""
+``PreTrainedConfig`` has no ``__getattr__``, so on a composite (VLM) config a decoder field lives only
+on ``get_text_config()`` while others live only on the wrapper, and a one-level read returns the
+default instead. The run-scoped writes, the embedding-tie readers and the special-token snapshot
+build on the same level enumeration."""
 
 import contextlib
 import weakref
@@ -13,7 +11,8 @@ from typing import Any
 
 from transformers.integrations.heterogeneity import AmbiguousGlobalPerLayerAttributeError
 
-_SPECIAL_TOKEN_ID_FIELDS = ("eos_token_id", "bos_token_id", "pad_token_id")
+# The config field every family spells its input/output embedding tie with.
+TIE_WORD_EMBEDDINGS_FLAG = "tie_word_embeddings"
 
 # A field the level did not hold when its value was captured, so the restore removes it rather than
 # writing a value back: a special-token id a composite wrapper lacked until align_special_tokens
@@ -24,28 +23,22 @@ _ABSENT = object()
 # Pre-mutation values of run-scoped config writes, kept outside the config object so nothing carries
 # them into ``to_dict()``/``config.json``. Keyed by ``id``: transformers 5 configs define ``__eq__``
 # without ``__hash__``, which a WeakKeyDictionary rejects.
-_RUN_SCOPED_FIELD_ORIGINALS: dict[int, dict[str, Any]] = {}
+_run_scoped_field_originals: dict[int, dict[str, Any]] = {}
 # Config objects that take no weak reference (a ``__slots__`` stand-in), pinned so their ``id``
 # cannot be recycled onto another config that would inherit their originals, which is the aliasing
 # the finalizer prevents for everything else.
-_RUN_SCOPED_UNFINALIZABLE: list[Any] = []
+_run_scoped_unfinalizable: list[Any] = []
 
 
 def text_config(cfg):
-    """The sub-config carrying the text-model fields; ``cfg`` itself for a plain config.
-
-    A composite (multimodal) config keeps ``model_type``, the head counts and the expert/router
-    fields on its text sub-config, and ``PreTrainedConfig`` defines no ``__getattr__``, so a
-    wrapper-only read returns the default instead of raising.
-    """
+    """The sub-config carrying the text-model fields (``model_type``, head counts, expert/router
+    fields); ``cfg`` itself for a plain config."""
     getter = getattr(cfg, "get_text_config", None)
     return (getter() if callable(getter) else None) or cfg
 
 
 def config_sources(cfg) -> tuple:
-    """``cfg`` plus its text sub-config, deduplicated: every level a field read or write must cover,
-    for the reason :func:`text_config` states. ``get_text_config()`` returns ``self`` for a plain
-    config, which therefore yields one level."""
+    """``cfg`` plus its text sub-config, deduplicated: every level a field read or write must cover."""
     text_cfg = text_config(cfg)
     return (cfg,) if text_cfg is cfg else (cfg, text_cfg)
 
@@ -55,21 +48,35 @@ def model_type_matches(cfg, *prefixes: str) -> bool:
     return any((getattr(level, "model_type", "") or "").startswith(prefixes) for level in config_sources(cfg))
 
 
-def config_ties_word_embeddings(model_config) -> bool:
-    """Whether this checkpoint declares a tied embedding/head pair.
+def tie_flag_configs(config, prefix: str = "") -> dict[str, object]:
+    """Dotted sub-config path → the config object there that declares the embedding tie.
 
-    Read through the composite-config accessor: the flag lives on the text sub-config of a multimodal
-    wrapper, and a config class defining no ``get_text_config`` (remote code) resolves to itself.
+    A composite (VLM) config declares it on its text sub-config as well as, or instead of, the top
+    level, and transformers resolves the tie across every submodel, so the top level alone is not the
+    whole declaration. Keyed by path rather than position so the values can be put back on a
+    different config tree (``from_pretrained`` hands the model a deep copy).
     """
-    return bool(getattr(text_config(model_config), "tie_word_embeddings", False))
+    holders = {prefix: config} if hasattr(config, TIE_WORD_EMBEDDINGS_FLAG) else {}
+    for name in getattr(config, "sub_configs", None) or ():
+        sub = getattr(config, name, None)
+        if sub is not None:
+            holders.update(tie_flag_configs(sub, f"{prefix}{name}."))
+    return holders
+
+
+def ties_word_embeddings(config) -> bool:
+    """Whether any level of ``config`` declaring the flag ties the embedding/head pair."""
+    return any(bool(getattr(level, TIE_WORD_EMBEDDINGS_FLAG)) for level in tie_flag_configs(config).values())
+
+
+def untie_word_embeddings(config) -> None:
+    """Clear the embedding tie on every level of ``config`` that declares it."""
+    for level in tie_flag_configs(config).values():
+        setattr(level, TIE_WORD_EMBEDDINGS_FLAG, False)
 
 
 def get_config_field(cfg, field: str, default=None, *, per_layer_reduce=None):
-    """First non-``None`` ``field`` across :func:`config_sources`, else ``default``.
-
-    The modeling code reads these off the text config, so a wrapper-only read yields the default and
-    turns a balancing decision into a no-op.
-    """
+    """First non-``None`` ``field`` across :func:`config_sources`, else ``default``."""
     for source in config_sources(cfg):
         try:
             value = getattr(source, field, None)
@@ -94,23 +101,17 @@ def get_config_field(cfg, field: str, default=None, *, per_layer_reduce=None):
 
 
 def configs_declaring(config, field: str) -> list:
-    """Every config level of ``config`` that declares ``field``: the wrapper and/or its text sub-config.
-
-    Both levels, because different consumers read different ones: pooling keys on
-    ``config.get_text_config().pad_token_id`` while the head is sized from the wrapper's
-    ``num_labels``. Empty means neither level declares the field.
-    """
+    """Every config level of ``config`` that declares ``field``: the wrapper and/or its text sub-config
+    (pooling reads the text level's ``pad_token_id``, the head is sized from the wrapper's ``num_labels``)."""
     return [level for level in config_sources(config) if hasattr(level, field)]
 
 
 def set_config_field(config, field: str, value, *, only_declared: bool) -> bool:
     """Write ``value`` to config levels of ``config``; ``False`` when the write reached none.
 
-    ``only_declared=True`` writes just the levels that already declare ``field``, so a value nothing
-    reads is never planted, and the return says whether any level declared it. ``False`` writes every
-    level (always at least one, hence always ``True``), which is what a toolkit-driven flag needs,
-    since HF forwards read the text config while call sites hold whichever object ``model.config``
-    returned.
+    ``only_declared=True`` writes just the levels already declaring ``field``, so a value nothing reads
+    is never planted. ``False`` writes every level, what a toolkit-driven flag needs, since HF forwards
+    read the text config while call sites hold whichever object ``model.config`` returned.
     """
     targets = configs_declaring(config, field) if only_declared else list(config_sources(config))
     for target in targets:
@@ -118,40 +119,24 @@ def set_config_field(config, field: str, value, *, only_declared: bool) -> bool:
     return bool(targets)
 
 
-def _config_storage_field(source, field: str) -> str:
-    """The instance-``__dict__`` key a ``setattr(source, field, ...)`` lands in.
-
-    ``PreTrainedConfig.__setattr__`` remaps aliased fields through ``attribute_map``, so the
-    run-scoped registry records and restores the mapped key; otherwise the restore would target a
-    slot the write never touched and leave the run-scoped value in ``config.json``.
-    """
-    return (getattr(source, "attribute_map", None) or {}).get(field, field)
-
-
-def _run_scoped_originals(source) -> dict[str, Any]:
-    key = id(source)
-    originals = _RUN_SCOPED_FIELD_ORIGINALS.get(key)
-    if originals is None:
-        originals = _RUN_SCOPED_FIELD_ORIGINALS[key] = {}
-        # The finalizer drops the entry so a recycled id() cannot inherit another config's originals.
-        try:
-            weakref.finalize(source, _RUN_SCOPED_FIELD_ORIGINALS.pop, key, None)
-        except TypeError:
-            _RUN_SCOPED_UNFINALIZABLE.append(source)
-    return originals
-
-
 def set_config_field_run_scoped(cfg, field: str, value) -> None:
-    """An ``only_declared=False`` write for run-scoped state: mutations that configure this training
-    run (zeroed ``router_aux_loss_coef``, forced ``output_router_logits``, toolkit stamps) but do not
-    describe the artifact. The pre-mutation value is recorded once per config source, and
-    :func:`config_export_ready` restores it around every config serialization; without that, the
-    exported ``config.json`` overwrites the hub's aux coefficient and makes plain-transformers
-    consumers pay the router-logit plane on every forward.
+    """An ``only_declared=False`` write for state that configures this run but does not describe the
+    artifact (zeroed ``router_aux_loss_coef``, forced ``output_router_logits``, toolkit stamps). The
+    pre-mutation value is recorded once per level, for :func:`config_export_ready` to restore.
     """
     for source in config_sources(cfg):
-        storage = _config_storage_field(source, field)
-        _run_scoped_originals(source).setdefault(storage, source.__dict__.get(storage, _ABSENT))
+        originals = _run_scoped_field_originals.get(id(source))
+        if originals is None:
+            originals = _run_scoped_field_originals[id(source)] = {}
+            # The finalizer drops the entry so a recycled id() cannot inherit another config's originals.
+            try:
+                weakref.finalize(source, _run_scoped_field_originals.pop, id(source), None)
+            except TypeError:
+                _run_scoped_unfinalizable.append(source)
+        # ``PreTrainedConfig.__setattr__`` remaps aliased fields through ``attribute_map``; a restore of
+        # the unmapped key would leave the run-scoped value in ``config.json``.
+        storage = (getattr(source, "attribute_map", None) or {}).get(field, field)
+        originals.setdefault(storage, source.__dict__.get(storage, _ABSENT))
     set_config_field(cfg, field, value, only_declared=False)
 
 
@@ -165,7 +150,7 @@ def config_export_ready(cfg):
         return
     reapply: list[tuple[Any, str, Any]] = []
     for source in config_sources(cfg):
-        for field, original in (_RUN_SCOPED_FIELD_ORIGINALS.get(id(source)) or {}).items():
+        for field, original in (_run_scoped_field_originals.get(id(source)) or {}).items():
             reapply.append((source, field, source.__dict__.get(field, _ABSENT)))
             if original is _ABSENT:
                 source.__dict__.pop(field, None)
@@ -182,16 +167,13 @@ def config_export_ready(cfg):
 
 
 def snapshot_special_token_ids(config) -> list[tuple[object, str, object]]:
-    """Capture every config level's special-token ids, list-valued ones copied.
-
-    HF's ``align_special_tokens`` (run by ``Trainer.train``) overwrites ``config.eos_token_id`` with
-    the tokenizer's single id, collapsing a list-valued stop set (Gemma 4's ``[1, 106]``, GLM's three
-    role enders) in the config every export ships, so serving never stops on turn ends and a stage-2
-    run masking against the exported config trains zero tokens.
+    """Capture every config level's special-token ids, list-valued ones copied: HF's
+    ``align_special_tokens`` collapses a list-valued stop set (Gemma 4's ``[1, 106]``) to the
+    tokenizer's single id in the config every export ships.
     """
     snapshot = []
     for level in config_sources(config):
-        for field in _SPECIAL_TOKEN_ID_FIELDS:
+        for field in ("eos_token_id", "bos_token_id", "pad_token_id"):
             if hasattr(level, field):
                 value = getattr(level, field)
                 snapshot.append((level, field, list(value) if isinstance(value, list) else value))
@@ -201,11 +183,8 @@ def snapshot_special_token_ids(config) -> list[tuple[object, str, object]]:
 
 
 def restore_special_token_ids(snapshot: list[tuple[object, str, object]]) -> None:
-    """Re-assert the pristine special-token ids captured by :func:`snapshot_special_token_ids`.
-
-    Run before every config write: the generation config keeps HF's unioned EOS set (that part of
-    the alignment is correct and preserved), only the model config's collapse is undone.
-    """
+    """Re-assert the special-token ids captured by :func:`snapshot_special_token_ids`, before every
+    config write; the generation config keeps HF's unioned EOS set."""
     for level, field, value in snapshot:
         if value is _ABSENT:
             if field in getattr(level, "__dict__", {}):

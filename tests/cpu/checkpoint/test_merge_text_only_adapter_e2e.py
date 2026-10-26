@@ -22,7 +22,7 @@ from __future__ import annotations
 
 # Ahead of the Qwen3.5 modeling modules, which bind transformers' hub-kernel fallback at import: the
 # chain test runs CPU forwards, which otherwise reach the CUDA-only causal_conv1d kernel.
-import src.models.patches.kernel_dispatch  # noqa: F401  # isort: skip
+import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 import tempfile
 from pathlib import Path

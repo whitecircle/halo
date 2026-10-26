@@ -14,7 +14,6 @@ from accelerate.utils import is_peft_model
 from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedModel
 from trl import ModelConfig
 
-from src.distributed.filesystem import joined_node_load
 from src.distributed.loading.model_source import resolve_model_source
 from src.distributed.loading.peft_setup import has_attention_lora_targets
 from src.distributed.loading.warmup import warm_attention_kernels
@@ -33,6 +32,7 @@ from src.models.patches.attention import resolve_attn_implementation
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
+from src.runtime.load_coordination import joined_node_load
 
 # Stdlib, not accelerate's adapter: warn_once marks a message seen on every rank, so each rank must emit it.
 logger = logging.getLogger(__name__)

@@ -9,7 +9,7 @@ evaluating that step, so the run keeps only the periodic checkpoints taken befor
 from accelerate.logging import get_logger
 
 from src.configs.grpo import EarlyStopConfig
-from src.distributed.runtime import rank_consensus
+from src.runtime.consensus import rank_consensus
 from src.trainers.grpo.objective.logratio import UPDATE_SKIPPED_KEY
 from src.training.early_stopping import StopsTrainingEarly
 
@@ -63,8 +63,7 @@ class GRPOEarlyStopCallback(StopsTrainingEarly):
             if breach is not None:
                 self._evidence[name] = breach
         held = [name for name, streak in self._streaks.items() if streak >= self.config.patience]
-        _, any_stop = rank_consensus(bool(held))
-        if not any_stop:
+        if not rank_consensus(bool(held)).any_ok:
             return
         self.stopped = True
         # Runs before the step's evaluation and save: a checkpoint of this step would be one from inside the drift.

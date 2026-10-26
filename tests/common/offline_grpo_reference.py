@@ -7,7 +7,8 @@ import torch
 from accelerate import PartialState
 from datasets import Dataset
 
-from src.distributed.runtime import DeferredRankFailure, fs_aware_save_rank
+from src.runtime.consensus import DeferredRankFailure
+from src.runtime.filesystem import is_fs_save_rank
 from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
 from src.trainers.grpo.reference_cache import ReferenceScoreCache
 
@@ -32,7 +33,7 @@ def mapped_scores(output_dir, dataset, rows):
     cache = ReferenceScoreCache(output_dir, dp_size=1)
     guard = DeferredRankFailure("Preparing fixture reference rows", exc_type=ValueError)
     try:
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             guard.run(lambda: cache.append_rows(0, rows))
         guard.reject()
         return cache.finish(dataset)

@@ -8,11 +8,11 @@ import pytest
 import torch
 
 from src.callbacks import efficiency, wiring
-from src.callbacks.efficiency import _PRECISION_KEY_BY_LOWP, EfficiencyCallback, _detect_precision
+from src.callbacks.efficiency import EfficiencyCallback, _detect_precision
 from src.callbacks.model_flops import _is_expert_param, compute_expert_params, estimate_linear_flops_per_token
 from src.callbacks.parameter_stats import count_model_parameters
-from src.distributed.parallelism_config import LOWP_PRECISIONS
 from src.hardware import GPU_PEAK_FLOPS, _classify_gpu_name, get_gpu_peak_flops
+from src.kernels.lowp.spec import LowpSpec
 from src.models.moe_balancing import detect_moe_experts_topk
 from tests.common.parallelism import make_parallelism_config
 
@@ -189,12 +189,6 @@ def test_detect_precision_fp32_is_tf32_aware():
         torch.set_float32_matmul_precision(prev)
 
 
-def test_every_low_precision_mode_has_a_peak_key():
-    """A ``lowp_precision`` the peak table does not spell falls back to the parameter dtype — i.e.
-    silently to the bf16 peak, the very mis-scaling the map exists to prevent, one mode later."""
-    assert set(_PRECISION_KEY_BY_LOWP) == set(LOWP_PRECISIONS) - {"bf16"}
-
-
 @pytest.mark.parametrize(
     ("lowp_precision", "expected"),
     [("fp8", "fp8"), ("fp4", "fp4"), ("mxfp4", "fp4"), ("bf16", "bf16")],
@@ -208,7 +202,7 @@ def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_pre
     """
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "B300")
     callback = efficiency.EfficiencyCallback(
-        make_parallelism_config(world_size=1, gpus_per_node=1, lowp_precision=lowp_precision)
+        make_parallelism_config(world_size=1, gpus_per_node=1, lowp=LowpSpec(precision=lowp_precision))
     )
     callback._initialize_metrics(MockTrainingArgs(bf16=True))
 
@@ -222,7 +216,7 @@ def test_a_detected_gpu_without_a_peak_for_the_precision_warns(monkeypatch, capl
 
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "A100")
     callback = efficiency.EfficiencyCallback(
-        make_parallelism_config(world_size=1, gpus_per_node=1, lowp_precision="fp8")
+        make_parallelism_config(world_size=1, gpus_per_node=1, lowp=LowpSpec(precision="fp8"))
     )
     with caplog.at_level(logging.WARNING, logger=efficiency.__name__):
         callback._initialize_metrics(MockTrainingArgs(bf16=True))

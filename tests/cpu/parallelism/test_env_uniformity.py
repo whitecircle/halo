@@ -24,9 +24,9 @@ import pytest
 import torch
 
 from src.distributed.expert_parallel import dispatcher as dispatcher_mod
-from src.distributed.runtime import divergent_settings, reject_divergent_settings
+from src.runtime.consensus import divergent_settings, reject_divergent_settings
 
-_MOD = "src.distributed.runtime"
+_MOD = "src.runtime.consensus"
 
 
 def test_an_aligned_world_reports_nothing():
@@ -58,7 +58,7 @@ def test_the_collective_raises_with_the_caller_s_guidance():
         del obj
         out_list[:] = [{"HALO_GRAD_BUCKET_MB": 256}] * 4 + [{"HALO_GRAD_BUCKET_MB": 64}] * 4
 
-    def disagreeing_digests(slots, op=None):
+    def disagreeing_digests(slots, op=None, group=None):
         slots.copy_(torch.tensor([7, -3, 0, 0]))  # max(d) != -max(-d): two digests met
 
     with (

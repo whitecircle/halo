@@ -25,10 +25,11 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 
 import src.distributed.checkpoint.coordination as coordination
-import src.distributed.runtime as runtime_mod
 from src.checkpoint.format import ADAPTER_WEIGHT_NAMES, adapter_weight_paths
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.peft import _load_peft_adapter_state
+from src.runtime import dtensor
+from src.runtime.consensus import RankConsensus
 
 # Deliberately NOT sorted: a dict preserves insertion order, which is the adapter file's order.
 UNSORTED_KEYS = (
@@ -79,9 +80,9 @@ def test_dtensor_adapter_tensors_are_distributed_in_sorted_key_order(single_rank
     state = {key: torch.full((2, 2), float(order[key])) for key in UNSORTED_KEYS}
 
     issued: list[float] = []
-    real_distribute = runtime_mod.distribute_tensor
+    real_distribute = dtensor.distribute_tensor
     monkeypatch.setattr(
-        runtime_mod,
+        dtensor,
         "distribute_tensor",
         lambda tensor, device_mesh, placements: (
             issued.append(tensor.flatten()[0].item()),
@@ -106,11 +107,16 @@ def _run_consensus_read(tmp_path, monkeypatch, *, local: dict[str, bool], elsewh
         if present:
             (tmp_path / name).write_text(name)
     verdicts = iter(
-        [(local[name] and elsewhere[name], local[name] or elsewhere[name]) for name in ADAPTER_WEIGHT_NAMES]
+        [
+            RankConsensus(local[name] and elsewhere[name], local[name] or elsewhere[name])
+            for name in ADAPTER_WEIGHT_NAMES
+        ]
     )
     # The presence probes are scripted in candidate order; the read-success join that follows them
     # takes this rank's own verdict (every rank read what it picked).
-    monkeypatch.setattr(coordination, "rank_consensus", lambda local_ok: next(verdicts, (local_ok, local_ok)))
+    monkeypatch.setattr(
+        coordination, "rank_consensus", lambda local_ok: next(verdicts, RankConsensus(local_ok, local_ok))
+    )
     return consensus_read(
         adapter_weight_paths(str(tmp_path)),
         os.path.basename,

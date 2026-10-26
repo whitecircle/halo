@@ -11,7 +11,6 @@ from typing import get_args
 
 import torch.distributed as dist
 
-from src.distributed.runtime import get_global_world_size, rank_consensus, reject_across_ranks
 from src.models.config_access import (
     get_config_field,
     set_config_field,
@@ -31,6 +30,8 @@ from src.models.moe_balancing import (
     mark_router_logits_forced_off,
     native_balancing_hub_model_types,
 )
+from src.runtime.consensus import rank_consensus, reject_across_ranks
+from src.runtime.ranks import get_global_world_size
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,7 @@ def _enforce_bias_export_contract(model, mode: BalancingMode, is_moe: bool) -> N
         # Any rank's transient router makes the whole model's bias transient. Taken before the
         # `is_moe` test, never on the right of it: rank_consensus is a world all-reduce, so a rank
         # short-circuiting past it would leave every peer inside the collective.
-        any_transient = rank_consensus(bool(transient))[1]
+        any_transient = rank_consensus(bool(transient)).any_ok
         if is_moe and not any_transient:
             raise ValueError(
                 "moe_balancing=bias_update_transient, but every balancing router on this model "
@@ -229,7 +230,7 @@ def apply_balancing_strategy(
         # World-wide, not stage-local: under PP a stage holding no MoE layer accepts nothing by
         # construction, and its raise would leave the stages that did accept the bias in their next
         # collective.
-        if not rank_consensus(enabled > 0 or has_balancing_routers(model))[1]:
+        if not rank_consensus(enabled > 0 or has_balancing_routers(model)).any_ok:
             model_type = getattr(cfg, "model_type", "unknown")
             detail = (
                 f"its EP MoE layers {hook_layers} do not support bias-update balancing "

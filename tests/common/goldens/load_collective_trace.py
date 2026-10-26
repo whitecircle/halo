@@ -29,10 +29,10 @@ from transformers import PreTrainedModel
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from src.checkpoint.format import load_full_state_dict
-from src.distributed import filesystem
 from src.distributed.expert_parallel import dispatcher
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_distributed_model
+from src.runtime import load_coordination
 from tests.common.collective_recorder import CollectiveTrace, rebind_everywhere, recording_rank
 from tests.common.goldens import regen_main
 from tests.common.parallelism import make_parallelism_config
@@ -223,7 +223,7 @@ def cpu_model_builds(trace: CollectiveTrace) -> Iterator[None]:
 
 def recorded_load_phases(trace: CollectiveTrace) -> contextlib.AbstractContextManager[None]:
     """Each ``joined_node_load`` as an event carrying its phase label, ahead of the load's own events."""
-    real_joined_node_load = filesystem.joined_node_load
+    real_joined_node_load = load_coordination.joined_node_load
 
     def joined_node_load(what: str, max_concurrent: int | None):
         trace.record("joined_node_load", what)

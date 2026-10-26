@@ -13,7 +13,7 @@ from torch.distributed.tensor import DTensor
 
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
 from src.model_loading.model_preparation import concrete_model_class
-from src.models.config_access import config_ties_word_embeddings, text_config
+from src.models.config_access import text_config, ties_word_embeddings
 
 
 def _tied_module_names(concrete) -> tuple[set[str], set[str]]:
@@ -57,7 +57,7 @@ def consistent_tied_tp_plan(model_class, model_config):
     """
     concrete = concrete_model_class(model_class, model_config)
     heads, embeddings = _tied_module_names(concrete)
-    if not config_ties_word_embeddings(model_config) or not heads or not embeddings:
+    if not ties_word_embeddings(model_config) or not heads or not embeddings:
         yield
         return
     class_plan = getattr(concrete, "_tp_plan", None)

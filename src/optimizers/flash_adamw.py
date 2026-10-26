@@ -10,8 +10,8 @@ from typing import Any
 import torch
 from torch.distributed.tensor import DTensor
 
-from src.distributed.runtime import is_global_main_process
 from src.optimizers.param_groups import decay_groups
+from src.runtime.ranks import is_global_main_process
 
 try:
     from flashoptim import FlashAdamW

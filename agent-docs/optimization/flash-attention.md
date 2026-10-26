@@ -173,8 +173,8 @@ After a PyTorch upgrade the `.so` is ABI-incompatible (`undefined symbol: _ZNK3c
 A YAML config can pin the backend (`attn_implementation: flash_attention_2`); omit the field for
 auto-detection plus the model-specific handling above.
 
-**Gradient checkpointing with EP.** EP MoE layers go through `enable_ep_gradient_checkpointing`
-(`src/distributed/expert_parallel/patching.py`), which enables GC and installs the checkpoint scope its
+**Gradient checkpointing with EP.** EP MoE layers go through `enable_scoped_gradient_checkpointing`
+(`src/models/gradient_checkpointing.py`), which enables GC and installs the recompute scope its
 recompute replays the DeepEP dispatch from. Enabling GC by any other route leaves EP without that scope
 and raises.
 

@@ -1,20 +1,21 @@
-"""Sequence-classification heads transformers does not ship, registered at import.
-
-transformers 5.16 maps no seq-cls head for Gemma 4 or for MoE Qwen3.5/3.6, so reward modeling and
-classification fail at load on both families. Each head is the upstream Generic head over the
-family's ``PreTrainedModel``, registered in both spellings a checkpoint can carry (the composite
-wrapper and its text tower); a release that lands a native head takes precedence.
+"""Sequence-classification heads transformers 5.16 does not ship (Gemma 4, MoE Qwen3.5/3.6), registered
+at import, and the live roster of multimodal families carrying a head. Each is the upstream Generic head
+over the family's ``PreTrainedModel``, registered for both spellings a checkpoint can carry (the
+composite wrapper and its text tower); a release that lands a native head takes precedence.
 """
 
 from transformers import AutoModelForSequenceClassification
 from transformers.modeling_layers import GenericForSequenceClassification
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.auto.modeling_auto import MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4PreTrainedModel
 from transformers.models.qwen3_5_moe import Qwen3_5MoePreTrainedModel, Qwen3_5MoeTextConfig
 
+from src.models.modality import config_declares_multimodality
 
-def register_sequence_classification_head(model_cls) -> None:
+
+def _register_sequence_classification_head(model_cls) -> None:
     """Register a seq-cls head transformers does not ship, under the config it declares.
 
     Not ``register()``: transformers >= 5.12 no-ops it for a config class living under
@@ -56,4 +57,16 @@ class Qwen3_5MoeTextForSequenceClassification(GenericForSequenceClassification, 
 # registers under the config class it already declares.
 for _head_cls in GenericForSequenceClassification.__subclasses__():
     if _head_cls.__module__ == __name__:
-        register_sequence_classification_head(_head_cls)
+        _register_sequence_classification_head(_head_cls)
+
+
+def multimodal_sequence_classification_model_types() -> list[str]:
+    """Model types with both a sequence-classification head (the toolkit's heads above, then
+    transformers' own mapping, read live) and a vision tower, by the
+    :func:`~src.models.modality.config_declares_multimodality` verdict the run-time probe reads, taken
+    off each config class so the roster cannot classify a family differently from that probe."""
+    config_classes = list(AutoModelForSequenceClassification._model_mapping._extra_content)
+    config_classes += [
+        CONFIG_MAPPING[name] for name in MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES if name in CONFIG_MAPPING
+    ]
+    return sorted({cls.model_type for cls in config_classes if config_declares_multimodality(cls)})

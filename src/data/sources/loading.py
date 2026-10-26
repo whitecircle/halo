@@ -16,7 +16,6 @@ from src.data.pipeline.processing import (
     require_render_column,
     run_load_rank_first,
 )
-from src.data.probe_consensus import agree_input_probe_across_ranks, agree_probe_across_ranks
 from src.data.sources.dataset_cache import HALO_S3_DATASET_CACHE_DIR
 from src.data.sources.paths import (
     DATA_FILE_BUILDERS,
@@ -30,15 +29,16 @@ from src.data.sources.paths import (
 from src.data.sources.s3_client import load_dataset_from_s3_uri
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_RAW_IMAGE_COLUMNS, carried_image_columns
-from src.distributed.filesystem import store_join_recorded_failure
-from src.distributed.runtime import (
+from src.log import KEY_PREVIEW_COUNT
+from src.runtime.consensus import (
     agree_across_ranks,
-    get_global_world_size,
-    get_local_world_size,
+    agree_probe_across_ranks,
     rank_consensus,
     reject_divergent_settings,
+    store_join_recorded_failure,
 )
-from src.log import KEY_PREVIEW_COUNT
+from src.runtime.filesystem import agree_input_probe_across_ranks
+from src.runtime.ranks import get_global_world_size, get_local_world_size
 
 # INFO opt-in (the convention vlm_setup and the training scripts use): this module's INFO lines are
 # the run's only record of what data actually loaded (columns kept, split sizes, source dispatch).
@@ -802,7 +802,7 @@ def load_datasets(
         # pre-sharded eval equalization refuses world-uniformly once evaluation runs. Only a split
         # empty on every rank is refused here: a rank raising alone would leave its peers blocked in
         # their next collective.
-        test_empty, _ = rank_consensus(test_empty)
+        test_empty = rank_consensus(test_empty).all_ok
     if test_empty:
         raise ValueError("No test data after schema normalization. Please check your dataset.")
     logger.info(f"Test data after schema normalization: {len(ds['test'])}")

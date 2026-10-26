@@ -2,7 +2,7 @@
 """Elastic EP runs long context at ep8 — there is no DeepEP "symmetric-window token ceiling".
 
 The apparent ceiling at `num_max_tokens_per_rank × ep_size × hidden ≈ 2³⁰` (~46.6k tokens/rank at
-ep8) is not a DeepEP limit: it is the `fused_gptoss_glu` int32 program offset overflowing on the
+ep8) is not a DeepEP limit: it is the GptOss GLU kernel's int32 program offset overflowing on the
 skewed grouped activation (>2³¹ elements), which async-reports on peer ranks as DeepEP's
 `symmetric.hpp 719`. The int64 offset (`src/kernels/fused_glu.py`) lets elastic stream arbitrary
 sequence length.

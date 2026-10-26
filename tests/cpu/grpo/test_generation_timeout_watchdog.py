@@ -2,7 +2,7 @@
 """Online GRPO's vLLM generation timeout must stay below the NCCL collective watchdog.
 
 The generation POST is single-shot and blocking, so every peer sits at the next collective for its
-whole duration. Env-GRPO validates its rollout timeouts against ``resolve_nccl_timeout_minutes()``;
+whole duration. Env-GRPO validates its rollout timeouts against ``nccl_timeout()``;
 online GRPO has no such guard, so the client's default is derived from the same resolver instead of
 spelled as a literal — otherwise lowering ``DIST_NCCL_TIMEOUT_MINUTES`` leaves an HTTP timeout the
 watchdog fires long before.
@@ -14,7 +14,7 @@ import logging
 
 import pytest
 
-from src.env import resolve_nccl_timeout_minutes, watchdog_bounded_seconds
+from src.env import nccl_timeout, watchdog_bounded_seconds
 from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.weight_sync import offline_client
@@ -59,7 +59,7 @@ def test_default_generation_timeout_clears_the_default_watchdog(monkeypatch, gen
     timeout = generation_timeout()
 
     assert timeout == watchdog_bounded_seconds()
-    assert timeout < resolve_nccl_timeout_minutes() * 60, (
+    assert timeout < nccl_timeout().total_seconds(), (
         "a generation call that reaches the watchdog aborts every peer's collective before it returns"
     )
 

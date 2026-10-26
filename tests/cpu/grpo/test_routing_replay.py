@@ -15,10 +15,10 @@ from transformers import PretrainedConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
 
-from src.distributed.expert_parallel.gc_scope import EPCheckpointScope
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.models.gradient_checkpointing import RecomputeScope
 from src.trainers.grpo.rollout.routing_replay import (
     RoutingReplayInjector,
     assemble_rollout_masks,
@@ -124,7 +124,7 @@ def test_concurrent_checkpoint_frames_replay_their_own_slice():
     full = torch.stack([torch.randperm(E)[:K] for _ in range(2 * T)])
     layer._forced_topk_indices = full
     natural = torch.zeros(T, K, dtype=torch.long)
-    frame1, frame2 = EPCheckpointScope(), EPCheckpointScope()
+    frame1, frame2 = RecomputeScope(), RecomputeScope()
     with frame1:  # microbatch 1 forward
         layer._maybe_replace_selection(natural)
     with frame2:  # microbatch 2 forward
@@ -140,7 +140,7 @@ def test_recompute_call_the_forward_never_made_raises():
     # must fail loud rather than silently route on stale indices.
     layer = _BareLayer()
     layer.train()
-    scope = EPCheckpointScope()
+    scope = RecomputeScope()
     with scope:
         pass
     layer._forced_topk_indices = torch.zeros(T, K, dtype=torch.long)
@@ -154,7 +154,7 @@ def test_gc_recompute_skips_flip_metric_but_still_replaces():
     natural = torch.stack([torch.randperm(E)[:K] for _ in range(T)])
     forced = _shuffled_valid_indices(natural)
     layer._forced_topk_indices = forced
-    scope = EPCheckpointScope()
+    scope = RecomputeScope()
     with scope:
         layer._maybe_replace_selection(natural)  # original in-checkpoint forward (counts + saves)
     counts_after_original = layer._replay_flip_counts.clone()
@@ -288,7 +288,7 @@ def test_record_expert_load_skips_gc_recompute():
     layer.balancing_biases = torch.zeros(E)
     layer.expert_load_counter = None
     idx = torch.randint(0, E, (T, K))
-    scope = EPCheckpointScope()
+    scope = RecomputeScope()
     with scope:  # original in-checkpoint forward
         layer._record_expert_load(idx)
     counts_after_original = layer.expert_load_counter.clone()

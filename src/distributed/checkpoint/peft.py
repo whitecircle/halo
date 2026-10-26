@@ -4,7 +4,7 @@
 CP key normalization, or the standard ``save_pretrained`` path. :func:`restore_adapters` is the
 resume counterpart, needed because EP/CP rebuild the model with zero-init adapters; both directions
 share the CP key remap defined here. Restores write through
-:func:`~src.distributed.runtime.copy_full_tensor`, the DTensor-aware whole-tensor write.
+:func:`~src.runtime.dtensor.copy_full_tensor`, the DTensor-aware whole-tensor write.
 """
 
 from __future__ import annotations
@@ -47,14 +47,6 @@ from src.distributed.expert_parallel.expert_weights import (
     apply_ep_lora_adapters,
     gather_ep_lora_adapters,
 )
-from src.distributed.runtime import (
-    barrier_on_exit,
-    copy_full_tensor,
-    fs_aware_makedirs,
-    is_global_main_process,
-    reject_across_ranks,
-    resolve_param_tensor,
-)
 from src.log import KEY_PREVIEW_COUNT
 from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import stamped_sinks_policy
@@ -64,6 +56,11 @@ from src.models.unwrapping import (
     unwrap_framework_wrappers,
     unwrap_toolkit_wrappers,
 )
+from src.runtime.collectives import barrier_on_exit
+from src.runtime.consensus import reject_across_ranks
+from src.runtime.dtensor import copy_full_tensor, full_cpu_tensor
+from src.runtime.filesystem import fs_aware_makedirs
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -256,7 +253,7 @@ class PeftAdapterSaver:
         keeping the collectives aligned.
         """
         full_state = {
-            name: resolve_param_tensor(t.data)
+            name: full_cpu_tensor(t.data)
             for name, t in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model))
             if _is_adapter_relevant(name)
         }

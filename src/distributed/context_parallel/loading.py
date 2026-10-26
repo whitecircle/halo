@@ -17,8 +17,8 @@ from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
 from src.distributed.expert_parallel.loading import load_ep_model, load_through_cpu
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
-from src.distributed.runtime import get_global_rank
 from src.models.patches.attention import revalidate_attn_kwarg
+from src.runtime.ranks import get_global_rank
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def load_model_for_cp(
             optional one would let a caller that omitted it install an UNVALIDATED implementation.
         model_class: defaults to ``AutoModelForCausalLM``.
         max_concurrent_loading: ranks that may load weights in parallel within a node
-            (passed to :func:`~src.distributed.filesystem.joined_node_load`).
+            (passed to :func:`~src.runtime.load_coordination.joined_node_load`).
         ep_config: when given (an ``ep_size == 1`` config), the MoE blocks get the grouped-GEMM
             expert wrappers before the CP wrap — same ordering as EP+CP, so the generation hook and
             the state-dict expert paths land on the inner HF model, not on the CP wrapper. Without

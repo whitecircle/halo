@@ -91,7 +91,7 @@ def test_pinned_schema_with_kept_columns_is_refused_at_the_seam():
 
 
 def test_the_vlm_loader_takes_the_modality_verdict_instead_of_re_probing(monkeypatch):
-    """``is_vlm_model`` enters the ``vlm_probe`` c10d-store phase, and only multimodal runs reach
+    """``probe_checkpoint`` enters the ``vlm_probe`` c10d-store phase, and only multimodal runs reach
     ``load_vlm_model_and_processor``. Probing again from inside that branch makes the phase count
     rank-dependent the moment two ranks disagree on the verdict, leaving the peers waiting on a key
     nobody writes. The caller owns the verdict, so this loader must reach the processor without it."""
@@ -105,7 +105,7 @@ def test_the_vlm_loader_takes_the_modality_verdict_instead_of_re_probing(monkeyp
     def _processor_reached(*args, **kwargs):
         raise _Sentinel
 
-    monkeypatch.setattr(vlm_setup, "is_vlm_model", _must_not_probe)
+    monkeypatch.setattr(vlm_setup, "probe_checkpoint", _must_not_probe)
     # The processor load is the loader's first step; reaching it proves no probe ran.
     monkeypatch.setattr(vlm_setup, "load_vlm_processor", _processor_reached)
     model_config = types.SimpleNamespace(model_name_or_path="Qwen/Qwen3-4B", model_revision=None)

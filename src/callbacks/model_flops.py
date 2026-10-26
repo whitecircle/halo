@@ -8,9 +8,9 @@ comes off this rank's decoder layers), so the estimate describes what this GPU c
 from transformers.utils import logging
 
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
-from src.distributed.runtime import local_numel
 from src.models.attention_layout import AttentionLayout, attention_layout
 from src.models.config_access import get_config_field, text_config
+from src.runtime.dtensor import local_numel
 
 logger = logging.get_logger(__name__)
 

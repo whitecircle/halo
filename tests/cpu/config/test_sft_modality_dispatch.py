@@ -24,7 +24,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.models import modality
+from src.distributed.loading import model_source
 from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
@@ -283,7 +283,7 @@ def test_the_checkpoint_config_is_read_once(tmp_path):
     the verdict the prefix already probed rather than reading the checkpoint config a second time."""
     probes = []
     with (
-        mock.patch.object(modality, "_probe_checkpoint_config", side_effect=lambda *args: probes.append(args)),
+        mock.patch.object(model_source, "_probe_checkpoint_config", side_effect=lambda *args: probes.append(args)),
         pytest.raises(_TextPathReached),
     ):
         _run_sft(tmp_path, "", _dataset(), stub_vlm_prep=False)

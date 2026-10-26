@@ -16,7 +16,7 @@ Every helper here is opt-in and costs nothing when disabled.
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
 | Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
 
-The consistency check lives in `src/diagnostics/rank_divergence.py`. It is **manual
+The consistency check is `assert_rank_uniform` in `src/runtime/consensus.py`. It is **manual
 instrumentation** — the toolkit ships no call sites for it, so the env flag does nothing until you
 add the call to the code you are investigating. The profiler session and CUDA-memory helpers live in
 `src/diagnostics/profiling.py`, the py-spy captures behind `py_spy_diag.py` in
@@ -151,9 +151,9 @@ model class and EP degree, not the dense ceiling.
 collective report (`scripts/profiling/trace_report.py`), which attributes wait time per collective
 per rank without a code change.
 
-**Fine-grained op timing** — `get_performance_monitor().time_operation(name)`
-(`src/diagnostics/performance_monitor.py`) times a span on CUDA events where available, else the
-wall clock, and accumulates it into the monitor's `.stats` map: one `TimingStats` (`count`,
+**Fine-grained op timing** — `get_ep_span_timer().time_operation(name)`
+(`src/diagnostics/ep_span_timing.py`) times a span on CUDA events where available, else the
+wall clock, and accumulates it into the timer's `.stats` map: one `TimingStats` (`count`,
 `total_time`, `.avg_time`) per operation name.
 
 `HALO_EP_PERF_PROFILE=1` is a benchmark switch: the EP layers then wrap their
@@ -244,7 +244,7 @@ export HALO_TP_CONSISTENCY_CHECK=1   # make assert_rank_uniform raise instead of
 ```
 
 ```python
-from src.diagnostics.rank_divergence import assert_rank_uniform
+from src.runtime.consensus import assert_rank_uniform
 assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in")
 ```
 

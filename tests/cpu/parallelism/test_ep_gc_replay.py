@@ -7,7 +7,7 @@ combine in the checkpoint frame's scope and the recompute replays them. Here eve
 supports checkpointing runs its tiny model with each dispatcher live over a loopback transport that
 stands in for DeepEP: a one-rank EP group owning every expert, so each transport op is the identity,
 and every op is logged with the handle it ran on. Under reentrant and non-reentrant checkpointing
-installed by ``enable_ep_gradient_checkpointing``:
+installed by ``enable_scoped_gradient_checkpointing``:
 
 - each layer dispatches and combines once per microbatch, its backward ops run on that dispatch's
   handle, and the recompute runs in the forward's scope;
@@ -32,8 +32,8 @@ from src.distributed.expert_parallel import autograd as ep_autograd
 from src.distributed.expert_parallel import dispatcher as ep_dispatcher
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.expert_parallel.gc_scope import active_checkpoint_scope
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
@@ -97,7 +97,7 @@ def _live_model(name: str, log: list, *, use_reentrant: bool | None) -> torch.nn
         layer.dispatcher._noop = False
         layer.dispatcher.backend = LoopbackBackend(layer.dispatcher, log)
     if use_reentrant is not None:
-        enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": use_reentrant})
+        enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": use_reentrant})
     return model
 
 
@@ -125,7 +125,7 @@ def _record_passes(model: torch.nn.Module) -> dict[str, list]:
     for path, layer in find_ep_layers(model):
 
         def record(_module, _args, path=path):
-            scope = active_checkpoint_scope()
+            scope = active_recompute_scope()
             passes[path].append((scope, scope is not None and scope.is_recompute))
 
         layer.register_forward_pre_hook(record)

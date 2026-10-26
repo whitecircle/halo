@@ -36,10 +36,10 @@ from trl import SFTConfig, SFTTrainer
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.model_loading.model_preparation import resolve_auto_model_class
 from src.optimizers.flash_adamw import create_flash_adamw_optimizer
 from src.optimizers.registry import register_custom_optimizers
+from src.runtime.collectives import barrier
 from tests.common.benchmark_args import create_benchmark_parser
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (

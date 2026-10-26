@@ -26,15 +26,9 @@ from src.distributed.group_layout import (
     reject_cross_node_etp_shape,
     reject_node_local_ep_group,
 )
-from src.distributed.runtime import (
-    get_global_rank,
-    get_global_world_size,
-    get_local_world_size,
-    get_nccl_timeout,
-    is_global_main_process,
-)
-from src.env import env_int
+from src.env import env_int, nccl_timeout
 from src.models.moe_balancing import ROUTER_EXPERT_COUNT_FIELDS, get_first_router_field
+from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -440,7 +434,7 @@ class EPConfig:
         if self.num_rank_blocks > 1:
             for base in self._rank_block_bases():
                 block_ranks = list(range(base, base + self.world_size))
-                group = dist.new_group(block_ranks, timeout=get_nccl_timeout())
+                group = dist.new_group(block_ranks, timeout=nccl_timeout())
                 if base == self.rank_offset:
                     self.dp_scope_group = group
             if self.dp_scope_group is None:
@@ -533,7 +527,7 @@ class EPConfig:
             my_ep_group_ranks = [global_rank]
         else:
             for base, group_idx, ep_group_ranks in self._iter_all_ep_group_ranks():
-                group = dist.new_group(ep_group_ranks, timeout=get_nccl_timeout())
+                group = dist.new_group(ep_group_ranks, timeout=nccl_timeout())
                 if base == self.rank_offset and group_idx == self.ep_group_idx:
                     self.process_group = group
                     my_ep_group_ranks = ep_group_ranks
@@ -559,7 +553,7 @@ class EPConfig:
             for base in self._rank_block_bases():
                 for target_ep_rank in range(self.ep_group_size):
                     replicas = [base + r for r in replica_ranks(target_ep_rank)]
-                    group = dist.new_group(replicas, timeout=get_nccl_timeout())
+                    group = dist.new_group(replicas, timeout=nccl_timeout())
                     if base == self.rank_offset and target_ep_rank == self.ep_rank:
                         self.expert_replica_group = group
                         self.expert_replica_ranks = replicas
@@ -607,14 +601,14 @@ class EPConfig:
             for _, _, group_ranks in self._iter_all_ep_group_ranks():
                 for d in range(ep_size):
                     tp_ranks = [group_ranks[d + ep_size * t] for t in range(expert_tp_size)]
-                    group = dist.new_group(tp_ranks, timeout=get_nccl_timeout())
+                    group = dist.new_group(tp_ranks, timeout=nccl_timeout())
                     if global_rank in tp_ranks:
                         self.expert_tp_group = group
             if ep_size > 1:
                 for _, _, group_ranks in self._iter_all_ep_group_ranks():
                     for t in range(expert_tp_size):
                         sub_ep_ranks = group_ranks[t * ep_size : (t + 1) * ep_size]
-                        group = dist.new_group(sub_ep_ranks, timeout=get_nccl_timeout())
+                        group = dist.new_group(sub_ep_ranks, timeout=nccl_timeout())
                         if global_rank in sub_ep_ranks:
                             self.dispatch_ep_group = group
         else:
@@ -644,7 +638,7 @@ class EPConfig:
             for _, _, group_ranks in self._iter_all_ep_group_ranks():
                 for c in range(ep_size):
                     etp_ranks = group_ranks[c * expert_tp_size : (c + 1) * expert_tp_size]
-                    group = dist.new_group(etp_ranks, timeout=get_nccl_timeout())
+                    group = dist.new_group(etp_ranks, timeout=nccl_timeout())
                     if global_rank in etp_ranks:
                         self.expert_tp_group = group
             # Dispatch (sub-EP) group = same intra-domain position across all domains (cross-node).
@@ -652,7 +646,7 @@ class EPConfig:
                 for _, _, group_ranks in self._iter_all_ep_group_ranks():
                     for p in range(expert_tp_size):
                         disp_ranks = [group_ranks[p + expert_tp_size * c] for c in range(ep_size)]
-                        group = dist.new_group(disp_ranks, timeout=get_nccl_timeout())
+                        group = dist.new_group(disp_ranks, timeout=nccl_timeout())
                         if global_rank in disp_ranks:
                             self.dispatch_ep_group = group
 

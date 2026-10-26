@@ -26,7 +26,7 @@ from scripts.environments._common import (
     write_eval_outputs,
 )
 from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, resolve_env_config
-from src.env import resolve_nccl_timeout_minutes
+from src.env import nccl_timeout
 from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from src.environments.registry import resolve_environment
 from src.environments.rollout_config import DEFAULT_ROLLOUT_TOP_P
@@ -140,7 +140,7 @@ def default_watchdog_recipe(monkeypatch):
     """The codeforces recipe's contract under the default watchdog, which its episode_timeout exceeds."""
     monkeypatch.delenv("DIST_NCCL_TIMEOUT_MINUTES", raising=False)
     contract = TrainingContract.load(str(_CODEFORCES_RECIPE))
-    assert contract.async_config.episode_timeout > resolve_nccl_timeout_minutes() * 60
+    assert contract.async_config.episode_timeout > nccl_timeout().total_seconds()
     return contract
 
 

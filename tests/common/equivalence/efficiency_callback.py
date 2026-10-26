@@ -33,6 +33,7 @@ from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from src.kernels.lowp.spec import LowpSpec
 from tests.common.distributed import fake_process_group
 from tests.common.equivalence.revisions import (
     RAISED,
@@ -355,7 +356,7 @@ def run_case(case: EfficiencyCase, scratch: str, *, perturb: bool = False) -> di
             world_size=shape.world_size,
             gpus_per_node=shape.gpus_per_node or shape.world_size,
             rank=shape.rank,
-            lowp_precision=scenario.lowp_precision,
+            lowp=LowpSpec(precision=scenario.lowp_precision),
             **shape.fields,
         )
         model = _model(case, scenario, parallelism)

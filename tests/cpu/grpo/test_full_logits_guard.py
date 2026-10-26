@@ -19,6 +19,7 @@ import pytest
 import torch
 
 import src.trainers.grpo.mixins.chunked_logprobs as chunked
+from src.runtime.consensus import RankConsensus
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth, full_logits_verdict
 from src.trainers.grpo.offline import OfflineGRPOTrainer
@@ -96,7 +97,7 @@ def test_an_oversized_plane_refuses_the_run(free_memory):
 def test_a_plane_another_rank_cannot_hold_refuses_the_run_here_too(free_memory, monkeypatch):
     """A refusal on one rank alone would leave its peers in the next collective."""
     free_memory(64 * _GIB)
-    monkeypatch.setattr(chunked, "rank_consensus", lambda ok: (False, True))
+    monkeypatch.setattr(chunked, "rank_consensus", lambda ok: RankConsensus(False, True))
     with pytest.raises(RuntimeError, match="Another rank"):
         ChunkedLogprobsCore._check_full_logits_fit(_host(), _WIDTH)
 

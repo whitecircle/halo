@@ -31,24 +31,15 @@ from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.coordination import all_ranks_ok, consensus_read
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.expert_parallel.base_layer import find_ep_layers
-from src.distributed.filesystem import joined_node_load
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    barrier,
-    broadcast_from_rank0,
-    fs_aware_save_rank,
-    gather_rank_reasons,
-    gathered_failure_summary,
-    get_global_rank,
-    get_global_world_size,
-    is_global_main_process,
-    is_output_shared_filesystem,
-    rank_consensus,
-)
 from src.hardware import available_host_ram_bytes
 from src.log import KEY_PREVIEW_COUNT
 from src.models.unwrapping import unwrap_toolkit_wrappers
+from src.runtime.collectives import barrier, broadcast_from_rank0
+from src.runtime.consensus import DeferredRankFailure, gather_rank_reasons, gathered_failure_summary, rank_consensus
+from src.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
+from src.runtime.load_coordination import joined_node_load
+from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -253,12 +244,12 @@ class OptimizerShardStore:
 
         # Every restore decision below is collective (set_optimizer_state_dict issues DTensor collectives),
         # and topology gates run BEFORE the presence check so a topology change reads as change, not torn.
-        shard_all, shard_any = rank_consensus(os.path.exists(shard_path))
-        saved = self._read_saved_meta(os.path.join(checkpoint, OPTIMIZER_META_FILE), shard_any=shard_any)
+        shards = rank_consensus(os.path.exists(shard_path))
+        saved = self._read_saved_meta(os.path.join(checkpoint, OPTIMIZER_META_FILE), shard_any=shards.any_ok)
 
         # Under PP the gates below RAISE instead of warm-restarting: shards keyed by stage-LOCAL FQNs let
         # topology drift map moments onto the wrong layers.
-        pp_strict = ctx.is_pp_mode and shard_any
+        pp_strict = ctx.is_pp_mode and shards.any_ok
 
         # Ahead of the rank-count gate: a meta that cannot vouch for its shards is an interrupted
         # save, not a topology change, and resuming past it would reset the moments silently.
@@ -297,8 +288,8 @@ class OptimizerShardStore:
         # WORLD fact before any rank branches on it: on a non-shared filesystem the meta is written
         # once per node, so a heterogeneous set would otherwise split the ranks across the gates
         # below — a watchdog hang instead of a diagnostic.
-        fp_all, fp_any = rank_consensus(saved.fingerprint is not None)
-        if shard_any and not fp_all:
+        fingerprints = rank_consensus(saved.fingerprint is not None)
+        if shards.any_ok and not fingerprints.all_ok:
             raise RuntimeError(
                 f"Optimizer resume from {checkpoint}: the per-rank optimizer shards carry no topology "
                 f"fingerprint in optimizer_meta.pt on at least one rank. Pre-fingerprint checkpoints "
@@ -337,8 +328,8 @@ class OptimizerShardStore:
         if pp_strict:
             self._reject_pp_partition_drift(checkpoint, saved)
 
-        if not shard_all:
-            return self._resolve_absent_shards(checkpoint, shard_any=shard_any, fp_any=fp_any)
+        if not shards.all_ok:
+            return self._resolve_absent_shards(checkpoint, shard_any=shards.any_ok, fp_any=fingerprints.any_ok)
 
         osd, read_failure = self._read_local_state(checkpoint, shard_path)
         if self._settle_restore_failure(
@@ -511,7 +502,7 @@ class OptimizerShardStore:
         and under PP a stage can hold no EP layer at all) — gating entry on any of them would leave
         a peer waiting out the store timeout on a key nobody writes.
 
-        Its exit joins the world over the store (:func:`~src.distributed.filesystem.joined_node_load`):
+        Its exit joins the world over the store (:func:`~src.runtime.load_coordination.joined_node_load`):
         the first batch waits for the last there, under ``DIST_STORE_TIMEOUT_HOURS``, not in the
         collective after it under the NCCL watchdog — a node reading ~800 GB of shards in serialized
         batches outlasts that. A read failure is still returned for the caller's verdict; only an
@@ -598,7 +589,7 @@ class OptimizerShardStore:
         # wholesale. Consensus'd because each node sees different files; any single rank's evidence must
         # raise the whole world.
         local_evidence = fp_any or bool(glob.glob(os.path.join(checkpoint, _OPTIMIZER_SHARD_GLOB)))
-        if rank_consensus(local_evidence)[1]:
+        if rank_consensus(local_evidence).any_ok:
             raise RuntimeError(
                 f"No rank found its own optimizer shard at {checkpoint}, but optimizer state WAS "
                 f"written there (other ranks' optimizer_shard_*.pt files and/or a topology-matched "
@@ -611,7 +602,7 @@ class OptimizerShardStore:
         # The base save's rank-0 optimizer.pt is deleted only once its per-rank replacement is on disk,
         # so finding it here means that replacement never landed — or a non-sharded run wrote it.
         replicated = any(os.path.isfile(os.path.join(checkpoint, name)) for name in OPTIMIZER_STATE_FILES)
-        if rank_consensus(replicated)[1]:
+        if rank_consensus(replicated).any_ok:
             return self._refuse_unless_opted_in(
                 checkpoint,
                 f"Optimizer resume from {checkpoint}: it holds a replicated "
@@ -870,7 +861,7 @@ class OptimizerShardStore:
                 # Staged, so an interrupted write leaves no meta rather than a truncated one.
                 atomic_torch_save(os.path.join(output_dir, OPTIMIZER_META_FILE), lambda: meta)
 
-            if fs_aware_save_rank():
+            if is_fs_save_rank():
                 guard.run(_write_meta)
                 if guard.reason is None:
                     logger.info(f"✓ Saved per-rank optimizer shards ({get_global_world_size()} ranks) to {output_dir}")

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import math
-from functools import partial
 
 import torch
 import torch.nn as nn
 
 from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
-from src.kernels.fused_glu import fused_silu_then_clamp_mul, is_silu_activation
+from src.kernels.fused_glu import GluCombine, is_silu_activation
 
 
 class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
@@ -82,7 +81,7 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
         self.swiglu_limit = float(experts.limit)
         if not math.isinf(self.swiglu_limit):
             self._fused_glu_mul = (
-                partial(fused_silu_then_clamp_mul, limit=self.swiglu_limit)
+                GluCombine.clamped_silu(self.swiglu_limit, clamp_activated=True)
                 if is_silu_activation(self.act_fn)
                 else self._act_then_clamp_eager
             )

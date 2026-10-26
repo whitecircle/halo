@@ -36,7 +36,7 @@ from src.checkpoint.writing import (
     save_dtype_caster,
     write_merged_index,
 )
-from src.distributed.checkpoint.write import exchange_shard_index, resolve_retained
+from src.distributed.checkpoint.write import exchange_shard_index
 from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
 from src.distributed.expert_parallel.base_layer import find_ep_layers
@@ -49,23 +49,16 @@ from src.distributed.expert_parallel.expert_weights import (
     to_hub_layer_key,
 )
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    barrier_on_exit,
-    fs_aware_makedirs,
-    fs_aware_save_rank,
-    get_global_rank,
-    get_global_world_size,
-    get_local_world_size,
-    is_output_shared_filesystem,
-    materialize_dtensor,
-    resolve_param_tensor,
-)
 from src.distributed.tensor_parallel.state_dict import gather_tp_sharded_non_dtensor_params
 from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
-from src.models.structure import LoraFolds, lora_folded_data
+from src.models.peft_adapters import LoraFolds, lora_folded_data
 from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_toolkit_wrappers
+from src.runtime.collectives import barrier_on_exit
+from src.runtime.consensus import DeferredRankFailure
+from src.runtime.dtensor import full_cpu_tensor, materialize_dtensor, resolve_retained
+from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank, is_output_shared_filesystem
+from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size
 
 logger = get_logger(__name__)
 
@@ -142,7 +135,7 @@ def save_ep_model(
     (default) gathers an HF-standard checkpoint. ``cp_key_remap`` rewrites CP attention keys
     (required for EP+CP). ``merge_lora=True`` folds native grouped-LoRA deltas into the gathered base.
 
-    ``lora_folds`` (:func:`~src.models.structure.lora_fold_targets` of the PeftModel) folds the PEFT
+    ``lora_folds`` (:func:`~src.models.peft_adapters.lora_fold_targets` of the PeftModel) folds the PEFT
     adapters' deltas into the non-EP base tensors as they are written, out of place; no LoRA layer
     sits inside an EP layer (the trainer's ``_validate_lora_ep_compatibility`` refuses one).
     ``keep_live_dtype`` (a training checkpoint) is :func:`~src.checkpoint.writing.save_dtype_caster`'s.
@@ -202,7 +195,7 @@ def _save_ep_gathered(
     would need the entire model resident in one host's RAM. On non-shared filesystems each node's
     local rank 0 saves.
     """
-    is_save_rank = fs_aware_save_rank()
+    is_save_rank = is_fs_save_rank()
 
     if is_save_rank:
         logger.info(f"Saving EP model to {output_dir} (gathered mode)")
@@ -233,7 +226,7 @@ def _save_ep_gathered(
         # One tensor at a time; a folded DTensor's delta is a collective every rank enters.
         data = lora_folded_data(param, lora_folds)
         if is_save_rank:
-            state_dict[name] = cast(name, resolve_param_tensor(data))
+            state_dict[name] = cast(name, full_cpu_tensor(data))
         else:
             materialize_dtensor(data)
         del data
@@ -341,7 +334,7 @@ def save_ep_lora_adapters(
     checkpoint, whose fp32 adapters must resume unrounded).
     """
     model = unwrap_toolkit_wrappers(model)  # a wrapper walk would prefix every adapter key (see save_ep_model)
-    is_save_rank = fs_aware_save_rank()
+    is_save_rank = is_fs_save_rank()
     fs_aware_makedirs(output_dir)
     # Collective on every rank; only the writer keeps the result (else one host holds
     # local_ranks copies of the whole adapter set).
@@ -551,12 +544,12 @@ def _save_ep_sharded(
     shard = {}
 
     # EP+TP: non-EP DTensors need a full_tensor() collective on all ranks even though only rank 0
-    # writes; rank==0 (not fs_aware_save_rank) since non-shared multi-node is blocked upstream.
+    # writes; rank==0 (not is_fs_save_rank) since non-shared multi-node is blocked upstream.
     for name, param in model.named_parameters():
         if name in ep_expert_param_names:
             shard[f"{name}{EP_SHARD_KEY_INFIX}{rank}"] = cast(name, param.data.cpu())
         else:
-            resolved = resolve_param_tensor(param.data)
+            resolved = full_cpu_tensor(param.data)
             if rank == 0:
                 shard[name] = cast(name, resolved)
 

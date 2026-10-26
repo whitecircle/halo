@@ -24,7 +24,7 @@ from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling
 
 from src.configs.distillation import DistillationConfig
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
+from src.runtime.collectives import barrier
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import (

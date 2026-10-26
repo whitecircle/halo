@@ -13,8 +13,8 @@ import torch
 import transformers.models.zaya.modeling_zaya as zaya_modeling
 from accelerate.logging import get_logger
 
-from src.distributed.expert_parallel.gc_scope import counts_toward_expert_load
 from src.kernels.histogram import accumulate_bincount
+from src.models.gradient_checkpointing import counts_toward_expert_load
 from src.models.patches.attention import install_packed_position_ids_injection
 
 logger = get_logger(__name__)

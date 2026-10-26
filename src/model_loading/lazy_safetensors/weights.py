@@ -26,7 +26,7 @@ from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.checkpoint_coverage import verify_checkpoint_coverage
 from src.model_loading.dtype import reject_fp8_tensor
 from src.model_loading.lazy_safetensors.conversion import Concat, Convert, Rename, convert_disk_keys
-from src.models.param_roles import fp32_pinned_state_keys
+from src.models.param_roles import fp32_pinned_names
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +244,7 @@ class SafetensorsWeightLoader:
         Every materialized tensor is shape-checked against the live target before assignment, since
         this path bypasses ``from_pretrained``'s own size-mismatch check.
         """
-        pinned = fp32_pinned_state_keys(model)
+        pinned = fp32_pinned_names(model, include_buffers=True)
         self._open()
         try:
             loaded = expert_sharded = 0

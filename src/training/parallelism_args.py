@@ -1,29 +1,14 @@
 """Build a :class:`ParallelismConfig` from parsed ``DistributedArguments``."""
 
-from dataclasses import MISSING, fields
+from dataclasses import fields
 from typing import TYPE_CHECKING
 
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.lowp.spec import LowpSpec
 from src.models.context_window import is_bounded_length
 
 if TYPE_CHECKING:
     from src.distributed.expert_parallel.config import ExpertLoraSpec
-
-# The lowp_* shape knobs, forwarded only for SFT; a non-default value anywhere else would be read by
-# nothing. Defaults come from the ParallelismConfig fields rather than being restated here.
-_LOWP_SHAPE_KNOBS: tuple[str, ...] = (
-    "lowp_apply_dense_mlp",
-    "lowp_apply_moe_experts",
-    "lowp_keep_first_blocks",
-    "lowp_keep_last_blocks",
-)
-
-# Knob -> its default, read off the dataclass fields so the SFT-only gate stays in step with the
-# class declaration; a knob name that stops matching a field raises KeyError here at import.
-_PC_FIELD_DEFAULTS = {f.name: f.default for f in fields(ParallelismConfig) if f.default is not MISSING}
-_LOWP_SHAPE_DEFAULTS: dict[str, bool | int] = {name: _PC_FIELD_DEFAULTS[name] for name in _LOWP_SHAPE_KNOBS}
-# Forwarded only under ``allow_low_precision``, so they are excluded from the by-name forwarding below.
-_LOWP_KNOBS: frozenset[str] = frozenset({"lowp_precision", *_LOWP_SHAPE_KNOBS})
 
 # Rows one model call carries per dataset example, declared on the trainer class. Absent means 1,
 # the multiplier for a trainer that does not concatenate.
@@ -35,14 +20,9 @@ def same_name_arg_forwards(dist_args) -> tuple[str, ...]:
 
     The by-name half of :func:`parallelism_config_from_args`' wiring: derived from the two
     declarations rather than listed, so a knob added to both is forwarded automatically. Fields the
-    builder renames (``expert_parallel_size`` → ``ep_size``) or derives do not appear here, and the
-    ``lowp_*`` knobs are excluded because only SFT forwards them.
+    builder renames (``expert_parallel_size`` → ``ep_size``) or derives do not appear here.
     """
-    return tuple(
-        f.name
-        for f in fields(ParallelismConfig)
-        if f.init and f.name not in _LOWP_KNOBS and hasattr(dist_args, f.name)
-    )
+    return tuple(f.name for f in fields(ParallelismConfig) if f.init and hasattr(dist_args, f.name))
 
 
 def forward_rows_per_example(trainer_cls) -> int:
@@ -83,22 +63,22 @@ def parallelism_config_from_args(
             call carries per dataset example. The preference and Bradley-Terry reward trainers score
             chosen and rejected in a single concatenated forward, so their MoE layers present twice
             the rows a token budget computed from ``per_device_train_batch_size`` alone would predict.
-        allow_low_precision: forward the ``lowp_*`` knobs (SFT only); elsewhere a non-``bf16``
-            ``lowp_precision`` is rejected.
+        allow_low_precision: accept the ``lowp_*`` knobs (SFT only); elsewhere a non-default one is
+            rejected.
         expert_lora: peeled native EP expert-LoRA spec. Must be passed here, not assigned onto the
             returned config: only construction runs ``__post_init__``, where its PP and expert-TP
             refusals live, and :meth:`ParallelismConfig.create_ep_config` caches the ``EPConfig`` it
             builds, so a later assignment never reaches the layers.
     """
+    lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
     if not allow_low_precision:
-        if dist_args.lowp_precision != "bf16":
+        if lowp.precision != "bf16":
             raise ValueError(
-                f"lowp_precision={dist_args.lowp_precision!r} is only validated for SFT training; this "
+                f"lowp_precision={lowp.precision!r} is only validated for SFT training; this "
                 "trainer runs in bf16. Remove lowp_precision from the config (or use the SFT script)."
             )
-        # The other lowp_* knobs are not forwarded here either, so a config that sets them outside
-        # SFT would parse cleanly and have no effect; reject it instead.
-        ignored = [name for name, default in _LOWP_SHAPE_DEFAULTS.items() if getattr(dist_args, name) != default]
+        # A config setting the other lowp_* keys outside SFT would parse cleanly and have no effect.
+        ignored = lowp.non_default_shape_fields()
         if ignored:
             raise ValueError(
                 f"{', '.join(ignored)} apply only to SFT training and would be silently dropped here. "
@@ -124,8 +104,8 @@ def parallelism_config_from_args(
             "(EP) and/or Tensor Parallelism (TP) instead, or remove --pipeline_parallel_size."
         )
 
-    # Fields the two dataclasses spell identically forward themselves; only the renames, the
-    # derivations and the SFT-gated lowp block below stay explicit.
+    # Fields the two dataclasses spell identically forward themselves; only the renames and the
+    # derivations stay explicit.
     kwargs = {name: getattr(dist_args, name) for name in same_name_arg_forwards(dist_args)}
     kwargs.update(
         ep_size=dist_args.expert_parallel_size,
@@ -139,6 +119,7 @@ def parallelism_config_from_args(
         ep_fp32_router=dist_args.fp32_router,
         ep_fp32_experts=dist_args.fp32_experts,
         expert_lora=expert_lora,
+        lowp=lowp,
         # The two factors stay separate because only one of them is knowable here: a config with no
         # max_length field at all (generation-shaped budgets) declares neither rows nor budget, while
         # ``max_length: null`` declares its rows and leaves the length to the gate's context-window
@@ -151,8 +132,6 @@ def parallelism_config_from_args(
         ),
         ep_declared_max_length=declared_row_length(training_config),
     )
-    if allow_low_precision:
-        kwargs.update({name: getattr(dist_args, name) for name in _LOWP_KNOBS})
     config = ParallelismConfig(**kwargs)
     config.reject_cross_domain_determinism(bool(getattr(training_config, "full_determinism", False)))
     return config

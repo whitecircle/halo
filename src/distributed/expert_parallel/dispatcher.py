@@ -28,6 +28,7 @@ import os
 import sys
 import weakref
 from abc import ABC, abstractmethod
+from datetime import timedelta
 from typing import Self
 
 import torch
@@ -47,15 +48,11 @@ from src.distributed.expert_parallel.config import (
 )
 from src.distributed.expert_parallel.extension import deep_ep, deep_ep_available
 from src.distributed.grad_reduce import GRAD_BUCKET_MB
-from src.distributed.runtime import (
-    barrier,
-    get_local_world_size,
-    is_global_main_process,
-    rank_consensus,
-    reject_divergent_settings,
-)
-from src.env import env_flag, env_int, env_positive_int, resolve_nccl_timeout_minutes, resolve_store_timeout_hours
+from src.env import env_flag, env_int, env_positive_int, nccl_timeout, store_timeout
 from src.log import warn_once
+from src.runtime.collectives import barrier
+from src.runtime.consensus import rank_consensus, reject_divergent_settings
+from src.runtime.ranks import get_local_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -136,8 +133,8 @@ def rank_uniform_ep_settings() -> dict[str, object]:
         # Reported back in the unit the operator sets (MB), so a divergence message names the value
         # they can grep their --env-file for.
         "HALO_GRAD_BUCKET_MB": GRAD_BUCKET_MB,
-        "DIST_NCCL_TIMEOUT_MINUTES": resolve_nccl_timeout_minutes(),
-        "DIST_STORE_TIMEOUT_HOURS": resolve_store_timeout_hours(),
+        "DIST_NCCL_TIMEOUT_MINUTES": nccl_timeout() // timedelta(minutes=1),
+        "DIST_STORE_TIMEOUT_HOURS": store_timeout() // timedelta(hours=1),
         "EP_DISABLE_GIN": os.environ.get("EP_DISABLE_GIN"),
     }
 
@@ -351,7 +348,7 @@ class _SharedArena:
 
     def _unclaimed_on_every_rank(self) -> bool:
         """Whether no rank of this arena's group still claims it (collective over the group)."""
-        return rank_consensus(self._users <= 0, group=self.group)[0]
+        return rank_consensus(self._users <= 0, group=self.group).all_ok
 
 
 class _ElasticArena(_SharedArena):

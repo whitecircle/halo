@@ -39,7 +39,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.hub_layout import revert_to_load_layout
 from src.models.moe_balancing import balancing_param_keys
-from src.models.param_roles import fp32_pinned_state_keys, norm_param_keys
+from src.models.param_roles import fp32_pinned_names, norm_param_keys
 from src.models.unwrapping import strip_peft_adapter_segment
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,7 @@ def save_dtype_caster(model: torch.nn.Module, *, keep_live_dtype: bool = False):
     """
     if keep_live_dtype:
         return _as_live
-    keep = norm_param_keys(model) | balancing_param_keys(model) | fp32_pinned_state_keys(model)
+    keep = norm_param_keys(model) | balancing_param_keys(model) | fp32_pinned_names(model, include_buffers=True)
 
     def cast(name: str, t: torch.Tensor) -> torch.Tensor:
         return t if name in keep or strip_peft_adapter_segment(name) in keep else cast_to_save_dtype(t)

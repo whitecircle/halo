@@ -35,7 +35,7 @@ A gated delta-rule recurrent attention with a sequence-axis causal Conv1d on the
 
 The imports reach the layer through transformers' hub-kernel funnel, whose package resolution attribute-walks a bare package import. `fla` exports nothing at root, so upstream alone silently captures the torch scan, at ~10x the kernel's step time.
 
-`src/models/patches/kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed; that warning in a training log is a throughput alarm. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair.
+`src/kernels/hub_kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed; that warning in a training log is a throughput alarm. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair.
 
 The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing, and SMPO refuses its own `padding_free` likewise ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 

@@ -1,6 +1,6 @@
 # Debug playbook — symptom → cause → fix
 
-Companion to `SKILL.md`. Sources: `src/diagnostics/rank_divergence.py`, `src/diagnostics/py_spy.py`,
+Companion to `SKILL.md`. Sources: `src/runtime/consensus.py` (`assert_rank_uniform`), `src/diagnostics/py_spy.py`,
 `src/diagnostics/profiling.py` (CUDA-memory helpers),
 `src/callbacks/torch_profiler.py` (`TorchProfilerCallback`),
 `src/callbacks/wiring.py` (wiring), `src/env.py` (`env_flag`, `DIST_NCCL_TIMEOUT_MINUTES`),
@@ -42,7 +42,7 @@ export HALO_TP_CONSISTENCY_CHECK=1   # makes assert_rank_uniform RAISE on mismat
 ```
 
 ```python
-from src.diagnostics.rank_divergence import assert_rank_uniform
+from src.runtime.consensus import assert_rank_uniform
 assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in")
 assert_rank_uniform(some_scalar, group=ep_group, label="n_tokens")
 ```
@@ -161,7 +161,7 @@ and the EP degree, never the dense ceiling.
 ## References
 
 - `agent-docs/reference/debugging.md` — full user-facing guide (this playbook mirrors it)
-- `src/diagnostics/rank_divergence.py`, `src/diagnostics/py_spy.py` — consistency-check and py-spy capture helpers (authoritative for env vars/signatures)
+- `src/runtime/consensus.py` (`assert_rank_uniform`), `src/diagnostics/py_spy.py` — consistency-check and py-spy capture helpers (authoritative for env vars/signatures)
 - `src/diagnostics/profiling.py` — CUDA-memory helpers (`read_cuda_memory`, `log_cuda_memory`, `cuda_memory_history`)
 - `src/callbacks/torch_profiler.py` — `TorchProfilerCallback`
 - `agent-docs/parallelism/multi-node.md` — NCCL/IB env vars, FS coordination

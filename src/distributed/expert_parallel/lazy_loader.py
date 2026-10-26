@@ -55,8 +55,6 @@ from src.distributed.expert_parallel.patching import (
     create_ep_buffers,
     patch_moe_model_for_ep,
 )
-from src.distributed.filesystem import fs_aware_main_first
-from src.distributed.runtime import DeferredRankFailure, get_local_rank
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.dtype import reject_fp8_tensor
 from src.model_loading.lazy_safetensors.conversion import Concat
@@ -75,6 +73,9 @@ from src.model_loading.lazy_safetensors.weights import (
 from src.models.config_access import text_config
 from src.models.patches.attention import revalidate_attn_kwarg
 from src.models.patches.buffer_fixes import finalize_loaded_model
+from src.runtime.consensus import DeferredRankFailure
+from src.runtime.filesystem import fs_aware_main_first
+from src.runtime.ranks import get_local_rank
 
 logger = logging.getLogger(__name__)
 

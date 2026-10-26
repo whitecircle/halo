@@ -31,8 +31,8 @@ from src.data.sources.loading import alias_images_column
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
-from src.distributed.runtime import barrier
 from src.model_loading.model_preparation import log_model_info
+from src.runtime.collectives import barrier
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser

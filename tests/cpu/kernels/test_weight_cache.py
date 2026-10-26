@@ -52,13 +52,13 @@ def test_distinct_tensors_never_alias():
 
 
 def test_cached_fake_quant_cache_evicts_end_to_end():
-    baseline = len(quantization._WEIGHT_DEQUANT_CACHE)
+    baseline = len(quantization._weight_dequant_cache)
     w = torch.nn.Parameter(torch.randn(8, 64) * 0.3)
     quantization.cached_fake_quant(w, "mxfp8", axis=-1)
-    assert len(quantization._WEIGHT_DEQUANT_CACHE) == baseline + 1
+    assert len(quantization._weight_dequant_cache) == baseline + 1
     del w
     gc.collect()
-    assert len(quantization._WEIGHT_DEQUANT_CACHE) == baseline
+    assert len(quantization._weight_dequant_cache) == baseline
 
 
 if __name__ == "__main__":

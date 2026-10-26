@@ -24,7 +24,7 @@ Run with 2 GPUs:
 import torch
 import torch.distributed as dist
 
-from src.distributed.runtime import nccl_safe_broadcast
+from src.runtime.collectives import nccl_safe_broadcast
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.harness import gpu_test_main
 

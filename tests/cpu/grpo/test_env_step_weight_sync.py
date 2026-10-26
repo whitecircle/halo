@@ -31,9 +31,9 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
-import src.distributed.runtime as runtime
 import src.trainers.grpo.rollout.async_rollouts as async_mod
 from src.distributed.parallelism_config import ParallelismConfig
+from src.runtime import collectives, consensus
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, sync_weights_to_client
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -98,13 +98,13 @@ class _ShardedPolicy(nn.Module):
 
 def _push_worker(rank: int, tmp_dir: str) -> None:
     barriers = []
-    real_barrier = runtime.barrier
+    real_barrier = collectives.barrier
 
     def counting_barrier(group=None):
         barriers.append(rank)
         real_barrier(group)
 
-    runtime.barrier = counting_barrier
+    collectives.barrier = counting_barrier
     client = _SlowFlush() if rank == 0 else None
     trainer = SimpleNamespace(
         model=_ShardedPolicy(init_device_mesh("cpu", (WORLD_SIZE,))),
@@ -156,14 +156,14 @@ class _EngineClient(RecordingSender):
 def _counted_verdicts(what: str) -> list[str]:
     """The rank-uniform verdicts named ``what`` this rank joins from here on."""
     joined = []
-    real_reject = runtime.reject_across_ranks
+    real_reject = consensus.reject_across_ranks
 
     def counting_reject(reason, name, exc_type=RuntimeError):
         if name == what:
             joined.append(name)
         return real_reject(reason, name, exc_type=exc_type)
 
-    runtime.reject_across_ranks = counting_reject
+    consensus.reject_across_ranks = counting_reject
     return joined
 
 

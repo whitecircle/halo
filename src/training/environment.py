@@ -30,18 +30,13 @@ from src.checkpoint.format import (
 from src.data.pipeline.processing import ensure_cache_dir
 from src.distributed.checkpoint.coordination import resolve_resume_checkpoint
 from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
-from src.distributed.filesystem import OUTPUT_FS_PROBE_PREFIX
-from src.distributed.runtime import (
-    barrier,
-    broadcast_from_rank0,
-    fs_aware_load_rank,
-    fs_aware_save_rank,
-    is_global_main_process,
-    reject_across_ranks,
-)
 from src.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME
 from src.model_loading.dtype import configure_float32_matmul_precision
 from src.models.patches.attention import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
+from src.runtime.collectives import barrier, broadcast_from_rank0
+from src.runtime.consensus import reject_across_ranks
+from src.runtime.filesystem import OUTPUT_FS_PROBE_PREFIX, is_fs_load_rank, is_fs_save_rank
+from src.runtime.ranks import is_global_main_process
 from src.training.parser import is_true_string
 from src.training.run_logging import setup_logging
 
@@ -93,7 +88,7 @@ def _validate_output_dir_across_ranks(output_dir: str) -> None:
     rejection seam, which preserves the ``ValueError`` type callers of this guard match on.
     """
     validation_error: str | None = None
-    if fs_aware_save_rank():
+    if is_fs_save_rank():
         try:
             _validate_output_dir(output_dir)
         except ValueError as e:
@@ -158,7 +153,7 @@ def setup_training_environment(args, training_config, script_name: str) -> None:
         _validate_output_dir_across_ranks(training_config.output_dir)
 
     # Read-side election, unlike the per-node default the coordinated dataset ops use.
-    hf_datasets_cache = ensure_cache_dir(writer_rank=fs_aware_load_rank)
+    hf_datasets_cache = ensure_cache_dir(writer_rank=is_fs_load_rank)
     datasets.config.HF_DATASETS_CACHE = Path(hf_datasets_cache)
     os.environ["HF_DATASETS_CACHE"] = hf_datasets_cache
 

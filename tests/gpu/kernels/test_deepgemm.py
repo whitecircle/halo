@@ -61,7 +61,7 @@ def test_deepgemm_forward_backward():
             x = (torch.randn(T, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
             w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * (K**-0.5)).requires_grad_(True)
             offs = torch.cumsum(torch.tensor(counts, device=DEV, dtype=torch.int32), 0).to(torch.int32)
-            out = deepgemm_grouped_gemm(x, w, offs=offs, precision=precision)
+            out = deepgemm_grouped_gemm(x, w, offs=offs, quant_format=precision)
             ref = _bf16_ref(x.detach(), w.detach(), offs)
             rel = fro_rel_err(out.detach(), ref)
             assert lo < rel < hi, (
@@ -94,7 +94,7 @@ def test_weight_cache_across_steps():
     losses = []
     for _ in range(3):
         x = torch.randn(8 * 256, K, device=DEV, dtype=torch.bfloat16) * 0.3
-        out = deepgemm_grouped_gemm(x, w, offs=offs, precision="mxfp8")
+        out = deepgemm_grouped_gemm(x, w, offs=offs, quant_format="mxfp8")
         loss = out.float().pow(2).mean()
         opt.zero_grad()
         loss.backward()

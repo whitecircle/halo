@@ -20,7 +20,7 @@ import torch
 from torch import nn
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.gc_scope import EPCheckpointScope
+from src.models.gradient_checkpointing import RecomputeScope
 from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
 
 ROWS, SEQ, K, E = 2, 4, 2, 8
@@ -110,7 +110,7 @@ def test_gc_recompute_does_not_advance_consumption():
     slice WITHOUT consuming — consumed-total counts each token once."""
     injector, layer = _armed_injector()
     layer.train()
-    scope = EPCheckpointScope()
+    scope = RecomputeScope()
     with scope:  # original forward
         _consume(layer, ROWS * SEQ)
     with scope:  # backward recompute

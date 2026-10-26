@@ -25,12 +25,12 @@ from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.frozen_models import load_reference_model_for_on_policy_grpo
 from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.runtime import barrier
 from src.environments.base import resolve_reasoning_effort
 from src.environments.rollout_config import VLLM_BACKEND
 from src.model_loading.model_preparation import log_model_info
 from src.rewards.functions import ScorerRewardFunction, reward_functions
 from src.rewards.graders.verifiable import RLVR_GRADERS
+from src.runtime.collectives import barrier
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.weight_sync_clients import (

@@ -26,10 +26,9 @@ import torch
 import torch.distributed as dist
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.gc_scope import active_checkpoint_scope
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
@@ -83,7 +82,7 @@ def load_ep_model(gradient_checkpointing: bool | None):
         attn_implementation="flash_attention_2",
     )
     if gradient_checkpointing is not None:
-        enable_ep_gradient_checkpointing(
+        enable_scoped_gradient_checkpointing(
             model, gradient_checkpointing_kwargs={"use_reentrant": gradient_checkpointing}
         )
     model.train()
@@ -133,7 +132,7 @@ def run(ctx):
         checks[f"{label}_compared_every_param"] = compared == len(reference) and compared > 0
         checks[f"{label}_grads_finite"] = all(torch.isfinite(g).all() for g in grads.values())
         checks[f"{label}_has_ep_layers"] = len(ep_layers) > 0
-        checks[f"{label}_no_scope_leaked"] = active_checkpoint_scope() is None
+        checks[f"{label}_no_scope_leaked"] = active_recompute_scope() is None
         checks[f"{label}_no_cache_growth_across_steps"] = resident_second <= resident_first * 1.001
         metrics[f"{label}_worst_grad_rel_err"] = worst
         metrics[f"{label}_resident_gb_step2"] = resident_first / 2**30

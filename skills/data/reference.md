@@ -98,8 +98,8 @@ JSON or a JSON file path).
   cached per-shard under a FileLock keyed by `md5("<bucket>/<key>/<shard.path>")`.
 - `is_sharded_dataset_coordinated()` all-reduces the per-rank probe (MAX) so a transient per-rank S3
   flake can't split ranks onto sharded-vs-full paths (→ divergent sizes / NCCL hang).
-- `fs_aware_main_first(tag)` (`src/distributed/filesystem.py`) / `is_input_shared_filesystem()`
-  (`src/distributed/runtime.py`): shared input FS
+- `fs_aware_main_first(tag)` / `is_input_shared_filesystem()`
+  (`src/runtime/filesystem.py`): shared input FS
   (`DIST_INPUT_SHARED_FILESYSTEM`, falling back to the `DIST_SHARED_FILESYSTEM="1"` umbrella) →
   global rank 0 runs the body first, then the peers run it against the cache it filled; non-shared
   (`"0"`) → each node's local rank 0 leads its node, nodes in parallel. Waiters sit on a c10d store key bounded by

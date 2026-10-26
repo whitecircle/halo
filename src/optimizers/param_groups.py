@@ -12,7 +12,7 @@ import torch
 from torch.distributed.tensor import DTensor
 from torch.nn import Parameter
 
-from src.distributed.runtime import is_global_main_process
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 

@@ -5,7 +5,7 @@ transformers ≥ 5.16 shards a planned projection into DTensor params and replac
 with an INSTANCE attribute (``tp_forward``) closed over the bound ``nn.Linear.forward`` it found.
 ``LowPrecisionLinear.convert_`` retypes the module in place, and an instance attribute shadows the
 class ``forward``: the wrapper keeps calling the captured bf16 forward while
-``apply_mixed_precision_compute`` reports the module converted — a run under ``lowp_precision: fp8``
+``apply_lowp_compute`` reports the module converted — a run under ``lowp_precision: fp8``
 that trains in bf16 with no other symptom.
 
 The TP machinery in play is transformers' own (``apply_tensor_parallelism`` on a fake process group,
@@ -26,9 +26,10 @@ from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tenso
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from src.distributed.mesh import MeshDim
-from src.kernels.lowp.linear import PRECISION_TO_FORMAT, LinearPrecision, LowPrecisionLinear, lowp_linear
-from src.kernels.lowp.mixed_precision import apply_mixed_precision_compute
-from src.kernels.lowp.quantization import fake_quant
+from src.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
+from src.kernels.lowp.quantization import QUANTIZERS, fake_quant
+from src.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
+from src.model_loading.parallel.lowp_compute import apply_lowp_compute
 from tests.common.distributed import fake_process_group_mesh
 
 WIDTH = 64  # a multiple of every block size (32 mx, 16 nvfp4)
@@ -74,14 +75,14 @@ def test_convert_refuses_a_shadowing_instance_forward():
     x = torch.randn(4, WIDTH)
 
     with pytest.raises(TypeError, match="instance-level forward"):
-        LowPrecisionLinear.convert_(linear, LinearPrecision.FP8)
+        LowPrecisionLinear.convert_(linear, "mxfp8")
     assert type(linear) is nn.Linear, "a refused conversion must not half-retype the module"
 
     # The mechanism the refusal exists for: a bare retype under the shadow computes bf16.
     linear.__class__ = LowPrecisionLinear
-    linear.precision = LinearPrecision.FP8
+    linear.quant_format = "mxfp8"
     assert torch.equal(linear(x), F.linear(x, linear.weight))
-    assert not torch.equal(linear(x), lowp_linear(x, linear.weight, precision=LinearPrecision.FP8))
+    assert not torch.equal(linear(x), lowp_linear(x, linear.weight, quant_format="mxfp8"))
 
 
 def test_apply_refuses_a_shadow_it_cannot_reinstall():
@@ -92,10 +93,10 @@ def test_apply_refuses_a_shadow_it_cannot_reinstall():
     _shadow_like_transformers(model.layers[0].down_proj)
 
     with pytest.raises(RuntimeError, match="instance-level forward"):
-        apply_mixed_precision_compute(model, precision="fp8")
+        apply_lowp_compute(model, LowpSpec(precision="fp8"), expert_weight_cacheable=True)
 
 
-@pytest.mark.parametrize("precision", [p.value for p in LinearPrecision])
+@pytest.mark.parametrize("precision", sorted(LOWP_RECIPES))
 def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
     """After transformers' TP load, every converted projection must compute ``lowp_linear`` through
     the plan's own transforms — in the training (DTensor) path and the no-grad local path alike."""
@@ -111,11 +112,11 @@ def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
             assert "forward" in vars(module), "premise: transformers installs an instance-level forward"
             assert isinstance(module.weight, DTensor), "premise: transformers shards into DTensor params"
 
-        summary = apply_mixed_precision_compute(model, precision=precision)
+        summary = apply_lowp_compute(model, LowpSpec(precision=precision), expert_weight_cacheable=True)
         assert summary["dense_linears"] == 3
 
         x = torch.randn(4, WIDTH)
-        lin_precision = LinearPrecision(precision)
+        quant_format = LOWP_RECIPES[precision].quant_format
         for proj in ("gate_proj", "up_proj", "down_proj"):
             module = getattr(model.layers[0], proj)
             assert isinstance(module, LowPrecisionLinear)
@@ -123,7 +124,7 @@ def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
             # to the module's graph — never a leaf (no ``.grad``) and accumulating a second time
             # into ``module.weight``. On a 1-rank mesh the local shard IS the full weight.
             weight = module.weight.to_local().detach()
-            expected = lowp_linear(x, weight, precision=lin_precision)
+            expected = lowp_linear(x, weight, quant_format=quant_format)
             assert not torch.equal(expected, F.linear(x, weight)), "premise: fake-quant changes the numerics"
 
             out = module(x)
@@ -135,18 +136,17 @@ def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
             # Straight-through gradient still reaches the DTensor master through the re-installed transforms.
             module(x).sum().backward()
             reference = weight.clone().requires_grad_()
-            lowp_linear(x, reference, precision=lin_precision).sum().backward()
+            lowp_linear(x, reference, quant_format=quant_format).sum().backward()
             assert isinstance(module.weight.grad, DTensor)
             assert torch.allclose(module.weight.grad.to_local(), reference.grad)
 
 
-@pytest.mark.parametrize("precision", [p.value for p in LinearPrecision])
-def test_lowp_linear_quantizes_dtensor_operands_shard_locally(precision):
+@pytest.mark.parametrize("quant_format", sorted(QUANTIZERS))
+def test_lowp_linear_quantizes_dtensor_operands_shard_locally(quant_format):
     """Under TP the operands are DTensors; quantizing each rank's shard must equal the full-tensor
     quantization (block boundaries tile the contraction shards) — and must run at all for the fp4
     formats, whose ``bucketize`` DTensor dispatch has no sharding rule."""
     torch.manual_seed(0)
-    fmt = PRECISION_TO_FORMAT[LinearPrecision(precision)]
     x_full = torch.randn(8, WIDTH)
     w_full = torch.randn(WIDTH, WIDTH)
     tp_size = 2
@@ -155,20 +155,20 @@ def test_lowp_linear_quantizes_dtensor_operands_shard_locally(precision):
             # Rowwise: input and weight both sharded along the contraction axis; output is a partial sum.
             x_shard = distribute_tensor(x_full, mesh, [Shard(-1)], src_data_rank=None)
             w_shard = distribute_tensor(w_full, mesh, [Shard(-1)], src_data_rank=None)
-            partial = lowp_linear(x_shard, w_shard, precision=LinearPrecision(precision)).to_local()
+            partial = lowp_linear(x_shard, w_shard, quant_format=quant_format).to_local()
             expected = F.linear(
-                fake_quant(x_full, fmt, axis=-1).chunk(tp_size, dim=-1)[rank],
-                fake_quant(w_full, fmt, axis=-1).chunk(tp_size, dim=-1)[rank],
+                fake_quant(x_full, quant_format, axis=-1).chunk(tp_size, dim=-1)[rank],
+                fake_quant(w_full, quant_format, axis=-1).chunk(tp_size, dim=-1)[rank],
             )
             assert torch.equal(partial, expected), f"rowwise rank {rank}"
 
             # Colwise: replicated input, weight sharded along its output rows.
             x_rep = distribute_tensor(x_full, mesh, [Replicate()], src_data_rank=None)
             w_rows = distribute_tensor(w_full, mesh, [Shard(0)], src_data_rank=None)
-            local = lowp_linear(x_rep, w_rows, precision=LinearPrecision(precision)).to_local()
+            local = lowp_linear(x_rep, w_rows, quant_format=quant_format).to_local()
             expected = F.linear(
-                fake_quant(x_full, fmt, axis=-1),
-                fake_quant(w_full, fmt, axis=-1).chunk(tp_size, dim=0)[rank],
+                fake_quant(x_full, quant_format, axis=-1),
+                fake_quant(w_full, quant_format, axis=-1).chunk(tp_size, dim=0)[rank],
             )
             assert torch.equal(local, expected), f"colwise rank {rank}"
 

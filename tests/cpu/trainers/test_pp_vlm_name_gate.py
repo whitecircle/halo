@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 from datasets import Dataset
 
-import src.models.modality as modality
+import src.distributed.loading.model_source as model_source
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
 
 _VLM_REJECTION = "Vision-language training is not supported under pipeline parallelism"
@@ -112,7 +112,7 @@ def test_the_probe_never_reaches_the_hub():
     def _forbidden(*args, **kwargs):
         raise AssertionError("is_vlm_model fetched a config from the hub despite being passed one")
 
-    with mock.patch.object(modality.AutoConfig, "from_pretrained", _forbidden):
+    with mock.patch.object(model_source.AutoConfig, "from_pretrained", _forbidden):
         assert _drive("acme_mystery_vlm", "acme/mystery-vl-8b") is not None
         assert _drive("qwen3", "/ckpt/revision-8472618/qwen3-8b") is None
 

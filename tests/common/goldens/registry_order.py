@@ -30,7 +30,7 @@ from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_mod
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.distributed.pipeline_parallel.split import PP_SPEC_MAP
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
-from src.models.head_transform import HEAD_TRANSFORM_SPEC_MAP
+from src.models.head_transform import _HEAD_TRANSFORM_SPEC_MAP
 from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
 from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.goldens import regen_main
@@ -68,7 +68,7 @@ def registry_order() -> dict[str, object]:
         "balancing key suffixes": sorted(moe_balancing._BALANCING_KEY_SUFFIXES),
         "cp attention claims": _claims(WRAPPER_CLASS_MAP),
         "pp backbone claims": _claims(PP_SPEC_MAP),
-        "head transform claims": _claims(HEAD_TRANSFORM_SPEC_MAP),
+        "head transform claims": _claims(_HEAD_TRANSFORM_SPEC_MAP),
         "weight-sync clients": _claims(
             {backend: resolve_weight_sync_client(backend) for backend in rollout_backends()}
         ),

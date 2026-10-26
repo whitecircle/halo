@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from functools import partial
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from src.distributed.expert_parallel.base_layer import TOPK_WEIGHT_NORM_EPS, EPMoELayerBase
-from src.kernels.fused_glu import fused_clamped_silu_mul, is_silu_activation
+from src.kernels.fused_glu import GluCombine, is_silu_activation
 
 
 class EPDeepseekV4MoELayer(EPMoELayerBase):
@@ -78,9 +76,7 @@ class EPDeepseekV4MoELayer(EPMoELayerBase):
         self.act_fn = experts.act_fn
         self.limit = float(experts.limit)
         self._fused_glu_mul = (
-            partial(fused_clamped_silu_mul, limit=self.limit)
-            if is_silu_activation(self.act_fn)
-            else self._clamped_swiglu_eager
+            GluCombine.clamped_silu(self.limit) if is_silu_activation(self.act_fn) else self._clamped_swiglu_eager
         )
 
     def _clamped_swiglu_eager(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:

@@ -27,10 +27,10 @@ from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import materialize_dtensor
 from src.distributed.tensor_parallel.state_dict import iter_tp_sharded_non_dtensor_full
 from src.hardware import supports_grouped_mm
 from src.models.patches.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
+from src.runtime.dtensor import materialize_dtensor
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded

@@ -54,9 +54,9 @@ from src.data.vlm import (
     render_vlm_text,
     run_vlm_processor,
 )
-from src.distributed.runtime import is_local_main_process
 from src.model_loading.tokenizer_backend import resolve_processor_backend, resolve_tokenizer_backend
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.runtime.ranks import is_local_main_process
 
 logger = logging.getLogger(__name__)
 

@@ -11,10 +11,10 @@ import pytest
 from accelerate import PartialState
 
 from src.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME
+from src.log import RUN_LOG_DIR_NAME
 
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
-from src.distributed.filesystem import OUTPUT_FS_PROBE_PREFIX
-from src.log import RUN_LOG_DIR_NAME
+from src.runtime.filesystem import OUTPUT_FS_PROBE_PREFIX
 from src.training.environment import _validate_output_dir, detect_resume_checkpoint
 
 # The module logs through accelerate's logger, which requires an initialized state (CPU here).

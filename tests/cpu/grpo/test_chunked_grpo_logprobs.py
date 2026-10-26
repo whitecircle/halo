@@ -15,8 +15,8 @@ import torch
 from transformers import Gemma2Config, Gemma2ForCausalLM, LlamaConfig, LlamaForCausalLM, PretrainedConfig
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
-from src.distributed.runtime import materialize_dtensor
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
+from src.runtime.dtensor import materialize_dtensor
 from src.trainers.grpo.mixins import chunked_logprobs
 from src.trainers.grpo.mixins.chunked_logprobs import (
     _VOCAB_CHUNK,

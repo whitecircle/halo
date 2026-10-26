@@ -156,7 +156,7 @@ is installed ([below](#fused-glu-under-an-ep-wrapper)); otherwise the model's ow
 
 For Ling that implementation is fused too, by Halo rather than Liger: its remote code builds the routed experts
 as an `nn.ModuleList` of `BailingMoeV2MLP` / `BailingMoeV3MLP`, the class its spec names in `glu_mlp`, so off
-the EP wrapper the toolkit's class swap runs them on Halo's own SwiGLU kernel (`fused_silu_mul`), the one the
+the EP wrapper the toolkit's class swap runs them on Halo's own SwiGLU kernel (`GluCombine.silu()`), the one the
 wrapper runs.
 
 Upstream's MoE appliers (Qwen3 MoE, Mixtral, Qwen3-VL MoE, GLM-4V MoE, HunYuan MoE, Qwen3.5 MoE, Qwen3-Next)
@@ -194,18 +194,17 @@ otherwise get the withheld `swiglu` back ([below](#ep--cp--tp-behavior)).
 ### Fused GLU under an EP wrapper
 
 Where an EP wrapper owns the routed experts, their activation is the toolkit's own fused Triton GLU, not
-Liger's: SwiGLU (`fused_silu_mul`) or tanh-GeGLU (`fused_gelu_tanh_mul`), chosen by probing the layer's
+Liger's: SwiGLU (`GluCombine.silu()`) or tanh-GeGLU (`GluCombine.gelu_tanh()`), chosen by probing the layer's
 `act_fn` and falling back to the family's eager combine when neither kernel computes it. It runs on the
 grouped-GEMM, per-expert-loop and ETP paths alike.
 
-One row-strided kernel pair (`src/kernels/fused_glu.py`) serves every combine, the clamped family's
-(GptOss, DeepSeek-V4, GLM-5 Next, Step-3.7) included: the activation, the clamp placement and GptOss's
-`up + 1` are `tl.constexpr`, `alpha` and the bound runtime arguments. On a layer storing one fused
-`[gate | up]` projection, `packed_glu_mul` resolves the latched combine (including a clamp-binding
-`functools.partial`) to its packed form, which reads both halves in place and writes one `[..., 2M]`
-gradient.
+One row-strided kernel pair (`src/kernels/fused_glu.py`) serves every combine, each a `GluCombine`
+(`silu`, `gelu_tanh`, `clamped_silu`, `silu_then_clamp`, `gptoss`): the activation, the clamp placement and
+GptOss's `up + 1` are `tl.constexpr`, `alpha` and the bound runtime arguments. On a layer storing one fused
+`[gate | up]` projection, a latched `GluCombine` runs its packed form (`GluCombine.packed`), which reads
+both halves in place and writes one `[..., 2M]` gradient.
 
-Each wrapped layer logs the executed path at construction (`grouped_mm=True, glu_combine=fused_silu_mul`, or
+Each wrapped layer logs the executed path at construction (`grouped_mm=True, glu_combine=silu`, or
 `glu_combine=eager`, as every layer reads under `HALO_FUSED_GLU=0`); `tests/gpu/kernels/test_fused_glu.py`
 checks BF16 and FP32 forward/backward numerics.
 
@@ -348,7 +347,7 @@ family the on-policy RL trainers score against a vLLM copy running the eager nor
 
 The EP MoE layer's own clamped-SwiGLU is independent of Liger: every path — per-expert loop,
 [grouped GEMM](grouped-gemm.md) (default on SM90+) and ETP — runs the same fused Triton kernel
-`fused_gptoss_glu` (`src/kernels/fused_glu.py`), the loop path splitting the halves out of one interleaved
+`GluCombine.gptoss` (`src/kernels/fused_glu.py`), the loop path splitting the halves out of one interleaved
 `gate_up` projection.
 
 ## Benchmarks

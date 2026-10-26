@@ -14,14 +14,9 @@ from datasets import Dataset
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    fs_aware_save_rank,
-    rank_consensus,
-    reject_across_ranks,
-    reject_divergent_settings,
-)
 from src.models.unwrapping import base_transformers_model
+from src.runtime.consensus import DeferredRankFailure, rank_consensus, reject_across_ranks, reject_divergent_settings
+from src.runtime.filesystem import is_fs_save_rank
 from src.trainers.grpo.reference_cache import (
     REFERENCE_BUFFER_VALUES,
     MappedReferenceScores,
@@ -336,7 +331,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsCheckpointMixin):
         reject_divergent_settings(identity, "Offline GRPO evaluation rows", "Every rank must evaluate the same rows.")
         stored = next((scores for known, _, scores in self._stored_references() if known == identity), None)
         # Agreed, not local: scoring enters collectives that attaching stored scores does not.
-        if rank_consensus(stored is not None)[0]:
+        if rank_consensus(stored is not None).all_ok:
             scores = stored
         else:
             scores = self._score_evaluation_rows(dataset, identity, original_reference_model)
@@ -363,7 +358,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsCheckpointMixin):
         matches = guard.run(match_rows)
         guard.reject()
         # Agreed, not local: the sweep and the cache reuse below enter different collectives.
-        missing = rank_consensus(any(match is None for match in matches))[1]
+        missing = rank_consensus(any(match is None for match in matches)).any_ok
         reject_across_ranks(
             "Evaluation contains unseen token rows whose original KL reference was not precomputed. "
             "Declare this eval split before training, or outside CP/PP call "
@@ -380,7 +375,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsCheckpointMixin):
             cache = ReferenceScoreCache(self._reference_cache_output_dir(), dp_size=1)
             guard = DeferredRankFailure("Reusing original evaluation reference scores")
             try:
-                if fs_aware_save_rank():
+                if is_fs_save_rank():
                     guard.run(
                         lambda: cache.append_rows(
                             0,

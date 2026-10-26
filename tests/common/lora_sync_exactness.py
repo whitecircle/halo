@@ -60,14 +60,14 @@ from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers every EP family)
-import src.models.structure as structure
+import src.models.peft_adapters as peft_adapters
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes, has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import broadcast_from_rank0
-from src.models.structure import lora_fold_targets
+from src.models.peft_adapters import lora_fold_targets
 from src.models.unwrapping import unwrap_framework_wrappers
+from src.runtime.collectives import broadcast_from_rank0
 from src.trainers.grpo.rollout.weight_sync import (
     gather_and_send_weights,
     sync_trainer_weights,
@@ -215,7 +215,7 @@ def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
     """Record every tensor the sync folds: the bytes requested as its fold starts and the fold's own
     peak over that. A fold that kept anything past its tensor would show as a start that grows along
     the walk."""
-    fold = structure.lora_folded
+    fold = peft_adapters.lora_folded
 
     def recorded(param, layers):
         torch.cuda.synchronize()
@@ -226,7 +226,7 @@ def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
         record.append((start, _requested_bytes("peak") - start))
         return folded
 
-    with patch.object(structure, "lora_folded", recorded):
+    with patch.object(peft_adapters, "lora_folded", recorded):
         yield
 
 

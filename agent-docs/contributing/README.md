@@ -532,7 +532,7 @@ and each rank's `ep_group_idx` and `expert_replica_ranks`. `new_group` is a coll
 group, so a rank making other calls than rank 0 hangs a real job; `tests/common/goldens/ep_group_order.py`
 raises there. Two calls over the same members build two communicators, so a reordered call fails this
 golden even where the rank-layout golden, which compares memberships, passes. The record is built with
-`DIST_NCCL_TIMEOUT_MINUTES` off its default, so a timeout is written as `get_nccl_timeout()` only when
+`DIST_NCCL_TIMEOUT_MINUTES` off its default, so a timeout is written as `nccl_timeout()` only when
 the group reads it from that call. `tests/common/goldens/ep_group_order.json` holds a digest per shape
 plus the full record of node-local and cross-node EP at expert TP 1, 2 and 4 on one pipeline stage, EP
 or expert TP alone on two, and shapes whose one-rank EP groups are skipped;

@@ -14,12 +14,6 @@ import torch
 import torch.distributed as dist
 from accelerate.utils import gather_object
 
-from src.distributed.runtime import (
-    fs_aware_save_rank,
-    is_global_main_process,
-    is_multi_rank_run,
-    is_output_shared_filesystem,
-)
 from src.environments.base import (
     EPISODE_SLICES_KEY,
     REWARD_COMPONENTS_KEY,
@@ -30,6 +24,8 @@ from src.environments.base import (
 from src.environments.episode import RolloutResult
 from src.rewards.samples import CUT_CALL_NOTE
 from src.rewards.terms import REWARD_COMPONENT_PREFIX
+from src.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
+from src.runtime.ranks import is_global_main_process, is_multi_rank_run
 from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 
 logger = logging.getLogger(__name__)
@@ -45,15 +41,15 @@ def _gather_to_completion_writers(values: list) -> list | None:
     is ``emit_completion_artifacts`` on the writer rank. With a shared output filesystem that writer
     is global rank 0 alone, so the payload is gathered there and nowhere else; without one, every
     node's local rank 0 writes its own copy of the world record, and the all-gather is what feeds
-    them. The receiving set is :func:`fs_aware_save_rank` itself — the same predicate that elects
+    them. The receiving set is :func:`is_fs_save_rank` itself — the same predicate that elects
     the writer — so the two cannot drift into gathering to a rank that does not write.
     """
     if not is_multi_rank_run():
         return list(values)
     if not is_output_shared_filesystem():
         return list(gather_object(values))
-    # Shared output FS ⇒ fs_aware_save_rank() is global rank 0, which is what dst names.
-    chunks: list | None = [None] * dist.get_world_size() if fs_aware_save_rank() else None
+    # Shared output FS ⇒ is_fs_save_rank() is global rank 0, which is what dst names.
+    chunks: list | None = [None] * dist.get_world_size() if is_fs_save_rank() else None
     dist.gather_object(values, chunks, dst=0)
     if chunks is None:
         return None

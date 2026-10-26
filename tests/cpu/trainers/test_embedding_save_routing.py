@@ -97,8 +97,8 @@ class _TokenizerStub:
 
 
 def _context(host, monkeypatch):
-    monkeypatch.setattr(embedding_module, "fs_aware_save_rank", lambda: host._is_save_rank)
-    monkeypatch.setattr("src.trainers.mixins.checkpointing.fs_aware_save_rank", lambda: host._is_save_rank)
+    monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: host._is_save_rank)
+    monkeypatch.setattr("src.trainers.mixins.checkpointing.is_fs_save_rank", lambda: host._is_save_rank)
     return EmbeddingTrainer._checkpoint_context(host)
 
 
@@ -207,8 +207,8 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
         order.append("exit")
 
     monkeypatch.setattr(checkpointing_mod, "pristine_model_max_length", _pristine)
-    monkeypatch.setattr(embedding_module, "fs_aware_save_rank", lambda: True)
-    monkeypatch.setattr("src.trainers.mixins.checkpointing.fs_aware_save_rank", lambda: True)
+    monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("src.trainers.mixins.checkpointing.is_fs_save_rank", lambda: True)
     monkeypatch.setattr(
         EmbeddingTrainer,
         "_save_distributed_embedding_model",
@@ -227,7 +227,7 @@ def _record_save_steps(host, monkeypatch) -> list[str]:
     host._persist_router_balancing_biases = lambda _dir: calls.append("sidecar")
     for module in (embedding_module, checkpointing_mod):
         monkeypatch.setattr(module, "reshard_fsdp2_modules", lambda _model: calls.append("reshard"))
-        monkeypatch.setattr(module, "fs_aware_save_rank", lambda: True)
+        monkeypatch.setattr(module, "is_fs_save_rank", lambda: True)
     monkeypatch.setattr(
         EmbeddingTrainer,
         "_save_distributed_embedding_model",

@@ -26,8 +26,9 @@ import pytest
 from accelerate import PartialState
 from transformers import TrainerState
 
-from src.distributed import runtime
-from src.distributed.runtime import fs_aware_save_rank, get_global_rank
+from src.runtime import collectives, filesystem
+from src.runtime.filesystem import is_fs_save_rank
+from src.runtime.ranks import get_global_rank
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.environment import detect_resume_checkpoint
 from tests.common.base_save import BaseTrainerSave
@@ -56,7 +57,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
     def __init__(self, run_dir):
         self.run_dir = run_dir
         self.args = SimpleNamespace(
-            save_total_limit=1, save_only_model=False, should_save=fs_aware_save_rank(), push_to_hub=False
+            save_total_limit=1, save_only_model=False, should_save=is_fs_save_rank(), push_to_hub=False
         )
         self.state = TrainerState(global_step=150)
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, merge_expert_lora_on_save=False)
@@ -90,20 +91,20 @@ def _worker(rank: int, root: str, per_node: bool) -> None:
     outcome = {}
     try:
         PartialState()
-        runtime.resolve_shared_filesystem_consensus()
+        filesystem.resolve_shared_filesystem_consensus()
         os.path.getmtime = lambda path: FAKE_MTIME
         run_dir = os.path.join(root, f"node_{rank}" if per_node else "shared", "out")
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             _plant(run_dir, 100, complete=True)
             _plant(run_dir, 200, complete=per_node and rank == 0)
             if per_node and rank == 1:
                 _plant(run_dir, 250, complete=True)
-        runtime.barrier()
+        collectives.barrier()
 
         config = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True, overwrite_output_dir=False)
         outcome["resumed"] = os.path.basename(detect_resume_checkpoint(config))
         _Trainer(run_dir)._save_checkpoint(model=None, trial=None)
-        runtime.barrier()
+        collectives.barrier()
         outcome["step_dirs"] = sorted(name for name in os.listdir(run_dir) if name.startswith("checkpoint-"))
         holding = os.path.join(run_dir, HOLDING_DIR)
         outcome["held"] = sorted(os.listdir(holding)) if os.path.isdir(holding) else []
@@ -111,7 +112,7 @@ def _worker(rank: int, root: str, per_node: bool) -> None:
     except Exception as e:  # the setup failing must still leave a verdict file for the assertions
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
-        runtime.reset_shared_filesystem_consensus()
+        filesystem.reset_shared_filesystem_consensus()
     with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
         json.dump(outcome, fh)
 

@@ -166,7 +166,7 @@ all-reduce (visible in py-spy as ranks stuck at different sub-modules of one for
 
 This affects trainers pulling per-rank data from an external service. `DistributedGRPOTrainer`
 overrides `_generate_single_turn` to broadcast the vLLM rollout tuple from the TP-group leader. For
-custom trainers, add an `assert_rank_uniform` call (`src.diagnostics.rank_divergence`; pass
+custom trainers, add an `assert_rank_uniform` call (`src.runtime.consensus`; pass
 `tuple(t.shape)` to compare a shape) at the suspect tensor — the toolkit ships no call sites, so
 `HALO_TP_CONSISTENCY_CHECK=1` on its own produces nothing; it only turns the check's warning into a
 raise.
@@ -302,7 +302,7 @@ torchrun --nnodes=2 --node_rank=0 --nproc_per_node=4 \
 ```
 
 `DIST_NCCL_TIMEOUT_MINUTES` (default 30) is pinned onto the default group and every EP/CP/TP subgroup
-via `apply_default_pg_timeout`. DeepEP's dispatch/combine runs behind its own `ElasticBuffer`
+via `_apply_default_pg_timeout`. DeepEP's dispatch/combine runs behind its own `ElasticBuffer`
 GPU-side barrier, not the PyTorch watchdog, so this does **not** bound it.
 
 ## Checkpoint saving

@@ -17,7 +17,7 @@ Two sizes: 20B and 120B. MoE with **attention sinks** (per-head learnable scalar
 - Routing: custom router returning `(logits, weights, experts)`; softmax top-k with FP32 weights for DeepEP.
 - Storage: interleaved `gate_up_proj [E, H, 2M]` (`[g0, u0, g1, u1, …]`), `down_proj [E, M, H]`, plus the optional expert biases `gate_up_proj_bias [E, 2M]` (interleaved the same way) and `down_proj_bias [E, H]`.
 - Compute: **Grouped GEMM** (default on SM90+) reads de-interleaved `gate_proj_gmm` / `up_proj_gmm` stored as separate contiguous tensors at init, avoiding NaN gradients on the stride-2 slice. The **loop fallback** iterates per expert with `index_add_`.
-- Activation: clamped SwiGLU, `(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`. Every path — grouped GEMM, ETP and the per-expert loop — runs the same fused Triton kernel (`fused_gptoss_glu`, `src/kernels/fused_glu.py`, forward + backward, fp32 accumulation).
+- Activation: clamped SwiGLU, `(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`. Every path — grouped GEMM, ETP and the per-expert loop — runs the same fused Triton kernel (`GluCombine.gptoss`, latched once per layer and logged as `glu_combine=gptoss`, `src/kernels/fused_glu.py`, forward + backward, fp32 accumulation).
 
     The kernel replaces `torch.compile`, whose recompiles would storm on the varying per-step routed-token count and whose float arguments go stale once shapes are dynamic. The loop path splits the halves out of its interleaved projection output first.
 

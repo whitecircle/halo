@@ -24,8 +24,9 @@ import triton
 import triton.language as tl
 from torch import Tensor
 
-from src.distributed.runtime import is_global_main_process, to_local
 from src.optimizers.param_groups import decay_groups
+from src.runtime.dtensor import to_local
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 

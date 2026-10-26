@@ -14,6 +14,7 @@ import torch.distributed as dist
 from src.args.distributed_args import DistributedArguments
 from src.distributed.expert_parallel.config import EPConfig, ExpertLoraSpec
 from src.distributed.group_layout import cross_node_rank_and_group, node_local_rank_and_group
+from src.kernels.lowp.spec import LowpSpec
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.sft import DistributedSFTTrainer
@@ -424,34 +425,32 @@ def test_guard_nvlink_domain_multiple_of_node():
 
 
 def test_guard_lowp_bad_precision():
-    _expect_reject("lowp_precision", lowp_precision="int4", world_size=8, gpus_per_node=8)
+    _expect_reject("lowp_precision", lowp=LowpSpec(precision="int4"), world_size=8, gpus_per_node=8)
 
 
 def test_guard_lowp_applied_nowhere():
     _expect_reject(
         "apply to nothing",
-        lowp_precision="fp8",
-        lowp_apply_dense_mlp=False,
-        lowp_apply_moe_experts=False,
+        lowp=LowpSpec(precision="fp8", apply_dense_mlp=False, apply_moe_experts=False),
         world_size=8,
         gpus_per_node=8,
     )
 
 
 def test_guard_lowp_negative_keep_blocks():
-    _expect_reject(">= 0", lowp_precision="fp8", lowp_keep_first_blocks=-1, world_size=8, gpus_per_node=8)
+    _expect_reject(">= 0", lowp=LowpSpec(precision="fp8", keep_first_blocks=-1), world_size=8, gpus_per_node=8)
 
 
 def test_lowp_valid_combos_accepted():
     # No backend knob: low precision is the fake-quant oracle, with the native DeepGEMM kernel opt-in
     # via env (HALO_DEEPGEMM_NATIVE), not a config field.
-    for kw in (
-        {"lowp_precision": "fp8"},
-        {"lowp_precision": "fp4"},
-        {"lowp_precision": "fp8", "lowp_apply_moe_experts": False},
+    for lowp in (
+        LowpSpec(precision="fp8"),
+        LowpSpec(precision="fp4"),
+        LowpSpec(precision="fp8", apply_moe_experts=False),
     ):
-        cfg = create_config(world_size=8, gpus_per_node=8, **kw)
-        assert cfg.lowp_precision in ("fp8", "fp4")
+        cfg = create_config(world_size=8, gpus_per_node=8, lowp=lowp)
+        assert cfg.lowp.precision in ("fp8", "fp4")
 
 
 # Properties
@@ -740,7 +739,7 @@ def test_parallelism_config_from_args_basic():
         assert cfg.ep_size == 8
         assert cfg.expert_tp_size == 1
         assert cfg.use_grouped_gemm is True
-        assert cfg.lowp_precision == "bf16"
+        assert cfg.lowp.precision == "bf16"
         assert cfg.fp32_grad_reduce is True  # forwarded, not reset to the default
         assert cfg.max_concurrent_loading == 3
 
@@ -798,7 +797,7 @@ def test_parallelism_config_from_args_lowp_allowed_for_sft():
     args.lowp_precision = "fp8"
     with simulated_world(world_size=8, gpus_per_node=8):
         cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=True)
-        assert cfg.lowp_precision == "fp8"
+        assert cfg.lowp.precision == "fp8"
 
 
 # Rank methods (mocked rank=0)

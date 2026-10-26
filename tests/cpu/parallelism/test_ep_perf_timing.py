@@ -2,7 +2,7 @@
 """CPU test: the EP phase-timing opt-in must stay opt-in.
 
 Every EP layer wraps its dispatch / expert-compute / combine phases in ``self._perf``, resolved once
-in ``EPMoELayerBase._init_ep_state``: ``HALO_EP_PERF_PROFILE`` on → :meth:`PerformanceMonitor.time_operation`
+in ``EPMoELayerBase._init_ep_state``: ``HALO_EP_PERF_PROFILE`` on → :meth:`EPSpanTimer.time_operation`
 (two ``torch.cuda.synchronize()`` per phase per forward), off → ``torch.profiler.record_function``, a
 label with no device work. ``agent-docs/reference/configuration-reference.md`` promises exactly that: with the
 knob off the ``ep.*`` spans still appear in a profiler trace **at no cost**.
@@ -23,8 +23,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.diagnostics import performance_monitor
-from src.diagnostics.performance_monitor import get_performance_monitor
+from src.diagnostics import ep_span_timing
+from src.diagnostics.ep_span_timing import get_ep_span_timer
 from src.distributed.expert_parallel import base_layer
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 
@@ -65,9 +65,9 @@ def _ep_layer(monkeypatch: pytest.MonkeyPatch) -> EPMoELayerBase:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_global_monitor(monkeypatch: pytest.MonkeyPatch):
+def _fresh_global_timer(monkeypatch: pytest.MonkeyPatch):
     """Reset the process-wide monitor so "was one created?" is this test's own answer."""
-    monkeypatch.setattr(performance_monitor, "_global_monitor", None)
+    monkeypatch.setattr(ep_span_timing, "_global_timer", None)
 
 
 def test_the_spans_are_profiler_labels_and_build_no_monitor_when_the_knob_is_off(monkeypatch: pytest.MonkeyPatch):
@@ -81,8 +81,8 @@ def test_the_spans_are_profiler_labels_and_build_no_monitor_when_the_knob_is_off
     )
     with layer._perf("ep.dispatch"):
         pass
-    assert performance_monitor._global_monitor is None, (
-        "the default path constructed a PerformanceMonitor — the opt-in must be read before the "
+    assert ep_span_timing._global_timer is None, (
+        "the default path constructed an EPSpanTimer — the opt-in must be read before the "
         "monitor is reached, not after"
     )
 
@@ -91,7 +91,7 @@ def test_the_spans_are_timed_by_the_process_monitor_when_the_knob_is_on(monkeypa
     monkeypatch.setenv("HALO_EP_PERF_PROFILE", "1")
     layer = _ep_layer(monkeypatch)
 
-    monitor = get_performance_monitor()
+    monitor = get_ep_span_timer()
     assert getattr(layer._perf, "__self__", None) is monitor, (
         f"HALO_EP_PERF_PROFILE=1 must route the phase spans to the process-wide monitor's "
         f"time_operation; got {layer._perf!r}"

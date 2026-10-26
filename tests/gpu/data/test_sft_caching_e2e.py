@@ -27,7 +27,7 @@ from transformers import AutoTokenizer
 
 from src.data.pipeline.processing import process_dataset_with_map_and_filter
 from src.data.pipeline.row_processors import create_llm_processor
-from src.distributed.runtime import barrier
+from src.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log

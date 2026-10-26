@@ -24,12 +24,9 @@ from transformers import GptOssConfig, GptOssForCausalLM, Qwen3MoeConfig, Qwen3M
 
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import (
-    create_ep_buffers,
-    enable_ep_gradient_checkpointing,
-    patch_moe_model_for_ep,
-)
+from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.models.moe_balancing import declared_routers
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG
@@ -91,7 +88,7 @@ def run(ctx):
     plain = router_gradient(model, batch, COEF)
     plain_aux = plain - router_gradient(model, batch, 0.0)
 
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     forward_calls["n"] = 0
     checkpointed = router_gradient(model, batch, COEF)
     checks["recompute_ran"] = forward_calls["n"] == 2

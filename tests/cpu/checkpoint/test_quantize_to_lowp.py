@@ -21,8 +21,8 @@ import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
 from src.distributed.expert_parallel.expert_weights import hf_fused_expert_keys, per_expert_layouts
-from src.kernels.lowp.mixed_precision import MLP_PROJECTIONS
 from src.kernels.lowp.quantization import BlockScaledTensor, dequantize, fake_quant
+from src.kernels.lowp.spec import MLP_PROJECTIONS
 from tests.common.checkpoint_io import weight_files
 from tests.common.repo import load_script_module
 
@@ -445,7 +445,7 @@ def test_a_moe_checkpoint_whose_experts_match_nothing_is_refused(tmp_path):
 def test_vision_tower_projections_are_never_quantized():
     """A VLM's vision tower and projector run in bf16 during QAT, so the export must leave them there.
 
-    ``apply_mixed_precision_compute`` converts ``MLP_PROJECTIONS`` inside the TEXT backbone only
+    ``apply_lowp_compute`` converts ``MLP_PROJECTIONS`` inside the TEXT backbone only
     (``_text_backbone_prefix``): a SigLIP-style tower's ``fc1``/``fc2`` is not in that roster at all,
     and a Qwen-VL-style tower names its projections like the text MLP but sits outside the backbone.
     Quantizing either on export contradicts this file's "reproduces the QAT forward exactly" claim —

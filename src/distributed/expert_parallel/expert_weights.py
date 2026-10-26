@@ -23,16 +23,13 @@ import torch
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers every family subclass
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.runtime import (
-    broadcast_from_rank0,
-    get_global_rank,
-    materialize_dtensor,
-    resolve_param_tensor,
-)
 from src.models.config_access import config_sources
 from src.models.moe_balancing import apply_export_renames
 from src.models.param_roles import persistent_buffers
 from src.models.unwrapping import unwrap_framework_wrappers
+from src.runtime.collectives import broadcast_from_rank0
+from src.runtime.dtensor import full_cpu_tensor, materialize_dtensor
+from src.runtime.ranks import get_global_rank
 from src.subclass_registry import build_class_claim_map, iter_subclasses
 
 
@@ -302,9 +299,7 @@ def gather_ep_layer_weights(
         if param_name.split(".")[0] in expert_roots:
             continue
         if retain:
-            gathered.setdefault(
-                f"{layer_name}.{to_hub_layer_key(param_name, layer_cls)}", resolve_param_tensor(param.data)
-            )
+            gathered.setdefault(f"{layer_name}.{to_hub_layer_key(param_name, layer_cls)}", full_cpu_tensor(param.data))
         else:
             materialize_dtensor(param.data)  # same collective, without the host copy
 
@@ -314,9 +309,7 @@ def gather_ep_layer_weights(
         if buf_name.split(".")[0] in expert_roots:
             continue
         if retain:
-            gathered.setdefault(
-                f"{layer_name}.{to_hub_layer_key(buf_name, layer_cls)}", resolve_param_tensor(buf.data)
-            )
+            gathered.setdefault(f"{layer_name}.{to_hub_layer_key(buf_name, layer_cls)}", full_cpu_tensor(buf.data))
         else:
             materialize_dtensor(buf.data)
 

@@ -5,7 +5,7 @@ gradients sharing a reduction into a few flat collectives; :func:`agree_grad_pre
 grads enter one. Callers are the deferred cross-replica EP sweep, the TP replicated / per-head-norm
 sweep, the QLoRA sweep and the EP router grad hook.
 
-A leaf by construction — torch, :mod:`src.env` and the :mod:`src.distributed.runtime` leaf only — so
+A leaf by construction — torch, :mod:`src.env` and :mod:`src.runtime.collectives` only — so
 any part of the toolkit can reduce gradients without importing a parallelism implementation.
 """
 
@@ -16,8 +16,8 @@ from collections import defaultdict
 import torch
 import torch.distributed as dist
 
-from src.distributed.runtime import collective_device
 from src.env import env_int
+from src.runtime.collectives import collective_device
 
 # Flat-buffer cap for bucketed reduction: bounds the transient cat allocation while keeping collectives few.
 GRAD_BUCKET_MB = env_int("HALO_GRAD_BUCKET_MB", 256)

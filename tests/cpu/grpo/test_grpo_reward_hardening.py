@@ -20,6 +20,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
+from src.runtime.consensus import RankConsensus
 from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
 from src.trainers.grpo.objective import advantages as advantages_module
 from src.trainers.grpo.objective.advantages import (
@@ -180,7 +181,7 @@ def test_non_finite_rewards_raise_instead_of_zeroing(scale, bad):
 def test_a_peer_ranks_non_finite_reward_raises_here_too(monkeypatch):
     """The verdict is agreed across ranks: a rank whose own rewards are finite must raise with the one
     whose are not, or it heads into the next collective alone."""
-    monkeypatch.setattr(advantages_module, "rank_consensus", lambda ok: (False, True))
+    monkeypatch.setattr(advantages_module, "rank_consensus", lambda ok: RankConsensus(False, True))
     with pytest.raises(ValueError, match="Non-finite GRPO rewards or advantages"):
         group_relative_advantages(torch.tensor([0.0, 1.0]), 2, "group")
 

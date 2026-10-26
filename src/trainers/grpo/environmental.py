@@ -23,12 +23,6 @@ from trl.extras.profiling import profiling_context
 from trl.trainer.utils import pad
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    get_global_rank,
-    is_multi_rank_run,
-    reject_across_ranks,
-)
 from src.environments.base import (
     ANSWER_KEY,
     EPISODE_INVALID_REASON_KEY,
@@ -50,6 +44,8 @@ from src.environments.episode import (
 )
 from src.environments.rollout_config import IDENTITY_SAMPLER
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
+from src.runtime.ranks import get_global_rank, is_multi_rank_run
 from src.trainers.grpo.early_stop import build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import (
     ChunkedGRPOLogprobsMixin,

@@ -1,14 +1,6 @@
-"""Halo command-line launcher.
-
-Two entry points wrap the repository's runnable scripts so a method or tool can be
-launched by name instead of spelling out ``python``/``torchrun`` and a file path:
-
-* ``halo launch`` — config-driven training methods under ``scripts/training``
-  (run with ``python``, ``torchrun`` via ``--nproc``, or ``accelerate launch`` via ``--accelerate``).
-* ``halo run`` — flag-driven tools under every other ``scripts/`` subtree (after-training,
-  inference, before-training data preparation, environments, profiling, ...), discovered
-  from the tree rather than a hand-maintained list.
-"""
+"""The ``halo`` launcher: ``halo launch`` runs a training method under ``scripts/training`` (``python``,
+``torchrun`` with ``--nproc``, or ``accelerate launch`` with ``--accelerate``), and ``halo run`` a tool
+from any other ``scripts/`` subtree, both by name and discovered from the tree."""
 
 from __future__ import annotations
 
@@ -249,17 +241,9 @@ def _lookup(index: dict[str, Path], name: str, kind: str, root: Path) -> Path:
 
 
 def _execute(argv: list[str], cwd: Path | None, *, dry_run: bool) -> None:
-    """Exec ``argv``, from ``cwd`` when one is given.
-
-    ``halo launch`` passes the repo root so a training config's relative paths (dataset dirs, output
-    dirs, accelerate configs) resolve there whatever the caller's cwd; :func:`resolve_config`
-    absolutizes the config for the same reason.
-
-    ``halo run`` passes ``None``: a tool's path flags were typed against the caller's cwd, and
-    chdir'ing would re-root a relative ``--output_dir ./out`` under the repo, which lives on the
-    small root filesystem. No chdir is needed — the indexed script path is already absolute and the
-    image puts ``src`` on ``PYTHONPATH``.
-    """
+    """Exec ``argv``, from ``cwd`` when one is given: ``halo launch`` passes the repo root so a config's
+    relative paths resolve there, ``halo run`` passes ``None`` so a tool's path flags keep the caller's
+    cwd."""
     if dry_run:
         typer.echo(" ".join(shlex.quote(part) for part in argv))
         return

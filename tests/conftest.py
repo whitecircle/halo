@@ -89,9 +89,9 @@ def _reset_shared_filesystem_consensus():
     ``hub_metadata_main_first`` agrees the ``DIST_*_SHARED_FILESYSTEM`` flags the first time any test
     probes a real checkpoint config and memoizes them for the process; a later test that varies the
     env (order- and xdist-dependent) would otherwise assert against that stale scope. Reset only when
-    the runtime module was actually imported — no torch import for tests that never touched it.
+    the filesystem module was actually imported — no torch import for tests that never touched it.
     """
     yield
-    runtime = sys.modules.get("src.distributed.runtime")
-    if runtime is not None:
-        runtime.reset_shared_filesystem_consensus()
+    filesystem = sys.modules.get("src.runtime.filesystem")
+    if filesystem is not None:
+        filesystem.reset_shared_filesystem_consensus()

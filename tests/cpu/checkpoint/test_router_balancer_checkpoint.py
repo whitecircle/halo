@@ -23,6 +23,7 @@ from accelerate import PartialState
 
 import src.distributed.checkpoint.coordination as coordination
 from src.models.moe_balancing import apply_router_balancing_sidecar
+from src.runtime.consensus import RankConsensus
 from src.trainers.mixins.base import DistributedTrainerMixin
 
 # The mixin logs through accelerate's logger, which requires an initialized state.
@@ -105,7 +106,7 @@ def test_restore_raises_uniformly_when_a_peer_is_missing_the_sidecar(monkeypatch
 
     def _consensus(local_flag):
         entered.append(local_flag)
-        return False, True  # a peer holds the file, this rank does not
+        return RankConsensus(False, True)  # a peer holds the file, this rank does not
 
     monkeypatch.setattr(coordination, "rank_consensus", _consensus)
     model = _MoEModel()

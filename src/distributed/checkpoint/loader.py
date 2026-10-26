@@ -44,18 +44,13 @@ from src.distributed.checkpoint.save import reject_unhandled_pp_axes
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.pipeline_parallel.lazy_loader import PER_NODE_PLACEMENT_REMEDY
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    barrier,
-    broadcast_from_rank0,
-    copy_full_tensor,
-    is_global_main_process,
-    raise_rank0_failure,
-    reject_across_ranks,
-)
 from src.log import KEY_PREVIEW_COUNT
 from src.models.param_roles import persistent_buffers
 from src.models.unwrapping import unwrap_framework_wrappers, unwrap_toolkit_wrappers
+from src.runtime.collectives import barrier, broadcast_from_rank0
+from src.runtime.consensus import DeferredRankFailure, raise_rank0_failure, reject_across_ranks
+from src.runtime.dtensor import copy_full_tensor
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 

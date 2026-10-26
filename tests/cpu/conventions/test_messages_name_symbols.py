@@ -2,7 +2,7 @@
 
 An error, a warning or a field help names the symbol its reader acts on (``DECODER_LAYER_LIST_ATTRS``,
 ``LigerFamilySpec``), which a move leaves valid where a path would go stale, spelled from the repo root
-(``src/models/structure.py``) or from the package's (``models/structure.py``) alike. Docstrings are
+(``src/models/peft_adapters.py``) or from the package's (``models/peft_adapters.py``) alike. Docstrings are
 documentation, not messages, and stay out of the sweep; a ``scripts/`` tool a user runs is named by its path
 on purpose.
 """

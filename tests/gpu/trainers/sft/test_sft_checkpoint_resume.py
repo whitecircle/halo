@@ -43,8 +43,8 @@ from trl import SFTConfig
 
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.env import env_flag, env_str
+from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import (

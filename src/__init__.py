@@ -22,4 +22,4 @@ transformers.logging.enable_explicit_format()
 
 # Install the device-aware dispatch shim before any toolkit module imports a transformers modeling
 # module, which binds the hub-kernel fallback factory at import time.
-import src.models.patches.kernel_dispatch  # noqa: E402, F401
+import src.kernels.hub_kernel_dispatch  # noqa: E402, F401

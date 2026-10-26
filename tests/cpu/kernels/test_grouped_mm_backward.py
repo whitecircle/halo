@@ -1,4 +1,4 @@
-"""CPU tests for the ``src/kernels/grouped_mm_autograd.py`` autograd wrapper.
+"""CPU tests for the ``src/kernels/grouped_mm.py`` autograd wrapper.
 
 ``F.grouped_mm`` is CUDA-only, so a reference implementation (matching the 2D×3D forward and the
 2D×3D / 2D×2D backward shapes the wrapper issues) is monkeypatched in. The reference enforces the
@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.nn.functional
 
-from src.kernels.grouped_mm_autograd import grouped_mm
+from src.kernels.grouped_mm import grouped_mm
 
 
 def _reference_grouped_mm(mat_a, mat_b, offs=None):

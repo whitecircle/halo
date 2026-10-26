@@ -17,7 +17,7 @@ weights, no crash, no NaN.
 Also pinned here: the wrapper's int32 offset normalization. ``torch.cumsum`` returns int64 and the
 production router builds ``offs`` with it; ``F.grouped_mm`` rejects int64 outright
 (``RuntimeError: Offsets have to be int32``), so dropping the cast in
-``src.kernels.grouped_mm_autograd._GroupedMMFunction.forward`` takes every MoE forward down.
+``src.kernels.grouped_mm._GroupedMMFunction.forward`` takes every MoE forward down.
 
 Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_grouped_mm_empty_groups.py
 """
@@ -25,8 +25,8 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_grouped_mm_empty_groups.
 import torch
 import torch.nn.functional as F
 
-from src.kernels.grouped_gemm import GroupedGemmPrecision, grouped_gemm
-from src.kernels.grouped_mm_autograd import grouped_mm
+from src.kernels.expert_gemm import expert_gemm
+from src.kernels.grouped_mm import grouped_mm
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import fro_rel_err, log
 
@@ -156,20 +156,21 @@ def test_the_precision_dispatch_survives_empty_groups():
     x_ref, w_ref = _operands(SKEWED_COUNTS)
     reference = _reference(x_ref, w_ref, offs).float()
 
-    for precision in (GroupedGemmPrecision.BF16, GroupedGemmPrecision.MXFP8, GroupedGemmPrecision.NVFP4):
+    for quant_format in (None, "mxfp8", "nvfp4"):
+        label = quant_format or "bf16"
         x, w = _operands(SKEWED_COUNTS, requires_grad=True)
-        out = grouped_gemm(x, w, offs=offs, precision=precision)
+        out = expert_gemm(x, w, offs=offs, quant_format=quant_format)
         (out * torch.randn_like(out)).sum().backward()
 
         assert out.shape == (sum(SKEWED_COUNTS), N)
-        assert torch.isfinite(out).all(), f"{precision.value}: empty groups produced non-finite output"
-        assert torch.isfinite(w.grad).all(), f"{precision.value}: empty groups produced non-finite grads"
+        assert torch.isfinite(out).all(), f"{label}: empty groups produced non-finite output"
+        assert torch.isfinite(w.grad).all(), f"{label}: empty groups produced non-finite grads"
         rel = fro_rel_err(out.detach(), reference)
-        assert rel < 0.3, f"{precision.value}: rel {rel:.3f} — empty groups broke the quantized path"
+        assert rel < 0.3, f"{label}: rel {rel:.3f} — empty groups broke the quantized path"
         for expert, count in enumerate(SKEWED_COUNTS):
             if count == 0:
-                assert w.grad[expert].abs().max().item() == 0.0, f"{precision.value}: expert {expert} not zero"
-        print(f"  {precision.value} with empty groups: rel {rel:.3f} PASS")
+                assert w.grad[expert].abs().max().item() == 0.0, f"{label}: expert {expert} not zero"
+        print(f"  {label} with empty groups: rel {rel:.3f} PASS")
 
 
 def test_zero_total_tokens_with_a_broadcast_grad_backpropagates():

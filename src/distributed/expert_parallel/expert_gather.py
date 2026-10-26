@@ -19,7 +19,7 @@ from functools import partial
 import torch
 import torch.distributed as dist
 
-from src.distributed.runtime import copy_full_tensor, materialize_dtensor
+from src.runtime.dtensor import copy_full_tensor, materialize_dtensor
 
 
 class EPExpertGatherMixin:
@@ -130,7 +130,7 @@ class EPExpertGatherMixin:
 
         Folds in the grouped-LoRA delta ``scaling·(A@B)`` when ``merge_lora`` is set and ``attr``
         carries an adapter, so the RL weight sync ships the trained experts rather than the frozen
-        base. Folds on the full plain tensor :func:`~src.distributed.runtime.materialize_dtensor`
+        base. Folds on the full plain tensor :func:`~src.runtime.dtensor.materialize_dtensor`
         returns. ``expert_tp_size==1`` only (expert-LoRA + ETP is rejected at config)."""
         base = materialize_dtensor(getattr(self, attr).data)
         if not merge_lora or attr not in self._expert_lora_attrs:

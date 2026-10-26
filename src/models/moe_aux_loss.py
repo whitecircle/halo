@@ -25,6 +25,7 @@ import torch
 import torch.nn as nn
 from peft.utils.other import AuxiliaryTrainingWrapper
 
+from src.models.gradient_checkpointing import current_graph_task
 from src.models.moe_balancing import ROUTER_LOGITS_KEY, declared_routers, declares_router_logits
 
 # The attribute marking a backbone as already carrying the hooks, so a second install is a no-op.
@@ -33,15 +34,6 @@ _INSTALLED_ATTR = "_router_aux_gradient"
 # Module levels between a router and the block that calls it which never run the block's forward:
 # module containers, and PEFT's ``modules_to_save`` wrapper around a trained router copy.
 _PASS_THROUGH_LEVELS = (nn.ModuleDict, nn.ModuleList, AuxiliaryTrainingWrapper)
-
-
-def _graph_task() -> int:
-    """The autograd graph task executing on this thread, ``-1`` outside backward.
-
-    A module forward running while it is set is a checkpoint recompute; the id also names the one
-    outer backward that a carrier's gradient and the recompute consuming it both belong to.
-    """
-    return torch._C._current_graph_task_id()
 
 
 @dataclass(eq=False)
@@ -150,7 +142,7 @@ class _RouterAuxGradient:
         logits = output[self._logits_index[router]] if isinstance(output, (tuple, list)) else output
         if not isinstance(logits, torch.Tensor):
             return
-        if _graph_task() != -1:
+        if current_graph_task() != -1:
             self._live[router] = logits
         elif self._open is not None and not torch.is_grad_enabled():
             # A no_grad router inside a grad-enabled backbone forward: a reentrant checkpoint's first pass.
@@ -188,7 +180,7 @@ class _RouterAuxGradient:
 
     def keep(self, record: _BackboneForward, router: nn.Module, gradient: torch.Tensor) -> None:
         """Hold ``gradient`` for ``router``'s recompute in the backward now running."""
-        task = _graph_task()
+        task = current_graph_task()
         if task != self._task:
             self._task, self._task_forwards = task, []
             torch.autograd.Variable._execution_engine.queue_callback(partial(self._finish, task))
@@ -197,7 +189,7 @@ class _RouterAuxGradient:
         record.gradients[router] = gradient
 
     def _take(self, router: nn.Module) -> torch.Tensor | None:
-        if self._task is None or self._task != _graph_task():
+        if self._task is None or self._task != current_graph_task():
             return None
         holders = [record for record in self._task_forwards if router in record.gradients]
         if len(holders) > 1:
@@ -209,7 +201,7 @@ class _RouterAuxGradient:
         return holders[0].gradients.pop(router) if holders else None
 
     def _on_owner(self, owner, args, output):
-        if _graph_task() == -1:
+        if current_graph_task() == -1:
             return None
         for router in self._owned[owner]:
             logits = self._live.pop(router, None)

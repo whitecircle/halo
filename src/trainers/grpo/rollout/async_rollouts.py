@@ -27,17 +27,11 @@ from trl.extras.profiling import profiling_context
 from src.checkpoint.atomic import atomic_torch_save
 from src.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_filename
 from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    broadcast_from_rank0,
-    get_global_rank,
-    get_global_world_size,
-    get_num_nodes,
-    is_global_main_process,
-    rank_consensus,
-)
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import RolloutManager, ray_init_kwargs
+from src.runtime.collectives import broadcast_from_rank0
+from src.runtime.consensus import DeferredRankFailure, rank_consensus
+from src.runtime.ranks import get_global_rank, get_global_world_size, get_num_nodes, is_global_main_process
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
 from src.trainers.grpo.world_metrics import world_sums
@@ -616,7 +610,7 @@ class AsyncRolloutMixin:
                     f"{path} holds pending prefetch rounds this run does not prefetch; they are not trained."
                 )
             return
-        if not rank_consensus(payload["layout"] == self._prefetch_round_layout())[0]:
+        if not rank_consensus(payload["layout"] == self._prefetch_round_layout()).all_ok:
             if is_global_main_process():
                 logger.warning(
                     f"{checkpoint}'s pending prefetch rounds were drawn under {payload['layout']}, this run "

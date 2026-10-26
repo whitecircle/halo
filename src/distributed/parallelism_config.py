@@ -38,16 +38,9 @@ from src.distributed.nvlink import (
     get_nvlink_domain_size,
     validate_nvlink_domain_against_fabric,
 )
-from src.distributed.runtime import (
-    get_global_rank,
-    get_global_world_size,
-    get_local_world_size,
-    is_global_main_process,
-    reject_across_ranks,
-    reject_divergent_settings,
-)
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
 from src.env import is_accelerate_launch
+from src.kernels.lowp.spec import LowpPrecision, LowpSpec
 from src.models.config_access import text_config
 from src.models.context_window import context_window_from_config
 from src.models.moe_balancing import (
@@ -56,6 +49,8 @@ from src.models.moe_balancing import (
     resolve_expert_ffn_shard_width,
     resolve_router_topk,
 )
+from src.runtime.consensus import reject_across_ranks, reject_divergent_settings
+from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +63,6 @@ EPScope = Literal["auto", "node", "global"]
 EP_SCOPES: tuple[str, ...] = get_args(EPScope)
 EPBufferBackend = Literal["auto", "elastic", "legacy"]
 EP_BUFFER_BACKENDS: tuple[str, ...] = get_args(EPBufferBackend)
-LowpPrecision = Literal["bf16", "fp8", "fp4", "mxfp4"]
-LOWP_PRECISIONS: tuple[str, ...] = get_args(LowpPrecision)
 
 # Axis → CLI flag: rejection messages quote the flag the user typed, not the internal field name.
 AXIS_FLAGS: dict[str, str] = {
@@ -229,13 +222,7 @@ class ParallelismConfig:
     # F.grouped_mm for expert matmuls on SM90+; at ep_size=1 also applies EP wrappers (no inter-rank comm).
     use_grouped_gemm: bool = True
 
-    # Low-precision GEMM compute, masters + checkpoint stay bf16: 'fp8'=mxfp8, 'fp4'=nvfp4 (most
-    # accurate), 'mxfp4'=fast fp4. keep_{first,last}_blocks pin end blocks to bf16.
-    lowp_precision: LowpPrecision = "bf16"
-    lowp_apply_dense_mlp: bool = True
-    lowp_apply_moe_experts: bool = True
-    lowp_keep_first_blocks: int = 0
-    lowp_keep_last_blocks: int = 0
+    lowp: LowpSpec = field(default_factory=LowpSpec)
 
     # Max ranks loading simultaneously per node. None = derive from the node width (half of it, capped
     # at 4); 1 = sequential (lowest CPU-RAM peak), 0 = all parallel. Any explicit value is honoured
@@ -680,12 +667,12 @@ class ParallelismConfig:
                 f"checkpointing for the memory."
             )
 
-        if self.lowp_precision != "bf16":
+        if self.lowp.precision != "bf16":
             raise ValueError(
-                f"PP + lowp_precision={self.lowp_precision!r} is not supported "
+                f"PP + lowp_precision={self.lowp.precision!r} is not supported "
                 f"(pipeline_parallel_size={self.pp_size}). No equivalence gate has ever compared PP "
                 f"low-precision gradients against an unsplit reference, and the composition has a "
-                f"known silent failure: apply_mixed_precision_compute derives each block's index from "
+                f"known silent failure: apply_lowp_compute derives each block's index from "
                 f"its MODULE NAME and keeps lowp_keep_first_blocks / lowp_keep_last_blocks at the ends "
                 f"of that numbering, but a stage's layers are re-based to 0 — so every stage would "
                 f"keep its OWN first and last blocks in bf16 while the network's true ends get low "
@@ -1001,31 +988,9 @@ class ParallelismConfig:
             )
 
     def _validate_lowp(self):
-        """Low-precision compute validation: guard enums/ranges and reject no-op/contradictory combos."""
-        if self.lowp_precision not in LOWP_PRECISIONS:
-            raise ValueError(
-                f"lowp_precision must be one of {', '.join(repr(p) for p in LOWP_PRECISIONS)} "
-                f"('bf16' = off), got {self.lowp_precision!r}"
-            )
-        if self.lowp_keep_first_blocks < 0 or self.lowp_keep_last_blocks < 0:
-            raise ValueError(
-                f"lowp_keep_first_blocks / lowp_keep_last_blocks must be >= 0, got "
-                f"{self.lowp_keep_first_blocks} / {self.lowp_keep_last_blocks}"
-            )
-        if self.lowp_precision != "bf16":
-            if not (self.lowp_apply_dense_mlp or self.lowp_apply_moe_experts):
-                raise ValueError(
-                    f"lowp_precision={self.lowp_precision!r} is set but both lowp_apply_dense_mlp "
-                    f"and lowp_apply_moe_experts are False — low precision would apply to nothing. "
-                    f"Enable at least one, or set lowp_precision='bf16'."
-                )
-        elif (
-            self.lowp_keep_first_blocks
-            or self.lowp_keep_last_blocks
-            or not self.lowp_apply_dense_mlp
-            or not self.lowp_apply_moe_experts
-        ) and is_global_main_process():
-            enabled = ", ".join(repr(p) for p in LOWP_PRECISIONS if p != "bf16")
+        self.lowp.validate()
+        if not self.lowp.enabled and self.lowp.non_default_shape_fields() and is_global_main_process():
+            enabled = ", ".join(repr(p) for p in get_args(LowpPrecision) if p != "bf16")
             logger.warning(
                 "lowp_* tuning options are set but lowp_precision='bf16' (low precision is OFF) — "
                 f"keep_blocks/apply_* have no effect until lowp_precision is one of {enabled}."

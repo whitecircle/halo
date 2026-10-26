@@ -47,15 +47,12 @@ from src.distributed.checkpoint.write import (
 )
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    barrier_on_exit,
-    fs_aware_save_rank,
-    is_local_main_process,
-    is_output_shared_filesystem,
-)
-from src.models.structure import lora_fold_targets
+from src.models.peft_adapters import lora_fold_targets
 from src.models.unwrapping import unwrap_toolkit_wrappers
+from src.runtime.collectives import barrier_on_exit
+from src.runtime.consensus import DeferredRankFailure
+from src.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
+from src.runtime.ranks import is_local_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +178,7 @@ def save_ep_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     With native grouped-LoRA on experts, writes a standalone adapter unless
     ``merge_expert_lora_on_save`` requests a merged checkpoint. That merge covers BOTH halves of a
     mixed run: the expert deltas fold inside each family's gather, and any attention adapters fold
-    into each base tensor as it is written, out of place (:func:`~src.models.structure.lora_folded`,
+    into each base tensor as it is written, out of place (:func:`~src.models.peft_adapters.lora_folded`,
     the weight sync's fold), so the save never writes the trainer's own weights. A training
     checkpoint also carries the unmerged adapters it resumes from (:func:`save_resume_adapter`).
     """
@@ -259,7 +256,7 @@ def remove_stale_completion_markers(checkpoint_dir: str) -> None:
     enters, and each FS-aware save rank clears its own copy.
     """
     with barrier_on_exit():
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             for name in CHECKPOINT_COMPLETION_MARKERS:
                 with suppress(FileNotFoundError):
                     os.remove(os.path.join(checkpoint_dir, name))
@@ -297,7 +294,7 @@ def commit_trainer_state(checkpoint_dir: str) -> None:
     one.
     """
     guard = DeferredRankFailure(f"Committing {TRAINER_STATE_NAME} in {checkpoint_dir}")
-    if fs_aware_save_rank():
+    if is_fs_save_rank():
         guard.run(partial(_publish_withheld_trainer_state, checkpoint_dir))
     guard.reject()
 

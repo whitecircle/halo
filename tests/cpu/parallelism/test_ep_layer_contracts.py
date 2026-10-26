@@ -31,8 +31,9 @@ from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.fused_glu import GluCombine
+from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
@@ -66,7 +67,7 @@ class _EPStub(EPMoELayerBase):
 class _GCSequential(nn.Sequential):
     """Stub policy model: records the GC kwargs the EP path forces on it.
 
-    ``enable_ep_gradient_checkpointing`` raises on a model with no
+    ``enable_scoped_gradient_checkpointing`` raises on a model with no
     ``gradient_checkpointing_enable`` — returning quietly would leave GC off on BOTH sides,
     since the EP path has already disabled HF Trainer's own. Installing
     ``_gradient_checkpointing_func`` mirrors ``PreTrainedModel``: the EP path re-points it at the
@@ -113,7 +114,7 @@ def test_gc_disabled_skips_the_contract_check():
 
 def test_gc_on_supporting_layer_passes():
     trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True)
-    with patch("src.trainers.mixins.ep_introspection.enable_ep_gradient_checkpointing") as enable:
+    with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
         trainer._setup_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is True
@@ -127,7 +128,7 @@ def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
     trainer.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2)
     trainer.model.config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
     assert not trainer.parallelism_config.is_ep_mode, "fixture must leave only the config to decide"
-    with patch("src.trainers.mixins.ep_introspection.enable_ep_gradient_checkpointing") as enable:
+    with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
         trainer._setup_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
@@ -135,7 +136,7 @@ def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
 def test_gc_under_pp_is_non_reentrant():
     # PP needs non-reentrant GC: a reentrant forward runs under no_grad, so FSDP2 registers no pre-backward hooks.
     trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True, world=4, gpus_per_node=2, pp_size=2)
-    with patch("src.trainers.mixins.ep_introspection.enable_ep_gradient_checkpointing") as enable:
+    with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
         trainer._setup_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": False})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is False
@@ -165,7 +166,7 @@ def test_gc_enable_requires_a_real_checkpoint_function():
             pass
 
     with pytest.raises(RuntimeError, match="installed no checkpoint function"):
-        enable_ep_gradient_checkpointing(
+        enable_scoped_gradient_checkpointing(
             _Silent(_EPStub(supports_gc=None)), gradient_checkpointing_kwargs={"use_reentrant": True}
         )
 
@@ -179,7 +180,7 @@ def test_repeated_gc_reenables_neither_stack_nor_lose_the_scope():
     the second DeepEP dispatch that would corrupt every gradient.
     """
     model = _GCSequential(_EPStub(supports_gc=None))
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     wrapper = model.gradient_checkpointing_enable
 
     for _ in range(3):
@@ -190,13 +191,13 @@ def test_repeated_gc_reenables_neither_stack_nor_lose_the_scope():
 
 
 def test_a_second_full_enable_is_idempotent_not_a_raise():
-    """A mode switch re-runs the FULL ``enable_ep_gradient_checkpointing``. The rescope hook has
-    already wrapped the fresh install by then, so ``install_ep_checkpoint_scopes`` finds only
+    """A mode switch re-runs the FULL ``enable_scoped_gradient_checkpointing``. The rescope hook has
+    already wrapped the fresh install by then, so ``install_recompute_scopes`` finds only
     already-scoped functions — which must read as "scopes in place", never as the no-checkpoint
     RuntimeError."""
     model = _GCSequential(_EPStub(supports_gc=None))
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": False})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": False})
     assert getattr(model._gradient_checkpointing_func, "_ep_scoped", False)
 
 
@@ -234,8 +235,7 @@ class _GptOssBlock(nn.Module):
 
 def test_gptoss_layer_reads_activation_constants_from_experts():
     layer = EPGptOssMoELayer(_GptOssBlock(), single_process_ep_config(E))
-    assert layer.alpha == 1.702
-    assert layer.limit == 7.0
+    assert layer._gptoss_glu == GluCombine.gptoss(1.702, 7.0)
 
 
 def test_gptoss_layer_fails_loud_on_missing_activation_constants():
@@ -244,11 +244,12 @@ def test_gptoss_layer_fails_loud_on_missing_activation_constants():
 
 
 def _grouped_mm_probe(use_grouped_mm: bool, expert_tp_size: int) -> EPGptOssMoELayer:
-    """A layer carrying only what ``_grouped_mm_enabled`` reads — the method is pure, and a real
+    """A layer carrying only what ``_grouped_mm_enabled`` and the summary's combine name read — a real
     ``__init__`` needs DeepEP groups and a device."""
     layer = EPGptOssMoELayer.__new__(EPGptOssMoELayer)
     layer._use_grouped_mm = use_grouped_mm
     layer.expert_tp_size = expert_tp_size
+    layer._gptoss_glu = GluCombine.gptoss(1.702, 7.0)
     return layer
 
 

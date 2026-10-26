@@ -13,7 +13,7 @@ whose backward is skipped or pruned drops the microbatch — and DOUBLE-counts i
 shipped balancing config sets ``gradient_checkpointing: true``, and nothing about either failure
 surfaces as an error.
 
-:func:`~src.distributed.expert_parallel.gc_scope.counts_toward_expert_load` is unit-pinned on stubs
+:func:`~src.models.gradient_checkpointing.counts_toward_expert_load` is unit-pinned on stubs
 in ``tests/cpu/parallelism/test_expert_load_recording.py``. What only a GPU can show is the same
 matrix through the real thing: a patched ``EPGptOssMoELayer`` with a live DeepEP ``ElasticBuffer``,
 HF's own checkpoint function, and the native adopted ``router.bias`` the export path serves. So this
@@ -44,12 +44,9 @@ from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import (
-    create_ep_buffers,
-    enable_ep_gradient_checkpointing,
-    patch_moe_model_for_ep,
-)
+from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.utils import log
@@ -186,7 +183,7 @@ def run(ctx):
     checks["frozen_no_grad_pass_records_nothing"] = all(c is None for c in frozen_forward(model, ep_layers, batch))
 
     # ── 2. REENTRANT checkpointing — what every non-PP EP/CP run is forced onto ──────────────────
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     checks["gc_scopes_installed"] = all_checkpoint_funcs_scoped(model)
     forward_calls["n"] = 0
     mid_step: list[list[torch.Tensor | None]] = []

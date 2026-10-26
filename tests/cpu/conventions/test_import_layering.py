@@ -1,8 +1,8 @@
 """The import layering of ``src/``, read off the import graph itself.
 
-Enforced: the sharding-agnostic trees (``src/checkpoint/``, ``src/model_loading/``) and
-``src/models/config_access.py`` import no ``src.distributed`` or ``torch.distributed``; nothing else in
-``src/distributed`` imports the loader dispatch (``src/distributed/loading/``); the members of
+Enforced: the sharding-agnostic trees (``src/checkpoint/``, ``src/model_loading/`` outside its
+``parallel/`` loaders, ``src/models/``) import no ``src.distributed`` or ``torch.distributed``; nothing
+else in ``src/distributed`` imports the loader dispatch (``src/distributed/loading/``); the members of
 ``src/distributed`` import each other acyclically; every toolkit env knob is read through ``src/env.py``.
 
 The final layer table (``_LAYERS`` and the rules beside it) is laid over today's tree, each module placed where
@@ -30,9 +30,10 @@ from tests.common.sample_tree import write_sample_tree
 _SRC = REPO_ROOT / PACKAGE
 _INDEX = RepoIndex(REPO_ROOT)
 
-# The two sharding-agnostic trees, the composite-config module both read, and what they may not reach.
-_AGNOSTIC_DIRS = ("checkpoint", "model_loading")
-_AGNOSTIC_EXTRA_FILES = ("models/config_access.py",)
+# The sharding-agnostic trees and what they may not reach.
+_AGNOSTIC_DIRS = ("checkpoint", "model_loading", "models")
+# The parallelism-aware loaders: inside model_loading/, above src/distributed.
+_AGNOSTIC_EXCLUDED_DIR = "model_loading/parallel"
 _FORBIDDEN_ROOTS = (f"{PACKAGE}.distributed", "torch.distributed")
 
 # The package above every parallelism implementation, which nothing else in src/distributed imports.
@@ -116,22 +117,16 @@ _PENDING_MOVES = {
     "training.early_stopping": "callbacks.early_stop",
     "training.parallelism_args": "configs.parallelism_arguments",
     "training.parser": "configs.parser",
-    "data.probe_consensus": "runtime.consensus",
-    "diagnostics.rank_divergence": "runtime.consensus",
     "diagnostics.weight_sync_transport": "weight_sync.transport_check",
     "kernels.liger": "model_loading.liger",
-    "kernels.lowp.mixed_precision": "model_loading.parallel.lowp_compute",
     "models.patches.buffer_fixes": "model_loading.buffer_repair",
-    "models.patches.kernel_dispatch": "kernels.hub_kernel_dispatch",
     "models.patches.remote_code_compat": "model_loading.remote_code",
     "models.patches.remote_code_hooks": "model_loading.remote_code",
     "distributed.checkpoint": "checkpoint.parallel",
-    "distributed.filesystem": "runtime.filesystem",
     "distributed.loading": "model_loading.parallel",
     "distributed.loading.vlm_setup": "entrypoints.model_setup",
     "distributed.nccl": "weight_sync.transport",
     "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
-    "distributed.runtime": "runtime.ranks",
     "distributed.context_parallel.key_mapping": "models.unwrapping",
     "distributed.context_parallel.loading": "model_loading.parallel.cp",
     "distributed.pipeline_parallel.lazy_loader": "model_loading.parallel.pp",
@@ -144,7 +139,6 @@ _PENDING_MOVES = {
     "distributed.expert_parallel.expert_weights": "distributed.expert_parallel.families.roster",
     "distributed.expert_parallel.extension": "distributed.expert_parallel.deepep.backends",
     "distributed.expert_parallel.fp32_masters": "model_loading.parallel.fp32_masters",
-    "distributed.expert_parallel.gc_scope": "models.gradient_checkpointing",
     "distributed.expert_parallel.grad_sync": "distributed.expert_parallel.moe_layer.grad_sync",
     "distributed.expert_parallel.hub_conversion": "model_loading.lazy_safetensors.conversion_selection",
     "distributed.expert_parallel.layers": "distributed.expert_parallel.families",
@@ -173,8 +167,6 @@ _KNOWN_LAYER_BREAKS = frozenset(
             "model_loading.lazy_safetensors.conversion_selection",
             "distributed.expert_parallel.families.roster",
         ),
-        ("tool-safe", "models.modality", "runtime.filesystem"),
-        ("tool-safe", "models.modality", "runtime.ranks"),
     }
 )
 
@@ -271,10 +263,10 @@ def _member(module: str, package: str) -> str | None:
 
 _IMPORTS = _package_imports(_INDEX)
 _AGNOSTIC_FILES = sorted(
-    [
-        *(path for directory in _AGNOSTIC_DIRS for path in (_SRC / directory).rglob("*.py")),
-        *(_SRC / file for file in _AGNOSTIC_EXTRA_FILES),
-    ]
+    path
+    for directory in _AGNOSTIC_DIRS
+    for path in (_SRC / directory).rglob("*.py")
+    if not path.is_relative_to(_SRC / _AGNOSTIC_EXCLUDED_DIR)
 )
 _BELOW_DISPATCH_FILES = [
     path
@@ -458,14 +450,11 @@ def _report(breaks: Iterable[_Break]) -> str:
     return "\n".join(f"{found.location or found.importer}: {found.rule}: {found.detail}" for found in breaks)
 
 
-def test_the_sweep_sees_both_agnostic_trees_and_every_extra_file():
-    """Anti-vacuity: an empty or shrunken sweep, or an extra file that moved away, would pass every
-    assertion below."""
+def test_the_sweep_sees_every_agnostic_tree():
+    """Anti-vacuity: an empty or shrunken sweep would pass every assertion below."""
     assert len(_AGNOSTIC_FILES) > 10, f"the sharding-agnostic sweep collapsed to {len(_AGNOSTIC_FILES)} files"
     for directory in _AGNOSTIC_DIRS:
         assert any(path.is_relative_to(_SRC / directory) for path in _AGNOSTIC_FILES), directory
-    for file in _AGNOSTIC_EXTRA_FILES:
-        assert (_SRC / file).is_file(), f"src/{file} moved; place its new path in _AGNOSTIC_EXTRA_FILES"
 
 
 @pytest.mark.parametrize("path", _AGNOSTIC_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))

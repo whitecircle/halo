@@ -14,7 +14,7 @@ import torch
 from accelerate.utils import gather
 from scipy import stats
 
-from src.distributed.runtime import rank_consensus
+from src.runtime.consensus import rank_consensus
 
 # Matches TRL, so env-, online- and offline-GRPO agree on near-degenerate groups.
 STD_EPS = 1e-4
@@ -209,7 +209,7 @@ def _require_finite(rewards: torch.Tensor, advantages: torch.Tensor) -> None:
 
     The verdict is agreed across ranks: a rank raising alone leaves its peers in the next collective.
     """
-    if rank_consensus(bool(torch.isfinite(rewards).all() & torch.isfinite(advantages).all()))[0]:
+    if rank_consensus(bool(torch.isfinite(rewards).all() & torch.isfinite(advantages).all())).all_ok:
         return
     raise ValueError(
         f"Non-finite GRPO rewards or advantages on at least one rank (this rank: "

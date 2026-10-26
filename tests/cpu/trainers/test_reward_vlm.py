@@ -38,6 +38,7 @@ from src.distributed.loading import vlm_setup
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.modality import config_declares_multimodality, is_vlm_model
+from src.models.seq_cls_heads import multimodal_sequence_classification_model_types
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.repo import load_script_module
@@ -373,7 +374,7 @@ def test_the_checkpoint_context_hands_the_processor_to_the_save():
         mock.patch.object(DistributedRewardTrainer, "_top_level_model", lambda self: model),
         mock.patch.object(DistributedRewardTrainer, "_get_tp_rank", lambda self: 0),
         mock.patch.object(DistributedRewardTrainer, "_find_cp_wrapper", lambda self: None),
-        mock.patch("src.trainers.mixins.checkpointing.fs_aware_save_rank", return_value=True),
+        mock.patch("src.trainers.mixins.checkpointing.is_fs_save_rank", return_value=True),
         mock.patch("src.trainers.mixins.checkpointing.has_ep_lora", return_value=False),
     ):
         ctx = trainer._checkpoint_context()
@@ -440,7 +441,7 @@ def test_a_text_backbone_registered_under_image_text_to_text_stays_text_only():
 def test_the_seq_cls_roster_holds_the_multimodal_families_and_no_text_one():
     """Anti-drift on the shared predicate's blast radius: this roster is what the refusal above
     offers as the way forward, so a family gained or lost here changes a user-facing gate."""
-    roster = set(vlm_setup.multimodal_sequence_classification_model_types())
+    roster = set(multimodal_sequence_classification_model_types())
 
     assert {"gemma4", "qwen3_5", "qwen3_5_moe"} <= roster
     assert roster.isdisjoint({"mistral4", "qwen3", "qwen3_moe", "gpt_oss"})

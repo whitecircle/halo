@@ -189,7 +189,7 @@ fp32_grad_reduce: bool = False    # fp32 cross-rank grad reduction, bf16 storage
 Training args: `bf16=True`, `gradient_checkpointing=True` (recommended).
 `ddp_find_unused_parameters=True` is required for EP and set automatically by the entry scripts —
 do not rely on setting it yourself. With GC the trainer calls
-`enable_ep_gradient_checkpointing()` and sets `args.gradient_checkpointing=False` so HF Trainer does
+`enable_scoped_gradient_checkpointing()` and sets `args.gradient_checkpointing=False` so HF Trainer does
 not re-enable it.
 
 **`fp32_grad_reduce`** upcasts the router grad (always reduced) and the expert cross-replica grad
@@ -357,7 +357,7 @@ So the first pass caches detached dispatch/combine results and the recompute rep
 `ReplayDispatchFunction` / `ReplayCombineFunction`. Only the expert compute is recomputed, and
 backward still calls `buffer.combine()` / `buffer.dispatch()` for the gradient comm.
 
-That cache lives on an `EPCheckpointScope` (`src/distributed/expert_parallel/gc_scope.py`) created
+That cache lives on a `RecomputeScope` (`src/models/gradient_checkpointing.py`) created
 per checkpoint invocation and entered by both passes, not on the layer: concurrent frames stay
 separate, and a `no_grad` reference or teacher pass
 cannot reach a scope it did not create. The recompute signal is the scope's pass counter, not grad
@@ -377,7 +377,7 @@ never double-counts `moe/*` metrics or bias-update balancing, and a `no_grad` fo
 train-mode checkpointed model (offline GRPO's KL reference pass) records nothing either.
 
 Scopes are installed automatically when `gradient_checkpointing=True` and EP is active, and they
-follow every later re-enable: `enable_ep_gradient_checkpointing` wraps the model's own
+follow every later re-enable: `enable_scoped_gradient_checkpointing` wraps the model's own
 `gradient_checkpointing_enable`. Online GRPO depends on this — TRL wraps generation in
 `disable_gradient_checkpointing`, whose exit restores a bare checkpoint from the args once per step,
 and a layer that entered backward without a scope raises rather than silently corrupt the gradients.
@@ -590,7 +590,7 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | `No module named 'deep_ep'` | Install DeepEP ([deepep.md](../infrastructure/deepep.md)) |
 | `EP group size (N) must divide world size (M)` / `… the NVLink domain (M)` | Use a size dividing `world_size` (cross-node) or `nvlink_domain_size` (node-local) |
 | `Parameter indices which did not receive grad` | `ddp_find_unused_parameters=True` did not reach the trainer — launch through the entry scripts, which set it for every EP run |
-| `DeepEP NVLink barrier timeout` then `cudaErrorLaunchFailure` abort, under GC | `use_reentrant=False` reached the EP path. The trainer forces `True` — this only appears if `enable_ep_gradient_checkpointing` was called directly. Do not pin `false` |
+| `DeepEP NVLink barrier timeout` then `cudaErrorLaunchFailure` abort, under GC | `use_reentrant=False` reached the EP path. The trainer forces `True` — this only appears if `enable_scoped_gradient_checkpointing` was called directly. Do not pin `false` |
 | OOM | Enable GC; raise EP size (each doubling roughly halves per-GPU expert memory) |
 
 gpt-oss-20b peak memory per EP degree on 8× B300: [EP-only table](../optimization/throughput-benchmarks.md#ep-only-batch-scaling)

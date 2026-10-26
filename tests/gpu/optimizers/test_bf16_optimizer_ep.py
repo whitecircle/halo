@@ -33,8 +33,8 @@ from trl import SFTConfig
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.loading import load_ep_model
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
@@ -87,7 +87,7 @@ def test_full_training(output_dir: str) -> bool:
 
     # Enable gradient checkpointing with EP-safe dispatch caching
     log("Enabling gradient checkpointing...")
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
     # Create config
     config = SFTConfig(
@@ -232,7 +232,7 @@ def test_lora_training(output_dir: str) -> bool:
 
     # Enable gradient checkpointing with EP-safe dispatch caching
     log("Enabling gradient checkpointing...")
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
     # Create config
     config = SFTConfig(

@@ -14,8 +14,9 @@ import subprocess
 import torch
 import torch.distributed as dist
 
-from src.distributed.runtime import is_global_main_process, is_multi_rank_run, reject_across_ranks
 from src.env import env_int
+from src.runtime.consensus import reject_across_ranks
+from src.runtime.ranks import is_global_main_process, is_multi_rank_run
 
 logger = logging.getLogger(__name__)
 

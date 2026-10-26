@@ -34,7 +34,7 @@ from src.models.moe_balancing import (
     mark_router_logits_forced_off,
 )
 from src.models.patches.gpt_oss_sinks import has_live_attention_sinks
-from src.models.structure import tuner_adapter_param_ids
+from src.models.peft_adapters import tuner_adapter_param_ids
 
 logger = get_logger(__name__)
 
@@ -445,7 +445,7 @@ class ParallelismValidationMixin:
 
         Adapters count whether PEFT wrapped the model or injected them in place (the embedding path
         does the latter, so an ``isinstance`` check alone would miss it), read off the tuner layers
-        (:func:`~src.models.structure.tuner_adapter_param_ids`) so a backbone's own ``lora_*``
+        (:func:`~src.models.peft_adapters.tuner_adapter_param_ids`) so a backbone's own ``lora_*``
         parameters stay base weights. EP's native grouped expert adapters are counted separately:
         they are no tuner layer and the TP replicated-grad sweep excludes them by param identity, so
         expert-only LoRA under EP+TP would otherwise reach no gate.

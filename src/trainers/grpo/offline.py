@@ -78,19 +78,14 @@ from src.distributed.pipeline_parallel.losses import (
     rows_with_labels,
     token_logprobs,
 )
-from src.distributed.runtime import (
-    DeferredRankFailure,
-    collective_device,
-    get_global_rank,
-    get_global_world_size,
-    is_global_main_process,
-    reject_across_ranks,
-)
 from src.hardware import current_device
 from src.model_loading.dtype import resolve_training_dtype
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.context_window import is_bounded_length
 from src.models.unwrapping import base_transformers_model
+from src.runtime.collectives import collective_device
+from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
+from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth
 from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin, reject_unsupported_reference_input
 from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS, compute_group_advantages

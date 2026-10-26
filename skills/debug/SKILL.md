@@ -19,7 +19,7 @@ allowed-tools:
 # Distributed-training failure triage
 
 Diagnose a hang / OOM / NaN-loss / DeepEP fault / NCCL timeout. Every helper and
-env var below matches its owner **exactly** — `src/diagnostics/rank_divergence.py` (consistency
+env var below matches its owner **exactly** — `src/runtime/consensus.py` (`assert_rank_uniform` consistency
 check), `src/diagnostics/py_spy.py` (py-spy capture), `src/diagnostics/profiling.py`
 (`cuda_memory_history`, `log_cuda_memory`), `src/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`),
 `src/models/patches/attention.py` (`model_fa4_backward_nan_prone`) — do not invent flags. The full

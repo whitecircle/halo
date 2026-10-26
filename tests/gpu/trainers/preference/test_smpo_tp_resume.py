@@ -32,7 +32,7 @@ from transformers import AutoTokenizer
 from src.configs.preference import SmoothMarginPOConfig
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
+from src.runtime.collectives import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.checkpoint_io import (
     TP_RESUME_PROBE_TEXT,

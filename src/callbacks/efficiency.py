@@ -18,11 +18,12 @@ from src.callbacks.model_flops import (
 )
 from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import get_global_world_size, is_global_main_process
 from src.hardware import detect_gpu_model, get_gpu_peak_flops
+from src.kernels.lowp.spec import LOWP_RECIPES
 from src.model_loading.dtype import resolve_training_dtype
 from src.models.attention_layout import AttentionLayout
 from src.models.moe_balancing import detect_moe_experts_topk
+from src.runtime.ranks import get_global_world_size, is_global_main_process
 
 logger = logging.get_logger(__name__)
 
@@ -52,11 +53,6 @@ _DISPLAY_DECIMALS = 2
 _UNKNOWN_UTILIZATION = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 _PRECISION_KEY_BY_DTYPE = {torch.bfloat16: "bf16", torch.float16: "fp16"}
-
-# Peak-FLOPS key per ``lowp_precision`` mode: low-precision compute decides the peak the matmuls
-# actually issue at, whatever the master weights' dtype. Both fp4 recipes (nvfp4, mxfp4) run the same
-# 4-bit MMA. ``"bf16"`` (low precision off) is absent — the dtype decides there.
-_PRECISION_KEY_BY_LOWP = {"fp8": "fp8", "fp4": "fp4", "mxfp4": "fp4"}
 
 
 def resolve_max_seq_len(*sources) -> int | None:
@@ -271,9 +267,8 @@ def _detect_precision(model: torch.nn.Module | None, training_args, lowp_precisi
     until the Trainer hands over a model reference, where the args flags are the only signal (bf16 is
     the default).
     """
-    lowp_key = _PRECISION_KEY_BY_LOWP.get(lowp_precision)
-    if lowp_key is not None:
-        return lowp_key
+    if lowp_precision in LOWP_RECIPES:
+        return LOWP_RECIPES[lowp_precision].peak_flops_key
 
     declared = resolve_training_dtype(training_args)
     if declared != torch.float32:
@@ -641,7 +636,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         """Initialize GPU detection, peak FLOPS, and local param counting."""
         self.training_args = args  # before _max_seq_len(), which reads it
         self.state.gpu_model = detect_gpu_model()
-        self.state.precision = _detect_precision(self.model_ref, args, self._parallelism_config.lowp_precision)
+        self.state.precision = _detect_precision(self.model_ref, args, self._parallelism_config.lowp.precision)
 
         if self.state.gpu_model:
             self.state.gpu_peak_flops = get_gpu_peak_flops(

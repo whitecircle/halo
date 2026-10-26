@@ -34,9 +34,9 @@ from src.configs.classification import ClassificationConfig
 from src.configs.preference import SmoothMarginPOConfig
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.model_loading.tokenizer_setup import setup_model_and_tokenizer
+from src.runtime.collectives import barrier
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.preference.smpo import SmoothMarginPOTrainer

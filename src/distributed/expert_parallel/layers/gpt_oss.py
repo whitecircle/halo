@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.kernels.fused_glu import fused_glu_enabled, fused_gptoss_glu
+from src.kernels.fused_glu import GluCombine, fused_glu_enabled
 from src.kernels.moe_permute import MoEExpertBiasGather
 
 
@@ -76,11 +76,10 @@ class EPGptOssMoELayer(EPMoELayerBase):
     )
 
     def _init_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
-        """GptOss implements its own interleaved clamped-SwiGLU compute paths, so it takes these two
-        constants instead of an activation. Read as attributes, not with defaults: a substituted
-        default corrupts the clamped SwiGLU on every expert."""
-        self.alpha = experts.alpha
-        self.limit = experts.limit
+        """GptOss implements its own interleaved clamped-SwiGLU compute paths, so it latches that combine
+        instead of an activation. ``alpha`` and ``limit`` are read as attributes, not with defaults: a
+        substituted default corrupts the clamped SwiGLU on every expert."""
+        self._gptoss_glu = GluCombine.gptoss(experts.alpha, experts.limit)
 
     def _init_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False):
         """Slice and register expert parameters for this rank.
@@ -141,8 +140,8 @@ class EPGptOssMoELayer(EPMoELayerBase):
 
     def _glu_combine_name(self) -> str:
         """GptOss runs its own interleaved-bias compute paths and never reaches the base GLU seam; every
-        path calls :func:`fused_gptoss_glu`, eager under ``HALO_FUSED_GLU=0``."""
-        return fused_gptoss_glu.__name__ if fused_glu_enabled() else "eager"
+        path calls its latched combine, eager under ``HALO_FUSED_GLU=0``."""
+        return self._gptoss_glu.name if fused_glu_enabled() else "eager"
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         """Warm whichever activation this layer's compute path calls (see the base method).
@@ -155,7 +154,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
             gate, up = (half.contiguous() for half in gate_up.chunk(2, dim=-1))
         else:
             gate, up = split_interleaved_gate_up(gate_up)
-        return fused_gptoss_glu(gate, up, self.alpha, self.limit)
+        return self._gptoss_glu(gate, up)
 
     @classmethod
     def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:
@@ -320,7 +319,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
         gate_up = self._expert_proj_single(idx, x, "gate_up_proj")
         if hasattr(self, "gate_up_proj_bias"):
             gate_up = gate_up + self.gate_up_proj_bias[idx]
-        gated = fused_gptoss_glu(*split_interleaved_gate_up(gate_up), self.alpha, self.limit)
+        gated = self._gptoss_glu(*split_interleaved_gate_up(gate_up))
         out = self._expert_proj_single(idx, gated, "down_proj")
         if hasattr(self, "down_proj_bias"):
             out = out + self.down_proj_bias[idx]
@@ -334,7 +333,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
             gate = gate + self.gate_proj_bias[idx]
         if hasattr(self, "up_proj_bias"):
             up = up + self.up_proj_bias[idx]
-        gated = fused_gptoss_glu(gate, up, self.alpha, self.limit)
+        gated = self._gptoss_glu(gate, up)
         out = self._expert_proj_single(idx, gated, "down_proj")
         if hasattr(self, "down_proj_bias"):
             out = out + self.down_proj_bias[idx]
@@ -353,7 +352,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
                 gate = gate + MoEExpertBiasGather.apply(self.gate_proj_gmm_bias, eids)
             if hasattr(self, "up_proj_gmm_bias"):
                 up = up + MoEExpertBiasGather.apply(self.up_proj_gmm_bias, eids)
-            gated = fused_gptoss_glu(gate, up, self.alpha, self.limit)
+            gated = self._gptoss_glu(gate, up)
             out = self._expert_proj(gated.to(output_dtype), "down_proj", offs, output_dtype)
             if hasattr(self, "down_proj_bias"):
                 out = out + MoEExpertBiasGather.apply(self.down_proj_bias, eids)

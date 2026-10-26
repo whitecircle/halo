@@ -55,11 +55,11 @@ from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.frozen_models import load_reference_model_for_on_policy_grpo
 from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.runtime import barrier
 from src.environments.base import ANSWER_KEY
 from src.environments.episode import bind_episode_effort
 from src.environments.registry import create_environment
 from src.model_loading.model_preparation import log_model_info
+from src.runtime.collectives import barrier
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 from src.trainers.grpo.rollout.weight_sync_clients import (

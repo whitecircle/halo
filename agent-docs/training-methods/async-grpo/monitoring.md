@@ -116,7 +116,7 @@ A turn the engine cut mid-tool-call shows the partial call after its text, tagge
 
 ### Writer rank
 
-`fs_aware_save_rank` picks the writer: global rank 0 on a shared output filesystem, one per node otherwise. A failed write (a full disk, a wandb outage) fails the step on every rank.
+`is_fs_save_rank` picks the writer: global rank 0 on a shared output filesystem, one per node otherwise. A failed write (a full disk, a wandb outage) fails the step on every rank.
 
 ## Early stop
 

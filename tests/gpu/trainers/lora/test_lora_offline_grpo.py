@@ -26,7 +26,7 @@ import argparse
 import math
 
 from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.runtime import barrier
+from src.runtime.collectives import barrier
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main

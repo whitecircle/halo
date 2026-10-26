@@ -32,8 +32,8 @@ import torch.nn as nn
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
-from src.distributed.runtime import to_local
 from src.optimizers.muon import create_muon_optimizer
+from src.runtime.dtensor import to_local
 from tests.common.harness import gpu_test_main, record_check
 
 # ── Configuration ────────────────────────────────────────────────────────────

@@ -18,7 +18,7 @@ from transformers import GenerationConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from src.model_loading.lazy_safetensors.weights import resolve_run_dtype
-from src.models.param_roles import params_matching_fp32_pins
+from src.models.param_roles import fp32_pin_matches
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ def _apply_fp32_dtype_plan(model: nn.Module, dtype: torch.dtype) -> None:
     """
     if not isinstance(model, PreTrainedModel):
         return
-    for name in params_matching_fp32_pins(model, model._get_dtype_plan(dtype)):
+    for name in fp32_pin_matches((name for name, _ in model.named_parameters()), model._get_dtype_plan(dtype)):
         param = model.get_parameter(name)
         param.data = param.data.to(torch.float32)
 

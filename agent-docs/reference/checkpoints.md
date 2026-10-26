@@ -37,7 +37,7 @@ through `write_gathered_checkpoint`. How it resumes, LoRA or full fine-tune:
 write-bandwidth optimization and must be merged before loading.
 
 Every gather is a collective, so **all** ranks run it. Only the save rank copies the result to host
-memory (`materialize_dtensor` on the others, not `resolve_param_tensor`), so a node pays one
+memory (`materialize_dtensor` on the others, not `full_cpu_tensor`), so a node pays one
 writer's copy instead of `gpus_per_node` × model.
 
 Under EP the same `retain` flag is threaded into each family's `gather_expert_state_dict`. The
@@ -450,7 +450,7 @@ as DTensors, so `save_tp_model()` (`src/distributed/checkpoint/tp_save.py`) reco
 either with one `full_tensor()` walk.
 
 The gather is a collective every TP rank must enter, and GptOss `sinks` need the separate
-plain-tensor all-gather. One writer per filesystem scope (`fs_aware_save_rank`) avoids write races
+plain-tensor all-gather. One writer per filesystem scope (`is_fs_save_rank`) avoids write races
 between the multiple TP groups a node holds when `tp_size < gpus_per_node`.
 
 There is no per-rank TP save: the TP writer always gathers, and streams the result like every other
@@ -979,7 +979,7 @@ checkpoint size ÷ filesystem write speed, with margin.
 
 A write that fails on any rank — ENOSPC, EIO, a stale NFS handle — stops the whole job at the next
 collective with that rank's real error, rather than leaving its peers in a gather until the watchdog
-fires. `DeferredRankFailure` (`src/distributed/runtime.py`) is the seam: it records the local
+fires. `DeferredRankFailure` (`src/runtime/consensus.py`) is the seam: it records the local
 failure, lets every rank finish the collectives, then raises everywhere.
 
 ## Troubleshooting

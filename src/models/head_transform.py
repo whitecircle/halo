@@ -1,19 +1,8 @@
-"""The head-path contract: what a causal LM's forward applies between its backbone and its logits.
-
-The chunked GRPO log-prob sweep and the last pipeline stage compute logits from the backbone's last
-hidden state rather than through the model's forward. A family whose forward does more than project
-through the output embedding — Gemma's softcap, Cohere's ``logit_scale``, Granite's ``logits_scaling``
-division, Inkling's μP hidden division and vocabulary truncation — must have that transform applied
-on both paths, or they score a different distribution than the model samples from and nothing
-raises. :class:`HeadTransform` is that transform, and both paths apply the one
-:func:`resolve_head_transform` returns.
-
-A family declares its transform on a :class:`HeadTransformSpec` subclass. The declaration is never
-trusted: :func:`verify_head_transform` runs the family's own forward on a meta-device shell whose
-backbone emits a fixed hidden state and whose output embedding is a small real stand-in, and refuses
-a family whose logits the declaration does not reproduce. The verdict reads the class, the config and
-whether the model has an output embedding at all, never a weight, so every rank of a sharded model,
-and every pipeline stage before its head is dropped, reaches the same one.
+"""The head-path contract: what a causal LM's forward applies between its backbone and its logits
+(Gemma's softcap, Cohere's ``logit_scale``, Granite's ``logits_scaling``, Inkling's μP division and
+vocabulary cut). A path computing logits from the last hidden state applies the :class:`HeadTransform`
+:func:`resolve_head_transform` returns, or it scores a different distribution than the model samples
+from; each family's :class:`HeadTransformSpec` declaration is verified against its own forward.
 """
 
 from __future__ import annotations
@@ -27,27 +16,15 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from src.models.config_access import get_config_field, text_config
 from src.models.model_classes import transformers_model_class
+from src.models.module_tree import module_path
 from src.models.unwrapping import base_transformers_model
 from src.subclass_registry import build_class_claim_map
-
-# The probe's hidden state is diagonal with log-spaced magnitudes, so its logits span 1e-2..1e3 times
-# the stand-in weights: a softcap of any practical width saturates on some positions and stays linear
-# on others, and a missing scale or truncation moves every position.
-_PROBE_POSITIONS = 8
-_PROBE_MAGNITUDES = (-2.0, 3.0)
-_PROBE_SEED = 0
-# The forward and the declaration compute the same fp32 function in possibly different op forms
-# (``x / s`` against ``x * (1 / s)``), so they agree to rounding; a wrong transform is off by orders.
-_PROBE_RTOL = 1e-5
 
 
 @dataclass(frozen=True)
 class HeadTransform:
-    """``softcap(logit_scale · head(hidden_scale · hidden))`` over the first ``vocab_size`` columns.
-
-    Each ``None`` field is skipped, so the default is the bare output embedding. The order is the
-    one every declaring family's forward uses; the numeric verification holds each declaration to it.
-    """
+    """``softcap(logit_scale · head(hidden_scale · hidden))`` over the first ``vocab_size`` columns; a
+    ``None`` field is skipped, so the default is the bare output embedding."""
 
     hidden_scale: float | None = None
     logit_scale: float | None = None
@@ -80,12 +57,9 @@ IDENTITY_HEAD_TRANSFORM = HeadTransform()
 
 
 class HeadTransformSpec:
-    """A family's declared head transform, keyed by its causal-LM class names.
-
-    Subclasses claim ``HF_MODULE_NAMES`` and override :meth:`transform`; a family with no spec gets the
-    base, which applies ``final_logit_softcapping`` wherever the config sets it (the one head
-    transform transformers spells alike across families). Resolution walks the model class's MRO, so a
-    toolkit subclass or a framework class swap inherits its family's declaration.
+    """A family's declared head transform: subclasses claim ``HF_MODULE_NAMES`` and override
+    :meth:`transform`. The base applies ``final_logit_softcapping`` wherever the config sets it, the
+    one head transform transformers spells alike across families.
     """
 
     HF_MODULE_NAMES: tuple[str, ...] = ()
@@ -158,16 +132,17 @@ def build_head_transform_spec_map() -> dict[str, type[HeadTransformSpec]]:
     return build_class_claim_map(HeadTransformSpec, "HF causal-LM head class name")
 
 
-HEAD_TRANSFORM_SPEC_MAP = build_head_transform_spec_map()
+_HEAD_TRANSFORM_SPEC_MAP = build_head_transform_spec_map()
 
 
 def resolve_head_transform_spec(model_class: type) -> type[HeadTransformSpec]:
-    """The spec claiming ``model_class`` or its nearest claimed ancestor, else the base."""
+    """The spec claiming ``model_class`` or its nearest claimed ancestor (so a toolkit subclass or a
+    framework class swap inherits its family's declaration), else the base."""
     return next(
         (
-            HEAD_TRANSFORM_SPEC_MAP[cls.__name__]
+            _HEAD_TRANSFORM_SPEC_MAP[cls.__name__]
             for cls in model_class.__mro__
-            if cls.__name__ in HEAD_TRANSFORM_SPEC_MAP
+            if cls.__name__ in _HEAD_TRANSFORM_SPEC_MAP
         ),
         HeadTransformSpec,
     )
@@ -183,26 +158,9 @@ class _ProbeBackboneOutput(BaseModelOutputWithPast):
         return None
 
 
-def _probe_inputs(vocab: int, with_bias: bool) -> tuple[torch.Tensor, nn.Linear]:
-    """The probe's ``(hidden, stand-in output embedding)``, deterministic."""
-    generator = torch.Generator().manual_seed(_PROBE_SEED)
-    hidden = torch.diag(torch.logspace(*_PROBE_MAGNITUDES, _PROBE_POSITIONS)).unsqueeze(0)
-    head = nn.Linear(_PROBE_POSITIONS, vocab, bias=with_bias)
-    with torch.no_grad():
-        head.weight.copy_(torch.randn(head.weight.shape, generator=generator))
-        if with_bias:
-            head.bias.copy_(torch.randn(head.bias.shape, generator=generator))
-    return hidden, head
-
-
 def _probe_logits(model_class: type, config, declared: HeadTransform) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """``(forward logits, declared logits)`` from one probe, or ``None`` for a model with no output
-    embedding (a classification or reward head, which the hidden-state paths project directly).
-
-    The shell is built on the meta device from the class and config alone, so no weight is allocated;
-    only the stand-in head and the probe hidden state are real, and the family's forward runs every
-    op it applies around them.
-    """
+    """``(forward logits, declared logits)`` from one probe on a meta-device shell with a real stand-in
+    head, or ``None`` for a model with no output embedding (a classification or reward head)."""
     with torch.device("meta"):
         shell = model_class._from_config(copy.deepcopy(config), dtype=torch.float32, attn_implementation="eager")
     head = shell.get_output_embeddings()
@@ -216,8 +174,17 @@ def _probe_logits(model_class: type, config, declared: HeadTransform) -> tuple[t
     backbone = shell.base_model
     if backbone is shell:
         raise ValueError(f"{model_class.__name__} exposes no backbone distinct from its head (base_model is itself).")
-    hidden, standin = _probe_inputs(head.out_features, head.bias is not None)
-    shell.set_submodule(next(name for name, module in shell.named_modules() if module is head), standin)
+    # Diagonal with log-spaced magnitudes, so the logits span 1e-2..1e3 times the stand-in weights: a
+    # softcap of any practical width saturates on some positions and stays linear on others, and a
+    # missing scale or truncation moves every position.
+    hidden = torch.diag(torch.logspace(-2.0, 3.0, 8)).unsqueeze(0)
+    standin = nn.Linear(hidden.shape[-1], head.out_features, bias=head.bias is not None)
+    generator = torch.Generator().manual_seed(0)
+    with torch.no_grad():
+        standin.weight.copy_(torch.randn(standin.weight.shape, generator=generator))
+        if standin.bias is not None:
+            standin.bias.copy_(torch.randn(standin.bias.shape, generator=generator))
+    shell.set_submodule(module_path(shell, head), standin)
 
     def emit_probe_hidden(*args, **kwargs) -> _ProbeBackboneOutput:
         return _ProbeBackboneOutput(last_hidden_state=hidden)
@@ -237,10 +204,9 @@ def _probe_logits(model_class: type, config, declared: HeadTransform) -> tuple[t
 def verify_head_transform(model_class: type, config) -> HeadTransform:
     """The declared head transform of ``model_class`` under ``config``, verified against its forward.
 
-    Raises:
-        ValueError: the family's forward returns logits its declaration does not reproduce, or the
-            probe cannot run it. A path computing logits from the hidden state would then score a
-            different distribution than the model's own forward, silently.
+    Reads the class and the config, never a weight, so every rank and every pipeline stage reaches the
+    same verdict. Raises ValueError when the forward's logits differ from the declaration's or the probe
+    cannot run it.
     """
     try:
         declared = resolve_head_transform_spec(model_class).transform(config)
@@ -257,11 +223,13 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
     if probe is None:
         return IDENTITY_HEAD_TRANSFORM
     logits, expected = probe
-    # Tolerance per position: the probe rows span five decades, so a plane-wide floor would leave the
-    # small-magnitude rows unchecked.
+    # The forward and the declaration compute the same fp32 function in possibly different op forms
+    # (``x / s`` against ``x * (1 / s)``), so they agree to rounding; a wrong transform is off by
+    # orders. Tolerance per position: the probe rows span five decades, so a plane-wide floor would
+    # leave the small-magnitude rows unchecked.
     row_scale = expected.abs().amax(dim=-1, keepdim=True)
     matches = logits.shape == expected.shape and bool(
-        ((logits.float() - expected).abs() <= _PROBE_RTOL * (row_scale + expected.abs())).all()
+        ((logits.float() - expected).abs() <= 1e-5 * (row_scale + expected.abs())).all()
     )
     if not matches:
         deviation = (
@@ -280,15 +248,8 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
 
 
 def resolve_head_transform(model: nn.Module) -> HeadTransform:
-    """The verified head transform of ``model``, under any framework, toolkit or PEFT wrapper.
-
-    Identity without verification for a model with no output embedding (a classification or reward
-    head, which no causal-LM forward transforms).
-
-    Raises:
-        TypeError: ``model`` is not a transformers model, so there is no family forward to verify.
-        ValueError: see :func:`verify_head_transform`.
-    """
+    """The verified head transform of ``model``, under any framework, toolkit or PEFT wrapper; identity
+    for a model with no output embedding. Raises TypeError for a non-transformers model."""
     base = base_transformers_model(model)
     model_class = transformers_model_class(base)
     if model_class is None:

@@ -9,7 +9,7 @@ prevents one), so these tests count gather calls on both
 sides of ``retain`` rather than waiting for a live hang to prove it.
 
 Counting is done by replacing the gather primitives where every branch reads them — the pair
-``src.distributed.checkpoint.write`` reads (``resolve_param_tensor`` / ``materialize_dtensor``). The tensors themselves stay plain, since a real DTensor needs an initialized
+``src.runtime.dtensor.resolve_retained`` reads (``full_cpu_tensor`` / ``materialize_dtensor``). The tensors themselves stay plain, since a real DTensor needs an initialized
 process group.
 """
 
@@ -17,7 +17,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.distributed.checkpoint.write as checkpoint_write_mod
+import src.runtime.dtensor as dtensor_mod
 from src.distributed.checkpoint.write import chunked_saveable_tensors, gather_saveable_tensors
 
 
@@ -35,7 +35,7 @@ def _count_gathers(monkeypatch):
     """Count every gather any leg issues, retaining or not (all of them are collectives)."""
     counter = {"n": 0}
 
-    def counting(tensor, _real_resolve=checkpoint_write_mod.resolve_param_tensor):
+    def counting(tensor, _real_resolve=dtensor_mod.full_cpu_tensor):
         counter["n"] += 1
         return _real_resolve(tensor)
 
@@ -43,8 +43,8 @@ def _count_gathers(monkeypatch):
         counter["n"] += 1
         return tensor
 
-    monkeypatch.setattr(checkpoint_write_mod, "resolve_param_tensor", counting)
-    monkeypatch.setattr(checkpoint_write_mod, "materialize_dtensor", counting_materialize)
+    monkeypatch.setattr(dtensor_mod, "full_cpu_tensor", counting)
+    monkeypatch.setattr(dtensor_mod, "materialize_dtensor", counting_materialize)
     return counter
 
 

@@ -44,7 +44,6 @@ from src.data.pipeline.processing import (
     report_rejected_rows,
     resolve_map_num_proc,
 )
-from src.data.probe_consensus import agree_probe_across_ranks
 from src.distributed.pipeline_parallel.losses import (
     PPLossAdapter,
     interleave_pairs,
@@ -52,6 +51,7 @@ from src.distributed.pipeline_parallel.losses import (
     split_pairs,
 )
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.runtime.consensus import agree_probe_across_ranks
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions

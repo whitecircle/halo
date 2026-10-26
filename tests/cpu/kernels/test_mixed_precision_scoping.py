@@ -1,6 +1,6 @@
-"""CPU tests for text-backbone scoping in ``src/kernels/lowp/mixed_precision.py``.
+"""CPU tests for text-backbone scoping in ``src/model_loading/parallel/lowp_compute.py``.
 
-``keep_first/last_n_blocks`` is an NVFP4 recipe about the TEXT decoder's precision-sensitive end
+``keep_first/last_blocks`` is an NVFP4 recipe about the TEXT decoder's precision-sensitive end
 blocks. Block indices must therefore come from the model's own decoder (``get_decoder()``), never
 from a vision tower's ``layers.N`` — a deeper vision stack would otherwise inflate ``n_blocks`` and
 shift the kept set off the real text end-blocks.
@@ -13,7 +13,8 @@ import torch
 import torch.nn as nn
 
 from src.kernels.lowp.linear import LowPrecisionLinear
-from src.kernels.lowp.mixed_precision import apply_mixed_precision_compute
+from src.kernels.lowp.spec import LowpSpec
+from src.model_loading.parallel.lowp_compute import apply_lowp_compute
 
 
 class _MLPBlock(nn.Module):
@@ -44,7 +45,7 @@ class _VLM(nn.Module):
 
 def test_keep_last_blocks_counts_text_backbone_only():
     model = _VLM()
-    summary = apply_mixed_precision_compute(model, precision="fp8", keep_last_n_blocks=1)
+    summary = apply_lowp_compute(model, LowpSpec(precision="fp8", keep_last_blocks=1), expert_weight_cacheable=True)
     # Kept set derives from the 4 TEXT blocks (last = 3), not the 8 vision blocks (last = 7).
     assert summary["kept_blocks"] == [3]
     assert not isinstance(model.model.layers[3].gate_proj, LowPrecisionLinear)  # kept in bf16
@@ -67,7 +68,7 @@ def test_conversion_keeps_module_hooks_and_attributes():
         block.down_proj.register_forward_hook(lambda m, inp, out, i=i: fired.append(i) or out)
         block.down_proj._is_hooked = True
 
-    apply_mixed_precision_compute(model, precision="fp8")
+    apply_lowp_compute(model, LowpSpec(precision="fp8"), expert_weight_cacheable=True)
 
     for i, block in enumerate(model.layers):
         assert isinstance(block.down_proj, LowPrecisionLinear), f"layer {i} down_proj not converted"
@@ -81,7 +82,9 @@ def test_conversion_keeps_module_hooks_and_attributes():
 
 def test_plain_text_model_unchanged():
     model = _Stack(4)  # no get_decoder resolving elsewhere → whole model is the backbone
-    summary = apply_mixed_precision_compute(model, precision="fp8", keep_first_n_blocks=1, keep_last_n_blocks=1)
+    summary = apply_lowp_compute(
+        model, LowpSpec(precision="fp8", keep_first_blocks=1, keep_last_blocks=1), expert_weight_cacheable=True
+    )
     assert summary["kept_blocks"] == [0, 3]
     assert not isinstance(model.layers[0].gate_proj, LowPrecisionLinear)
     assert not isinstance(model.layers[3].gate_proj, LowPrecisionLinear)
@@ -91,7 +94,7 @@ def test_plain_text_model_unchanged():
 def test_unknown_precision_raises_before_converting_anything():
     model = _Stack(2)
     with pytest.raises(ValueError, match="fp16"):
-        apply_mixed_precision_compute(model, precision="fp16")
+        apply_lowp_compute(model, LowpSpec(precision="fp16"), expert_weight_cacheable=True)
     assert not any(isinstance(m, LowPrecisionLinear) for m in model.modules())
 
 

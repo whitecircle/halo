@@ -36,7 +36,7 @@ import src.distributed.checkpoint.save as save_mod
 import src.trainers.mixins.base as mixin_mod
 import src.trainers.mixins.checkpointing as checkpointing_mod
 import src.trainers.mixins.grad_sync as grad_sync_mod
-from src.models.structure import lora_folded_data
+from src.models.peft_adapters import lora_folded_data
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.peft_helpers import randomize_adapters
 

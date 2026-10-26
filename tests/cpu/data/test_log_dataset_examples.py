@@ -108,8 +108,8 @@ def test_datasetdict_uses_first_split():
 
 def test_off_the_fs_save_rank_no_write():
     """A rank that is not the FS-aware save rank writes nothing — else N ranks stampede one path."""
-    original = processing.fs_aware_save_rank
-    processing.fs_aware_save_rank = lambda: False
+    original = processing.is_fs_save_rank
+    processing.is_fs_save_rank = lambda: False
     try:
         with tempfile.TemporaryDirectory() as d:
             log_dataset_examples(
@@ -117,7 +117,7 @@ def test_off_the_fs_save_rank_no_write():
             )
             assert not os.path.exists(os.path.join(d, "log"))
     finally:
-        processing.fs_aware_save_rank = original
+        processing.is_fs_save_rank = original
 
 
 def test_non_main_fs_save_rank_still_writes():
@@ -127,9 +127,9 @@ def test_non_main_fs_save_rank_still_writes():
     ``<output_dir>/log/`` (where ``run.log`` is also teed). Gating the sample dump on global rank 0
     instead leaves every other node's log dir without the samples it is supposed to sit beside.
     """
-    original_main, original_save = processing.is_global_main_process, processing.fs_aware_save_rank
+    original_main, original_save = processing.is_global_main_process, processing.is_fs_save_rank
     processing.is_global_main_process = lambda: False
-    processing.fs_aware_save_rank = lambda: True
+    processing.is_fs_save_rank = lambda: True
     try:
         with tempfile.TemporaryDirectory() as d:
             log_dataset_examples(
@@ -140,7 +140,7 @@ def test_non_main_fs_save_rank_still_writes():
             )
     finally:
         processing.is_global_main_process = original_main
-        processing.fs_aware_save_rank = original_save
+        processing.is_fs_save_rank = original_save
 
 
 def test_config_field_defaults_off():

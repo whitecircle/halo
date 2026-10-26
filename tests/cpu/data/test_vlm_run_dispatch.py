@@ -51,6 +51,7 @@ from src.data.vlm import (
     is_vlm_run,
     process_vlm_conversation,
 )
+from src.training import script_runner
 from src.training.script_runner import enforce_text_path_padding_side, resolve_vlm_run
 from tests.common.repo import load_script_module
 
@@ -163,16 +164,25 @@ def test_the_script_seam_probes_the_checkpoint_the_run_loads(monkeypatch):
     """A training script's probe must read the pinned commit under the run's own trust: hub ``main``
     can name a different modality, and a forced trust would execute code the run never trusted."""
     seen = []
-    monkeypatch.setattr(vlm_module, "is_vlm_model", lambda name, **kwargs: seen.append((name, kwargs)) or True)
+    monkeypatch.setattr(
+        script_runner, "probe_checkpoint", lambda *args, **kwargs: seen.append((args, kwargs)) or (None, True)
+    )
     model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision="abc123", trust_remote_code=True)
 
     assert resolve_vlm_run(_args(images_field="images"), model_config, None, text_only_model=False)
-    assert seen == [("org/ckpt", {"config": None, "revision": "abc123", "trust_remote_code": True})]
+    assert seen == [(("org/ckpt",), {"revision": "abc123", "trust_remote_code": True})]
+
+
+def test_a_run_verdict_needs_the_checkpoint_config_or_its_probe_verdict():
+    with pytest.raises(ValueError, match="needs the checkpoint's config or its probe_checkpoint verdict"):
+        is_vlm_run(_args(images_field="images"), "org/ckpt", None)
 
 
 @pytest.mark.parametrize("vlm_checkpoint", [True, False])
 def test_a_checkpoint_verdict_already_taken_is_not_probed_again(monkeypatch, vlm_checkpoint):
-    monkeypatch.setattr(vlm_module, "is_vlm_model", lambda *a, **k: pytest.fail("the checkpoint was probed again"))
+    monkeypatch.setattr(
+        script_runner, "probe_checkpoint", lambda *a, **k: pytest.fail("the checkpoint was probed again")
+    )
     model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision=None, trust_remote_code=False)
 
     verdict = resolve_vlm_run(

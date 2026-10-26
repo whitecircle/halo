@@ -35,8 +35,8 @@ from trl import SFTConfig
 from src.checkpoint.format import StreamingCheckpointReader
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import resolve_param_tensor
 from src.models.unwrapping import unwrap_toolkit_wrappers
+from src.runtime.dtensor import full_cpu_tensor
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
@@ -164,7 +164,7 @@ def run(ctx):
     init_state = build_dense_model().state_dict()
     moved = 0
     for local, value in sorted(local_state.items()):
-        full = resolve_param_tensor(value).cpu()  # collective inside the stage mesh — sorted order
+        full = full_cpu_tensor(value).cpu()  # collective inside the stage mesh — sorted order
         reference = saved[stage.global_parameter_name(local)]
         weights_ok &= torch.equal(full, reference)
         n_compared += 1
@@ -183,7 +183,7 @@ def run(ctx):
     stage_e = unwrap_toolkit_wrappers(make_trainer("runE", N_STEPS, model=resumed_model).model)
     built_ok, n_built = True, 0
     for local, value in sorted(stage_e.state_dict().items()):
-        full = resolve_param_tensor(value).cpu()  # collective inside the stage mesh — sorted order
+        full = full_cpu_tensor(value).cpu()  # collective inside the stage mesh — sorted order
         reference = saved.get(stage_e.global_parameter_name(local))
         built_ok &= reference is not None and torch.equal(full, reference)
         n_built += 1

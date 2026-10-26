@@ -12,16 +12,14 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.distributed.runtime import rank_tag
+from src.runtime.ranks import rank_tag
 
 # On the node's own temp filesystem rather than under HALO_DATA_ROOT, so a hang diagnosis does not
 # itself block on a shared filesystem.
 STACK_DUMP_DIR = os.path.join(tempfile.gettempdir(), "halo_diag_stacks")
 FLAMEGRAPH_DIR = os.path.join(tempfile.gettempdir(), "halo_diag_flamegraphs")
 
-# py-spy attach budgets: a dump snapshots an already-stopped process, while a record needs headroom
-# on top of its own ``duration``. pgrep is a local /proc walk, so its budget elapses only on a wedged
-# host.
+# A record needs headroom on top of its own ``duration``; pgrep's budget elapses only on a wedged host.
 _PY_SPY_DUMP_TIMEOUT_S = 10
 _PY_SPY_RECORD_GRACE_S = 30
 _PGREP_TIMEOUT_S = 5
@@ -88,18 +86,13 @@ def _run_py_spy_per_pid(
     timeout: int,
     output_suffix: str,
 ) -> PySpyCapture:
-    """Run one ``build_command(pid, target)`` invocation per pid, all at once, and report each failure.
-
-    Concurrent, so every rank is captured over the same window: a sequential sweep samples the last
-    rank ``len(pids)`` windows late. The tool's stdout+stderr land in ``pid<pid><output_suffix>``. A
-    failed attach (a non-zero exit, the timeout, a launch error) writes ``pid<pid>.error`` while the
-    others run on, so one bad pid does not abort a sweep over a hanging job.
+    """Run ``build_command(pid, target)`` for every pid at once, so all ranks share one window; output
+    lands in ``pid<pid><output_suffix>`` and a failed attach writes ``pid<pid>.error`` while the rest run on.
     """
     running: dict[int, subprocess.Popen] = {}
     failures: dict[int, str] = {}
     with ExitStack() as stack:
-        # Unwinds last, so no py-spy stays attached to a rank: neither one past the timeout nor one
-        # still sampling when an error or an interrupt leaves this block early.
+        # Unwinds last, so no py-spy stays attached past the timeout or an early exit.
         stack.callback(_stop_running, running)
         for pid in sorted(pids):
             output = stack.enter_context((target / f"pid{pid}{output_suffix}").open("w"))

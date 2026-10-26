@@ -17,9 +17,9 @@ from src.data.pipeline.processing import (
     require_render_column,
 )
 from src.data.pipeline.row_processors import create_vlm_processor
-from src.data.probe_consensus import agree_probe_across_ranks
 from src.data.spans import require_response_marker
 from src.data.vlm import render_vlm_text, vlm_row_tools
+from src.runtime.consensus import agree_probe_across_ranks
 
 # Maps a row's history to the longest conversation its collator renders from it (the
 # self-distillation teacher branch, longer by its hint), for the over-length filter to measure.

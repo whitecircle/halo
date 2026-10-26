@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 
 import src.distributed.checkpoint.ep_save as ep_saving_mod
-from src.distributed import runtime
 from src.distributed.checkpoint.ep_save import (
     _check_ep_merge_family_supported,
     _check_ep_sharded_save_supported,
@@ -26,6 +25,7 @@ from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.runtime import filesystem
 
 
 def _fake_model(model_type):
@@ -62,7 +62,7 @@ class _FakeEPLayer(EPMoELayerBase):
 
 def _non_shared_two_node_fs(monkeypatch, ranks_per_node=8):
     """Non-shared output FS on a 2-node shape (16 ranks / 8 per node), consensus memo cleared."""
-    runtime.reset_shared_filesystem_consensus()
+    filesystem.reset_shared_filesystem_consensus()
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "0")
     monkeypatch.setattr(ep_saving_mod, "get_local_world_size", lambda: ranks_per_node)
 

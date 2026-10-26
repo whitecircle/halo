@@ -25,8 +25,8 @@ from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
 
 from src.data.pipeline import preprocessed_metadata
 from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata, is_preprocessed_dataset
-from src.data.probe_consensus import agree_input_probe_across_ranks
 from src.data.sources.loading import load_datasets_auto
+from src.runtime.filesystem import agree_input_probe_across_ranks
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 4

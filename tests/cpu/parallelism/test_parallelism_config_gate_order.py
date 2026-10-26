@@ -8,6 +8,7 @@ Run: python tests/cpu/parallelism/test_parallelism_config_gate_order.py
 import pytest
 
 from src.distributed.parallelism_config import ParallelismConfig
+from src.kernels.lowp.spec import LowpSpec
 from tests.common.parallelism import create_config, simulated_world
 
 # (shape breaking both gates, the earlier gate's message head, shape breaking only the later gate,
@@ -161,9 +162,9 @@ GATE_OVERLAPS = (
         id="hsdp-before-the-fsdp-settings",
     ),
     pytest.param(
-        {"fsdp_defer_grad_sync": True, "fsdp_reshard_after_forward": True, "lowp_precision": "int4"},
+        {"fsdp_defer_grad_sync": True, "fsdp_reshard_after_forward": True, "lowp": LowpSpec(precision="int4")},
         "fsdp_defer_grad_sync=True contradicts fsdp_reshard_after_forward=True",
-        {"lowp_precision": "int4"},
+        {"lowp": LowpSpec(precision="int4")},
         "lowp_precision must be one of",
         id="fsdp-settings-before-low-precision",
     ),

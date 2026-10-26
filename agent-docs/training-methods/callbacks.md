@@ -206,4 +206,4 @@ class LossSpikeCallback(TrainerCallback):
             control.should_training_stop = True   # also: should_evaluate/save/log
 ```
 
-Distributed rules: gate prints on `is_global_main_process()` (`src/distributed/runtime.py`); unwrap FSDP/DDP before `.generate()`; wrap collectives in `barrier()`, keeping any participation gate rank-uniform. A reusable callback goes in `src/callbacks/` and is imported from its own module — the package init re-exports nothing.
+Distributed rules: gate prints on `is_global_main_process()` (`src/runtime/ranks.py`); unwrap FSDP/DDP before `.generate()`; wrap collectives in `barrier()`, keeping any participation gate rank-uniform. A reusable callback goes in `src/callbacks/` and is imported from its own module — the package init re-exports nothing.

@@ -15,7 +15,7 @@ import ast
 
 import pytest
 
-from src.distributed import runtime
+from src.runtime import consensus
 from src.training.script_runner import verify_backend_on_rank0
 from tests.common.repo import REPO_ROOT
 
@@ -64,8 +64,8 @@ def test_a_peer_rank_skips_the_probe_and_raises_rank0s_verdict(monkeypatch, rank
         sent.append(value)
         return rank0_verdict
 
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: False)
-    monkeypatch.setattr(runtime, "broadcast_from_rank0", broadcast)
+    monkeypatch.setattr(consensus, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(consensus, "broadcast_from_rank0", broadcast)
 
     def probe():
         raise AssertionError("a peer rank must not probe the backend")

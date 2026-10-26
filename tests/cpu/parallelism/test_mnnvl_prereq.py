@@ -69,7 +69,7 @@ def _run_required(clique, imex_ok: bool, *, world: int = 16, all_reasons=None):
         patch(f"{_MOD}.dist.is_initialized", return_value=True),
         patch(f"{_MOD}.dist.get_world_size", return_value=world),
         patch(f"{_MOD}.dist.get_rank", return_value=0),
-        patch("src.distributed.runtime.collective_device", return_value=torch.device("cpu")),
+        patch("src.runtime.consensus.collective_device", return_value=torch.device("cpu")),
         patch(f"{_MOD}.dist.all_reduce", side_effect=fake_has_reason_flag),
         patch(f"{_MOD}.dist.all_gather_object", side_effect=fake_all_gather),
         patch(f"{_MOD}.imex_channels_present", return_value=imex_ok),

@@ -45,7 +45,12 @@ from trl.trainer.utils import disable_dropout_in_model
 
 from src.callbacks.variable_scheduler import VariableSchedulerCallback
 from src.configs.preference import SmoothMarginPOConfig
-from src.data.collators.smpo import PREFERENCE_BATCH_KEYS, DataCollatorForSMPO, DataCollatorForVLMSMPO
+from src.data.collators.smpo import (
+    PREFERENCE_BATCH_KEYS,
+    DataCollatorForSMPO,
+    DataCollatorForVLMSMPO,
+    flush_rows_left,
+)
 from src.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.spans import LABEL_IGNORE_INDEX, resolve_eos_token_ids
@@ -71,7 +76,6 @@ from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS, effective_
 from src.models.segment_markers import (
     document_ids,
     flattened_document_positions,
-    flush_rows_left,
     reject_compressed_kv_rows,
     require_segment_aware_kernels,
     segment_marker_kwargs,

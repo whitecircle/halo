@@ -37,7 +37,8 @@ import src.trainers.mixins.reference_logps as precompute_mod
 from src.args.distributed_args import DistributedArguments
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.preference import DPOScriptArguments, KTOScriptArguments
-from src.distributed import runtime
+from src.runtime import filesystem
+from src.runtime.consensus import RankConsensus
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.reference_logps import token_digest as _token_digest
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
@@ -516,7 +517,7 @@ def test_a_split_saved_on_some_ranks_only_refuses_without_sweeping(kind, tmp_pat
     """A node whose copy differs must stop the whole world before any rank enters the sweep's
     collectives; the partial verdict comes from the presence consensus."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
-    monkeypatch.setattr(precompute_mod, "rank_consensus", lambda local_ok: (False, True))
+    monkeypatch.setattr(precompute_mod, "rank_consensus", lambda local_ok: RankConsensus(False, True))
     trainer = _resumed(kind, tmp_path)
 
     with pytest.raises(RuntimeError, match="on some ranks only"):
@@ -539,13 +540,13 @@ def test_the_sidecar_is_written_by_the_save_rank_inside_the_fence(kind, tmp_path
             fence.append(("exit", path.exists()))
 
     monkeypatch.setattr(precompute_mod, "barrier_on_exit", recording_fence)
-    monkeypatch.setattr(precompute_mod, "fs_aware_save_rank", lambda: False)
+    monkeypatch.setattr(precompute_mod, "is_fs_save_rank", lambda: False)
     trainer._persist_trainer_sidecars(str(tmp_path))
     assert not path.exists(), "a rank that is not its node's save rank wrote the sidecar"
     assert fence == [("enter", False), ("exit", False)], "every rank must enter the fence"
 
     fence.clear()
-    monkeypatch.setattr(precompute_mod, "fs_aware_save_rank", lambda: True)
+    monkeypatch.setattr(precompute_mod, "is_fs_save_rank", lambda: True)
     trainer._persist_trainer_sidecars(str(tmp_path))
     assert fence == [("enter", False), ("exit", True)], "the save rank must write inside the fence"
 
@@ -668,10 +669,10 @@ def test_directory_sync_failure_keeps_the_previous_reference_checkpoint(kind, tm
 
 
 def _reference_writer_failure_worker(rank: int, root: str, shared: bool) -> None:
-    runtime.resolve_shared_filesystem_consensus()
+    filesystem.resolve_shared_filesystem_consensus()
     try:
-        assert runtime.is_output_shared_filesystem() is shared
-        assert runtime.fs_aware_save_rank() is (rank == 0 if shared else True)
+        assert filesystem.is_output_shared_filesystem() is shared
+        assert filesystem.is_fs_save_rank() is (rank == 0 if shared else True)
         failing_rank = 0 if shared else 1
         node = "shared" if shared else f"node_{rank}"
         for kind in TRAINERS:
@@ -703,7 +704,7 @@ def _reference_writer_failure_worker(rank: int, root: str, shared: bool) -> None
             for name in REFERENCE_COLUMNS[kind]:
                 assert torch.equal(column(restored, name), column(prepared, name))
     finally:
-        runtime.reset_shared_filesystem_consensus()
+        filesystem.reset_shared_filesystem_consensus()
 
 
 @pytest.mark.parametrize("shared", [True, False], ids=["shared_fs", "node_local_fs"])

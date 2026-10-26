@@ -88,9 +88,9 @@ from src.checkpoint.format import (
     resume_adapter_dir,
 )
 from src.configs.embedding import EmbeddingConfig
-from src.distributed import runtime
 from src.distributed.checkpoint.loader import resume_numel_coverage
 from src.distributed.parallelism_config import ParallelismConfig
+from src.runtime import filesystem
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
 from tests.common.checkpoint_io import loading_problems
@@ -534,9 +534,9 @@ def _node_checkpoint(root: str, rank: int) -> str:
 def _node_worker(rank: int, root: str, base: str) -> None:
     problems: list[str] = []
     try:
-        runtime.resolve_shared_filesystem_consensus()  # what init_distributed does for a real run
+        filesystem.resolve_shared_filesystem_consensus()  # what init_distributed does for a real run
         PartialState()
-        if runtime.is_output_shared_filesystem() or not runtime.fs_aware_save_rank():
+        if filesystem.is_output_shared_filesystem() or not filesystem.is_fs_save_rank():
             problems.append("premise: this rank is not its node's checkpoint writer")
         checkpoint = _node_checkpoint(root, rank)
         os.makedirs(checkpoint)
@@ -577,7 +577,7 @@ def _node_worker(rank: int, root: str, base: str) -> None:
 
     with open(os.path.join(root, f"result_{rank}.txt"), "w") as fh:
         fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems))
-    runtime.reset_shared_filesystem_consensus()
+    filesystem.reset_shared_filesystem_consensus()
 
 
 def test_each_node_writes_and_restores_its_own_resume_adapter(tmp_path):

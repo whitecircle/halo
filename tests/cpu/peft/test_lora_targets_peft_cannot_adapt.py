@@ -345,7 +345,7 @@ def test_a_forward_override_that_keeps_the_affine_map_stays_adapted():
     """The low-precision compute drop-in overrides ``nn.Linear.forward`` but computes the same map, so
     excluding it would silently stop training the projections a fp8/fp4 run names."""
     model = _Multimodal(_PlainAttention(64), width=64)  # the fake-quant block is 32 wide
-    LowPrecisionLinear.convert_(model.language_model.q_proj, "fp8")
+    LowPrecisionLinear.convert_(model.language_model.q_proj, "mxfp8")
     assert type(model.language_model.q_proj) is LowPrecisionLinear, "the retype is this test's premise"
 
     peft_config = build_peft_config(model, _model_config())

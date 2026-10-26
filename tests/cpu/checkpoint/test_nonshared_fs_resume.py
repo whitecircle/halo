@@ -2,7 +2,7 @@
 """Non-shared-filesystem save + resume: two "nodes", two writers, two per-node checkpoint dirs.
 
 With ``DIST_OUTPUT_SHARED_FILESYSTEM=0`` the checkpoint writer is EVERY node's local rank 0
-(:func:`fs_aware_save_rank`), each writing to its own local disk. A single-node run never reaches
+(:func:`is_fs_save_rank`), each writing to its own local disk. A single-node run never reaches
 that shape — ``is_local_main_process()`` and ``is_global_main_process()`` agree there, so the writer
 set collapses back to global rank 0 and the divergent-writer path is proven only by the unit tests
 of the guards around it. Two 1-rank "nodes" (``LOCAL_WORLD_SIZE=1``) on one gloo group restore the
@@ -38,10 +38,10 @@ import pathlib
 import pytest
 import torch
 
-from src.distributed import runtime
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.checkpoint.optimizer import OptimizerShardStore
-from src.distributed.runtime import fs_aware_makedirs, fs_aware_save_rank
+from src.runtime import filesystem
+from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from tests.common.checkpoint_io import (
     shard_round_trip_model,
     shard_round_trip_optimizer,
@@ -93,10 +93,10 @@ def _state_signature(state_dict: dict) -> str:
 def _worker(rank: int, root: str) -> None:
     problems: list[str] = []
     try:
-        runtime.resolve_shared_filesystem_consensus()  # what init_distributed does for a real run
-        if runtime.is_output_shared_filesystem():
+        filesystem.resolve_shared_filesystem_consensus()  # what init_distributed does for a real run
+        if filesystem.is_output_shared_filesystem():
             problems.append("premise: the output filesystem resolved as shared")
-        if not fs_aware_save_rank():
+        if not is_fs_save_rank():
             problems.append("premise: this rank is not a checkpoint writer, so the writers do not diverge")
 
         out_dir = _node_dir(root, rank)
@@ -124,14 +124,14 @@ def _worker(rank: int, root: str) -> None:
 
     with open(os.path.join(root, f"result_{rank}.txt"), "w") as fh:
         fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems))
-    runtime.reset_shared_filesystem_consensus()
+    filesystem.reset_shared_filesystem_consensus()
 
 
 def _torn_node_worker(rank: int, root: str) -> None:
     """Both nodes save; node 1 then loses its meta, as a save killed between its shard and its meta."""
     outcome = {"raised": None, "restored_entries": None}
     try:
-        runtime.resolve_shared_filesystem_consensus()
+        filesystem.resolve_shared_filesystem_consensus()
         out_dir = _node_dir(root, rank)
         fs_aware_makedirs(out_dir)
         config = make_parallelism_config(world_size=WORLD_SIZE, gpus_per_node=1, rank=rank)
@@ -153,7 +153,7 @@ def _torn_node_worker(rank: int, root: str) -> None:
         outcome["raised"] = f"setup {type(e).__name__}: {e}"
     with open(os.path.join(root, f"torn_{rank}.json"), "w") as fh:
         json.dump(outcome, fh)
-    runtime.reset_shared_filesystem_consensus()
+    filesystem.reset_shared_filesystem_consensus()
 
 
 @pytest.fixture(scope="module")

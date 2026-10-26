@@ -10,10 +10,10 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset
 
-import src.distributed.runtime as runtime
 import src.trainers.grpo.reference_cache as cache_module
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from src.runtime import consensus
 from src.trainers.grpo.reference_cache import ReferenceScoreCache, reference_cache_writers
 from src.training.environment import _validate_output_dir
 from tests.common.distributed import shared_output_dir
@@ -41,7 +41,7 @@ def _scratch_files(root) -> list[str]:
 @pytest.mark.parametrize("owners", [(1, 0, 0, 0), (0, 1, 0, 1), (1, 1, 1, 1)])
 def test_cache_writer_election_gathers_the_checkpoint_owner_predicate(monkeypatch, owners):
     monkeypatch.setattr(cache_module, "get_global_world_size", lambda: len(owners))
-    monkeypatch.setattr(cache_module, "fs_aware_save_rank", lambda: bool(owners[1]))
+    monkeypatch.setattr(cache_module, "is_fs_save_rank", lambda: bool(owners[1]))
 
     def gather(output, flag):
         assert flag.item() == owners[1]
@@ -357,7 +357,7 @@ def _bounded_batch(rank, root, failure, dp_size, writers, buffer_values):
     cache.writers = writers
     rejects = []
     metadata = []
-    original_join = runtime._rank_max
+    original_join = consensus._rank_max
     original_metadata_gather = dist.all_gather_into_tensor
 
     def record_reject(slots):
@@ -374,7 +374,7 @@ def _bounded_batch(rank, root, failure, dp_size, writers, buffer_values):
     def unexpected_broadcast(*args, **kwargs):
         pytest.fail("batch metadata used per-shard broadcasts")
 
-    patch.setattr(runtime, "_rank_max", record_reject)
+    patch.setattr(consensus, "_rank_max", record_reject)
     patch.setattr(dist, "all_gather_into_tensor", record_metadata)
     patch.setattr(dist, "broadcast", unexpected_broadcast)
     if failure == "write" and rank == writers[-1]:

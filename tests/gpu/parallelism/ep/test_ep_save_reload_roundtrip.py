@@ -44,8 +44,9 @@ from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier, is_global_main_process
 from src.env import env_flag, env_int, env_str
+from src.runtime.collectives import barrier
+from src.runtime.ranks import is_global_main_process
 from tests.common.checkpoint_io import fixed_batch_loss, fixed_text_batch
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint

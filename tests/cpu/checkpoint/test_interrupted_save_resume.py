@@ -32,8 +32,9 @@ import pytest
 from accelerate import PartialState
 from transformers import TrainerState
 
-from src.distributed import runtime
-from src.distributed.runtime import fs_aware_save_rank, get_global_rank
+from src.runtime import collectives, filesystem
+from src.runtime.filesystem import is_fs_save_rank
+from src.runtime.ranks import get_global_rank
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.environment import detect_resume_checkpoint
 from tests.common.base_save import BaseTrainerSave
@@ -82,7 +83,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
         self.run_dir = run_dir
         self.stop = stop
         self.args = SimpleNamespace(
-            save_total_limit=2, save_only_model=False, should_save=fs_aware_save_rank(), push_to_hub=False
+            save_total_limit=2, save_only_model=False, should_save=is_fs_save_rank(), push_to_hub=False
         )
         self.state = (_StateWriteThenStop if stop == "state" else TrainerState)(global_step=2)
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, merge_expert_lora_on_save=False)
@@ -123,13 +124,13 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
     outcome = {}
     try:
         PartialState()
-        runtime.resolve_shared_filesystem_consensus()
+        filesystem.resolve_shared_filesystem_consensus()
         run_dir = os.path.join(root, f"node_{rank}" if per_node else "shared", "out")
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             _plant_complete_checkpoint(run_dir, 1, "abandoned" if rewrite else "new")
             if rewrite:
                 _plant_complete_checkpoint(run_dir, 2, "abandoned")
-        runtime.barrier()
+        collectives.barrier()
 
         try:
             _Trainer(run_dir, stop)._save_checkpoint(model=None, trial=None)
@@ -151,7 +152,7 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
     except Exception as e:  # the setup failing must still leave a verdict file for the assertions
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
-        runtime.reset_shared_filesystem_consensus()
+        filesystem.reset_shared_filesystem_consensus()
     with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
         json.dump(outcome, fh)
 
@@ -192,11 +193,11 @@ def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> N
     outcome = {}
     try:
         PartialState()
-        runtime.resolve_shared_filesystem_consensus()
+        filesystem.resolve_shared_filesystem_consensus()
         run_dir = os.path.join(root, f"node_{rank}" if per_node else "shared", "out")
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             _plant_complete_checkpoint(run_dir, 1, "previous")
-        runtime.barrier()
+        collectives.barrier()
 
         trainer = _Trainer(run_dir, stop="none")
         trainer._fsdp_wrapped = False
@@ -217,7 +218,7 @@ def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> N
     except Exception as e:  # the setup failing must still leave a verdict file for the assertions
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
-        runtime.reset_shared_filesystem_consensus()
+        filesystem.reset_shared_filesystem_consensus()
     with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
         json.dump(outcome, fh)
 

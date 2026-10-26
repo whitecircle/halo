@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from functools import partial
-
 import torch.nn as nn
 
 from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
-from src.kernels.fused_glu import fused_clamped_silu_mul
+from src.kernels.fused_glu import GluCombine
 
 
 class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
@@ -69,7 +67,7 @@ class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
         and no config branch, so the combine latched into the base seam is unconditional; only the
         clamp bound comes off the live experts module, read as an attribute so a rename raises."""
         self.swiglu_limit = float(experts.swiglu_limit)
-        self._fused_glu_mul = partial(fused_clamped_silu_mul, limit=self.swiglu_limit)
+        self._fused_glu_mul = GluCombine.clamped_silu(self.swiglu_limit)
 
     def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
         return (f"swiglu_limit={self.swiglu_limit}",)

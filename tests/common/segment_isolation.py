@@ -8,7 +8,7 @@ preference batch and that lone-document reference.
 # The device-aware kernel-dispatch shim must land before the modeling modules the registry below
 # imports bind transformers' hub-kernel fallback factory at import: after them, a CPU forward reaches
 # the CUDA-only kernels and a CUDA forward can capture the torch fallback instead of the fla kernel.
-import src.models.patches.kernel_dispatch  # noqa: F401  # isort: skip
+import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 import torch
 import torch.nn.functional as F

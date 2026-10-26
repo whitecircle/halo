@@ -15,8 +15,8 @@ from src.data.pipeline.conversation import (
     conversation_carries_images,
     fold_system_into_conversation,
 )
-from src.data.probe_consensus import agree_probe_across_ranks
 from src.models.modality import is_vlm_model
+from src.runtime.consensus import agree_probe_across_ranks
 
 # The stored schema of a preprocessed VLM dataset: pinned on the offline map (else an all-None batch
 # infers null Arrow columns) and declared by :class:`~src.data.collators.vlm.PreprocessedVLMDataCollator`
@@ -295,8 +295,6 @@ def is_vlm_run(
     dataset=None,
     *,
     config=None,
-    revision: str | None = None,
-    trust_remote_code: bool = False,
     vlm_checkpoint: bool | None = None,
 ) -> bool:
     """Whether this run takes the VLM data path: a multimodal checkpoint plus image data to feed it.
@@ -307,15 +305,18 @@ def is_vlm_run(
     class either way, so only the processor requirement, data prep, collator and eval split follow
     this verdict.
 
-    Agreed across ranks once for the whole verdict rather than per term. ``config`` / ``revision`` /
-    ``trust_remote_code`` reach the modality probe as in :func:`~src.models.modality.is_vlm_model`;
-    pass the already-loaded ``model.config`` where there is one, or the probe's own verdict as
-    ``vlm_checkpoint`` where the caller already took it, so the checkpoint config is not read twice.
+    Agreed across ranks once for the whole verdict rather than per term. The checkpoint's side comes
+    from the already-loaded ``config`` (:func:`~src.models.modality.is_vlm_model`) or from
+    ``vlm_checkpoint``, the verdict of
+    :func:`~src.distributed.loading.model_source.probe_checkpoint`; one of the two is required.
     """
     if vlm_checkpoint is None:
-        vlm_checkpoint = is_vlm_model(
-            model_name_or_path, config=config, revision=revision, trust_remote_code=trust_remote_code
-        )
+        if config is None:
+            raise ValueError(
+                f"is_vlm_run({model_name_or_path!r}) needs the checkpoint's config or its probe_checkpoint "
+                f"verdict (vlm_checkpoint)."
+            )
+        vlm_checkpoint = is_vlm_model(model_name_or_path, config)
     local = vlm_checkpoint and bool(
         getattr(args, "images_field", None)
         or _declares_images_locally(dataset, getattr(args, "conversation_field", None))

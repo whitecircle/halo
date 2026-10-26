@@ -254,10 +254,10 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
 - **Save retains state on the save-rank only** — `save_ep_model`
   (`src/distributed/checkpoint/ep_save.py`) has all ranks run each gather collective but only the
   save rank keeps the tensor (per-node CPU RAM peaks well under 1× model, not gpus_per_node×). TP
-  mirrors this, and on the same `fs_aware_save_rank()` — never `tp_rank == 0`, which the several TP
+  mirrors this, and on the same `is_fs_save_rank()` — never `tp_rank == 0`, which the several TP
   groups a node holds would race on identical files. Don't "optimize" by skipping ranks in the
   collective. The save rank is
-  `fs_aware_save_rank()` (`src/distributed/runtime.py`): on a **shared FS** only global rank 0
+  `is_fs_save_rank()` (`src/runtime/filesystem.py`): on a **shared FS** only global rank 0
   writes the shards + index (avoids the NFS write race of many ranks touching one path); on a
   **non-shared FS** (`DIST_SHARED_FILESYSTEM=0`) each node's local rank 0 writes its own copy to
   node-local storage.

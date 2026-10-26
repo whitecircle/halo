@@ -64,7 +64,7 @@ from src.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
 from src.log import configure_cli_logging
 from src.model_loading.dtype import DTYPE_BY_NAME
 from src.model_loading.model_preparation import concrete_model_class, resolve_auto_model_class
-from src.models.config_access import config_ties_word_embeddings
+from src.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, config_sources
 from src.models.moe_balancing import is_balancing_state_key
 
 configure_cli_logging()
@@ -182,7 +182,7 @@ def _tied_head_key(reference: list[str], base_only: set[str], readers: list[_Ten
     kept = [key for key in pair if all(key in reader.weight_map for reader in readers)]
     if len(pair) != 2 or len(tied_away) != 1 or len(kept) != 1:
         return set()
-    if not (config_ties_word_embeddings(config) and getattr(config, "tie_word_embeddings", False)):
+    if not all(getattr(level, TIE_WORD_EMBEDDINGS_FLAG, False) for level in config_sources(config)):
         return set()
     return set(tied_away)
 

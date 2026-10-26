@@ -10,7 +10,9 @@ from typing import Literal
 import torch
 import torch.distributed as dist
 
-from src.distributed.runtime import agree_across_ranks, collective_device, is_multi_rank_run
+from src.runtime.collectives import collective_device
+from src.runtime.consensus import agree_across_ranks
+from src.runtime.ranks import is_multi_rank_run
 
 
 def agreed_metric_keys(keys: list[str], train_eval: str) -> list[str]:

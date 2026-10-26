@@ -33,7 +33,7 @@ import gc
 from src.distributed.expert_parallel import dispatcher as dispatcher_mod
 from src.distributed.expert_parallel.dispatcher import DeepEPDispatcher, free_unclaimed_ep_buffers
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
+from src.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log
 

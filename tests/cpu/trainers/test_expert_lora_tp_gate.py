@@ -21,7 +21,7 @@ import torch.nn as nn
 from peft import IA3Config, LoraConfig, PeftModel, get_peft_model, inject_adapter_in_model
 
 import src.trainers.mixins.validation as validation_mod
-from src.models.structure import tuner_adapter_param_ids
+from src.models.peft_adapters import tuner_adapter_param_ids
 from src.trainers.mixins.base import DistributedTrainerMixin
 
 _validate = DistributedTrainerMixin._validate_lora_tp_compatibility

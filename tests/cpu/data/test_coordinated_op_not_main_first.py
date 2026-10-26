@@ -6,7 +6,7 @@ body by holding the peers OUTSIDE it — accelerate's ``_goes_first`` barriers b
 non-main ranks and after it on main — so the body's coordination is shifted by one position between
 them: the main rank's ``ensure_cache_dir`` barrier pairs with a peer's entry barrier, and from there
 the ranks disagree on which join they are in — one side waits out a store key its peer never writes
-(the ``_StorePhase`` equal-entry divergence), the other times out in a gloo barrier nobody matches.
+(the ``StorePhase`` equal-entry divergence), the other times out in a gloo barrier nobody matches.
 Against ``fs_aware_main_first`` the peers sit on the outer store key and are in no collective at
 all, so the main rank's barrier blocks alone.
 
@@ -31,7 +31,7 @@ from accelerate import PartialState
 from datasets import Dataset
 
 from src.data.pipeline.processing import coordinated_map
-from src.distributed import filesystem
+from src.runtime import consensus, filesystem
 from tests.common.gloo import run_gloo_ranks
 from tests.common.repo import REPO_ROOT
 
@@ -213,9 +213,9 @@ def _identity(row):
 def _worker(rank: int, tmp_dir: str, wrapped: bool) -> None:
     """Run one coordinated map, optionally inside a main-first block; record the outcome."""
     # Bound the store joins like the process group: a diverged sequence must end in a loud timeout
-    # in seconds, not DIST_STORE_TIMEOUT_HOURS (hours-granular, min 1) of suite stall. Rebound on
-    # `filesystem`, which owns every store wait and resolves the getter in its own namespace.
-    filesystem.get_store_timeout = lambda timeout_hours=None: datetime.timedelta(seconds=PG_TIMEOUT_SEC + 5)
+    # in seconds, not DIST_STORE_TIMEOUT_HOURS (hours-granular, min 1) of suite stall. Rebound on the
+    # two modules whose store waits it runs, each resolving the getter in its own namespace.
+    filesystem.store_timeout = consensus.store_timeout = lambda: datetime.timedelta(seconds=PG_TIMEOUT_SEC + 5)
     dataset = Dataset.from_dict({"text": ["a", "b"]})
 
     def run():
@@ -269,7 +269,7 @@ def test_main_first_wrapper_diverges_the_collective_sequence(tmp_path):
         f"the ordering before trusting the repo scan above"
     )
     # How a diverged sequence surfaces: a barrier nobody matches (gloo timeout), a store key nobody
-    # writes (the _StorePhase diagnostic), or a rank unpickling the wrong buffer.
+    # writes (the StorePhase diagnostic), or a rank unpickling the wrong buffer.
     assert any("Timed out" in o or "Ran out of input" in o or "Store coordination" in o for o in outcomes), (
         f"the wrapped run failed for some reason other than a diverged coordination sequence: {outcomes}"
     )

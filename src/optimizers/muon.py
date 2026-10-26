@@ -21,10 +21,12 @@ from gram_newton_schulz.muon.muon_utils.muon_matrix_split_utils import (
 from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
 from src.config_validation import differs_from_default
-from src.distributed.runtime import is_global_main_process, rank_consensus, to_local
 from src.models.param_roles import EMBEDDING_HEAD_MARKERS
 from src.optimizers.adamw_bf16 import BLOCK_SIZE, AdamWBF16, require_param_names, sr_param_index, sr_seed_pair
 from src.optimizers.param_groups import decay_groups
+from src.runtime.consensus import rank_consensus
+from src.runtime.dtensor import to_local
+from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +359,7 @@ def create_muon_optimizer(
         # Per-rank probes can disagree (JIT hiccup, driver skew). A mixed NS backend is numerically
         # equivalent but not bit-identical, which drifts replicas apart, so the kernels are used
         # only when every rank has them.
-        kernels_ok = rank_consensus(_muon_kernels_available())[0]
+        kernels_ok = rank_consensus(_muon_kernels_available()).all_ok
         if not kernels_ok:
             logger.warning(
                 "Muon Newton-Schulz CUDA kernels (quack/cutlass) are unavailable on at least one "

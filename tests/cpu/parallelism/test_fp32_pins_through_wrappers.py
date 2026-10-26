@@ -19,7 +19,7 @@ from transformers import DeepseekV4Config, DeepseekV4ForCausalLM
 
 from src.checkpoint.writing import save_dtype_caster
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.models.param_roles import fp32_pinned_param_names
+from src.models.param_roles import fp32_pinned_names
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
@@ -33,7 +33,7 @@ def _model() -> DeepseekV4ForCausalLM:
 
 def test_pins_are_read_through_a_plain_wrapper():
     model = _model()
-    pinned = fp32_pinned_param_names(model)
+    pinned = fp32_pinned_names(model)
     assert pinned and any("hc" in name for name in pinned), sorted(pinned)[:5]
 
     class _Holder(nn.Module):
@@ -41,17 +41,17 @@ def test_pins_are_read_through_a_plain_wrapper():
             super().__init__()
             self.inner = inner
 
-    assert fp32_pinned_param_names(_Holder(model)) == {f"inner.{name}" for name in pinned}
+    assert fp32_pinned_names(_Holder(model)) == {f"inner.{name}" for name in pinned}
 
 
 def test_pipeline_stages_pin_exactly_the_unsplit_models_tensors():
     """Union of the stages' pins (in global names) == the unsplit model's; the stage caster keeps
     each pinned tensor at its trained dtype while an unpinned one goes to the save dtype."""
-    pinned = fp32_pinned_param_names(_model())
+    pinned = fp32_pinned_names(_model())
     seen: set[str] = set()
     for pp_rank in range(PP_SIZE):
         stage = build_pipeline_stage(_model(), pp_rank, PP_SIZE, moe_balancing="none")
-        local = fp32_pinned_param_names(stage)
+        local = fp32_pinned_names(stage)
         assert local, f"stage {pp_rank} derives no pins"
         seen |= {stage.global_parameter_name(name) for name in local}
 

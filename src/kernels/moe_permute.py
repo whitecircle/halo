@@ -1,19 +1,8 @@
 """Atomic-free token permute/unpermute and per-expert bias gather for grouped-GEMM MoE expert compute.
 
-The permute's gather has ``index_add_`` as its default backward, and the unpermute is one: a bf16 kernel
-that emulates an atomic add with a CAS loop, which serializes under high ``top_k``. Both directions here
-reduce over a token's ``top_k`` expert rows through :func:`build_inv_map`'s ``inv_map`` (``[recv_N,
-top_k]`` sorted positions, padded with the sentinel ``N_sorted``) instead. The eager form pads the source
-with a zero row, gathers a ``[recv_N, top_k, H]`` transient and sums it; the kernels walk ``inv_map`` per
-output row and accumulate in fp32, so neither the pad copy nor the transient exists.
-
-The routing-weight multiply is folded into the unpermute, and its backward emits the expert-output
-gradient and the routing-weight gradient from one read of each operand. The expert outputs feed only
-the routing-weight gradient, so they are saved, and that gradient computed, only when the weights
-need one.
-
-:func:`warm_permute_kernels` compiles the permute kernels ahead of their first call inside an EP
-dispatch-combine span.
+Both directions reduce over a token's ``top_k`` expert rows through :func:`build_inv_map`'s ``inv_map``
+instead of the bf16 CAS-loop ``index_add_`` that serializes under high ``top_k``, accumulating in fp32
+with no pad copy or ``[recv_N, top_k, H]`` transient; the routing-weight multiply folds into the unpermute.
 """
 
 from __future__ import annotations

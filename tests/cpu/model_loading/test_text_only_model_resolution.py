@@ -99,7 +99,9 @@ def test_text_only_skips_the_vlm_branch_in_load_model_for_training(monkeypatch):
     and the wrapper class it leads to is exactly what text_only_model exists to avoid — patching
     the resolver alone is not enough, since sft.py loads through this entry point."""
     calls = {}
-    monkeypatch.setattr(vlm_setup, "is_vlm_model", lambda *a, **k: calls.setdefault("probe", True) or True)
+    monkeypatch.setattr(
+        vlm_setup, "probe_checkpoint", lambda *a, **k: calls.setdefault("probe", True) and (None, True)
+    )
     monkeypatch.setattr(
         vlm_setup,
         "load_model_consuming_init_kwargs",

@@ -1,21 +1,14 @@
-"""Fused GLU activations for grouped MoE expert compute.
-
-One row-strided kernel pair serves every combine: SiLU and tanh-GELU (SwiGLU / GeGLU), and the clamped
-SwiGLU family (GptOss, DeepSeek-V4, GLM-5 Next, Step-3.7). The activation, the clamp placement and
-GptOss's ``up + 1`` are ``tl.constexpr``, so each combine compiles only its own arithmetic; ``alpha`` and
-the bound are runtime arguments, so every layer and family with one combine shares one compilation.
-
-Row-strided means the kernels read the ``gate``/``up`` halves of a fused ``[gate | up]`` projection in
-place. The packed entry points (:data:`PACKED_GLU_MULS`) take that projection output whole and return
-its gradient as one ``[..., 2M]`` buffer, so the expert path runs no copy on either side of the activation.
+"""Fused GLU combines for MoE expert compute: one row-strided Triton kernel pair serves SiLU and tanh-GELU
+(SwiGLU / GeGLU) and the clamped SwiGLU family (GptOss, DeepSeek-V4, GLM-5 Next, Step-3.7), each a
+:class:`GluCombine`. :meth:`GluCombine.packed` reads a fused ``[gate | up]`` projection in place and
+returns its gradient as one buffer, so the expert path copies on neither side of the activation.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from functools import partial
-from typing import NamedTuple
+from dataclasses import dataclass
 
 import torch
 import triton
@@ -26,8 +19,7 @@ from src.env import env_flag
 
 logger = logging.getLogger(__name__)
 
-# ``HALO_FUSED_GLU=0`` runs every combine below through its eager form on CUDA as well, the switch for a
-# GPU where a GLU kernel fails to compile or launch. Read once at import.
+# ``HALO_FUSED_GLU=0`` runs every combine eagerly on CUDA too, for a GPU where a GLU kernel fails to build.
 _FUSED_GLU_ENABLED = env_flag("HALO_FUSED_GLU", True)
 
 # Activation codes (``tl.constexpr`` in the kernels).
@@ -35,26 +27,22 @@ _SILU = 0
 _GELU_TANH = 1
 _CLAMPED_SILU = 2  # alpha-scaled SiLU with the clamps of the GptOss/DeepSeek-V4/Step-3.7 family
 
-# tanh-GELU (`approximate="tanh"`): 0.5*x*(1 + tanh(sqrt(2/pi)*(x + k*x^3))). The constants are fixed by
-# the reference rather than tuned: the kernel is gated on reproducing torch's own tanh-GELU. Wrapped in
-# ``tl.constexpr`` because a ``@triton.jit`` body may only read module globals that are constexpr.
+# torch's tanh-GELU, 0.5*x*(1 + tanh(sqrt(2/pi)*(x + k*x^3))); ``tl.constexpr`` because a ``@triton.jit``
+# body reads only constexpr module globals.
 _GELU_SQRT_2_OVER_PI = tl.constexpr(0.7978845608028654)
 _GELU_TANH_COEFF = tl.constexpr(0.044715)
 
-# Both saturating tails, both signs, zero and the near-zero region. Sufficiency is checked by the
-# registry-wide sweep in ``tests/cpu/kernels/test_silu_activation_probe.py``, which requires every other
-# ``ACT2FN`` entry to be rejected for each probed activation.
+# Both saturating tails, both signs, zero and the near-zero region; the ``ACT2FN`` sweep in
+# ``test_silu_activation_probe.py`` checks it separates every registered activation.
 _ACTIVATION_PROBE_INPUT = (-64.0, -8.0, -1.0, -0.5, -1e-3, 0.0, 1e-3, 0.5, 1.0, 8.0, 64.0)
 
 
 def _computes_exactly(act_fn: object, reference_fn: Callable[[torch.Tensor], torch.Tensor], name: str) -> bool:
-    """Whether ``act_fn`` reproduces ``reference_fn`` bit-for-bit over the probe vector.
+    """Whether ``act_fn`` reproduces ``reference_fn`` bit for bit over the probe vector; False on anything
+    else, a raise included.
 
-    The test is behavioural rather than by type: ``ACT2FN["silu"]`` is a bare ``nn.Module`` that is
-    neither ``nn.SiLU`` nor ``F.silu``, so an ``isinstance`` check would disable the kernels. A
-    non-callable, a raised exception, or any result not exactly equal in shape, dtype and value returns
-    False, falling back to the eager combine. Callers latch the result at construction, so an activation
-    whose parameters train away from the reference would keep the kernel enabled.
+    Behavioural rather than by type: ``ACT2FN["silu"]`` is neither ``nn.SiLU`` nor ``F.silu``. Callers
+    latch the result at construction, so an activation whose parameters train away keeps the kernel.
     """
     if not callable(act_fn):
         return False
@@ -80,72 +68,45 @@ def is_silu_activation(act_fn: object) -> bool:
 
 
 def is_gelu_tanh_activation(act_fn: object) -> bool:
-    """Whether ``act_fn`` computes exactly the tanh-GELU approximation the fused GeGLU kernel hardcodes.
-
-    Exact (erf) GELU is a different function and returns False; using the kernel for it would change
-    the activation on every expert.
-    """
+    """Whether ``act_fn`` computes exactly the tanh-GELU approximation the fused GeGLU kernel hardcodes;
+    exact (erf) GELU is a different function."""
     return _computes_exactly(act_fn, lambda x: torch.nn.functional.gelu(x, approximate="tanh"), "tanh-GELU")
 
 
 def silu_mul_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Reference SwiGLU combine used by the fused kernel."""
+    """SwiGLU reference."""
     return torch.nn.functional.silu(gate) * up
 
 
 def gelu_tanh_mul_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Reference tanh-GeGLU combine used by Gemma 4."""
+    """tanh-GeGLU reference (Gemma 4)."""
     return torch.nn.functional.gelu(gate, approximate="tanh") * up
 
 
 def gptoss_glu_eager(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
-    """Reference (unfused) GptOss clamped-SwiGLU — equivalence target for the kernel."""
+    """GptOss clamped-SwiGLU reference."""
     gate = gate.clamp(max=limit)
     up = up.clamp(min=-limit, max=limit)
     return (up + 1) * (gate * torch.sigmoid(gate * alpha))
 
 
 def clamped_silu_mul_eager(gate: torch.Tensor, up: torch.Tensor, limit: float) -> torch.Tensor:
-    """Clamped SwiGLU shared by DeepSeek-V4 and GLM-5 Next experts (their ``_apply_gate``):
-    clamp the gate from above and the up half symmetrically, then SiLU-gate."""
+    """DeepSeek-V4 and GLM-5 Next clamped SwiGLU reference: the gate clamped from above and the up half
+    symmetrically, then SiLU-gated."""
     return torch.nn.functional.silu(gate.clamp(max=limit)) * up.clamp(min=-limit, max=limit)
 
 
 def silu_then_clamp_mul_eager(gate: torch.Tensor, up: torch.Tensor, limit: float) -> torch.Tensor:
-    """Step-3.7's clamped SwiGLU (``Step3p7Experts._apply_gate``): SiLU first, then clamp the activated
-    gate from above and the up half symmetrically. The post-activation counterpart of
-    :func:`clamped_silu_mul_eager` and not interchangeable with it: it saturates at ``limit`` where the
-    pre-activation clamp saturates at ``silu(limit)``, and the gate gradient vanishes elsewhere."""
+    """Step-3.7 clamped SwiGLU reference: SiLU first, then the activated gate clamped from above and the up
+    half symmetrically. Not interchangeable with :func:`clamped_silu_mul_eager`: it saturates at
+    ``limit`` rather than ``silu(limit)``, and its gate gradient vanishes elsewhere."""
     return torch.nn.functional.silu(gate).clamp(max=limit) * up.clamp(min=-limit, max=limit)
 
 
-class _GluVariant(NamedTuple):
-    """One combine: its activation code, runtime ``alpha``/``limit``, and the clamped family's switches."""
-
-    activation: int
-    alpha: float = 1.0
-    limit: float = 0.0
-    clamp_activated: bool = False
-    up_plus_one: bool = False
-
-
-_SILU_VARIANT = _GluVariant(_SILU)
-_GELU_TANH_VARIANT = _GluVariant(_GELU_TANH)
-
-
-def _clamped_variant(limit: float, clamp_activated: bool) -> _GluVariant:
-    """The clamped SwiGLU at ``alpha = 1``: the gate clamped before the SiLU, or (``clamp_activated``) the
-    activated gate after it."""
-    return _GluVariant(_CLAMPED_SILU, 1.0, float(limit), clamp_activated, False)
-
-
 def _glu_launch(n_rows: int, width: int) -> tuple[tuple[int, int], dict]:
-    """The grid and the ``BLOCK_M``/``ROWS`` tile of a GLU kernel launch over ``[n_rows, width]``.
-
-    ``BLOCK_M`` is the column tile, ``ROWS`` the rows each program walks. The tile is keyed on the width
-    alone, so the EP layer's small-token warmup compiles the exact variant a full dispatch runs. Tuned on
-    the Gemma 4 and Qwen/GLM expert widths.
-    """
+    """The grid and ``BLOCK_M`` (column) / ``ROWS`` (rows per program) tile of a launch over
+    ``[n_rows, width]``, keyed on the width alone so the EP layer's small-token warmup compiles the
+    binary a full dispatch runs. Tuned on the Gemma 4 and Qwen/GLM expert widths."""
     block_m, rows = (1024, 4) if width <= 1024 else (512, 8)
     return (triton.cdiv(n_rows, rows), triton.cdiv(width, block_m)), {"BLOCK_M": block_m, "ROWS": rows}
 
@@ -171,9 +132,8 @@ def _clamped_glu_terms(gate, up, alpha, limit, CLAMP_ACTIVATED: tl.constexpr, UP
     return activated, up_g, gate_a, s, glu
 
 
-# ``n_rows`` is the dispatch's row count, which changes every step. Left specializable, Triton compiles a
-# binary per class of it (1, a multiple of 16, neither), and an unseen class compiles between an EP
-# dispatch and its combine.
+# ``n_rows`` changes every step; specialized, each class of it (1, a multiple of 16, neither) would compile
+# its own binary, an unseen one between an EP dispatch and its combine.
 @triton.jit(do_not_specialize=["n_rows"])
 def _glu_fwd_kernel(
     gate_ptr,
@@ -271,31 +231,21 @@ def _as_rows(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1, t.shape[-1])
 
 
-def _variant_args(variant: _GluVariant) -> dict:
+def _kernel_args(combine: GluCombine) -> dict:
     return {
-        "alpha": variant.alpha,
-        "limit": variant.limit,
-        "ACTIVATION": variant.activation,
-        "CLAMP_ACTIVATED": variant.clamp_activated,
-        "UP_PLUS_ONE": variant.up_plus_one,
+        "alpha": combine.alpha,
+        "limit": combine.limit,
+        "ACTIVATION": combine.activation,
+        "CLAMP_ACTIVATED": combine.clamp_activated,
+        "UP_PLUS_ONE": combine.up_plus_one,
     }
 
 
-def _glu_forward(gate: torch.Tensor, up: torch.Tensor, variant: _GluVariant) -> torch.Tensor:
+def _glu_forward(gate: torch.Tensor, up: torch.Tensor, combine: GluCombine) -> torch.Tensor:
     n_rows, width = gate.shape
     out = torch.empty((n_rows, width), device=gate.device, dtype=gate.dtype)
     grid, tile = _glu_launch(n_rows, width)
-    _glu_fwd_kernel[grid](
-        gate,
-        up,
-        out,
-        n_rows,
-        width,
-        gate.stride(0),
-        up.stride(0),
-        **_variant_args(variant),
-        **tile,
-    )
+    _glu_fwd_kernel[grid](gate, up, out, n_rows, width, gate.stride(0), up.stride(0), **_kernel_args(combine), **tile)
     return out
 
 
@@ -305,7 +255,7 @@ def _glu_backward(
     grad_out: torch.Tensor,
     dgate: torch.Tensor,
     dup: torch.Tensor,
-    variant: _GluVariant,
+    combine: GluCombine,
 ) -> None:
     n_rows, width = gate.shape
     grid, tile = _glu_launch(n_rows, width)
@@ -321,7 +271,7 @@ def _glu_backward(
         up.stride(0),
         dgate.stride(0),
         dup.stride(0),
-        **_variant_args(variant),
+        **_kernel_args(combine),
         **tile,
     )
 
@@ -330,12 +280,12 @@ class _FusedGLU(torch.autograd.Function):
     """``combine(gate, up)`` over separate (possibly row-strided) halves."""
 
     @staticmethod
-    def forward(ctx, gate: torch.Tensor, up: torch.Tensor, variant: _GluVariant) -> torch.Tensor:
+    def forward(ctx, gate: torch.Tensor, up: torch.Tensor, combine: GluCombine) -> torch.Tensor:
         shape = gate.shape
         gate2d, up2d = _as_rows(gate), _as_rows(up)
         ctx.save_for_backward(gate2d, up2d)
-        ctx.variant, ctx.shape = variant, shape
-        return _glu_forward(gate2d, up2d, variant).view(shape)
+        ctx.combine, ctx.shape = combine, shape
+        return _glu_forward(gate2d, up2d, combine).view(shape)
 
     @staticmethod
     def backward(ctx, grad_out: torch.Tensor):
@@ -344,25 +294,22 @@ class _FusedGLU(torch.autograd.Function):
             torch.empty_like(gate, memory_format=torch.contiguous_format),
             torch.empty_like(up, memory_format=torch.contiguous_format),
         )
-        _glu_backward(gate, up, grad_out, dgate, dup, ctx.variant)
+        _glu_backward(gate, up, grad_out, dgate, dup, ctx.combine)
         return dgate.view(ctx.shape), dup.view(ctx.shape), None
 
 
 class _FusedPackedGLU(torch.autograd.Function):
-    """``combine(gate, up)`` over a fused ``[..., 2M]`` projection output laid out ``[gate | up]``.
-
-    Reads both halves in place and writes the input gradient as one ``[..., 2M]`` buffer, so neither the
-    ``.contiguous()`` copies of the chunked halves nor autograd's ``cat`` behind ``chunk`` run.
-    """
+    """``combine(gate, up)`` over a ``[..., 2M]`` ``[gate | up]`` projection output, read in place with the
+    gradient written as one buffer: no ``.contiguous()`` copies of the halves, no ``cat`` behind ``chunk``."""
 
     @staticmethod
-    def forward(ctx, gate_up: torch.Tensor, variant: _GluVariant) -> torch.Tensor:
+    def forward(ctx, gate_up: torch.Tensor, combine: GluCombine) -> torch.Tensor:
         shape = gate_up.shape
         rows2d = _as_rows(gate_up)
         width = shape[-1] // 2
         ctx.save_for_backward(rows2d)
-        ctx.variant, ctx.shape = variant, shape
-        out = _glu_forward(rows2d[:, :width], rows2d[:, width:], variant)
+        ctx.combine, ctx.shape = combine, shape
+        out = _glu_forward(rows2d[:, :width], rows2d[:, width:], combine)
         return out.view(*shape[:-1], width)
 
     @staticmethod
@@ -370,123 +317,83 @@ class _FusedPackedGLU(torch.autograd.Function):
         (rows2d,) = ctx.saved_tensors
         width = rows2d.shape[-1] // 2
         grad = torch.empty(rows2d.shape, device=rows2d.device, dtype=rows2d.dtype)
-        _glu_backward(rows2d[:, :width], rows2d[:, width:], grad_out, grad[:, :width], grad[:, width:], ctx.variant)
+        _glu_backward(rows2d[:, :width], rows2d[:, width:], grad_out, grad[:, :width], grad[:, width:], ctx.combine)
         return grad.view(ctx.shape), None
 
 
-def _split_packed(gate_up: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    return gate_up.chunk(2, dim=-1)
-
-
 def fused_glu_enabled() -> bool:
-    """Whether the fused kernels may run (``HALO_FUSED_GLU``); off, every combine here runs its eager form."""
+    """Whether the fused kernels may run (``HALO_FUSED_GLU``); off, every combine runs its eager form."""
     return _FUSED_GLU_ENABLED
 
 
-def _runs_fused(t: torch.Tensor) -> bool:
-    return t.is_cuda and fused_glu_enabled()
+@dataclass(frozen=True)
+class GluCombine:
+    """One ``act(gate) * up`` combine: the fused kernel on CUDA, its eager reference elsewhere and under
+    ``HALO_FUSED_GLU=0``. ``alpha`` and ``limit`` are runtime kernel arguments and the rest
+    ``tl.constexpr``, so every layer with one combine shares one compilation."""
+
+    activation: int
+    alpha: float = 1.0
+    limit: float = 0.0
+    clamp_activated: bool = False
+    up_plus_one: bool = False
+
+    @classmethod
+    def silu(cls) -> GluCombine:
+        return cls(_SILU)
+
+    @classmethod
+    def gelu_tanh(cls) -> GluCombine:
+        return cls(_GELU_TANH)
+
+    @classmethod
+    def clamped_silu(cls, limit: float, *, clamp_activated: bool = False) -> GluCombine:
+        """SiLU-gated with ``up`` clamped to ``±limit`` and the gate clamped from above before the SiLU
+        (DeepSeek-V4, GLM-5 Next) or, with ``clamp_activated``, the activated gate after it (Step-3.7)."""
+        return cls(_CLAMPED_SILU, limit=float(limit), clamp_activated=clamp_activated)
+
+    @classmethod
+    def gptoss(cls, alpha: float, limit: float) -> GluCombine:
+        """:func:`gptoss_glu_eager`: the clamped gate scaled by ``alpha`` inside the sigmoid, times the
+        clamped ``up + 1``."""
+        return cls(_CLAMPED_SILU, alpha=float(alpha), limit=float(limit), up_plus_one=True)
+
+    @property
+    def name(self) -> str:
+        if self.activation != _CLAMPED_SILU:
+            return "silu" if self.activation == _SILU else "gelu_tanh"
+        if self.up_plus_one:
+            return "gptoss"
+        return "silu_then_clamp" if self.clamp_activated else "clamped_silu"
+
+    def __call__(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        if gate.is_cuda and fused_glu_enabled():
+            return _FusedGLU.apply(gate, up, self)
+        return self._eager(gate, up)
+
+    def packed(self, gate_up: torch.Tensor) -> torch.Tensor:
+        """The combine over a fused ``[..., 2M]`` projection output laid out ``[gate | up]``."""
+        if gate_up.is_cuda and fused_glu_enabled():
+            return _FusedPackedGLU.apply(gate_up, self)
+        return self._eager(*gate_up.chunk(2, dim=-1))
+
+    def _eager(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        if self.activation == _SILU:
+            return silu_mul_eager(gate, up)
+        if self.activation == _GELU_TANH:
+            return gelu_tanh_mul_eager(gate, up)
+        if self.up_plus_one:
+            return gptoss_glu_eager(gate, up, self.alpha, self.limit)
+        if self.clamp_activated:
+            return silu_then_clamp_mul_eager(gate, up, self.limit)
+        return clamped_silu_mul_eager(gate, up, self.limit)
 
 
-def fused_silu_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """SwiGLU combine, fused on CUDA and eager elsewhere."""
-    if _runs_fused(gate):
-        return _FusedGLU.apply(gate, up, _SILU_VARIANT)
-    return silu_mul_eager(gate, up)
-
-
-def fused_gelu_tanh_mul(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-    """Gemma-style tanh-GeGLU combine, fused on CUDA and eager elsewhere."""
-    if _runs_fused(gate):
-        return _FusedGLU.apply(gate, up, _GELU_TANH_VARIANT)
-    return gelu_tanh_mul_eager(gate, up)
-
-
-def fused_gptoss_glu(gate: torch.Tensor, up: torch.Tensor, alpha: float, limit: float) -> torch.Tensor:
-    """:func:`gptoss_glu_eager` — clamp the gate, scale it by ``alpha`` inside the sigmoid, multiply by
-    the clamped ``up + 1``. Triton-fused on CUDA, eager fallback otherwise."""
-    if _runs_fused(gate):
-        return _FusedGLU.apply(gate, up, _GluVariant(_CLAMPED_SILU, float(alpha), float(limit), False, True))
-    return gptoss_glu_eager(gate, up, alpha, limit)
-
-
-def fused_clamped_silu_mul(gate: torch.Tensor, up: torch.Tensor, limit: float) -> torch.Tensor:
-    """:func:`clamped_silu_mul_eager` — clamp the gate, then SiLU (``alpha = 1``), times the clamped
-    ``up``. Fused on CUDA and eager elsewhere."""
-    if _runs_fused(gate):
-        return _FusedGLU.apply(gate, up, _clamped_variant(limit, clamp_activated=False))
-    return clamped_silu_mul_eager(gate, up, limit)
-
-
-def fused_silu_then_clamp_mul(gate: torch.Tensor, up: torch.Tensor, limit: float) -> torch.Tensor:
-    """:func:`silu_then_clamp_mul_eager` — SiLU (``alpha = 1``) then clamp the activated gate, times
-    the clamped ``up``. Fused on CUDA and eager elsewhere."""
-    if _runs_fused(gate):
-        return _FusedGLU.apply(gate, up, _clamped_variant(limit, clamp_activated=True))
-    return silu_then_clamp_mul_eager(gate, up, limit)
-
-
-def fused_silu_mul_packed(gate_up: torch.Tensor) -> torch.Tensor:
-    """:func:`fused_silu_mul` over a fused ``[gate | up]`` projection output."""
-    if _runs_fused(gate_up):
-        return _FusedPackedGLU.apply(gate_up, _SILU_VARIANT)
-    return silu_mul_eager(*_split_packed(gate_up))
-
-
-def fused_gelu_tanh_mul_packed(gate_up: torch.Tensor) -> torch.Tensor:
-    """:func:`fused_gelu_tanh_mul` over a fused ``[gate | up]`` projection output."""
-    if _runs_fused(gate_up):
-        return _FusedPackedGLU.apply(gate_up, _GELU_TANH_VARIANT)
-    return gelu_tanh_mul_eager(*_split_packed(gate_up))
-
-
-def fused_clamped_silu_mul_packed(gate_up: torch.Tensor, limit: float) -> torch.Tensor:
-    """:func:`fused_clamped_silu_mul` over a fused ``[gate | up]`` projection output."""
-    if _runs_fused(gate_up):
-        return _FusedPackedGLU.apply(gate_up, _clamped_variant(limit, clamp_activated=False))
-    return clamped_silu_mul_eager(*_split_packed(gate_up), limit)
-
-
-def fused_silu_then_clamp_mul_packed(gate_up: torch.Tensor, limit: float) -> torch.Tensor:
-    """:func:`fused_silu_then_clamp_mul` over a fused ``[gate | up]`` projection output."""
-    if _runs_fused(gate_up):
-        return _FusedPackedGLU.apply(gate_up, _clamped_variant(limit, clamp_activated=True))
-    return silu_then_clamp_mul_eager(*_split_packed(gate_up), limit)
-
-
-# The packed-input form of each combine, keyed on the combine a layer latches (or, for a
-# ``functools.partial`` that binds a clamp, on the function it wraps; the bound keywords carry over).
-# A latch that is none of these (a bound method, the eager fallback) keeps the chunked path.
-PACKED_GLU_MULS: dict[Callable, Callable[..., torch.Tensor]] = {
-    fused_silu_mul: fused_silu_mul_packed,
-    fused_gelu_tanh_mul: fused_gelu_tanh_mul_packed,
-    fused_clamped_silu_mul: fused_clamped_silu_mul_packed,
-    fused_silu_then_clamp_mul: fused_silu_then_clamp_mul_packed,
-}
-
-
-def packed_glu_mul(combine: Callable | None) -> Callable[[torch.Tensor], torch.Tensor] | None:
-    """The packed form of a latched combine, with any keywords a ``functools.partial`` binds, or ``None``."""
-    if isinstance(combine, partial):
-        packed = PACKED_GLU_MULS.get(combine.func)
-        if packed is None or combine.args:
-            return None
-        return partial(packed, **combine.keywords)
-    return PACKED_GLU_MULS.get(combine) if combine is not None else None
-
-
-# Probe → the kernel that computes it. A family gets a fused combine by having one of these
-# activations rather than by setting a flag.
-_FUSED_GLU_MULS = (
-    (is_silu_activation, fused_silu_mul),
-    (is_gelu_tanh_activation, fused_gelu_tanh_mul),
-)
-
-FusedGluMul = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
-
-
-def resolve_fused_glu_mul(act_fn: object) -> FusedGluMul | None:
-    """The fused ``act_fn(gate) * up`` kernel for this activation, or ``None`` for the eager combine."""
-    for matches, fused in _FUSED_GLU_MULS:
-        if matches(act_fn):
-            return fused
+def resolve_fused_glu_mul(act_fn: object) -> GluCombine | None:
+    """The fused combine computing ``act_fn(gate) * up``, or None for the eager ``act_fn`` combine. A
+    family gets a fused combine by having one of these activations rather than by setting a flag."""
+    if is_silu_activation(act_fn):
+        return GluCombine.silu()
+    if is_gelu_tanh_activation(act_fn):
+        return GluCombine.gelu_tanh()
     return None

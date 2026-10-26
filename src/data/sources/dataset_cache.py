@@ -16,12 +16,7 @@ from collections.abc import Callable
 
 import filelock
 
-from src.env import (
-    data_path,
-    env_positive_int,
-    env_str,
-    resolve_store_timeout_hours,
-)
+from src.env import data_path, env_positive_int, env_str, store_timeout
 from src.log import info_logger
 
 logger = info_logger(__name__)
@@ -37,7 +32,7 @@ _MARKER_FINGERPRINT_PREFIX = "etag_fingerprint="
 # that bounds the peers on the other side of that download. Positive-int because ``filelock`` reads
 # the extremes as modes (0 fails immediately, negative waits forever).
 _CACHE_LOCK_TIMEOUT_SECONDS = env_positive_int(
-    "HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS", resolve_store_timeout_hours() * 3600
+    "HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS", int(store_timeout().total_seconds())
 )
 
 # Written inside a published cache dir; its presence is what makes the cache servable. Shared with

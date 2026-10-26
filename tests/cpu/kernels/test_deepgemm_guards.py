@@ -78,12 +78,22 @@ def test_full_coverage_passes_the_guard(monkeypatch):
         _forward(monkeypatch, [10, 20, 30, T])
 
 
+def test_a_direct_call_without_deep_gemm_raises_import_error(monkeypatch):
+    """The resolver returns None when ``deep_gemm`` does not import; the entry point must still fail loud
+    rather than unpack the miss."""
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
+    with pytest.raises(ImportError, match="deep_gemm"):
+        deepgemm.deepgemm_grouped_gemm(
+            torch.zeros(T, K), torch.zeros(E, K, N), offs=torch.tensor([10, 20, 30, T]), quant_format="mxfp8"
+        )
+
+
 def test_fallback_warning_fires_once_per_weight_shape(caplog):
     """The warning promises once per shape, and the routed token count varies every forward — so a
     key carrying it would both re-warn each step and grow the seen-set without bound."""
     key = ("mxfp8", N, K, E)
-    deepgemm._WARNED_FALLBACK_SHAPES.discard(key)
-    before = len(deepgemm._WARNED_FALLBACK_SHAPES)
+    deepgemm._warned_fallback_shapes.discard(key)
+    before = len(deepgemm._warned_fallback_shapes)
     try:
         with caplog.at_level("WARNING", logger=deepgemm.__name__):
             for tokens in (128, 256, 384):
@@ -91,9 +101,9 @@ def test_fallback_warning_fires_once_per_weight_shape(caplog):
         rejected = [r for r in caplog.records if "DeepGEMM native path rejected" in r.getMessage()]
         assert len(rejected) == 1, [r.getMessage() for r in rejected]
         # Three calls, one entry: the token count is outside the key, so the set cannot grow per step.
-        assert len(deepgemm._WARNED_FALLBACK_SHAPES) == before + 1
+        assert len(deepgemm._warned_fallback_shapes) == before + 1
     finally:
-        deepgemm._WARNED_FALLBACK_SHAPES.discard(key)
+        deepgemm._warned_fallback_shapes.discard(key)
 
 
 def test_the_call_site_keys_only_on_the_weight_shape():
@@ -122,7 +132,7 @@ def test_a_genuinely_different_shape_still_warns(caplog):
     """Anti-vacuity: the dedupe is per weight shape, not a one-shot global mute."""
     keys = [("mxfp8", N, K, E), ("nvfp4", N, K, E), ("mxfp8", N * 2, K, E)]
     for key in keys:
-        deepgemm._WARNED_FALLBACK_SHAPES.discard(key)
+        deepgemm._warned_fallback_shapes.discard(key)
     try:
         with caplog.at_level("WARNING", logger=deepgemm.__name__):
             for key in keys:
@@ -130,7 +140,7 @@ def test_a_genuinely_different_shape_still_warns(caplog):
         assert len([r for r in caplog.records if "DeepGEMM native path rejected" in r.getMessage()]) == len(keys)
     finally:
         for key in keys:
-            deepgemm._WARNED_FALLBACK_SHAPES.discard(key)
+            deepgemm._warned_fallback_shapes.discard(key)
 
 
 if __name__ == "__main__":

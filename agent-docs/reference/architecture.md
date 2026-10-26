@@ -17,10 +17,11 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 |---|---|---|---|
 | Config | YAML parse, toolkit defaults, strict rejection of unknown or retired keys; env knobs read through one seam; the per-method argument/config dataclasses and the field guards and argument refusals they share | `src/training/parser.py`, `src/env.py`, `src/args/`, `src/configs/`, `src/config_validation.py` | [Configuration](../getting-started/configuration.md) |
 | Trainers | Training loop, loss, gradient clipping, saving | `src/trainers/mixins/` (the spine is `base.py`) | [Trainer Architecture](trainer-architecture.md) |
+| Runtime | Process plumbing every layer above shares: rank and node math, process-group construction and timeouts, barriers and broadcasts, cross-rank verdicts and the c10d-store joins, the shared-filesystem scope and main-first ordering, the per-node load throttle, DTensor access | `src/runtime/` | [Multi-Node](../parallelism/multi-node.md) |
 | Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `src/distributed/parallelism_config.py`, `src/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
 | Data | Dataset loading, sharding, collators | `src/data/`, `src/data/collators/` | [Dataset Formats](../data/dataset-formats.md) |
 | Callbacks | Throughput, MoE load, router-bias balancing | `src/callbacks/`, `src/hardware.py` (GPU detection + peak-FLOPs table) | [Callbacks](../training-methods/callbacks.md) |
-| Diagnostics | Opt-in and off by default: the cross-rank divergence check, py-spy capture, torch-profiler traces, CUDA memory snapshots, the weight-sync transport preflight | `src/diagnostics/` | [Debugging](debugging.md) |
+| Diagnostics | Opt-in and off by default: py-spy capture, torch-profiler traces, CUDA memory snapshots, EP span timing, the weight-sync transport preflight | `src/diagnostics/` | [Debugging](debugging.md) |
 | Kernels | Grouped GEMM, the fused GLU and MoE permute kernels, chunked fp32 log-probs, Liger, Flash Attention and FlexAttention on sliding-window layers, low-precision quantization | `src/kernels/`, `src/models/patches/attention.py`, `src/models/patches/flex_sliding_attention.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
 | Checkpoints | The per-mode saver ladder, weight resume, per-rank optimizer shards + LR scheduler, PEFT adapters, load-coverage gate — over the sharding-agnostic on-disk layer | `src/distributed/checkpoint/`, `src/checkpoint/`, `src/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
 | Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `src/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
@@ -38,9 +39,11 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 |---|---|---|
 | `src/data/spans.py` | turn terminators, completion spans, the one completion-mask implementation and the completion-only label builder over it | the collators, the offline label bake and the PP losses — none imports a collator to reach a span helper |
 | `src/models/unwrapping.py` | wrapper peeling (framework, toolkit, PEFT) and the plain hub spelling of a name read off a wrapped tree | the FSDP2 wrap, the CP wrapper, the weight sync, the MoE balancing, every checkpoint writer |
-| `src/models/module_tree.py` | decoder-layer discovery: the layer list, the layer index in a dotted name, the backbone owning the list, the module consuming the input embedding | the FSDP2/TP/PP wraps, the attention patches, the PEFT setup, the low-precision install, the routing replay |
+| `src/models/module_tree.py` | module-tree lookups: the decoder-layer list and the layer index in a dotted name, the backbone owning the list, the module consuming the input embedding, the embedding modules, module paths by identity, the attribute probe | the FSDP2/TP/PP wraps, the attention patches, the PEFT setup, the low-precision install, the routing replay |
 | `src/models/param_roles.py` | parameter roles: embedding/head markers, normalization modules, persistent buffers, fp32 pins | every checkpoint writer, the FSDP2 wrap and the lazy loaders (fp32 pins), Muon and the PEFT setup |
-| `src/models/structure.py` | PEFT adapter parameters and the out-of-place LoRA fold, the value PEFT's merge would write | the weight sync, the merged EP and FSDP2 saves, the embedding trainer's save, the PEFT validation |
+| `src/models/peft_adapters.py` | PEFT adapter parameters and the out-of-place LoRA fold, the value PEFT's merge would write | the weight sync, the merged EP and FSDP2 saves, the embedding trainer's save, the PEFT validation |
+| `src/models/gradient_checkpointing.py` | the recompute scope both passes of one checkpoint invocation share, expert-load counting off it, and the scoped gradient-checkpointing enable | the EP layers' dispatch replay, the router-bias load counters, the EP trainer setup |
+| `src/models/modality.py` | the multimodal verdict off a config in hand or a name; no hub read, no collective (the collective probe is `probe_checkpoint` in `src/distributed/loading/model_source.py`) | the loaders, the run-level `is_vlm_run`, the PP gate |
 | `src/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` | the collator factory, the packing and padding-free collators, and SMPO's padding-free forward |
 | `src/models/attention_layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term | the token-metrics mixin and the efficiency callbacks |
 | `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell | the chunked GRPO log-prob sweep (and the PP stage seam), which apply the same verdict |
@@ -63,12 +66,14 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `src/config_validation.py` guards are its only first-party imports | the argument dataclasses and `EnvironmentConfig`, which parse `rewards:` at config time without pulling in the scorers' SDK client |
 | `src/inference/endpoints.py` | the OpenAI-compatible endpoint defaults, key resolution and the loopback test (`is_loopback`) — `src/env.py` only | the reward terms, the CLI endpoint flag block (`scripts/_common.py`), the judge clients, the Ray rollout actors and the weight-sync group-address policy — none of them imports the SDK |
 
-`src/distributed/runtime.py` therefore holds rank/world state, `init_distributed` and the
-process-group timeouts, barriers, the cross-rank rejection/consensus seams (including the
-shared-filesystem verdict and the FS-aware writer rank), and DTensor resolution only; anything a
-single rank can compute alone lives in the leaves above. It is itself the package leaf:
-`nvlink.py` (fabric probes, read by `ParallelismConfig`) and `filesystem.py` (the c10d-store
-phase, main-first ordering, the output-FS probe, the load throttle) import it, never the reverse.
+`src/runtime/` therefore holds only what needs a process group or the launcher: rank and node math
+(`ranks.py`), `init_distributed` and the subgroup timeout pin (`process_group.py`), barriers,
+broadcasts and fixed-order group creation (`collectives.py`), the cross-rank rejection/consensus seams
+and the c10d-store joins (`consensus.py`), the shared-filesystem scope, FS-aware writer ranks,
+main-first ordering and the output-FS probe (`filesystem.py`), the per-node load throttle
+(`load_coordination.py`) and DTensor access (`dtensor.py`); anything a single rank can compute alone
+lives in the leaves above. It imports only `src.env`, `src.log` and `src.hardware`, and the
+parallelism strategies in `src/distributed/` import it, never the reverse.
 
 ## Trainers
 
@@ -137,7 +142,7 @@ the mesh groups (DP, TP) through the `ParallelDims` view (`src/distributed/mesh.
 groups (dispatch, expert-TP, expert-replica) off `EPConfig`. The bucketed
 gradient all-reduce and the grad-presence agreement every post-backward sweep shares — deferred EP
 cross-replica, TP replicated, QLoRA — live in a leaf (`src/distributed/grad_reduce.py`) that
-imports torch, `src.env` and the `src.distributed.runtime` leaf, and no parallelism implementation.
+imports torch, `src.env` and `src.runtime`, and no parallelism implementation.
 
 Which axis combinations may run is an allowlist, not a denylist — see
 [Parallelism](../parallelism/README.md#supported-combinations).

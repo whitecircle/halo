@@ -27,13 +27,13 @@ from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 import src.distributed.context_parallel.loading as cp_loading
 import src.distributed.expert_parallel.loading as eager_loading
 import src.distributed.expert_parallel.master_weights as master_loading
-import src.distributed.filesystem as filesystem
 import src.distributed.loading.model_loading as loading
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
 from src.distributed.expert_parallel.hub_conversion import resolve_loaded_conversion_steps
 from src.distributed.expert_parallel.lazy_loader import ExpertFuser, build_family_key_mapping
+from src.runtime import consensus, load_coordination
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import module_with_weight_keys
 
@@ -208,7 +208,8 @@ def test_tp_replay_preserves_each_placement_and_all_tied_owners(tmp_path, stored
 def _read_failure_rank(rank, source, outcomes):
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(loading, "from_pretrained_verified", _cpu_pretrained(loading.from_pretrained_verified))
-        monkeypatch.setattr(filesystem, "get_store_timeout", lambda: datetime.timedelta(seconds=10))
+        monkeypatch.setattr(load_coordination, "store_timeout", lambda: datetime.timedelta(seconds=10))
+        monkeypatch.setattr(consensus, "store_timeout", lambda: datetime.timedelta(seconds=10))
         original_get = master_loading.StreamingCheckpointReader.get
 
         def get(reader, key):

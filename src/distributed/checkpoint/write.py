@@ -23,31 +23,14 @@ from src.checkpoint.writing import (
     normalize_gathered_state_dict,
     reconcile_tie_word_embeddings,
 )
-from src.distributed.runtime import DeferredRankFailure, materialize_dtensor, resolve_param_tensor
 from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
 from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
+from src.runtime.consensus import DeferredRankFailure
+from src.runtime.dtensor import resolve_retained
 
 # One decoder layer is the chunk a streamed save converts as a unit; see :func:`conversion_chunk_key`.
 _LAYER_CHUNK_RE = re.compile(rf"^(.*\.(?:{'|'.join(DECODER_LAYER_LIST_ATTRS)})\.\d+)\.")
-
-
-def resolve_retained(items: Iterable[tuple[str, torch.Tensor]], *, retain: bool) -> dict[str, torch.Tensor]:
-    """Gather every item on every rank; return the host copies only where ``retain``.
-
-    ``resolve_param_tensor`` on a DTensor is a mesh-wide collective, so gating the call on ``retain``
-    hangs a gathered save: the writer enters the all-gather and its peers never do.
-    ``materialize_dtensor`` is that collective without the device-to-host copy, letting non-writers
-    join without holding N× model bytes per node. Public because the EP gathered save walks its own
-    key space and needs the same symmetry for its non-expert tensors.
-    """
-    resolved: dict[str, torch.Tensor] = {}
-    for name, tensor in items:
-        if retain:
-            resolved[name] = resolve_param_tensor(tensor)
-        else:
-            materialize_dtensor(tensor)
-    return resolved
 
 
 def gather_saveable_tensors(

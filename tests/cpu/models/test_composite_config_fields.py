@@ -13,9 +13,8 @@ is silently or loudly wrong for those families unless it goes through the nested
     ``config.get_text_config().pad_token_id`` — leaving it ``None`` (batch > 1 then raises) or stale
     at the checkpoint's value (pooling silently picks the wrong last token).
   * ``config_has_experts`` — the single "is this MoE?" gate — must see the nested expert counts.
-  * ``config_ties_word_embeddings`` gates the TP load's tied embedding/head handling; the flag it
-    reads lives on the decoder, and a wrong verdict either halves the tied gradient or replicates a
-    matrix the plan should shard.
+  * ``ties_word_embeddings`` gates the TP load's tied embedding/head handling; the flag lives on the
+    wrapper and/or the decoder, and a verdict missing a tying level halves the tied gradient.
 
     python tests/cpu/models/test_composite_config_fields.py
 """
@@ -40,9 +39,9 @@ from src.models.attention_geometry import (
 )
 from src.models.config_access import (
     config_sources,
-    config_ties_word_embeddings,
     configs_declaring,
     set_config_field,
+    ties_word_embeddings,
 )
 from src.models.moe_balancing import (
     ROUTER_EXPERT_COUNT_FIELDS,
@@ -350,33 +349,29 @@ def test_resolve_head_dim_reads_through_a_composite_wrapper():
 # tie_word_embeddings — the flag the TP load's plan filter is gated on
 
 
-@pytest.mark.parametrize("declared", [True, False])
-def test_the_tie_verdict_is_the_decoder_s_on_a_composite_wrapper(declared):
-    """The tie the TP plan filter protects is the DECODER's ``lm_head`` ↔ ``embed_tokens`` pair, so
-    the sub-config's declaration is the verdict — the wrapper's own copy can disagree (only the
-    decoder owns the two tensors). A wrong verdict here is silent either way: False on a tied model
-    lets the plan slice ``lm_head`` and halves the tied gradient, True on an untied one drops a
-    legitimate plan entry and runs that matrix replicated.
+@pytest.mark.parametrize(("wrapper", "decoder"), [(True, False), (False, True), (True, True), (False, False)])
+def test_the_tie_verdict_reads_both_levels_of_a_composite_wrapper(wrapper, decoder):
+    """transformers resolves the tie per submodel, so either level's declaration ties the pair. A
+    verdict missing the tying level is silent: False on a tied model lets the plan slice ``lm_head``
+    and halves the tied gradient.
     """
     config = _config("gemma4")
-    config.tie_word_embeddings = not declared
-    config.get_text_config().tie_word_embeddings = declared
-    assert config_ties_word_embeddings(config) is declared
+    config.tie_word_embeddings = wrapper
+    config.get_text_config().tie_word_embeddings = decoder
+    assert ties_word_embeddings(config) is (wrapper or decoder)
 
 
 def test_the_tie_read_survives_a_config_without_the_composite_accessor():
-    """Every read of a possibly-composite field goes through ``text_config``, whose fallback is the
-    config itself. Calling ``get_text_config()`` directly instead raises ``AttributeError`` on any
-    object that does not define it — aborting the load over a missing accessor rather than reading
-    the flag that is right there. ``None`` (no config passed to the loader) stays False.
+    """A config declaring no sub-configs and no ``get_text_config`` (remote code) is read at its own
+    level rather than aborting the load. ``None`` (no config passed to the loader) stays False.
     """
 
     class _RemoteCodeConfig:
         tie_word_embeddings = True
 
     assert not hasattr(_RemoteCodeConfig(), "get_text_config"), "premise: no composite accessor"
-    assert config_ties_word_embeddings(_RemoteCodeConfig()) is True
-    assert config_ties_word_embeddings(None) is False
+    assert ties_word_embeddings(_RemoteCodeConfig()) is True
+    assert ties_word_embeddings(None) is False
 
 
 def test_resolve_num_key_value_heads_reduces_per_layer_heterogeneity():

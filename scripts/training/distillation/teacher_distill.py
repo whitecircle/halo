@@ -28,13 +28,14 @@ from src.data.collators.vlm import VLMDataCollator
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, resolve_map_num_proc
 from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
 from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
-from src.distributed.filesystem import hub_metadata_main_first
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
-from src.distributed.runtime import barrier, is_global_main_process
 from src.model_loading.dtype import resolve_training_dtype
 from src.model_loading.model_preparation import log_model_info
+from src.runtime.collectives import barrier
+from src.runtime.filesystem import hub_metadata_main_first
+from src.runtime.ranks import is_global_main_process
 from src.trainers.distillation.losses import shared_vocab_width
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from src.training.environment import run_training

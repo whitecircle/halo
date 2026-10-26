@@ -19,7 +19,9 @@ import wandb
 from transformers.utils import is_rich_available
 from trl.trainer.utils import print_prompt_completions_sample
 
-from src.distributed.runtime import DeferredRankFailure, fs_aware_save_rank, is_global_main_process
+from src.runtime.consensus import DeferredRankFailure
+from src.runtime.filesystem import is_fs_save_rank
+from src.runtime.ranks import is_global_main_process
 
 # Cap per-cell text in the wandb table (parquet keeps the full text); untruncated cells stall the log call.
 _TABLE_CELL_CHARS = 8000
@@ -77,7 +79,7 @@ def emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str |
     ``mode`` names the rows' mode when it is not the model's current one (train rows written as an
     eval round begins); by default the model's mode picks the file.
 
-    Elected with ``fs_aware_save_rank`` like every other output artifact: on a non-shared output
+    Elected with ``is_fs_save_rank`` like every other output artifact: on a non-shared output
     filesystem global rank 0 is the only writer, so nodes 1..N would lose their completions entirely.
     A writer's failure (a full disk, a wandb outage) is raised on every rank, since raised on the
     writer alone it would leave the peers in the next collective; with neither artifact asked for (a
@@ -91,7 +93,7 @@ def emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str |
     mode = mode or ("train" if trainer.model.training else "eval")
     guard = DeferredRankFailure(f"Completions record at step {trainer.state.global_step}")
     try:
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             guard.run(partial(_emit_completion_artifacts, trainer, console=console, save=save, mode=mode))
     finally:
         _clear_completion_logs(trainer._logs)

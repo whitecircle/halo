@@ -14,7 +14,7 @@ attention itself correctly isolated.
 # modeling module below, which binds transformers' hub-kernel fallback factory at import. Ordered
 # after it (where isort puts first-party), this file's CPU forward reaches the CUDA-only
 # causal_conv1d kernel and dies with `Expected x.is_cuda()` on a standalone run.
-import src.models.patches.kernel_dispatch  # noqa: F401  # isort: skip
+import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 from unittest.mock import MagicMock
 

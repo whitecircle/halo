@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 
 import transformers
 
-from src.distributed.runtime import fs_aware_save_rank
 from src.log import RUN_LOG_DIR_NAME, RUN_LOG_FILE
+from src.runtime.filesystem import is_fs_save_rank
 
 if TYPE_CHECKING:
     # Importing TrainingArguments eagerly pulls the peft/pandas/accelerate stack; the YAML parser
@@ -49,13 +49,13 @@ def install_log_tee(output_dir: str | None) -> None:
     native torch/NCCL writes all land in the file while still showing live. No-op without
     ``output_dir`` or off the writer rank; a log directory or ``tee`` that cannot be set up is warned.
 
-    The writer rank is ``fs_aware_save_rank``: run.log is an output artifact, so it follows the
+    The writer rank is ``is_fs_save_rank``: run.log is an output artifact, so it follows the
     checkpoint writers' predicate and their rank-agreed shared-filesystem flags
     (``init_distributed`` has already run, in ``H4ArgumentParser.parse``), so a per-node env override
     cannot leave two nodes both writing into one ``run.log``.
     """
     global _TEE_LOG_PATH
-    if not output_dir or not fs_aware_save_rank():
+    if not output_dir or not is_fs_save_rank():
         return
 
     log_dir = os.path.join(output_dir, RUN_LOG_DIR_NAME)

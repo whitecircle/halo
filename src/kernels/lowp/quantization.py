@@ -1,21 +1,20 @@
-"""Block-scaled quantization for the low-precision GEMMs, plus the per-step
-:class:`WeightVersionCache` shared with :mod:`~src.kernels.lowp.deepgemm`.
-
-A format is low-precision elements plus one shared scale per contraction-axis block: MXFP8 (``e4m3`` +
-``e8m0``/32), MXFP4 (``e2m1`` + ``e8m0``/32), NVFP4 (``e2m1`` + ``e4m3``/16 plus a per-tensor fp32
-global scale — two-level, the most accurate fp4). Storage form is a :class:`BlockScaledTensor`.
+"""Block-scaled quantization for the low-precision GEMMs: low-precision elements plus one shared scale per
+contraction-axis block (stored as a :class:`BlockScaledTensor`), the straight-through fake-quant, and the
+per-step :class:`WeightVersionCache` the DeepGEMM backend shares.
 """
 
 from __future__ import annotations
 
 import logging
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 from torch._dynamo.exc import TorchDynamoException
 
 from src.env import env_flag
+from src.kernels.lowp.spec import QuantFormat
 
 logger = logging.getLogger(__name__)
 
@@ -35,20 +34,24 @@ _AMAX_FLOOR = torch.finfo(torch.float32).tiny
 # Tensor amax NVFP4's global scale normalizes to, so the largest block's e4m3 scale reaches E4M3_MAX.
 _NVFP4_GLOBAL_SCALE_DIVISOR = E4M3_MAX * E2M1_MAX
 
-# Elements per shared scale, per format. The checkpoint exporter sizes its contraction axis from this
-# rather than restating the block layout.
-FORMAT_BLOCK_SIZE = {"mxfp8": 32, "mxfp4": 32, "nvfp4": 16}
+# Elements per shared scale; the checkpoint exporter sizes its contraction axis from this.
+FORMAT_BLOCK_SIZE: dict[QuantFormat, int] = {"mxfp8": 32, "mxfp4": 32, "nvfp4": 16}
+# e8m0 power-of-two block scales (MX) or e4m3 ones (NVFP4).
+_POW2_SCALE: dict[QuantFormat, bool] = {"mxfp8": True, "mxfp4": True, "nvfp4": False}
+# Only power-of-two scales survive compile's reciprocal-multiply exactly; compiled NVFP4 would not match
+# the eager checkpoint quantizer, so it stays eager.
+_COMPILABLE = tuple(fmt for fmt, pow2 in _POW2_SCALE.items() if pow2)
+
+_compiled_round_trip = None
+_compile_failed = False
 
 
 @dataclass(frozen=True)
 class BlockScaledTensor:
-    """A block-scaled quantized tensor.
-
-    ``data`` holds ``float8_e4m3fn`` elements, or two ``e2m1`` nibbles per byte when ``packed``; ``scales``
-    one entry per ``block_size``-element block along ``axis``, an ``e8m0`` biased exponent when
-    ``pow2_scale`` (MX) and an ``e4m3`` value otherwise (NVFP4). An element is
-    ``code x scales x global_scale``, so dropping NVFP4's per-tensor ``global_scale`` (``None`` for the
-    single-level MX formats) reads the tensor rescaled by up to ``E4M3_MAX * E2M1_MAX``.
+    """``data`` holds ``float8_e4m3fn`` elements, or two ``e2m1`` nibbles per byte when ``packed``;
+    ``scales`` one entry per ``block_size``-element block along ``axis``, an ``e8m0`` biased exponent when
+    ``pow2_scale`` (MX) and an ``e4m3`` value otherwise (NVFP4). An element is ``code x scales x
+    global_scale``; NVFP4's per-tensor ``global_scale`` is None for the single-level MX formats.
     """
 
     data: torch.Tensor
@@ -74,11 +77,8 @@ def _restore_axis(t: torch.Tensor, axis: int, ndim: int) -> torch.Tensor:
 
 
 def _e8m0_scale(amax: torch.Tensor, format_max: float) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-block ``e8m0`` scale for an MX format: ``(fp32 divisor, biased-exponent uint8)``.
-
-    A NaN block takes the spec's ``0xFF`` NaN code: ``e2m1`` has no NaN encoding and a NaN exponent casts
-    to ``uint8`` 0, which would decode the poison as a finite near-zero block.
-    """
+    """Per-block ``e8m0`` scale for an MX format: ``(fp32 divisor, biased-exponent uint8)``. A NaN block
+    takes the ``0xFF`` NaN code: a NaN exponent casts to ``uint8`` 0, a finite near-zero block."""
     scale_exp = torch.ceil(torch.log2(amax.clamp(min=_AMAX_FLOOR) / format_max)).clamp(-_E8M0_BIAS, _E8M0_BIAS)
     biased = (scale_exp + _E8M0_BIAS).to(torch.uint8).masked_fill(amax.isnan(), _E8M0_NAN)
     return torch.exp2(scale_exp), biased
@@ -98,11 +98,8 @@ def _mxfp8_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
     """fp32 ``blocks`` → e2m1 codes (``uint8``: ``sign << 3 | magnitude-level``) given a per-block
-    ``divisor``. Shared by MXFP4/NVFP4 — only the scale differs.
-
-    Only an exactly-zero divisor is substituted, and only to avoid the division (such a block rounds to
-    code 0 regardless); an epsilon floor would corrupt every tensor whose real scales sit below it.
-    """
+    ``divisor``. Only an exactly-zero divisor is substituted (its block rounds to code 0 anyway); an
+    epsilon floor would corrupt every tensor whose real scales sit below it."""
     scaled = blocks / divisor.masked_fill(divisor == 0, 1.0)
     sign = (scaled < 0).to(torch.uint8)
     mag = scaled.abs().clamp(max=E2M1_MAX)
@@ -114,7 +111,7 @@ def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
 
 def _mxfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
     """``blocks`` → (e2m1 code ``[*, n_block, block_size]`` uint8, ``e8m0`` scale ``[*, n_block, 1]`` uint8,
-    no global scale — MX is single-level by definition)."""
+    no global scale)."""
     divisor, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), E2M1_MAX)
     return _e2m1_codes(blocks, divisor), scales, None
 
@@ -123,21 +120,16 @@ def _nvfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch
     """``blocks`` → (e2m1 code ``[*, n_block, block_size]`` uint8, ``e4m3`` scale ``[*, n_block, 1]``,
     per-tensor fp32 global scale).
 
-    Two-level, as the format defines it: the global scale lifts the tensor amax to ``E4M3_MAX`` so each
-    block's ``e4m3`` scale is relative to the tensor. A single absolute scale rounds to zero, and the
-    whole block dequantizes to zeros, for any block amax below ``E2M1_MAX x`` half of e4m3's smallest
-    subnormal (5.86e-3) — the band the residual-scaled ``down_proj`` init (``0.02/sqrt(2L)``) sits in.
-
-    Rounding the global scale up to a power of two keeps e4m3 rounding invariant, so an EP rank's expert
-    shard and the gathered tensor dequantize identically despite their differing amax, keeping the QAT
-    forward and the exported checkpoint in agreement, at a cost of one bit of the second level's ~4.6
-    decades.
+    The global scale lifts the tensor amax to ``E4M3_MAX``: a single absolute scale zeroes any block
+    whose amax is below ``E2M1_MAX x`` half e4m3's smallest subnormal (5.86e-3), where the residual-scaled
+    ``down_proj`` init sits. Rounded up to a power of two, it keeps e4m3 rounding invariant, so an EP
+    rank's expert shard and the gathered tensor dequantize identically (QAT forward == exported
+    checkpoint), for one bit of the second level's ~4.6 decades.
     """
     tensor_amax = blocks.abs().amax().clamp(min=_AMAX_FLOOR)
     global_scale = torch.exp2(torch.ceil(torch.log2(tensor_amax / _NVFP4_GLOBAL_SCALE_DIVISOR)))
     amax = blocks.abs().amax(dim=-1, keepdim=True)
-    # Mathematically redundant (no block amax exceeds the tensor amax); kept so fp rounding cannot
-    # push the scale past e4m3's range, where it would cast to NaN.
+    # Redundant in exact arithmetic; keeps fp rounding from pushing the scale past e4m3's range (NaN).
     scale = (amax / E2M1_MAX / global_scale).clamp(max=E4M3_MAX).to(torch.float8_e4m3fn)
     code = _e2m1_codes(blocks, scale.float() * global_scale)
     return code, scale, global_scale
@@ -159,7 +151,9 @@ def quantize_mxfp8(t: torch.Tensor, axis: int = -1) -> BlockScaledTensor:
     quant, scales = _mxfp8_core(blocks)
     data = _restore_axis(quant.reshape(*lead, k), axis, t.ndim)
     scales = _restore_axis(scales.squeeze(-1), axis, t.ndim)
-    return BlockScaledTensor(data.contiguous(), scales.contiguous(), block_size, axis, packed=False, pow2_scale=True)
+    return BlockScaledTensor(
+        data.contiguous(), scales.contiguous(), block_size, axis, packed=False, pow2_scale=_POW2_SCALE["mxfp8"]
+    )
 
 
 def _quantize_fp4(t: torch.Tensor, axis: int, block_size: int, core, pow2_scale: bool) -> BlockScaledTensor:
@@ -183,17 +177,16 @@ def _quantize_fp4(t: torch.Tensor, axis: int, block_size: int, core, pow2_scale:
 
 def quantize_mxfp4(t: torch.Tensor, axis: int = -1) -> BlockScaledTensor:
     """Quantize ``t`` to MXFP4 (packed ``e2m1`` data + ``e8m0`` power-of-two scales) along ``axis``."""
-    return _quantize_fp4(t, axis, FORMAT_BLOCK_SIZE["mxfp4"], _mxfp4_core, pow2_scale=True)
+    return _quantize_fp4(t, axis, FORMAT_BLOCK_SIZE["mxfp4"], _mxfp4_core, pow2_scale=_POW2_SCALE["mxfp4"])
 
 
 def quantize_nvfp4(t: torch.Tensor, axis: int = -1) -> BlockScaledTensor:
     """Quantize ``t`` to NVFP4 (packed ``e2m1`` data + ``e4m3`` scales) along ``axis`` (storage form)."""
-    return _quantize_fp4(t, axis, FORMAT_BLOCK_SIZE["nvfp4"], _nvfp4_core, pow2_scale=False)
+    return _quantize_fp4(t, axis, FORMAT_BLOCK_SIZE["nvfp4"], _nvfp4_core, pow2_scale=_POW2_SCALE["nvfp4"])
 
 
 def dequantize(q: BlockScaledTensor) -> torch.Tensor:
-    """Reconstruct a bf16 tensor from a :class:`BlockScaledTensor`, used by the export tool's
-    round-trip error check and as the reference for round-trip tests."""
+    """The bf16 tensor a :class:`BlockScaledTensor` encodes."""
     work, axis = _move_axis_last(q.data, q.axis)
     scales, _ = _move_axis_last(q.scales, q.axis)
     if q.packed:
@@ -213,21 +206,18 @@ def dequantize(q: BlockScaledTensor) -> torch.Tensor:
     return _restore_axis(out, axis, q.data.ndim).to(torch.bfloat16)
 
 
-QUANTIZERS = {"mxfp8": quantize_mxfp8, "mxfp4": quantize_mxfp4, "nvfp4": quantize_nvfp4}
+QUANTIZERS: dict[QuantFormat, Callable[..., BlockScaledTensor]] = {
+    "mxfp8": quantize_mxfp8,
+    "mxfp4": quantize_mxfp4,
+    "nvfp4": quantize_nvfp4,
+}
 
 
-def _block_round_trip(t: torch.Tensor, fmt: str, axis: int) -> torch.Tensor:
+def _block_round_trip(t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
     quantizer = QUANTIZERS.get(fmt)
     if quantizer is None:
         raise ValueError(f"unknown block-scaled format {fmt!r} (expected one of {sorted(QUANTIZERS)})")
     return dequantize(quantizer(t, axis=axis))
-
-
-# Only e8m0 (power-of-two) scales survive compile's reciprocal-multiply exactly; compiled NVFP4 (e4m3
-# scale) does not match the eager checkpoint quantizer, so that format stays eager. Weights only.
-_COMPILABLE = ("mxfp8", "mxfp4")
-_compiled_round_trip = None
-_compile_failed = False
 
 
 def _warn_compile_disabled(exc: Exception) -> None:
@@ -240,9 +230,9 @@ def _warn_compile_disabled(exc: Exception) -> None:
     )
 
 
-def _round_trip(t: torch.Tensor, fmt: str, axis: int) -> torch.Tensor:
-    """Quantize→dequantize ``t``, compiled for the power-of-two-scale formats (fixed-shape weights).
-    Eager for nvfp4 / when compilation is off or unavailable."""
+def _round_trip(t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
+    """Quantize→dequantize ``t``, compiled for the power-of-two-scale formats (fixed-shape weights) and
+    eager otherwise."""
     global _compiled_round_trip, _compile_failed
     if fmt not in _COMPILABLE or _compile_failed or not env_flag("HALO_LOWP_COMPILE", default=True):
         return _block_round_trip(t, fmt, axis)
@@ -263,12 +253,11 @@ def _round_trip(t: torch.Tensor, fmt: str, axis: int) -> torch.Tensor:
 
 
 class _FakeQuant(torch.autograd.Function):
-    """Straight-through block-scaled quantization (QAT estimator): forward quantize→dequantize so the
-    matmul sees low-precision numerics; backward is identity to the bf16/fp32 master."""
+    """Straight-through estimator: forward quantize→dequantize, identity backward to the master."""
 
     @staticmethod
-    def forward(ctx, t: torch.Tensor, fmt: str, axis: int) -> torch.Tensor:
-        # Eager: activation path (and dense weights); shapes vary, so compiling recompiles constantly.
+    def forward(ctx, t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
+        # Eager: activation shapes vary, so a compiled form would recompile constantly.
         return _block_round_trip(t, fmt, axis).to(t.dtype)
 
     @staticmethod
@@ -276,19 +265,16 @@ class _FakeQuant(torch.autograd.Function):
         return grad_output, None, None
 
 
-def fake_quant(t: torch.Tensor, fmt: str, axis: int = -1) -> torch.Tensor:
-    """Differentiable block-scaled fake quantization (straight-through estimator), eager.
-
-    Quantizes ``t`` to ``fmt`` along ``axis`` and back, identity backward; for weights use
-    :func:`cached_fake_quant`. The quantized axis must divide by the block size (32 mx, 16 nvfp4).
-    """
+def fake_quant(t: torch.Tensor, fmt: QuantFormat, axis: int = -1) -> torch.Tensor:
+    """``t`` quantized to ``fmt`` along ``axis`` and back, with an identity backward; the axis must divide
+    by the format's block size. EP expert weights use :func:`cached_fake_quant`."""
     return _FakeQuant.apply(t, fmt, axis)
 
 
 class WeightVersionCache:
-    """``weight -> value`` cache keyed by tensor identity plus a caller fingerprint (``(_version, fmt)``
-    and the like), for tensors derived once per optimizer step. A ``weakref`` finalizer evicts an entry
-    when its weight is collected, so a freed weight's reused ``id`` can never serve a stale hit."""
+    """``weight -> value`` cache keyed by tensor identity plus a caller fingerprint (``(_version, fmt)``),
+    for values derived once per optimizer step. A ``weakref`` finalizer evicts a collected weight's
+    entry, so its reused ``id`` never serves a stale hit."""
 
     def __init__(self) -> None:
         self._entries: dict[int, tuple[weakref.ref, tuple, object]] = {}
@@ -312,14 +298,14 @@ class WeightVersionCache:
         return len(self._entries)
 
 
-# Correct only for the EP expert weights it is used on: plain 3D params whose `_version` tracks the
-# optimizer step exactly, unlike a dense MLP's all-gathered FSDP2 view.
-_WEIGHT_DEQUANT_CACHE = WeightVersionCache()  # weight -> dequantized_detached, keyed (_version, fmt, axis)
+# Correct only for EP expert weights: plain 3D params whose `_version` tracks the optimizer step exactly,
+# unlike a dense MLP's all-gathered FSDP2 view.
+_weight_dequant_cache = WeightVersionCache()
 
 
 class _CachedFakeQuant(torch.autograd.Function):
-    """Straight-through wrapper reusing a cached dequant weight (fresh clone per call so the shared cache
-    entry never collides with autograd's one-grad_fn-per-tensor rule). Identity backward."""
+    """Straight-through over a cached dequantized weight, cloned per call so the shared entry never meets
+    autograd's one-grad_fn-per-tensor rule."""
 
     @staticmethod
     def forward(ctx, weight: torch.Tensor, cached_dequant: torch.Tensor) -> torch.Tensor:
@@ -330,19 +316,16 @@ class _CachedFakeQuant(torch.autograd.Function):
         return grad_output, None
 
 
-def cached_fake_quant(weight: torch.Tensor, fmt: str, axis: int = -1) -> torch.Tensor:
-    """``fake_quant`` for a (quasi-static) EP expert weight, quantized once per optimizer step.
-
-    The round-trip is keyed on ``weight._version`` and reused across grad-accum; exact and
-    straight-through either way. Only leaf params are cached — a non-leaf input (a fp32 master's
-    ``weight.to(bf16)`` copy) churns its ``id`` while ``_version`` stays 0. Disable with
-    ``HALO_LOWP_WEIGHT_CACHE=0``."""
+def cached_fake_quant(weight: torch.Tensor, fmt: QuantFormat, axis: int = -1) -> torch.Tensor:
+    """:func:`fake_quant` for an EP expert weight, quantized once per optimizer step (keyed on
+    ``weight._version``, reused across grad-accum; ``HALO_LOWP_WEIGHT_CACHE=0`` disables). Only leaf
+    params cache: a fp32 master's ``weight.to(bf16)`` copy churns its ``id`` at ``_version`` 0."""
     if not weight.is_leaf or not env_flag("HALO_LOWP_WEIGHT_CACHE", default=True):
         return fake_quant(weight, fmt, axis)
     fingerprint = (weight._version, fmt, axis)
-    dequant = _WEIGHT_DEQUANT_CACHE.get(weight, fingerprint)
+    dequant = _weight_dequant_cache.get(weight, fingerprint)
     if dequant is None:
         with torch.no_grad():
             dequant = _round_trip(weight, fmt, axis).to(weight.dtype)
-        _WEIGHT_DEQUANT_CACHE.put(weight, fingerprint, dequant)
+        _weight_dequant_cache.put(weight, fingerprint, dequant)
     return _CachedFakeQuant.apply(weight, dequant)

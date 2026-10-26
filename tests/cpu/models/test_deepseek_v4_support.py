@@ -7,7 +7,6 @@ the per-rope-type inv_freq buffer fix, and the moe_balancing auto resolution.
 """
 
 import tempfile
-from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +20,7 @@ from src.data.collators.factory import select_data_collator
 from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_layer_class
 from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
-from src.kernels.fused_glu import clamped_silu_mul_eager, fused_clamped_silu_mul
+from src.kernels.fused_glu import GluCombine, clamped_silu_mul_eager
 from src.models.moe_balancing import resolve_balancing_mode
 from src.models.patches.attention import _model_is_deepseek_v4
 from src.models.patches.buffer_fixes import finalize_loaded_model
@@ -175,7 +174,7 @@ def test_clamped_glu_matches_hf_apply_gate():
     # The layer seam — the compiled SiLU combine and the generic act_fn fallback, as
     # _init_expert_compute latches them into _fused_glu_mul.
     layer = _bare_ep_layer(act_fn=experts.act_fn, limit=config.swiglu_limit)
-    for combine in (partial(fused_clamped_silu_mul, limit=config.swiglu_limit), layer._clamped_swiglu_eager):
+    for combine in (GluCombine.clamped_silu(config.swiglu_limit), layer._clamped_swiglu_eager):
         layer._fused_glu_mul = combine
         out = layer._glu_combine(gate, up)
         assert torch.allclose(out, expected, atol=1e-6), f"_glu_combine ({layer._glu_combine_name()}) diverged"
@@ -206,19 +205,17 @@ def test_the_real_constructor_arms_the_compiled_silu_path(hidden_act, fused, mon
     """The latched combine decides whether the compiled clamped SwiGLU runs. The equivalence test above
     latches it by hand, so only this — the real ``__init__`` over the library block — pins which branch
     production takes, and a nominal `isinstance(act_fn, nn.SiLU)` test answers False for BOTH rows
-    (`ACT2FN["silu"]` is a `SiLUActivation`), disarming the kernel with no numerical trace.
-
-    The spy is installed BEFORE construction: the latch binds the kernel there, which is what makes the
-    reported combine and the executed one the same declaration."""
+    (`ACT2FN["silu"]` is a `SiLUActivation`), disarming the kernel with no numerical trace."""
     calls: list[float] = []
+    real_call = GluCombine.__call__
 
-    def spy(gate, up, limit):
-        calls.append(limit)
-        return clamped_silu_mul_eager(gate, up, limit)
+    def spy(combine, gate, up):
+        calls.append(combine.limit)
+        return real_call(combine, gate, up)
 
-    monkeypatch.setattr("src.distributed.expert_parallel.layers.deepseek_v4.fused_clamped_silu_mul", spy)
+    monkeypatch.setattr(GluCombine, "__call__", spy)
     layer = _real_moe_layer(hidden_act)
-    assert (getattr(layer._fused_glu_mul, "func", None) is spy) is fused
+    assert (layer._fused_glu_mul == GluCombine.clamped_silu(layer.limit)) is fused
 
     torch.manual_seed(SEED)
     gate, up = torch.randn(16, 8) * 3 * layer.limit, torch.randn(16, 8) * 3 * layer.limit
