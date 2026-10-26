@@ -27,7 +27,6 @@ from torch.utils.checkpoint import checkpoint
 from transformers import Qwen3MoeConfig
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
@@ -36,7 +35,7 @@ from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpoi
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
-from tests.common.parallelism import make_parallelism_config
+from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 
@@ -233,21 +232,15 @@ class _GptOssBlock(nn.Module):
         self.experts = _GptOssExperts(with_activation_constants)
 
 
-def _ep1_config() -> EPConfig:
-    cfg = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    cfg.finalize_expert_assignment(E)
-    return cfg
-
-
 def test_gptoss_layer_reads_activation_constants_from_experts():
-    layer = EPGptOssMoELayer(_GptOssBlock(), _ep1_config())
+    layer = EPGptOssMoELayer(_GptOssBlock(), single_process_ep_config(E))
     assert layer.alpha == 1.702
     assert layer.limit == 7.0
 
 
 def test_gptoss_layer_fails_loud_on_missing_activation_constants():
     with pytest.raises(AttributeError, match="alpha"):
-        EPGptOssMoELayer(_GptOssBlock(with_activation_constants=False), _ep1_config())
+        EPGptOssMoELayer(_GptOssBlock(with_activation_constants=False), single_process_ep_config(E))
 
 
 def _grouped_mm_probe(use_grouped_mm: bool, expert_tp_size: int) -> EPGptOssMoELayer:
@@ -391,7 +384,7 @@ def test_the_gptoss_wrapper_stores_its_router_under_the_declared_attribute():
     """The declaration names one attribute on BOTH sides — the HF block it is read from and the
     wrapper it is re-registered on — so the fp32 upcast and the grad-sync hook (both keyed off
     ``_ROUTER_ATTR``) reach the module the forward actually routes through."""
-    layer = EPGptOssMoELayer(_GptOssBlock(), _ep1_config())
+    layer = EPGptOssMoELayer(_GptOssBlock(), single_process_ep_config(E))
     assert getattr(layer, EPGptOssMoELayer._ROUTER_ATTR) is layer.router
 
 

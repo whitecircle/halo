@@ -19,8 +19,7 @@ import torch
 from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import save_file
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.trainer import TRAINER_STATE_NAME
 
 from scripts.after_training.merge_peft_adapters import merge_peft_adapter
@@ -35,6 +34,7 @@ from src.checkpoint.format import (
 from src.training.environment import _classify_resume_checkpoint
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import word_level_tokenizer
 
 PartialState()
 
@@ -48,18 +48,13 @@ RESUME_STATE = (
     RESUME_ADAPTER_MARKER_FILE,
     RESUME_ADAPTER_DIR,
 )
-VOCAB = {"<unk>": 0, "<eos>": 1, "hello": 2, "world": 3}
 
 
 def _training_checkpoint(path) -> str:
     """A tiny merge-on-save training checkpoint: weights, tokenizer and every resume file."""
-    backend = Tokenizer(models.WordLevel(VOCAB, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>"
-    )
+    tokenizer = word_level_tokenizer(("hello", "world"))
     torch.manual_seed(0)
-    Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, "vocab_size": len(VOCAB)})).save_pretrained(path)
+    Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, "vocab_size": len(tokenizer)})).save_pretrained(path)
     tokenizer.save_pretrained(path)
     (path / RESUME_ADAPTER_DIR).mkdir()
     save_file(
@@ -91,9 +86,8 @@ def test_a_vocab_patch_of_a_training_checkpoint_carries_no_resume_state(tmp_path
 
     patch_vocab.main()
 
-    assert Qwen3ForCausalLM.from_pretrained(out).get_input_embeddings().weight.shape[0] > len(VOCAB), (
-        "premise: the patch grew the vocabulary"
-    )
+    grown = Qwen3ForCausalLM.from_pretrained(out).get_input_embeddings().weight.shape[0]
+    assert grown > Qwen3Config.from_pretrained(source).vocab_size, "premise: the patch grew the vocabulary"
     _assert_no_resume_state(out)
 
 

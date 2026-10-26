@@ -24,7 +24,6 @@ from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import Mistral4Experts
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase, EPSharedExpertsMoELayerBase
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
@@ -36,6 +35,7 @@ from src.kernels.fused_glu import (
     is_silu_activation,
     resolve_fused_glu_mul,
 )
+from tests.common.parallelism import single_process_ep_config
 
 E, K, H, M = 4, 2, 8, 16
 
@@ -93,18 +93,14 @@ def _real_gemma4_experts() -> Gemma4TextExperts:
 
 def test_gemma4_layer_enables_fused_geglu_with_production_activation():
     """End of the wire: the layer must latch the tanh-GeGLU kernel, not merely recognize the gate."""
-    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    config.finalize_expert_assignment(E)
-    layer = EPGemma4MoELayer(_real_gemma4_experts(), config).cpu()
+    layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
     assert layer._fused_glu_mul is fused_gelu_tanh_mul
 
 
 def test_gemma4_fused_combine_matches_the_eager_activation():
     """The latched kernel must compute what ``act_fn(gate) * up`` computes. The CPU path is eager,
     so this pins the WIRING; ``tests/gpu/kernels/test_fused_glu.py`` pins the Triton kernel."""
-    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    config.finalize_expert_assignment(E)
-    layer = EPGemma4MoELayer(_real_gemma4_experts(), config).cpu()
+    layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
 
     gate, up = torch.randn(7, M), torch.randn(7, M)
     expected = F.gelu(gate, approximate="tanh") * up
@@ -115,9 +111,7 @@ def test_packed_combine_follows_the_latch(monkeypatch):
     """The fused ``[gate | up]`` path runs the packed kernel of whatever combine is latched, including a
     family's clamp-binding partial (with its bound keywords), and a latch with no packed form (a bound
     method, or eager) keeps the chunked seam rather than silently switching activation."""
-    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    config.finalize_expert_assignment(E)
-    layer = EPGemma4MoELayer(_real_gemma4_experts(), config).cpu()
+    layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
     gate_up = torch.randn(7, 2 * M)
     calls = []
     monkeypatch.setitem(
@@ -207,9 +201,7 @@ def test_base_glu_combine_name_tracks_the_latch(monkeypatch):
     """Keeps the override test above honest: for a family that DOES use the base seam, the reported
     name must follow the latch — fused when armed, ``eager`` when not, and ``eager`` under
     ``HALO_FUSED_GLU=0``, where the armed kernel runs its eager form."""
-    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    config.finalize_expert_assignment(E)
-    layer = EPGemma4MoELayer(_real_gemma4_experts(), config).cpu()
+    layer = EPGemma4MoELayer(_real_gemma4_experts(), single_process_ep_config(E)).cpu()
     monkeypatch.setattr(fused_glu, "_FUSED_GLU_ENABLED", True)
     assert layer._glu_combine_name() == fused_gelu_tanh_mul.__name__
     layer._fused_glu_mul = partial(fused_glu.fused_clamped_silu_mul, limit=7.0)

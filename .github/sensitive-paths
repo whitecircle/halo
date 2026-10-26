@@ -1,6 +1,7 @@
 # Paths a change may touch only with explicit, informed approval (CLAUDE.md, Process).
 # One glob per line, matched against a repo-relative file path: '*' stays within one path segment,
-# '**' spans any number of them. '#' starts a comment.
+# '**' matches zero or more whole segments, and a directory is written dir/**.
+# '#' starts a whole-line comment.
 
 # Build and dependency surface
 Dockerfile*

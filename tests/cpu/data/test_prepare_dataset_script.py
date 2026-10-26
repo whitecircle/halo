@@ -33,12 +33,11 @@ import tempfile
 import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
 
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.sources.loading import load_preprocessed_dataset
 from tests.common.repo import REPO_ROOT, load_script_module
+from tests.common.tiny_models import word_level_tokenizer
 
 _SCRIPT = REPO_ROOT / "scripts/before_training/prepare_dataset.py"
 
@@ -254,15 +253,6 @@ def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
     assert "REACHED_LOAD" not in output, f"the refusal came after the input dataset was fetched:\n{output}"
 
 
-def _save_tiny_tokenizer(directory: str) -> None:
-    vocab = {"<unk>": 0, "<eos>": 1, **{word: i + 2 for i, word in enumerate(_WORDS)}}
-    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    PreTrainedTokenizerFast(
-        tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>"
-    ).save_pretrained(directory)
-
-
 def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks():
     """The real script, unstubbed, on a local raw-text corpus with ``--num-shards 4``: the published
     artifact must load through ``load_preprocessed_dataset`` for each of 4 data-parallel ranks, and
@@ -272,7 +262,7 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
     num_shards, num_docs = 4, 16
     with tempfile.TemporaryDirectory() as directory:
         raw, tokenizer_dir, out = (os.path.join(directory, name) for name in ("raw", "tok", "out"))
-        _save_tiny_tokenizer(tokenizer_dir)
+        word_level_tokenizer(_WORDS).save_pretrained(tokenizer_dir)
         # Each document tokenizes to a distinct id sequence, so a row is identifiable after tokenization.
         Dataset.from_dict({"text": [f"doc {i}" for i in range(num_docs)]}).save_to_disk(raw)
         argv = [

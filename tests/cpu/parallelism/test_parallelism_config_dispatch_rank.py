@@ -15,17 +15,12 @@ shapes across both layouts, and asserts the two agree.
     python tests/cpu/parallelism/test_parallelism_config_dispatch_rank.py
 """
 
-import types
-from unittest.mock import patch
-
 import pytest
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.group_layout import etp_dispatch_coords
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.parallelism import make_parallelism_config
-
-_EP_MOD = "src.distributed.expert_parallel.config"
+from tests.common.parallelism import make_parallelism_config, stubbed_process_groups
 
 # (world_size, domain, ep_size, expert_tp_size, node_local) — shapes BOTH classes accept.
 SHAPES = [
@@ -48,18 +43,7 @@ def _make_parallelism_config(rank: int, world_size: int, gpus_per_node: int, **k
 
 def _make_ep_config(rank: int, world_size: int, gpus_per_node: int, **kwargs) -> EPConfig:
     """Build the REAL EPConfig for ``rank`` with distributed stubbed (new_group → rank tuple)."""
-    fake_dist = types.SimpleNamespace(
-        is_initialized=lambda: True,
-        new_group=lambda ranks, timeout=None: tuple(ranks),
-    )
-    with (
-        patch(f"{_EP_MOD}.dist", fake_dist),
-        patch(f"{_EP_MOD}.get_global_rank", return_value=rank),
-        patch(f"{_EP_MOD}.get_global_world_size", return_value=world_size),
-        patch(f"{_EP_MOD}.get_local_world_size", return_value=gpus_per_node),
-        patch(f"{_EP_MOD}.get_nccl_timeout", return_value=None),
-        patch(f"{_EP_MOD}.is_global_main_process", return_value=False),
-    ):
+    with stubbed_process_groups(world_size, rank):
         return EPConfig(world_size=world_size, gpus_per_node=gpus_per_node, **kwargs)
 
 

@@ -36,8 +36,7 @@ import pytest
 import torch
 from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 from trl import ModelConfig
 
@@ -56,6 +55,7 @@ from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.loading.peft_setup import build_peft_config
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import word_level_tokenizer
 
 _TINY_QWEN3 = {
     "vocab_size": 64,
@@ -78,18 +78,11 @@ def _load_merge_script():
     return load_script_module("scripts/after_training/merge_peft_adapters.py", "merge_peft_adapters_e2e")
 
 
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    """A real fast tokenizer built in-process: the merge refuses a checkpoint without one, and a hub
-    download would make this test network-bound."""
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2, "world": 3}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
-
-
 def _build_base(base_dir: Path) -> None:
     torch.manual_seed(0)
     Qwen3ForCausalLM(Qwen3Config(**_TINY_QWEN3)).save_pretrained(base_dir)
-    _tiny_tokenizer().save_pretrained(base_dir)
+    # The merge refuses a checkpoint without a tokenizer.
+    word_level_tokenizer(("hello", "world")).save_pretrained(base_dir)
 
 
 def _cp_context(model) -> CheckpointContext:

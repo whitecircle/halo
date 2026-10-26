@@ -55,7 +55,7 @@ make test-gpu-core                           # core GPU tier (pre-merge, GPU cha
 make test-gpu-full                           # full GPU tier (heavy, many-GPU; run by hand)
 
 # Benchmarks
-make bench                                   # EP/TP throughput benchmarks (NPROC GPUs)
+make bench BAND=1                            # throughput + peak memory held to tests/baselines/bench (8 GPUs)
 
 # Image builds (credential-free — every dep is public)
 make build-blackwell

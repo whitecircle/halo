@@ -32,21 +32,11 @@ import torch.nn as nn
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.grad_sync import create_router_grad_hook
 from src.trainers.mixins.base import DistributedTrainerMixin
+from tests.common.parallelism import stubbed_process_groups
 
-_EP_MOD = "src.distributed.expert_parallel.config"
 _GS_MOD = "src.distributed.expert_parallel.grad_sync"
 # The trainer-side sweep, whose globals the deferred-sync tests patch.
 _MIXIN_MOD = "src.trainers.mixins.grad_sync"
-
-
-def _recording_dist(calls: list):
-    """Stub ``torch.distributed``: ``new_group`` records the rank list and returns it as the handle."""
-
-    def _new_group(ranks, timeout=None):
-        calls.append(tuple(ranks))
-        return tuple(ranks)
-
-    return types.SimpleNamespace(is_initialized=lambda: True, new_group=_new_group)
 
 
 def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs):
@@ -55,14 +45,7 @@ def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs):
     Returns ``(config, calls)`` where ``calls`` is the ordered ``new_group`` rank-list sequence."""
     calls: list = []
     rank_offset = (rank // stage_world_size) * stage_world_size
-    with (
-        patch(f"{_EP_MOD}.dist", _recording_dist(calls)),
-        patch(f"{_EP_MOD}.get_global_rank", return_value=rank),
-        patch(f"{_EP_MOD}.get_global_world_size", return_value=world_size),
-        patch(f"{_EP_MOD}.get_local_world_size", return_value=8),
-        patch(f"{_EP_MOD}.get_nccl_timeout", return_value=None),
-        patch(f"{_EP_MOD}.is_global_main_process", return_value=False),
-    ):
+    with stubbed_process_groups(world_size, rank, calls):
         return EPConfig(world_size=stage_world_size, rank_offset=rank_offset, **kwargs), calls
 
 

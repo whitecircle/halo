@@ -29,12 +29,9 @@ from src.env import env_str
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.online_grpo_e2e import modes_for, run_online_grpo_e2e
-from tests.common.weight_sync import weight_transfer_port
+from tests.common.weight_sync import VLLM_DENSE_SERVER_URL, weight_transfer_port
 
 MODEL_NAME = env_str("HALO_TEST_ONLINE_GRPO_DENSE_MODEL", QWEN3_0_6B)
-# Its own endpoint: the MoE half of this pair serves a different checkpoint on VLLM_SERVER_URL,
-# and every row here asserts on logprobs only this model's server can produce.
-SERVER_URL = env_str("HALO_TEST_VLLM_DENSE_SERVER_URL") or env_str("VLLM_SERVER_URL") or "http://localhost:8010"
 
 
 def _row_index(trainer: str, mode: str, resume: bool) -> int:
@@ -60,7 +57,7 @@ def run(ctx) -> dict:
         trainer_kind=args.trainer,
         mode=args.mode,
         resume=args.resume,
-        server_url=SERVER_URL,
+        server_url=VLLM_DENSE_SERVER_URL,
         group_port=weight_transfer_port(
             "HALO_TEST_VLLM_GROUP_PORT", offset=_row_index(args.trainer, args.mode, args.resume)
         ),

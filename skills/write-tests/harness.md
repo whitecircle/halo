@@ -211,8 +211,9 @@ those, kept separate only so the manifest can attach its family markers, timeout
     top level: `tokens_per_second` (per-GPU), `cluster_tokens_per_second`, `peak_allocated_gb`,
     `training_peak_allocated_gb`, `avg_step_time_seconds`. MFU/S-MFU/TFLOPS live under `"diagnostics"` and
     are never gated.
-    - Benchmarks: `emit_benchmark("<key>", efficiency_cb)` prints a `__HALO_BENCH__` line a
-    refresh run uses to seed `tests/baselines/<key>.json`; `format_benchmark_report(cb)` for
+    - Benchmarks: `emit_benchmark("<key>", efficiency_cb)` (`emit_save_benchmark` for a checkpoint
+    save) prints this rank's `__HALO_BENCH__` line, which `make bench BAND=1` holds to
+    `tests/baselines/bench/<key>.json` and `make bench RECORD=1` records; `format_benchmark_report(cb)` for
     the human log. The result/bench lines (`RESULT_SENTINEL` = `__HALO_TEST_RESULT__`,
     `BENCH_SENTINEL` = `__HALO_BENCH__`) survive interleaved torchrun stdout.
 

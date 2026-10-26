@@ -327,11 +327,12 @@ Throughput benchmarks live under `tests/gpu/profiling/`, grouped by what they me
 | Kernel / mechanism A/B | `benchmark_attention_implementations` (FA4/FA2 vs flex/sdpa/eager, fwd + bwd), `benchmark_gemma4_attention` (Gemma 4 attention backends per layer type), `benchmark_grouped_mm` (loop vs `grouped_mm`), `benchmark_moe_block` (the Gemma 4 26B-A4B routed-expert block: transformers eager / `grouped_mm` vs Halo's grouped path), `benchmark_torch_compile` (Liger × compile 2×2 on EP), `benchmark_collators` (packing vs padding-free), `benchmark_roofline`, `bench_ep_buffer_backends` (DeepEP V1 Buffer vs V2 ElasticBuffer) |
 | Stock-TRL reference | `benchmark_trl_baseline` (same `EfficiencyCallback` metrics), `benchmark_convergence` (loss curves, same seed + data order) |
 
-Shell runners in the same directory: `run_all_benchmarks.sh`, `run_mfu_benchmarks.sh`,
-`run_ep_tp_benchmarks.sh`.
+Shell runners in the same directory: `run_all_benchmarks.sh`, `run_mfu_benchmarks.sh`, and
+`run_baseline_benchmarks.sh`, the rows `make bench` holds to `tests/baselines/bench/`
+([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
 
 ```bash
-./tests/gpu/profiling/run_ep_tp_benchmarks.sh --quick
+make bench BAND=1
 torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_smpo_ep.py --ep 8
 ```
 

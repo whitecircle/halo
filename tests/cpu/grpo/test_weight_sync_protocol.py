@@ -30,11 +30,9 @@ Run: ``python tests/cpu/grpo/test_weight_sync_protocol.py`` (or ``pytest -m cpu`
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import socket
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import requests
@@ -53,162 +51,12 @@ from src.trainers.grpo.rollout.weight_sync_clients import (
     verify_context_window,
     verify_sampler_logprob_reference,
 )
+from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer, fake_server_class
 from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 
 # Well above the client deadlines each test monkeypatches down, so a block is observed, not waited out.
 JOIN_TIMEOUT_S = 30.0
-# vLLM 0.26.0's default CUDA-graph capture range: prefills up to this many tokens replay a captured graph.
-GRAPH_CAPTURE_TOKENS = 512
-
-
-class FakeVLLMServer:
-    """Fake vLLM weight-transfer endpoints that track real engine state (paused / update open).
-
-    ``status`` overrides a path's HTTP status while the *state change* still happens first, exactly as
-    vLLM's handlers do (pause the engine, then write the reply). ``refuse`` models the other failure
-    shape — the request never reached the engine, so no state changed.
-    """
-
-    def __init__(self):
-        self.paused = False
-        self.update_open = False
-        # /get_world_size: 0 makes the trainer group a world of one, so create() returns without a peer
-        # while rank 0 still binds the listener the port tests exercise.
-        self.world_size = 1
-        # Declared on the model card only when set, as a server without one reports no context window.
-        self.max_model_len: int | None = None
-        # What /v1/completions logprobs account for: vLLM's raw default, its processed mode
-        # (temperature + nucleus renormalization), or SGLang's default (temperature only).
-        self.logprobs_mode = "raw_logprobs"
-        # Added to every prefill log-prob of a request within the capture range: an engine whose prompt
-        # log-probs depend on whether the prefill replayed a graph (vLLM 0.26.0's spec-decode overwrite).
-        self.graph_prefill_shift = 0.0
-        self.graph_capture_tokens = GRAPH_CAPTURE_TOKENS
-        self.requests: list[str] = []
-        self.bodies: dict[str, dict] = {}
-        self.posted: list[tuple[str, dict]] = []
-        self.queries: dict[str, str] = {}
-        self.status: dict[str, int] = {}
-        self.refuse: set[str] = set()
-        self._lock = threading.Lock()
-        server = self
-
-        class Handler(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.0"
-
-            def log_message(self, *args):
-                pass
-
-            def _reply(self, code: int, body: dict | None = None):
-                payload = json.dumps(body or {}).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
-
-            def do_GET(self):
-                path = self.path.split("?")[0]
-                with server._lock:
-                    server.requests.append(f"GET {path}")
-                code = server.status.get(path, 200)
-                if path == "/health":
-                    self._reply(code)
-                elif path == "/is_paused":
-                    self._reply(code, {"is_paused": server.paused})
-                elif path == "/v1/models":
-                    card = {"id": "fake-model"}
-                    if server.max_model_len is not None:
-                        card["max_model_len"] = server.max_model_len
-                    self._reply(code, {"data": [card]})
-                elif path == "/get_world_size":
-                    self._reply(code, {"world_size": server.world_size})
-                else:
-                    self._reply(404)
-
-            def _completion_logprobs(self, body: dict) -> list[float]:
-                """Top logprobs of a fixed 3-token prefill under the server's logprobs mode."""
-                logits = torch.tensor([2.0, 0.0, -1.0])
-                if server.logprobs_mode == "raw_logprobs":
-                    return torch.log_softmax(logits, dim=0).tolist()
-                logprobs = torch.log_softmax(logits / float(body.get("temperature", 1.0)), dim=0)
-                if server.logprobs_mode == "processed_logprobs" and float(body.get("top_p", 1.0)) < 1.0:
-                    probs = logprobs.exp()
-                    keep = probs.cumsum(0) - probs < float(body["top_p"])
-                    logprobs = torch.where(keep, torch.log(probs / probs[keep].sum()), torch.full_like(probs, -1e9))
-                return logprobs.tolist()
-
-            def do_POST(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length)
-                path, _, query = self.path.partition("?")
-                with server._lock:
-                    server.requests.append(f"POST {path}")
-                    server.queries[path] = query
-                    if raw:
-                        server.bodies[path] = json.loads(raw)
-                        server.posted.append((path, server.bodies[path]))
-                    if path in server.refuse:
-                        self._reply(503)
-                        return
-                    if path == "/generate" and server.bodies[path].get("return_logprob"):
-                        # SGLang's prefill log-probs: [logprob, token_id, text] per input token from
-                        # logprob_start_len; the window's first entry is its anchor and carries None.
-                        body = server.bodies[path]
-                        shift = server.prefill_shift(len(body["input_ids"]))
-                        ids = body["input_ids"][body["logprob_start_len"] :]
-                        echo = [[None, ids[0], None]] + [[-((tok % 7) + 1) / 10 + shift, tok, None] for tok in ids[1:]]
-                        self._reply(200, {"meta_info": {"input_token_logprobs": echo}})
-                        return
-                    if path == "/v1/completions" and "prompt_logprobs" in server.bodies[path]:
-                        # Prefill echo: one entry per prompt token (None for the first), keyed by token id.
-                        prompt = server.bodies[path]["prompt"]
-                        shift = server.prefill_shift(len(prompt))
-                        echo = [None] + [{str(tok): {"logprob": -((tok % 7) + 1) / 10 + shift}} for tok in prompt[1:]]
-                        self._reply(200, {"choices": [{"text": "", "prompt_logprobs": echo}]})
-                        return
-                    if path == "/v1/completions":
-                        values = self._completion_logprobs(server.bodies[path])
-                        top = {f"tok{i}": v for i, v in enumerate(values)}
-                        self._reply(
-                            200,
-                            {
-                                "choices": [
-                                    {
-                                        "text": "tok0",
-                                        "logprobs": {"token_logprobs": [values[0]], "top_logprobs": [top]},
-                                    }
-                                ]
-                            },
-                        )
-                        return
-                    # The engine acts first; only the reply may fail.
-                    if path == "/pause":
-                        server.paused = True
-                    elif path == "/resume":
-                        server.paused = False
-                    elif path == "/start_weight_update":
-                        server.update_open = True
-                    elif path == "/finish_weight_update":
-                        server.update_open = False
-                self._reply(server.status.get(path, 200))
-
-        self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.url = f"http://127.0.0.1:{self._httpd.server_address[1]}"
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-        self._thread.start()
-
-    def prefill_shift(self, num_tokens: int) -> float:
-        return self.graph_prefill_shift if num_tokens <= self.graph_capture_tokens else 0.0
-
-    def count(self, entry: str) -> int:
-        with self._lock:
-            return self.requests.count(entry)
-
-    def close(self):
-        self._httpd.shutdown()
-        self._httpd.server_close()
 
 
 class FakeCommunicator:
@@ -734,6 +582,22 @@ def test_context_window_preflight_skips_an_unreachable_server(server):
     verify_context_window(VLLMWeightSyncClient, [server.url], 10**9, None)
 
 
+@pytest.mark.parametrize("client_cls", [VLLMWeightSyncClient, SGLangWeightSyncClient], ids=["vllm", "sglang"])
+def test_the_preflight_probe_reads_each_engines_server(client_cls, caplog):
+    """The probe builds its own client per URL and degrades any failure to a warning, so a client that
+    can no longer be built from a URL alone would pass every preflight without reading a server."""
+    server = fake_server_class(client_cls)()
+    try:
+        server.max_model_len = 1024
+        with caplog.at_level(logging.WARNING):
+            verify_context_window(client_cls, [server.url], 512, None)
+            with pytest.raises(ValueError, match=r"context window \(1024\)"):
+                verify_context_window(client_cls, [server.url], 4096, None)
+    finally:
+        server.close()
+    assert not [record.getMessage() for record in caplog.records if "Could not" in record.getMessage()]
+
+
 def test_group_port_is_released_when_group_formation_fails(server, monkeypatch):
     """A failed group formation must give its ``group_port`` back, or every retry EADDRINUSEs.
 
@@ -814,6 +678,7 @@ def test_init_communicator_surfaces_a_server_side_init_failure(server, monkeypat
     monkeypatch.setattr(wsc, "_GROUP_FORMATION_TIMEOUT_S", 20)
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
     server.status["/init_weight_transfer_engine"] = 500
+    server.world_size = 0  # the stub forms no store, so no engine worker may dial the listener
 
     released = threading.Event()
     closed: list[bool] = []
@@ -996,7 +861,7 @@ def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():
     """SGLang's re-score goes through /generate with logprob_start_len on the last prompt token, whose
     entry anchors the window with no log-prob; the completion's entries follow, [logprob, token_id,
     text] each, and must carry the completion's own ids in order."""
-    server = FakeVLLMServer()
+    server = FakeSGLangServer()
     try:
         client = offline_client(SGLangWeightSyncClient, server.url)
         values = client.score_completion_logprobs([11, 12, 13], [14, 15])
@@ -1010,7 +875,7 @@ def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():
 
 def test_sglang_score_completion_logprobs_refuses_a_window_that_does_not_open_on_the_prompt():
     """A window whose anchor is not the last prompt token is a shifted reference, never silently read."""
-    server = FakeVLLMServer()
+    server = FakeSGLangServer()
     try:
         client = offline_client(SGLangWeightSyncClient, server.url)
         with pytest.raises(ValueError, match="at least one prompt token"):

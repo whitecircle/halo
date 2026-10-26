@@ -1,5 +1,6 @@
-"""Weight-sync stand-ins shared by the suites: an offline client, a recording wire, a recording sender,
-a stock model, and the probes of what a LoRA push leaves behind."""
+"""Weight-sync stand-ins shared by the suites: the rollout endpoints and group ports the GPU tiers use,
+an offline client, a recording wire, a recording sender, a stock model, and the probes of what a LoRA
+push leaves behind."""
 
 import copy
 from collections.abc import Callable, Iterator
@@ -17,10 +18,19 @@ from transformers import CONFIG_MAPPING, PretrainedConfig
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.clients.base import BaseWeightSyncClient
 from src.distributed.runtime import DeferredRankFailure, broadcast_from_rank0, materialize_dtensor, to_local
-from src.env import env_int
+from src.env import env_int, env_str
 from src.trainers.grpo.rollout.weight_sync import _HubForwarder
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from tests.common.ports import free_port
+
+# The rollout endpoints the GPU server tiers drive. ``or`` rather than an env_str default: an
+# exported-but-empty variable passes the conftest gate, which reads it the same way, so a suite must
+# fall back to the same URL rather than to "".
+SGLANG_SERVER_URL = env_str("SGLANG_SERVER_URL") or "http://localhost:30000"
+# The vLLM tier's dense endpoint: the MoE suites serve a different checkpoint on VLLM_SERVER_URL.
+VLLM_DENSE_SERVER_URL = (
+    env_str("HALO_TEST_VLLM_DENSE_SERVER_URL") or env_str("VLLM_SERVER_URL") or "http://localhost:8010"
+)
 
 
 def weight_transfer_port(knob: str, offset: int = 0) -> int:

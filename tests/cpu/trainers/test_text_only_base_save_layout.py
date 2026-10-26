@@ -32,13 +32,13 @@ from src.distributed.checkpoint.save import select_checkpoint_saver
 from src.models.loading.model_preparation import auto_load_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
+from tests.common.tiny_models import word_level_tokenizer
 from tests.cpu.checkpoint.test_merge_text_only_adapter_e2e import (
     _FAMILIES,
     _WRAPPER_TEXT_PREFIX,
     _build_multimodal_base,
     _declared_layout,
     _on_disk_keys,
-    _tiny_tokenizer,
 )
 
 _INPUT_IDS = [2, 3, 2, 3]
@@ -65,7 +65,7 @@ def _trainer(model, output_dir: Path) -> DistributedSFTTrainer:
         model=model,
         args=args,
         train_dataset=Dataset.from_dict({"input_ids": [_INPUT_IDS] * 2, "labels": [_INPUT_IDS] * 2}),
-        processing_class=_tiny_tokenizer(),
+        processing_class=word_level_tokenizer(("hello", "world")),
         parallelism_config=make_parallelism_config(world_size=1, gpus_per_node=1),
         moe_balancing="none",
     )

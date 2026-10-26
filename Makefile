@@ -47,7 +47,7 @@ DOCKER_RUN = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_
   -e HF_HOME=$(HALO_SCRATCH)/hf -e HF_DATASETS_CACHE=$(HALO_SCRATCH)/hf/datasets \
   -e TMPDIR=$(HALO_SCRATCH)/tmp -e HALO_DATA_ROOT=$(HALO_SCRATCH) \
   -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EFA_DOCKER_FLAGS) $(NCCL_PROTO_ENV) \
-  $(SERVER_TIER_DOCKER_ENV) $(EXTRA_DOCKER_ENV) \
+  $(SERVER_TIER_DOCKER_ENV) $(EQUIVALENCE_DOCKER_FLAGS) $(EXTRA_DOCKER_ENV) \
   -v $(CURDIR):/workspace $(MNT_MOUNT) $(if $(strip $(AWS_DIR)),-v $(AWS_DIR):/root/.aws,) -w /workspace \
   $(IMAGE)
 # The server tiers' own flags, set per target (see test-gpu-vllm); kept apart from the caller's
@@ -77,11 +77,13 @@ NCCL_PROTO_ENV = $(if $(strip $(NCCL_PROTO)),-e NCCL_PROTO=$(NCCL_PROTO),)
 HF_CACHE ?= $(HALO_SCRATCH)/hf
 DOCKER_RUN_CPU = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_RUNTIME),) \
   $(if $(strip $(HF_CACHE)),-e HF_HOME=$(HF_CACHE) -v $(HF_CACHE):$(HF_CACHE),) \
-  -e PYTHONPATH=/workspace $(EXTRA_DOCKER_ENV) -v $(CURDIR):/workspace -w /workspace $(IMAGE)
+  -e PYTHONPATH=/workspace $(EQUIVALENCE_DOCKER_FLAGS) $(EXTRA_DOCKER_ENV) -v $(CURDIR):/workspace -w /workspace $(IMAGE)
+# Set by the equivalence targets, which run git in the image as the caller (see verify-move).
+EQUIVALENCE_DOCKER_FLAGS =
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format precommit test-cpu seed-hf-cache test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench \
-        docs diagrams build-blackwell build-hopper build-vllm build-sglang build-all \
+.PHONY: help install lint format precommit test-cpu seed-hf-cache test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench bench-band \
+        verify-move verify-artifacts verify-ep verify-cp verify-efficiency docs diagrams build-blackwell build-hopper build-vllm build-sglang build-all \
         ecr-public-login push-public-blackwell push-public-hopper push-public-vllm \
         push-public-sglang push-public-all train clean
 
@@ -158,8 +160,80 @@ test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside T
 	  (EFA=1: add -f docker-compose.sglang.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and sglang_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
-bench: ## run the EP/TP throughput benchmarks
-	$(DOCKER_RUN) bash -lc "./tests/gpu/profiling/run_ep_tp_benchmarks.sh --gpus=$(NPROC)"
+# make bench runs the rows of tests/gpu/profiling/run_baseline_benchmarks.sh on one 8-GPU node BENCH_REPEATS
+# times, one log per repeat under evidence/. BAND=1 then holds the run to the committed baselines in
+# tests/baselines/bench; RECORD=1 makes those baselines the run's, which takes a clean tree (a baseline names
+# the commit it was measured at) and the 3 repeats it defaults to, MIN_REPEATS in
+# tests/common/equivalence/bench_band.py.
+BAND ?=
+RECORD ?=
+BENCH_MODE ?= $(if $(filter 1,$(RECORD)),record,check)
+BENCH_REPEATS ?= $(if $(filter record,$(BENCH_MODE)),3,1)
+BENCH_REVISION = $(shell git rev-parse HEAD 2>/dev/null)$(if $(shell git status --porcelain --untracked-files=no 2>/dev/null),-dirty)
+BENCH_LOGS = $(foreach repeat,$(shell seq $(BENCH_REPEATS)),evidence/bench-$(BENCH_REVISION)-$(repeat).log)
+
+bench: ## throughput and peak-memory rows on one 8-GPU node (BAND=1: hold them to tests/baselines/bench; RECORD=1: rewrite those)
+	$(if $(and $(filter 1,$(RECORD)),$(findstring -dirty,$(BENCH_REVISION))),$(error RECORD=1 needs a clean tree: a baseline names the commit it was measured at))
+	mkdir -p evidence
+	set -o pipefail; for log in $(BENCH_LOGS); do \
+	  $(DOCKER_RUN) bash -lc ./tests/gpu/profiling/run_baseline_benchmarks.sh | tee $$log || exit 1; \
+	done
+	$(if $(or $(filter 1,$(BAND)),$(filter 1,$(RECORD))),$(MAKE) --no-print-directory bench-band BENCH_LOGS="$(BENCH_LOGS)")
+
+# bench-band runs as the caller, so the evidence and the rewritten baselines are the caller's.
+bench-band: ## hold the logs make bench wrote at HEAD to tests/baselines/bench (BENCH_MODE=record: record them; no GPUs)
+	$(DOCKER_RUN_CPU) python -m tests.common.equivalence.bench_band $(BENCH_MODE) $(BENCH_LOGS) \
+	  --revision $(BENCH_REVISION) --image "$(IMAGE)@$(IMAGE_ID)"
+
+# The equivalence harnesses compare HEAD_REF with BASE, both read from git, and write
+# evidence/<harness>-<head sha>.json. They run as the caller, so the evidence is the caller's to remove,
+# and git runs in the image: a worktree's checkout names its git directory outside the repo, so that
+# directory is mounted at its own path, read-only, and git is told to trust a mount it does not own.
+# Every harness but the move kit runs its own module in both trees, so BASE must already carry it.
+BASE ?=
+HEAD_REF ?= HEAD
+# The move kit's declared renames: a JSON file under the repo, by its repo-relative path (only the repo
+# is mounted; see tests/common/equivalence/move_kit.py).
+RENAMES ?=
+# Further move-kit flags, e.g. MOVE_ARGS="--require renames side_effects goldens --min-similarity 70".
+MOVE_ARGS ?=
+# The cases whose deltas a flagged change declares, space-separated: a case path or any prefix of one, e.g.
+# ACCEPT="cpu/qwen3_moe" for verify-ep. Their deltas stay in the evidence without failing it.
+ACCEPT ?=
+# The tiny families a harness runs, space-separated (default: every family it covers).
+FAMILIES ?=
+# Where verify-ep and verify-cp run: cpu (the image, no GPUs) or gpu.
+TIER ?= cpu
+EQUIVALENCE_RUN = $(if $(filter gpu,$(TIER)),$(DOCKER_RUN),$(DOCKER_RUN_CPU))
+GIT_COMMON_DIR = $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+IMAGE_ID = $(shell docker image inspect --format '{{.Id}}' $(IMAGE) 2>/dev/null)
+EQUIVALENCE_ARGS = --base-ref $(BASE) --head-ref $(HEAD_REF) --image "$(IMAGE)@$(IMAGE_ID)"
+COMPARISON_ARGS = $(EQUIVALENCE_ARGS) $(if $(strip $(ACCEPT)),--accept $(ACCEPT))
+FAMILY_ARGS = $(if $(strip $(FAMILIES)),--families $(FAMILIES))
+verify-move verify-artifacts verify-ep verify-cp verify-efficiency bench-band: EQUIVALENCE_DOCKER_FLAGS = --user $(shell id -u):$(shell id -g) -e HOME=/tmp \
+  $(if $(GIT_COMMON_DIR),-v $(GIT_COMMON_DIR):$(GIT_COMMON_DIR):ro) \
+  -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e 'GIT_CONFIG_VALUE_0=*'
+
+verify-move: ## move kit: HEAD_REF only moves BASE's code (BASE=<sha> [RENAMES=<map.json>] [MOVE_ARGS=...])
+	@test -n "$(BASE)" || { echo "BASE=<commit> is required"; exit 1; }
+	$(DOCKER_RUN_CPU) python -m tests.common.equivalence.move_kit $(EQUIVALENCE_ARGS) \
+	  $(if $(RENAMES),--renames $(RENAMES)) $(MOVE_ARGS)
+
+verify-artifacts: ## checkpoint artifacts of every CPU saver mode, BASE vs HEAD_REF (BASE=<sha> [FAMILIES=...] [ACCEPT=...])
+	@test -n "$(BASE)" || { echo "BASE=<commit> is required"; exit 1; }
+	$(DOCKER_RUN_CPU) python -m tests.common.equivalence.checkpoint_artifacts $(COMPARISON_ARGS) $(FAMILY_ARGS)
+
+verify-ep: ## EP forward, backward and gradients bit for bit, BASE vs HEAD_REF (BASE=<sha> [TIER=cpu|gpu] [FAMILIES=...] [ACCEPT=...])
+	@test -n "$(BASE)" || { echo "BASE=<commit> is required"; exit 1; }
+	$(EQUIVALENCE_RUN) python -m tests.common.equivalence.ep_bitwise $(COMPARISON_ARGS) --tier $(TIER) $(FAMILY_ARGS)
+
+verify-cp: ## Ulysses CP attention and model, BASE vs HEAD_REF (BASE=<sha> [TIER=cpu|gpu] [FAMILIES=...] [ACCEPT=...])
+	@test -n "$(BASE)" || { echo "BASE=<commit> is required"; exit 1; }
+	$(EQUIVALENCE_RUN) python -m tests.common.equivalence.cp_equivalence $(COMPARISON_ARGS) --tier $(TIER) $(FAMILY_ARGS)
+
+verify-efficiency: ## what the EfficiencyCallback reports, BASE vs HEAD_REF (BASE=<sha> [ACCEPT=...])
+	@test -n "$(BASE)" || { echo "BASE=<commit> is required"; exit 1; }
+	$(DOCKER_RUN_CPU) python -m tests.common.equivalence.efficiency_callback $(COMPARISON_ARGS)
 
 docs: ## links, anchors and code references in agent-docs/, human-docs/, skills/ and the root markdown
 	./scripts/docs/check_links.sh

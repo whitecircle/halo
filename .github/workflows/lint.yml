@@ -52,11 +52,13 @@ jobs:
       - name: Convention tests
         run: >-
           pytest -p no:cacheprovider
+          tests/cpu/conventions/test_bench_band.py
           tests/cpu/conventions/test_docs_link_check.py
           tests/cpu/conventions/test_env_var_catalogue.py
           tests/cpu/conventions/test_gpu_harness_conventions.py
           tests/cpu/conventions/test_hosted_conventions_are_stdlib.py
           tests/cpu/conventions/test_import_layering.py
+          tests/cpu/conventions/test_move_kit.py
           tests/cpu/conventions/test_package_inits.py
           tests/cpu/conventions/test_references_resolve.py
           tests/cpu/conventions/test_sensitive_label.py

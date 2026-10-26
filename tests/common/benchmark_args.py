@@ -1,4 +1,4 @@
-"""Shared argparse setup for the profiling benchmarks.
+"""Shared argparse setup and baseline-key spelling for the profiling benchmarks.
 
 Individual benchmarks extend the parser with add_argument() before calling
 parse_args().
@@ -112,6 +112,12 @@ def create_benchmark_parser(
         help="Number of dummy samples",
     )
     return parser
+
+
+def axis_tags(**sizes: int) -> list[str]:
+    """``<axis><size>`` for every parallel axis wider than one rank, in argument order: how a benchmark's
+    baseline key spells its layout."""
+    return [f"{axis}{size}" for axis, size in sizes.items() if size > 1]
 
 
 def pp_topology_kwargs(pp_size: int, world_size: int) -> dict:

@@ -1,6 +1,6 @@
 """Structured perf/mem reporting for GPU tests and benchmarks.
 
-Two jobs:
+Three jobs:
 
 1. Snapshot an :class:`~src.callbacks.efficiency.EfficiencyCallback`
    into a flat, JSON-serializable dict with a stable schema. The **headline**
@@ -14,17 +14,23 @@ Two jobs:
    from an infra ERROR (process died, no line emitted). The line is prefixed
    with :data:`RESULT_SENTINEL` so it survives interleaved torchrun stdout.
 
-Golden baselines (``tests/baselines/<key>.json``) carry a :func:`emit_benchmark`
-payload. Nothing reads them automatically — the comparison is by hand, on the
-headline metrics only (``agent-docs/contributing/README.md``).
+3. Emit and parse the :data:`BENCH_SENTINEL` lines a benchmark prints, one per
+   rank and key. The key names the golden ``tests/baselines/bench/<key>.json``
+   that ``tests/common/equivalence/bench_band.py`` holds a ``make bench`` run to.
 
 Standard library only: the launcher process imports this module and stays free of torch.
 """
 
 import json
+import os
+import shlex
+import sys
+from collections.abc import Iterator
 
 RESULT_SENTINEL = "__HALO_TEST_RESULT__"
 BENCH_SENTINEL = "__HALO_BENCH__"
+# A benchmark line's metrics carry two decimals, as the EfficiencyCallback rounds them.
+BENCH_DECIMALS = 2
 
 
 def snapshot_efficiency(cb) -> dict:
@@ -91,15 +97,38 @@ def format_benchmark_report(cb) -> str:
     return "\n".join(lines)
 
 
-def emit_benchmark(key: str, cb) -> None:
-    """Print a parseable benchmark line so a refresh run can seed a golden baseline.
+def _print_sentinel_line(sentinel: str, payload: dict) -> None:
+    """Print ``payload`` after ``sentinel`` in one write. torchrun starts its workers unbuffered, where ``print``
+    writes the newline on its own and lines the ranks print at once run into each other; a line written whole
+    stays whole on a pipe up to ``PIPE_BUF`` bytes."""
+    sys.stdout.write(f"{sentinel} {json.dumps(payload)}\n")
+    sys.stdout.flush()
 
-    ``key`` names the golden file ``tests/baselines/<key>.json`` (e.g.
-    ``"sft_ep_gpt-oss-20b_ep8_s4096"``); the snapshot's headline ``tokens_per_second`` +
-    ``peak_allocated_gb`` are what a refresh is compared against, by hand.
-    """
-    payload = {"key": key, "metrics": snapshot_efficiency(cb)}
-    print(f"{BENCH_SENTINEL} {json.dumps(payload)}", flush=True)
+
+def _emit_bench_line(key: str, metrics: dict) -> None:
+    """Print this rank's benchmark line for ``key``: the rank, the world size and the command that measured
+    ``metrics``, so a baseline records how it was measured and a run is compared only with its own row."""
+    line = {
+        "key": key,
+        "rank": int(os.environ.get("RANK", "0")),
+        "world_size": int(os.environ.get("WORLD_SIZE", "1")),
+        "command": shlex.join(sys.argv),
+        "metrics": metrics,
+    }
+    _print_sentinel_line(BENCH_SENTINEL, line)
+
+
+def emit_benchmark(key: str, cb) -> None:
+    """Print this rank's training-throughput line for ``key``, the golden ``tests/baselines/bench/<key>.json``
+    (e.g. ``"sft_ep_gpt-oss-20b_ep8_s4096"``): the :func:`snapshot_efficiency` of ``cb``."""
+    _emit_bench_line(key, snapshot_efficiency(cb))
+
+
+def emit_save_benchmark(key: str, seconds: float, peak_rss_gib: float) -> None:
+    """Print this rank's checkpoint-save line for ``key``: the save's wall time and this rank's peak resident host
+    memory while it ran."""
+    metrics = {"save_seconds": seconds, "save_peak_rss_gib": peak_rss_gib}
+    _emit_bench_line(key, {name: round(value, BENCH_DECIMALS) for name, value in metrics.items()})
 
 
 def emit_result(
@@ -121,17 +150,35 @@ def emit_result(
     }
     if error:
         line["error"] = error
-    print(f"{RESULT_SENTINEL} {json.dumps(line)}", flush=True)
+    _print_sentinel_line(RESULT_SENTINEL, line)
+
+
+def _sentinel_payloads(stdout: str, sentinel: str) -> Iterator[str]:
+    """The text after ``sentinel`` on each line of ``stdout`` that carries it, in order."""
+    for raw in stdout.splitlines():
+        idx = raw.find(sentinel)
+        if idx != -1:
+            yield raw[idx + len(sentinel) :].strip()
 
 
 def parse_result(stdout: str) -> dict | None:
     """Extract the last emitted result line from captured ``stdout`` (launcher side)."""
     found = None
-    for raw in stdout.splitlines():
-        idx = raw.find(RESULT_SENTINEL)
-        if idx != -1:
-            try:
-                found = json.loads(raw[idx + len(RESULT_SENTINEL) :].strip())
-            except json.JSONDecodeError:
-                continue
+    for payload in _sentinel_payloads(stdout, RESULT_SENTINEL):
+        try:
+            found = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
     return found
+
+
+def parse_benchmarks(stdout: str) -> list[dict]:
+    """Every benchmark line in ``stdout``, in order. A line that does not parse raises: a lost line would drop one
+    rank's measurement from the run it belongs to."""
+    lines = []
+    for payload in _sentinel_payloads(stdout, BENCH_SENTINEL):
+        try:
+            lines.append(json.loads(payload))
+        except json.JSONDecodeError as error:
+            raise ValueError(f"unreadable benchmark line {payload[:200]!r}: {error}") from error
+    return lines

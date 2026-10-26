@@ -51,7 +51,6 @@ from src.distributed.checkpoint.ep_save import (
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.checkpoint.tp_save import save_tp_model
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_classes,
     experts_container_attrs,
@@ -66,6 +65,7 @@ from src.models.structure import persistent_buffers
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from tests.common.checkpoint_io import loading_problems
 from tests.common.models import TINY_STEP3P7_CONFIG
+from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, TinyFamily, tiny_family_model
 from tests.common.utils import safetensors_state_dict
 
@@ -117,7 +117,7 @@ def _loaded(name: str, tmp_path) -> _Loaded:
     _write_hub_checkpoint(family, hub_dir)
     model = _load(family, hub_dir)
     source = {key: tensor.clone() for key, tensor in model.state_dict().items()}
-    patch_moe_model_for_ep(model, EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False))
+    patch_moe_model_for_ep(model, single_process_ep_config())
     ep_layers = {path: module for path, module in model.named_modules() if isinstance(module, EPMoELayerBase)}
     assert ep_layers, f"{name}: the EP patch wrapped nothing, so no assertion here would reach a gather"
     save_ep_model(model, ep_dir)
@@ -369,7 +369,7 @@ def test_a_dequantizing_load_record_is_not_reverted_as_a_hub_layout(tmp_path):
             for proj in ("gate_up_proj", "down_proj")
         ),
     ]
-    patch_moe_model_for_ep(model, EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False))
+    patch_moe_model_for_ep(model, single_process_ep_config())
 
     save_ep_model(model, ep_dir)
 
@@ -383,7 +383,7 @@ def test_a_failing_revert_fails_the_save(tmp_path, monkeypatch):
     hub_dir, ep_dir = str(tmp_path / "hub"), str(tmp_path / "ep")
     _write_hub_checkpoint(family, hub_dir)
     model = _load(family, hub_dir)
-    patch_moe_model_for_ep(model, EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False))
+    patch_moe_model_for_ep(model, single_process_ep_config())
 
     def failing_revert(*args, **kwargs):
         raise ValueError("no reverse for this chunk")

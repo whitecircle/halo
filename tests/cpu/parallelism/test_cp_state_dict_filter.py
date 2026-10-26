@@ -19,8 +19,8 @@ import torch
 import torch.nn as nn
 
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, stale_dense_mlp_keys
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
+from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 
@@ -166,9 +166,7 @@ def _bare_wrapper(model: nn.Module) -> UlyssesCPModelWrapper:
 
 def test_wrapper_state_dict_keeps_ep_experts_and_drops_stale_duplicates():
     torch.manual_seed(0)
-    cfg = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    cfg.finalize_expert_assignment(E)
-    ep_layer = EPGptOssMoELayer(_GptOssBlock(), cfg).cpu()
+    ep_layer = EPGptOssMoELayer(_GptOssBlock(), single_process_ep_config(E)).cpu()
 
     wrapper = _bare_wrapper(_toy_model(ep_layer))
     keys = set(wrapper.state_dict().keys())

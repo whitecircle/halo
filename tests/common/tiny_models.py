@@ -6,12 +6,15 @@ tier and the image build scripts import.
 """
 
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -45,6 +48,7 @@ from transformers import (
     Mistral3Config,
     Mistral3ForConditionalGeneration,
     PreTrainedModel,
+    PreTrainedTokenizerFast,
     Qwen3_5ForCausalLM,
     Qwen3_5MoeConfig,
     Qwen3_5MoeForCausalLM,
@@ -55,6 +59,8 @@ from transformers import (
     Qwen3ForCausalLM,
     Qwen3MoeConfig,
     Qwen3MoeForCausalLM,
+    Qwen3NextConfig,
+    Qwen3NextForCausalLM,
     Step3p7Config,
     Step3p7ForConditionalGeneration,
     ZayaConfig,
@@ -161,6 +167,15 @@ def copy_release_tokenizer(repo_id: str, out_dir: Path) -> None:
     for src in tokenizer_dir.iterdir():
         if src.is_file() and src.name.startswith(TOKENIZER_FILE_PREFIXES):
             shutil.copy2(src, out_dir / src.name)
+
+
+def word_level_tokenizer(words: Sequence[str] = ()) -> PreTrainedTokenizerFast:
+    """An offline whitespace tokenizer over ``<unk>``, ``<eos>`` (also its pad token) and then ``words``, for
+    a synthetic checkpoint that has no release tokenizer to copy."""
+    vocab = {"<unk>": 0, "<eos>": 1, **{word: index for index, word in enumerate(words, start=2)}}
+    backend = Tokenizer(WordLevel(vocab, unk_token="<unk>"))
+    backend.pre_tokenizer = Whitespace()
+    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
 
 
 def build_tied_qwen3_checkpoint(target_dir: str, tokenizer, *, moe: bool, seed: int) -> None:
@@ -387,6 +402,8 @@ TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3
 TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
 # The dense roster, keyed as the dense rows name it (``--family``).
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
+# A MoE family no EP layer class wraps (Qwen3-Next, whose text fields Qwen3.5-MoE kept).
+TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN35_MOE_CONFIG))
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:

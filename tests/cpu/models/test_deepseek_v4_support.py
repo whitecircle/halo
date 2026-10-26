@@ -18,7 +18,6 @@ from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Experts
 
 from src.data.collators.factory import select_data_collator
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_layer_class
 from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
@@ -28,6 +27,7 @@ from src.models.patches.attention import _model_is_deepseek_v4
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.segment_markers import reject_compressed_kv_rows
 from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import randomize_tid2eid
 
 SEED = 1234
@@ -188,9 +188,7 @@ def _real_moe_layer(hidden_act: str) -> EPDeepseekV4MoELayer:
     """The wrapper over the library's own non-hash MoE block, built through its real ``__init__``."""
     config = _tiny_config(hidden_act=hidden_act)
     block = next(layer.mlp for layer in _tiny_model(config).model.layers if not getattr(layer.mlp, "is_hash", True))
-    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    ep_config.finalize_expert_assignment(config.n_routed_experts)
-    return EPDeepseekV4MoELayer(block, ep_config).cpu()
+    return EPDeepseekV4MoELayer(block, single_process_ep_config(config.n_routed_experts)).cpu()
 
 
 def test_real_block_delivers_non_neutral_routing_knobs():
@@ -199,9 +197,7 @@ def test_real_block_delivers_non_neutral_routing_knobs():
     *TopkRouter refactor did exactly this to Mistral4) silently unscales every routed weight."""
     config = _tiny_config(routed_scaling_factor=2.5)
     block = next(layer.mlp for layer in _tiny_model(config).model.layers if not getattr(layer.mlp, "is_hash", True))
-    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    ep_config.finalize_expert_assignment(config.n_routed_experts)
-    layer = EPDeepseekV4MoELayer(block, ep_config).cpu()
+    layer = EPDeepseekV4MoELayer(block, single_process_ep_config(config.n_routed_experts)).cpu()
     assert layer.routed_scaling_factor == 2.5, "scaling fell back to its default — routed weights silently unscaled"
 
 

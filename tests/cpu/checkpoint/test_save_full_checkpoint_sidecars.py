@@ -24,21 +24,15 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.integrations.finegrained_fp8 import Fp8Dequantize
 
 from src.checkpoint.format import revert_conversions_for
 from src.checkpoint.tool_io import save_full_checkpoint
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
+from tests.common.tiny_models import word_level_tokenizer
 
 _STALE = {"special_tokens_map.json": {"pad_token": "<stale>"}, "chat_template.json": {"chat_template": "STALE"}}
-
-
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
 
 
 def _source_with_stale_sidecars(path) -> tuple[Qwen3ForCausalLM, str]:
@@ -54,7 +48,7 @@ def _source_with_stale_sidecars(path) -> tuple[Qwen3ForCausalLM, str]:
 def test_stale_legacy_tokenizer_files_do_not_survive_a_fresh_processing_class_save(tmp_path):
     model, source = _source_with_stale_sidecars(tmp_path / "src")
     out = tmp_path / "out"
-    save_full_checkpoint(model, str(out), processing_class=_tiny_tokenizer(), source_dir=source)
+    save_full_checkpoint(model, str(out), processing_class=word_level_tokenizer(("hello",)), source_dir=source)
 
     assert os.path.isfile(out / "tokenizer.json"), "the fresh tokenizer was not written"
     for name in _STALE:
@@ -68,7 +62,7 @@ def test_a_processing_class_that_still_writes_a_legacy_file_keeps_it(tmp_path):
 
     class _WritesLegacyMap:
         def save_pretrained(self, directory):
-            _tiny_tokenizer().save_pretrained(directory)
+            word_level_tokenizer(("hello",)).save_pretrained(directory)
             with open(os.path.join(directory, "special_tokens_map.json"), "w") as f:
                 json.dump({"pad_token": "<fresh>"}, f)
 

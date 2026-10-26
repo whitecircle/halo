@@ -8,6 +8,7 @@ import gc
 import math
 import os
 import pathlib
+import re
 from collections.abc import Callable, Iterable
 
 import torch
@@ -24,6 +25,8 @@ from tests.common.tolerances import TOL
 # Where a trained causal-LM loss lands: the floor catches a collapsed or masked-away objective, the ceiling
 # an untrained or garbage forward. Finiteness alone passes both.
 LM_TRAINING_LOSS_BAND = (0.05, 20.0)
+# Written to /proc/self/clear_refs, restarts the process's peak resident set size (VmHWM) from its current size.
+_RESET_PEAK_RSS = "5"
 
 
 def imports_name(path: pathlib.Path, name: str) -> bool:
@@ -103,6 +106,19 @@ def gpu_mem_gb() -> float:
 def gpu_peak_mem_gb() -> float:
     """Peak GPU memory usage of the current device, in GB."""
     return torch.cuda.max_memory_allocated() / 1e9
+
+
+def reset_host_peak_rss() -> None:
+    """Restart this process's peak resident set size (Linux ``VmHWM``) from its current size."""
+    pathlib.Path("/proc/self/clear_refs").write_text(_RESET_PEAK_RSS)
+
+
+def host_peak_rss_gib() -> float:
+    """This process's peak resident set size since it started or since :func:`reset_host_peak_rss`, in GiB."""
+    peak = re.search(r"^VmHWM:\s+(\d+) kB$", pathlib.Path("/proc/self/status").read_text(), re.MULTILINE)
+    if peak is None:
+        raise RuntimeError("/proc/self/status carries no VmHWM line to read a peak resident set size from")
+    return int(peak.group(1)) / 1024**2
 
 
 def cos_sim(a: torch.Tensor, b: torch.Tensor, *, label: str) -> float:

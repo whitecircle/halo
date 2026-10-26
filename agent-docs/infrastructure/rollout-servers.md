@@ -128,7 +128,8 @@ rather than the max: two servers each push at 27 GB/s over EFA, half of one serv
 
 A chunk cannot be replayed. A server that fails **after** its first chunk is reported rather than
 reconnected; the trainer does not hold what already landed. One that fails before any chunk went out
-(an engine restarted between syncs, the common case) is recovered by the reconnect + re-flush. Each
+(an engine restarted between syncs, the common case) is recovered by the reconnect + re-flush
+(`tests/gpu/trainers/grpo/test_weight_sync_pool_reconnect.py`). Each
 client owns its own NCCL connection to its server on a `group_port` bound on the *trainer* host
 ([group ports](../training-methods/async-grpo/setup.md#weight-synchronization)).
 
@@ -220,7 +221,11 @@ Stock vLLM 0.26.0 only drops the reference, and `PyNcclCommunicator` has no `__d
 connection strands a live communicator (~633 MiB of device memory per connection on every
 engine-core worker) until `ncclCommInitRank` fails while `/health` still answers `200`. The trainer
 half is symmetric: `close_communicator()` aborts its own communicator instead of dropping it. Both
-halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit.py`.
+halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit.py`. On SGLang the
+client releases the engine's half itself: `close_communicator()` asks the engine to destroy the group
+by name (`/destroy_weights_update_group`) while it destroys its own, and every join clears a stale
+registration first; `tests/gpu/trainers/grpo/test_sglang_weight_transfer_reinit.py` runs the same
+cycles there.
 
 **The spec-decode prompt-log-prob patch** (`docker/vllm/patches/vllm_spec_decode_prompt_logprobs_patch.py`,
 same hook) keeps `prompt_logprobs` correct under speculative decoding. Stock vLLM 0.26.0 runs the

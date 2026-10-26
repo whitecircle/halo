@@ -5,7 +5,7 @@ Dense model SFT MFU/TFLOPS benchmark.
 Measures Model FLOPS Utilization (MFU), achieved TFLOPS, and tokens/sec
 for dense (non-MoE) models using DistributedSFTTrainer with EfficiencyCallback.
 
-Supports modes: FSDP (default), TP, LoRA, QLoRA.
+Supports modes: FSDP (default), CP, TP, LoRA, QLoRA.
 
 ``--model`` and ``--seq`` default to the shared benchmark parser's values
 (``tests/common/benchmark_args.py``), whose default model is a MoE, so every example names a dense one.
@@ -18,6 +18,10 @@ Usage:
     # TP mode (tp=2) with Qwen3-8B
     torchrun --nproc_per_node=2 \
         tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --steps 10 --tp 2
+
+    # Ulysses CP mode (cp=2) with Qwen3-8B
+    torchrun --nproc_per_node=2 \
+        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --steps 10 --cp 2
 
     # LoRA r=64, attention-only targets
     torchrun --nproc_per_node=1 \
@@ -56,7 +60,12 @@ from src.distributed.runtime import barrier
 from src.kernels.liger.orchestrator import apply_liger_kernel
 from src.models.loading.model_preparation import finalize_liger_after_direct_load
 from src.trainers.sft import DistributedSFTTrainer
-from tests.common.benchmark_args import create_benchmark_parser, pp_topology_kwargs, resolve_benchmark_attn
+from tests.common.benchmark_args import (
+    axis_tags,
+    create_benchmark_parser,
+    pp_topology_kwargs,
+    resolve_benchmark_attn,
+)
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (
     cleanup_dirs,
@@ -79,6 +88,7 @@ def main() -> int:
         require_ep=False,
     )
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
+    parser.add_argument("--cp", type=int, default=1, help="Context parallel size (Ulysses, node-local)")
     parser.add_argument(
         "--fused_linear_ce", action="store_true", help="Use FusedLinearCrossEntropy instead of CrossEntropy"
     )
@@ -101,15 +111,14 @@ def main() -> int:
     model_name = args.model_path or model_cfg["hf_name"]
     full_params = model_cfg["full_params"]
     tp_size = args.tp
+    cp_size = args.cp
     pp_size = args.pp
 
     lora_r = args.lora_r
     lora_all_linear = args.lora_all_linear
     qlora = args.qlora
 
-    mode_str = f"TP={tp_size}" if tp_size > 1 else "FSDP"
-    if pp_size > 1:
-        mode_str = f"PP={pp_size} x {mode_str}"
+    layout = "_".join(axis_tags(cp=cp_size, tp=tp_size, pp=pp_size)) or "fsdp"
     if lora_r > 0:
         targets_str = "all_linear" if lora_all_linear else "attn_only"
         peft_str = f"QLoRA r={lora_r} {targets_str}" if qlora else f"LoRA r={lora_r} {targets_str}"
@@ -117,7 +126,7 @@ def main() -> int:
         peft_str = "Full FT"
 
     log(f"\n{'=' * 70}")
-    log(f"  Dense SFT Benchmark ({mode_str}, {peft_str})")
+    log(f"  Dense SFT Benchmark ({layout}, {peft_str})")
     log(f"  Model: {model_name} ({full_params / 1e9:.1f}B params)")
     log(f"  Sequence length: {args.seq}, Steps: {args.steps}, Warmup: {args.warmup}")
     log(f"  World size: {world_size}, Batch size: {args.batch_size}")
@@ -197,7 +206,7 @@ def main() -> int:
             )
 
         # --- Load model ---
-        log(f"\n[4/5] Loading model ({mode_str}, {peft_str})...")
+        log(f"\n[4/5] Loading model ({layout}, {peft_str})...")
         log(f"  GPU memory before load: {gpu_mem_gb():.1f}GB")
 
         pp_kwargs = {
@@ -205,8 +214,8 @@ def main() -> int:
             "pp_microbatches": args.pp_microbatches,
             **pp_topology_kwargs(pp_size, world_size),
         }
-        if tp_size > 1:
-            parallelism_config = ParallelismConfig(tp_size=tp_size, **pp_kwargs)
+        if tp_size > 1 or cp_size > 1:
+            parallelism_config = ParallelismConfig(tp_size=tp_size, cp_size=cp_size, **pp_kwargs)
             model, _ = load_distributed_model(
                 model_name_or_path=model_name,
                 parallelism_config=parallelism_config,
@@ -242,7 +251,7 @@ def main() -> int:
 
         # Under PP the Liger class patches are already applied (direct loading above); TRL's
         # instance re-application would run on the pipeline stage module, so defer the flag —
-        # the same handling as the TP branch.
+        # the same handling as the load_distributed_model branch.
         if pp_size > 1:
             sft_config.use_liger_kernel = False
 
@@ -293,14 +302,13 @@ def main() -> int:
 
         # --- Report ---
         log(f"\n{'=' * 70}")
-        log(f"  BENCHMARK RESULTS ({mode_str}, {peft_str})")
+        log(f"  BENCHMARK RESULTS ({layout}, {peft_str})")
         log(f"{'=' * 70}")
         log(f"  Training loss: {train_result.training_loss:.4f}")
         log(f"  Steps completed: {train_result.global_step}")
         log(f"  Trainable: {trainable / 1e6:.0f}M / {total / 1e6:.0f}M ({100 * trainable / total:.1f}%)")
         log("\n" + format_benchmark_report(efficiency_cb))
-        pp_tag = f"_pp{pp_size}" if pp_size > 1 else ""
-        emit_benchmark(f"sft_dense_{args.model}_tp{tp_size}{pp_tag}_s{args.seq}", efficiency_cb)
+        emit_benchmark(f"sft_dense_{args.model}_{layout}_s{args.seq}", efficiency_cb)
         log(f"{'=' * 70}\n")
 
     except Exception as e:

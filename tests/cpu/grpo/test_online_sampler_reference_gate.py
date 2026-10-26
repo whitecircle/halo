@@ -29,8 +29,8 @@ from src.trainers.grpo.rollout.weight_sync_clients import (
     verify_sampler_logprob_reference,
     verify_sampler_logprob_reference_synced,
 )
+from tests.common.fake_engines import FakeVLLMServer
 from tests.common.repo import REPO_ROOT
-from tests.cpu.grpo.test_weight_sync_protocol import FakeVLLMServer
 
 RLVR_SCRIPT = REPO_ROOT / "scripts/training/online_grpo/rlvr.py"
 ENV_SCRIPT = REPO_ROOT / "scripts/training/environmental_grpo.py"

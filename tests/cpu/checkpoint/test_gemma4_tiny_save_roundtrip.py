@@ -28,10 +28,10 @@ PartialState()  # save_ep_model logs through accelerate's logger
 
 from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from tests.common.checkpoint_io import written_keys
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG
+from tests.common.parallelism import single_process_ep_config
 
 LAYERS = TINY_GEMMA4_MOE_CONFIG["num_hidden_layers"]
 
@@ -42,7 +42,7 @@ def _tiny_gemma4_moe() -> Gemma4ForCausalLM:
 
 
 def _ep_patched(model: Gemma4ForCausalLM) -> Gemma4ForCausalLM:
-    patch_moe_model_for_ep(model, EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False))
+    patch_moe_model_for_ep(model, single_process_ep_config())
     wrapped = [name for name, module in model.named_modules() if isinstance(module, EPMoELayerBase)]
     # Anti-vacuity: on an unpatched model every assertion below passes without exercising the gather.
     assert wrapped == [f"model.layers.{index}.experts" for index in range(LAYERS)], wrapped

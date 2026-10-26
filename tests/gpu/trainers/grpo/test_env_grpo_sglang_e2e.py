@@ -32,11 +32,8 @@ from src.env import env_str
 from tests.common.env_grpo_e2e import run_env_grpo_e2e
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.weight_sync import weight_transfer_port
+from tests.common.weight_sync import SGLANG_SERVER_URL, weight_transfer_port
 
-# ``or`` (not an env_str default): an exported-but-empty SGLANG_SERVER_URL passes the conftest gate,
-# which reads it the same way, so the client must fall back to the same URL rather than to "".
-SERVER_URL = env_str("SGLANG_SERVER_URL") or "http://localhost:30000"
 # Its own knob: the server and the default family differ from the vLLM leg's.
 MODEL_NAME = env_str("HALO_TEST_ENV_GRPO_SGLANG_MODEL", GPT_OSS_20B)
 
@@ -56,7 +53,7 @@ def run(ctx):
     return run_env_grpo_e2e(
         ctx,
         backend="sglang",
-        server_url=SERVER_URL,
+        server_url=SGLANG_SERVER_URL,
         group_port=weight_transfer_port("HALO_TEST_SGLANG_GROUP_PORT"),
         ep_size=args.ep_size,
         tp_size=args.tp_size,

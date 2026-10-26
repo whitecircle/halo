@@ -161,7 +161,7 @@ EP distributes experts; DP = world_size = 8. Small-batch pure EP is **communicat
 | 8 | 1 | 10,905 | 301 | 25.5 GiB | 0.38s |
 | 8 | 4 | 13,239 | 366 | 48.2 GiB | 1.24s |
 
-Rows are the grouped-GEMM path (default); the ep1 row holds experts replicated per rank (`fsdp_shard_ep1_experts: false`). The b1 rows are the golden baselines in `tests/baselines/` (the ep8 file holds one of its row's two repeats). Nothing reads those files automatically: `tokens_per_second` and `peak_allocated_gb` are diffed by hand ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
+Rows are the grouped-GEMM path (default); the ep1 row holds experts replicated per rank (`fsdp_shard_ep1_experts: false`). `make bench` measures the b1 shapes at ep1 (sharded experts, the default), ep2 and ep8 and holds them to committed baselines ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
 
 `fsdp_shard_ep1_experts` (the ep1 default) shards the replicated experts across the DP group. It is faster and leaner than the replicated row at both measured batches: ep1 b1 runs **11,236 tok/s/GPU · 60.3 GiB** (+1.8% throughput, −59% memory), and b4 runs 23,590 · 75.8 GiB against replicated 22,386 · 149.4 GiB (+5.4%, −49%). It is the dense-EP1 config in the [achieved-TFLOPS table](#maximizing-achieved-tflops).
 
@@ -380,7 +380,7 @@ torchrun --nproc_per_node=1 \
     --no_grad_checkpoint --batch_size 2
 ```
 
-`tests/gpu/profiling/run_all_benchmarks.sh` is the master runner across all throughput/TFLOPS benchmarks. `tests/gpu/profiling/run_mfu_benchmarks.sh` sweeps seq 4096/8192/16384 for the SFT/SMPO benchmarks (defaults `GPUS=2 EP=2`; parses `--gpus=`, `--ep=`, `--steps=`, `--warmup=`):
+`tests/gpu/profiling/run_baseline_benchmarks.sh` runs the rows `make bench` holds to `tests/baselines/bench/` ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)). `tests/gpu/profiling/run_all_benchmarks.sh` is the master runner across all throughput/TFLOPS benchmarks. `tests/gpu/profiling/run_mfu_benchmarks.sh` sweeps seq 4096/8192/16384 for the SFT/SMPO benchmarks (defaults `GPUS=2 EP=2`; parses `--gpus=`, `--ep=`, `--steps=`, `--warmup=`):
 
 ```bash
 ./tests/gpu/profiling/run_all_benchmarks.sh

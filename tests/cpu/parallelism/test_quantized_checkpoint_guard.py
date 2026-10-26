@@ -10,7 +10,9 @@ family the error message names — and lets the run continue to an unrelated fai
 
 Both tests drive the real ``patch_moe_model_for_ep`` on the real upstream ``GptOssMLP`` layout, so
 they cover the guard's depth AND a transformers relayout in one place: the refusal test fails with
-``recurse=False``, and the acceptance test fails if the guard starts firing on bf16.
+``recurse=False``, and the acceptance test fails if the guard starts firing on bf16. They patch with a
+one-rank EP config, which builds no process group; the gate runs before construction and is the same
+at every ``ep_size``.
 
 Run: pytest tests/cpu/parallelism/test_quantized_checkpoint_guard.py
 """
@@ -21,8 +23,8 @@ import torch.nn as nn
 from transformers import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssMLP
 
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, patch_moe_model_for_ep
+from tests.common.parallelism import single_process_ep_config
 
 
 def _model_with_gptoss_mlp() -> nn.Module:
@@ -41,12 +43,6 @@ def _model_with_gptoss_mlp() -> nn.Module:
     return model
 
 
-def _ep_config() -> EPConfig:
-    # ep_size=1 keeps wrapper construction process-group-free; the quantization gate itself runs
-    # before construction and is identical at every ep_size.
-    return EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-
-
 def test_quantized_experts_are_refused_at_patch_time():
     """The real guard must see the nested uint8 expert tensor and refuse the model."""
     model = _model_with_gptoss_mlp()
@@ -55,13 +51,13 @@ def test_quantized_experts_are_refused_at_patch_time():
             torch.zeros_like(model.mlp.experts.gate_up_proj, dtype=torch.uint8), requires_grad=False
         )
     with pytest.raises(ValueError, match="de-quantized"):
-        patch_moe_model_for_ep(model, _ep_config())
+        patch_moe_model_for_ep(model, single_process_ep_config())
 
 
 def test_float_experts_are_not_rejected():
     """The guard must not fire on a normal bf16 model — patching proceeds and wraps the block."""
     model = _model_with_gptoss_mlp().to(torch.bfloat16)
-    returned = patch_moe_model_for_ep(model, _ep_config())
+    returned = patch_moe_model_for_ep(model, single_process_ep_config())
     assert type(returned.mlp).__name__ != "GptOssMLP", "the MoE block was not wrapped"
 
 

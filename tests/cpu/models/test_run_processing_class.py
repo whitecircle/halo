@@ -17,12 +17,10 @@ import torch
 from accelerate import PartialState
 from huggingface_hub import constants as hub_constants
 from huggingface_hub.errors import LocalEntryNotFoundError, RemoteEntryNotFoundError
-from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
     PreTrainedTokenizerBase,
-    PreTrainedTokenizerFast,
     Step3p7Config,
     Step3p7ForConditionalGeneration,
     Step3p7ImageProcessor,
@@ -38,7 +36,11 @@ from tests.common.models import (
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
+from tests.common.tiny_models import word_level_tokenizer
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
+
+# Step3p7Processor reads its image placeholder's id off the tokenizer.
+_TOKENIZER_WORDS = ("<im_patch>", "hello")
 
 
 @pytest.fixture(autouse=True)
@@ -54,17 +56,10 @@ def _no_weight_load(monkeypatch):
     monkeypatch.setattr(vlm_setup, "load_model_consuming_init_kwargs", lambda *args, **kwargs: ("model", None))
 
 
-def _tokenizer() -> PreTrainedTokenizerFast:
-    vocab = {"<unk>": 0, "<eos>": 1, "<im_patch>": 2, "hello": 3}
-    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
-
-
 def _step3p7_checkpoint(path, *, with_processor: bool) -> str:
     """A tiny Step-3.7 composite config plus tokenizer, with or without the processor's own config."""
     Step3p7Config(text_config=TINY_STEP3P7_CONFIG, vision_config=TINY_STEP3P7_VISION_CONFIG).save_pretrained(path)
-    tokenizer = _tokenizer()
+    tokenizer = word_level_tokenizer(_TOKENIZER_WORDS)
     tokenizer.save_pretrained(path)
     if with_processor:
         Step3p7Processor(image_processor=Step3p7ImageProcessor(), tokenizer=tokenizer).save_pretrained(path)
@@ -140,7 +135,7 @@ def test_an_unreachable_hub_is_not_read_as_no_processor_config(monkeypatch):
 
 def test_the_resolved_tokenizer_lands_on_whichever_class_the_run_loaded(tmp_path):
     """Read off the object: a multimodal checkpoint's text run can hold a bare tokenizer."""
-    loaded, resolved = _tokenizer(), _tokenizer()
+    loaded, resolved = word_level_tokenizer(_TOKENIZER_WORDS), word_level_tokenizer(_TOKENIZER_WORDS)
     assert install_resolved_tokenizer(loaded, resolved) is resolved
 
     processor = Step3p7Processor(image_processor=Step3p7ImageProcessor(), tokenizer=loaded)

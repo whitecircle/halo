@@ -30,11 +30,16 @@ Usage:
     # Disable Liger kernels
     torchrun --nproc_per_node=2 \
         tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 4096 --no_liger
+
+    # 8 GPUs at EP=8, then the gathered save's wall time and peak host memory
+    torchrun --nproc_per_node=8 \
+        tests/gpu/profiling/benchmark_sft_ep.py --ep 8 --seq 4096 --measure_save
 """
 
 import argparse
 import os
 import sys
+import time
 import traceback
 
 import torch
@@ -47,14 +52,14 @@ from trl import SFTConfig
 from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.profiler import TorchProfilerCallback
 from src.diagnostics.performance_monitor import get_performance_monitor
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.base_layer import EPMoELayerBase, find_ep_layers
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import LOWP_PRECISIONS, ParallelismConfig
-from src.distributed.runtime import barrier
-from src.env import torch_trace_dir
+from src.distributed.runtime import barrier, broadcast_from_rank0
+from src.env import env_float, torch_trace_dir
 from src.trainers.sft import DistributedSFTTrainer
-from tests.common.benchmark_args import create_benchmark_parser, pp_topology_kwargs
+from tests.common.benchmark_args import axis_tags, create_benchmark_parser, pp_topology_kwargs
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (
     cleanup_dirs,
@@ -64,8 +69,19 @@ from tests.common.distributed import (
     teardown_distributed,
 )
 from tests.common.models import MODEL_CONFIGS
-from tests.common.reporting import emit_benchmark, format_benchmark_report
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
+from tests.common.reporting import emit_benchmark, emit_save_benchmark, format_benchmark_report
+from tests.common.utils import cleanup_memory, gpu_mem_gb, host_peak_rss_gib, log, reset_host_peak_rss
+
+# The bench band's negative control: every EP layer holds the GPU idle this long before each forward.
+EP_FORWARD_DELAY_MS = env_float("HALO_TEST_EP_FORWARD_DELAY_MS", 0.0)
+
+
+def _stall_before_forward(*_) -> None:
+    """The negative control's delay, on the GPU timeline: a host sleep alone hides behind queued kernels wherever
+    nothing in the forward waits on the host, as at EP1."""
+    torch.cuda.synchronize()
+    time.sleep(EP_FORWARD_DELAY_MS / 1000)
+
 
 # Main Benchmark
 
@@ -228,6 +244,12 @@ def main() -> int:
         "production default (and required under PP); replication is the higher-memory variant.",
     )
     parser.add_argument(
+        "--measure_save",
+        action="store_true",
+        help="After training, save the model through the trainer (the gathered EP save) and report its wall "
+        "time and each rank's peak host memory while it runs.",
+    )
+    parser.add_argument(
         "--zero3",
         action="store_true",
         help="FSDP2 ZeRO-3 (reshard_after_forward=True) — params resharded after forward, lowest memory. "
@@ -379,6 +401,11 @@ def main() -> int:
         param_count = sum(p.numel() for p in model.parameters())
         log(f"  Model loaded: {param_count / 1e9:.2f}B parameters (local)")
         log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
+
+        if EP_FORWARD_DELAY_MS:
+            for _, layer in find_ep_layers(model):
+                layer.register_forward_pre_hook(_stall_before_forward)
+            log(f"  Negative control: every EP layer holds the GPU idle {EP_FORWARD_DELAY_MS} ms before its forward")
 
         # --- Adapter run: freeze base, then restore the trainable adapters ---
         # Expert adapters are plain grouped parameters built at load; PEFT (attention) is applied
@@ -532,8 +559,20 @@ def main() -> int:
         log(f"  Training loss: {train_result.training_loss:.4f}")
         log(f"  Steps completed: {train_result.global_step}")
         log("\n" + format_benchmark_report(efficiency_cb))
-        pp_tag = f"_pp{args.pp}" if args.pp > 1 else ""
-        emit_benchmark(f"sft_ep_{args.model}_ep{ep_size}{pp_tag}_s{args.seq}", efficiency_cb)
+        layout = "_".join([f"ep{ep_size}", *axis_tags(etp=args.etp, cp=args.cp, tp=args.tp, pp=args.pp)])
+        emit_benchmark(f"sft_ep_{args.model}_{layout}_s{args.seq}", efficiency_cb)
+
+        if args.measure_save:
+            # Every rank names rank 0's directory: the gathered save is collective and one rank writes it.
+            save_dir = broadcast_from_rank0(os.path.join(output_dir, "gathered_save"))
+            barrier()
+            reset_host_peak_rss()
+            start = time.perf_counter()
+            trainer.save_model(save_dir)
+            barrier()
+            save_seconds, peak_rss = time.perf_counter() - start, host_peak_rss_gib()
+            log(f"  Gathered save: {save_seconds:.1f}s, rank 0 peak host RSS {peak_rss:.1f} GiB")
+            emit_save_benchmark(f"sft_ep_{args.model}_{layout}_gathered_save", save_seconds, peak_rss)
 
         if args.comm_profile and rank == 0:
             stats = get_performance_monitor().stats

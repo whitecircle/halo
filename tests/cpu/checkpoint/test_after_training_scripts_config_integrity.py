@@ -29,12 +29,12 @@ import pytest
 import torch
 from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.checkpoint import tool_io
 from tests.common.checkpoint_io import weight_files
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import word_level_tokenizer
 
 # Tiny but real: the scripts run the genuine load → transform → save path.
 _TINY_QWEN3 = {
@@ -81,18 +81,11 @@ mm = load_script_module("scripts/after_training/merge_models.py")
 pv = load_script_module("scripts/before_training/patch_vocab.py")
 
 
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    """A real fast tokenizer built in-process: the merge scripts refuse a checkpoint without one, and
-    downloading a hub tokenizer would make these tests network-bound."""
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2, "world": 3}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
-
-
 def _build_tiny_checkpoint(out_dir: Path, seed: int = 0) -> None:
     torch.manual_seed(seed)
     Qwen3ForCausalLM(Qwen3Config(**_TINY_QWEN3)).save_pretrained(out_dir)
-    _tiny_tokenizer().save_pretrained(out_dir)
+    # The merge scripts refuse a checkpoint without a tokenizer.
+    word_level_tokenizer(("hello", "world")).save_pretrained(out_dir)
 
 
 def _build_lora_adapter(base_dir: Path, adapter_dir: Path) -> None:

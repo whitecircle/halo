@@ -6,6 +6,9 @@ entry point, each name of a ``from … import`` line) or a repo-root path under 
 (``<x>``, ``{}``, ``*``, ``$``, ``…``) cuts a reference short: only the part before it is checked. A
 path that wraps after a ``/`` onto the next comment line is read whole. Names resolve off the source's
 syntax trees (:class:`RepoIndex`); parsing the package's grammar needs Python 3.12.
+
+The syntax readers the resolution rests on are public (patch calls and their targets, the names a scope or
+a module binds, block statements, literal text), so any other check over the source reads it the same way.
 """
 
 from __future__ import annotations
@@ -46,6 +49,15 @@ _REPO_PATH = re.compile(
     rf"(?:(?<=/){_PATH_WRAP.pattern}[\w-]+(?:\.\w|/)[\w./-]*)?)(#[\w-]+)?"
 )
 _PLACEHOLDER_STARTS = ("<", "{", "*", "$", "[", "…", "...")
+# Stands in for an f-string field formatting no module-level string constant; the index reads ``{`` as
+# a placeholder, so a reference is checked only up to it.
+UNKNOWN_FIELD = "{}"
+# Besides patch() itself, the patch methods that take their target as a dotted string, and those that
+# take an owner object and an attribute name; monkeypatch's setattr / delattr take either.
+_STRING_TARGET_METHODS = frozenset({"setattr", "delattr", "dict", "multiple"})
+_OBJECT_TARGET_METHODS = frozenset({"object", "setattr", "delattr"})
+# Each binds its targets in a scope of its own.
+COMPREHENSION_SCOPES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 # What every module has without binding it.
 _MODULE_DUNDERS = frozenset(
     {"__dict__", "__doc__", "__file__", "__loader__", "__name__", "__package__", "__path__", "__spec__"}
@@ -73,6 +85,16 @@ class LoadedModule(NamedTuple):
 
     name: str  # dotted; a load by path reads the file's directories as its packages
     path: str | None  # the repo-relative file a load by path runs; None for a load by name
+
+
+class PatchCall(NamedTuple):
+    """A patch call on a first-party target."""
+
+    target: str  # dotted; the attribute is left off when the call lets it be absent
+    string: ast.expr | None  # the string literal naming the target; None in the object form
+    # False for ``patch.dict``, which edits the one object every holder shares, and for a patch that may
+    # create its attribute: neither replaces a binding something must read.
+    replaces_binding: bool
 
 
 class _Binding(NamedTuple):
@@ -112,7 +134,7 @@ def _directory_before_placeholder(path: str) -> str:
     return path.partition("...")[0].rpartition("/")[0] + "/"
 
 
-def _block_statements(statements: list[ast.stmt]):
+def block_statements(statements: list[ast.stmt]):
     """``statements`` and those nested in their blocks (``if``/``try``/``for``/``with``/``match``), not in
     function or class bodies: every statement that binds a name at this level."""
     for node in statements:
@@ -120,9 +142,9 @@ def _block_statements(statements: list[ast.stmt]):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
         for block in ("body", "orelse", "finalbody"):
-            yield from _block_statements(getattr(node, block, []))
+            yield from block_statements(getattr(node, block, []))
         for clause in [*getattr(node, "handlers", []), *getattr(node, "cases", [])]:
-            yield from _block_statements(clause.body)
+            yield from block_statements(clause.body)
 
 
 def _target_names(target: ast.expr):
@@ -160,7 +182,7 @@ def _scope(statements: list[ast.stmt], module: str, package: str) -> _Scope:
     """The names ``statements`` bind at their own level, in ``module`` of ``package``."""
     names: dict[str, _Binding] = {}
     is_open = False
-    for node in _block_statements(statements):
+    for node in block_statements(statements):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             names[node.name] = _OPAQUE
             is_open |= node.name == "__getattr__"
@@ -194,6 +216,47 @@ def _instance_attributes(cls: ast.ClassDef) -> set[str]:
         if isinstance(target, ast.Attribute)
         and isinstance(target.value, ast.Name)
         and target.value.id in ("self", "cls")
+    }
+
+
+def own_bindings(scope: ast.AST) -> frozenset[str]:
+    """The names a function, lambda or comprehension binds in its own scope, which hide a module-level name
+    inside it: a comprehension's loop targets; a function's parameters and what its body binds, not what a
+    nested function, class or comprehension binds inside itself, nor a name it declares ``global`` or
+    ``nonlocal``."""
+    if isinstance(scope, COMPREHENSION_SCOPES):
+        targets = (node for generator in scope.generators for node in ast.walk(generator.target))
+        return frozenset(node.id for node in targets if isinstance(node, ast.Name))
+    arguments = scope.args
+    every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
+    names = {argument.arg for argument in every if argument}
+    declared: set[str] = set()
+    pending = list(scope.body) if isinstance(scope.body, list) else [scope.body]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+            continue
+        if isinstance(node, (ast.Lambda, *COMPREHENSION_SCOPES)):
+            continue
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(alias.asname or alias.name.partition(".")[0] for alias in node.names)
+        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            declared.update(node.names)
+        pending.extend(ast.iter_child_nodes(node))
+    return frozenset(names - declared)
+
+
+def module_bindings(tree: ast.Module, module: str, package: str) -> dict[str, str]:
+    """The dotted name each top-level name of ``module`` (parsed as ``tree``, in ``package``) is bound to:
+    what an import binds it to, or ``module.name`` for one the module defines or assigns itself."""
+    return {
+        name: binding.target if binding.kind in ("import", "external") else f"{module}.{name}"
+        for name, binding in _scope(tree.body, module, package).names.items()
     }
 
 
@@ -231,6 +294,71 @@ def loaded_module(call: ast.Call, constants: dict[str, str]) -> LoadedModule | N
     if callee == "load_script_module" and target.endswith(".py"):
         return LoadedModule(target.removesuffix(".py").replace("/", "."), target)
     return LoadedModule(target, None) if callee == "import_module" else None
+
+
+def is_string_literal(node: ast.expr) -> bool:
+    """Whether ``node`` is a string literal or an f-string."""
+    return isinstance(node, ast.JoinedStr) or (isinstance(node, ast.Constant) and isinstance(node.value, str))
+
+
+def _field_text(field: ast.expr, constants: dict[str, str]) -> str:
+    if isinstance(field, ast.Constant):
+        return field.value
+    formats_a_constant = (
+        isinstance(field.value, ast.Name)
+        and field.value.id in constants
+        and field.conversion == -1
+        and field.format_spec is None
+    )
+    return constants[field.value.id] if formats_a_constant else UNKNOWN_FIELD
+
+
+def literal_text(node: ast.Constant | ast.JoinedStr, constants: dict[str, str]) -> str:
+    """The text a string literal spells; an f-string field formats the module-level string constant it
+    names, and :data:`UNKNOWN_FIELD` for anything else."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    return "".join(_field_text(field, constants) for field in node.values)
+
+
+def _may_be_absent(call: ast.Call) -> bool:
+    """Whether the patch call lets its attribute be missing (``create=True``, ``raising=False``)."""
+    return any(
+        isinstance(keyword.value, ast.Constant)
+        and (keyword.arg, keyword.value.value) in (("create", True), ("raising", False))
+        for keyword in call.keywords
+    )
+
+
+def patch_call(call: ast.Call, owners: dict[str, str], constants: dict[str, str]) -> PatchCall | None:
+    """What ``call`` patches when it is a ``patch`` / ``monkeypatch`` call on a first-party target; None for any
+    other call. ``owners`` binds a module-level name to the first-party module or object it holds
+    (:meth:`RepoIndex.owners`), which an object-form target names; ``constants`` the module's string
+    constants an f-string target may format."""
+    if not call.args:
+        return None
+    first, rest = call.args[0], call.args[1:]
+    if isinstance(call.func, ast.Name):
+        # The builtin setattr / delattr may create or drop any name; a bare call is a target only as patch().
+        callee, is_method = call.func.id, False
+    elif isinstance(call.func, ast.Attribute):
+        callee, is_method = call.func.attr, True
+    else:
+        return None
+    if is_string_literal(first) and (callee == "patch" or (is_method and callee in _STRING_TARGET_METHODS)):
+        target, string = literal_text(first, constants), first
+    elif is_method and callee in _OBJECT_TARGET_METHODS and rest and isinstance(rest[0], ast.Constant):
+        root, _, chain = (dotted_name(first) or "").partition(".")
+        if root not in owners or not isinstance(rest[0].value, str):
+            return None
+        target, string = ".".join(part for part in (owners[root], chain, rest[0].value) if part), None
+    else:
+        return None
+    if target.partition(".")[0] not in FIRST_PARTY:
+        return None
+    absent = _may_be_absent(call)
+    edits_in_place = is_method and callee == "dict"
+    return PatchCall(target.rpartition(".")[0] if absent else target, string, not (edits_in_place or absent))
 
 
 class RepoIndex:
@@ -280,6 +408,17 @@ class RepoIndex:
         """The first-party name each top-level name of ``file`` (parsed as ``tree``) is bound to by an import."""
         scope = _scope(tree.body, "", self.package_of(file))
         return {name: binding.target for name, binding in scope.names.items() if binding.kind == "import"}
+
+    def owners(self, file: Path, tree: ast.Module, constants: dict[str, str]) -> dict[str, str]:
+        """The first-party module or object each top-level name of ``file`` (parsed as ``tree``, with its
+        string ``constants``) is bound to, by an import or by a loader call."""
+        owners = self.imported_names(file, tree)
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                loaded = loaded_module(node.value, constants)
+                if loaded and loaded.name.partition(".")[0] in FIRST_PARTY:
+                    owners.update((target.id, loaded.name) for target in node.targets if isinstance(target, ast.Name))
+        return owners
 
     def import_binding(self, module: str, name: str) -> str | None:
         """The dotted name an import in ``module`` binds ``name`` to, first-party or not; None when ``name`` is

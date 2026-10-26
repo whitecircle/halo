@@ -580,6 +580,11 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/grpo/test_sglang_weight_sync_e2e.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=900
     ),
+    # The SGLang counterpart of the vLLM re-init suite: a dozen connect/sync/disconnect cycles on one group
+    # port and one group name against the dense server.
+    "trainers/grpo/test_sglang_weight_transfer_reinit.py": TestSpec(
+        nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=600
+    ),
     # The entries below assert the served policy changed, so the server must run the same checkpoint
     # the test trains; the defaults differ per engine (VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507,
     # SGLANG_MODEL=unsloth/gpt-oss-20b-BF16), and HALO_TEST_ENV_GRPO_MODEL / HALO_TEST_ENV_GRPO_SGLANG_MODEL
@@ -796,6 +801,11 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"),
         # 600s covers the cycles and the policy load, with room for a cold cache.
         timeout=600,
+    ),
+    # A pool client whose first update open fails is rebuilt once on its port and re-flushed, against the
+    # dense server.
+    "trainers/grpo/test_weight_sync_pool_reconnect.py": TestSpec(
+        nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"), timeout=600
     ),
     # Embedding resume, family x run shape x --lora (attention / mixed / embedding adapters, DoRA on the
     # attention, off = full fine-tune). Core: every data-parallel shape on the ST encoder, FSDP2 and the TP refusal on a

@@ -26,9 +26,9 @@ from src.trainers.grpo.rollout.weight_sync_clients import (
     _probe_prompt_logprobs,
     verify_engine_prompt_logprobs_synced,
 )
+from tests.common.fake_engines import GRAPH_CAPTURE_TOKENS, FakeEngineServer, fake_server_class
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 from tests.common.repo import REPO_ROOT
-from tests.cpu.grpo.test_weight_sync_protocol import GRAPH_CAPTURE_TOKENS, FakeVLLMServer
 
 PartialState()  # the re-score reports through accelerate's logger, which refuses to log without it
 
@@ -252,15 +252,15 @@ def _word_tokenizer(text):
 
 
 @pytest.fixture
-def prefill_server():
-    server = FakeVLLMServer()
+def prefill_server(client_cls):
+    server = fake_server_class(client_cls)()
     try:
         yield server
     finally:
         server.close()
 
 
-def _scored_lengths(server: FakeVLLMServer) -> list[int]:
+def _scored_lengths(server: FakeEngineServer) -> list[int]:
     """Token count of every prefill-log-prob request the server answered, in order, on either engine's route."""
     return [
         len(body["prompt"] if path == "/v1/completions" else body["input_ids"])

@@ -58,6 +58,7 @@ from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
 from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
 from src.models.moe_balancing import ROUTER_TOPK_FIELDS, resolve_balancing_slot
+from tests.common.parallelism import single_process_ep_config
 
 # The real transformers blocks, built once per family and already parameterized with NON-neutral
 # routing knobs — reusing them is what keeps this file comparing against upstream rather than
@@ -103,14 +104,6 @@ _KNOB_SPELLINGS = {
 _LIVE_TREE_FALLBACKS = {"n_routed_experts"}
 
 
-def _ep_config(num_experts: int) -> EPConfig:
-    # use_grouped_gemm off: the GptOss layout branches on it, and the loop layout is the one a CPU
-    # box can also run a forward through.
-    config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    config.finalize_expert_assignment(num_experts)
-    return config
-
-
 def _build(factory, wrapper, ep_config=None):
     """``(block, wrapper around it)``. The block is NOT deep-copied: adoption by reference is half of
     what is being checked, so the wrapper must see the very modules the block holds. Seeded, so two
@@ -125,7 +118,7 @@ def _build(factory, wrapper, ep_config=None):
             # would still match.
             nn.init.normal_(buffer, std=0.3)
     if ep_config is None:
-        ep_config = _ep_config(wrapper.detect_num_experts(block))
+        ep_config = single_process_ep_config(wrapper.detect_num_experts(block))
     else:
         ep_config.finalize_expert_assignment(wrapper.detect_num_experts(block))
     return block, wrapper(block, ep_config).cpu()

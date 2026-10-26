@@ -19,38 +19,16 @@ the rank math or the enumeration order fails here rather than on 16 GPUs.
 Run: python tests/cpu/parallelism/test_pp_group_construction.py
 """
 
-import types
-from unittest.mock import patch
-
 import pytest
 
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.groups import create_pipeline_group, create_stage_group
-from tests.common.parallelism import make_parallelism_config
-
-_EP_MOD = "src.distributed.expert_parallel.config"
-_CP_MOD = "src.distributed.context_parallel.config"
-_PP_MOD = "src.distributed.pipeline_parallel.groups"
+from tests.common.parallelism import make_parallelism_config, stubbed_process_groups
 
 
-def _recording_dist(calls: list, rank: int = 0):
-    """Stub ``torch.distributed``: ``new_group`` records the rank list and returns it as the handle."""
-
-    def _new_group(ranks, timeout=None):
-        calls.append(tuple(ranks))
-        return tuple(ranks)
-
-    return types.SimpleNamespace(
-        is_available=lambda: True,
-        is_initialized=lambda: True,
-        get_rank=lambda: rank,
-        new_group=_new_group,
-    )
-
-
-def _make_config(cls, module: str, rank: int, *, world_size: int, stage_world_size: int, **kwargs):
+def _make_config(cls, rank: int, *, world_size: int, stage_world_size: int, **kwargs):
     """Build the REAL ``cls`` for ``rank`` of a ``world_size`` job split into stage-wide blocks.
 
     Returns ``(config, calls)`` where ``calls`` is the ordered ``new_group`` rank-list sequence this
@@ -58,21 +36,14 @@ def _make_config(cls, module: str, rank: int, *, world_size: int, stage_world_si
     """
     calls: list = []
     rank_offset = (rank // stage_world_size) * stage_world_size
-    with (
-        patch(f"{module}.dist", _recording_dist(calls)),
-        patch(f"{module}.get_global_rank", return_value=rank),
-        patch(f"{module}.get_global_world_size", return_value=world_size),
-        patch(f"{module}.get_local_world_size", return_value=8),
-        patch(f"{module}.get_nccl_timeout", return_value=None),
-        patch(f"{module}.is_global_main_process", return_value=False),
-    ):
+    with stubbed_process_groups(world_size, rank, calls):
         return cls(world_size=stage_world_size, rank_offset=rank_offset, **kwargs), calls
 
 
 def _ep_over_world(*, world_size: int, stage_world_size: int, **kwargs):
     """Build the EPConfig of every rank of the job. Returns ``{rank: (config, calls)}``."""
     return {
-        rank: _make_config(EPConfig, _EP_MOD, rank, world_size=world_size, stage_world_size=stage_world_size, **kwargs)
+        rank: _make_config(EPConfig, rank, world_size=world_size, stage_world_size=stage_world_size, **kwargs)
         for rank in range(world_size)
     }
 
@@ -96,10 +67,7 @@ def _pp_groups(rank: int, *, world_size: int, pp_size: int):
     """
     config = make_parallelism_config(world_size=world_size, gpus_per_node=8, rank=rank, pp_size=pp_size)
     calls: list = []
-    with (
-        patch(f"{_PP_MOD}.dist", _recording_dist(calls, rank)),
-        patch(f"{_PP_MOD}.get_nccl_timeout", return_value=None),
-    ):
+    with stubbed_process_groups(world_size, rank, calls):
         return create_pipeline_group(config), create_stage_group(config), calls, config
 
 
@@ -190,7 +158,7 @@ def test_ep_new_group_sequence_identical_on_every_rank():
 def test_ep_pinned_call_sequence_ep2_two_stages():
     """Pin the exact ordered sequence for ep_size=2 on world=16, pp=2 (routing, replica, DP-scope)."""
     _, calls = _make_config(
-        EPConfig, _EP_MOD, 12, world_size=16, stage_world_size=8, ep_size=2, gpus_per_node=8, node_local=True
+        EPConfig, 12, world_size=16, stage_world_size=8, ep_size=2, gpus_per_node=8, node_local=True
     )
     assert calls == [
         # Routing groups, block-major.
@@ -291,14 +259,7 @@ def test_ep_etp_groups_stage_confined_under_pp():
 def test_pp1_ep_construction_is_unchanged():
     """Without PP (offset defaulted, world == stage) the created groups are exactly the pre-PP ones."""
     calls: list = []
-    with (
-        patch(f"{_EP_MOD}.dist", _recording_dist(calls)),
-        patch(f"{_EP_MOD}.get_global_rank", return_value=3),
-        patch(f"{_EP_MOD}.get_global_world_size", return_value=8),
-        patch(f"{_EP_MOD}.get_local_world_size", return_value=8),
-        patch(f"{_EP_MOD}.get_nccl_timeout", return_value=None),
-        patch(f"{_EP_MOD}.is_global_main_process", return_value=False),
-    ):
+    with stubbed_process_groups(8, 3, calls):
         cfg = EPConfig(ep_size=2, world_size=8, gpus_per_node=8, node_local=True)
 
     assert cfg.rank_offset == 0
@@ -310,14 +271,7 @@ def test_pp1_ep_construction_is_unchanged():
 def test_pp1_cp_construction_is_unchanged():
     """Same no-op guarantee for CP: default offset reproduces the pre-PP group list."""
     calls: list = []
-    with (
-        patch(f"{_CP_MOD}.dist", _recording_dist(calls)),
-        patch(f"{_CP_MOD}.get_global_rank", return_value=5),
-        patch(f"{_CP_MOD}.get_global_world_size", return_value=8),
-        patch(f"{_CP_MOD}.get_local_world_size", return_value=8),
-        patch(f"{_CP_MOD}.get_nccl_timeout", return_value=None),
-        patch(f"{_CP_MOD}.is_global_main_process", return_value=False),
-    ):
+    with stubbed_process_groups(8, 5, calls):
         cfg = CPConfig(cp_size=2, world_size=8, gpus_per_node=8)
 
     assert cfg.rank_offset == 0
@@ -339,7 +293,6 @@ def test_cp_groups_under_pp():
         built = {
             rank: _make_config(
                 CPConfig,
-                _CP_MOD,
                 rank,
                 world_size=16,
                 stage_world_size=8,
@@ -371,7 +324,6 @@ def test_cp_rank_math_agrees_with_parallelism_config():
         for rank in range(8):
             cfg, _ = _make_config(
                 CPConfig,
-                _CP_MOD,
                 rank,
                 world_size=8,
                 stage_world_size=8,
@@ -399,13 +351,7 @@ def test_parallelism_config_passes_stage_base_rank_to_ep_config():
         assert pc.stage_base_rank == (rank // 8) * 8
 
         calls: list = []
-        with (
-            patch(f"{_EP_MOD}.dist", _recording_dist(calls)),
-            patch(f"{_EP_MOD}.get_global_rank", return_value=rank),
-            patch(f"{_EP_MOD}.get_global_world_size", return_value=16),
-            patch(f"{_EP_MOD}.get_nccl_timeout", return_value=None),
-            patch(f"{_EP_MOD}.is_global_main_process", return_value=False),
-        ):
+        with stubbed_process_groups(16, rank, calls):
             ep = pc.create_ep_config()
 
         assert ep.rank_offset == pc.stage_base_rank, rank

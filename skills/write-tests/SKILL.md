@@ -117,8 +117,8 @@ shell, not the manifest — `tests/gpu/profiling/` and `tests/gpu/optimizers/` b
 manifest's drift guard globs `bench*.py`, so a new one must be listed in `_UNMANIFESTED_BENCHMARKS`
 (`tests/gpu/manifest.py`) or collection fails. They MUST `sys.exit(main())` and return non-zero on
 crash (a crashed benchmark that reports PASS is the worst failure mode). Emit the machine-readable line via
-`emit_benchmark("<key>", efficiency_callback)` and diff the **headline**
-tokens/s/GPU + peak mem against the committed golden in `tests/baselines/<key>.json`. MFU /
+`emit_benchmark("<key>", efficiency_callback)`; a row of `run_baseline_benchmarks.sh` is held to its committed
+golden `tests/baselines/bench/<key>.json` on the **headline** tokens/s/GPU + peak mem by `make bench BAND=1`. MFU /
 S-MFU / TFLOPS are opt-in diagnostics — never the gated number.
 
 ## Cover the matrix

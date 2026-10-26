@@ -43,7 +43,18 @@ from typing import Literal, NamedTuple
 
 import pytest
 
-from scripts.docs.references import FIRST_PARTY, RepoIndex, dotted_name, loaded_module, string_constants
+from scripts.docs.references import (
+    COMPREHENSION_SCOPES,
+    FIRST_PARTY,
+    UNKNOWN_FIELD,
+    RepoIndex,
+    dotted_name,
+    is_string_literal,
+    literal_text,
+    own_bindings,
+    patch_call,
+    string_constants,
+)
 from tests.common.repo import REPO_ROOT
 from tests.common.sample_tree import spelled, write_sample_tree
 
@@ -83,16 +94,7 @@ _SENSITIVE_REEXPORT_IMPORTS = {
     "src/trainers/grpo/rollout/trajectory_tokenize.py": {"src.environments.engine_wire.VLLM_BACKEND"},
 }
 
-# Besides patch() itself, the patch methods that take their target as a dotted string, and those that
-# take an owner object and an attribute name; monkeypatch's setattr / delattr take either.
-_STRING_TARGET_METHODS = frozenset({"setattr", "delattr", "dict", "multiple"})
-_OBJECT_TARGET_METHODS = frozenset({"object", "setattr", "delattr"})
-# Stands in for an f-string field formatting no module-level string constant; the index reads ``{`` as
-# a placeholder, so a reference is checked only up to it.
-_UNKNOWN_FIELD = "{}"
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
-# Each binds its targets in a scope of its own.
-_COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 _INDEX = RepoIndex(REPO_ROOT)
 
 
@@ -131,117 +133,6 @@ def _text_files(root: Path) -> list[Path]:
 _FILES = [path for path in (*_python_files(REPO_ROOT), *_text_files(REPO_ROOT)) if path != Path(__file__).resolve()]
 
 
-def _owners(path: Path, tree: ast.Module, index: RepoIndex, constants: dict[str, str]) -> dict[str, str]:
-    """The first-party module or object each module-level name of ``path`` is bound to, by an import or
-    by a loader call."""
-    owners = index.imported_names(path, tree)
-    for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
-            loaded = loaded_module(node.value, constants)
-            if loaded and loaded.name.partition(".")[0] in FIRST_PARTY:
-                owners.update((target.id, loaded.name) for target in node.targets if isinstance(target, ast.Name))
-    return owners
-
-
-def _field_text(field: ast.expr, constants: dict[str, str]) -> str:
-    if isinstance(field, ast.Constant):
-        return field.value
-    formats_a_constant = (
-        isinstance(field.value, ast.Name)
-        and field.value.id in constants
-        and field.conversion == -1
-        and field.format_spec is None
-    )
-    return constants[field.value.id] if formats_a_constant else _UNKNOWN_FIELD
-
-
-def _string_text(node: ast.Constant | ast.JoinedStr, constants: dict[str, str]) -> str:
-    if isinstance(node, ast.Constant):
-        return node.value
-    return "".join(_field_text(field, constants) for field in node.values)
-
-
-def _is_string(node: ast.expr) -> bool:
-    return isinstance(node, ast.JoinedStr) or (isinstance(node, ast.Constant) and isinstance(node.value, str))
-
-
-def _may_be_absent(call: ast.Call) -> bool:
-    """Whether the patch call lets its attribute be missing (``create=True``, ``raising=False``)."""
-    return any(
-        isinstance(keyword.value, ast.Constant)
-        and (keyword.arg, keyword.value.value) in (("create", True), ("raising", False))
-        for keyword in call.keywords
-    )
-
-
-def _patch_target(
-    call: ast.Call, owners: dict[str, str], constants: dict[str, str]
-) -> tuple[str, ast.expr | None] | None:
-    """``(target, string node)`` for a patch call on a first-party target, the node None in the object
-    form; the attribute is left off when the call lets it be absent."""
-    if not call.args:
-        return None
-    first, rest = call.args[0], call.args[1:]
-    if isinstance(call.func, ast.Name):
-        # The builtin setattr / delattr may create or drop any name; a bare call is a target only as patch().
-        callee, is_method = call.func.id, False
-    elif isinstance(call.func, ast.Attribute):
-        callee, is_method = call.func.attr, True
-    else:
-        return None
-    if _is_string(first) and (callee == "patch" or (is_method and callee in _STRING_TARGET_METHODS)):
-        target, string_node = _string_text(first, constants), first
-    elif is_method and callee in _OBJECT_TARGET_METHODS and rest and isinstance(rest[0], ast.Constant):
-        root, _, chain = (dotted_name(first) or "").partition(".")
-        if root not in owners or not isinstance(rest[0].value, str):
-            return None
-        target, string_node = ".".join(part for part in (owners[root], chain, rest[0].value) if part), None
-    else:
-        return None
-    if target.partition(".")[0] not in FIRST_PARTY:
-        return None
-    return (target.rpartition(".")[0] if _may_be_absent(call) else target), string_node
-
-
-def _patches_a_binding(call: ast.Call) -> bool:
-    """Whether a patch call replaces a binding that something must read: ``patch.dict`` edits the one object
-    every holder shares, and a patch that may create its attribute leaves the target naming the owner."""
-    edits_in_place = isinstance(call.func, ast.Attribute) and call.func.attr == "dict"
-    return not (edits_in_place or _may_be_absent(call))
-
-
-def _own_bindings(scope: ast.AST) -> frozenset[str]:
-    """The names a function, lambda or comprehension binds in its own scope, which hide a module-level name
-    inside it: a comprehension's loop targets; a function's parameters and what its body binds, not what a
-    nested function, class or comprehension binds inside itself, nor a name it declares ``global`` or
-    ``nonlocal``."""
-    if isinstance(scope, _COMPREHENSIONS):
-        targets = (node for generator in scope.generators for node in ast.walk(generator.target))
-        return frozenset(node.id for node in targets if isinstance(node, ast.Name))
-    arguments = scope.args
-    every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs, arguments.vararg, arguments.kwarg]
-    names = {argument.arg for argument in every if argument}
-    declared: set[str] = set()
-    pending = list(scope.body) if isinstance(scope.body, list) else [scope.body]
-    while pending:
-        node = pending.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-            continue
-        if isinstance(node, (ast.Lambda, *_COMPREHENSIONS)):
-            continue
-        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
-            names.add(node.id)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            names.update(alias.asname or alias.name.partition(".")[0] for alias in node.names)
-        elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
-            names.add(node.name)
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            declared.update(node.names)
-        pending.extend(ast.iter_child_nodes(node))
-    return frozenset(names - declared)
-
-
 def _attribute_chains(tree: ast.Module, owners: dict[str, str]) -> list[tuple[int, str, bool]]:
     """``(line, dotted name, assigned)`` for each outermost attribute chain on a module-level name bound to a
     first-party owner, where no local binding hides that name; ``assigned`` when the chain is assigned to."""
@@ -249,8 +140,8 @@ def _attribute_chains(tree: ast.Module, owners: dict[str, str]) -> list[tuple[in
 
     def visit(node: ast.AST, hidden: frozenset[str]) -> None:
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (*_FUNCTIONS, *_COMPREHENSIONS)):
-                visit(child, hidden | _own_bindings(child))
+            if isinstance(child, (*_FUNCTIONS, *COMPREHENSION_SCOPES)):
+                visit(child, hidden | own_bindings(child))
             elif isinstance(child, ast.Attribute) and (chain := dotted_name(child)):
                 root, _, attributes = chain.partition(".")
                 if root in owners and root not in hidden:
@@ -275,13 +166,13 @@ def _run_time_loads(tree: ast.Module) -> list[str]:
             for evaluated in (*getattr(node, "decorator_list", ()), *arguments.defaults, *arguments.kw_defaults):
                 if evaluated is not None:
                     visit(evaluated, hidden)
-            inside = (hidden or frozenset()) | _own_bindings(node)
+            inside = (hidden or frozenset()) | own_bindings(node)
             for statement in node.body if isinstance(node.body, list) else [node.body]:
                 visit(statement, inside)
             return
         if hidden is not None:
-            if isinstance(node, _COMPREHENSIONS):
-                hidden = hidden | _own_bindings(node)
+            if isinstance(node, COMPREHENSION_SCOPES):
+                hidden = hidden | own_bindings(node)
             elif isinstance(node, (ast.Name, ast.Attribute)) and (dotted := dotted_name(node)):
                 # Assigning to a chain loads what it is set on.
                 loaded = dotted if isinstance(node.ctx, ast.Load) else dotted.rpartition(".")[0]
@@ -322,7 +213,7 @@ def _reads_through_modules(index: RepoIndex) -> dict[str, frozenset[str]]:
         if path.name.startswith("test_") and path.is_relative_to(index.root / "tests"):
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        owners = _owners(path, tree, index, string_constants(tree))
+        owners = index.owners(path, tree, string_constants(tree))
         modules = {name: owner for name, owner in owners.items() if index.module_source(owner) is not None}
         for loaded in _run_time_loads(tree):
             root, _, attributes = loaded.partition(".")
@@ -338,7 +229,7 @@ def _unread_patch_target(target: str, index: RepoIndex) -> str | None:
     module's own nor one elsewhere through the module object."""
     module, _, name = target.rpartition(".")
     source = index.module_source(module)
-    if _UNKNOWN_FIELD in target or source is None or source.is_dir() or index.module_source(target) is not None:
+    if UNKNOWN_FIELD in target or source is None or source.is_dir() or index.module_source(target) is not None:
         return None
     if name in _function_reads(source) or name in _reads_through_modules(index).get(module, ()):
         return None
@@ -382,7 +273,7 @@ def _scan_python(path: Path, index: RepoIndex) -> list[Finding]:
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     constants = string_constants(tree)
-    owners = _owners(path, tree, index, constants)
+    owners = index.owners(path, tree, constants)
     findings = []
     for line, dotted, assigned in _attribute_chains(tree, owners):
         why = index.unresolved_name(dotted)
@@ -412,19 +303,18 @@ def _scan_python(path: Path, index: RepoIndex) -> list[Finding]:
                     name = module if alias.name == "*" else f"{module}.{alias.name}"
                     why = index.unresolved_name(name) or _reexported_import(index, module, alias.name)
                     findings.append(Finding(node.lineno, "import", name, why))
-        elif isinstance(node, ast.Call) and (target := _patch_target(node, owners, constants)):
-            dotted, string_node = target
-            if string_node is not None:
-                accounted.add(id(string_node))
-            unread = _unread_patch_target(dotted, index) if _patches_a_binding(node) else None
+        elif isinstance(node, ast.Call) and (patch := patch_call(node, owners, constants)):
+            if patch.string is not None:
+                accounted.add(id(patch.string))
+            unread = _unread_patch_target(patch.target, index) if patch.replaces_binding else None
             findings += [
                 Finding(node.lineno, "patch target", reference.text, reference.why or unread)
-                for reference in index.references(dotted)
+                for reference in index.references(patch.target)
                 if reference.kind == "name"
             ]
     for node in ast.walk(tree):
-        if _is_string(node) and id(node) not in accounted:
-            findings += _text_findings(_string_text(node, constants), node.lineno, index, node.end_lineno)
+        if is_string_literal(node) and id(node) not in accounted:
+            findings += _text_findings(literal_text(node, constants), node.lineno, index, node.end_lineno)
     for line, comments in _comment_blocks(source):
         findings += _text_findings(comments, line, index)
     return findings
@@ -451,7 +341,7 @@ def test_the_sweep_sees_every_kind_of_reference():
         "pyproject.toml",
         ".env.example",
         ".pre-commit-config.yaml",
-        "tests/gpu/profiling/run_ep_tp_benchmarks.sh",
+        "tests/gpu/profiling/run_baseline_benchmarks.sh",
         "docker/training/flash_attn_split_stubs_hopper.cpp",
     } <= swept
     kinds = Counter(finding.kind for path in _FILES for finding in _findings(path))

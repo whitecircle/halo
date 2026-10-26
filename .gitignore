@@ -114,6 +114,8 @@ models/
 out/
 performance_logs/
 trainer_output/
+# Equivalence harness records (make verify-move / verify-artifacts), one per head commit
+/evidence/
 
 # Local-only signing keys / credentials (never commit)
 keys/

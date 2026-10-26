@@ -68,22 +68,31 @@ class FakeStore:
 
 
 @contextlib.contextmanager
-def fake_process_group_mesh(rank: int, world_size: int):
-    """A 1-D CPU device mesh over torch's fake process group, impersonating ``rank``.
+def fake_process_group(rank: int, world_size: int):
+    """torch's fake process group as the default group, impersonating ``rank`` of ``world_size``.
 
-    ``distribute_tensor(..., src_data_rank=None)``, what transformers' TP ``shard_param`` runs,
-    slices the local shard with no collective, so a single CPU process can obtain any rank's shard
-    from the real sharding machinery by re-entering with a different ``rank``. A leftover process
-    group from an earlier test in the same worker is torn down first, since the fake backend needs
-    the default group slot.
+    Its collectives complete at once and move no data. A leftover process group from an earlier test
+    in the same worker is torn down first, since the fake backend needs the default group slot.
     """
     if dist.is_initialized():
         dist.destroy_process_group()
     dist.init_process_group("fake", store=TorchFakeStore(), rank=rank, world_size=world_size)
     try:
-        yield init_device_mesh("cpu", (world_size,))
+        yield
     finally:
         dist.destroy_process_group()
+
+
+@contextlib.contextmanager
+def fake_process_group_mesh(rank: int, world_size: int):
+    """A 1-D CPU device mesh over torch's fake process group, impersonating ``rank``.
+
+    ``distribute_tensor(..., src_data_rank=None)``, what transformers' TP ``shard_param`` runs,
+    slices the local shard with no collective, so a single CPU process can obtain any rank's shard
+    from the real sharding machinery by re-entering with a different ``rank``.
+    """
+    with fake_process_group(rank, world_size):
+        yield init_device_mesh("cpu", (world_size,))
 
 
 def init_distributed() -> tuple[int, int, int]:

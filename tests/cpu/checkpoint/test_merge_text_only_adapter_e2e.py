@@ -33,7 +33,6 @@ import torch
 from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file, save_file
-from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import (
     AutoConfig,
     PreTrainedTokenizerBase,
@@ -53,6 +52,7 @@ from src.models.loading.model_preparation import auto_load_model, resolve_auto_m
 from src.models.loading.tokenizer_setup import load_processing_class
 from tests.common.models import QWEN3_5_2B, TINY_QWEN35_CONFIG, TINY_QWEN35_MOE_CONFIG
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import word_level_tokenizer
 from tests.common.tokenizers import load_cached_processor
 
 _TARGET, _CONTROL = "q_proj", "o_proj"
@@ -75,19 +75,13 @@ _FAMILIES = {
 }
 
 
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2, "world": 3}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
-
-
 # What a run customizes on the tokenizer it saves beside its adapter, none of which the base carries.
 _RUN_CHAT_TEMPLATE = "{% for message in messages %}<run>{{ message['content'] }}{% endfor %}"
 _RUN_SPECIAL_TOKEN = "<run_special>"
 
 
 def _run_tokenizer() -> PreTrainedTokenizerFast:
-    tokenizer = _tiny_tokenizer()
+    tokenizer = word_level_tokenizer(("hello", "world"))
     tokenizer.chat_template = _RUN_CHAT_TEMPLATE
     tokenizer.add_special_tokens({"additional_special_tokens": [_RUN_SPECIAL_TOKEN]})
     return tokenizer
@@ -107,7 +101,7 @@ def _build_multimodal_base(base_dir: Path, family: _Family) -> None:
         vision_config={**vision, "out_hidden_size": family.text_config["hidden_size"]},
     )
     family.wrapper_cls(config).save_pretrained(base_dir)
-    _tiny_tokenizer().save_pretrained(base_dir)
+    word_level_tokenizer(("hello", "world")).save_pretrained(base_dir)
 
 
 def _train_text_only_adapter(

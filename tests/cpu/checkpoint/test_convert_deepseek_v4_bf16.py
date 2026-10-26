@@ -26,12 +26,11 @@ import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import DeepseekV4Config, DeepseekV4ForCausalLM, PreTrainedTokenizerFast
+from transformers import DeepseekV4Config, DeepseekV4ForCausalLM
 
 from scripts.before_training.convert_deepseek_v4_bf16 import main, reject_uneven_fp8_blocks
 from tests.common.models import TINY_DSV4_CONFIG
-from tests.common.tiny_models import randomize_tid2eid
+from tests.common.tiny_models import randomize_tid2eid, word_level_tokenizer
 
 _BLOCK = (128, 128)
 _FP8_MAX = 448.0
@@ -73,12 +72,6 @@ def _reference_dequant(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tenso
     return out.to(torch.bfloat16)
 
 
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
-
-
 def _write_fp8_checkpoint(path) -> tuple[str, dict[str, torch.Tensor], dict]:
     """A tiny DeepSeek-V4 saved by transformers (hub layout), then re-written with its Linear weights
     block-quantized to fp8. Returns the source dir, the dequant oracle keyed by hub name, and the
@@ -87,7 +80,7 @@ def _write_fp8_checkpoint(path) -> tuple[str, dict[str, torch.Tensor], dict]:
     model = DeepseekV4ForCausalLM(DeepseekV4Config(**TINY_DSV4_CONFIG)).to(torch.bfloat16)
     randomize_tid2eid(model)
     model.save_pretrained(path)
-    _tiny_tokenizer().save_pretrained(path)
+    word_level_tokenizer(("hello",)).save_pretrained(path)
     with open(os.path.join(path, "config.json")) as f:
         pristine = json.load(f)
 

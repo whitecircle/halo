@@ -38,9 +38,9 @@ from src.checkpoint.config_export import (
 )
 from src.checkpoint.tool_io import save_full_checkpoint
 from src.distributed.checkpoint.ep_save import save_ep_model
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG, TINY_QWEN3_MOE_CONFIG
+from tests.common.parallelism import single_process_ep_config
 
 GLOBAL_HEAD_DIM = TINY_GEMMA4_MOE_CONFIG["global_head_dim"]
 GLOBAL_KV_HEADS = TINY_GEMMA4_MOE_CONFIG["num_global_key_value_heads"]
@@ -121,7 +121,7 @@ def test_save_full_checkpoint_writes_the_flat_form(tmp_path):
 def test_the_ep_gathered_save_writes_the_flat_form(tmp_path):
     torch.manual_seed(0)
     model = Gemma4ForCausalLM(Gemma4TextConfig(**TINY_GEMMA4_MOE_CONFIG)).to(torch.bfloat16)
-    patch_moe_model_for_ep(model, EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False))
+    patch_moe_model_for_ep(model, single_process_ep_config())
     save_ep_model(model, str(tmp_path))
     _assert_flat_form(_config_json(str(tmp_path)))
 

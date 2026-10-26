@@ -31,8 +31,7 @@ from huggingface_hub import ModelCard
 from huggingface_hub.repocard import metadata_load
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import GptOssConfig, GptOssForCausalLM, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers import GptOssConfig, GptOssForCausalLM, Qwen3Config, Qwen3ForCausalLM
 from trl import ModelConfig
 from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
@@ -55,6 +54,7 @@ from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.models.loading.model_preparation import finalize_run_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.tiny_models import word_level_tokenizer
 
 PartialState()  # the tools' loads log through accelerate's rank-aware logger
 
@@ -122,13 +122,6 @@ Card body written by the model's authors.
 def _tiny_qwen3() -> Qwen3ForCausalLM:
     torch.manual_seed(0)
     return Qwen3ForCausalLM(Qwen3Config(**_TINY_QWEN3))
-
-
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    """Built in-process, so the adapter conversion resolves a processing class without the network."""
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
 
 
 def _card(directory) -> ModelCard:
@@ -475,7 +468,7 @@ def test_the_unmerged_adapter_conversion_tags_its_output(tmp_path):
     """The tool loads its base untagged, so PEFT's card for the converted adapter has no Halo tag of its own."""
     base, adapter, output = tmp_path / "base", tmp_path / "adapter", tmp_path / "converted"
     _tiny_qwen3().save_pretrained(base)
-    _tiny_tokenizer().save_pretrained(base)
+    word_level_tokenizer(("hello",)).save_pretrained(base)
     peft_model = get_peft_model(
         Qwen3ForCausalLM.from_pretrained(base), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])
     )
@@ -493,7 +486,7 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     backbone still carries them, finalized like the EP/TP branch's, for a push of the backbone alone."""
     base = tmp_path / "base"
     _tiny_qwen3().save_pretrained(base)
-    _tiny_tokenizer().save_pretrained(base)
+    word_level_tokenizer(("hello",)).save_pretrained(base)
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
             is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None

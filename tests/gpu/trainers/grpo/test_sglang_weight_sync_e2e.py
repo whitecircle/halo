@@ -30,17 +30,13 @@ from transformers import AutoModelForCausalLM
 
 from src.configs.rollout_config import RolloutConfig
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.env import env_str
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.ray_actors import EnvironmentActor
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
-from tests.common.weight_sync import weight_transfer_port
+from tests.common.weight_sync import SGLANG_SERVER_URL, weight_transfer_port
 
-# ``or`` (not an env_str default): an exported-but-empty SGLANG_SERVER_URL passes the conftest gate,
-# which reads it the same way, so the client must fall back to the same URL rather than to "".
-SGLANG_SERVER_URL = env_str("SGLANG_SERVER_URL") or "http://localhost:30000"
 PROBE_PROMPT = "Count: 1 2 3"
 
 

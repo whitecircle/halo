@@ -413,7 +413,7 @@ def test_guard_bad_ep_scope():
 
 
 def test_guard_world_not_multiple_of_gpus_per_node():
-    _expect_reject("divisible by", world_size=12, gpus_per_node=8)
+    _expect_reject("world_size (12) must be divisible by gpus_per_node (8).", world_size=12, gpus_per_node=8)
 
 
 def test_guard_nvlink_domain_multiple_of_node():
