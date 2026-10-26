@@ -28,12 +28,8 @@ import pytest
 from transformers import AutoConfig, AutoModelForCausalLM, LagunaConfig, PretrainedConfig
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
-from src.checkpoint.config_export import (
-    checkpoint_source_ref,
-    drop_unshipped_auto_map,
-    finalize_exported_config,
-    save_model_config,
-)
+from src.checkpoint.config_export import drop_unshipped_auto_map, finalize_exported_config, save_model_config
+from src.checkpoint.weights_source import config_schema_source
 from tests.common.models import TINY_LAGUNA_CONFIG
 
 # What ``poolside/Laguna-S-2.1``'s config.json declares beside the in-library ``laguna`` model type.
@@ -177,7 +173,7 @@ def _in_library_laguna(source_dir):
 def _save_pretrained_export(model, output_dir: str) -> None:
     """The single-GPU / tool path: ``save_pretrained``, then the shared finalizer."""
     model.save_pretrained(output_dir)
-    finalize_exported_config(model.config, output_dir, source=checkpoint_source_ref(model))
+    finalize_exported_config(model.config, output_dir, source=config_schema_source(model))
 
 
 @pytest.mark.parametrize("export", [save_model_config, _save_pretrained_export], ids=["parallel", "save_pretrained"])

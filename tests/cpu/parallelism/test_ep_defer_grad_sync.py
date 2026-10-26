@@ -39,14 +39,19 @@ _GS_MOD = "src.distributed.expert_parallel.grad_sync"
 _MIXIN_MOD = "src.trainers.mixins.grad_sync"
 
 
-def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs):
-    """Build the REAL ``EPConfig`` for ``rank`` of a ``world_size`` job split into stage-wide blocks.
+def _make_ep(rank: int, *, world_size: int, stage_world_size: int, fsdp_shard_ep1_experts: bool = True, **kwargs):
+    """Build the REAL ``EPConfig`` for ``rank`` of a ``world_size`` job split into stage-wide blocks, with the
+    ``experts_fsdp_managed`` verdict ``ParallelismConfig`` passes for ``fsdp_shard_ep1_experts``.
 
     Returns ``(config, calls)`` where ``calls`` is the ordered ``new_group`` rank-list sequence."""
     calls: list = []
-    rank_offset = (rank // stage_world_size) * stage_world_size
+    stage_base_rank = (rank // stage_world_size) * stage_world_size
+    managed = fsdp_shard_ep1_experts and kwargs["ep_size"] * kwargs.get("expert_tp_size", 1) == 1
     with stubbed_process_groups(world_size, rank, calls):
-        return EPConfig(world_size=stage_world_size, rank_offset=rank_offset, **kwargs), calls
+        config = EPConfig(
+            stage_world_size=stage_world_size, stage_base_rank=stage_base_rank, experts_fsdp_managed=managed, **kwargs
+        )
+        return config, calls
 
 
 # defer_grad_sync truth table
@@ -54,7 +59,7 @@ def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs):
 
 def test_defer_false_without_pp_single_node():
     """pp1, single node, single EP group: hooks stay (defer False), no DP-scope group."""
-    cfg, _ = _make_ep(0, world_size=8, stage_world_size=8, ep_size=8, gpus_per_node=8, node_local=True)
+    cfg, _ = _make_ep(0, world_size=8, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_rank_blocks == 1
     assert not cfg.is_deferred_dp
     assert not cfg.defer_grad_sync
@@ -63,7 +68,7 @@ def test_defer_false_without_pp_single_node():
 
 def test_defer_true_for_multinode_deferred_dp_without_pp():
     """pp1 multi-node multi-group EP (is_deferred_dp) implies defer_grad_sync — superset check."""
-    cfg, _ = _make_ep(0, world_size=16, stage_world_size=16, ep_size=8, gpus_per_node=8, node_local=True)
+    cfg, _ = _make_ep(0, world_size=16, stage_world_size=16, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_rank_blocks == 1
     assert cfg.is_deferred_dp
     assert cfg.defer_grad_sync
@@ -73,7 +78,7 @@ def test_defer_true_for_multinode_deferred_dp_without_pp():
 def test_defer_true_under_pp_even_without_deferred_dp():
     """PP (2 rank blocks), single-node single-group EP: is_deferred_dp is False, but the
     per-microbatch hook firing forces the deferral anyway."""
-    cfg, _ = _make_ep(0, world_size=16, stage_world_size=8, ep_size=8, gpus_per_node=8, node_local=True)
+    cfg, _ = _make_ep(0, world_size=16, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_rank_blocks == 2
     assert not cfg.is_deferred_dp
     assert cfg.defer_grad_sync
@@ -87,7 +92,7 @@ def test_defer_false_under_pp_for_fsdp_sharded_ep1_experts():
         world_size=16,
         stage_world_size=8,
         ep_size=1,
-        gpus_per_node=8,
+        nvlink_domain_size=8,
         node_local=True,
         fsdp_shard_ep1_experts=True,
     )
@@ -103,7 +108,7 @@ def test_defer_true_under_pp_for_unsharded_ep1_experts():
         world_size=16,
         stage_world_size=8,
         ep_size=1,
-        gpus_per_node=8,
+        nvlink_domain_size=8,
         node_local=True,
         fsdp_shard_ep1_experts=False,
     )
@@ -119,7 +124,7 @@ def test_defer_true_under_pp_for_pure_etp():
         stage_world_size=8,
         ep_size=1,
         expert_tp_size=2,
-        gpus_per_node=8,
+        nvlink_domain_size=8,
         node_local=True,
         fsdp_shard_ep1_experts=True,
     )
@@ -151,7 +156,7 @@ def test_every_topology_with_expert_replicas_defers_their_sync(world, stage, ep_
             stage_world_size=stage,
             ep_size=ep_size,
             expert_tp_size=etp,
-            gpus_per_node=8,
+            nvlink_domain_size=8,
             node_local=node_local,
             fsdp_shard_ep1_experts=managed,
         )
@@ -165,7 +170,7 @@ def test_every_topology_with_expert_replicas_defers_their_sync(world, stage, ep_
 
 def test_single_process_mode_defaults():
     """Bare ``python`` launch (dist never initialized): one block, no deferral, world-scope group."""
-    cfg = EPConfig(ep_size=1, world_size=1, gpus_per_node=1)
+    cfg = EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True)
     assert cfg.num_rank_blocks == 1
     assert not cfg.defer_grad_sync
     assert cfg.dp_scope_group is None
@@ -177,7 +182,7 @@ def test_single_process_mode_defaults():
 def test_dp_scope_groups_block_confined_and_identical_order():
     """Every rank creates BOTH blocks' DP-scope groups in one order and keeps exactly its own."""
     built = {
-        rank: _make_ep(rank, world_size=16, stage_world_size=8, ep_size=8, gpus_per_node=8, node_local=True)
+        rank: _make_ep(rank, world_size=16, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
         for rank in range(16)
     }
     for rank, (cfg, calls) in built.items():
@@ -191,7 +196,7 @@ def test_dp_scope_groups_block_confined_and_identical_order():
 
 def test_pp1_new_group_sequence_bit_identical_to_pre_pp():
     """Without PP no DP-scope groups are created: the exact pre-PP pinned call list is unchanged."""
-    cfg, calls = _make_ep(3, world_size=8, stage_world_size=8, ep_size=2, gpus_per_node=8, node_local=True)
+    cfg, calls = _make_ep(3, world_size=8, stage_world_size=8, ep_size=2, nvlink_domain_size=8, node_local=True)
     assert cfg.dp_scope_group is None
     assert calls == [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2, 4, 6), (1, 3, 5, 7)], calls
 
@@ -203,7 +208,7 @@ def _router_hook_from(**ep_attrs):
     # The stub carries every attribute a real EPConfig sets: the hook factory reads them directly, so
     # a getattr default would mask a typo into "no expert grad sync".
     defaults = {
-        "world_size": 8,
+        "stage_world_size": 8,
         "expert_tp_size": 1,
         "needs_expert_grad_sync": False,
         "fp32_grad_reduce": False,
@@ -259,7 +264,7 @@ def _deferred_sweep_host(**ep_attrs):
             "expert_replica_group": None,
             "is_deferred_dp": True,
             "ep_group_size": 4,
-            "world_size": 8,
+            "stage_world_size": 8,
             "expert_tp_size": 1,
             "fp32_grad_reduce": False,
             "dp_scope_group": None,

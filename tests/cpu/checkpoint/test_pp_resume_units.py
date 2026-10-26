@@ -26,7 +26,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 import src.distributed.checkpoint.coordination as coordination_mod
 import src.distributed.checkpoint.loader as loader_mod
 import src.distributed.checkpoint.optimizer as optimizer_mod
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.checkpoint.loader import CheckpointLoader

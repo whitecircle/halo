@@ -36,7 +36,7 @@ from src.checkpoint.config_export import (
     flatten_per_layer_config,
     save_model_config,
 )
-from src.checkpoint.tool_io import save_full_checkpoint
+from src.checkpoint.offline_export import save_full_checkpoint
 from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG, TINY_QWEN3_MOE_CONFIG

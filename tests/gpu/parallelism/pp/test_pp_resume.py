@@ -32,7 +32,7 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimi
 from transformers import AutoTokenizer, default_data_collator
 from trl import SFTConfig
 
-from src.checkpoint.format import StreamingCheckpointReader
+from src.checkpoint.reading import StreamingCheckpointReader
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.unwrapping import unwrap_toolkit_wrappers

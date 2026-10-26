@@ -18,6 +18,7 @@ src/kernels/moe_permute.py
 src/kernels/fused_glu.py
 src/kernels/lowp/spec.py
 src/models/gradient_checkpointing.py
+src/models/moe/expert_lora_spec.py
 src/model_loading/parallel/**
 
 # Rollout-engine weight sync
@@ -25,6 +26,13 @@ src/weight_sync/**
 
 # Trainers
 src/trainers/**
+
+# Checkpoint artifact layout the savers and the weight sync share
+src/checkpoint/hub_layout.py
+src/checkpoint/writing.py
+src/checkpoint/adapters.py
+src/checkpoint/sidecars.py
+src/checkpoint/weights_source.py
 
 # Rulebook
 CLAUDE.md

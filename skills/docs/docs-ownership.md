@@ -36,7 +36,9 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/distributed/parallelism_config.py` (ParallelismConfig, validation) | `agent-docs/parallelism/*` (all; the combination table in `agent-docs/parallelism/README.md#supported-combinations`), `agent-docs/reference/configuration-reference.md`, the parallelism matrix in `CLAUDE.md` |
-| `src/distributed/expert_parallel/` (DeepEP, all-to-all, per-family layers, expert compute) | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md` |
+| `src/distributed/expert_parallel/` (EP topology, per-family layers, expert compute) | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md` |
+| `src/distributed/expert_parallel/deepep/` (DeepEP knobs, buffer sizing and the capacity scope, buffer backends, dispatcher), `src/distributed/rank_uniform_env.py` (the job-wide env agreement) | `agent-docs/infrastructure/deepep.md`, `agent-docs/reference/configuration-reference.md` (DeepEP environment variables) |
+| `src/models/moe/expert_lora_spec.py` (native expert-LoRA vocabulary) | `agent-docs/optimization/peft.md`, `agent-docs/models/adding-a-model.md` |
 | `src/distributed/context_parallel/` (Ulysses) | `agent-docs/parallelism/context-parallelism.md` |
 | `src/distributed/tensor_parallel/` (DTensor) | `agent-docs/parallelism/tensor-parallelism.md` |
 | `src/distributed/pipeline_parallel/` (stage split + stage module, losses, P2P groups, stage loader, the `PipelineRuntime` schedule engine) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` (stage shards) |
@@ -59,12 +61,16 @@ changes.
 | `src/trainers/grpo/mixins/chunked_logprobs.py` (`use_chunked_grpo_logprobs` — the chunked log-prob path past the logits wall) | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/environments/ray_actors.py` (actor pool, dispatch, Ray init) | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/async-grpo/setup.md` (trainer-side knobs) |
 | `src/distributed/checkpoint/` (save ladder, the EP and TP savers `ep_save.py` / `tp_save.py`, weight loader, OptimizerShardStore, PeftAdapterSaver) | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md` (Checkpointing), `agent-docs/parallelism/tensor-parallelism.md` (Checkpoint saving) |
-| `src/checkpoint/format.py` (on-disk spellings, the layout cascade, state-dict reads) | `agent-docs/reference/checkpoints.md` |
+| `src/checkpoint/format.py` (every shared on-disk name and name builder) | `agent-docs/reference/checkpoints.md` |
+| `src/checkpoint/reading.py` (the layout cascade, the JSON config reader, the streaming reader, partial-checkpoint refusals, shard walks, header sizing, family sniffing) | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
 | `src/checkpoint/hub_layout.py` (the load conversions a save reverts, `ModuleLayoutView`) | `agent-docs/reference/checkpoints.md` |
-| `src/checkpoint/atomic.py` (exclusive staging, atomic Torch-file publication, directory fsync) | `agent-docs/reference/checkpoints.md` |
+| `src/checkpoint/atomic.py` (exclusive staging, `staged_file`, atomic Torch-file publication, directory fsync, the staged directory publish) | `agent-docs/reference/checkpoints.md` |
 | `src/checkpoint/config_export.py` (what an exported `config.json` must contain: model_type restore, flat legacy keys, source schema) | `agent-docs/reference/checkpoints.md`, `agent-docs/models/README.md` |
-| `src/checkpoint/adapters.py` (saved-PEFT file layout, expert-LoRA shape gates, merge-into-base) | `agent-docs/optimization/peft.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
-| `src/checkpoint/tool_io.py` (tool-side checkpoint walks, input gates, staged publish, training-state sidecars), `src/checkpoint/fp8_dequant.py` (streaming fp8 → bf16) | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
+| `src/checkpoint/weights_source.py` (which checkpoint a live model's weights and config schema came from) | `agent-docs/reference/checkpoints.md` |
+| `src/checkpoint/adapters.py` (saved-PEFT file layout, its writers and readers, resume-adapter refusals, expert-LoRA shape gates) | `agent-docs/optimization/peft.md`, `agent-docs/reference/checkpoints.md` |
+| `src/checkpoint/adapter_merge.py` (the adapter input gates and the merge into a base) | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md` |
+| `src/checkpoint/sidecars.py` (training provenance and the training-state sidecars an export carries) | `agent-docs/reference/checkpoints.md` |
+| `src/checkpoint/offline_export.py` (the tools' source resolver, input gates, size preflight, non-weight copy, full-model save), `src/checkpoint/fp8_dequant.py` (streaming fp8 → bf16) | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
 | `src/checkpoint/writing.py` (save-dtype casts, stale-file sweeps, merged index, whole-dict and streaming shard writers, tie reconcile) | `agent-docs/reference/checkpoints.md` |
 | `src/checkpoint/model_card.py` (`HUB_TAGS`, `tag_model_card` / `tag_exported_model_card`: the `halo` Hub tag on the model card of every checkpoint Halo writes, tool conversions included) | `agent-docs/reference/checkpoints.md` (Hub model card), `human-docs/checkpoints.md` (upload) |
 | `src/distributed/checkpoint/write.py` (the collective half of a write: retain-gated DTensor resolve of params and buffers with neutralized sinks, the streamed part writer, the shard-index exchange) | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
@@ -124,7 +130,7 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/kernels/liger/` (orchestrator + appliers) | `agent-docs/optimization/liger-kernels.md` |
-| `src/optimizers/` (AdamWBF16, Muon, FlashAdamW) | `agent-docs/optimization/{bf16-optimizer,muon-optimizer,flash-adamw}.md` |
+| `src/optimizers/` (AdamWBF16, Muon, FlashAdamW; `stochastic_rounding.py`, the SR seeds and rounding step AdamWBF16 and Muon share) | `agent-docs/optimization/{bf16-optimizer,muon-optimizer,flash-adamw}.md` |
 | `src/kernels/lowp/` (spec: `LowpSpec`, `QuantFormat`, `LOWP_RECIPES`; quantization, linear, deepgemm) | `agent-docs/optimization/low-precision-moe-kernels.md`, `agent-docs/reference/configuration-reference.md` (`lowp`) |
 | `src/model_loading/parallel/lowp_compute.py` (`apply_lowp_compute`) | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `src/kernels/histogram.py` (the expert-load histogram behind the `moe/*` metrics and the bias update) | `agent-docs/training-methods/callbacks.md` |

@@ -29,10 +29,10 @@ from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.models.patches.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
 from tests.common.ep_reference import ep_layers
 from tests.common.peft_helpers import (

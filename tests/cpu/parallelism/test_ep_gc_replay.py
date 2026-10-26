@@ -28,9 +28,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.distributed.expert_parallel import autograd as ep_autograd
-from src.distributed.expert_parallel import dispatcher as ep_dispatcher
 from src.distributed.expert_parallel.base_layer import find_ep_layers
+from src.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
+from src.distributed.expert_parallel.deepep.backends import DeepEPBackend
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
@@ -44,7 +44,7 @@ CHECKPOINTED_FAMILIES = tuple(
 )
 
 
-class LoopbackBackend(ep_dispatcher._DeepEPBackend):
+class LoopbackBackend(DeepEPBackend):
     """DeepEP's transport ops on a one-rank EP group owning every expert: every token returns to the
     rank that sent it, so each op is the identity. Each op is appended to ``log`` as
     ``(op, dispatcher, handle)``, and each dispatch hands out a handle of its own."""
@@ -53,36 +53,33 @@ class LoopbackBackend(ep_dispatcher._DeepEPBackend):
         super().__init__(dispatcher)
         self._log = log
 
-    def prepare(self) -> None:
-        pass
-
     def ensure(self, num_tokens: int, num_topk: int, *, deterministic: bool) -> None:
         pass
 
-    def dispatch_fwd(self, x, topk_idx, topk_weights):
+    def dispatch_forward(self, x, topk_idx, topk_weights):
         handle = f"handle{len(self._log)}"
-        self._log.append(("dispatch_fwd", self._d, handle))
+        self._log.append(("dispatch_forward", self._d, handle))
         return x.clone(), topk_idx.clone(), topk_weights.clone(), handle
 
-    def combine_grad(self, grad_recv_x, grad_recv_topk_weights, handle):
-        self._log.append(("combine_grad", self._d, handle))
+    def dispatch_backward(self, grad_recv_x, grad_recv_topk_weights, handle):
+        self._log.append(("dispatch_backward", self._d, handle))
         grad_topk_weights = None if grad_recv_topk_weights is None else grad_recv_topk_weights.clone()
         return grad_recv_x.clone(), grad_topk_weights
 
-    def combine_fwd(self, x, topk_weights, handle):
-        self._log.append(("combine_fwd", self._d, handle))
+    def combine_forward(self, x, topk_weights, handle):
+        self._log.append(("combine_forward", self._d, handle))
         return x.clone()
 
-    def dispatch_grad(self, grad_combined_x, handle):
-        self._log.append(("dispatch_grad", self._d, handle))
+    def combine_backward(self, grad_combined_x, handle):
+        self._log.append(("combine_backward", self._d, handle))
         return grad_combined_x.clone()
 
 
 @pytest.fixture(autouse=True)
 def loopback_transport(monkeypatch):
     """DeepEP's index dtype without the native extension, and a live-dispatcher registry of the test's own."""
-    monkeypatch.setattr(ep_autograd, "deep_ep", lambda: SimpleNamespace(topk_idx_t=torch.int64))
-    monkeypatch.setattr(ep_dispatcher, "_LIVE_DISPATCHERS", weakref.WeakValueDictionary())
+    monkeypatch.setattr(ep_dispatcher, "deep_ep", lambda: SimpleNamespace(topk_idx_t=torch.int64))
+    monkeypatch.setattr(ep_dispatcher, "_live_dispatchers", weakref.WeakValueDictionary())
 
 
 def _live_model(name: str, log: list, *, use_reentrant: bool | None) -> torch.nn.Module:
@@ -156,10 +153,10 @@ def test_the_recompute_replays_the_forwards_dispatch_and_combine(name, mode):
     for path, ops in _ops_by_layer(model, log).items():
         handle = ops[0][1]
         assert ops == [
-            ("dispatch_fwd", handle),
-            ("combine_fwd", handle),
-            ("dispatch_grad", handle),
-            ("combine_grad", handle),
+            ("dispatch_forward", handle),
+            ("combine_forward", handle),
+            ("combine_backward", handle),
+            ("dispatch_backward", handle),
         ], path
         (scope, recompute), (replay_scope, replay_recompute) = passes[path]
         assert scope is not None and replay_scope is scope and (recompute, replay_recompute) == (False, True), path
@@ -183,14 +180,14 @@ def test_microbatches_in_flight_replay_their_own_frames(name, mode):
         first, second = ops[0][1], ops[2][1]
         assert first != second, path
         assert ops == [
-            ("dispatch_fwd", first),
-            ("combine_fwd", first),
-            ("dispatch_fwd", second),
-            ("combine_fwd", second),
-            ("dispatch_grad", first),
-            ("combine_grad", first),
-            ("dispatch_grad", second),
-            ("combine_grad", second),
+            ("dispatch_forward", first),
+            ("combine_forward", first),
+            ("dispatch_forward", second),
+            ("combine_forward", second),
+            ("combine_backward", first),
+            ("dispatch_backward", first),
+            ("combine_backward", second),
+            ("dispatch_backward", second),
         ], path
     _assert_same_gradients(model, reference)
 

@@ -20,9 +20,9 @@ import torch.nn as nn
 from peft import LoraConfig
 from trl import ModelConfig
 
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.loading import peft_setup as model_info
 from src.distributed.loading.peft_setup import setup_peft_model, split_expert_lora_targets
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 
 

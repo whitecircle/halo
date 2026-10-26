@@ -1,71 +1,46 @@
-"""Saved PEFT adapters as an artifact: the file layout, the shape gates, and the merge into a base.
-
-Format layer only, with no ``torch.distributed``, so the standalone merge tools and the parallel
-adapter saver classify one artifact shape the same way. Producing an adapter from a live sharded
-model (the DTensor gather, the CP key remap) belongs to :mod:`src.distributed.checkpoint.peft`.
+"""Saved PEFT adapters as an artifact: the file layout and its writers and readers, the resume-adapter
+refusals and the expert-LoRA shape gates. Producing an adapter from a live sharded model belongs to
+:mod:`src.distributed.checkpoint.peft`.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
+import logging
 import os
-from collections.abc import Callable, Mapping
-from typing import NamedTuple
+from collections.abc import Mapping
 
 import torch
-from accelerate.logging import get_logger
-from peft import PeftConfig, PeftModel
 from safetensors import safe_open
 from safetensors.torch import load_file
-from transformers import PreTrainedModel
+from safetensors.torch import save_file as safetensors_save_file
 
 from src.checkpoint.format import (
+    ADAPTER_BIN_FILE,
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
-    DEFAULT_MAX_SHARD_SIZE,
-    adapter_weight_paths,
+    ADAPTER_WEIGHT_NAMES,
+    RESUME_ADAPTER_DIR,
+    RESUME_ADAPTER_MARKER_FILE,
 )
-from src.checkpoint.tool_io import (
-    PROCESSOR_FILES,
-    apply_training_sidecars,
-    copy_training_sidecars,
-    preflight_model_load_resources,
-    reject_in_place_conversion,
-    reject_sharded_checkpoint,
-    save_full_checkpoint,
-)
-from src.checkpoint.writing import cast_to_save_dtype
-from src.model_loading.tokenizer_setup import resolve_peft_processing_class
-from src.models.moe_balancing import is_balancing_state_key
-from src.models.unwrapping import PEFT_BASE_MODEL_PREFIX, strip_peft_adapter_segment
+from src.checkpoint.reading import read_checkpoint_config
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from src.models.unwrapping import PEFT_BASE_MODEL_PREFIX
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
-# Where a merge places the adapter's own config beside the merged weights: adapter_config.json in
-# the output root would make every from_pretrained-based tool downstream read the merged model as an
-# unmerged adapter and re-export the bare base.
-MERGED_ADAPTER_CONFIG_DIR = "original_adapter_config"
-
-# ``adapter_config.json`` markers for the two adapter shapes carrying native EP grouped expert
-# deltas: the expert-only save (``save_ep_checkpoint``) and the mixed attention+expert save
-# (``PeftAdapterSaver``). The merge guard keys on them, one spelling each. Kept out of PEFT's
-# ``PEFT_TYPE_TO_CONFIG_MAPPING`` on purpose: stock PEFT drops an unknown state-dict key without
-# error, so a ``peft_type: LORA`` hybrid would load its attention half and discard every expert
-# delta, while an unknown ``peft_type`` makes that lookup raise and name the marker.
+# ``peft_type`` markers of the expert-only and the mixed attention+expert adapters. Kept out of PEFT's
+# config mapping on purpose: stock PEFT drops unknown state-dict keys silently, so a ``LORA`` label would
+# load the attention half and discard every expert delta, while an unknown type makes the load raise.
 EXPERT_LORA_PEFT_TYPE = "EXPERT_LORA"
 MIXED_EXPERT_LORA_PEFT_TYPE = "LORA_WITH_EP_EXPERT_LORA"
 EXPERT_LORA_PEFT_TYPES = frozenset({EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE})
-# Where a mixed attention+expert ``adapter_config.json`` describes its expert half; the expert-only one
-# carries the same fields at the top level.
+# Where a mixed ``adapter_config.json`` describes its expert half; the expert-only one has the fields on top.
 EXPERT_LORA_CONFIG_KEY = "ep_expert_lora"
-
-# The ``LoraConfig`` fields a LoRA delta is scaled by (and, under DoRA, reparametrized with). A resume
-# under other values restores every adapter tensor by name and shape and rescales the delta, so the
-# values recorded beside the adapter are what refuse it. The native expert adapters record the first two.
+# The fields a LoRA delta is scaled by. A resume under other values would restore every tensor and rescale
+# the delta, so the recorded values refuse it; the native expert adapters record the first two.
 LORA_SCALING_FIELDS = ("lora_alpha", "use_rslora", "use_dora", "alpha_pattern")
 EXPERT_LORA_SCALING_FIELDS = ("lora_alpha", "use_rslora")
-
 # What PEFT appends below the adapted module's own path in a saved key.
 _ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".original_module")
 
@@ -73,130 +48,176 @@ _ADAPTER_KEY_SUFFIX_MARKERS = (".lora_", ".modules_to_save", ".base_layer", ".or
 def is_expert_lora_key(key: str) -> bool:
     """Whether a saved adapter key is a native EP expert adapter (``<layer>.experts.<attr>.lora_{A,B}``).
 
-    The saved-key counterpart of ``is_expert_weight_attr``, which classifies the live parameter name;
-    the resume path and the PEFT-merge guard must agree on this namespace.
-
-    The trailing-segment test separates the two namespaces. A native adapter is stored as the whole
-    grouped tensor, so its key ends at ``lora_A``/``lora_B``; stock PEFT wraps an ``nn.Linear`` and
-    always appends the tuner's own suffix (``.lora_A.default.weight``). Families that keep experts as
-    a per-expert ``nn.ModuleList`` (Bailing/Ling) also carry ``.experts.`` in their PEFT keys, and
-    matching those here would route real PEFT adapters into the EP loader.
+    A native adapter stores the whole grouped tensor, so its key ends at ``lora_A``/``lora_B``; stock PEFT
+    always appends the tuner suffix, including on per-expert ``ModuleList`` families (Bailing/Ling).
     """
     return ".experts." in key and key.endswith((".lora_A", ".lora_B"))
 
 
-def _adapter_tensor_keys(adapter_dir: str) -> list[str]:
-    """The tensor names in an adapter's first weight file present, without materializing its tensors;
-    empty when the directory holds none."""
+def expert_lora_config_fields(spec: ExpertLoraSpec) -> dict:
+    """The ``adapter_config.json`` fields describing native EP grouped expert adapters: every field that
+    changes what the adapter means, since a reload would otherwise rescale every expert delta."""
+    return {
+        "r": spec.r,
+        "lora_alpha": spec.alpha,
+        "lora_dropout": spec.dropout,
+        "use_rslora": spec.use_rslora,
+        "expert_projections": sorted(spec.projections),
+    }
+
+
+def expert_lora_adapter_config(spec: ExpertLoraSpec, base_model_name_or_path: str | None) -> dict:
+    """The PEFT-style ``adapter_config.json`` of an expert-only adapter save."""
+    return {
+        "peft_type": EXPERT_LORA_PEFT_TYPE,
+        "base_model_name_or_path": base_model_name_or_path,
+        **expert_lora_config_fields(spec),
+    }
+
+
+def write_adapter_config(config: dict, output_dir: str) -> None:
+    """Write ``config`` as ``output_dir``'s ``adapter_config.json``."""
+    with open(os.path.join(output_dir, ADAPTER_CONFIG_FILE), "w") as fh:
+        json.dump(config, fh, indent=2)
+
+
+def write_mixed_adapter_config(peft_config, expert_lora_spec: ExpertLoraSpec | None, output_dir: str) -> None:
+    """Write the attention ``LoraConfig`` re-typed :data:`MIXED_EXPERT_LORA_PEFT_TYPE`, so stock PEFT refuses
+    the hybrid adapter instead of loading its attention half, with the expert half described under
+    :data:`EXPERT_LORA_CONFIG_KEY`."""
+    peft_config.save_pretrained(output_dir)
+    config = read_adapter_config(output_dir)
+    config["peft_type"] = MIXED_EXPERT_LORA_PEFT_TYPE
+    if expert_lora_spec is not None:
+        config[EXPERT_LORA_CONFIG_KEY] = expert_lora_config_fields(expert_lora_spec)
+    write_adapter_config(config, output_dir)
+
+
+def write_adapter_file(state: dict, output_dir: str) -> None:
+    """Write adapter tensors as ``adapter_model.safetensors``, or as ``adapter_model.bin`` where
+    safetensors refuses them."""
+    st_path = os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE)
+    # safetensors refuses a view (a gathered DTensor adapter, a ``modules_to_save`` clone), which would
+    # send the whole adapter to the .bin fallback.
+    state = {key: tensor.contiguous() for key, tensor in state.items()}
+    try:
+        safetensors_save_file(state, st_path)
+    except Exception as e:
+        logger.warning(f"safetensors adapter save failed: {e}, using pytorch format")
+        # The .bin lands first, then the safetensors leftover goes: every reader prefers that name, so
+        # leaving it would resume or merge the old adapter.
+        torch.save(state, os.path.join(output_dir, ADAPTER_BIN_FILE))
+        try:
+            if os.path.exists(st_path):
+                os.remove(st_path)
+        except OSError as remove_error:
+            logger.warning(
+                f"could not remove stale {ADAPTER_SAFETENSORS_FILE} after the .bin fallback: "
+                f"{remove_error} — readers prefer it over the fresh {ADAPTER_BIN_FILE}"
+            )
+
+
+def adapter_weight_paths(adapter_dir: str) -> tuple[str, ...]:
+    """The adapter weight files a directory may carry, in PEFT's load-preference order (``.bin`` last)."""
+    return tuple(os.path.join(adapter_dir, name) for name in ADAPTER_WEIGHT_NAMES)
+
+
+def has_adapter_weight_file(directory: str) -> bool:
+    """Whether a directory holds an adapter weight file, from stats alone."""
+    return any(os.path.isfile(path) for path in adapter_weight_paths(directory))
+
+
+def read_adapter_config(adapter_dir: str, *, missing_ok: bool = False) -> dict | None:
+    """Parse an adapter's ``adapter_config.json``; ``None`` only for an absent file under ``missing_ok``."""
+    return read_checkpoint_config(adapter_dir, missing_ok=missing_ok, filename=ADAPTER_CONFIG_FILE)
+
+
+def read_adapter_keys(adapter_dir: str) -> list[str]:
+    """The tensor names in an adapter's first weight file present, read without tensor data; empty when
+    the directory holds none."""
     path = next((path for path in adapter_weight_paths(adapter_dir) if os.path.isfile(path)), None)
     if path is None:
         return []
     if path.endswith(ADAPTER_SAFETENSORS_FILE):
         with safe_open(path, framework="pt") as handle:
             return list(handle.keys())
-    return list(torch.load(path, map_location="cpu", weights_only=True))
+    return list(torch.load(path, map_location="meta", weights_only=True))
 
 
 def adapter_module_paths(adapter_dir: str) -> set[str]:
     """The base model's module paths a saved adapter addresses, read off its tensor keys.
 
-    A key carrying no PEFT segment is a parameter the save wrote whole (``save_embedding_layers``
-    adds ``...embed_tokens.weight`` / ``...lm_head.weight``); its module is the key minus that leaf.
+    A key with no PEFT segment is a parameter saved whole (``save_embedding_layers``); its module is the
+    key minus that leaf.
     """
     paths: set[str] = set()
-    for key in _adapter_tensor_keys(adapter_dir):
+    for key in read_adapter_keys(adapter_dir):
         name = key.removeprefix(PEFT_BASE_MODEL_PREFIX)
         cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
         paths.add(name[:cut] if cut >= 0 else name.rpartition(".")[0])
     return paths
 
 
-def _paths_absent_from(model: PreTrainedModel, paths: set[str]) -> list[str]:
-    absent = []
-    for path in sorted(paths):
-        try:
-            model.get_submodule(path)
-        except AttributeError:
-            absent.append(path)
-    return absent
-
-
-class AdapterBase(NamedTuple):
-    """The base an adapter applies to, and whether it is a multimodal checkpoint's text-only class."""
-
-    model: PreTrainedModel
-    text_only: bool
-
-
-def load_base_for_adapter(
-    adapter_dir: str,
-    base_model_path: str,
-    load_base_model: Callable[..., PreTrainedModel],
-    *,
-    excuse_task_head: bool,
-    log,
-) -> AdapterBase:
-    """The base loaded through the class whose module tree the adapter's keys address.
-
-    ``PeftModel.from_pretrained`` only warns when saved keys name no live module, then merges nothing
-    and the tool writes the bare base as a finished model. An adapter trained through a multimodal
-    checkpoint's text-only class (``text_only_model: true``) addresses ``model.layers``, which the
-    widest Auto* class spells ``model.language_model.layers``, so it is met through that class; a key
-    set neither class carries is a base that does not belong to the adapter.
-    """
-    paths = adapter_module_paths(adapter_dir)
-    base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head)
-    absent = _paths_absent_from(base_model, paths)
-    if not absent:
-        return AdapterBase(base_model, text_only=False)
-    # A path both classes carry (a ``modules_to_save`` lm_head) resolves on the wrapper too, so any
-    # absence, not every absence, is the text-only hypothesis.
-    wrapper = type(base_model).__name__
-    del base_model
-    try:
-        text_only_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head, text_only=True)
-    except ValueError as no_text_only_class:
-        # A one-class task, or a family shipping only its multimodal wrapper: the mismatch stands.
-        raise ValueError(_no_module_message(adapter_dir, base_model_path, wrapper, absent)) from no_text_only_class
-    if not _paths_absent_from(text_only_model, paths):
-        log(f"The adapter addresses the text-only class of {wrapper}; merging as {type(text_only_model).__name__}.")
-        return AdapterBase(text_only_model, text_only=True)
-    raise ValueError(_no_module_message(adapter_dir, base_model_path, wrapper, absent))
-
-
-def _no_module_message(adapter_dir: str, base_model_path: str, model_class: str, absent: list[str]) -> str:
-    return (
-        f"The adapter at {adapter_dir} addresses {len(absent)} module(s) that {model_class} loaded from "
-        f"{base_model_path} does not have (e.g. {absent[0]}). PEFT would merge nothing there and the tool "
-        f"would write the bare base; the adapter and its base_model_name_or_path do not belong together."
-    )
-
-
 def read_adapter_file(path: str) -> dict:
-    """The adapter tensors at ``path`` — safetensors, or the legacy pickle PEFT still writes."""
+    """The adapter tensors at ``path``: safetensors, or the legacy pickle PEFT still writes."""
     if path.endswith(ADAPTER_SAFETENSORS_FILE):
         return load_file(path)
     return torch.load(path, map_location="cpu", weights_only=True)
 
 
+def resume_adapter_dir(checkpoint_dir: str) -> str | None:
+    """The adapter directory a marked checkpoint resumes from, or ``None``; stat-only, for rank-0 probes."""
+    if not os.path.isfile(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE)):
+        return None
+    return os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)
+
+
+def missing_resume_adapter_reason(checkpoint_dir: str) -> str:
+    """The refusal for a marked checkpoint whose :data:`RESUME_ADAPTER_DIR` holds no adapter file."""
+    return (
+        f"{checkpoint_dir} is marked to resume from its adapter ({RESUME_ADAPTER_MARKER_FILE}), but "
+        f"{os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)} holds no adapter file, so the adapters would "
+        f"resume from initialization. Resume from a complete checkpoint."
+    )
+
+
+def resume_adapter_on_own_weights_reason(checkpoint_dir: str) -> str:
+    """The refusal for resuming a marked checkpoint onto a model built from its own merged weights."""
+    return (
+        f"{checkpoint_dir} holds merged weights, which already carry the adapter delta, and resume "
+        f"restores the unmerged adapters from {os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)} onto the "
+        f"base model. This model was loaded from the checkpoint itself, so the delta would apply twice. "
+        f"Load the model from the base the run started from (the training scripts keep "
+        f"model_name_or_path there for this checkpoint)."
+    )
+
+
+def unmarked_merged_checkpoint_reason(checkpoint_dir: str) -> str:
+    """The refusal for an adapter run resuming merged weights that carry no resume adapter."""
+    return (
+        f"{checkpoint_dir} holds merged weights without its resume adapter (no {RESUME_ADAPTER_MARKER_FILE}: "
+        f"a torn save, or one written without it), and this run trains adapters. Resuming would restart "
+        f"them from initialization under their restored optimizer state, on weights that may already "
+        f"hold their trained delta. Resume from a checkpoint that carries its resume adapter, or start a "
+        f"new run from its merged weights (model_name_or_path: {checkpoint_dir}, without "
+        f"resume_from_checkpoint)."
+    )
+
+
 def lora_scaling_mismatch(adapter_dir: str, attention: Mapping | None, expert: Mapping | None = None) -> str | None:
     """Why the adapter in ``adapter_dir`` was trained at another LoRA scaling than the live run, or None.
 
-    ``attention`` is the live ``LoraConfig`` as a dict, ``expert`` the live native expert adapters'
-    config fields (None for a half the run does not train); each is held to the ``adapter_config.json``
-    beside the adapter on :data:`LORA_SCALING_FIELDS` / :data:`EXPERT_LORA_SCALING_FIELDS`. A missing
-    config is a reason too, since nothing else records the scaling. Rank-local read.
+    ``attention`` and ``expert`` are the live configs of the halves the run trains, held to the saved
+    ``adapter_config.json``; a missing config is a reason too, since nothing else records the scaling.
     """
     if attention is None and expert is None:
         return None
-    config_path = os.path.join(adapter_dir, ADAPTER_CONFIG_FILE)
-    if not os.path.isfile(config_path):
+    saved = read_adapter_config(adapter_dir, missing_ok=True)
+    if saved is None:
         return (
-            f"{config_path} is missing, so the LoRA scaling the adapter beside it was trained at cannot be "
-            f"held to this run's. Resume from a complete checkpoint."
+            f"{os.path.join(adapter_dir, ADAPTER_CONFIG_FILE)} is missing, so the LoRA scaling the adapter "
+            f"beside it was trained at cannot be held to this run's. Resume from a complete checkpoint."
         )
-    with open(config_path) as fh:
-        saved = json.load(fh)
     halves = [("", saved, attention, LORA_SCALING_FIELDS)]
     halves.append(("expert ", saved.get(EXPERT_LORA_CONFIG_KEY, saved), expert, EXPERT_LORA_SCALING_FIELDS))
     changed = {
@@ -215,32 +236,23 @@ def lora_scaling_mismatch(adapter_dir: str, attention: Mapping | None, expert: M
     )
 
 
-def cast_adapter_state_to_save_dtype(state: dict) -> dict:
-    """Adapter-file cast honouring the balancing export contract: balancing tensors (a
-    ``modules_to_save`` router's bias riding along with the clone) stay at trained dtype, as in every
-    full-checkpoint writer, since a bf16-rounded bias flips near-tie top-k picks on serve.
+def assert_no_expert_lora_adapter(adapter_dir: str) -> None:
+    """Refuse an adapter directory carrying native EP expert-LoRA deltas, which ``merge_and_unload`` drops.
 
-    Adapter keys interpose PEFT segments between the module path and the slot
-    (``gate.modules_to_save.default.e_score_correction_bias``); they are stripped for the check
-    so the registry's dotted suffixes match the same tensors they match in a full checkpoint.
+    The verdict follows the shape, not just the marker: an absent or unmarked config falls back to a
+    tensor-key scan. Every tool that merges a saved adapter runs this.
     """
-
-    def _is_balancing(key: str) -> bool:
-        return is_balancing_state_key(strip_peft_adapter_segment(key))
-
-    return {k: v if _is_balancing(k) else cast_to_save_dtype(v) for k, v in state.items()}
-
-
-def _expert_lora_merge_remedy(adapter_dir: str, *, mixed: bool) -> str:
-    """What this adapter holds that a PEFT merge drops, and the save that folds it instead.
-
-    Both shapes carry native EP grouped ``*.experts.<attr>.lora_{A,B}`` tensors, which PEFT cannot
-    wrap and ``merge_and_unload`` discards, so both have the same remedy: re-save the run with
-    ``merge_expert_lora_on_save``, which folds them inside
-    :func:`~src.distributed.checkpoint.save.save_ep_checkpoint`'s gathered save. On the mixed shape
-    that flag also routes the write past :class:`PeftAdapterSaver` and folds the attention half
-    into each tensor it writes, so ``mixed`` only selects the wording.
-    """
+    peft_type = (read_adapter_config(adapter_dir, missing_ok=True) or {}).get("peft_type")
+    if peft_type in EXPERT_LORA_PEFT_TYPES:
+        mixed = peft_type == MIXED_EXPERT_LORA_PEFT_TYPE
+    else:
+        keys = read_adapter_keys(adapter_dir)
+        expert_keys = [key for key in keys if is_expert_lora_key(key)]
+        if not expert_keys:
+            return
+        # Any non-expert adapter tensor beside them is the mixed shape.
+        mixed = len(expert_keys) != len(keys)
+    # ``merge_expert_lora_on_save`` folds both shapes; ``mixed`` only selects the wording.
     if mixed:
         shape = (
             f"holds a MIXED attention+expert LoRA adapter (peft_type={MIXED_EXPERT_LORA_PEFT_TYPE}): "
@@ -253,129 +265,8 @@ def _expert_lora_merge_remedy(adapter_dir: str, *, mixed: bool) -> str:
             "*.experts.<attr>.lora_{A,B} tensors"
         )
         folds = "the expert deltas inside each family's expert gather"
-    return (
+    raise ValueError(
         f"{adapter_dir} {shape} — which a PEFT merge silently drops. Re-save the run with "
         f"merge_expert_lora_on_save=True: the gathered EP save folds {folds}, producing a merged "
         "servable HF checkpoint."
     )
-
-
-def assert_no_expert_lora_adapter(adapter_dir: str) -> None:
-    """Refuse an adapter directory carrying native EP expert-LoRA deltas.
-
-    EP expert adapters are plain ``<layer>.experts.<attr>.lora_{A,B}`` tensors (PEFT cannot wrap
-    grouped expert weights), so ``PeftModel.merge_and_unload()`` drops every expert delta. Both
-    writer shapes carry their :data:`EXPERT_LORA_PEFT_TYPES` marker, but the verdict follows the
-    shape rather than the marker, so an adapter whose config is absent or unmarked is still
-    classified by a tensor-key scan; one carrying no expert keys loads as a plain adapter.
-
-    Every tool that calls ``merge_and_unload`` on a saved adapter must run this check.
-    """
-    cfg_path = os.path.join(adapter_dir, ADAPTER_CONFIG_FILE)
-    if os.path.isfile(cfg_path):
-        with open(cfg_path) as fh:
-            peft_type = json.load(fh).get("peft_type")
-        if peft_type in EXPERT_LORA_PEFT_TYPES:
-            raise ValueError(_expert_lora_merge_remedy(adapter_dir, mixed=peft_type == MIXED_EXPERT_LORA_PEFT_TYPE))
-
-    keys = _adapter_tensor_keys(adapter_dir)
-    expert_keys = [key for key in keys if is_expert_lora_key(key)]
-    if expert_keys:
-        # Unmarked but expert-shaped. Any non-expert adapter tensor means an attention PeftModel was
-        # present too, i.e. the mixed shape rather than the expert-only one.
-        raise ValueError(_expert_lora_merge_remedy(adapter_dir, mixed=len(expert_keys) != len(keys)))
-
-
-def adapter_input_gates(adapter_dir: str, output_dir: str) -> PeftConfig:
-    """Refuse a saved adapter a tool cannot convert into ``output_dir``, then return its config.
-
-    The gate order every tool writing from a saved adapter shares; each gate covers a failure that
-    raises nothing:
-
-    * a per-rank EP/TP directory reads as whole while every expert tensor is one rank's slice.
-      Checked on the adapter and again on the base, from which a merge takes its weights;
-    * an ``--output_dir`` pointing at the adapter or the base destroys that input, since the save
-      deletes the weight files it does not overwrite;
-    * ``merge_and_unload`` cannot fold a native EP expert-LoRA adapter, and drops every expert delta.
-    """
-    reject_sharded_checkpoint(adapter_dir)
-    reject_in_place_conversion(adapter_dir, output_dir)
-    assert_no_expert_lora_adapter(adapter_dir)
-
-    peft_config = PeftConfig.from_pretrained(adapter_dir)
-    base_model_path = peft_config.base_model_name_or_path
-    if base_model_path and os.path.isdir(base_model_path):
-        reject_in_place_conversion(base_model_path, output_dir)
-        reject_sharded_checkpoint(base_model_path)
-    return peft_config
-
-
-def merge_adapter_into_base(
-    adapter_dir: str,
-    output_dir: str,
-    *,
-    load_base_model: Callable[..., PreTrainedModel],
-    tool: str,
-    device_map: str | None = None,
-    max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
-    trust_remote_code: bool = True,
-    prepare_for_save: Callable[[PreTrainedModel], None] | None = None,
-    verbose: bool = True,
-) -> PreTrainedModel:
-    """Fold a saved PEFT adapter into its base model and write the merged checkpoint.
-
-    :func:`adapter_input_gates` runs first, so nothing is loaded or written for a refused input.
-    ``excuse_task_head`` is read off the adapter's ``modules_to_save``: a classification head on a
-    plain causal-LM base is the only absence the tool's own ``load_base_model`` may excuse.
-    ``prepare_for_save`` mutates the merged model before the save, which carries the base's aux files
-    (``source_dir``); the adapter's sidecars and its own config travel separately.
-    """
-    log = logger.info if verbose else lambda message: None
-
-    peft_config = adapter_input_gates(adapter_dir, output_dir)
-    base_model_path = peft_config.base_model_name_or_path
-
-    # Size preflight before the heavy load: without a device map the whole base lands in host RAM,
-    # and the merged output is about the base checkpoint's size on disk.
-    preflight_model_load_resources(base_model_path, output_dir, tool=tool, device_map=device_map)
-
-    log(f"Merging {adapter_dir} ({peft_config.peft_type}) into base model {base_model_path}...")
-    base = load_base_for_adapter(
-        adapter_dir,
-        base_model_path,
-        load_base_model,
-        excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
-        log=log,
-    )
-    # A text-only merge writes the export a text_only_model run writes: the run's tokenizer, and none
-    # of the multimodal base's processor files, since the class it merged through has no vision path.
-    processing_class = resolve_peft_processing_class(
-        adapter_dir, base_model_path, text_only=base.text_only, trust_remote_code=trust_remote_code
-    )
-    if processing_class is None:
-        raise OSError(f"Could not load a processor or tokenizer from {adapter_dir} or {base_model_path}")
-    merged_model = PeftModel.from_pretrained(base.model, adapter_dir).merge_and_unload()
-
-    for action in apply_training_sidecars(merged_model, adapter_dir):
-        log(action)
-    if prepare_for_save is not None:
-        prepare_for_save(merged_model)
-
-    log(f"Saving merged model to {output_dir}...")
-    os.makedirs(output_dir, exist_ok=True)
-    # The base's resume state describes the base's own run, not this merge of an adapter into it.
-    save_full_checkpoint(
-        merged_model,
-        output_dir,
-        processing_class=processing_class,
-        source_dir=base_model_path,
-        include_resume_sidecars=False,
-        max_shard_size=max_shard_size,
-    )
-    if base.text_only:
-        for name in PROCESSOR_FILES:
-            with contextlib.suppress(FileNotFoundError):
-                os.remove(os.path.join(output_dir, name))
-    copy_training_sidecars(adapter_dir, output_dir)
-    peft_config.save_pretrained(os.path.join(output_dir, MERGED_ADAPTER_CONFIG_DIR))
-    return merged_model

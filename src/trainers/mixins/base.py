@@ -29,11 +29,8 @@ from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.context_parallel.validation import validate_trainer_args_for_cp
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, find_cp_wrapper
 from src.distributed.expert_parallel.base_layer import make_disable_adapter_ep_aware
-from src.distributed.expert_parallel.dispatcher import (
-    free_unclaimed_ep_buffers,
-    register_forward_generation_hook,
-    verify_rank_uniform_env,
-)
+from src.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
+from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import (
     IdentityParamSet,
@@ -46,6 +43,7 @@ from src.distributed.fsdp import (
 from src.distributed.mesh import ParallelDims
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
+from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from src.kernels.liger.orchestrator import (
     sanitize_liger_config,
@@ -60,7 +58,7 @@ from src.models.patches.flex_sliding_attention import reject_full_determinism_af
 from src.models.peft_adapters import lora_fold_targets
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.models.unwrapping import unwrap_framework_wrappers
-from src.optimizers.adamw_bf16 import build_bf16_optimizer
+from src.optimizers.adamw_bf16 import adamw_bf16_optimizer_from_args
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
 from src.optimizers.registry import (
     NAMED_OPTIMIZER_BUILDERS,
@@ -483,7 +481,7 @@ class DistributedTrainerMixin(
         # bucketed grad sweeps in this mixin (the TP replicated sweep, the QLoRA sweep) read
         # HALO_GRAD_BUCKET_MB over groups that span OS nodes, and neither goes near DeepEP: a
         # trainer built without the script scaffold would otherwise have no uniformity guard.
-        verify_rank_uniform_env()
+        agree_rank_uniform_env()
 
         config = self.parallelism_config
 
@@ -1008,11 +1006,11 @@ class DistributedTrainerMixin(
         if ep_cfg.is_deferred_dp:
             # Sharded over the EP group, not the stage: non-expert memory per rank is `replicas`x
             # the stage-FSDP figure.
-            replicas = max(1, ep_cfg.world_size // ep_cfg.ep_group_size)
+            replicas = max(1, ep_cfg.stage_world_size // ep_cfg.ep_group_size)
             if replicas > 1 and is_global_main_process():
                 logger.info(
                     f"FSDP2 shards non-expert params {ep_cfg.ep_group_size}-way (the EP group) inside a "
-                    f"stage of {ep_cfg.world_size}: non-expert memory per rank is {replicas}x the "
+                    f"stage of {ep_cfg.stage_world_size}: non-expert memory per rank is {replicas}x the "
                     f"stage-wide-FSDP figure, and the cross-replica average is deferred over "
                     f"{replicas} replicas."
                 )
@@ -1485,7 +1483,7 @@ class DistributedTrainerMixin(
             decay_parameters = self.get_decay_parameter_names(self.model)
             optim = optim_name(self.args.optim)
             if self._bf16_optimizer:
-                self.optimizer = build_bf16_optimizer(self.model, self.args, decay_parameters)
+                self.optimizer = adamw_bf16_optimizer_from_args(self.model, self.args, decay_parameters)
             elif optim in NAMED_OPTIMIZER_BUILDERS:
                 builder = NAMED_OPTIMIZER_BUILDERS[optim][0]
                 self.optimizer = builder(self.model, self.args, decay_parameters)

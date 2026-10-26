@@ -16,8 +16,8 @@ import torch
 from peft import LoraConfig, get_peft_model
 from transformers import PretrainedConfig
 
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.mixins.validation import ParallelismValidationMixin
 
 # A real PretrainedConfig, not a namespace: get_peft_model reads the config through ``to_dict()``

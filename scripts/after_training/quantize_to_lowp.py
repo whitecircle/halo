@@ -52,16 +52,16 @@ from operator import itemgetter
 
 import torch
 from safetensors.torch import save_file
-from transformers.utils import CONFIG_NAME
 
 from src.checkpoint.config_export import write_config_json
-from src.checkpoint.format import SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE, copy_checkpoint_aux_files
-from src.checkpoint.tool_io import (
+from src.checkpoint.format import SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
+from src.checkpoint.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
+from src.checkpoint.reading import (
     SAFETENSORS_FLOAT_DTYPES,
     checkpoint_shard_files,
     detect_model_types,
     iter_checkpoint_shard_entries,
-    reject_in_place_conversion,
+    read_checkpoint_config,
 )
 from src.checkpoint.writing import remove_stale_checkpoint_files, write_merged_index
 from src.distributed.expert_parallel.expert_weights import (
@@ -462,12 +462,10 @@ def _write_manifest(
     # "block_scaled" method; plain transformers only warns, skips quantization and random-initializes
     # every quantized weight. A raw format name ("mxfp4", "nvfp4", "mxfp8") would instead select a
     # transformers or vLLM method that reads a different on-disk layout.
-    config_path = os.path.join(output_dir, CONFIG_NAME)
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            config = json.load(f)
+    config = read_checkpoint_config(output_dir, missing_ok=True)
+    if config is not None:
         config["quantization_config"] = manifest
-        write_config_json(config_path, config)
+        write_config_json(output_dir, config)
 
 
 def parse_args():

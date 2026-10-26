@@ -32,13 +32,13 @@ import scripts.training.distillation.self_distill as self_distill_script
 import scripts.training.distillation.teacher_distill as distill_script
 import scripts.training.offline_grpo as offline_grpo_script
 import src.distributed.loading.frozen_models as frozen_models
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.loading.frozen_models import (
     load_frozen_auxiliary_model,
     load_reference_model_for_on_policy_grpo,
     load_reference_model_for_preference,
 )
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
 from tests.common.repo import REPO_ROOT
@@ -68,7 +68,7 @@ FROZEN_LOAD_STEP_OWNERS = frozenset(
         "src/distributed/loading/frozen_models.py",
         "src/distributed/loading/model_loading.py",
         "scripts/training/embedding.py",
-        "src/checkpoint/tool_io.py",
+        "src/checkpoint/sidecars.py",
         "scripts/before_training/patch_vocab.py",
         "scripts/after_training/reset_sinks.py",
     }

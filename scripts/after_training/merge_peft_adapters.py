@@ -27,7 +27,7 @@ from transformers import AutoModelForSequenceClassification
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_device_map_arg, add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.adapters import merge_adapter_into_base
+from src.checkpoint.adapter_merge import merge_adapter_into_base
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.log import configure_cli_logging
 from src.model_loading.checkpoint_coverage import from_pretrained_verified

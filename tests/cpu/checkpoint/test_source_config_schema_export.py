@@ -30,8 +30,9 @@ from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
 from src.checkpoint import config_export
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR, save_model_config
-from src.checkpoint.tool_io import save_full_checkpoint
+from src.checkpoint.config_export import save_model_config
+from src.checkpoint.offline_export import save_full_checkpoint
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG

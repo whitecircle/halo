@@ -13,7 +13,7 @@ inside its path's domain.
 The square case also runs at two decades: the first three steps only lift singular values below
 ~1e-2 of the Frobenius norm, so a one-decade input passes with any of them dropped.
 
-The orthogonalizer under test is the one ``create_muon_optimizer`` configures, on its pure-torch
+The orthogonalizer under test is the one ``build_muon_optimizer`` configures, on its pure-torch
 backend. The fused Triton step around it is GPU-only, so ``tests/gpu/optimizers/test_muon.py``
 checks the update that step writes, on the CUDA-kernel backend where it runs.
 
@@ -24,7 +24,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.muon import build_muon_optimizer
 from tests.common.tolerances import TOL
 from tests.common.utils import assert_orthogonalized, log_spectrum_matrix
 
@@ -33,7 +33,7 @@ from tests.common.utils import assert_orthogonalized, log_spectrum_matrix
 def newton_schulz():
     """The orthogonalizer a toolkit-built Muon runs, on the pure-torch backend."""
     holder = nn.Linear(8, 8, bias=False, dtype=torch.bfloat16)
-    return create_muon_optimizer(holder, ns_use_kernels=False).newton_schulz
+    return build_muon_optimizer(holder, ns_use_kernels=False).newton_schulz
 
 
 @pytest.mark.parametrize(

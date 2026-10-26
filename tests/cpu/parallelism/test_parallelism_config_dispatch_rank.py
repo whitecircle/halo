@@ -44,7 +44,9 @@ def _make_parallelism_config(rank: int, world_size: int, gpus_per_node: int, **k
 def _make_ep_config(rank: int, world_size: int, gpus_per_node: int, **kwargs) -> EPConfig:
     """Build the REAL EPConfig for ``rank`` with distributed stubbed (new_group → rank tuple)."""
     with stubbed_process_groups(world_size, rank):
-        return EPConfig(world_size=world_size, gpus_per_node=gpus_per_node, **kwargs)
+        return EPConfig(
+            stage_world_size=world_size, nvlink_domain_size=gpus_per_node, experts_fsdp_managed=False, **kwargs
+        )
 
 
 def test_dispatch_rank_agreement_across_layouts():

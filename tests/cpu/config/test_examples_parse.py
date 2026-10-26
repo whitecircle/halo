@@ -20,7 +20,7 @@ import pytest
 import transformers.training_args
 import yaml
 
-from src.distributed.expert_parallel.config import GIN_MAX_TOKENS_PER_RANK
+from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
 from src.training.parser import H4ArgumentParser
 from tests.common.repo import REPO_ROOT, load_script_module
 

@@ -36,7 +36,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassifi
 
 import scripts.after_training.convert_to_bf16 as convert_to_bf16
 import scripts.after_training.merge_peft_adapters as merge_peft_adapters
-from src.checkpoint import adapters
+from src.checkpoint import adapter_merge
 from src.distributed.loading import model_loading
 from src.model_loading import model_preparation
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -155,7 +155,7 @@ def test_the_excuse_is_derived_from_the_adapter_config():
     head unconditionally is the ungated behaviour under another name — and a literal ``True`` here
     is exactly that. Read at the shared merge, which is where every merge tool's base load goes: the
     one call that derives it, and every base load below it forwarding what it was handed."""
-    source = pathlib.Path(adapters.__file__)
+    source = pathlib.Path(adapter_merge.__file__)
     (derived,) = _keyword_values(source, "load_base_for_adapter", "excuse_task_head")
     assert not isinstance(derived, ast.Constant), (
         "excuse_task_head is passed as a literal — the excuse must be read off peft_config.modules_to_save"

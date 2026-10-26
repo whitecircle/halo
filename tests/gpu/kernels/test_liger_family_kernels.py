@@ -334,7 +334,9 @@ def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
     config = CONFIG_MAPPING[model_type](
         **{**tiny, "layer_types": ["full_attention"] * tiny["num_hidden_layers"], "attn_implementation": "eager"}
     )
-    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=True)
+    ep_config = EPConfig(
+        ep_size=1, stage_world_size=1, nvlink_domain_size=1, use_grouped_gemm=True, experts_fsdp_managed=True
+    )
     input_ids = torch.randint(0, config.vocab_size, (BATCH, SEQ), device=device)
 
     torch.manual_seed(SEED)

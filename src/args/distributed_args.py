@@ -4,7 +4,8 @@ from dataclasses import dataclass, field
 
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.config_validation import RangeValidatedConfig, present, require_int
-from src.distributed.parallelism_config import EPBufferBackend, EPScope, PPSchedule
+from src.distributed.expert_parallel.config import EPBufferBackend
+from src.distributed.parallelism_config import EPScope, PPSchedule
 from src.kernels.lowp.spec import LowpPrecision
 
 

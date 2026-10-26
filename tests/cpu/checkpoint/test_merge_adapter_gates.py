@@ -32,13 +32,18 @@ import torch
 from safetensors.torch import save_file
 
 from scripts.after_training import convert_to_bf16, merge_peft_adapters
-from src.checkpoint import adapters
+from src.checkpoint import adapter_merge
 from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, assert_no_expert_lora_adapter
-from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHT_NAMES, SAFETENSORS_INDEX_FILE
+from src.checkpoint.format import (
+    ADAPTER_CONFIG_FILE,
+    ADAPTER_WEIGHT_NAMES,
+    MERGED_ADAPTER_CONFIG_DIR,
+    SAFETENSORS_INDEX_FILE,
+)
 
 # The gates that must run for real: each one is the check under test, not a stand-in for it.
 _REAL_GATES = (
-    "reject_sharded_checkpoint",
+    "reject_partial_checkpoint",
     "reject_in_place_conversion",
     "assert_no_expert_lora_adapter",
     "preflight_model_load_resources",
@@ -88,13 +93,13 @@ def _instrument(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]) -
     BASE as well as the adapter, and a transcript of names alone cannot tell the two calls apart.
     """
     for name in _REAL_GATES:
-        real = getattr(adapters, name)
+        real = getattr(adapter_merge, name)
 
         def wrapped(*args, _name=name, _real=real, **kwargs):
             calls.append((_name, str(args[0]) if args else ""))
             return _real(*args, **kwargs)
 
-        monkeypatch.setattr(adapters, name, wrapped)
+        monkeypatch.setattr(adapter_merge, name, wrapped)
 
     def stub(name, result):
         def record(*args, **_kwargs):
@@ -103,11 +108,13 @@ def _instrument(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]) -
 
         return record
 
-    monkeypatch.setattr(adapters, "PeftModel", _FakePeftModel)
-    monkeypatch.setattr(adapters, "resolve_peft_processing_class", stub("resolve_peft_processing_class", object()))
-    monkeypatch.setattr(adapters, "apply_training_sidecars", stub("apply_training_sidecars", []))
-    monkeypatch.setattr(adapters, "save_full_checkpoint", stub("save_full_checkpoint", None))
-    monkeypatch.setattr(adapters, "copy_training_sidecars", stub("copy_training_sidecars", None))
+    monkeypatch.setattr(adapter_merge, "PeftModel", _FakePeftModel)
+    monkeypatch.setattr(
+        adapter_merge, "resolve_peft_processing_class", stub("resolve_peft_processing_class", object())
+    )
+    monkeypatch.setattr(adapter_merge, "apply_training_sidecars", stub("apply_training_sidecars", []))
+    monkeypatch.setattr(adapter_merge, "save_full_checkpoint", stub("save_full_checkpoint", None))
+    monkeypatch.setattr(adapter_merge, "copy_training_sidecars", stub("copy_training_sidecars", None))
 
 
 def _load_base_model(calls: list[tuple[str, str]]):
@@ -128,7 +135,7 @@ def test_every_gate_runs_before_the_load_on_both_the_adapter_and_the_base(tmp_pa
     calls: list[tuple[str, str]] = []
     _instrument(monkeypatch, calls)
 
-    adapters.merge_adapter_into_base(
+    adapter_merge.merge_adapter_into_base(
         adapter,
         str(tmp_path / "out"),
         load_base_model=_load_base_model(calls),
@@ -140,7 +147,7 @@ def test_every_gate_runs_before_the_load_on_both_the_adapter_and_the_base(tmp_pa
     load_at = names.index("load_base_model")
     assert set(_REAL_GATES) <= set(names[:load_at]), f"a gate did not run before the load: {names}"
     assert not set(_REAL_GATES) & set(names[load_at:]), f"a gate ran after the load: {names}"
-    for gate in ("reject_sharded_checkpoint", "reject_in_place_conversion"):
+    for gate in ("reject_partial_checkpoint", "reject_in_place_conversion"):
         checked = {target for name, target in calls if name == gate}
         assert checked == {str(adapter), str(base)}, (
             f"{gate} saw {checked}: a merge takes its WEIGHTS from the base, so both inputs owe it"
@@ -149,7 +156,7 @@ def test_every_gate_runs_before_the_load_on_both_the_adapter_and_the_base(tmp_pa
     assert load_at < names.index("save_full_checkpoint") < names.index("copy_training_sidecars")
     # The adapter's own config is relocated, never left beside the merged weights where every
     # from_pretrained-based tool downstream would read the merged model as an unmerged adapter.
-    relocated = tmp_path / "out" / adapters.MERGED_ADAPTER_CONFIG_DIR / ADAPTER_CONFIG_FILE
+    relocated = tmp_path / "out" / MERGED_ADAPTER_CONFIG_DIR / ADAPTER_CONFIG_FILE
     assert relocated.is_file(), "the adapter config was not relocated beside the merged output"
 
 
@@ -164,7 +171,7 @@ def test_an_output_aimed_at_an_input_is_refused_before_the_load(tmp_path, monkey
     _instrument(monkeypatch, calls)
 
     with pytest.raises(ValueError, match="not in-place"):
-        adapters.merge_adapter_into_base(
+        adapter_merge.merge_adapter_into_base(
             adapter,
             adapter if side == "adapter" else str(base),
             load_base_model=_load_base_model(calls),
@@ -194,7 +201,7 @@ def test_a_per_rank_sharded_base_is_refused_before_the_load(tmp_path, monkeypatc
     _instrument(monkeypatch, calls)
 
     with pytest.raises(ValueError, match="per-rank sharded checkpoint"):
-        adapters.merge_adapter_into_base(
+        adapter_merge.merge_adapter_into_base(
             adapter, str(tmp_path / "out"), load_base_model=_load_base_model(calls), tool="test", verbose=False
         )
 
@@ -212,7 +219,7 @@ def test_a_native_expert_lora_adapter_is_refused_before_the_load(tmp_path, monke
     _instrument(monkeypatch, calls)
 
     with pytest.raises(ValueError):
-        adapters.merge_adapter_into_base(
+        adapter_merge.merge_adapter_into_base(
             adapter, str(tmp_path / "out"), load_base_model=_load_base_model(calls), tool="test", verbose=False
         )
 
@@ -261,7 +268,7 @@ def _merge_via_merge_peft_adapters(adapter: str, output_dir: str) -> None:
 def test_both_merge_tools_fold_through_the_shared_sequence(tmp_path, monkeypatch, script, run):
     """A tool that re-grew its own load→merge→save path would carry none of the gates above, so each
     tool's own entry point is driven here and must arrive at the shared merge."""
-    assert script.merge_adapter_into_base is adapters.merge_adapter_into_base
+    assert script.merge_adapter_into_base is adapter_merge.merge_adapter_into_base
 
     base = tmp_path / "base"
     base.mkdir()
@@ -284,7 +291,7 @@ def test_both_merge_tools_fold_through_the_shared_sequence(tmp_path, monkeypatch
 def test_an_unmerged_adapter_conversion_runs_the_shared_gates(tmp_path, monkeypatch, side):
     """``convert_to_bf16 --peft`` without ``--merge_adapter`` re-saves an adapter a later merge reads,
     so it owes the merge's gates, taken from the one sequence rather than a copy of it."""
-    assert convert_to_bf16.adapter_input_gates is adapters.adapter_input_gates
+    assert convert_to_bf16.adapter_input_gates is adapter_merge.adapter_input_gates
 
     base = tmp_path / "base"
     base.mkdir()

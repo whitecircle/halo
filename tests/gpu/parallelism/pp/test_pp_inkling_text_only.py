@@ -33,7 +33,7 @@ from transformers.models.inkling.configuration_inkling import (
 from transformers.models.inkling.modeling_inkling import InklingForCausalLM, InklingForConditionalGeneration
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
+from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
@@ -98,7 +98,14 @@ def run(ctx):
 
     # One EP group spanning the world: the two ranks are one stage's ranks, and the virtual
     # pipeline is walked by both of them.
-    ep_config = EPConfig(ep_size=2, world_size=ctx.world_size, rank_offset=0, node_local=True, gpus_per_node=2)
+    ep_config = EPConfig(
+        ep_size=2,
+        stage_world_size=ctx.world_size,
+        stage_base_rank=0,
+        node_local=True,
+        nvlink_domain_size=2,
+        experts_fsdp_managed=False,
+    )
     ctx.broadcast_seed(1234)
 
     total_compared = 0

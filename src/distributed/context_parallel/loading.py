@@ -16,7 +16,7 @@ from transformers import AutoModelForCausalLM
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.wrapper import patch_model_for_cp
 from src.distributed.expert_parallel.loading import load_ep_model, load_through_cpu
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.models.patches.attention import revalidate_attn_kwarg
 from src.runtime.ranks import get_global_rank
 
@@ -81,7 +81,6 @@ def load_model_for_cp(
 
     if ep_config is not None:
         model = patch_moe_model_for_ep(model, ep_config)
-        create_ep_buffers(model)
 
     model = patch_model_for_cp(model, cp_config)
     logger.info(f"[Rank {rank}] ✓ Model loaded with CP")

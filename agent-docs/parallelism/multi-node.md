@@ -245,12 +245,12 @@ YAML-built one. Derived fields: `data_parallel_size`,
 
 ## DeepEP inter-node communication
 
-`DeepEPDispatcher` (`src/distributed/expert_parallel/dispatcher.py`) shares one lazily built
+`DeepEPDispatcher` (`src/distributed/expert_parallel/deepep/dispatcher.py`) shares one lazily built
 `deep_ep.ElasticBuffer` across every MoE layer on an EP group (`HALO_EP_CAPACITY_DEDUP=0` gives each
-layer its own) and selects the transport from the EP topology: intra-node uses
-the NVLink (non-Gin) path; inter-node (`requires_rdma=True`) uses the NCCL Gin backend
-(GPU-Initiated Networking / RDMA, e.g. AWS EFA). The dispatcher sets `EP_DISABLE_GIN` (`0`
-inter-node, `1` intra-node) at buffer construction; an explicit env value is honored.
+layer its own) and selects the transport from the EP topology: within one NVLink domain it uses the
+NVLink (non-Gin) path; across domains (`requires_rdma=True`, `EPConfig.spans_domains`) the NCCL Gin
+backend (GPU-Initiated Networking / RDMA, e.g. AWS EFA). The backend sets `EP_DISABLE_GIN` (`0`
+across domains, `1` within one) before its first buffer build; an explicit env value is honored.
 
 NVLink carries the all-to-all several times faster than any RDMA fabric ([measured busbw by
 interconnect](../reference/gpu-training-theory.md#interconnect-tiers)), so prefer `ep_scope="node"`

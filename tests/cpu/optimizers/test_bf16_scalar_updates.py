@@ -14,7 +14,7 @@ import torch
 from torch import nn
 
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.muon import build_muon_optimizer
 
 LR = 3e-4  # the documented Muon default, and a typical fine-tune LR
 STEPS = 200
@@ -65,7 +65,7 @@ def test_muon_routes_scalar_params_through_the_stochastic_rounding_optimizer():
     Muon requires bf16 weights, so a plain torch.optim.AdamW on that branch hits the freeze above.
     """
     model = nn.Sequential(nn.Linear(32, 32, bias=True), nn.LayerNorm(32)).to(torch.bfloat16)
-    optimizer = create_muon_optimizer(model, lr=LR, ns_use_kernels=False)
+    optimizer = build_muon_optimizer(model, lr=LR, ns_use_kernels=False)
 
     scalar_optimizer = optimizer.scalar_optimizer
     assert scalar_optimizer is not None, "expected 1-D params to be routed to a scalar optimizer"

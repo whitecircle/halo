@@ -34,7 +34,7 @@ from tests.common.parallelism import make_parallelism_config
 
 E, H, M = 2, 4, 8
 _FABRIC_PROBE = "src.distributed.parallelism_config.validate_nvlink_domain_against_fabric"
-_RANK_UNIFORM_ENV = "src.trainers.mixins.base.verify_rank_uniform_env"
+_RANK_UNIFORM_ENV = "src.trainers.mixins.base.agree_rank_uniform_env"
 
 # Every axis set whose wrap leaves EP layers out of FSDP2, paired with the mode setup
 # _setup_distributed_modes dispatches it to: ep_group_size > 1, or plain DP with fsdp_shard_ep1_experts

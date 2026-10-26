@@ -54,7 +54,9 @@ def _ep_patched(family: str, device: torch.device) -> torch.nn.Module:
     """The family's tiny model, identically initialized on every rank, EP-patched at ``EP_SIZE``."""
     torch.manual_seed(0)
     model = tiny_family_model(_ROSTER[family]).to(device=device, dtype=torch.bfloat16)
-    config = EPConfig(ep_size=EP_SIZE, world_size=EP_SIZE, gpus_per_node=EP_SIZE)
+    config = EPConfig(
+        ep_size=EP_SIZE, stage_world_size=EP_SIZE, nvlink_domain_size=EP_SIZE, experts_fsdp_managed=False
+    )
     return patch_moe_model_for_ep(model, config)
 
 

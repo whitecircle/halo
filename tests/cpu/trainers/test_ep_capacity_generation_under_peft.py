@@ -30,8 +30,8 @@ from trl import SFTConfig
 
 PartialState()  # the trainer logs through accelerate's logger, which refuses an uninitialized state
 
-from src.distributed.expert_parallel import dispatcher as dispatcher_mod
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from src.distributed.expert_parallel.deepep.capacity import capacity_scope
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG
@@ -88,10 +88,10 @@ def _trainer(tmp_path, peft_config: LoraConfig | None) -> DistributedSFTTrainer:
 
 def _generation_delta(module: torch.nn.Module, forwards: int) -> int:
     """How far ``forwards`` calls of ``module`` moved the process-global generation."""
-    before = dispatcher_mod._FORWARD_GENERATION
+    before = capacity_scope.generation
     for _ in range(forwards):
         module(input_ids=torch.tensor([_INPUT_IDS]))
-    return dispatcher_mod._FORWARD_GENERATION - before
+    return capacity_scope.generation - before
 
 
 def test_an_attention_lora_run_still_advances_the_ep_capacity_generation(tmp_path):

@@ -25,11 +25,11 @@ from src.data.pipeline.preferences import prepare_generative_dataset, prepare_pr
 from src.data.pipeline.processing import log_dataset_examples, resolve_map_num_proc
 from src.data.sources.loading import is_presharded_dataset_load, load_datasets, reject_image_columns
 from src.data.vlm import dataset_declares_images, is_vlm_run
-from src.distributed.expert_parallel.dispatcher import verify_rank_uniform_env
 from src.distributed.loading.model_source import probe_checkpoint
 from src.distributed.loading.peft_setup import split_expert_lora_targets
 from src.distributed.loading.vlm_setup import load_model_consuming_init_kwargs
 from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, setup_model_and_tokenizer
 from src.models.context_window import get_model_context_window, is_bounded_length, resolve_length_to_context
@@ -107,7 +107,7 @@ def init_training_script(
     # Before the weight load (a check placed after it would be the first collective a straggler
     # misses, and the watchdog would then time out here) and after the device bind (the gather
     # runs over NCCL).
-    verify_rank_uniform_env()
+    agree_rank_uniform_env()
 
     # Peeled before the config is built: __post_init__ validates expert_lora (PP rejects it) and
     # create_ep_config caches its EPConfig, so a later assignment would not reach the layers.

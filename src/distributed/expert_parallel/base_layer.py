@@ -25,10 +25,13 @@ import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
 from src.diagnostics.ep_span_timing import get_ep_span_timer
-from src.distributed.expert_parallel.autograd import ReplayCombineFunction, ReplayDispatchFunction
 from src.distributed.expert_parallel.balancing import EPRouterBalancingMixin
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.dispatcher import DeepEPDispatcher
+from src.distributed.expert_parallel.deepep.dispatcher import (
+    DeepEPDispatcher,
+    ReplayCombineFunction,
+    ReplayDispatchFunction,
+)
 from src.distributed.expert_parallel.expert_gather import EPExpertGatherMixin
 from src.distributed.expert_parallel.grad_sync import (
     create_expert_grad_hook,

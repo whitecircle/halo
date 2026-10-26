@@ -19,8 +19,8 @@ Gathered is the default for every mode; the sharded EP save is an opt-in write-b
 (there is no per-rank TP save). Nothing loads `ep_sharded` directly: `reject_ep_sharded_checkpoint`
 raises world-uniformly at EP load (`src/distributed/expert_parallel/loading.py`) and
 `load_full_state_dict` refuses the marker with the merge instructions
-(`src/checkpoint/format.py`); a shard directory whose index never landed is caught tool-side by the
-`.shard_N` header peek (`_reject_indexless_ep_shards`, `src/checkpoint/tool_io.py`). `merge_ep_shards`
+(`src/checkpoint/reading.py`); a shard directory whose index never landed is caught tool-side by the
+`.shard_N` header peek (`_reject_indexless_ep_shards`, the same module). `merge_ep_shards`
 additionally needs `ep_size` in the index metadata, not just the marker.
 
 ## Resume — three paths
@@ -65,7 +65,7 @@ on any rank (an unreadable shard, a CUDA OOM) raises on every rank unless `allow
 Source: `src/distributed/checkpoint/loader.py` (`CheckpointLoader`, `_load_streamed`, `_load_fsdp2`,
 `_load_pp_stage`), `src/distributed/checkpoint/optimizer.py` (`OptimizerShardStore.load` / `.save` /
 `.restore_lr_scheduler`), `src/distributed/checkpoint/fingerprint.py`,
-`src/checkpoint/format.py` (`load_full_state_dict`), `src/checkpoint/hub_layout.py` (`ModuleLayoutView`).
+`src/checkpoint/reading.py` (`load_full_state_dict`), `src/checkpoint/hub_layout.py` (`ModuleLayoutView`).
 `src/trainers/mixins/checkpointing.py::_load_from_checkpoint` is a thin delegate over the loader.
 
 ## Per-script reference (`scripts/after_training/`)
@@ -106,7 +106,7 @@ models), `--num_labels`, `--max_shard_size` (`5GB`), `--attn_implementation`, pl
 (`load_base_for_adapter`): the widest one (`resolve_auto_model_class`, the full
 `*ForImageTextToText` wrapper for a VLM), or the `*ForCausalLM` sibling when the adapter came from a
 `text_only_model` run, whose merge keeps the text-only `model.*` layout. The work happens in the
-shared `merge_adapter_into_base` (`src/checkpoint/adapters.py`), which also refuses a
+shared `merge_adapter_into_base` (`src/checkpoint/adapter_merge.py`), which also refuses a
 per-rank-sharded adapter or base, an in-place output and a native expert-LoRA adapter, and picks the
 processing class through `resolve_peft_processing_class` (`src/model_loading/tokenizer_setup.py`):
 for a text-only merge the run's tokenizer from the adapter dir (the base's only when the adapter
@@ -200,14 +200,14 @@ wrapper class for Qwen3.5/3.6; SGLang 0.5.17 loads a text-only export as-is.
 `router_balancing_biases.pt` (trained router-balancing biases, written by
 `_persist_router_balancing_biases` in `src/trainers/mixins/checkpointing.py` every save) and `training_provenance.json` (the GptOss sink
 policy) hold training state the weights cannot. `apply_training_sidecars(model, source_dir)`
-(`src/checkpoint/tool_io.py`) is the single seam that re-applies both to an assembled model:
+(`src/checkpoint/sidecars.py`) is the single seam that re-applies both to an assembled model:
 it restores the balancing tensors **at their trained precision** (a bf16 round trip quantizes away
 the ~1e-3 sign steps), then, only where the source ships no weights of its own (a PEFT adapter
 dir), fills the native slots from the sidecar via `apply_router_balancing_sidecar`
 (`src/models/moe_balancing.py`, off the slot registry the EP layer classes register into) and **warns**
 about routers whose bias was transient — those exports serve without it. `merge_peft_adapters.py`
 and `convert_to_bf16.py` call it and print the returned actions; `copy_training_sidecars` moves
-`TRAINING_STATE_FILES` into an output dir a full save did not write them to.
+`EXPORT_SIDECAR_FILES` into an output dir a full save did not write them to.
 
 ## Footguns (source-cited)
 

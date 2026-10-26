@@ -15,16 +15,16 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-import src.checkpoint.tool_io as tool_io
+import src.checkpoint.offline_export as offline_export
 from scripts.after_training.merge_ep_shards import merge_ep_shards
-from src.checkpoint.tool_io import preflight_model_load_resources, preflight_resource_warning
+from src.checkpoint.offline_export import preflight_model_load_resources, preflight_resource_warning
 from src.hardware import available_host_ram_bytes
 
 H = 32
 
 
 def test_ram_warning_fires_with_numbers(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1_000_000)
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1_000_000)
     preflight_resource_warning("tool_x", str(tmp_path), disk_bytes=None, ram_bytes=2_000_000_000)
     out = capsys.readouterr().out
     assert "WARNING" in out and "tool_x" in out and "RAM" in out
@@ -32,7 +32,9 @@ def test_ram_warning_fires_with_numbers(monkeypatch, capsys, tmp_path):
 
 
 def test_disk_warning_walks_up_to_an_existing_ancestor(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(tool_io.shutil, "disk_usage", lambda path: SimpleNamespace(total=10, used=9, free=1_000))
+    monkeypatch.setattr(
+        offline_export.shutil, "disk_usage", lambda path: SimpleNamespace(total=10, used=9, free=1_000)
+    )
     # The output dir does not exist yet — every tool preflights before creating it.
     preflight_resource_warning("tool_x", str(tmp_path / "a" / "b"), disk_bytes=1_000_000, ram_bytes=None)
     out = capsys.readouterr().out
@@ -40,13 +42,13 @@ def test_disk_warning_walks_up_to_an_existing_ancestor(monkeypatch, capsys, tmp_
 
 
 def test_silent_when_resources_are_ample(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 10**15)
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 10**15)
     preflight_resource_warning("tool_x", str(tmp_path), disk_bytes=1, ram_bytes=1)
     assert capsys.readouterr().out == ""
 
 
 def test_silent_and_no_raise_when_meminfo_is_unreadable(monkeypatch, capsys, tmp_path):
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: None)
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: None)
     preflight_resource_warning("tool_x", str(tmp_path), disk_bytes=None, ram_bytes=10**18)
     assert capsys.readouterr().out == ""
 
@@ -65,7 +67,7 @@ def _tiny_checkpoint(directory):
 def test_model_load_preflight_estimates_from_local_checkpoint_bytes(monkeypatch, capsys, tmp_path):
     src_dir = tmp_path / "src"
     _tiny_checkpoint(str(src_dir))
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1)  # any load is too big
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)  # any load is too big
     preflight_model_load_resources(str(src_dir), str(tmp_path / "out"), tool="convert_to_bf16")
     assert "WARNING: convert_to_bf16" in capsys.readouterr().out
 
@@ -73,7 +75,7 @@ def test_model_load_preflight_estimates_from_local_checkpoint_bytes(monkeypatch,
 def test_model_load_preflight_is_silent_for_a_hub_id(monkeypatch, capsys, tmp_path):
     """A hub id resolves to no local directory — there is nothing to measure, and probing must not
     turn the preflight into a crash or a download."""
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1)
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
     preflight_model_load_resources("Qwen/Qwen3-4B", str(tmp_path), tool="convert_to_bf16")
     assert capsys.readouterr().out == ""
 
@@ -82,8 +84,10 @@ def test_model_load_preflight_skips_ram_when_device_map_offloads(monkeypatch, ca
     """With --device_map the weights land on devices, not host RAM — no spurious RAM warning."""
     src_dir = tmp_path / "src"
     _tiny_checkpoint(str(src_dir))
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1)
-    monkeypatch.setattr(tool_io.shutil, "disk_usage", lambda path: SimpleNamespace(total=1, used=0, free=10**18))
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
+    monkeypatch.setattr(
+        offline_export.shutil, "disk_usage", lambda path: SimpleNamespace(total=1, used=0, free=10**18)
+    )
     preflight_model_load_resources(str(src_dir), str(tmp_path / "out"), tool="convert_to_bf16", device_map="auto")
     assert capsys.readouterr().out == ""
 
@@ -117,7 +121,7 @@ def _write_tiny_ep_checkpoint(input_dir):
 def test_merge_ep_shards_routes_through_the_preflight_and_still_completes(monkeypatch, capsys, tmp_path):
     """The streamed merge must warn about RAM/disk BEFORE its heavy phase — silence here means the
     script stopped calling the shared helper — and the warning must not abort the merge."""
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1)
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
     input_dir, output_dir = tmp_path / "in", tmp_path / "out"
     os.makedirs(input_dir)
     _write_tiny_ep_checkpoint(str(input_dir))

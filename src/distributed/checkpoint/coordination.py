@@ -23,7 +23,8 @@ from transformers.trainer import TRAINER_STATE_NAME
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
 from src.checkpoint.atomic import fsync_directory
-from src.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, StreamingCheckpointReader
+from src.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME
+from src.checkpoint.reading import StreamingCheckpointReader
 from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure, rank_consensus
 from src.runtime.filesystem import is_fs_save_rank

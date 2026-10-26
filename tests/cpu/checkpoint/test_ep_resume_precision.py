@@ -25,12 +25,10 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, Qwen3MoeForSequenceClassification
 
 import src.distributed.context_parallel.loading as cp_loading
-import src.distributed.expert_parallel.lazy_loader as lazy_loading
 import src.distributed.expert_parallel.loading as eager_loading
 import src.distributed.loading.model_loading as model_loading
-import src.distributed.pipeline_parallel.lazy_loader as pp_lazy_loading
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
-from src.checkpoint.format import StreamingCheckpointReader, load_full_state_dict
+from src.checkpoint.reading import StreamingCheckpointReader, load_full_state_dict
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
 from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
@@ -144,7 +142,6 @@ def _patch_cpu_loading(monkeypatch):
     """No forward or distributed collective runs; the actual checkpoint materialization does."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(eager_loading, "move_model_to_local_device", lambda model: model)
-    monkeypatch.setattr(model_loading, "create_ep_buffers", lambda model: 0)
     verified = model_loading.from_pretrained_verified
 
     def cpu_pretrained(model_class, source, **kwargs):
@@ -152,8 +149,6 @@ def _patch_cpu_loading(monkeypatch):
         return verified(model_class, source, **kwargs)
 
     monkeypatch.setattr(model_loading, "from_pretrained_verified", cpu_pretrained)
-    for module in (eager_loading, lazy_loading, pp_lazy_loading):
-        monkeypatch.setattr(module, "create_ep_buffers", lambda model: 0)
     monkeypatch.setattr(cp_loading, "patch_model_for_cp", _cpu_cp_wrap)
 
 
@@ -172,11 +167,11 @@ def _cpu_cp_wrap(model, config):
 def _ep_config(*, fp32_router, fp32_experts, fp32_non_ep, managed_experts):
     return EPConfig(
         ep_size=1,
-        world_size=1,
-        gpus_per_node=1,
+        stage_world_size=1,
+        nvlink_domain_size=1,
         fp32_router=fp32_router or fp32_non_ep,
         fp32_experts=fp32_experts,
-        fsdp_shard_ep1_experts=managed_experts,
+        experts_fsdp_managed=managed_experts,
         use_grouped_gemm=False,
     )
 

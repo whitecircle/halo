@@ -30,12 +30,8 @@ from torch.distributed.checkpoint.state_dict import _init_optim_state
 
 import src.optimizers.adamw_bf16 as adamw_mod
 import src.optimizers.muon as muon_mod
-from src.optimizers.adamw_bf16 import (
-    AdamWBF16,
-    _eager_adam_bf16_step,
-    sr_seed_pair,
-    stochastic_round_to_bf16,
-)
+from src.optimizers.adamw_bf16 import AdamWBF16, _eager_adam_bf16_step
+from src.optimizers.stochastic_rounding import sr_seed_pair, stochastic_round_to_bf16
 
 
 def _bf16_ulp(x: float) -> float:

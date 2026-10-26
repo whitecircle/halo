@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Safetensors-index classification and reading: ``is_sharded_checkpoint`` + ``load_full_state_dict``.
+"""Safetensors-index classification and reading: ``is_ep_sharded_checkpoint`` + ``load_full_state_dict``.
 
 The predicate gates resume paths inside rank-0 decision/broadcast patterns, so a torn/truncated
 ``model.safetensors.index.json`` must classify as ``False`` (not raise — a rank-local raise would
@@ -22,7 +22,13 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from src.checkpoint.format import EP_SHARDED_FORMAT, is_sharded_checkpoint, load_full_state_dict
+from src.checkpoint.format import EP_SHARDED_FORMAT, ep_sharded_index_metadata
+from src.checkpoint.reading import (
+    ep_sharded_checkpoint_reason,
+    is_ep_sharded_checkpoint,
+    load_full_state_dict,
+    reject_partial_checkpoint,
+)
 
 
 def _write_index(tmp_path, payload: str) -> str:
@@ -35,12 +41,19 @@ def _write_index(tmp_path, payload: str) -> str:
 def test_gathered_index_without_format_marker_is_not_sharded(tmp_path):
     """A gathered HF index (plain weight_map, no format metadata) must stay directly loadable."""
     payload = json.dumps({"metadata": {"total_size": 4}, "weight_map": {"w": "model-00001.safetensors"}})
-    assert is_sharded_checkpoint(_write_index(tmp_path, payload)) is False
+    assert is_ep_sharded_checkpoint(_write_index(tmp_path, payload)) is False
 
 
 def test_sharded_format_marker_detected(tmp_path):
     payload = json.dumps({"metadata": {"format": EP_SHARDED_FORMAT}, "weight_map": {}})
-    assert is_sharded_checkpoint(_write_index(tmp_path, payload)) is True
+    assert is_ep_sharded_checkpoint(_write_index(tmp_path, payload)) is True
+
+
+def test_the_ep_sharded_index_metadata_is_what_the_predicate_reads(tmp_path):
+    metadata = ep_sharded_index_metadata(total_size=12, ep_size=4)
+
+    assert metadata == {"total_size": 12, "ep_size": 4, "format": "ep_sharded"}
+    assert is_ep_sharded_checkpoint(_write_index(tmp_path, json.dumps({"metadata": metadata, "weight_map": {}})))
 
 
 def test_pp_stage_index_is_not_per_rank_sharded(tmp_path):
@@ -49,7 +62,7 @@ def test_pp_stage_index_is_not_per_rank_sharded(tmp_path):
     payload = json.dumps(
         {"metadata": {"total_size": 8}, "weight_map": {"w": "model-pp00000-of-00002-00001.safetensors"}}
     )
-    assert is_sharded_checkpoint(_write_index(tmp_path, payload)) is False
+    assert is_ep_sharded_checkpoint(_write_index(tmp_path, payload)) is False
 
 
 def test_torn_truncated_index_returns_false_not_raise(tmp_path):
@@ -57,11 +70,11 @@ def test_torn_truncated_index_returns_false_not_raise(tmp_path):
     never propagate the JSONDecodeError into the rank-0 decision path."""
     full = json.dumps({"metadata": {"format": "ep_sharded"}, "weight_map": {"w": "shard-0.safetensors"}})
     torn_dir = _write_index(tmp_path, full[: len(full) // 2])
-    assert is_sharded_checkpoint(torn_dir) is False
+    assert is_ep_sharded_checkpoint(torn_dir) is False
 
 
 def test_empty_index_file_returns_false(tmp_path):
-    assert is_sharded_checkpoint(_write_index(tmp_path, "")) is False
+    assert is_ep_sharded_checkpoint(_write_index(tmp_path, "")) is False
 
 
 @pytest.mark.parametrize("payload", ["", "{not json", '{"metadata": {"format": "ep_sha'])
@@ -82,6 +95,19 @@ def test_load_full_state_dict_rejects_per_rank_shards(tmp_path):
     payload = json.dumps({"metadata": {"format": "ep_sharded"}, "weight_map": {"w": "model-00001.safetensors"}})
     with pytest.raises(ValueError, match="merge_ep_shards"):
         load_full_state_dict(_write_index(tmp_path, payload))
+
+
+def test_every_ep_sharded_refusal_gives_one_reason(tmp_path):
+    """The resume reader and the tools' gate refuse the same artifact, so they tell the user one thing."""
+    payload = json.dumps({"metadata": {"format": "ep_sharded"}, "weight_map": {"w": "model-00001.safetensors"}})
+    checkpoint_dir = _write_index(tmp_path, payload)
+    with pytest.raises(ValueError) as resume:
+        load_full_state_dict(checkpoint_dir)
+    with pytest.raises(ValueError) as tool:
+        reject_partial_checkpoint(checkpoint_dir)
+
+    assert str(resume.value) == str(tool.value) == ep_sharded_checkpoint_reason(checkpoint_dir)
+    assert "per-rank sharded checkpoint" in str(tool.value) and "merge_ep_shards" in str(tool.value)
 
 
 def test_load_full_state_dict_rejects_an_index_without_weight_map(tmp_path):

@@ -20,8 +20,8 @@ from torch.distributed.checkpoint.state_dict import _init_optim_state
 
 from src.kernels.lowp.quantization import cached_fake_quant
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.flash_adamw import build_flash_adamw_optimizer
+from src.optimizers.muon import build_muon_optimizer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import assert_optimizer_state_bit_exact
 
@@ -468,7 +468,7 @@ def test_every_optimizer_advances_the_version_counter():
 
     Swept over all four rather than pinned to AdamWBF16: every fused Triton step is exposed, both
     FlashAdamW's (upstream code the toolkit only wraps) and Muon's, not just AdamWBF16's.
-    The Muon leg must build through ``create_muon_optimizer`` — the bare upstream
+    The Muon leg must build through ``build_muon_optimizer`` — the bare upstream
     ``Muon`` writes via ATen ops that bump the counter themselves, and would mask the fused path.
     """
     print("\nTEST 10: every optimizer advances param._version (low-precision cache invalidation)")
@@ -484,8 +484,8 @@ def test_every_optimizer_advances_the_version_counter():
     builders = {
         "AdamWBF16 (Triton)": lambda p: AdamWBF16([("p", p)], lr=1e-1, weight_decay=0.0),
         "AdamWBF16 (eager)": lambda p: AdamWBF16([("p", p)], lr=1e-1, weight_decay=0.0, use_triton=False),
-        "Muon (fused step)": _named(lambda m: create_muon_optimizer(m, lr=1e-1, weight_decay=0.01)),
-        "FlashAdamW": _named(lambda m: create_flash_adamw_optimizer(m, lr=1e-1, weight_decay=0.0)),
+        "Muon (fused step)": _named(lambda m: build_muon_optimizer(m, lr=1e-1, weight_decay=0.01)),
+        "FlashAdamW": _named(lambda m: build_flash_adamw_optimizer(m, lr=1e-1, weight_decay=0.0)),
     }
     for label, build in builders.items():
         param = torch.nn.Parameter(torch.randn(256, 256, device="cuda", dtype=torch.bfloat16))
@@ -639,7 +639,7 @@ def test_restore_replays_the_rounding():
     print("\nTEST 11: A restored optimizer replays the uninterrupted run's rounding")
     builders = {
         "AdamWBF16 (Triton)": lambda m: AdamWBF16(m.named_parameters(), lr=1e-3),
-        "Muon (fused step)": lambda m: create_muon_optimizer(m, lr=1e-2, weight_decay=0.01),
+        "Muon (fused step)": lambda m: build_muon_optimizer(m, lr=1e-2, weight_decay=0.01),
     }
     for name, build in builders.items():
         gen = torch.Generator(device="cuda").manual_seed(7)

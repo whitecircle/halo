@@ -24,10 +24,11 @@ from peft import LoraConfig, get_peft_model
 from transformers.trainer_utils import enable_full_determinism
 
 from src.distributed.expert_parallel.base_layer import find_ep_layers
-from src.distributed.expert_parallel.config import EPConfig, ExpertLoraSpec
+from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.optimizers.param_groups import decay_groups
 from src.trainers.grpo.rollout.routing_replay import build_routing_replay_injector
 from tests.common.distributed import init_distributed, teardown_distributed
@@ -73,7 +74,7 @@ LORA_RANK = 8
 # mask, and bias-update balancing with seeded biases.
 FORWARD_VARIANTS = {
     "defaults": {},
-    "fp32_masters": {"fsdp_shard_ep1_experts": False, "fp32_router": True},
+    "fp32_masters": {"experts_fsdp_managed": False, "fp32_router": True},
     "expert_lora": {"expert_lora": ExpertLoraSpec(r=LORA_RANK, alpha=16.0, dropout=0.1)},
     "routing_replay": {},
     "bias_update": {},
@@ -301,9 +302,10 @@ def _construction_case(family: str, variant: str, *, perturb: bool):
         model = _model(family, torch.float32)
         with stubbed_process_groups(layout.world_size, rank):
             ep_config = EPConfig(
-                world_size=layout.world_size,
-                gpus_per_node=layout.world_size,
+                stage_world_size=layout.world_size,
+                nvlink_domain_size=layout.world_size,
                 use_grouped_gemm=False,
+                experts_fsdp_managed=False,
                 **layout.fields,
             )
             _wrap(model, ep_config, perturb=perturb)
@@ -325,7 +327,6 @@ def _gpu_ep_case(family: str, mode: str, *, perturb: bool, device):
     parallelism = ParallelismConfig(**GPU_EP_MODES[mode])
     model = _model(family, torch.bfloat16, device)
     _wrap(model, parallelism.create_ep_config(), perturb=perturb)
-    create_ep_buffers(model)
     # The expert-TP partners share a data-parallel batch.
     batch_index = parallelism.get_data_parallel_rank()
     return _forward_backward(model, "defaults", SEQ["gpu"], device, batch_index), _orders(model)

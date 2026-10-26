@@ -100,13 +100,14 @@ def family(request, tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _stub_ep_patching(monkeypatch):
-    """EP patching and buffer creation need DeepEP + process groups; the load itself does not."""
+    """EP patching needs DeepEP + process groups; the load itself does not."""
     monkeypatch.setattr(ep_lazy_loader, "patch_moe_model_for_ep", lambda model, *a, **k: model)
-    monkeypatch.setattr(ep_lazy_loader, "create_ep_buffers", lambda *a, **k: None)
 
 
 def _lazy(model_class, path: str, ep_size: int):
-    ep_config = EPConfig(ep_size=ep_size, world_size=ep_size, gpus_per_node=ep_size)
+    ep_config = EPConfig(
+        ep_size=ep_size, stage_world_size=ep_size, nvlink_domain_size=ep_size, experts_fsdp_managed=ep_size == 1
+    )
     return load_ep_model_lazy(
         path,
         ep_config,

@@ -16,9 +16,9 @@ import types
 import pytest
 from trl import ModelConfig
 
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.loading.peft_setup import has_attention_lora_targets
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 
 # What split_expert_lora_targets leaves behind: the attention targets of a mixed run, none of an
 # expert-only one.

@@ -44,8 +44,13 @@ from scripts.after_training.quantize_to_lowp import quantize_checkpoint
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
 from scripts.before_training import convert_deepseek_v4_bf16, convert_glm5_bf16, convert_mistral4_bf16, patch_vocab
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE, is_sharded_checkpoint
-from src.checkpoint.tool_io import checkpoint_shard_files, detect_model_type, reject_sharded_checkpoint
+from src.checkpoint.format import SAFETENSORS_INDEX_FILE
+from src.checkpoint.reading import (
+    checkpoint_shard_files,
+    detect_model_type,
+    is_ep_sharded_checkpoint,
+    reject_partial_checkpoint,
+)
 from src.checkpoint.writing import save_sharded_state_dict
 from src.distributed.expert_parallel.expert_weights import per_expert_hub_model_types
 from tests.common.repo import REPO_ROOT
@@ -117,14 +122,14 @@ def _write_pp_per_node_checkpoint(path, *, model_type="qwen3_moe", complete=Fals
 def test_fixture_is_recognized_as_per_rank_sharded(tmp_path):
     """Anti-vacuity: the guards below are only meaningful if the fixture really trips the detector."""
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep")
-    assert is_sharded_checkpoint(str(ep))
-    assert not is_sharded_checkpoint(str(_write_gathered_checkpoint(tmp_path / "ok", {"a": torch.zeros(2)})))
+    assert is_ep_sharded_checkpoint(str(ep))
+    assert not is_ep_sharded_checkpoint(str(_write_gathered_checkpoint(tmp_path / "ok", {"a": torch.zeros(2)})))
 
 
-def test_reject_sharded_checkpoint_raises_and_names_the_merge_scripts(tmp_path):
+def test_reject_partial_checkpoint_raises_and_names_the_merge_scripts(tmp_path):
     ep = _write_ep_sharded_checkpoint(tmp_path / "ep")
     with pytest.raises(ValueError, match="per-rank sharded checkpoint"):
-        reject_sharded_checkpoint(str(ep))
+        reject_partial_checkpoint(str(ep))
 
 
 def test_an_index_naming_absent_shards_is_refused_and_names_them(tmp_path):
@@ -135,14 +140,14 @@ def test_an_index_naming_absent_shards_is_refused_and_names_them(tmp_path):
     directory of the same shape must pass — the PP layout is loadable once every part is present."""
     node = _write_pp_per_node_checkpoint(tmp_path / "node0")
     with pytest.raises(ValueError, match="does not hold") as excinfo:
-        reject_sharded_checkpoint(str(node))
+        reject_partial_checkpoint(str(node))
     assert "model-pp00001-of-00002-00001.safetensors" in str(excinfo.value)
     assert "gather every node" in str(excinfo.value)
     with pytest.raises(ValueError, match="does not hold"):
         checkpoint_shard_files(str(node))
 
     gathered = _write_pp_per_node_checkpoint(tmp_path / "gathered", complete=True)
-    reject_sharded_checkpoint(str(gathered))
+    reject_partial_checkpoint(str(gathered))
     assert len(checkpoint_shard_files(str(gathered))) == 2
 
 

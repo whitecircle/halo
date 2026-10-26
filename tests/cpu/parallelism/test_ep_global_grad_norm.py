@@ -102,7 +102,7 @@ def _worker(rank: int, out: str) -> None:
             defer_grad_sync=True,
             expert_replica_group=replica_group,
             is_deferred_dp=False,
-            world_size=WORLD,
+            stage_world_size=WORLD,
             expert_tp_size=WORLD // divisor,
             expert_tp_group=None,
             dispatch_ep_group=None,
@@ -132,7 +132,7 @@ def _ep_etp(rank: int, dispatch_group, expert_tp_group) -> dict:
     ep_config = SimpleNamespace(
         defer_grad_sync=False,
         expert_replica_group=None,
-        world_size=WORLD,
+        stage_world_size=WORLD,
         expert_tp_size=2,
         expert_tp_group=expert_tp_group,
         dispatch_ep_group=dispatch_group,

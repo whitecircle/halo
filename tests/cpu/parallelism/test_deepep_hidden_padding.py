@@ -3,7 +3,7 @@
 
 The ElasticBuffer's TMA combine kernel requires ``hidden % 256 == 0``, so ``_ElasticBackend`` widens
 non-conforming hidden on the wire and slices it back. The pair is applied symmetrically across
-forward and backward (``dispatch``/``combine``/``combine_grad``/``dispatch_grad``) and is invisible
+forward and backward (``dispatch``/``combine``/``dispatch_backward``/``combine_backward``) and is invisible
 to callers — which is exactly why a regression in it is silent: a wrong width does not crash, it
 feeds the expert FFN garbage columns, or drops real ones.
 
@@ -24,8 +24,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.distributed.expert_parallel.config import DEEPEP_HIDDEN_ALIGN
-from src.distributed.expert_parallel.dispatcher import _ElasticBackend
+from src.distributed.expert_parallel.deepep.backends import _ElasticBackend
+from src.distributed.expert_parallel.deepep.capacity import DEEPEP_HIDDEN_ALIGN
 
 # Roster hidden sizes: the first pads (GptOss), the rest already conform.
 GPTOSS_HIDDEN = 2880

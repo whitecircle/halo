@@ -123,7 +123,7 @@ def test_reward_model_loader_applies_the_requested_dtype(monkeypatch, requested,
         def eval(self):
             return self
 
-    monkeypatch.setattr(reward_model_common, "reject_sharded_checkpoint", lambda path: None)
+    monkeypatch.setattr(reward_model_common, "reject_partial_checkpoint", lambda path: None)
     monkeypatch.setattr(
         reward_model_common,
         "AutoTokenizer",

@@ -67,7 +67,7 @@ class _TinyMoEModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.proj = nn.Linear(H, H, bias=False)
-        self.moe = EPLfm2MoELayer(_Lfm2Block(), single_process_ep_config(E, fsdp_shard_ep1_experts=False)).cpu()
+        self.moe = EPLfm2MoELayer(_Lfm2Block(), single_process_ep_config(E, experts_fsdp_managed=False)).cpu()
 
     def forward(self, x):  # pragma: no cover - never called
         return self.moe(self.proj(x))

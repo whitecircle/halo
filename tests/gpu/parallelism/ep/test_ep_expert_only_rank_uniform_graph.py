@@ -36,10 +36,10 @@ import torch.distributed as dist
 from accelerate.state import GradientState
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_reference import ep_layers, score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import freeze_base_keep_expert_adapters
@@ -111,7 +111,6 @@ def build_models(family: str, device):
     ep_pc.expert_lora = ref_pc.expert_lora = spec
     model = patch_moe_model_for_ep(base.to(device), ep_pc.create_ep_config())
     reference = patch_moe_model_for_ep(reference.to(device), ref_pc.create_ep_config())
-    create_ep_buffers(model)
 
     generator = torch.Generator().manual_seed(SEED)
     for index, (layer, ref_layer) in enumerate(zip(ep_layers(model), ep_layers(reference), strict=True)):

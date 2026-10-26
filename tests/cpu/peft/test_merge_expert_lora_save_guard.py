@@ -13,7 +13,7 @@
   with the attention delta already folded into the base weights being gathered. This is what makes
   "re-save with ``merge_expert_lora_on_save=True``" a real export route for the mixed shape rather
   than an adapter file no tool folds, and it is the behavior
-  ``src.checkpoint.adapters._expert_lora_merge_remedy`` points users at.
+  ``src.checkpoint.adapters.assert_no_expert_lora_adapter`` points users at.
 * the QLoRA post-backward sweep — it must honor
   ``parallelism_config.fp32_grad_reduce`` (the QLoRA path bypasses FSDP2's ``reduce_dtype``, so
   dropping the flag silently reduces adapter grads in bf16).

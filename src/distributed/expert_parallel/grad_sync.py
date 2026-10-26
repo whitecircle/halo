@@ -28,7 +28,7 @@ def has_grad_sync_peers(ep_config: EPConfig) -> bool:
     initialized independently of config construction. Single-process runs have no peers and no default
     group, so every hook is inert there.
     """
-    return dist.is_available() and dist.is_initialized() and ep_config.world_size > 1
+    return dist.is_available() and dist.is_initialized() and ep_config.stage_world_size > 1
 
 
 def _noop_sync_hook(param):
@@ -61,7 +61,7 @@ def create_router_grad_hook(ep_config: EPConfig):
     if not has_grad_sync_peers(ep_config):
         return _noop_sync_hook
     return _make_hook(
-        divisor=ep_config.world_size,
+        divisor=ep_config.stage_world_size,
         group=ep_config.dp_scope_group,
         reduce=True,
         fp32=ep_config.fp32_grad_reduce,
@@ -87,4 +87,4 @@ def create_expert_grad_hook(ep_config: EPConfig):
             "received tokens, so a zero-token rank would leave its replicas hanging in it. "
             "EPConfig.defer_grad_sync must cover every multi-EP-group topology."
         )
-    return _make_hook(divisor=ep_config.world_size // ep_config.expert_tp_size, reduce=False)
+    return _make_hook(divisor=ep_config.stage_world_size // ep_config.expert_tp_size, reduce=False)

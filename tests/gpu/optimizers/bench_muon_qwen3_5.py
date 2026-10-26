@@ -19,8 +19,8 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.flash_adamw import build_flash_adamw_optimizer
+from src.optimizers.muon import build_muon_optimizer
 from tests.common.models import QWEN3_5_2B
 
 
@@ -48,11 +48,11 @@ def create_optimizer_for(name, model, lr):
     elif name == "AdamWBF16 (SR)":
         return AdamWBF16(model.named_parameters(), lr=lr)
     elif name == "Muon (GNS)":
-        return create_muon_optimizer(model, lr=lr)
+        return build_muon_optimizer(model, lr=lr)
     elif name == "Muon (std NS)":
-        return create_muon_optimizer(model, lr=lr, ns_algorithm="standard_newton_schulz")
+        return build_muon_optimizer(model, lr=lr, ns_algorithm="standard_newton_schulz")
     elif name == "FlashAdamW":
-        return create_flash_adamw_optimizer(model, lr=lr)
+        return build_flash_adamw_optimizer(model, lr=lr)
     else:
         raise ValueError(f"Unknown optimizer: {name}")
 

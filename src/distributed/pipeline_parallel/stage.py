@@ -23,10 +23,11 @@ from torch.distributed.tensor import DTensor
 from torch.utils.checkpoint import checkpoint
 from transformers import PretrainedConfig
 
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR, hf_architecture_name
+from src.checkpoint.config_export import hf_architecture_name
 from src.checkpoint.hub_layout import CheckpointNamespace
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.expert_parallel.base_layer import find_ep_layers
-from src.distributed.expert_parallel.dispatcher import register_forward_generation_hook
+from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.pipeline_parallel.split import (
     decoder_layers_attr,

@@ -118,7 +118,16 @@ def single_process_ep_config(num_experts: int | None = None, **overrides) -> EPC
     ``expert_start_idx``/``expert_end_idx`` at construction, so ``num_experts`` finalizes the expert
     assignment here; :func:`patch_moe_model_for_ep` finalizes it off the model when it is left unset.
     """
-    config = EPConfig(**{"ep_size": 1, "world_size": 1, "gpus_per_node": 1, "use_grouped_gemm": False, **overrides})
+    config = EPConfig(
+        **{
+            "ep_size": 1,
+            "stage_world_size": 1,
+            "nvlink_domain_size": 1,
+            "use_grouped_gemm": False,
+            "experts_fsdp_managed": True,
+            **overrides,
+        }
+    )
     if num_experts is not None:
         config.finalize_expert_assignment(num_experts)
     return config

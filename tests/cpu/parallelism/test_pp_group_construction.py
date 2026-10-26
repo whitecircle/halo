@@ -40,10 +40,22 @@ def _make_config(cls, rank: int, *, world_size: int, stage_world_size: int, **kw
         return cls(world_size=stage_world_size, rank_offset=rank_offset, **kwargs), calls
 
 
+def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs):
+    """Build the REAL ``EPConfig`` for ``rank`` of a ``world_size`` job split into stage-wide blocks, its
+    distributed experts outside FSDP2. Returns ``(config, calls)`` as :func:`_make_config` does."""
+    calls: list = []
+    stage_base_rank = (rank // stage_world_size) * stage_world_size
+    with stubbed_process_groups(world_size, rank, calls):
+        config = EPConfig(
+            stage_world_size=stage_world_size, stage_base_rank=stage_base_rank, experts_fsdp_managed=False, **kwargs
+        )
+        return config, calls
+
+
 def _ep_over_world(*, world_size: int, stage_world_size: int, **kwargs):
     """Build the EPConfig of every rank of the job. Returns ``{rank: (config, calls)}``."""
     return {
-        rank: _make_config(EPConfig, rank, world_size=world_size, stage_world_size=stage_world_size, **kwargs)
+        rank: _make_ep(rank, world_size=world_size, stage_world_size=stage_world_size, **kwargs)
         for rank in range(world_size)
     }
 
@@ -124,7 +136,9 @@ def test_ep_every_rank_selects_a_group_containing_itself():
     "EP group selection inconsistency".
     """
     for ep_size, groups_per_stage in _NODE_LOCAL_EP_SHAPES:
-        built = _ep_over_world(world_size=16, stage_world_size=8, ep_size=ep_size, gpus_per_node=8, node_local=True)
+        built = _ep_over_world(
+            world_size=16, stage_world_size=8, ep_size=ep_size, nvlink_domain_size=8, node_local=True
+        )
         for rank, (cfg, _) in built.items():
             assert cfg.num_ep_groups == groups_per_stage, (ep_size, rank, cfg.num_ep_groups)
             assert cfg.process_group is not None, (ep_size, rank)
@@ -136,7 +150,9 @@ def test_ep_every_rank_selects_a_group_containing_itself():
 def test_ep_groups_are_stage_confined_and_tile_the_world():
     """The EP groups partition all 16 ranks and none straddles the stage-0 / stage-1 boundary."""
     for ep_size, groups_per_stage in _NODE_LOCAL_EP_SHAPES:
-        built = _ep_over_world(world_size=16, stage_world_size=8, ep_size=ep_size, gpus_per_node=8, node_local=True)
+        built = _ep_over_world(
+            world_size=16, stage_world_size=8, ep_size=ep_size, nvlink_domain_size=8, node_local=True
+        )
         groups = {tuple(cfg._my_ep_group_ranks) for cfg, _ in built.values()}
         assert len(groups) == 2 * groups_per_stage, (ep_size, groups)
         _assert_partitions_world(groups, 16, 8)
@@ -145,7 +161,9 @@ def test_ep_groups_are_stage_confined_and_tile_the_world():
 def test_ep_new_group_sequence_identical_on_every_rank():
     """Every rank issues the SAME ``new_group`` calls in the SAME order (the deadlock invariant)."""
     for ep_size, _ in _NODE_LOCAL_EP_SHAPES:
-        built = _ep_over_world(world_size=16, stage_world_size=8, ep_size=ep_size, gpus_per_node=8, node_local=True)
+        built = _ep_over_world(
+            world_size=16, stage_world_size=8, ep_size=ep_size, nvlink_domain_size=8, node_local=True
+        )
         sequences = {rank: calls for rank, (_, calls) in built.items()}
         reference = sequences[0]
         for rank, seq in sequences.items():
@@ -157,9 +175,7 @@ def test_ep_new_group_sequence_identical_on_every_rank():
 
 def test_ep_pinned_call_sequence_ep2_two_stages():
     """Pin the exact ordered sequence for ep_size=2 on world=16, pp=2 (routing, replica, DP-scope)."""
-    _, calls = _make_config(
-        EPConfig, 12, world_size=16, stage_world_size=8, ep_size=2, gpus_per_node=8, node_local=True
-    )
+    _, calls = _make_ep(12, world_size=16, stage_world_size=8, ep_size=2, nvlink_domain_size=8, node_local=True)
     assert calls == [
         # Routing groups, block-major.
         (0, 1),
@@ -186,7 +202,9 @@ def test_ep_expert_replica_sets_are_stage_confined():
     for ep_size, groups_per_stage in _NODE_LOCAL_EP_SHAPES:
         if groups_per_stage == 1:
             continue  # single group per stage → no cross-group sync
-        built = _ep_over_world(world_size=16, stage_world_size=8, ep_size=ep_size, gpus_per_node=8, node_local=True)
+        built = _ep_over_world(
+            world_size=16, stage_world_size=8, ep_size=ep_size, nvlink_domain_size=8, node_local=True
+        )
         for rank, (cfg, _) in built.items():
             replicas = cfg.expert_replica_ranks
             assert cfg.needs_expert_grad_sync, (ep_size, rank)
@@ -204,7 +222,7 @@ def test_ep_cross_node_scope_under_pp():
     Stage 0 groups are [0-3, 8-11] / [4-7, 12-15]; stage 1's are the same shifted by 16. A group that
     straddled the boundary would put PP-incompatible ranks in one DeepEP dispatch group.
     """
-    built = _ep_over_world(world_size=32, stage_world_size=16, ep_size=8, gpus_per_node=8, node_local=False)
+    built = _ep_over_world(world_size=32, stage_world_size=16, ep_size=8, nvlink_domain_size=8, node_local=False)
     for rank, (cfg, _) in built.items():
         assert cfg.num_ep_groups == 2, (rank, cfg.num_ep_groups)
         assert rank in cfg._my_ep_group_ranks, (rank, cfg._my_ep_group_ranks)
@@ -235,7 +253,7 @@ def test_ep_etp_groups_stage_confined_under_pp():
     stage-local, contain their rank, and be created in an identical order on every rank.
     """
     built = _ep_over_world(
-        world_size=16, stage_world_size=8, ep_size=4, expert_tp_size=2, gpus_per_node=8, node_local=True
+        world_size=16, stage_world_size=8, ep_size=4, expert_tp_size=2, nvlink_domain_size=8, node_local=True
     )
     etp_groups, dispatch_groups = set(), set()
     for rank, (cfg, _) in built.items():
@@ -260,9 +278,11 @@ def test_pp1_ep_construction_is_unchanged():
     """Without PP (offset defaulted, world == stage) the created groups are exactly the pre-PP ones."""
     calls: list = []
     with stubbed_process_groups(8, 3, calls):
-        cfg = EPConfig(ep_size=2, world_size=8, gpus_per_node=8, node_local=True)
+        cfg = EPConfig(
+            ep_size=2, stage_world_size=8, nvlink_domain_size=8, node_local=True, experts_fsdp_managed=False
+        )
 
-    assert cfg.rank_offset == 0
+    assert cfg.stage_base_rank == 0
     assert calls == [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2, 4, 6), (1, 3, 5, 7)], calls
     assert cfg._my_ep_group_ranks == [2, 3]
     assert cfg.expert_replica_ranks == [1, 3, 5, 7]
@@ -354,8 +374,8 @@ def test_parallelism_config_passes_stage_base_rank_to_ep_config():
         with stubbed_process_groups(16, rank, calls):
             ep = pc.create_ep_config()
 
-        assert ep.rank_offset == pc.stage_base_rank, rank
-        assert ep.world_size == pc.stage_world_size == 8
+        assert ep.stage_base_rank == pc.stage_base_rank, rank
+        assert ep.stage_world_size == pc.stage_world_size == 8
         assert ep._my_ep_group_ranks == pc.get_ep_group_ranks(), (rank, ep._my_ep_group_ranks)
         assert ep._my_ep_group_ranks == list(range(pc.stage_base_rank, pc.stage_base_rank + 8)), rank
         # EP routing groups (one per stage), then the per-block DP-scope groups (same rank sets).

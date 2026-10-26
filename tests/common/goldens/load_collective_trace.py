@@ -28,8 +28,8 @@ from huggingface_hub.file_download import repo_folder_name
 from transformers import PreTrainedModel
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
-from src.checkpoint.format import load_full_state_dict
-from src.distributed.expert_parallel import dispatcher
+from src.checkpoint.reading import load_full_state_dict
+from src.distributed import rank_uniform_env
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_distributed_model
 from src.runtime import load_coordination
@@ -252,7 +252,7 @@ def trace_rank(
         checkpoints.offline_hub(),
         cpu_model_builds(trace),
         recorded_load_phases(trace),
-        patch.object(dispatcher, "_ENV_UNIFORMITY_VERIFIED", True),
+        patch.object(rank_uniform_env, "_env_uniformity_verified", True),
     ):
         if case.frozen_reference:
             load_frozen_auxiliary_model(

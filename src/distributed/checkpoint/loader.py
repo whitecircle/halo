@@ -5,7 +5,7 @@ are handled by :class:`~src.distributed.checkpoint.optimizer.OptimizerShardStore
 :func:`~src.distributed.checkpoint.peft.restore_adapters`. :func:`weights_read_from` and
 :func:`built_from_checkpoint` are its construction-identity probe, public for the trainers whose own
 restores refuse a model built from the checkpoint. Resume policy only — the file reads it
-drives (:class:`StreamingCheckpointReader`, :func:`read_checkpoint_key_set`) live in the format leaf,
+drives (:class:`StreamingCheckpointReader`, :func:`resolve_checkpoint_weights`) live in the reading leaf,
 shared with the standalone tools.
 """
 
@@ -22,21 +22,22 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_
 from torch.distributed.tensor import DTensor, distribute_tensor
 from transformers import PreTrainedModel
 
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
-from src.checkpoint.format import (
-    CheckpointWeights,
+from src.checkpoint.adapters import (
     has_adapter_weight_file,
-    has_whole_model_weight_file,
-    is_sharded_checkpoint,
-    load_full_state_dict,
     missing_resume_adapter_reason,
-    read_checkpoint_key_set,
-    resolve_checkpoint_weights,
     resume_adapter_dir,
     resume_adapter_on_own_weights_reason,
     unmarked_merged_checkpoint_reason,
 )
 from src.checkpoint.hub_layout import ModuleLayoutView
+from src.checkpoint.reading import (
+    CheckpointWeights,
+    has_whole_model_weight_file,
+    is_ep_sharded_checkpoint,
+    load_full_state_dict,
+    resolve_checkpoint_weights,
+)
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.coordination import all_ranks_ok, joined_streaming_reader
 from src.distributed.checkpoint.peft import find_peft_model, restore_adapters
@@ -210,7 +211,7 @@ class CheckpointLoader:
         """Raise uniformly (rank-0 check, broadcast) when the resume target is a per-rank EP
         sharded save — intact files, partial tensors — instead of letting it degrade into the
         torn-checkpoint fallback's confusing failure."""
-        if broadcast_from_rank0(is_global_main_process() and is_sharded_checkpoint(checkpoint)):
+        if broadcast_from_rank0(is_global_main_process() and is_ep_sharded_checkpoint(checkpoint)):
             raise ValueError(
                 f"{checkpoint} is a per-rank EP-sharded checkpoint; merge it first "
                 f"(scripts/after_training/merge_ep_shards.py) and resume from the merged directory."
@@ -258,9 +259,9 @@ class CheckpointLoader:
                 built_from_ckpt = built_from_checkpoint(live_source, resume_from_checkpoint)
                 merged_resume_adapter = resume_adapter_dir(resume_from_checkpoint)
                 try:
-                    has_base = bool(read_checkpoint_key_set(resume_from_checkpoint)) or is_sharded_checkpoint(
-                        resume_from_checkpoint
-                    )
+                    has_base = bool(
+                        resolve_checkpoint_weights(resume_from_checkpoint).key_set()
+                    ) or is_ep_sharded_checkpoint(resume_from_checkpoint)
                 except Exception as e:
                     read_failed = True
                     logger.warning(f"Unreadable checkpoint key set at {resume_from_checkpoint}: {e}")
@@ -406,7 +407,7 @@ class CheckpointLoader:
         readable = False
         if is_global_main_process():
             try:
-                readable = bool(read_checkpoint_key_set(checkpoint))
+                readable = bool(resolve_checkpoint_weights(checkpoint).key_set())
             except Exception as e:
                 logger.warning(f"Torn/unreadable model checkpoint at {checkpoint}: {e}")
         if not broadcast_from_rank0(readable):

@@ -44,17 +44,16 @@ from transformers.trainer_callback import TrainerCallback
 from trl.trainer.utils import disable_dropout_in_model
 
 import src.trainers.embedding.sentence_transformers_compat  # noqa: F401  installs ST's gradient-checkpointing signatures
-from src.checkpoint.adapters import lora_scaling_mismatch, read_adapter_file
-from src.checkpoint.format import (
-    ADAPTER_SAFETENSORS_FILE,
-    RESUME_ADAPTER_DIR,
-    RESUME_ADAPTER_MARKER_FILE,
+from src.checkpoint.adapters import (
     adapter_weight_paths,
+    lora_scaling_mismatch,
     missing_resume_adapter_reason,
+    read_adapter_file,
     resume_adapter_dir,
     resume_adapter_on_own_weights_reason,
     unmarked_merged_checkpoint_reason,
 )
+from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
 from src.checkpoint.writing import write_gathered_checkpoint
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext

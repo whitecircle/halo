@@ -20,8 +20,8 @@ import torch
 import torch.nn as nn
 
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.flash_adamw import build_flash_adamw_optimizer
+from src.optimizers.muon import build_muon_optimizer
 
 # ─── Model ───────────────────────────────────────────────────────────────────
 
@@ -78,15 +78,15 @@ def make_optimizers(model, lr):
 
     # Muon
     m = create_model_copy(model)
-    optimizers["Muon (GNS)"] = (m, create_muon_optimizer(m, lr=lr))
+    optimizers["Muon (GNS)"] = (m, build_muon_optimizer(m, lr=lr))
 
     # Muon (standard NS)
     m = create_model_copy(model)
-    optimizers["Muon (std NS)"] = (m, create_muon_optimizer(m, lr=lr, ns_algorithm="standard_newton_schulz"))
+    optimizers["Muon (std NS)"] = (m, build_muon_optimizer(m, lr=lr, ns_algorithm="standard_newton_schulz"))
 
     # FlashAdamW (quantized states + 24-bit master weights)
     m = create_model_copy(model)
-    optimizers["FlashAdamW"] = (m, create_flash_adamw_optimizer(m, lr=lr))
+    optimizers["FlashAdamW"] = (m, build_flash_adamw_optimizer(m, lr=lr))
 
     return optimizers
 
@@ -199,9 +199,9 @@ def bench_memory(model_template, hidden, intermediate, num_layers, lr, batch, se
         elif opt_name == "AdamWBF16 (SR)":
             opt = AdamWBF16(m.named_parameters(), lr=lr)
         elif opt_name == "FlashAdamW":
-            opt = create_flash_adamw_optimizer(m, lr=lr)
+            opt = build_flash_adamw_optimizer(m, lr=lr)
         else:
-            opt = create_muon_optimizer(m, lr=lr)
+            opt = build_muon_optimizer(m, lr=lr)
 
         x = torch.randn(batch, seq_len, hidden, device="cuda", dtype=torch.bfloat16)
         y = torch.randn_like(x)

@@ -771,8 +771,8 @@
   "Qwen3_5MoeTextConfig": "Qwen3_5MoeTextForSequenceClassification"
  },
  "optimizer builders": {
-  "muon": "build_muon_optimizer",
-  "flash_adamw": "build_flash_adamw_optimizer"
+  "muon": "muon_optimizer_from_args",
+  "flash_adamw": "flash_adamw_optimizer_from_args"
  },
  "environments": [
   "react_math",

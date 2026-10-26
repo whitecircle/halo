@@ -21,10 +21,10 @@ boundary.
 
 `nvlink_domain_size` (auto = `gpus_per_node`; set `NVLINK_DOMAIN_SIZE` on NVL72) is the locality unit
 every validator divides by, and it decides which axis is allowed onto RDMA. The dispatcher keys the
-decision off topology alone: `is_inter_node = num_nodes > 1 and not node_local`
-(`src/distributed/expert_parallel/dispatcher.py`), which sets `EP_DISABLE_GIN=0`, Gin on.
+decision off topology alone: `EPConfig.spans_domains = num_domains > 1 and not node_local`
+(`src/distributed/expert_parallel/config.py`), on which the elastic backend sets `EP_DISABLE_GIN=0`, Gin on.
 
-`num_nodes` counts NVLink **domains**, not OS nodes, so a group inside one NVL72 rack stays on NVLink
+`num_domains` counts NVLink **domains**, not OS nodes, so a group inside one NVL72 rack stays on NVLink
 even though it spans ~18 hosts.
 
 What EP at `ep_scope=global` across domains puts on that fabric per microbatch, at this model's 60
@@ -32,7 +32,7 @@ MoE layers, is **240** all-to-alls over the EP group: forward dispatch + combine
 their backward mirrors — arithmetic from the layer count and the autograd graph, not a benchmark.
 
 Four per layer, not two, because `DeepEPDispatchFunction.backward` *is* a combine and
-`DeepEPCombineFunction.backward` *is* a dispatch (`src/distributed/expert_parallel/autograd.py`).
+`DeepEPCombineFunction.backward` *is* a dispatch (`src/distributed/expert_parallel/deepep/dispatcher.py`).
 Gradient checkpointing does not multiply the count — recompute replays cached results rather than
 re-issuing the collective.
 

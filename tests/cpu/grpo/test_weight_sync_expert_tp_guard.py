@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import ExpertLoraSpec
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 
 LAYER_PATH = "mlp"

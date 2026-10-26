@@ -36,7 +36,7 @@ def _param_with_grad() -> nn.Parameter:
 
 def test_router_hook_noop_without_process_group():
     """The router hook must not touch dist collectives when no process group exists."""
-    ep_config = single_process_ep_config(E, fsdp_shard_ep1_experts=False)
+    ep_config = single_process_ep_config(E, experts_fsdp_managed=False)
     assert not has_grad_sync_peers(ep_config), "a single-process run must report no grad-sync peers"
 
     param = _param_with_grad()
@@ -48,7 +48,7 @@ def test_router_hook_noop_without_process_group():
 def test_expert_hook_noop_without_process_group():
     param = _param_with_grad()
     before = param.grad.clone()
-    create_expert_grad_hook(single_process_ep_config(E, fsdp_shard_ep1_experts=False))(param)
+    create_expert_grad_hook(single_process_ep_config(E, experts_fsdp_managed=False))(param)
     assert torch.equal(param.grad, before), "single-process expert hook must leave the grad untouched"
 
 
@@ -86,7 +86,7 @@ def test_first_backward_survives_single_process_launch():
     ``fsdp_shard_ep1_experts=False`` registers its grad-sync hooks; the first backward fires them.
     A live collective in the router hook raises here."""
     torch.manual_seed(0)
-    layer = EPLfm2MoELayer(_Lfm2Block(), single_process_ep_config(E, fsdp_shard_ep1_experts=False)).cpu()
+    layer = EPLfm2MoELayer(_Lfm2Block(), single_process_ep_config(E, experts_fsdp_managed=False)).cpu()
     layer.train()
 
     out = layer(torch.randn(2, 3, H))

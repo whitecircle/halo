@@ -90,7 +90,7 @@ UNCAST_LOADERS = frozenset({("src/distributed/loading/model_loading.py", "_load_
 # shell that holds no weights.
 NON_TRAINING_BUILDS = frozenset(
     {
-        ("src/checkpoint/adapters.py", "merge_adapter_into_base"),
+        ("src/checkpoint/adapter_merge.py", "merge_adapter_into_base"),
         ("src/models/head_transform.py", "_probe_logits"),
     }
 )
@@ -332,7 +332,7 @@ def test_a_config_built_shell_selects_the_same_masters_as_pretrained(roster_chec
         for config_only in (False, True)
     ]
 
-    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1)
+    ep_config = EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True)
     kept = [fp32_master_param_keys(shell, ep_config, keep_non_ep=True) for shell in shells]
     assert kept[0] == kept[1]
     assert kept[0], "every family has non-EP parameters for configured masters"
@@ -363,10 +363,9 @@ def _load_with(
         return model
     for module in (ep_lazy_loader, pp_lazy_loader):
         monkeypatch.setattr(module, "patch_moe_model_for_ep", lambda model, *args, **kwargs: model)
-        monkeypatch.setattr(module, "create_ep_buffers", lambda *args, **kwargs: None)
         if loader.endswith("config_shell"):
             monkeypatch.setattr(module, "instantiate_on_meta", _config_built_shell)
-    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1)
+    ep_config = EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True)
     config = AutoConfig.from_pretrained(path)
     common = {
         "dtype": torch.bfloat16,
@@ -471,7 +470,11 @@ def test_the_lazy_keep_set_leaves_out_ep_wrapped_blocks(pinned_checkpoints, ep_w
     )
     shell.get_parameter(in_block).data = shell.get_parameter(in_block).data.float()
 
-    ep_config = EPConfig(ep_size=1, world_size=1, gpus_per_node=1) if ep_wrapped else None
+    ep_config = (
+        EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True)
+        if ep_wrapped
+        else None
+    )
     kept = fp32_master_param_keys(shell, ep_config, keep_non_ep=True)
     every_name = frozenset(name for name, _param in shell.named_parameters(remove_duplicate=False))
     expected = _outside_moe_blocks(shell, aliases=True) if ep_wrapped else every_name

@@ -25,7 +25,8 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 
 import src.distributed.checkpoint.coordination as coordination
-from src.checkpoint.format import ADAPTER_WEIGHT_NAMES, adapter_weight_paths
+from src.checkpoint.adapters import adapter_weight_paths
+from src.checkpoint.format import ADAPTER_WEIGHT_NAMES
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.peft import _load_peft_adapter_state
 from src.runtime import dtensor

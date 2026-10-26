@@ -29,10 +29,10 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded

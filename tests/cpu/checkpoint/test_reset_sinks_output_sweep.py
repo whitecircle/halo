@@ -35,9 +35,10 @@ PartialState()  # the script's model loading logs through accelerate's logger
 
 import scripts.after_training.reset_sinks as reset_sinks_mod
 from scripts.after_training.reset_sinks import reset_sinks
-from src.checkpoint import tool_io
+from src.checkpoint import offline_export
+from src.checkpoint.atomic import PUBLISH_STAGING_SUFFIX
 from src.checkpoint.format import SAFETENSORS_METADATA
-from src.checkpoint.tool_io import PUBLISH_STAGING_SUFFIX, checkpoint_shard_files
+from src.checkpoint.reading import checkpoint_shard_files
 from src.models.patches import gpt_oss_sinks
 from tests.common.checkpoint_io import weight_files
 
@@ -419,7 +420,7 @@ def test_both_branches_preflight_the_full_checkpoint_load(tmp_path, monkeypatch,
     """Both branches hold the whole checkpoint in host RAM (``load_file``, or from_pretrained onto the
     CPU), so the shared preflight must warn before either loads — silence means the tool stopped
     calling the helper — and must not abort the reset."""
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1)
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
     source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=sharded)
 

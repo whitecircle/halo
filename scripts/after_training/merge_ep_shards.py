@@ -32,22 +32,14 @@ import torch
 from safetensors import safe_open
 
 from scripts._common import add_max_shard_size_arg
-from src.checkpoint.format import (
-    DEFAULT_MAX_SHARD_SIZE,
-    EP_SHARD_KEY_RE,
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, EP_SHARD_KEY_RE, ep_shard_filename, is_ep_shard
+from src.checkpoint.offline_export import (
     copy_checkpoint_aux_files,
-    ep_shard_filename,
-    is_ep_shard,
-    is_sharded_checkpoint,
-    read_checkpoint_index,
-)
-from src.checkpoint.tool_io import (
-    detect_model_type,
     preflight_resource_warning,
     reject_in_place_conversion,
     reject_sibling_adapter,
-    stored_tensor_nbytes,
 )
+from src.checkpoint.reading import detect_model_type, header_nbytes, is_ep_sharded_checkpoint, read_checkpoint_index
 from src.checkpoint.writing import StreamingShardWriter
 from src.distributed.expert_parallel.expert_weights import (
     expert_weight_roots,
@@ -164,7 +156,7 @@ def merge_ep_shards(
     # A gathered (or PP/TP) checkpoint already carries HF-layout expert keys matching the pattern
     # below, so merging one doubles the ``experts.experts.`` prefix and from_pretrained then reads
     # those keys as missing.
-    if not is_sharded_checkpoint(input_dir) or "ep_size" not in metadata:
+    if not is_ep_sharded_checkpoint(input_dir) or "ep_size" not in metadata:
         raise ValueError(
             f"{input_dir} is not a per-rank EP-sharded checkpoint: no index there declares the "
             f"EP save's format marker and ep_size (index metadata {metadata!r}). Only a directory "
@@ -250,7 +242,7 @@ def merge_ep_shards(
             return merged
 
         def logical_nbytes(name: str) -> int:
-            return sum(stored_tensor_nbytes(key_reader[key], key) for key in input_keys(name))
+            return sum(header_nbytes(key_reader[key].get_slice(key)) for key in input_keys(name))
 
         writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
 

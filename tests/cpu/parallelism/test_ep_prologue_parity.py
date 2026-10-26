@@ -324,7 +324,13 @@ def test_construction_allocates_nothing_that_grows_with_world_size(family, wrapp
     """
 
     def snapshot(world_size: int, gpus_per_node: int) -> dict:
-        config = EPConfig(ep_size=1, world_size=world_size, gpus_per_node=gpus_per_node, use_grouped_gemm=False)
+        config = EPConfig(
+            ep_size=1,
+            stage_world_size=world_size,
+            nvlink_domain_size=gpus_per_node,
+            use_grouped_gemm=False,
+            experts_fsdp_managed=True,
+        )
         _block, layer = _build(factory, wrapper, ep_config=config)
         return {
             name: (tuple(tensor.shape), tensor.dtype, tensor.detach().clone())
@@ -359,7 +365,7 @@ def test_the_managed_ep1_experts_branch_constructs_identically(family, wrapper, 
 
     def snapshot(managed: bool):
         config = EPConfig(
-            ep_size=1, world_size=8, gpus_per_node=8, use_grouped_gemm=False, fsdp_shard_ep1_experts=managed
+            ep_size=1, stage_world_size=8, nvlink_domain_size=8, use_grouped_gemm=False, experts_fsdp_managed=managed
         )
         _block, layer = _build(factory, wrapper, ep_config=config)
         return layer, {n: t.detach().clone() for n, t in layer.expert_named_params()}

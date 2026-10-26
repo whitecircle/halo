@@ -1,6 +1,1 @@
-"""Sharding-agnostic checkpoint layer: on-disk format, the hub's tensor names on save, the exported-config
-contract, the saved-adapter shape, tool-side directory I/O, the weight-file writers and the ``halo`` tag on
-the Hub model card. Imports neither ``src.distributed`` nor ``torch.distributed``, so a CPU-only
-conversion tool pays for neither. Re-exports nothing; import the owning module. The
-parallelism-aware savers live in :mod:`src.distributed.checkpoint`, above this package.
-"""
+"""Checkpoint I/O; the parallel savers and resume live in :mod:`src.distributed.checkpoint`."""

@@ -14,13 +14,9 @@ from unittest.mock import patch
 
 import pytest
 
-from src.distributed.expert_parallel.config import (
-    LORA_PROJECTION_COVERAGE,
-    ExpertLoraSpec,
-    expert_target_projections,
-)
 from src.distributed.loading import peft_setup as model_info
 from src.distributed.loading.peft_setup import split_expert_lora_targets
+from src.models.moe.expert_lora_spec import LORA_PROJECTION_COVERAGE, ExpertLoraSpec, expert_target_projections
 
 
 @dataclass

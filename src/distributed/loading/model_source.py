@@ -19,11 +19,8 @@ from huggingface_hub import snapshot_download
 from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
 from transformers import AutoConfig
 
-from src.checkpoint.format import (
-    HUB_SUBFOLDER_IGNORE_PATTERNS,
-    SAFETENSORS_INDEX_FILE,
-    resolve_checkpoint_weights,
-)
+from src.checkpoint.format import HUB_SUBFOLDER_IGNORE_PATTERNS, SAFETENSORS_INDEX_FILE
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.log import KEY_PREVIEW_COUNT, warn_once
 from src.models.modality import is_vlm_model, is_vlm_name
 from src.runtime.collectives import broadcast_from_rank0
@@ -136,7 +133,7 @@ def _resolve_on_this_rank(
 
 def _weight_files(snapshot: str) -> tuple[str, ...]:
     """The files a load reads the snapshot's weights from: the safetensors index and the shards it
-    names, or the single weight file (:func:`~src.checkpoint.format.resolve_checkpoint_weights`)."""
+    names, or the single weight file (:func:`~src.checkpoint.reading.resolve_checkpoint_weights`)."""
     layout = resolve_checkpoint_weights(snapshot)
     index = (SAFETENSORS_INDEX_FILE,) if layout.index is not None else ()
     legacy = (layout.legacy_bin,) if layout.legacy_bin is not None else ()

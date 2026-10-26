@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""CPU tests for the Adam-beta plumbing in :func:`src.optimizers.muon.build_muon_optimizer`.
+"""CPU tests for the Adam-beta plumbing in :func:`src.optimizers.muon.muon_optimizer_from_args`.
 
 Muon's internal scalar (1D / embedding / head) AdamW has its own tuned betas ``(0.9, 0.95)``, while
 HF's ``TrainingArguments.adam_beta2`` defaults to ``0.999``. Forwarding the training args
 unconditionally would silently retune the scalar optimizer of every Muon config that never mentions
-betas, so ``build_muon_optimizer`` forwards a beta only when the config explicitly overrides it.
+betas, so ``muon_optimizer_from_args`` forwards a beta only when the config explicitly overrides it.
 
 Run: python tests/cpu/optimizers/test_muon_scalar_betas.py  (or pytest)
 """
@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from transformers import TrainingArguments
 
-from src.optimizers.muon import DEFAULT_SCALAR_BETAS, build_muon_optimizer
+from src.optimizers.muon import DEFAULT_SCALAR_BETAS, muon_optimizer_from_args
 
 
 class _TinyModel(nn.Module):
@@ -28,7 +28,7 @@ class _TinyModel(nn.Module):
 
 
 def _scalar_betas(args) -> tuple[float, float]:
-    optimizer = build_muon_optimizer(_TinyModel(), args, decay_parameters=[])
+    optimizer = muon_optimizer_from_args(_TinyModel(), args, decay_parameters=[])
     groups = optimizer.scalar_optimizer.param_groups
     betas = {tuple(g["betas"]) for g in groups}
     assert len(betas) == 1, f"scalar param groups disagree on betas: {betas}"

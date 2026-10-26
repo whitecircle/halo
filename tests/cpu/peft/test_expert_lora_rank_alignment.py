@@ -17,8 +17,8 @@ import torch
 import torch.nn as nn
 
 from src.distributed.expert_parallel.base_layer import EXPERT_LORA_RANK_MULTIPLE
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.kernels.grouped_mm import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 
 NUM_LOCAL_EXPERTS, HIDDEN, INTERMEDIATE = 2, 8, 16

@@ -22,9 +22,9 @@ import torch
 import torch.nn as nn
 
 from src.optimizers import flash_adamw
-from src.optimizers.adamw_bf16 import build_bf16_optimizer
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.adamw_bf16 import adamw_bf16_optimizer_from_args
+from src.optimizers.flash_adamw import build_flash_adamw_optimizer
+from src.optimizers.muon import build_muon_optimizer
 
 WEIGHT_DECAY = 0.123
 SCALAR_WEIGHT_DECAY = 0.456  # distinct, so a scalar group serving the matrix value is visible
@@ -103,7 +103,7 @@ def _names(model: nn.Module, groups) -> list[list[str]]:
 
 def test_bf16_builder_splits_by_decay_name_in_order():
     model = _TinyNet()
-    optimizer = build_bf16_optimizer(model, _args(), DECAY_NAMES)
+    optimizer = adamw_bf16_optimizer_from_args(model, _args(), DECAY_NAMES)
 
     assert _names(model, optimizer.param_groups) == [EXPECTED_DECAY, EXPECTED_NO_DECAY]
     assert [g["weight_decay"] for g in optimizer.param_groups] == [WEIGHT_DECAY, 0.0]
@@ -116,7 +116,7 @@ def test_bf16_builder_keeps_an_empty_no_decay_group():
     collapsing it to one group renumbers every saved group and drops the shard restore.
     """
     model = nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
-    optimizer = build_bf16_optimizer(model, _args(), ["weight"])
+    optimizer = adamw_bf16_optimizer_from_args(model, _args(), ["weight"])
 
     assert _names(model, optimizer.param_groups) == [["weight"], []]
     assert [g["weight_decay"] for g in optimizer.param_groups] == [WEIGHT_DECAY, 0.0]
@@ -125,7 +125,7 @@ def test_bf16_builder_keeps_an_empty_no_decay_group():
 def test_flash_builder_splits_by_decay_name_in_order(monkeypatch):
     monkeypatch.setattr(flash_adamw, "FlashAdamW", _FakeFlashAdamW)
     model = _TinyNet()
-    optimizer = create_flash_adamw_optimizer(model, weight_decay=WEIGHT_DECAY, decay_parameters=DECAY_NAMES)
+    optimizer = build_flash_adamw_optimizer(model, weight_decay=WEIGHT_DECAY, decay_parameters=DECAY_NAMES)
 
     assert _names(model, optimizer.param_groups) == [EXPECTED_DECAY, EXPECTED_NO_DECAY]
     assert [g["weight_decay"] for g in optimizer.param_groups] == [WEIGHT_DECAY, 0.0]
@@ -135,7 +135,7 @@ def test_flash_builder_drops_the_empty_group(monkeypatch):
     """FlashAdamW's own convention: only non-empty groups reach it."""
     monkeypatch.setattr(flash_adamw, "FlashAdamW", _FakeFlashAdamW)
     model = nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
-    optimizer = create_flash_adamw_optimizer(model, weight_decay=WEIGHT_DECAY, decay_parameters=["weight"])
+    optimizer = build_flash_adamw_optimizer(model, weight_decay=WEIGHT_DECAY, decay_parameters=["weight"])
 
     assert _names(model, optimizer.param_groups) == [["weight"]]
     assert [g["weight_decay"] for g in optimizer.param_groups] == [WEIGHT_DECAY]
@@ -144,7 +144,7 @@ def test_flash_builder_drops_the_empty_group(monkeypatch):
 def test_flash_builder_without_decay_names_decays_every_trainable_param(monkeypatch):
     monkeypatch.setattr(flash_adamw, "FlashAdamW", _FakeFlashAdamW)
     model = _TinyNet()
-    optimizer = create_flash_adamw_optimizer(model, weight_decay=WEIGHT_DECAY, decay_parameters=None)
+    optimizer = build_flash_adamw_optimizer(model, weight_decay=WEIGHT_DECAY, decay_parameters=None)
 
     assert _names(model, optimizer.param_groups) == [EXPECTED_ALL_TRAINABLE]
     assert [g["weight_decay"] for g in optimizer.param_groups] == [WEIGHT_DECAY]
@@ -153,7 +153,7 @@ def test_flash_builder_without_decay_names_decays_every_trainable_param(monkeypa
 def test_muon_builder_splits_both_legs_by_decay_name():
     """Matrix leg and scalar leg each split decay-first, and the scalar leg keeps its own decay."""
     model = _TinyNet()
-    optimizer = create_muon_optimizer(
+    optimizer = build_muon_optimizer(
         model,
         weight_decay=WEIGHT_DECAY,
         scalar_weight_decay=SCALAR_WEIGHT_DECAY,
@@ -179,7 +179,7 @@ def test_muon_builder_splits_both_legs_by_decay_name():
 def test_muon_builder_drops_the_empty_groups():
     """A model with no undecayed matrix and no scalar parameter ships exactly one group."""
     model = nn.Linear(4, 4, bias=False, dtype=torch.bfloat16)
-    optimizer = create_muon_optimizer(
+    optimizer = build_muon_optimizer(
         model, weight_decay=WEIGHT_DECAY, decay_parameters=["weight"], ns_use_kernels=False
     )
 

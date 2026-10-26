@@ -32,7 +32,7 @@ from __future__ import annotations
 import pytest
 
 from src.args.distributed_args import DistributedArguments
-from src.distributed.expert_parallel.config import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
+from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.parallelism_args import (

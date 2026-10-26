@@ -40,13 +40,8 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 from trl import ModelConfig
 
-from src.checkpoint.format import (
-    ADAPTER_CONFIG_FILE,
-    PROVENANCE_GPT_OSS_SINKS,
-    ROUTER_BALANCING_BIASES_FILE,
-    TRAINING_PROVENANCE_FILE,
-)
-from src.checkpoint.tool_io import apply_training_sidecars
+from src.checkpoint.format import ADAPTER_CONFIG_FILE, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
+from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.context_parallel.config import CPConfig

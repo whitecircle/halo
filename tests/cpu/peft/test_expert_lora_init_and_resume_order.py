@@ -22,7 +22,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.config import ExpertLoraSpec
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 
 NUM_LOCAL_EXPERTS = 2

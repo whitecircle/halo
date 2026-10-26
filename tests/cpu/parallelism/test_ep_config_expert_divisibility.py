@@ -20,7 +20,9 @@ from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner
 
 def _config(ep_size: int, **kwargs) -> EPConfig:
     # Distributed is not initialized → single-process mode (no process groups created).
-    return EPConfig(ep_size=ep_size, world_size=ep_size, gpus_per_node=ep_size, **kwargs)
+    return EPConfig(
+        ep_size=ep_size, stage_world_size=ep_size, nvlink_domain_size=ep_size, experts_fsdp_managed=False, **kwargs
+    )
 
 
 def test_dividing_num_experts_finalizes_uniform_assignment():
@@ -53,7 +55,7 @@ def test_non_dividing_num_experts_raises(ep_size: int, num_experts: int):
 
 def test_divisor_is_ep_size_not_ep_group_size_under_expert_tp():
     # ETP: distribution size stays ep_size (2); ep_group_size = 4 would wrongly reject 6 experts.
-    cfg = EPConfig(ep_size=2, expert_tp_size=2, world_size=4, gpus_per_node=4)
+    cfg = EPConfig(ep_size=2, expert_tp_size=2, stage_world_size=4, nvlink_domain_size=4, experts_fsdp_managed=False)
     cfg.finalize_expert_assignment(6)
     assert cfg.experts_per_rank == 3
     with pytest.raises(ValueError, match="divisible by expert_parallel_size"):

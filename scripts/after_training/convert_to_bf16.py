@@ -26,19 +26,16 @@ from transformers import AutoModel, AutoModelForSequenceClassification, AutoToke
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_device_map_arg, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.adapters import adapter_input_gates, load_base_for_adapter, merge_adapter_into_base
+from src.checkpoint.adapter_merge import adapter_input_gates, load_base_for_adapter, merge_adapter_into_base
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
 from src.checkpoint.model_card import tag_model_card
-from src.checkpoint.tool_io import (
-    apply_training_sidecars,
-    copy_training_sidecars,
-    header_numel,
-    iter_checkpoint_shard_entries,
+from src.checkpoint.offline_export import (
     preflight_model_load_resources,
     reject_in_place_conversion,
-    reject_sharded_checkpoint,
     save_full_checkpoint,
 )
+from src.checkpoint.reading import header_numel, iter_checkpoint_shard_entries, reject_partial_checkpoint
+from src.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
 from src.log import configure_cli_logging
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.model_preparation import auto_load_model, sanitize_generation_config
@@ -307,7 +304,7 @@ def _convert_checkpoint_to_bf16(
     if is_peft:
         weights_source = adapter_input_gates(model_path, output_path).base_model_name_or_path
     else:
-        reject_sharded_checkpoint(model_path)
+        reject_partial_checkpoint(model_path)
         reject_in_place_conversion(model_path, output_path)
         weights_source = model_path
         processing_class = load_processing_class(model_path, trust_remote_code=trust_remote_code)

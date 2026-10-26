@@ -32,7 +32,7 @@ from src.distributed.expert_parallel.lazy_loader import (
     ExpertFuser,
     lazy_load_prologue,
 )
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.pipeline_parallel.split import (
     TIE_WORD_EMBEDDINGS_FLAG,
     resolve_layer_partition,
@@ -285,9 +285,6 @@ def load_pp_stage_model(
             # which is the whole reason this raise is fenced rather than propagated.
             reason = f"EP patching failed on pipeline stage {pp_rank}: {type(e).__name__}: {e}"
         reject_across_ranks(reason, _PP_LOAD_LABEL)
-        # Only this stage's layers exist, so the buffers are stage-scoped by construction; EP groups
-        # never straddle a stage, so every rank of a stage creates the same set.
-        create_ep_buffers(model)
 
     # Non-persistent buffers stayed meta on the shell; the tie leg is a no-op (PP rejects tied
     # embeddings).

@@ -42,10 +42,9 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
-from src.checkpoint.format import is_sharded_checkpoint
 from src.checkpoint.hub_layout import revert_conversions
-from src.checkpoint.tool_io import checkpoint_shard_files
+from src.checkpoint.reading import checkpoint_shard_files, is_ep_sharded_checkpoint
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.checkpoint.writing import save_dtype_caster
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
 from src.distributed.checkpoint.ep_save import save_ep_model
@@ -130,7 +129,13 @@ PP_FAMILY_OVERRIDES = {
     "inkling_mm_model": TINY_INKLING_PP_OVERRIDES,
 }
 PP_FAMILY_SPLITS = {"laguna": [4, 4], "gpt_oss": [4, 4]}
-SINGLE_RANK_EP_CONFIG = {"ep_size": 1, "world_size": 1, "gpus_per_node": 1, "use_grouped_gemm": False}
+SINGLE_RANK_EP_CONFIG = {
+    "ep_size": 1,
+    "stage_world_size": 1,
+    "nvlink_domain_size": 1,
+    "use_grouped_gemm": False,
+    "experts_fsdp_managed": True,
+}
 
 
 def _tiny_qwen3() -> Qwen3ForCausalLM:
@@ -677,7 +682,7 @@ def test_after_training_tools_read_a_pp_checkpoint_whole(tmp_path):
     with open(os.path.join(tmp_path, "model.safetensors.index.json"), "w") as fh:
         json.dump({"metadata": {"total_size": 128}, "weight_map": weight_map}, fh)
 
-    assert not is_sharded_checkpoint(str(tmp_path)), "a PP checkpoint must not read as per-rank sharded"
+    assert not is_ep_sharded_checkpoint(str(tmp_path)), "a PP checkpoint must not read as per-rank sharded"
     resolved = [os.path.basename(p) for p in checkpoint_shard_files(str(tmp_path))]
     assert resolved == sorted(shards), f"tools would read {resolved}, missing a stage's shard"
 

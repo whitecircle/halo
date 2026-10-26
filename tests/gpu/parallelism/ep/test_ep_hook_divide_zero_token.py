@@ -25,7 +25,7 @@ from transformers import AutoModelForCausalLM
 from transformers.models.qwen3_moe import Qwen3MoeConfig
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
@@ -79,7 +79,6 @@ def run(ctx):
 
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = patch_moe_model_for_ep(model, pc.create_ep_config())
-    create_ep_buffers(model)
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPMoELayerBase)]
     ep_cfg = ep_layers[0].ep_config

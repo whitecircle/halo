@@ -70,7 +70,7 @@ def test_full_training(output_dir: str) -> bool:
 
     # Load model with EP
     log("Loading model with EP...")
-    ep_config = EPConfig(ep_size=EP_SIZE)
+    ep_config = EPConfig(ep_size=EP_SIZE, experts_fsdp_managed=False)
     model = load_ep_model(
         MODEL_PATH,
         ep_config,
@@ -199,7 +199,7 @@ def test_lora_training(output_dir: str) -> bool:
 
     # Load model with EP
     log("Loading model with EP...")
-    ep_config = EPConfig(ep_size=EP_SIZE)
+    ep_config = EPConfig(ep_size=EP_SIZE, experts_fsdp_managed=False)
     model = load_ep_model(
         MODEL_PATH,
         ep_config,

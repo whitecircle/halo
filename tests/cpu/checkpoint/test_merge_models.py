@@ -41,7 +41,7 @@ from src.checkpoint.format import (
     prefetch_pending_filename,
     write_resume_adapter_marker,
 )
-from src.checkpoint.tool_io import iter_checkpoint_shard_entries
+from src.checkpoint.reading import iter_checkpoint_shard_entries
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import load_script_module
 

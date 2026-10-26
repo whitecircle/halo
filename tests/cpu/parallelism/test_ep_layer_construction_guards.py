@@ -34,9 +34,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel import dispatcher as dispatcher_mod
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase, EPSharedExpertsMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
 from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
@@ -47,14 +47,14 @@ from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 
 
-def _ep_config(fsdp_shard_ep1_experts: bool = False) -> EPConfig:
+def _ep_config(experts_fsdp_managed: bool = False) -> EPConfig:
     # use_grouped_gemm off: keeps the per-expert loop path so the forward runs on CPU even when
     # the dev box exposes a CUDA device to the test process.
     cfg = EPConfig(
         ep_size=1,
-        world_size=1,
-        gpus_per_node=1,
-        fsdp_shard_ep1_experts=fsdp_shard_ep1_experts,
+        stage_world_size=1,
+        nvlink_domain_size=1,
+        experts_fsdp_managed=experts_fsdp_managed,
         use_grouped_gemm=False,
     )
     cfg.finalize_expert_assignment(E)
@@ -255,7 +255,7 @@ def test_expert_fp32_upcast_preserves_frozen_requires_grad():
     """A frozen expert base (expert-LoRA freezes it before the upcast runs) must STAY frozen through
     the fp32 nn.Parameter rebuild — the default requires_grad=True would silently train the base."""
     torch.manual_seed(0)
-    cfg = _ep_config(fsdp_shard_ep1_experts=False)
+    cfg = _ep_config(experts_fsdp_managed=False)
     cfg.fp32_experts = True
     layer = EPQwen3MoELayer(_Qwen3Block(), cfg)
     assert layer.gate_proj.dtype == torch.float32
@@ -272,7 +272,7 @@ def test_expert_fp32_upcast_skipped_when_fsdp_manages_ep1_experts():
     """fsdp_shard_ep1_experts at ep_group_size==1: FSDP2's bf16 param_dtype policy casts the experts
     for compute anyway, so the upcast is skipped (logged) instead of silently degrading."""
     torch.manual_seed(0)
-    cfg = _ep_config(fsdp_shard_ep1_experts=True)
+    cfg = _ep_config(experts_fsdp_managed=True)
     cfg.fp32_experts = True
     layer = EPQwen3MoELayer(_Qwen3Block(), cfg)
     assert layer.gate_proj.dtype == torch.float32 or layer.gate_proj.dtype == torch.get_default_dtype()

@@ -1,6 +1,5 @@
 """Model patching for Expert Parallelism with DeepEP: wrap each supported HuggingFace MoE block with its
-``EP*MoELayer`` wrapper (:data:`MOE_LAYER_MAP`), create DeepEP comm buffers, and enable EP-safe gradient
-checkpointing.
+``EP*MoELayer`` wrapper (:data:`MOE_LAYER_MAP`).
 """
 
 import logging
@@ -9,10 +8,7 @@ import torch.nn as nn
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.dispatcher import (
-    register_forward_generation_hook,
-    verify_rank_uniform_env,
-)
+from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from src.runtime.ranks import is_global_main_process
 from src.subclass_registry import build_class_claim_map, swap_registered_modules
 
@@ -99,31 +95,8 @@ def patch_moe_model_for_ep(
         # ep_group_size == 1 wraps only for grouped GEMM; unwrapped keeps stock HF expert compute.
         logger.warning(f"No MoE layers found. Supported: {sorted(MOE_LAYER_MAP)}")
     else:
-        # Registered here (not create_ep_buffers) so every EP-patch entry point gets it. Idempotent.
+        # Registered here so every EP-patch entry point gets it. Idempotent.
         register_forward_generation_hook(model)
         logger.info(f"Patched {patched} MoE layers for EP with DeepEP")
 
     return model
-
-
-def create_ep_buffers(model: nn.Module) -> int:
-    """Create DeepEP communication buffers for all EP layers in the model.
-
-    Collective — all EP ranks must call together, after all ranks have loaded and patched.
-
-    Returns:
-        Number of buffers created.
-    """
-    # Latched backstop: the entry scripts already run this in distributed setup, so it is free here;
-    # it still covers a caller that reaches DeepEP without that scaffold.
-    verify_rank_uniform_env()
-
-    created = 0
-    for module in model.modules():
-        if isinstance(module, EPMoELayerBase):
-            module.dispatcher.create_buffer()
-            created += 1
-
-    if created > 0:
-        logger.info(f"Created {created} DeepEP buffers")
-    return created

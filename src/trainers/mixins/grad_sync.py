@@ -302,7 +302,7 @@ class GradientSyncMixin:
                 f"SUM/world_size leg is not idempotent — a second pass halves every expert gradient."
             )
         self._deferred_sweep_last_step = current_step
-        world_size = ep_cfg.world_size
+        world_size = ep_cfg.stage_world_size
         # ETP partners slice one expert and share a batch, so the DP divisor drops the ETP factor.
         expert_divisor = world_size // ep_cfg.expert_tp_size
         fp32 = ep_cfg.fp32_grad_reduce

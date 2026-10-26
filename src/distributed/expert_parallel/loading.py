@@ -24,11 +24,7 @@ from src.distributed.expert_parallel.lazy_loader import (
     load_ep_model_lazy,
 )
 from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
-from src.distributed.expert_parallel.patching import (
-    create_ep_buffers,
-    ep_claimed_blocks,
-    patch_moe_model_for_ep,
-)
+from src.distributed.expert_parallel.patching import ep_claimed_blocks, patch_moe_model_for_ep
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.dtype import cast_parameters_to_run_dtype
 from src.model_loading.lazy_safetensors.weights import (
@@ -376,9 +372,6 @@ def _load_ep_model_huggingface(
         revision=revision,
         **model_kwargs,
     )
-
-    # Collective — every EP rank must participate, and only once all ranks are loaded and on GPU.
-    create_ep_buffers(model)
 
     logger.info(f"[Rank {rank}] Model loaded successfully")
     return model

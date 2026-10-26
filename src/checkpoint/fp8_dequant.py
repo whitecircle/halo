@@ -1,12 +1,9 @@
 """Streaming fp8 to bf16 conversion of a released checkpoint, shared by the ``*_bf16.py`` converters.
 
-An fp8 release stores each quantized weight beside a scale sidecar whose layout differs per release
-(block grid vs per-channel vector, ``_scale_inv`` vs ``_scale``): :class:`DequantRules` carries that
-part, :func:`run_dequant_conversion` everything else. The model is never materialized (the source is
-walked shard by shard), so a multi-hundred-GB release converts in a bounded working set.
+The per-release scale sidecar layout is :class:`DequantRules`'; the source is walked shard by shard, so a
+multi-hundred-GB release converts in a bounded working set.
 """
 
-import json
 import logging
 import os
 from collections.abc import Callable
@@ -15,19 +12,22 @@ from typing import Any
 
 import torch
 from safetensors import safe_open
-from transformers.utils import CONFIG_NAME
 
 from src.checkpoint.config_export import write_config_json
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, copy_checkpoint_aux_files
-from src.checkpoint.tool_io import (
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.checkpoint.offline_export import (
+    copy_checkpoint_aux_files,
+    preflight_resource_warning,
+    reject_in_place_conversion,
+    resolve_checkpoint_source,
+)
+from src.checkpoint.reading import (
     FP8_HEADER_DTYPE,
     checkpoint_shard_files,
     header_nbytes,
     header_numel,
     iter_checkpoint_shards,
-    preflight_resource_warning,
-    reject_in_place_conversion,
-    resolve_checkpoint_source,
+    read_checkpoint_config,
 )
 from src.checkpoint.writing import StreamingShardWriter
 
@@ -36,9 +36,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class DequantRules:
-    """One fp8 release's dequantization rules: how its scale sidecars are spelled, which scale
-    layouts it may carry, how a weight is dequantized, and how an unquantized tensor is sized for
-    the disk preflight."""
+    """One fp8 release's dequantization rules: scale spelling and layouts, the dequantization, and the
+    size of an unquantized tensor for the disk preflight."""
 
     scale_suffix: str
     is_sidecar: Callable[[str], bool]
@@ -56,12 +55,8 @@ def run_dequant_conversion(
     revision: str | None = None,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
 ) -> None:
-    """Stream an fp8 release into its bf16 checkpoint under one release's :class:`DequantRules`.
-
-    The source is resolved (Hub id or local directory), its shards listed and an in-place run
-    refused before the output directory exists. ``rules`` is called with the resolved source, so a
-    converter whose rules come out of the checkpoint's own config reads them there.
-    """
+    """Stream an fp8 release into its bf16 checkpoint; ``rules`` is called with the resolved source, so
+    rules read off its own config come from there."""
     source = resolve_checkpoint_source(model_id, revision)
     destination = os.path.abspath(output_dir)
 
@@ -80,13 +75,8 @@ def run_dequant_conversion(
 
 
 def _preflight_dequant_shards(source: str, output_dir: str, *, tool: str, rules: DequantRules) -> int:
-    """Header-only pass over every shard of an fp8 checkpoint before anything is written.
-
-    Every sidecar must sit beside its weight, every fp8 tensor must carry one, and
-    ``rules.validate_scale`` judges the layout against the weight's shape, so a structural fault
-    fails here rather than hours into the streamed write. Returns the output byte count, sized for
-    the disk preflight (fp8 lands as bf16, everything else at ``rules.passthrough_nbytes``).
-    """
+    """Header-only validation of every shard before anything is written, so a structural fault fails
+    here rather than hours in; returns the output byte count."""
     scale_suffix = rules.scale_suffix
     output_bytes = 0
     for shard, reader in iter_checkpoint_shards(source):
@@ -112,13 +102,8 @@ def _preflight_dequant_shards(source: str, output_dir: str, *, tool: str, rules:
 def _stream_dequantized_checkpoint(
     input_shards: list[str], output_dir: str, *, rules: DequantRules, max_shard_size: str
 ) -> int:
-    """Stream every weight of ``input_shards`` through ``rules.convert`` into an HF-standard checkpoint.
-
-    Shards are read in order and keys in sorted order (a set walk relayouts a multi-hundred-GB output
-    on every run), with never more than the writer's pending part resident. A sidecar key is consumed
-    only through the weight it scales, and an fp8 tensor with none is refused rather than written
-    raw. ``output_dir`` must not exist yet. Returns the bytes written.
-    """
+    """Stream every weight of ``input_shards`` through ``rules.convert`` into a new HF-standard checkpoint;
+    returns the bytes written. Keys go in sorted order, so reruns lay the output out identically."""
     os.makedirs(output_dir, exist_ok=False)
     writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
     for index, shard_path in enumerate(input_shards, start=1):
@@ -138,16 +123,10 @@ def _stream_dequantized_checkpoint(
 
 
 def _copy_dequantized_assets(source: str, output_dir: str) -> None:
-    """Carry a dequantized checkpoint's non-weight files across and re-stamp its ``config.json``.
-
-    The weights no longer answer to the source's ``quantization_config`` and are bf16 now, so a
-    config still declaring the scheme would send ``from_pretrained`` looking for scale tensors that
-    are gone.
-    """
+    """Carry the non-weight files across and drop the ``quantization_config`` the bf16 weights no longer
+    answer to."""
     copy_checkpoint_aux_files(source, output_dir)
-    config_path = os.path.join(output_dir, CONFIG_NAME)
-    with open(config_path) as f:
-        config = json.load(f)
+    config = read_checkpoint_config(output_dir)
     config.pop("quantization_config", None)
     config["dtype"] = "bfloat16"
-    write_config_json(config_path, config)
+    write_config_json(output_dir, config)

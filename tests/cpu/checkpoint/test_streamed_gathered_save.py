@@ -24,7 +24,7 @@ from safetensors import safe_open
 import src.checkpoint.writing as writing_mod
 import src.distributed.checkpoint.tp_save as tp_checkpoint_mod
 import src.distributed.checkpoint.write as checkpoint_write_mod
-from src.checkpoint.format import load_full_state_dict
+from src.checkpoint.reading import load_full_state_dict
 from src.checkpoint.writing import StreamingShardWriter, write_gathered_checkpoint
 from src.distributed.checkpoint.tp_save import save_tp_model
 from src.distributed.checkpoint.write import (

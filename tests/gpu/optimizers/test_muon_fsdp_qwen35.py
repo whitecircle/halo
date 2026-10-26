@@ -21,7 +21,7 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.muon import build_muon_optimizer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_5_2B
 
@@ -87,7 +87,7 @@ def run(ctx) -> dict:
     if rank == 0:
         print("\n[3/4] Creating Muon optimizer...")
 
-    optimizer = create_muon_optimizer(model, lr=LR)
+    optimizer = build_muon_optimizer(model, lr=LR)
 
     muon_count = sum(p.numel() for p in model.parameters() if p.requires_grad and p.ndim >= 2)
     scalar_count = sum(p.numel() for p in model.parameters() if p.requires_grad and p.ndim < 2)

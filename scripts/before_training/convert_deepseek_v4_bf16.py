@@ -34,15 +34,17 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, FineGr
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.tool_io import (
+from src.checkpoint.offline_export import (
+    preflight_resource_warning,
+    reject_in_place_conversion,
+    resolve_checkpoint_source,
+    save_full_checkpoint,
+)
+from src.checkpoint.reading import (
     FP8_HEADER_DTYPE,
     checkpoint_shard_files,
     iter_checkpoint_shard_entries,
-    preflight_resource_warning,
-    reject_in_place_conversion,
-    reject_sharded_checkpoint,
-    resolve_checkpoint_source,
-    save_full_checkpoint,
+    reject_partial_checkpoint,
 )
 from src.log import configure_cli_logging
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
@@ -116,7 +118,7 @@ def main() -> None:
     # A per-rank EP save reuses the ordinary index filename while each tensor is one rank's partial
     # slice, so from_pretrained would report the real expert keys as missing and randomly initialize
     # them, warning rather than raising.
-    reject_sharded_checkpoint(source)
+    reject_partial_checkpoint(source)
     # save_pretrained clears the model*.safetensors it does not overwrite, so an in-place run would
     # destroy the 100+ GiB FP8 source it is still reading the tokenizer from.
     reject_in_place_conversion(source, args.output_dir)

@@ -21,7 +21,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from scripts._common import add_dtype_arg, add_openai_endpoint_args, add_trust_remote_code_arg
 from scripts.inference._common import add_generation_args, add_prompt_field_args, assistant_turn, follow_up_messages
-from src.checkpoint.tool_io import reject_sharded_checkpoint
+from src.checkpoint.reading import reject_partial_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
 from src.inference.openai_client import build_openai_client, chat_completion
@@ -90,7 +90,7 @@ def load_reward_model(
     """
     # A per-rank EP-sharded dir loads its non-expert weights under their true names while every expert
     # is randomly initialized, so the scores would be plausible-looking noise.
-    reject_sharded_checkpoint(model_path)
+    reject_partial_checkpoint(model_path)
     print(f"Loading Reward Model from {model_path}...")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
     tokenizer.model_max_length = max_seq_len

@@ -28,15 +28,14 @@ Usage (inside the training image; point HF_HOME and the output at a large volume
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import math
-import os
 
 import torch
 
 from scripts._common import add_hub_source_args, add_max_shard_size_arg
 from src.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
+from src.checkpoint.reading import read_checkpoint_config
 from src.log import configure_cli_logging
 
 configure_cli_logging()
@@ -57,9 +56,7 @@ def parse_args() -> argparse.Namespace:
 
 def read_block_shape(source: str) -> tuple[int, int]:
     """The fp8 block shape the checkpoint's own config declares; also the gate on the quant scheme."""
-    with open(os.path.join(source, "config.json")) as f:
-        config = json.load(f)
-    quant = config.get("quantization_config")
+    quant = read_checkpoint_config(source).get("quantization_config")
     if quant is None:
         raise ValueError(
             f"{source}/config.json declares no quantization_config — the checkpoint is not the fp8 "

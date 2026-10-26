@@ -12,9 +12,10 @@ import pytest
 import torch.distributed as dist
 
 from src.args.distributed_args import DistributedArguments
-from src.distributed.expert_parallel.config import EPConfig, ExpertLoraSpec
+from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.group_layout import cross_node_rank_and_group, node_local_rank_and_group
 from src.kernels.lowp.spec import LowpSpec
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.sft import DistributedSFTTrainer
@@ -632,7 +633,13 @@ _GLOO_TIMEOUT_SEC = 180
 
 def _ep_group_size_one_worker(rank: int, out_dir: str) -> None:
     """Build the REAL ``EPConfig`` and ``ParallelismConfig`` for ``rank`` on a live gloo group."""
-    ep = EPConfig(ep_size=1, world_size=_GLOO_WORLD, gpus_per_node=_GLOO_WORLD, use_grouped_gemm=False)
+    ep = EPConfig(
+        ep_size=1,
+        stage_world_size=_GLOO_WORLD,
+        nvlink_domain_size=_GLOO_WORLD,
+        use_grouped_gemm=False,
+        experts_fsdp_managed=True,
+    )
     pc = make_parallelism_config(world_size=_GLOO_WORLD, gpus_per_node=_GLOO_WORLD, rank=rank, ep_size=1)
     failures = []
     if ep.ep_group_size != 1 or not ep.needs_expert_grad_sync:
@@ -1272,11 +1279,12 @@ def test_epconfig_second_timing_rejects_expert_lora_with_etp():
     try:
         EPConfig(
             ep_size=1,
-            world_size=2,
-            gpus_per_node=2,
+            stage_world_size=2,
+            nvlink_domain_size=2,
             expert_tp_size=2,
             use_grouped_gemm=False,
             expert_lora=ExpertLoraSpec(r=8, alpha=16.0),
+            experts_fsdp_managed=False,
         )
         raise AssertionError("hand-built EPConfig accepted expert LoRA under expert_tp_size > 1")
     except ValueError as e:

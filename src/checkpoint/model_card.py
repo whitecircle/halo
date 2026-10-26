@@ -1,15 +1,5 @@
-"""The Hugging Face Hub tag on every checkpoint Halo writes, and the ``README.md`` card that holds it.
+"""The Hugging Face Hub tag on every checkpoint Halo writes, and the ``README.md`` card that holds it."""
 
-:func:`tag_model_card` tags a directory's card, creating it if absent. The two export finalizers run it
-through :func:`tag_exported_model_card`: the config finalizer every full-model writer ends with, and
-the non-weight copy every tool that builds an export from a source directory runs. The adapter savers
-and the tools that reach neither finalizer call one of the two themselves. A card a library builds
-from its own tag list gets the tag where that list comes from: the loaded model's ``model_tags``
-(PEFT's adapter card, ``push_to_hub``), the trainer's ``create_model_card`` (:func:`with_halo_tags`),
-and the embedding pipeline's card data.
-"""
-
-import json
 import logging
 import os
 import shutil
@@ -20,9 +10,10 @@ from huggingface_hub.constants import REPOCARD_NAME
 from huggingface_hub.repocard import metadata_load, metadata_save
 from huggingface_hub.utils import HFValidationError, validate_repo_id
 from peft import PeftType
-from peft.utils import CONFIG_NAME as ADAPTER_CONFIG_FILE
 
-from src.checkpoint.atomic import create_staged_file
+from src.checkpoint.atomic import staged_file
+from src.checkpoint.format import ADAPTER_CONFIG_FILE
+from src.checkpoint.reading import read_checkpoint_config
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
@@ -54,17 +45,13 @@ def with_halo_tags(tags: str | list[str] | None) -> list[str]:
 def tag_model_card(output_dir: str) -> None:
     """Add :data:`HUB_TAGS` to the ``README.md`` card in ``output_dir``, creating it if absent.
 
-    Only the ``tags`` entry of an existing card changes value: its other metadata round-trips as the
-    raw mapping (``model-index`` included), keys and order kept, and its body, line endings and mode
-    are kept. The metadata block is re-dumped, though, so its YAML comments and flow style are lost. A
-    card that already carries every tag is not rewritten. A fresh card holds the tags, plus what
-    :func:`_fresh_card_metadata` derives for an adapter directory, under the mode the umask gives any
-    new file. The write goes to a uniquely named file beside the card and is swapped in, which also
-    replaces a symlinked card (a Hub-cache snapshot) instead of writing through it into the blob.
+    Only the ``tags`` value of an existing card changes (its YAML comments are lost to the re-dump), and a
+    fully tagged card is left alone. The write is staged and swapped in, which also replaces a symlinked
+    Hub-cache card instead of writing through it into the blob.
 
     Raises:
-        MalformedModelCardError: the card's metadata block is not a YAML mapping, or its ``tags``
-            entry is neither a list nor a string.
+        MalformedModelCardError: the metadata block is not a mapping, or ``tags`` is neither a list nor
+            a string.
     """
     path = Path(output_dir) / REPOCARD_NAME
     exists = path.is_file()
@@ -82,27 +69,19 @@ def tag_model_card(output_dir: str) -> None:
     if exists and tags == metadata.get("tags"):
         return
     metadata["tags"] = tags
-    staged = create_staged_file(path.parent, REPOCARD_NAME)
-    try:
+    with staged_file(path.parent, REPOCARD_NAME, durable=False) as staged:
         if exists:
             shutil.copyfile(path, staged)
         metadata_save(staged, metadata)
         if exists:
             # After the write: a read-only source mode on the staged file would refuse metadata_save.
             shutil.copymode(path, staged)
-        os.replace(staged, path)
-    except BaseException:
-        staged.unlink(missing_ok=True)
-        raise
 
 
 def tag_exported_model_card(output_dir: str, *, source_dir: str | None = None) -> None:
-    """:func:`tag_model_card` for an export, whose card nothing that loads the checkpoint reads.
-
-    A card with malformed metadata must not fail an export whose weights are already on disk: it
-    stays verbatim and untagged, and a warning names the file to repair, which is the card in
-    ``source_dir`` when the export copied it from there (a re-run copies it again).
-    """
+    """:func:`tag_model_card` for an export, where a malformed card stays untagged with a warning instead
+    of failing a write whose weights are on disk; the warning names ``source_dir``'s card when it was
+    copied from there."""
     try:
         tag_model_card(output_dir)
     except MalformedModelCardError as error:
@@ -122,17 +101,10 @@ def _malformed_card_message(card: Path, reason: Exception) -> str:
 
 
 def _fresh_card_metadata(directory: Path) -> dict:
-    """What a new card declares besides the tags: the stock-PEFT identity of an adapter directory.
-
-    An adapter stock PEFT loads gets the ``library_name: peft`` and ``base_model`` PEFT's own card
-    carries. A ``peft_type`` outside PEFT's registry (the native EP expert adapters) and a full-model
-    directory declare no library, so the card claims no loader that would refuse the files.
-    """
-    adapter_config = directory / ADAPTER_CONFIG_FILE
-    if not adapter_config.is_file():
-        return {}
-    config = json.loads(adapter_config.read_text())
-    if config.get("peft_type") not in _STOCK_PEFT_TYPES:
+    """What a new card declares besides the tags: ``library_name: peft`` and ``base_model`` for an adapter
+    stock PEFT loads, nothing otherwise, so the card claims no loader that would refuse the files."""
+    config = read_checkpoint_config(directory, missing_ok=True, filename=ADAPTER_CONFIG_FILE)
+    if config is None or config.get("peft_type") not in _STOCK_PEFT_TYPES:
         return {}
     metadata = {"library_name": "peft"}
     base_model = config.get("base_model_name_or_path")

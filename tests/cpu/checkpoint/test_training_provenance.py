@@ -5,7 +5,7 @@ A GptOss adapter trains against live OR neutralized attention sinks (``reset_sin
 merge rebuilds the base from the hub, whose sinks are always live — so without the record the merge
 silently serves attention the adapter never trained under. ``PeftAdapterSaver`` writes
 ``training_provenance.json`` next to the adapter, and the merge tools re-apply it via
-``_apply_training_provenance``.
+``apply_training_provenance``.
 
     python tests/cpu/checkpoint/test_training_provenance.py
 """
@@ -20,8 +20,8 @@ import torch.nn as nn
 from accelerate import PartialState
 from transformers import CONFIG_MAPPING
 
-from src.checkpoint.format import PROVENANCE_GPT_OSS_SINKS, TRAINING_PROVENANCE_FILE
-from src.checkpoint.tool_io import _apply_training_provenance
+from src.checkpoint.format import TRAINING_PROVENANCE_FILE
+from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_provenance, write_training_provenance
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 
@@ -53,32 +53,40 @@ class _GptOssStub(nn.Module):
         self.model = backbone
 
 
+@pytest.fixture(
+    params=[PeftAdapterSaver._write_training_provenance, write_training_provenance],
+    ids=["PeftAdapterSaver", "write_training_provenance"],
+)
+def writer(request):
+    return request.param
+
+
 def _read(d: str) -> dict:
     with open(os.path.join(d, TRAINING_PROVENANCE_FILE)) as fh:
         return json.load(fh)
 
 
-def test_writer_records_the_neutralized_policy():
+def test_writer_records_the_neutralized_policy(writer):
     model = _GptOssStub()
     apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED)
     with tempfile.TemporaryDirectory() as d:
-        PeftAdapterSaver._write_training_provenance(model, d)
+        writer(model, d)
         assert _read(d) == {PROVENANCE_GPT_OSS_SINKS: SinksPolicy.NEUTRALIZED}
 
 
-def test_writer_records_the_live_policy():
+def test_writer_records_the_live_policy(writer):
     model = _GptOssStub()
     apply_sinks_policy(model, model.config, policy=SinksPolicy.LIVE)
     with tempfile.TemporaryDirectory() as d:
-        PeftAdapterSaver._write_training_provenance(model, d)
+        writer(model, d)
         assert _read(d) == {PROVENANCE_GPT_OSS_SINKS: SinksPolicy.LIVE}
 
 
-def test_writer_records_the_trainable_policy():
+def test_writer_records_the_trainable_policy(writer):
     model = _GptOssStub()
     apply_sinks_policy(model, model.config, policy=SinksPolicy.TRAINABLE, attn_implementation="eager")
     with tempfile.TemporaryDirectory() as d:
-        PeftAdapterSaver._write_training_provenance(model, d)
+        writer(model, d)
         assert _read(d) == {PROVENANCE_GPT_OSS_SINKS: SinksPolicy.TRAINABLE}
 
 
@@ -105,23 +113,23 @@ def test_failed_layer_walk_raises_instead_of_stamping(policy):
     assert stamped_sinks_policy(model) is None
 
 
-def test_writer_records_nothing_when_no_policy_ran():
+def test_writer_records_nothing_when_no_policy_ran(writer):
     """An absent stamp means "nothing to record", never "neutralized" — guessing would neutralize a
     live-sink artifact on the next merge."""
     model = _GptOssStub()
     with tempfile.TemporaryDirectory() as d:
-        PeftAdapterSaver._write_training_provenance(model, d)
+        writer(model, d)
         assert not os.path.isfile(os.path.join(d, TRAINING_PROVENANCE_FILE))
 
 
-def test_writer_skips_families_without_sinks():
+def test_writer_skips_families_without_sinks(writer):
     """The family signal derives from the stamp: the policy stamps only sink-carrying models, so a
     sink-less family records nothing even after the policy ran."""
     model = nn.Module()
     model.config = CONFIG_MAPPING["qwen3"](num_hidden_layers=1)
     apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED)
     with tempfile.TemporaryDirectory() as d:
-        PeftAdapterSaver._write_training_provenance(model, d)
+        writer(model, d)
         assert not os.path.isfile(os.path.join(d, TRAINING_PROVENANCE_FILE))
 
 
@@ -132,7 +140,7 @@ def test_apply_neutralizes_merged_sinks():
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, TRAINING_PROVENANCE_FILE), "w") as fh:
             json.dump({"gpt_oss_attention_sinks": "neutralized"}, fh)
-        actions = _apply_training_provenance(model, d)
+        actions = apply_training_provenance(model, d)
     assert actions, "the neutralization must be reported to the tool's output"
     sinks = model.model.layers[0].self_attn.sinks
     assert torch.equal(sinks.data, torch.full((NUM_HEADS,), torch.finfo(sinks.dtype).min))
@@ -143,14 +151,14 @@ def test_apply_keeps_live_sinks_untouched():
     with tempfile.TemporaryDirectory() as d:
         with open(os.path.join(d, TRAINING_PROVENANCE_FILE), "w") as fh:
             json.dump({"gpt_oss_attention_sinks": "live"}, fh)
-        assert _apply_training_provenance(model, d) == []
+        assert apply_training_provenance(model, d) == []
     assert torch.equal(model.model.layers[0].self_attn.sinks.data, torch.ones(NUM_HEADS))
 
 
 def test_apply_is_a_noop_without_the_record():
     model = _GptOssStub()
     with tempfile.TemporaryDirectory() as d:
-        assert _apply_training_provenance(model, d) == []
+        assert apply_training_provenance(model, d) == []
     assert torch.equal(model.model.layers[0].self_attn.sinks.data, torch.ones(NUM_HEADS))
 
 

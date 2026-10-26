@@ -19,7 +19,7 @@ from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.context_parallel.base_layer import get_flash_attn_func
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.losses import loss_token_counts_per_row
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
@@ -75,7 +75,6 @@ def _build_model(device, cp_size):
         world_size=8, gpus_per_node=8, nvlink_domain_size=8, ep_size=8, cp_size=cp_size, ep_fp32_router=True
     )
     patch_moe_model_for_ep(model, pc.create_ep_config())
-    assert create_ep_buffers(model) == CONFIG["num_hidden_layers"]
     cp_config = pc.create_cp_config() if cp_size > 1 else None
     if cp_size > 1:
         model = UlyssesCPModelWrapper(model, cp_config)

@@ -21,7 +21,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.distributed.expert_parallel import dispatcher as dispatcher_mod
+from src.distributed.expert_parallel.deepep import backends as backends_mod
+from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
+from src.distributed.expert_parallel.deepep.capacity import capacity_scope
 from tests.common.distributed import pin_deterministic_ep_dispatch
 
 NUM_EXPERTS, HIDDEN, TOPK = 8, 256, 2
@@ -57,8 +59,9 @@ class _DispatcherShell:
     hidden_dim = HIDDEN
     num_experts = NUM_EXPERTS
     ep_size = 2
-    is_inter_node = False
+    spans_domains = False
     ep_config = SimpleNamespace(expert_tp_size=1)
+    _live = False
 
     def __init__(self, backend_cls):
         self.backend = backend_cls(self)
@@ -71,16 +74,14 @@ class _DispatcherShell:
 def recorded_deep_ep(monkeypatch):
     _RecordingBuffer.built, _RecordingBuffer.destroyed = [], []
     monkeypatch.setattr(
-        dispatcher_mod, "deep_ep", lambda: SimpleNamespace(ElasticBuffer=_RecordingBuffer, Buffer=_RecordingBuffer)
+        backends_mod, "deep_ep", lambda: SimpleNamespace(ElasticBuffer=_RecordingBuffer, Buffer=_RecordingBuffer)
     )
-    monkeypatch.setattr(dispatcher_mod._SharedArena, "_REGISTRY", {})
-    monkeypatch.setattr(dispatcher_mod, "_CAPACITY_CACHE", {})
-    monkeypatch.setattr(dispatcher_mod, "_LIVE_DISPATCHERS", weakref.WeakValueDictionary())
+    monkeypatch.setattr(backends_mod._Arena, "_registry", {})
+    capacity_scope.clear()
+    monkeypatch.setattr(dispatcher_mod, "_live_dispatchers", weakref.WeakValueDictionary())
     real_tensor = torch.tensor
-    monkeypatch.setattr(
-        dispatcher_mod.torch, "tensor", lambda data, **kw: real_tensor(data, **{**kw, "device": "cpu"})
-    )
-    monkeypatch.setattr(dispatcher_mod.dist, "all_reduce", lambda *a, **kw: None)
+    monkeypatch.setattr(backends_mod.torch, "tensor", lambda data, **kw: real_tensor(data, **{**kw, "device": "cpu"}))
+    monkeypatch.setattr(backends_mod.dist, "all_reduce", lambda *a, **kw: None)
     monkeypatch.setenv("EP_DISABLE_GIN", "1")
     # pin_deterministic_ep_dispatch replaces the seam for the rest of a process; restored after each test.
     monkeypatch.setattr(dispatcher_mod, "_deterministic_dispatch", dispatcher_mod._deterministic_dispatch)
@@ -99,27 +100,27 @@ def deterministic_mode():
 
 def test_outside_the_mode_the_default_buffer_is_built_and_the_fill_left_alone():
     fill = torch.utils.deterministic.fill_uninitialized_memory
-    _DispatcherShell(dispatcher_mod._ElasticBackend).ensure_buffer()
+    _DispatcherShell(backends_mod._ElasticBackend).ensure_buffer()
     assert [kwargs["deterministic"] for kwargs in _RecordingBuffer.built] == [False]
     assert torch.utils.deterministic.fill_uninitialized_memory is fill
 
 
 @pytest.mark.parametrize(
-    "backend_cls", [dispatcher_mod._ElasticBackend, dispatcher_mod._LegacyBackend], ids=["elastic", "legacy"]
+    "backend_cls", [backends_mod._ElasticBackend, backends_mod._LegacyBackend], ids=["elastic", "legacy"]
 )
 def test_under_the_mode_the_fill_is_off_before_any_deepep_buffer_exists(backend_cls, deterministic_mode):
     _DispatcherShell(backend_cls).ensure_buffer()
     (kwargs,) = _RecordingBuffer.built
     assert kwargs["fill_at_build"] is False
     assert torch.utils.deterministic.fill_uninitialized_memory is False
-    if backend_cls is dispatcher_mod._ElasticBackend:
+    if backend_cls is backends_mod._ElasticBackend:
         assert kwargs["deterministic"] is True
 
 
 def test_a_mode_change_moves_the_layer_to_a_buffer_of_the_new_mode():
     """A buffer built before the mode turned on (a forward ahead of ``Trainer.__init__``) must not keep
     serving the deterministic run, and a same-mode call reuses the buffer it has."""
-    backend = _DispatcherShell(dispatcher_mod._ElasticBackend).backend
+    backend = _DispatcherShell(backends_mod._ElasticBackend).backend
     backend.ensure(64, TOPK, deterministic=False)
     backend.ensure(64, TOPK, deterministic=True)
     backend.ensure(64, TOPK, deterministic=True)
@@ -131,7 +132,7 @@ def test_the_test_pin_builds_deterministic_buffers_through_the_same_seam():
     """A replay test pins the mode without turning torch's deterministic algorithms on."""
     fill = torch.utils.deterministic.fill_uninitialized_memory
     pin_deterministic_ep_dispatch()
-    _DispatcherShell(dispatcher_mod._ElasticBackend).ensure_buffer()
+    _DispatcherShell(backends_mod._ElasticBackend).ensure_buffer()
     assert [kwargs["deterministic"] for kwargs in _RecordingBuffer.built] == [True]
     assert torch.utils.deterministic.fill_uninitialized_memory is fill
 

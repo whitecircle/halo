@@ -27,8 +27,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from src.checkpoint import tool_io
-from src.checkpoint.tool_io import (
+from src.checkpoint import reading
+from src.checkpoint.reading import (
     detect_model_type,
     detect_model_types,
     iter_checkpoint_shard_entries,
@@ -56,7 +56,7 @@ class _ReaderSpy:
 
 def _record_shard_io(monkeypatch) -> list[tuple[str, str]]:
     """Record ``(open|close|read, shard name | key)`` at the walk's real seam: the ``safe_open``
-    ``tool_io`` calls per shard, and the reader it hands out."""
+    ``reading`` calls per shard, and the reader it hands out."""
     events: list[tuple[str, str]] = []
 
     @contextlib.contextmanager
@@ -69,7 +69,7 @@ def _record_shard_io(monkeypatch) -> list[tuple[str, str]]:
         finally:
             events.append(("close", name))
 
-    monkeypatch.setattr(tool_io, "safe_open", _recording_open)
+    monkeypatch.setattr(reading, "safe_open", _recording_open)
     return events
 
 

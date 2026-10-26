@@ -1,6 +1,5 @@
-"""Parameter grouping for optimizer construction: the weight-decay split the custom-optimizer
-builders pass to their optimizer, and the tensor-type split a stock optimizer needs under FSDP2 + EP.
-"""
+"""Parameter grouping: the weight-decay split every toolkit optimizer builds from, and the tensor-type
+split a stock optimizer needs under FSDP2 + EP."""
 
 from __future__ import annotations
 
@@ -26,11 +25,10 @@ def decay_groups(
 ) -> list[dict[str, Any]]:
     """``[decay group, no-decay group]`` over the trainable params, each in iteration order.
 
-    Each group carries its params' names under torch's own ``param_names`` key, which the
-    stochastically rounding optimizers key their noise by (:func:`~src.optimizers.adamw_bf16.sr_param_index`).
-    ``decay_parameters=None`` decays everything. ``keep_empty`` emits a group that came out empty:
-    the group count defines the index space of a saved optimizer state and of a scheduler's per-group
-    updates, so a builder whose optimizer always carries two groups must keep emitting two.
+    Each group carries its params' names under torch's ``param_names`` key, which the SR optimizers key
+    their noise by (:func:`~src.optimizers.stochastic_rounding.sr_param_index`). ``decay_parameters=None``
+    decays everything. ``keep_empty`` keeps an empty group: the group count defines the index space of a
+    saved optimizer state and of a scheduler's per-group updates.
     """
     decay_names = None if decay_parameters is None else set(decay_parameters)
     decay: list[tuple[str, Parameter]] = []
@@ -57,11 +55,10 @@ def build_tensor_type_grouped_optimizer(
     decay_parameters: Sequence[str],
     get_optimizer_cls_and_kwargs: Callable[[Any, torch.nn.Module], tuple[type, dict]],
 ):
-    """Optimizer with param groups split by (weight decay, dtype, tensor type), single-tensor mode.
+    """The args' optimizer over groups split by (weight decay, dtype, tensor type), single-tensor mode.
 
-    FSDP2 parameters are DTensors while FSDP-ignored EP parameters are plain tensors. Foreach/fused
-    optimizers cannot mix the two in one update, so split the groups and disable those paths. The
-    dtype axis additionally handles ``fp32_non_ep_params``.
+    FSDP2 params are DTensors and FSDP-ignored EP params plain tensors, which a foreach/fused update
+    cannot mix; the dtype axis covers ``fp32_non_ep_params``.
     """
     decay_names = set(decay_parameters)
     groups: dict[tuple, list] = {}

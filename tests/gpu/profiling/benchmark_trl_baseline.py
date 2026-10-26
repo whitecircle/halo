@@ -37,7 +37,7 @@ from trl import SFTConfig, SFTTrainer
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.model_preparation import resolve_auto_model_class
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
+from src.optimizers.flash_adamw import build_flash_adamw_optimizer
 from src.optimizers.registry import register_custom_optimizers
 from src.runtime.collectives import barrier
 from tests.common.benchmark_args import create_benchmark_parser
@@ -72,7 +72,7 @@ class FlashAdamWSFTTrainer(SFTTrainer):
         if self.args.optim != "flash_adamw":
             return super().create_optimizer()
         if self.optimizer is None:
-            self.optimizer = create_flash_adamw_optimizer(
+            self.optimizer = build_flash_adamw_optimizer(
                 self.model,
                 lr=self.args.learning_rate,
                 betas=(self.args.adam_beta1, self.args.adam_beta2),

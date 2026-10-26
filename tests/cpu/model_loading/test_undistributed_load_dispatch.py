@@ -43,7 +43,7 @@ def _dispatch(pc: ParallelismConfig, model_type: str) -> list:
     with (
         patch.object(model_loading, "get_local_rank", return_value=0),
         patch.object(model_loading, "_from_pretrained_on_local_gpu", return_value=loaded),
-        patch.object(model_loading, "_apply_ep_wrappers", side_effect=lambda m, cfg: wrapped.append(cfg) or m),
+        patch.object(model_loading, "patch_moe_model_for_ep", side_effect=lambda m, cfg: wrapped.append(cfg) or m),
     ):
         model = model_loading._dispatch_model_loading(
             "stub/checkpoint", pc, SimpleNamespace(), {"config": CONFIG_MAPPING[model_type]()}
@@ -68,7 +68,7 @@ def test_a_moe_gets_the_expert_wrappers_without_any_expert_distribution():
 
 def test_a_dense_model_is_never_wrapped_even_with_grouped_gemm_requested():
     """``use_grouped_gemm`` is a default, not a declaration that the model has experts: a dense model
-    reaching ``_apply_ep_wrappers`` patches zero MoE layers and raises."""
+    reaching ``patch_moe_model_for_ep`` patches zero MoE layers and raises."""
     assert _dispatch(_pc(use_grouped_gemm=True), "llama") == []
 
 

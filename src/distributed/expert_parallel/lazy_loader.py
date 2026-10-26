@@ -35,9 +35,7 @@ import torch.nn as nn
 from safetensors import safe_open
 from transformers import AutoModelForCausalLM
 
-from src.checkpoint.format import (
-    StreamingCheckpointReader,
-)
+from src.checkpoint.reading import StreamingCheckpointReader
 from src.distributed.expert_parallel.config import (
     EPConfig,
     get_num_experts,
@@ -51,10 +49,7 @@ from src.distributed.expert_parallel.expert_weights import (
 )
 from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys, verify_fp32_master_coverage
 from src.distributed.expert_parallel.hub_conversion import resolve_conversion_steps, resolve_loaded_conversion_steps
-from src.distributed.expert_parallel.patching import (
-    create_ep_buffers,
-    patch_moe_model_for_ep,
-)
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.dtype import reject_fp8_tensor
 from src.model_loading.lazy_safetensors.conversion import Concat
@@ -775,7 +770,6 @@ def load_ep_model_lazy(
     # 0..E_local-1 — no error, 7/8 of the experts never trained.
     weights_already_sharded = bool(fused_keys) or n_shard > 0
     model = patch_moe_model_for_ep(model, ep_config, weights_already_sharded=weights_already_sharded)
-    create_ep_buffers(model)
     # Non-persistent buffers stayed meta (the shell never materialized them) and the shadow tied
     # lm_head stays meta until tying.
     finalize_loaded_model(model)

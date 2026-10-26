@@ -32,7 +32,7 @@ import torch.nn as nn
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.muon import build_muon_optimizer
 from src.runtime.dtensor import to_local
 from tests.common.harness import gpu_test_main, record_check
 
@@ -117,7 +117,7 @@ def test_muon_fsdp_ffn():
     if rank == 0:
         print(f"  Parameters wrapped as DTensors: {has_dtensor}")
 
-    optimizer = create_muon_optimizer(model, lr=LR)
+    optimizer = build_muon_optimizer(model, lr=LR)
     losses = train_steps(model, optimizer, NUM_STEPS)
 
     assert all(math.isfinite(l) for l in losses), "Non-finite loss detected"
@@ -147,7 +147,7 @@ def test_muon_fsdp_nobias():
             fully_shard(module)
     fully_shard(model)
 
-    optimizer = create_muon_optimizer(model, lr=LR)
+    optimizer = build_muon_optimizer(model, lr=LR)
     assert optimizer.scalar_optimizer is None, "No 1D params, scalar optimizer should be None"
 
     losses = train_steps(model, optimizer, NUM_STEPS)
@@ -179,7 +179,7 @@ def test_muon_fsdp_weight_decay():
             fully_shard(module)
     fully_shard(model)
 
-    optimizer = create_muon_optimizer(model, lr=1e-4, weight_decay=0.5)
+    optimizer = build_muon_optimizer(model, lr=1e-4, weight_decay=0.5)
 
     dtype = next(model.parameters()).dtype
     torch.manual_seed(42 + rank)

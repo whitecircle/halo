@@ -256,7 +256,7 @@ What an EP run has to plan around:
   for long sequences, and cap SFT `max_length` or the RL rollout budget.
 - **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` composes with the `ElasticBuffer`**
   ([DeepEP → Memory allocation failures](../infrastructure/deepep.md#runtime-errors)).
-- **Dtype contract** (`src/distributed/expert_parallel/autograd.py`): `topk_weights` must be FP32
+- **Dtype contract** (`src/distributed/expert_parallel/deepep/dispatcher.py`): `topk_weights` must be FP32
   contiguous; token tensors keep their dtype across dispatch/combine. The wire zero-pads the feature
   dim to a multiple of 256 and slices it back symmetrically (GPT-OSS hidden 2880 → 3072), so
   gradients are exact.
@@ -321,7 +321,7 @@ arrive in changes from step to step, and with it the summation order of the expe
 bit-identical while every expert weight drifts in its last bits, and two runs diverge within a few
 steps. Under torch's deterministic-algorithms mode, which HF's `Trainer` turns on for
 `full_determinism`, the dispatcher builds the `ElasticBuffer` with DeepEP's `deterministic=True`
-(`src/distributed/expert_parallel/dispatcher.py`): a prologue kernel places each received token by
+(`src/distributed/expert_parallel/deepep/backends.py`): a prologue kernel places each received token by
 source rank and token index. The `legacy` V1 buffer places tokens by prefix sums already and needs
 nothing. The rest of the EP path is deterministic as is: grouped GEMM, the fused GLU, the atomic-free
 permute, the combine, the per-expert loop (`use_grouped_gemm: false`), whose every `index_add_` call

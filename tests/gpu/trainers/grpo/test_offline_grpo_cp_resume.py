@@ -16,7 +16,8 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint.format import REFERENCE_LOGPS_FILE, load_full_state_dict
+from src.checkpoint.format import REFERENCE_LOGPS_FILE
+from src.checkpoint.reading import load_full_state_dict
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase

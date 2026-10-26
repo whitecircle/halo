@@ -25,7 +25,7 @@ from transformers.models.glm5_next.configuration_glm5_next import Glm5NextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditionalGeneration, Glm5NextTextMLP
 
 from src.distributed.expert_parallel.layers.glm5_next import EPGlm5NextMoELayer
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_spread
 from tests.common.ep_reference import score_ep_grad_pairs
@@ -96,7 +96,6 @@ def run(ctx):
     model = _build_model(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = patch_moe_model_for_ep(model, pc.create_ep_config())
-    create_ep_buffers(model)
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPGlm5NextMoELayer)]
     text_layers = model.model.language_model.layers

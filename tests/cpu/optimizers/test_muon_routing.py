@@ -24,7 +24,7 @@ from gram_newton_schulz import Muon as UpstreamMuon
 
 from src.models.param_roles import EMBEDDING_HEAD_MARKERS
 from src.optimizers import muon
-from src.optimizers.muon import _is_embedding_or_head, create_muon_optimizer
+from src.optimizers.muon import _is_embedding_or_head, build_muon_optimizer
 
 
 class _TinyMoE(nn.Module):
@@ -102,7 +102,7 @@ def test_the_marker_set_is_shared_not_copied():
 
 def test_routing_by_module():
     model = _TinyMoE()
-    opt = create_muon_optimizer(model, ns_use_kernels=False)
+    opt = build_muon_optimizer(model, ns_use_kernels=False)
     muon_params = {id(p) for g in opt._muon_param_groups for p in g["params"]}
     scalar_params = {id(p) for g in opt.scalar_optimizer.param_groups for p in g["params"]}
     assert id(model.shared_expert.weight) in muon_params
@@ -144,7 +144,7 @@ def test_embedding_and_head_resolved_structurally_for_new_family():
     assert not _is_embedding_or_head("embed_in.weight")
     assert not _is_embedding_or_head("embed_out.weight")
 
-    opt = create_muon_optimizer(model, ns_use_kernels=False)
+    opt = build_muon_optimizer(model, ns_use_kernels=False)
     muon_params = {id(p) for g in opt._muon_param_groups for p in g["params"]}
     scalar_params = {id(p) for g in opt.scalar_optimizer.param_groups for p in g["params"]}
     assert id(model.embed_in.weight) in scalar_params
@@ -156,14 +156,14 @@ def test_tied_embedding_head_routes_once_to_adamw():
     """A tied head shares storage with the embedding — it must not leak onto Muon."""
     model = _UnconventionalNames()
     model.embed_out.weight = model.embed_in.weight
-    opt = create_muon_optimizer(model, ns_use_kernels=False)
+    opt = build_muon_optimizer(model, ns_use_kernels=False)
     muon_params = {id(p) for g in opt._muon_param_groups for p in g["params"]}
     assert id(model.embed_in.weight) not in muon_params
 
 
 def test_non_bf16_muon_param_rejected():
     try:
-        create_muon_optimizer(_TinyMoE(dtype=torch.float32), ns_use_kernels=False)
+        build_muon_optimizer(_TinyMoE(dtype=torch.float32), ns_use_kernels=False)
     except ValueError as e:
         assert "bf16" in str(e)
     else:
@@ -179,7 +179,7 @@ def test_the_toolkit_muon_is_a_subclass_carrying_its_own_step_and_name():
     the scalar leg must be AdamWBF16's own bound ``step`` — upstream wraps it in ``torch.compile``,
     which only pays graph breaks around a kernel launch.
     """
-    opt = create_muon_optimizer(_TinyMoE(), ns_use_kernels=False)
+    opt = build_muon_optimizer(_TinyMoE(), ns_use_kernels=False)
 
     assert type(opt).__name__ == "Muon", "the fingerprint's optimizer_class changed"
     assert isinstance(opt, UpstreamMuon) and type(opt) is not UpstreamMuon
@@ -189,7 +189,7 @@ def test_the_toolkit_muon_is_a_subclass_carrying_its_own_step_and_name():
 
 def test_state_dict_roundtrips_scalar_state():
     model = _TinyMoE()
-    opt = create_muon_optimizer(model, ns_use_kernels=False)
+    opt = build_muon_optimizer(model, ns_use_kernels=False)
     for p in opt.scalar_optimizer.param_groups[0]["params"]:
         p.grad = torch.zeros_like(p)
     opt.scalar_optimizer.step()
@@ -200,7 +200,7 @@ def test_state_dict_roundtrips_scalar_state():
     assert len(sd["state"]) >= n_scalar, "state_dict must include the scalar-optimizer entries"
 
     model2 = _TinyMoE()
-    opt2 = create_muon_optimizer(model2, ns_use_kernels=False)
+    opt2 = build_muon_optimizer(model2, ns_use_kernels=False)
     opt2.load_state_dict(sd)
     assert len(opt2.scalar_optimizer.state) == n_scalar, "scalar state must land back on the scalar optimizer"
     scalar_ids = {id(p) for g in opt2.scalar_optimizer.param_groups for p in g["params"]}

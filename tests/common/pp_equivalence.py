@@ -38,7 +38,7 @@ from trl import SFTConfig
 from src.distributed.expert_parallel import base_layer
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import world_spread
@@ -128,7 +128,6 @@ def build_patched_moe_model(config: ParallelismConfig, dtype: torch.dtype = torc
     """The MoE model carrying the config's EP wrappers + prepared (non-collective) EP buffers."""
     model = build_moe_model(dtype)
     patch_moe_model_for_ep(model, config.create_ep_config())
-    create_ep_buffers(model)
     return model
 
 
@@ -164,11 +163,17 @@ def rel_err(test: torch.Tensor, ref: torch.Tensor) -> float:
 def inert_ep1_config(rank: int, use_grouped_gemm: bool = True) -> EPConfig:
     """A single-process ep1 EPConfig whose hooks and dispatch stay inert.
 
-    ``world_size=1`` / ``rank_offset=global_rank`` keeps its group creation collective-consistent
+    ``stage_world_size=1`` / ``stage_base_rank=global_rank`` keeps its group creation collective-consistent
     (every rank creates every single-rank group in the same order).
     """
     return EPConfig(
-        ep_size=1, world_size=1, rank_offset=rank, node_local=True, gpus_per_node=1, use_grouped_gemm=use_grouped_gemm
+        ep_size=1,
+        stage_world_size=1,
+        stage_base_rank=rank,
+        node_local=True,
+        nvlink_domain_size=1,
+        use_grouped_gemm=use_grouped_gemm,
+        experts_fsdp_managed=True,
     )
 
 

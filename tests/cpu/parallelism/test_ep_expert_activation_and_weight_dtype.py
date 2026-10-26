@@ -11,8 +11,8 @@
 * **The fused SwiGLU kernel is armed exactly when the block gates with SiLU.** Every SiLU-gated family
   swaps one Triton kernel in for the activation and the multiply; disarming it costs only throughput, so
   nothing but a real block at ``hidden_act: silu`` catches a gate that stopped recognizing SiLU.
-* **Routing weights reach the dispatch boundary in fp32.** ``_to_topk_weights`` upcasts inside
-  ``DeepEPDispatchFunction.forward``, so a bf16 weight tensor still produces the right FORWARD; but
+* **Routing weights reach the dispatch boundary in fp32.** ``DeepEPDispatchFunction.forward``
+  upcasts them, so a bf16 weight tensor still produces the right FORWARD; but
   the backward then hands DeepEP's fp32 ``grad_topk_weights`` back to a bf16 graph input and the
   autograd engine downcasts it silently, so the router-weight gradient of that family alone is
   computed in bf16. Under ETP the same tensor is the operand of ``SumGradAcrossGroup``, whose reduce

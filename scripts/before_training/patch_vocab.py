@@ -38,12 +38,12 @@ from scripts._common import (
     add_max_shard_size_arg,
     add_trust_remote_code_arg,
 )
-from src.checkpoint.tool_io import (
+from src.checkpoint.offline_export import (
     preflight_model_load_resources,
     reject_in_place_conversion,
-    reject_sharded_checkpoint,
     save_full_checkpoint,
 )
+from src.checkpoint.reading import reject_partial_checkpoint
 from src.log import configure_cli_logging
 from src.model_loading.dtype import DTYPE_BY_NAME
 from src.model_loading.model_preparation import auto_load_model
@@ -209,7 +209,7 @@ def main():
     # with randomly initialized experts (missing keys only warn) while the patched save looked
     # complete.
     reject_in_place_conversion(args.model_id, args.output_dir)
-    reject_sharded_checkpoint(args.model_id)
+    reject_partial_checkpoint(args.model_id)
     # Without --device_map the whole model lands in host RAM, and the patched output is about the
     # source's size on disk (not reported for a Hub id, where there is nothing local to measure).
     preflight_model_load_resources(args.model_id, args.output_dir, tool="patch_vocab", device_map=args.device_map)

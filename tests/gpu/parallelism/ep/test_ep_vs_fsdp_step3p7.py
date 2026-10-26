@@ -31,7 +31,7 @@ from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration, Step3p7MLP
 
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.moe_balancing import resolve_balancing_mode
 from tests.common.distributed import world_spread
@@ -100,7 +100,6 @@ def run(ctx):
     model = _build_model(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = patch_moe_model_for_ep(model, pc.create_ep_config())
-    create_ep_buffers(model)
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPStep3p7MoELayer)]
     text_layers = model.model.language_model.layers

@@ -28,7 +28,8 @@ from transformers import TrainerCallback
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.utils import CONFIG_NAME
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE, has_whole_model_weight_file, load_full_state_dict
+from src.checkpoint.format import SAFETENSORS_INDEX_FILE
+from src.checkpoint.reading import has_whole_model_weight_file, load_full_state_dict
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.fsdp import reshard_fsdp2_modules
 from tests.common.peft_helpers import snapshot_adapters, unwrap

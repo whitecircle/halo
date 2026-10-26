@@ -16,20 +16,20 @@ torchrun --nproc_per_node=8 \
     --optim=muon --learning_rate=3e-4 --weight_decay=0.1
 ```
 
-`optim: muon` routes through `build_muon_optimizer` (`src/optimizers/muon.py`), which forwards `learning_rate`, `weight_decay`, `adam_epsilon`, and the decay-parameter set.
+`optim: muon` routes through `muon_optimizer_from_args` (`src/optimizers/muon.py`), which forwards `learning_rate`, `weight_decay`, `adam_epsilon`, and the decay-parameter set.
 
 `adam_beta1` / `adam_beta2` reach Muon's internal scalar AdamW only when the config sets them to something other than the HF default; Muon's tuned `DEFAULT_SCALAR_BETAS = (0.9, 0.95)` (`src/optimizers/muon.py`) otherwise stands, since HF's `adam_beta2` default of `0.999` would silently retune the scalar optimizer of every Muon config that never mentions betas.
 
-Everything else takes the `create_muon_optimizer` default: `momentum=0.95`, `nesterov=True`, `scalar_lr=lr`, `ns_algorithm="gram_newton_schulz"`, `ns_use_kernels=True`. To change those, call `create_muon_optimizer` directly:
+Everything else takes the `build_muon_optimizer` default: `momentum=0.95`, `nesterov=True`, `scalar_lr=lr`, `ns_algorithm="gram_newton_schulz"`, `ns_use_kernels=True`. To change those, call `build_muon_optimizer` directly:
 
 ```python
-from src.optimizers.muon import create_muon_optimizer
-opt = create_muon_optimizer(model, lr=3e-4, weight_decay=0.1, ns_algorithm="standard_newton_schulz")
+from src.optimizers.muon import build_muon_optimizer
+opt = build_muon_optimizer(model, lr=3e-4, weight_decay=0.1, ns_algorithm="standard_newton_schulz")
 ```
 
 ## Parameter splitting
 
-`create_muon_optimizer` splits parameters by shape and module role:
+`build_muon_optimizer` splits parameters by shape and module role:
 
 - Hidden 2D+ weight matrices (Linear, conv) → Muon with Newton-Schulz.
 - Everything below 2D (biases, norms) and the token embedding / `lm_head` → an internal scalar optimizer (`scalar_lr`, betas `(0.9, 0.95)`).
@@ -54,13 +54,13 @@ per-param index space; upstream Muon serializes only its own state, which would 
 
 ## Stochastic rounding on the bf16 weight write
 
-`_weight_decay_update_kernel` computes the update in fp32 and rounds the new weight to bf16 with stochastic rounding (same technique as [AdamWBF16](bf16-optimizer.md)). The orthogonalized update has magnitude ~`lr` after RMS-norm scaling, which at typical fine-tune LRs is below the bf16 weight ULP; nearest rounding would truncate the entire update to zero.
+`_weight_decay_update_kernel` computes the update in fp32 and rounds the new weight to bf16 with stochastic rounding, through the same `sr_round_to_bf16` step as [AdamWBF16](bf16-optimizer.md) (`src/optimizers/stochastic_rounding.py`). The orthogonalized update has magnitude ~`lr` after RMS-norm scaling, which at typical fine-tune LRs is below the bf16 weight ULP; nearest rounding would truncate the entire update to zero.
 
 SR keeps the write unbiased so small updates accumulate. Each seed is keyed by the parameter's step count (a `step` entry in Muon's per-param state) and its name, under a key apart from the internal AdamWBF16's (see [AdamWBF16](bf16-optimizer.md#stochastic-rounding)), so replicas stay bit-identical and a resume rounds as the uninterrupted run would.
 
 ## Newton-Schulz kernel backend
 
-The orthogonalization matmuls can run on the `quack-kernels` / `nvidia-cutlass-dsl` CUDA backend (`ns_use_kernels`, on by default). `create_muon_optimizer` probes the kernel on a tiny tensor at construction; if the call raises — missing package, import error, or ABI mismatch — it warns and falls back to a numerically-equivalent pure-torch path that is slower.
+The orthogonalization matmuls can run on the `quack-kernels` / `nvidia-cutlass-dsl` CUDA backend (`ns_use_kernels`, on by default). `build_muon_optimizer` probes the kernel on a tiny tensor at construction; if the call raises — missing package, import error, or ABI mismatch — it warns and falls back to a numerically-equivalent pure-torch path that is slower.
 
 The `Dockerfile` force-installs the ABI-compatible pair (`quack-kernels==0.5.0`, `nvidia-cutlass-dsl==4.5.2`) over `uv.lock`'s `0.4.1` / `4.4.2`, so the probe passes and the kernel path is the active one in the images. A bare host on the lockfile versions takes the fallback.
 

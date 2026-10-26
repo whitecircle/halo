@@ -46,8 +46,8 @@ from transformers import (
 )
 
 from scripts.after_training.reattach_vision_tower import reattach_vision_tower
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.checkpoint.tool_io import PROCESSOR_FILES, iter_checkpoint_shard_entries
+from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, PROCESSOR_FILES
+from src.checkpoint.reading import iter_checkpoint_shard_entries
 from src.model_loading.model_preparation import auto_load_model, resolve_auto_model_class
 from src.model_loading.tokenizer_setup import load_processing_class
 from tests.common.models import QWEN3_5_2B, TINY_QWEN35_CONFIG, TINY_QWEN35_MOE_CONFIG

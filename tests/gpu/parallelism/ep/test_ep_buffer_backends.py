@@ -24,7 +24,7 @@ Requirements:
 import torch
 from transformers import AutoTokenizer
 
-from src.distributed.expert_parallel.dispatcher import _ElasticBackend, _LegacyBackend
+from src.distributed.expert_parallel.deepep.backends import _ElasticBackend, _LegacyBackend
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import supports_grouped_mm

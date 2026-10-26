@@ -30,8 +30,9 @@ Requirements:
 
 import gc
 
-from src.distributed.expert_parallel import dispatcher as dispatcher_mod
-from src.distributed.expert_parallel.dispatcher import DeepEPDispatcher, free_unclaimed_ep_buffers
+from src.distributed.expert_parallel.deepep import backends as backends_mod
+from src.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
+from src.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
 from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main
@@ -47,7 +48,7 @@ NUM_LAYERS = 2
 
 
 def live_arenas() -> list:
-    return list(dispatcher_mod._SharedArena._REGISTRY.values())
+    return list(backends_mod._Arena._registry.values())
 
 
 def build_dispatchers(ep_config, num_experts: int) -> list:
@@ -59,7 +60,6 @@ def build_dispatchers(ep_config, num_experts: int) -> list:
     built = []
     for _ in range(NUM_LAYERS):
         dispatcher = DeepEPDispatcher(ep_config, num_experts, HIDDEN)
-        dispatcher.create_buffer()
         dispatcher._ensure_buffer(TOKENS_PER_RANK, NUM_TOPK)
         built.append(dispatcher)
     return built

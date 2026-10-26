@@ -18,10 +18,7 @@ from accelerate.logging import get_logger
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP  # Only for accelerate isinstance checks
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, rotate_checkpoints
 
-from src.checkpoint.config_export import (
-    checkpoint_source_ref,
-    finalize_exported_config,
-)
+from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
     OPTIMIZER_STATE_FILES,
@@ -30,6 +27,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.hub_layout import save_pretrained_layout
 from src.checkpoint.model_card import with_halo_tags
+from src.checkpoint.weights_source import config_schema_source
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
 from src.distributed.checkpoint.coordination import consensus_read, resolve_resume_checkpoint
 from src.distributed.checkpoint.loader import CheckpointLoader
@@ -514,7 +512,7 @@ class CheckpointingMixin:
             # family (Step-3.7) saved single-GPU/DDP is unreadable to the merge tools and the
             # pinned server otherwise, with nothing wrong at train time to show for it.
             if self.args.should_save:
-                finalize_exported_config(ctx.model.config, output_dir, source=checkpoint_source_ref(ctx.model))
+                finalize_exported_config(ctx.model.config, output_dir, source=config_schema_source(ctx.model))
 
     def _mark_model_save_collectives_done(self) -> None:
         """Record that this save's collectives are behind it: the fence in :meth:`_save_checkpoint`

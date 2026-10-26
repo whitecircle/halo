@@ -26,7 +26,7 @@ from datasets import Dataset
 
 from scripts.after_training import convert_to_bf16, merge_models, reset_sinks
 from scripts.inference.generation import dataset_deduplication
-from src.checkpoint import adapters
+from src.checkpoint import adapter_merge
 
 # --- merge_models: a tokenizer-less artifact is not a deliverable ---------------------------------
 
@@ -168,16 +168,16 @@ def test_a_merged_peft_conversion_copies_the_base_directory_not_the_adapter(tmp_
         def from_pretrained(base_model, _adapter_dir):
             return base_model
 
-    monkeypatch.setattr(adapters, "PeftConfig", _FakePeftConfig)
-    monkeypatch.setattr(adapters, "PeftModel", _FakePeftModel)
-    monkeypatch.setattr(adapters, "assert_no_expert_lora_adapter", lambda _path: None)
-    monkeypatch.setattr(adapters, "resolve_peft_processing_class", lambda *a, **k: object())
-    monkeypatch.setattr(adapters, "preflight_model_load_resources", lambda *a, **k: None)
-    monkeypatch.setattr(adapters, "reject_sharded_checkpoint", lambda _path: None)
-    monkeypatch.setattr(adapters, "apply_training_sidecars", lambda *a, **k: [])
-    monkeypatch.setattr(adapters, "copy_training_sidecars", lambda *a, **k: None)
+    monkeypatch.setattr(adapter_merge, "PeftConfig", _FakePeftConfig)
+    monkeypatch.setattr(adapter_merge, "PeftModel", _FakePeftModel)
+    monkeypatch.setattr(adapter_merge, "assert_no_expert_lora_adapter", lambda _path: None)
+    monkeypatch.setattr(adapter_merge, "resolve_peft_processing_class", lambda *a, **k: object())
+    monkeypatch.setattr(adapter_merge, "preflight_model_load_resources", lambda *a, **k: None)
+    monkeypatch.setattr(adapter_merge, "reject_partial_checkpoint", lambda _path: None)
+    monkeypatch.setattr(adapter_merge, "apply_training_sidecars", lambda *a, **k: [])
+    monkeypatch.setattr(adapter_merge, "copy_training_sidecars", lambda *a, **k: None)
     monkeypatch.setattr(
-        adapters,
+        adapter_merge,
         "save_full_checkpoint",
         lambda model, output_dir, **kwargs: captured.update(source_dir=kwargs.get("source_dir")),
     )

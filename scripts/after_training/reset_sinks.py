@@ -26,18 +26,20 @@ from safetensors.torch import load_file, save_file
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.atomic import create_staged_file, link_or_copy_file, publish_staged_file
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
-from src.checkpoint.model_card import tag_exported_model_card
-from src.checkpoint.tool_io import (
+from src.checkpoint.atomic import (
     PUBLISH_STAGING_SUFFIX,
     clear_staging_path,
-    iter_checkpoint_tensors,
+    link_or_copy_file,
+    staged_file,
+)
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
+from src.checkpoint.model_card import tag_exported_model_card
+from src.checkpoint.offline_export import (
     preflight_model_load_resources,
     reject_in_place_conversion,
-    reject_sharded_checkpoint,
     save_full_checkpoint,
 )
+from src.checkpoint.reading import iter_checkpoint_tensors, reject_partial_checkpoint
 from src.checkpoint.writing import sweep_after_full_save
 from src.log import configure_cli_logging
 from src.model_loading.model_preparation import auto_load_model
@@ -145,24 +147,18 @@ def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: 
         logger.info("Dry run — no changes written.")
         return len(sink_keys)
 
-    output_safetensors = output_dir / SAFETENSORS_WEIGHTS_FILE
-
     if output_dir != checkpoint_dir:
         logger.info(f"Copying checkpoint files to {output_dir}...")
         shutil.copytree(str(checkpoint_dir), str(output_dir), dirs_exist_ok=True)
 
     # Staged write, verify, then publish: under --in_place the rename replaces the only copy, which a
     # kill mid-write, or a write that kept live sinks, must not reach.
-    logger.info(f"Saving updated checkpoint to {output_safetensors}...")
-    staged = create_staged_file(output_dir, SAFETENSORS_WEIGHTS_FILE)
-    try:
+    logger.info(f"Saving updated checkpoint to {output_dir / SAFETENSORS_WEIGHTS_FILE}...")
+    with staged_file(output_dir, SAFETENSORS_WEIGHTS_FILE) as staged:
         save_file(state_dict, str(staged), metadata=SAFETENSORS_METADATA)
         logger.info("Verifying...")
         written = {key: tensor for key, tensor in load_file(str(staged), device="cpu").items() if is_sink_key(key)}
         _assert_sinks_at_min(written, sink_keys, str(staged))
-        publish_staged_file(staged, output_safetensors)
-    finally:
-        staged.unlink(missing_ok=True)
     logger.info(f"All {len(sink_keys)} sink tensors verified — reset to dtype min.")
     # The copytree carries the source's card over untagged; save_full_checkpoint tags the
     # from_pretrained branch's.
@@ -312,7 +308,7 @@ def reset_sinks(
     # real expert keys read as missing and are randomly initialized. That diagnosis is more useful
     # than a missing-destination error, and it holds whichever destination was named. A Hub id has no
     # local directory here and passes through to the load, where the coverage gate stands in.
-    reject_sharded_checkpoint(checkpoint_dir)
+    reject_partial_checkpoint(checkpoint_dir)
 
     if in_place:
         if output_dir is not None:

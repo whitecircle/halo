@@ -14,7 +14,7 @@ run. Paths are relative to the repo root; anything that executes runs **inside t
 |---|---|
 | EP wrapper | `src/distributed/expert_parallel/layers/<name>.py` — `layers/roster.py` imports the whole package, so the file's existence *is* the registration |
 | EP base / hooks | `src/distributed/expert_parallel/base_layer.py` (gather in `expert_gather.py`, balancing in `balancing.py`) |
-| Expert-LoRA coverage | `src/distributed/expert_parallel/config.py` (`LORA_PROJECTION_COVERAGE`) |
+| Expert-LoRA coverage | `src/models/moe/expert_lora_spec.py` (`LORA_PROJECTION_COVERAGE`) |
 | Non-persistent buffers | `src/models/patches/buffer_fixes.py` — add a fixer to the `_NON_PERSISTENT_FIXERS` / `_ROTARY_FIXERS` chains; `finalize_loaded_model` is the seam every load path calls, and a buffer no fixer covers stays on meta and is rejected at device placement |
 | Liger coverage | `src/kernels/liger/families.py` (`LIGER_FAMILY_SPECS`) |
 | CP wrapper | `src/distributed/context_parallel/layers/<name>.py` |

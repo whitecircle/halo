@@ -30,7 +30,7 @@ from trl import SFTConfig
 from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
 from src.callbacks.wiring import build_perf_callbacks
 from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
@@ -94,7 +94,6 @@ def run(ctx):
     )
     model = build_model()
     patch_moe_model_for_ep(model, config.create_ep_config())
-    create_ep_buffers(model)
 
     # The production balancing seam: build_perf_callbacks applies the bias_update side effects
     # (creates balancing_biases + expert_load_counter on the EP layers) and returns the callback.

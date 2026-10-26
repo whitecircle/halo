@@ -36,11 +36,8 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.checkpoint.format import (
-    ADAPTER_SAFETENSORS_FILE,
-    PROVENANCE_GPT_OSS_SINKS,
-    TRAINING_PROVENANCE_FILE,
-)
+from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, TRAINING_PROVENANCE_FILE
+from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.peft import PeftAdapterSaver, _load_peft_adapter_state, remap_cp_adapter_keys_to_live
 from src.distributed.context_parallel.config import CPConfig

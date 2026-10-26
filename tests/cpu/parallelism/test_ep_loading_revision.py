@@ -34,7 +34,7 @@ _REVISION = "970cfc9f5e7e5a4f5f6f0645955928a9b6a98415"
 
 def _make_ep_config() -> EPConfig:
     """EPConfig valid in single-process mode (no torch.distributed)."""
-    return EPConfig(ep_size=2, world_size=2, gpus_per_node=2)
+    return EPConfig(ep_size=2, stage_world_size=2, nvlink_domain_size=2, experts_fsdp_managed=False)
 
 
 # The loaders take the dispatcher's already-loaded config; every load here is patched out, so what

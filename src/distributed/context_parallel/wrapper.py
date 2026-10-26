@@ -25,7 +25,7 @@ from src.distributed.context_parallel.config import (
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
 from src.distributed.context_parallel.patching import patch_attention_for_ulysses
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.dispatcher import bump_forward_generation
+from src.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from src.models.config_access import get_config_field
 from src.models.unwrapping import base_transformers_model, unwrap_framework_wrappers
 

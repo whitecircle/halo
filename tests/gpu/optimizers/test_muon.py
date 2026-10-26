@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Muon optimizer (Newton-Schulz orthogonalization) on one GPU: the fused Triton step end to end.
 
-Verifies that create_muon_optimizer:
+Verifies that build_muon_optimizer:
 1. Correctly splits 2D+ params (Muon) vs 1D params (AdamW scalar)
 2. Achieves loss descent on a simple regression task
 3. Handles models with only 2D params (no scalar optimizer)
@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
-from src.optimizers.muon import _GNS_CHUNK_SIZE, _muon_kernels_available, create_muon_optimizer
+from src.optimizers.muon import _GNS_CHUNK_SIZE, _muon_kernels_available, build_muon_optimizer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import assert_optimizer_state_bit_exact, assert_orthogonalized, log, log_spectrum_matrix
 
@@ -139,7 +139,7 @@ def _assert_updates_from_zero(model: nn.Module, lr: float, sources: dict[str, to
 def check_param_split():
     """Muon should put 2D+ params in Muon groups and 1D params in scalar AdamW."""
     model = FFNModel().cuda().to(torch.bfloat16)
-    optimizer = create_muon_optimizer(model, lr=3e-4)
+    optimizer = build_muon_optimizer(model, lr=3e-4)
 
     muon_params = []
     for g in optimizer._muon_param_groups:
@@ -165,7 +165,7 @@ def check_loss_descends():
     """Muon should decrease loss on a regression task."""
     torch.manual_seed(42)
     model = FFNModel().cuda().to(torch.bfloat16)
-    optimizer = create_muon_optimizer(model, lr=2e-3)
+    optimizer = build_muon_optimizer(model, lr=2e-3)
 
     losses = run_training(model, optimizer, num_steps=100)
 
@@ -180,7 +180,7 @@ def check_loss_descends_no_bias():
     """Muon should work on a model with only 2D params (no scalar optimizer)."""
     torch.manual_seed(42)
     model = NoBiasModel().cuda().to(torch.bfloat16)
-    optimizer = create_muon_optimizer(model, lr=2e-3)
+    optimizer = build_muon_optimizer(model, lr=2e-3)
 
     assert optimizer.scalar_optimizer is None, "No 1D params, scalar optimizer should be None"
 
@@ -203,7 +203,7 @@ def check_decay_parameter_names():
     model = NoBiasModel(hidden=64, layers=1).cuda().to(torch.bfloat16)
     decayed, undecayed = model.net[0].weight, model.net[2].weight
     lr, weight_decay = 0.1, 0.5
-    optimizer = create_muon_optimizer(model, lr=lr, weight_decay=weight_decay, decay_parameters={"net.0.weight"})
+    optimizer = build_muon_optimizer(model, lr=lr, weight_decay=weight_decay, decay_parameters={"net.0.weight"})
 
     groups = {id(p): g["weight_decay"] for g in optimizer._muon_param_groups for p in g["params"]}
     assert groups == {id(decayed): weight_decay, id(undecayed): 0.0}, f"Muon groups misrouted decay: {groups}"
@@ -229,13 +229,13 @@ def check_state_dict_roundtrip():
     the base restore), and a post-load step still moves weights."""
     torch.manual_seed(42)
     model = FFNModel().cuda().to(torch.bfloat16)
-    optimizer = create_muon_optimizer(model, lr=2e-3, weight_decay=0.1, momentum=0.95)
+    optimizer = build_muon_optimizer(model, lr=2e-3, weight_decay=0.1, momentum=0.95)
     run_training(model, optimizer, num_steps=5)
     saved = copy.deepcopy(optimizer.state_dict())
 
     torch.manual_seed(7)
     model2 = FFNModel().cuda().to(torch.bfloat16)
-    optimizer2 = create_muon_optimizer(model2, lr=5e-1, weight_decay=0.0, momentum=0.5)
+    optimizer2 = build_muon_optimizer(model2, lr=5e-1, weight_decay=0.0, momentum=0.5)
     # Premise: the fresh constructor's hyperparams differ from the checkpoint's, otherwise the
     # follows-the-checkpoint assertion below could not tell the two apart.
     for live, saved_group in zip(optimizer2.param_groups, saved["param_groups"], strict=True):
@@ -275,7 +275,7 @@ def check_step_writes_orthogonalized_update():
     generator = torch.Generator().manual_seed(0)
     model = ZeroMatrices().cuda()
     lr = 1e-2
-    optimizer = create_muon_optimizer(model, lr=lr, weight_decay=0.0)
+    optimizer = build_muon_optimizer(model, lr=lr, weight_decay=0.0)
     momentum = optimizer.param_groups[0]["momentum"]
 
     first = _fill_log_spectrum_grads(model, generator)

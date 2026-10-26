@@ -17,7 +17,7 @@ from transformers.models.inkling.configuration_inkling import InklingConfig, Ink
 from transformers.models.inkling.modeling_inkling import InklingForConditionalGeneration
 
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_spread
 from tests.common.harness import gpu_test_main
@@ -89,7 +89,6 @@ def run(ctx):
     model = _build_model(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = patch_moe_model_for_ep(model, pc.create_ep_config())
-    create_ep_buffers(model)
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPInklingMoELayer)]
     checks["ep_layers_patched_under_wrapper"] = len(ep_layers) == TINY_INKLING_CONFIG["num_hidden_layers"]

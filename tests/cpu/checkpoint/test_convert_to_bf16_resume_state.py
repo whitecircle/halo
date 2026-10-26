@@ -28,9 +28,9 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     SCHEDULER_STATE_FILE,
-    read_checkpoint_key_set,
     write_resume_adapter_marker,
 )
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.training.environment import _classify_resume_checkpoint
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -72,7 +72,7 @@ def test_a_converted_merged_checkpoint_resumes_like_its_source(tmp_path):
     for entry in _RESUME_ENTRIES:
         assert (out / entry).is_file(), f"{entry} was dropped by the conversion"
         assert (out / entry).read_bytes() == (source / entry).read_bytes(), f"{entry} changed in the conversion"
-    assert read_checkpoint_key_set(str(out)) == read_checkpoint_key_set(str(source)), (
+    assert resolve_checkpoint_weights(str(out)).key_set() == resolve_checkpoint_weights(str(source)).key_set(), (
         "the resume adapter's tensors must stay out of the converted weights"
     )
 

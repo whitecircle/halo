@@ -40,22 +40,21 @@ import src.distributed.checkpoint.loader as loader_mod
 import src.distributed.checkpoint.peft as peft_mod
 import src.distributed.checkpoint.save as save_mod
 import src.trainers.mixins.checkpointing as checkpointing_mod
-from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
+from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE, resume_adapter_dir
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     SAFETENSORS_WEIGHTS_FILE,
-    load_full_state_dict,
-    resume_adapter_dir,
     write_resume_adapter_marker,
 )
+from src.checkpoint.reading import load_full_state_dict
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.peft import restore_adapters
 from src.distributed.checkpoint.save import save_resume_adapter
-from src.distributed.expert_parallel.config import ExpertLoraSpec
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
 from tests.common.base_save import BaseTrainerSave

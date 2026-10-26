@@ -62,7 +62,7 @@ The base owns dispatch→compute→combine, GC dispatch replay, grad-sync hooks,
 | `_init_expert_params(experts, weights_already_sharded)` | `_init_fused_glu_params` | Qwen3 (split), Bailing (stack), GptOss (interleave) |
 | `_init_summary_extras(block)` | `()` | any family with a field worth printing at construction |
 
-A hook may read only the wrapped module and the `EPConfig`. **No hook may issue a collective**: some load paths patch layers before every rank has reached group setup, so a collective here deadlocks the job rather than failing it (DeepEP buffer creation is deferred to `create_ep_buffers()` for that reason).
+A hook may read only the wrapped module and the `EPConfig`. **No hook may issue a collective**: some load paths patch layers before every rank has reached group setup, so a collective here deadlocks the job rather than failing it (DeepEP builds its buffer lazily, at the first dispatch, for that reason).
 
 No hook may allocate state sized by `world_size` either — invisible at 8 GPUs, an OOM at 512. Both rules are pinned per family in `tests/cpu/parallelism/test_ep_prologue_parity.py`.
 
@@ -136,7 +136,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
     Everything else is required — an upstream rename raises instead of silently under-scaling every routed weight. Laguna and Step-3.7 carry no group limiting and no `norm_topk_prob`; no family opts out of `routed_scaling_factor`.
 
-**3. Expert LoRA.** A new stored weight root needs a `LORA_PROJECTION_COVERAGE` entry (`src/distributed/expert_parallel/config.py`) mapping it to the logical `gate`/`up`/`down` projection — without it `expert_lora` silently never adapts that weight (`tests/cpu/peft/test_expert_lora_projection_coverage.py` fails on any registered root missing an entry).
+**3. Expert LoRA.** A new stored weight root needs a `LORA_PROJECTION_COVERAGE` entry (`src/models/moe/expert_lora_spec.py`) mapping it to the logical `gate`/`up`/`down` projection — without it `expert_lora` silently never adapts that weight (`tests/cpu/peft/test_expert_lora_projection_coverage.py` fails on any registered root missing an entry).
 
 **4. Sharded-save merge.** `save_sharded_ep=True` needs the class to declare `HF_MODEL_TYPES` — every `config.model_type` spelling its checkpoints carry, including text-tower and remote-code variants. That union is what resolves a checkpoint back to its layer class (`resolve_ep_merge_layer_class`, `src/distributed/expert_parallel/expert_weights.py`); a `model_type` no registered family claims **raises** at trainer construction (`validate_ep_sharded_save`). Drop `save_sharded_ep` and take the gathered save, which needs no transform.
 

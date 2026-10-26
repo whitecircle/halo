@@ -17,9 +17,9 @@ from types import SimpleNamespace
 import pytest
 
 from src.distributed.context_parallel.config import CPConfig, cp_chunk_bounds
-from src.distributed.expert_parallel.config import reject_expert_lora_with_expert_tp
 from src.distributed.parallelism_config import accelerate_launch_rejection
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
+from src.models.moe.expert_lora_spec import reject_expert_lora_with_expert_tp
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
 

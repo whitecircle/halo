@@ -45,8 +45,9 @@ from scripts.training.embedding import build_sentence_transformer
 from src.checkpoint import model_card
 from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, EXPERT_LORA_PEFT_TYPES
 from src.checkpoint.config_export import finalize_exported_config, save_model_config
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, copy_checkpoint_aux_files
+from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from src.checkpoint.model_card import MalformedModelCardError, tag_model_card
+from src.checkpoint.offline_export import copy_checkpoint_aux_files
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.ep_save import save_ep_lora_adapters

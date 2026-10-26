@@ -33,11 +33,11 @@ from transformers import AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase, disable_expert_adapters
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.expert_parallel.expert_weights import apply_ep_lora_adapters, gather_ep_lora_adapters, has_ep_lora
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset

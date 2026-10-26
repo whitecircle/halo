@@ -18,7 +18,7 @@ from huggingface_hub import snapshot_download
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
-from src.checkpoint.format import StreamingCheckpointReader, read_checkpoint_key_set, resolve_checkpoint_weights
+from src.checkpoint.reading import StreamingCheckpointReader, resolve_checkpoint_weights
 from src.distributed.expert_parallel.config import EPConfig, get_num_experts
 from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys, verify_fp32_master_coverage
 from src.distributed.expert_parallel.lazy_loader import (
@@ -122,7 +122,7 @@ def restore_fp32_master_parameters(
         if isinstance(param, nn.Parameter):
             aliases[id(param)].append(key)
     layout = resolve_checkpoint_weights(model_path)
-    disk_keys = read_checkpoint_key_set(model_path)
+    disk_keys = layout.key_set()
     weight_map = {key: layout.legacy_bin for key in disk_keys} if layout.legacy_bin is not None else layout.weight_map
     disk_to_model, fanout = build_family_key_mapping(model, list(weight_map), loaded_conversions=True)
     plans = EPWeightPlanner(None).build(weight_map, disk_to_model, set(state), fanout=fanout)

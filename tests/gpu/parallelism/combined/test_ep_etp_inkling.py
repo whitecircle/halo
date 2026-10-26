@@ -25,7 +25,7 @@ from transformers import AutoModelForCausalLM
 from transformers.models.inkling.configuration_inkling import InklingTextConfig
 
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_spread
 from tests.common.ep_reference import score_ep_grad_pairs
@@ -80,7 +80,6 @@ def run(ctx):
     pc = ParallelismConfig(ep_size=ep_size, expert_tp_size=2)
     log(f"patching for {pc.mode_string}")
     model = patch_moe_model_for_ep(model, pc.create_ep_config())
-    create_ep_buffers(model)
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPInklingMoELayer)]
     checks["ep_layers_patched"] = len(ep_layers) == TINY_INKLING_CONFIG["num_hidden_layers"]

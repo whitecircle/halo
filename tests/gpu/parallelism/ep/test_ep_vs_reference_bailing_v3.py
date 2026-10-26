@@ -34,7 +34,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from tests.common.ep_reference import score_ep_grad_pairs
@@ -111,7 +111,6 @@ def run(ctx):
     container.mlp = _build_block(config, device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
     patch_moe_model_for_ep(container, pc.create_ep_config())
-    create_ep_buffers(container)
 
     ep_layer = container.mlp
     checks["block_patched"] = isinstance(ep_layer, EPBailingMoELayer)

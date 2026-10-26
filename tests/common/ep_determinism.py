@@ -29,8 +29,8 @@ import torch
 from accelerate.state import GradientState
 from transformers.trainer_utils import enable_full_determinism
 
-from src.distributed.expert_parallel.dispatcher import _ElasticBackend
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.deepep.backends import _ElasticBackend
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_all
 from tests.common.ep_reference import ep_layers, random_token_batch
@@ -89,7 +89,6 @@ def run_backward_replay(ctx, *, family: str, mode: str) -> dict:
     torch.manual_seed(SEED)
     model = tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides).to(torch.bfloat16)
     model = patch_moe_model_for_ep(model.to(ctx.device), ParallelismConfig(**parallelism).create_ep_config())
-    create_ep_buffers(model)
     model.train()
     layers = ep_layers(model)
     expert_params = {id(param) for layer in layers for _, param in layer.expert_named_params()}

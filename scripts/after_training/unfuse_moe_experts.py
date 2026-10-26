@@ -25,7 +25,6 @@ A checkpoint with no fused expert keys is reported and copied through unchanged.
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 from functools import lru_cache
@@ -34,15 +33,19 @@ import torch
 from transformers.utils import CONFIG_NAME
 
 from scripts._common import add_max_shard_size_arg
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, copy_checkpoint_aux_files
-from src.checkpoint.tool_io import (
-    checkpoint_shard_files,
-    detect_model_type,
-    iter_checkpoint_shard_entries,
-    iter_checkpoint_tensors,
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.checkpoint.offline_export import (
+    copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
-    stored_tensor_nbytes,
+)
+from src.checkpoint.reading import (
+    checkpoint_shard_files,
+    detect_model_type,
+    header_nbytes,
+    iter_checkpoint_shard_entries,
+    iter_checkpoint_tensors,
+    read_checkpoint_config,
 )
 from src.checkpoint.writing import StreamingShardWriter
 from src.distributed.expert_parallel.expert_weights import (
@@ -100,8 +103,7 @@ def _moe_dims(ckpt_dir: str) -> tuple[int | None, int | None, str]:
     The family comes from :func:`detect_model_type`, which the family gates here also use (text_config
     fallback included), rather than a second parse of the same key.
     """
-    with open(os.path.join(ckpt_dir, CONFIG_NAME)) as f:
-        cfg = json.load(f)
+    cfg = read_checkpoint_config(ckpt_dir)
     tc = cfg.get("text_config", {})
     hidden = cfg.get("hidden_size") or tc.get("hidden_size")
     # moe_intermediate_size names the expert FFN width on the contiguous fused-GLU families; fall back
@@ -270,7 +272,7 @@ def unfuse_checkpoint(in_dir: str, out_dir: str, max_shard_size: str = DEFAULT_M
     # Peak RAM is about the largest fused bank plus the per-expert copies split out of it, on top of
     # the writer's pending output shard. On disk the per-expert artifact is about the input's size.
     largest_tensor = max(
-        (stored_tensor_nbytes(reader, key) for _shard, reader, key in iter_checkpoint_shard_entries(in_dir)),
+        (header_nbytes(reader.get_slice(key)) for _shard, reader, key in iter_checkpoint_shard_entries(in_dir)),
         default=0,
     )
     writer = StreamingShardWriter(out_dir, max_shard_size, enabled=True)

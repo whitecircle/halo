@@ -79,14 +79,14 @@ from scripts.after_training.merge_models import merge_models
 from scripts.after_training.merge_peft_adapters import merge_peft_adapter
 from scripts.training.embedding import inject_lora
 from src.args.distributed_args import DistributedArguments
+from src.checkpoint.adapters import resume_adapter_dir
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
-    read_checkpoint_key_set,
-    resume_adapter_dir,
 )
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.checkpoint.loader import resume_numel_coverage
 from src.distributed.parallelism_config import ParallelismConfig
@@ -919,7 +919,9 @@ def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path):
     trainer = _trainer(SentenceTransformer(base, device="cpu"), tmp_path / "resumed")
 
     loader_model = trainer._checkpoint_loader().ctx.model
-    covered, unmatched, _matched, _total = resume_numel_coverage(loader_model, read_checkpoint_key_set(checkpoint))
+    covered, unmatched, _matched, _total = resume_numel_coverage(
+        loader_model, resolve_checkpoint_weights(checkpoint).key_set()
+    )
 
     assert covered and not unmatched, f"the loader's model misses the saved names: {sorted(unmatched)[:3]}"
     assert trainer._optimizer_store().ctx.model is trainer.model

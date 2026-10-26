@@ -22,7 +22,7 @@ from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteMLP
 
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_spread
 from tests.common.ep_reference import score_ep_grad_pairs
@@ -84,7 +84,6 @@ def run(ctx):
     model = _build_model(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
     model = patch_moe_model_for_ep(model, pc.create_ep_config())
-    create_ep_buffers(model)
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPGlm4MoELayer)]
     checks["ep_layers_found"] = len(ep_layers) == len(_SPARSE_LAYERS)

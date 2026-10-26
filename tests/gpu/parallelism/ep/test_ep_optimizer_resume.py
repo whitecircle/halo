@@ -53,7 +53,7 @@ from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
 import src.distributed.checkpoint.optimizer as optimizer_store_mod
-from src.checkpoint.format import load_full_state_dict
+from src.checkpoint.reading import load_full_state_dict
 from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules

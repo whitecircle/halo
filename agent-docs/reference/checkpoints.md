@@ -60,7 +60,7 @@ an oversized tensor — so the file count and key→file mapping can differ whil
 ## What lands on disk — four layouts
 
 Tell them apart by `model.safetensors.index.json`, not the filename: the per-rank layout carries a
-`metadata.format` marker (`is_sharded_checkpoint` reads it). The `format: "pt"` inside each
+`metadata.format` marker (`is_ep_sharded_checkpoint` reads it). The `format: "pt"` inside each
 safetensors *file* header is the container format, not this marker.
 
 | On-disk layout | Files | Produced by | Index marker | Loadable? |
@@ -153,11 +153,11 @@ checkpoints hardlink the immutable file, falling back to a copy where links are 
 adding a scored split writes a new payload. Write failures rendezvous across ranks before
 checkpoint rotation can remove the previous complete checkpoint.
 
-Staging and durable publication live in `src/checkpoint/atomic.py`. Fresh files use `0o666` under
+Staging and durable publication live in `src/checkpoint/atomic.py` (`staged_file` for one file). Fresh files use `0o666` under
 the process umask, matching ordinary checkpoint-file permissions. Export copies omit every
 unpublished file an interrupted save leaves: a staged write's stage (the reference and prefetch
 sidecars, `optimizer_meta.pt`, the model card), the withheld `.trainer_state.json.uncommitted`, and
-the `.<name>.<uuid hex>` / `<name>.staged` staging spellings.
+the `.<name>.<uuid hex>.tmp` staging spelling.
 
 Offline GRPO's mapped reference storage and old-checkpoint recovery are covered in its
 [reference contract](../training-methods/grpo/offline.md#reference-model).
@@ -510,8 +510,8 @@ different files would issue the DTensor loads (sorted by key, a mesh collective 
 different orders.
 
 A GptOss run additionally writes `training_provenance.json` recording whether attention sinks were
-live or neutralized. The export tools (`apply_training_sidecars` in `src/checkpoint/tool_io.py`)
-re-apply it, because a merge rebuilds the base from the hub, whose sinks are always live, while a
+live or neutralized. The writer is `write_training_provenance` (`src/checkpoint/sidecars.py`), and the export tools
+(`apply_training_sidecars`, the same module) re-apply it, because a merge rebuilds the base from the hub, whose sinks are always live, while a
 `reset_sinks` run trained its adapter under neutralized ones. It is a separate sidecar, never
 `adapter_config.json`, so stock PEFT keeps loading the adapter unchanged.
 
@@ -556,7 +556,7 @@ exact for fp32 adapters (`fp32_experts`, `fp32_non_ep_params`) too.
 output is the same run's weights (`convert_to_bf16`, `merge_ep_shards`, `unfuse_moe_experts`,
 `reset_sinks`, `quantize_to_lowp`, `reattach_vision_tower`) keeps them, and a tool whose output is a
 new base drops them with every other resume sidecar (`merge_models`, `patch_vocab.py`, and
-`merge_adapter_into_base`, the shared fold behind `merge_peft_adapters.py` and `convert_to_bf16
+`merge_adapter_into_base` (`src/checkpoint/adapter_merge.py`), the shared fold behind `merge_peft_adapters.py` and `convert_to_bf16
 --merge_adapter`).
 
 Covering test: `tests/common/merged_resume_e2e.py` (exact resume against an uninterrupted run).
@@ -692,7 +692,7 @@ records ([PEFT](../optimization/peft.md#checkpoint-saving)).
 
 The save rank writes both modes' biases to `router_balancing_biases.pt` and every rank restores them
 on resume ([The balancing sidecar](../training-methods/callbacks.md#the-balancing-sidecar)). The
-export tools re-apply them through `apply_training_sidecars` (`src/checkpoint/tool_io.py`): an
+export tools re-apply them through `apply_training_sidecars` (`src/checkpoint/sidecars.py`): an
 adapter directory gets the sidecar applied into the merged model's native slots, while a source that
 carries weights already holds the bias and has its balancing tensors re-read from its own shards at
 their trained fp32.
@@ -705,7 +705,7 @@ through `StreamingCheckpointReader` instead — one tensor at a time, per rank, 
 only when the model was not constructed from the checkpoint.
 
 Where those tensors live is resolved in one place, `resolve_checkpoint_weights()`
-(`src/checkpoint/format.py`): index first — read as the map itself, so a key-set or key-subset read
+(`src/checkpoint/reading.py`): index first — read as the map itself, so a key-set or key-subset read
 opens no shard — then a single `model.safetensors`, then a legacy `pytorch_model.bin`. It reports
 the layout and applies no policy, so each reader keeps its own verdict on an empty directory, a
 per-rank sharded index or a torn one.

@@ -15,20 +15,37 @@ import importlib
 
 import pytest
 
-from src.distributed.expert_parallel import config as ep_config_mod
+from src.distributed.expert_parallel.deepep import capacity as capacity_mod
+
+# The process capacity scope the backends hold; reloading the module for its ceiling must not replace it.
+_CAPACITY_SCOPE = capacity_mod.capacity_scope
+
+
+def _reject_cross_node(capacity: int) -> None:
+    """The ceiling alone: a wire-index extent far below DeepEP's 32-bit limit, on a group spanning domains."""
+    capacity_mod.reject_oversized_dispatch(capacity, num_topk=1, padded_hidden=1, spans_domains=True)
+
+
+def _reload() -> None:
+    importlib.reload(capacity_mod).capacity_scope = _CAPACITY_SCOPE
 
 
 def test_default_ceiling_is_the_validated_boundary():
     """8,192 trains, 16,384 wedges (measured) — the default must sit exactly on the passing side."""
-    assert ep_config_mod.GIN_MAX_TOKENS_PER_RANK == 8192
-    ep_config_mod.reject_oversized_gin_dispatch(8192)  # at the ceiling: allowed
+    assert capacity_mod.GIN_MAX_TOKENS_PER_RANK == 8192
+    _reject_cross_node(8192)  # at the ceiling: allowed
     with pytest.raises(ValueError, match="proxy-GIN ceiling"):
-        ep_config_mod.reject_oversized_gin_dispatch(8193)
+        _reject_cross_node(8193)
+
+
+def test_the_ceiling_binds_only_a_group_spanning_domains():
+    """The NVLink path has no such limit, so a node-local dispatch past the ceiling passes."""
+    capacity_mod.reject_oversized_dispatch(16384, num_topk=1, padded_hidden=1, spans_domains=False)
 
 
 def test_message_names_the_mechanism_and_the_levers():
     with pytest.raises(ValueError) as err:
-        ep_config_mod.reject_oversized_gin_dispatch(16384)
+        _reject_cross_node(16384)
     text = str(err.value)
     assert "received count 0" in text, "the wedge symptom must be searchable from the raise"
     assert "ep_scope=node" in text
@@ -38,17 +55,17 @@ def test_message_names_the_mechanism_and_the_levers():
 def test_env_override_and_disable(monkeypatch):
     """The env var raises the ceiling or (0) disables the guard entirely, via module reload."""
     monkeypatch.setenv("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", "0")
-    importlib.reload(ep_config_mod)
+    _reload()
     try:
-        ep_config_mod.reject_oversized_gin_dispatch(1_000_000)  # disabled: no raise
+        _reject_cross_node(1_000_000)  # disabled: no raise
         monkeypatch.setenv("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", "32768")
-        importlib.reload(ep_config_mod)
-        ep_config_mod.reject_oversized_gin_dispatch(32768)
+        _reload()
+        _reject_cross_node(32768)
         with pytest.raises(ValueError, match="proxy-GIN ceiling"):
-            ep_config_mod.reject_oversized_gin_dispatch(32769)
+            _reject_cross_node(32769)
     finally:
         monkeypatch.delenv("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", raising=False)
-        importlib.reload(ep_config_mod)
+        _reload()
 
 
 if __name__ == "__main__":

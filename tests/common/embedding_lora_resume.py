@@ -67,14 +67,9 @@ from trl import ModelConfig, get_peft_config
 
 from scripts.training.embedding import build_sentence_transformer, inject_lora
 from src.args.distributed_args import DistributedArguments
-from src.checkpoint.format import (
-    ADAPTER_CONFIG_FILE,
-    ADAPTER_SAFETENSORS_FILE,
-    RESUME_ADAPTER_DIR,
-    has_adapter_weight_file,
-    load_full_state_dict,
-    resume_adapter_dir,
-)
+from src.checkpoint.adapters import has_adapter_weight_file, resume_adapter_dir
+from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR
+from src.checkpoint.reading import load_full_state_dict
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig

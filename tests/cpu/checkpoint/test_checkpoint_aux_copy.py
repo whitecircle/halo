@@ -43,10 +43,10 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_MARKER_FILE,
     ROUTER_BALANCING_BIASES_FILE,
     WEIGHT_FILE_IGNORE_PATTERNS,
-    copy_checkpoint_aux_files,
     prefetch_pending_filename,
     write_resume_adapter_marker,
 )
+from src.checkpoint.offline_export import copy_checkpoint_aux_files
 
 SKIPPED = (
     "model.safetensors",
@@ -94,7 +94,6 @@ _STAGE_TOKEN = "0123456789abcdef0123456789abcdef"
 LEFTOVER_STAGES = (
     ".trainer_state.json.uncommitted",
     f".reference_logps.pt.{_STAGE_TOKEN}.tmp",
-    "prefetch_pending-0-of-2.pt.staged",
 )
 
 

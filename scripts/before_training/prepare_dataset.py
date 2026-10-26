@@ -30,7 +30,7 @@ from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTokenizer
 
 from scripts._common import add_trust_remote_code_arg
-from src.checkpoint.tool_io import DISPLACED_SUFFIX, clear_staging_path
+from src.checkpoint.atomic import DISPLACED_SUFFIX, clear_staging_path
 from src.data.pipeline.preprocessed_metadata import PACKING_STRATEGIES, PREPROCESSING_MODES, PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset
 from src.data.pipeline.processing import require_render_column, resolve_map_num_proc

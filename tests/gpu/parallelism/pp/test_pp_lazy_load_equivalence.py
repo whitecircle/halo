@@ -57,7 +57,7 @@ from transformers import (
 
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
+from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.split import resolve_layer_partition
@@ -213,12 +213,13 @@ def run(ctx):
     ep_config = (
         EPConfig(
             ep_size=EP_SIZE,
-            world_size=ctx.world_size,
-            rank_offset=0,
+            stage_world_size=ctx.world_size,
+            stage_base_rank=0,
             node_local=True,
-            gpus_per_node=2,
+            nvlink_domain_size=2,
             fp32_router=FP32_MASTERS,
             fp32_experts=FP32_MASTERS,
+            experts_fsdp_managed=False,
         )
         if EP_SIZE > 1
         else None

@@ -2,18 +2,10 @@
 
 Stochastic rounding keeps the bf16 writes unbiased, where nearest rounding would truncate a sub-ULP
 ``lr*step`` update to zero and inflate the non-negative second moment. Writes go through
-``p.detach()`` (``p.data`` carries its own version counter) and bump ``_version`` explicitly, since
-the raw-pointer Triton stores are invisible to ATen and the low-precision weight cache keys on it.
-
-The rounding noise is a pure function of the parameter's optimizer step and name
-(:func:`sr_seed_pair`, :func:`sr_param_index`), so replicas round alike whatever else each rank's
-optimizer holds, and a resumed run rounds as the uninterrupted one did, with no generator state to
-checkpoint. An element's noise is keyed by its offset in the rank's local shard: reproducible for a
-given sharding layout (the one a resume must keep to restore optimizer shards), not across layouts.
+``p.detach()`` and bump ``_version`` explicitly: the Triton stores are invisible to ATen, and the
+low-precision weight cache keys on the counter.
 """
 
-import functools
-import hashlib
 import logging
 import math
 from collections.abc import Sequence
@@ -25,6 +17,14 @@ import triton.language as tl
 from torch import Tensor
 
 from src.optimizers.param_groups import decay_groups
+from src.optimizers.stochastic_rounding import (
+    SR_BLOCK_SIZE,
+    require_param_names,
+    sr_param_index,
+    sr_round_to_bf16,
+    sr_seed_pair,
+    stochastic_round_to_bf16,
+)
 from src.runtime.dtensor import to_local
 from src.runtime.ranks import is_global_main_process
 
@@ -32,16 +32,9 @@ logger = logging.getLogger(__name__)
 
 # Key of this optimizer's rounding noise; Muon keys its own, so the two never share a stream.
 _SR_KEY = 0xB165EED
-# Seeds stay inside int32, so a kernel's seed argument keeps one Triton type specialization.
-_SR_SEED_MASK = (1 << 30) - 1
-_MASK64 = (1 << 64) - 1
-
-# Launch tile shared by every SR kernel here and in Muon: all of them make the same elementwise pass
-# over a flattened parameter.
-BLOCK_SIZE = 1024
-# Warps for the Adam kernel only (Muon's kernels draw per element): one thread per Philox lane of four
-# elements, which beats Triton's default 4 warps on a large parameter's memory-bound step.
-_ADAM_NUM_WARPS = BLOCK_SIZE // 4 // 32
+# One thread per Philox lane of four elements: beats Triton's default 4 warps on a large parameter's
+# memory-bound step.
+_ADAM_NUM_WARPS = SR_BLOCK_SIZE // 4 // 32
 
 
 @triton.jit
@@ -57,21 +50,19 @@ def _adam_bf16_sr_kernel(
     eps,
     wd_factor,
     n_elements,
-    seed,  # one Philox call yields both noise streams
+    seed,
     grad_scale_ptr,
     HAS_GRAD_SCALE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Fused Adam update with stochastic rounding for bf16 params (reads bf16, computes fp32, SR-writes bf16).
+    """Fused Adam step for bf16 params: reads bf16, computes fp32, stochastically rounds the writes.
 
-    ``grad_scale_ptr`` (with ``HAS_GRAD_SCALE``) is a device fp32 scalar multiplied into the gradient as it
-    is read: the deferred gradient-clip coefficient, which then costs no pass of its own over the grads.
-    The product is the one CUDA's in-place ``grad.mul_(scale)`` computes, bit for bit: the scale rounded
-    to the gradient's dtype, the product rounded back to it.
+    ``grad_scale_ptr`` (with ``HAS_GRAD_SCALE``) is the deferred clip coefficient, applied as CUDA's
+    in-place ``grad.mul_(scale)`` computes it: scale and product rounded to the gradient's dtype.
     """
-    # Each lane owns four consecutive elements and one Philox call: its 4 x 32 random bits give every
-    # element its own two 16-bit noise draws (high half for the second moment, low half for the weight).
-    # A call per element would make the Philox rounds, not memory, the bound.
+    # One Philox call per lane of four elements: its 4 x 32 bits give each element two 16-bit draws
+    # (high half for the second moment, low half for the weight). A call per element would make the
+    # Philox rounds, not memory, the bound.
     QUARTER: tl.constexpr = BLOCK_SIZE // 4
     pid = tl.program_id(0).to(tl.int64)
     lane = tl.arange(0, QUARTER)
@@ -90,7 +81,7 @@ def _adam_bf16_sr_kernel(
     ea = beta1 * ea + (1.0 - beta1) * grad
     easq = beta2 * easq + (1.0 - beta2) * grad * grad
 
-    # exp_avg stored nearest: a signed ~zero-mean EMA, so truncation is already unbiased.
+    # exp_avg is a signed ~zero-mean EMA, so nearest rounding is already unbiased.
     tl.store(ea_ptr + offsets, ea.to(tl.bfloat16), mask=mask)
 
     r0, r1, r2, r3 = tl.randint4x(seed, pid * QUARTER + lane)
@@ -98,61 +89,15 @@ def _adam_bf16_sr_kernel(
     easq_noise = (bits >> 16).to(tl.int32)
     rand_noise = (bits & 0xFFFF).to(tl.int32)
 
-    # SR the second moment: near the bf16 underflow floor nearest rounding biases this non-negative
-    # accumulator by tens of percent, with a sign set by the gradient regime, moving sqrt(v) and the
-    # effective step away from lr.
-    easq_bits = easq.to(tl.int32, bitcast=True)
-    easq_bits = (easq_bits + easq_noise) & (-65536)
-    tl.store(easq_ptr + offsets, easq_bits.to(tl.float32, bitcast=True).to(tl.bfloat16), mask=mask)
+    # Near the bf16 underflow floor nearest rounding biases this non-negative accumulator by tens of
+    # percent, moving sqrt(v) and the effective step away from lr.
+    tl.store(easq_ptr + offsets, sr_round_to_bf16(easq, easq_noise), mask=mask)
 
-    # Weight update in fp32 using pre-rounding easq (exact second moment).
+    # The weight update reads the un-rounded second moment.
     p = p * wd_factor
     denom = tl.math.sqrt(easq) / bc2_sqrt + eps
     p = p - step_size * ea / denom
-
-    p_bits = p.to(tl.int32, bitcast=True)
-    p_bits = (p_bits + rand_noise) & (-65536)  # -65536 == 0xFFFF0000 (two's complement)
-    p_sr = p_bits.to(tl.float32, bitcast=True).to(tl.bfloat16)
-
-    tl.store(p_ptr + offsets, p_sr, mask=mask)
-
-
-def _splitmix64(x: int) -> int:
-    """SplitMix64's output function: a 64-bit avalanche mix, so adjacent inputs map to unrelated outputs."""
-    x = (x + 0x9E3779B97F4A7C15) & _MASK64
-    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
-    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & _MASK64
-    return x ^ (x >> 31)
-
-
-@functools.cache
-def sr_param_index(name: str) -> int:
-    """The rounding-noise key of the parameter named ``name``: a stable 64-bit hash of the name.
-
-    Not its position: ranks can hold different parameter lists (an expert-TP rank owns a bias its
-    partners do not), and a replicated parameter must still round as it does on every other rank.
-    """
-    return int.from_bytes(hashlib.blake2b(name.encode(), digest_size=8).digest(), "little")
-
-
-def require_param_names(param_groups: list[dict], optimizer: str) -> None:
-    """Refuse param groups built without names, which :func:`sr_param_index` keys the rounding by."""
-    if any("param_names" not in group for group in param_groups):
-        raise ValueError(
-            f"{optimizer} keys its stochastic rounding by parameter name: build it from named parameters "
-            f"(decay_groups, or (name, param) pairs)."
-        )
-
-
-def sr_seed_pair(key: int, step: int, index: int) -> tuple[int, int]:
-    """The SR seed pair of the parameter keyed ``index`` (:func:`sr_param_index`), at its ``step``.
-
-    ``step`` is the count the restored state carries. Nothing is drawn, so the zero-LR step that
-    materializes state before a restore consumes nothing a later step reads. The eager step seeds its
-    two SR writes with the pair; the kernel derives both noise streams from the first.
-    """
-    mixed = _splitmix64(_splitmix64(key ^ step) ^ index)
-    return mixed & _SR_SEED_MASK, (mixed >> 32) & _SR_SEED_MASK
+    tl.store(p_ptr + offsets, sr_round_to_bf16(p, rand_noise), mask=mask)
 
 
 def _triton_adam_bf16_step(
@@ -169,28 +114,15 @@ def _triton_adam_bf16_step(
     sr_seeds: tuple[int, int],
     grad_scale: Tensor | None = None,
 ):
-    """Launch the fused Adam+SR Triton kernel for a single parameter (``grad_scale``: see the kernel)."""
-    p_data = to_local(p.detach())
-    grad_local = to_local(grad)
-    ea_local = to_local(exp_avg)
-    easq_local = to_local(exp_avg_sq)
-
-    p_flat = p_data.view(-1)
-    grad_flat = grad_local.view(-1)
-    ea_flat = ea_local.view(-1)
-    easq_flat = easq_local.view(-1)
+    """Launch :func:`_adam_bf16_sr_kernel` on one parameter's local shard."""
+    p_flat = to_local(p.detach()).view(-1)
+    grad_flat = to_local(grad).view(-1)
     n = p_flat.numel()
-
-    grid = ((n + BLOCK_SIZE - 1) // BLOCK_SIZE,)
-
-    # The kernel uses only the first of the pair (see :func:`sr_seed_pair`).
-    seed = sr_seeds[0]
-
-    _adam_bf16_sr_kernel[grid](
+    _adam_bf16_sr_kernel[(triton.cdiv(n, SR_BLOCK_SIZE),)](
         p_flat,
         grad_flat,
-        ea_flat,
-        easq_flat,
+        to_local(exp_avg).view(-1),
+        to_local(exp_avg_sq).view(-1),
         beta1,
         beta2,
         step_size,
@@ -198,33 +130,17 @@ def _triton_adam_bf16_step(
         eps,
         wd_factor,
         n,
-        seed,
+        sr_seeds[0],  # the kernel derives both noise streams from the first seed
         grad_scale if grad_scale is not None else grad_flat,
         HAS_GRAD_SCALE=grad_scale is not None,
-        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_SIZE=SR_BLOCK_SIZE,
         num_warps=_ADAM_NUM_WARPS,
     )
-    torch.autograd.graph.increment_version(p)  # the raw-pointer store above is invisible to ATen
-
-
-def stochastic_round_to_bf16(x_fp32: Tensor, seed: int) -> Tensor:
-    """Convert an fp32 tensor to bf16 by stochastic rounding, modifying it in-place.
-
-    Noise comes from ``seed`` (:func:`sr_seed_pair`), not torch's default generator whose CUDA state
-    drifts per rank, so replicated bf16 params round identically across replicas.
-    """
-    x_fp32 = x_fp32.contiguous()
-    bits = x_fp32.view(torch.int32)
-    gen = torch.Generator(device=bits.device)
-    gen.manual_seed(seed)
-    bits += torch.randint(0, 0x10000, bits.shape, dtype=bits.dtype, device=bits.device, generator=gen)
-    bits &= 0xFFFF0000
-    return x_fp32.to(torch.bfloat16)
+    torch.autograd.graph.increment_version(p)
 
 
 def _scaled_grad(grad: Tensor, grad_scale: Tensor | None) -> Tensor:
-    """``grad`` times the deferred clip scale, the same multiply as the clip's ``grad.mul_(grad_scale)``
-    (see :meth:`AdamWBF16.defer_grad_scale`)."""
+    """``grad`` times the deferred clip scale (:meth:`AdamWBF16.defer_grad_scale`)."""
     return grad if grad_scale is None else grad * grad_scale
 
 
@@ -242,41 +158,38 @@ def _eager_adam_bf16_step(
     sr_seeds: tuple[int, int],
     grad_scale: Tensor | None = None,
 ):
-    """Eager (non-Triton) Adam+SR step for a single bf16 parameter."""
+    """Eager Adam step for one bf16 parameter, seeding its two SR writes with ``sr_seeds``."""
     easq_seed, weight_seed = sr_seeds
     p_data = to_local(p.detach())
-    grad = _scaled_grad(to_local(grad), grad_scale)
+    grad_fp32 = _scaled_grad(to_local(grad), grad_scale).float()
     exp_avg = to_local(exp_avg)
     exp_avg_sq = to_local(exp_avg_sq)
 
-    # EMA upcast to fp32; in-place bf16 ops would lose precision on small grads and diverge from Triton.
+    # The EMAs run in fp32, as in the kernel: in-place bf16 ops would lose small gradients.
     ea_fp32 = exp_avg.float()
-    ea_fp32.mul_(beta1).add_(grad.float(), alpha=1.0 - beta1)
+    ea_fp32.mul_(beta1).add_(grad_fp32, alpha=1.0 - beta1)
     exp_avg.copy_(ea_fp32.bfloat16())
 
     easq_fp32 = exp_avg_sq.float()
-    grad_fp32 = grad.float()
     easq_fp32.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2)
 
-    # Un-rounded second moment: sqrt() stays out-of-place so easq_fp32 survives for the SR store below.
+    # sqrt() stays out of place: the SR store below reads the un-rounded second moment.
     p_fp32 = p_data.float() * wd_factor
     denom = easq_fp32.sqrt().div_(bc2_sqrt).add_(eps)
     p_fp32.addcdiv_(ea_fp32, denom, value=-step_size)
     del denom
 
     exp_avg_sq.copy_(stochastic_round_to_bf16(easq_fp32, seed=easq_seed))
-
     p_data.copy_(stochastic_round_to_bf16(p_fp32, seed=weight_seed))
-    # For a DTensor param the copy_ bumps only the local shard's counter, not the wrapper's that
-    # cached_fake_quant keys on; for plain tensors this is a harmless second bump.
+    # A DTensor's copy_ bumps only the local shard's counter, not the wrapper's cached_fake_quant reads.
     torch.autograd.graph.increment_version(p)
 
 
 class AdamWBF16(torch.optim.Optimizer):
-    """AdamW with stochastic rounding for bf16 master weights (6 B/param).
+    """AdamW with stochastically rounded bf16 weights and moments.
 
-    bf16 params take the fused Triton (or eager) Adam+SR path; fp32 params (e.g. ``fp32_router`` /
-    ``fp32_experts``) take standard in-place AdamW without SR. use_triton=False uses eager ops (slower).
+    bf16 params take the fused Triton step (eager with ``use_triton=False`` or off CUDA); fp32 params
+    (``fp32_router`` / ``fp32_experts``) take plain in-place AdamW.
     """
 
     def __init__(
@@ -297,26 +210,18 @@ class AdamWBF16(torch.optim.Optimizer):
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError(f"Invalid beta2: {betas[1]}")
 
-        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay}
-        super().__init__(params, defaults)
+        super().__init__(params, {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay})
         require_param_names(self.param_groups, type(self).__name__)
-        # Resolved per parameter at step time from the tensor's own device: the eager path is
-        # equivalent, and gating on `torch.cuda.is_available()` would send a CPU param to Triton.
         self._use_triton = use_triton
         self._grad_scale: Tensor | None = None
 
     def defer_grad_scale(self, scale: Tensor) -> None:
-        """Multiply every gradient by ``scale`` (a device fp32 scalar) inside the next :meth:`step`.
+        """Multiply every gradient by ``scale`` (a device fp32 scalar) once, inside the next :meth:`step`.
 
-        The gradient clip hands its coefficient here instead of rescaling the gradients in place, so the
-        scale rides the optimizer's own read of each gradient rather than costing a separate pass over
-        all of them. The gradients themselves stay unscaled until the step; the scale applies once.
-
-        Each gradient is scaled exactly as ``grad.mul_(scale)`` would scale it, product rounded to the
-        gradient's dtype (and on CUDA the scale too), so the step matches clip-then-step bit for bit. The
-        coefficient carries the global norm's last-bit run-to-run noise (expert gradients are not
-        bit-reproducible under EP); that rounding absorbs it for bf16 gradients as the in-place clip
-        does, where an fp32 product would pass it on to the stochastically rounded weights.
+        The gradient clip hands its coefficient here, so the scale rides the step's own read of each
+        gradient instead of a separate pass. Each gradient is scaled exactly as ``grad.mul_(scale)``
+        would (product rounded to the gradient's dtype), so the step matches clip-then-step bit for bit
+        and bf16 rounding absorbs the coefficient's last-bit run-to-run noise as the in-place clip does.
         """
         self._grad_scale = scale.detach().to(dtype=torch.float32).reshape(())
 
@@ -325,13 +230,8 @@ class AdamWBF16(torch.optim.Optimizer):
         self._grad_scale = None
         super().zero_grad(set_to_none=set_to_none)
 
-    def _triton_for(self, param: torch.Tensor) -> bool:
-        """Whether ``param`` takes the fused kernel. Its device decides — Triton needs CUDA storage."""
-        return self._use_triton and param.is_cuda
-
     @torch.no_grad()
     def step(self, closure=None):
-        """Single step: bf16 params → fused Triton Adam+SR (or eager); fp32 params → standard in-place AdamW."""
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -344,79 +244,58 @@ class AdamWBF16(torch.optim.Optimizer):
             eps = group["eps"]
             wd = group["weight_decay"]
 
-            bf16_params = []
-            fp32_params = []
-
             for p, name in zip(group["params"], group["param_names"], strict=True):
                 # The step count advances for every param, including one with no grad, so replicas
                 # whose grad presence differs still agree on the step a param's seed is keyed by.
                 state = self.state[p]
-                if len(state) == 0:
+                if not state:
                     state["step"] = 0
                     state["exp_avg"] = torch.zeros_like(p)
                     state["exp_avg_sq"] = torch.zeros_like(p)
                 state["step"] += 1
+                if p.grad is None:
+                    continue
 
-                if p.grad is not None:
-                    if p.dtype == torch.bfloat16:
-                        bf16_params.append((p, p.grad, state, sr_param_index(name)))
-                    else:
-                        fp32_params.append((p, p.grad, state))
-
-            for p, grad, state, param_index in bf16_params:
-                update_fn = _triton_adam_bf16_step if self._triton_for(p) else _eager_adam_bf16_step
                 step = state["step"]
-                bc1 = 1.0 - beta1**step
                 bc2_sqrt = math.sqrt(1.0 - beta2**step)
-                step_size = lr / bc1
-                wd_factor = 1.0 - lr * wd
+                step_size = lr / (1.0 - beta1**step)
+                if p.dtype == torch.bfloat16:
+                    # Triton needs CUDA storage, so the param's own device picks the path.
+                    update_fn = _triton_adam_bf16_step if self._use_triton and p.is_cuda else _eager_adam_bf16_step
+                    update_fn(
+                        p,
+                        p.grad,
+                        state["exp_avg"],
+                        state["exp_avg_sq"],
+                        step_size,
+                        bc2_sqrt,
+                        eps,
+                        1.0 - lr * wd,
+                        beta1,
+                        beta2,
+                        sr_seed_pair(_SR_KEY, step, sr_param_index(name)),
+                        grad_scale,
+                    )
+                    continue
 
-                update_fn(
-                    p,
-                    grad,
-                    state["exp_avg"],
-                    state["exp_avg_sq"],
-                    step_size,
-                    bc2_sqrt,
-                    eps,
-                    wd_factor,
-                    beta1,
-                    beta2,
-                    sr_seed_pair(_SR_KEY, step, param_index),
-                    grad_scale,
-                )
-
-            # Per-param updates (no _foreach_* — FSDP2 DTensor params can't mix with plain Tensors).
-            for p, grad, state in fp32_params:
-                step = state["step"]
-                bc1 = 1.0 - beta1**step
-                bc2_sqrt = math.sqrt(1.0 - beta2**step)
-                step_size = lr / bc1
-
-                # All four share one sharding, so the pointwise update on local shards writes through.
+                # Per param, not _foreach_*: FSDP2 DTensor params cannot mix with plain tensors. All four
+                # tensors share one sharding, so the pointwise update on local shards writes through.
                 p_data = to_local(p.detach())
                 exp_avg = to_local(state["exp_avg"])
                 exp_avg_sq = to_local(state["exp_avg_sq"])
-                grad_fp32 = _scaled_grad(to_local(grad), grad_scale).float()
-
+                grad_fp32 = _scaled_grad(to_local(p.grad), grad_scale).float()
                 exp_avg.mul_(beta1).add_(grad_fp32, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2)
-
                 if wd != 0.0:
                     p_data.mul_(1.0 - lr * wd)
-
                 denom = (exp_avg_sq.sqrt() / bc2_sqrt).add_(eps)
                 p_data.addcdiv_(exp_avg, denom, value=-step_size)
 
         return loss
 
 
-def build_bf16_optimizer(model: torch.nn.Module, args: Any, decay_parameters: Sequence[str]):
-    """AdamWBF16 with stochastic rounding, built from the training args.
-
-    Handles mixed dtypes internally: bf16 params use the fused Triton SR kernel, fp32 params use
-    standard in-place AdamW.
-    """
+def adamw_bf16_optimizer_from_args(model: torch.nn.Module, args: Any, decay_parameters: Sequence[str]):
+    """AdamWBF16 built from the training args."""
     # Two groups even when one is empty: the count defines the index space of a saved state dict.
     grouped = decay_groups(model.named_parameters(), decay_parameters, args.weight_decay, keep_empty=True)
     optimizer = AdamWBF16(

@@ -29,8 +29,8 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
-from src.optimizers.muon import create_muon_optimizer
+from src.optimizers.flash_adamw import build_flash_adamw_optimizer
+from src.optimizers.muon import build_muon_optimizer
 
 BASE_LR = 1e-2
 DECAY = 0.5
@@ -78,7 +78,7 @@ def test_muon_scheduler_compat():
     model = _tiny_model()
     # No CUDA -> the kernels probe fails -> pure-torch Newton-Schulz fallback; 2D grads stay None
     # on CPU (fused momentum kernel is Triton), the scalar AdamW leg steps for real.
-    opt = create_muon_optimizer(model, lr=BASE_LR)
+    opt = build_muon_optimizer(model, lr=BASE_LR)
     _assert_scheduler_drives_lr(opt, model, grad_max_ndim=1)
 
 
@@ -88,7 +88,7 @@ def test_flash_adamw_scheduler_compat():
         pytest.skip("flashoptim refuses CPU params at construction (quantized states need CUDA)")
 
     model = _tiny_model().cuda()
-    opt = create_flash_adamw_optimizer(model, lr=BASE_LR)
+    opt = build_flash_adamw_optimizer(model, lr=BASE_LR)
     _assert_scheduler_drives_lr(opt, model)
 
 

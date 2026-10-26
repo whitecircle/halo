@@ -29,10 +29,11 @@ def _ep_config(ep_size: int, expert_tp_size: int = 1) -> EPConfig:
     world = ep_size * expert_tp_size
     return EPConfig(
         ep_size=ep_size,
-        world_size=world,
-        gpus_per_node=world,
+        stage_world_size=world,
+        nvlink_domain_size=world,
         expert_tp_size=expert_tp_size,
         use_grouped_gemm=False,
+        experts_fsdp_managed=False,
     )
 
 

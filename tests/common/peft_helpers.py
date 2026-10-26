@@ -36,13 +36,9 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM
 from trl import ModelConfig, get_quantization_config
 
-from src.checkpoint.format import (
-    ADAPTER_CONFIG_FILE,
-    ADAPTER_SAFETENSORS_FILE,
-    SAFETENSORS_INDEX_FILE,
-    has_adapter_weight_file,
-    read_checkpoint_index,
-)
+from src.checkpoint.adapters import has_adapter_weight_file
+from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, SAFETENSORS_INDEX_FILE
+from src.checkpoint.reading import read_checkpoint_index
 from src.checkpoint.writing import cast_to_save_dtype
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora

@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 from safetensors import safe_open
 
-from src.checkpoint.format import has_whole_model_weight_file, resolve_checkpoint_weights
+from src.checkpoint.reading import has_whole_model_weight_file, resolve_checkpoint_weights
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.checkpoint_coverage import verify_checkpoint_coverage
 from src.model_loading.dtype import reject_fp8_tensor
@@ -52,7 +52,7 @@ def resolve_safetensors_index(model_path: str) -> tuple[dict[str, str], list[str
 def has_safetensors_checkpoint(model_path: str) -> bool:
     """Whether a model directory holds a safetensors checkpoint, the lazy path's entry question.
 
-    The safetensors-only spelling of :func:`~src.checkpoint.format.has_whole_model_weight_file`,
+    The safetensors-only spelling of :func:`~src.checkpoint.reading.has_whole_model_weight_file`,
     which defines the filenames that count; re-listing them here would drift from it.
     """
     return has_whole_model_weight_file(model_path, safetensors_only=True)

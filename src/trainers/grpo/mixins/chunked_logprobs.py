@@ -22,7 +22,7 @@ from trl.models.utils import _ForwardRedirection
 
 from src.distributed.context_parallel.config import cp_shift_against_full_labels
 from src.distributed.context_parallel.wrapper import find_cp_wrapper
-from src.distributed.expert_parallel.dispatcher import bump_forward_generation
+from src.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from src.models.modality import config_declares_multimodality

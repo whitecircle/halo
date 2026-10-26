@@ -8,7 +8,7 @@ from src.kernels.lowp.spec import LowpSpec
 from src.models.context_window import is_bounded_length
 
 if TYPE_CHECKING:
-    from src.distributed.expert_parallel.config import ExpertLoraSpec
+    from src.models.moe.expert_lora_spec import ExpertLoraSpec
 
 # Rows one model call carries per dataset example, declared on the trainer class. Absent means 1,
 # the multiplier for a trainer that does not concatenate.

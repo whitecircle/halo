@@ -18,7 +18,7 @@ from transformers import (
     PreTrainedTokenizer,
 )
 
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.context_parallel.loading import load_model_for_cp, load_model_for_ep_cp
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
@@ -35,12 +35,13 @@ from src.distributed.expert_parallel.loading import (
     resolve_hub_or_local_dir,
 )
 from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
+from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.loading.model_source import resolve_model_source
 from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig, accelerate_launch_rejection
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
+from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.distributed.tensor_parallel.parallelize_attention import (
     apply_tp_to_attention_only,
     retarget_hf_replicated_grad_hooks,
@@ -230,6 +231,8 @@ def load_distributed_model(
     and additionally requires complete master coverage. Native TP restores its existing 1-D TP
     placements before DP/FSDP2 wraps; the trainer therefore need not reread already-constructed weights.
     """
+    # Latched: free after the entry script's own pre-load call, a backstop for a caller without it.
+    agree_rank_uniform_env()
     _validate_launch_method_for_parallelism(parallelism_config)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks, train_sinks=train_sinks)
 
@@ -544,14 +547,6 @@ def _lazy_loader_passthrough(common_kwargs: dict) -> dict:
     return {k: v for k, v in common_kwargs.items() if k not in _LAZY_LOADER_NAMED_KWARGS}
 
 
-def _apply_ep_wrappers(model: PreTrainedModel, ep_config) -> PreTrainedModel:
-    """Replace MoE blocks with EP/grouped-GEMM wrappers and create the DeepEP buffers.
-    Shared by the EP+TP, TP-MoE and grouped-GEMM loaders."""
-    model = patch_moe_model_for_ep(model, ep_config)
-    create_ep_buffers(model)
-    return model
-
-
 def _load_pp_stage_model(
     model_name_or_path: str,
     pc: ParallelismConfig,
@@ -685,7 +680,7 @@ def _load_ep_tp_model(
             **common_kwargs,
         )
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
-        model = _apply_ep_wrappers(model, ep_config)
+        model = patch_moe_model_for_ep(model, ep_config)
 
     # Not in a ``finally``: this collective would turn one rank's traceback into a peer-wide timeout.
     log_global_load_duration_seconds(
@@ -802,7 +797,7 @@ def _load_tp_moe_model(
     _apply_attention_only_tp(model, rank, tp_size, dp_size)
 
     if pc.needs_ep_wrappers:
-        model = _apply_ep_wrappers(model, ep_config)
+        model = patch_moe_model_for_ep(model, ep_config)
         logger.info("Applied grouped GEMM wrappers to MoE layers")
 
     logger.info(f"Model loaded with TP on MoE (tp={tp_size}, dp={dp_size})")
@@ -902,7 +897,7 @@ def _load_undistributed_model(
         ep_config=ep_config,
     )
     if ep_wrappers:
-        model = _apply_ep_wrappers(model, ep_config)
+        model = patch_moe_model_for_ep(model, ep_config)
     mode = "Grouped GEMM wrappers (no EP distribution)" if ep_wrappers else "standard DDP"
     logger.info(f"Model loaded with {mode}")
     return model

@@ -79,7 +79,7 @@ def _install_sweep_divisor_probe(trainer, ep_config, verdict: dict) -> None:
     """
     original = trainer._sync_deferred_expert_grads
     expert_ids = trainer._get_sharded_expert_param_ids()
-    divisor = ep_config.world_size // ep_config.expert_tp_size
+    divisor = ep_config.stage_world_size // ep_config.expert_tp_size
 
     def probed() -> None:
         if "sweep_divisor" in verdict:  # first optimizer step only; later ones add nothing

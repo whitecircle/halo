@@ -51,12 +51,12 @@ import torch
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
+from src.checkpoint.adapters import resume_adapter_dir
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
-    resume_adapter_dir,
 )
 from src.distributed.context_parallel.validation import UlyssesConfigError
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters

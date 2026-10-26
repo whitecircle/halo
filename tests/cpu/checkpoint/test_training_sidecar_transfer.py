@@ -21,17 +21,9 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from src.checkpoint import tool_io
-from src.checkpoint.format import (
-    PROVENANCE_GPT_OSS_SINKS,
-    ROUTER_BALANCING_BIASES_FILE,
-    TRAINING_PROVENANCE_FILE,
-)
-from src.checkpoint.tool_io import (
-    TRAINING_STATE_FILES,
-    apply_training_sidecars,
-    copy_training_sidecars,
-)
+from src.checkpoint import sidecars
+from src.checkpoint.format import EXPORT_SIDECAR_FILES, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
+from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars, copy_training_sidecars
 
 # One of the registry-declared native slots (DeepSeek-V3-style ALF), so the key predicate under test
 # is the shipped one rather than a spelling invented here.
@@ -120,7 +112,7 @@ def test_an_adapter_directory_gives_the_slot_fp32_storage_for_its_sidecar(tmp_pa
         seen["sidecar"] = loaded
         return ["model.layers.0.mlp.gate"], ["model.layers.9.mlp.gate"]
 
-    monkeypatch.setattr(tool_io, "apply_router_balancing_sidecar", fake_apply)
+    monkeypatch.setattr(sidecars, "apply_router_balancing_sidecar", fake_apply)
     actions = apply_training_sidecars(model, str(adapter_dir))
 
     assert seen["dtype"] == torch.float32, "the sidecar would have been rounded into the slot's bf16"
@@ -142,7 +134,7 @@ def test_a_source_with_its_own_weights_keeps_its_sidecar_as_a_travelling_copy(tm
     def refuse(*args, **kwargs):
         raise AssertionError("the sidecar must not be re-applied to a source that carries weights")
 
-    monkeypatch.setattr(tool_io, "apply_router_balancing_sidecar", refuse)
+    monkeypatch.setattr(sidecars, "apply_router_balancing_sidecar", refuse)
     model = _Model()
 
     assert apply_training_sidecars(model, str(source)) == []
@@ -153,7 +145,7 @@ def test_the_provenance_action_is_reported_alongside(tmp_path, monkeypatch):
     """Both records come back through one call, so a tool cannot report one and drop the other."""
     source = _checkpoint(tmp_path, bias=TRAINED_BIAS)
     (source / TRAINING_PROVENANCE_FILE).write_text(json.dumps({PROVENANCE_GPT_OSS_SINKS: "neutralized"}))
-    monkeypatch.setattr(tool_io, "apply_sinks_policy", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sidecars, "apply_sinks_policy", lambda *args, **kwargs: None)
 
     actions = apply_training_sidecars(_Model(), str(source))
 
@@ -167,12 +159,12 @@ def test_the_sidecars_are_carried_to_the_output(tmp_path):
     source, output = tmp_path / "src", tmp_path / "out"
     source.mkdir()
     output.mkdir()
-    for name in TRAINING_STATE_FILES:
+    for name in EXPORT_SIDECAR_FILES:
         (source / name).write_bytes(b"payload")
 
     copy_training_sidecars(str(source), str(output))
 
-    assert sorted(os.listdir(output)) == sorted(TRAINING_STATE_FILES)
+    assert sorted(os.listdir(output)) == sorted(EXPORT_SIDECAR_FILES)
 
 
 def test_carrying_sidecars_that_do_not_exist_is_a_no_op(tmp_path):

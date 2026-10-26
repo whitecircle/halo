@@ -25,7 +25,7 @@ from transformers import CONFIG_MAPPING, AutoModelForCausalLM, Qwen3Config, Qwen
 
 PartialState()  # save_model_config logs through accelerate's logger
 
-from src.checkpoint.format import load_full_state_dict
+from src.checkpoint.reading import load_full_state_dict
 from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.checkpoint.peft import _adapter_file_state
 from src.distributed.checkpoint.save import save_pp_checkpoint

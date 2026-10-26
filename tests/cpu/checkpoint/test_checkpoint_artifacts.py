@@ -166,9 +166,13 @@ def test_a_staged_file_readable_by_its_owner_only_is_a_mode_delta(monkeypatch, t
 
     monkeypatch.setattr(checkpoint_atomic, "create_staged_file", owner_only)
 
-    [delta] = compare_outputs(baseline, _produced(tmp_path / "mutated", [DENSE_TRAINING]))
+    deltas = compare_outputs(baseline, _produced(tmp_path / "mutated", [DENSE_TRAINING]))
 
-    assert delta == {"path": meta, "delta": "differs", "entries": [f'mode: "{baseline[meta]["mode"]}" != "600"']}
+    staged = sorted((meta, f"{DENSE_TRAINING.path}/README.md"))
+    assert sorted(deltas, key=lambda delta: delta["path"]) == [
+        {"path": path, "delta": "differs", "entries": [f'mode: "{baseline[path]["mode"]}" != "600"']}
+        for path in staged
+    ]
 
 
 def test_a_dropped_optimizer_moment_is_a_delta(monkeypatch, tmp_path):

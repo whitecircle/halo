@@ -43,18 +43,24 @@ from tests.common.parallelism import stubbed_process_groups
 _GS_MOD = "src.distributed.expert_parallel.grad_sync"
 
 
-def _make_ep(rank: int, *, world_size: int, stage_world_size: int, **kwargs) -> EPConfig:
-    """Build the REAL ``EPConfig`` for ``rank`` of a ``world_size`` job split into stage-wide blocks."""
-    rank_offset = (rank // stage_world_size) * stage_world_size
+def _make_ep(
+    rank: int, *, world_size: int, stage_world_size: int, fsdp_shard_ep1_experts: bool = True, **kwargs
+) -> EPConfig:
+    """Build the REAL ``EPConfig`` for ``rank`` of a ``world_size`` job split into stage-wide blocks, with the
+    ``experts_fsdp_managed`` verdict ``ParallelismConfig`` passes for ``fsdp_shard_ep1_experts``."""
+    stage_base_rank = (rank // stage_world_size) * stage_world_size
+    managed = fsdp_shard_ep1_experts and kwargs["ep_size"] * kwargs.get("expert_tp_size", 1) == 1
     with stubbed_process_groups(world_size, rank):
-        return EPConfig(world_size=stage_world_size, rank_offset=rank_offset, **kwargs)
+        return EPConfig(
+            stage_world_size=stage_world_size, stage_base_rank=stage_base_rank, experts_fsdp_managed=managed, **kwargs
+        )
 
 
 def _expert_hook_from(**ep_attrs):
     """Build the expert grad hook off a stub carrying every attribute a real ``EPConfig`` sets, with
     ``dist`` reporting peers so the hook is the distributed one rather than the single-process no-op."""
     defaults = {
-        "world_size": 8,
+        "stage_world_size": 8,
         "expert_tp_size": 1,
         "needs_expert_grad_sync": False,
         "fp32_grad_reduce": False,
@@ -74,7 +80,7 @@ def test_single_domain_multigroup_ep_defers():
     multi-group shape. ``is_deferred_dp`` is False there (it needs >1 domain), so an
     ``is_deferred_dp``-gated rule lands this on the in-backward hook path with a live cross-replica
     all-reduce."""
-    cfg = _make_ep(0, world_size=8, stage_world_size=8, ep_size=2, gpus_per_node=8, node_local=True)
+    cfg = _make_ep(0, world_size=8, stage_world_size=8, ep_size=2, nvlink_domain_size=8, node_local=True)
     assert cfg.num_ep_groups == 4
     assert cfg.needs_expert_grad_sync
     assert not cfg.is_deferred_dp, "single-domain multi-group EP is NOT is_deferred_dp — the whole point"
@@ -85,7 +91,7 @@ def test_single_ep_group_still_hooks():
     """One EP group spanning the world needs no cross-replica reduce, so the cheap in-backward hook
     path stays. Guards against "just defer everything", which would drop backward overlap for the
     single-group majority."""
-    cfg = _make_ep(0, world_size=8, stage_world_size=8, ep_size=8, gpus_per_node=8, node_local=True)
+    cfg = _make_ep(0, world_size=8, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_ep_groups == 1
     assert not cfg.needs_expert_grad_sync
     assert not cfg.defer_grad_sync
@@ -96,7 +102,13 @@ def test_fsdp_managed_ep1_experts_never_defer():
     the EP layer registers no hooks at all. ``num_ep_groups`` is world-wide here, so a naive
     "defer whenever needs_expert_grad_sync" would double-sync every expert."""
     cfg = _make_ep(
-        0, world_size=8, stage_world_size=8, ep_size=1, gpus_per_node=8, node_local=True, fsdp_shard_ep1_experts=True
+        0,
+        world_size=8,
+        stage_world_size=8,
+        ep_size=1,
+        nvlink_domain_size=8,
+        node_local=True,
+        fsdp_shard_ep1_experts=True,
     )
     assert cfg.ep_group_size == 1
     assert cfg.needs_expert_grad_sync
@@ -121,7 +133,7 @@ def test_no_topology_leaves_a_reducing_hook_on_any_rank():
     for shape in shapes:
         for rank in range(world):
             cfg = _make_ep(
-                rank, world_size=world, stage_world_size=world, gpus_per_node=world, node_local=True, **shape
+                rank, world_size=world, stage_world_size=world, nvlink_domain_size=world, node_local=True, **shape
             )
             hooks_registered = not cfg.experts_fsdp_managed and not cfg.defer_grad_sync
             assert not (hooks_registered and cfg.needs_expert_grad_sync), (shape, rank)
@@ -140,7 +152,7 @@ def test_expert_hook_refuses_to_carry_a_cross_replica_reduce():
 def test_expert_hook_only_scales_and_issues_no_collective():
     """The surviving hook path divides in place by ``world_size // expert_tp_size`` and calls no
     collective — so a rank that never fires it costs nothing but its own (zero) contribution."""
-    hook = _expert_hook_from(world_size=8, expert_tp_size=2)
+    hook = _expert_hook_from(stage_world_size=8, expert_tp_size=2)
     param = nn.Parameter(torch.zeros(2, 2))
     param.grad = torch.full((2, 2), 8.0)
     reduced: list = []
@@ -156,7 +168,7 @@ def test_expert_hook_only_scales_and_issues_no_collective():
 
 def test_expert_hook_is_a_noop_without_peers():
     """Single-process runs have no peers: the hook must not even divide (divisor 1 semantics)."""
-    hook = _expert_hook_from(world_size=1)
+    hook = _expert_hook_from(stage_world_size=1)
     param = nn.Parameter(torch.zeros(2))
     param.grad = torch.ones(2)
     with patch(f"{_GS_MOD}.should_sync_gradients", return_value=True):
@@ -173,7 +185,7 @@ def test_every_multi_group_rank_holds_an_expert_replica_group():
         checked = 0
         for rank in range(world):
             cfg = _make_ep(
-                rank, world_size=world, stage_world_size=world, gpus_per_node=world, node_local=True, **shape
+                rank, world_size=world, stage_world_size=world, nvlink_domain_size=world, node_local=True, **shape
             )
             assert cfg.needs_expert_grad_sync, shape
             assert cfg.expert_replica_group is not None, (shape, rank)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The cross-rank DeepEP env check compares RESOLVED settings, not raw strings.
 
-``verify_rank_uniform_env`` refuses a job whose ranks disagree on a knob that changes how many
+``agree_rank_uniform_env`` refuses a job whose ranks disagree on a knob that changes how many
 collectives a rank runs. Every ``HALO_*`` knob in that set is consumed through :mod:`src.env`, where
 an ABSENT variable and the variable set to its default are the same behaviour. Comparing the raw
 strings instead would reject the ordinary multi-node shape — a launcher or per-node ``--env-file``
@@ -19,8 +19,9 @@ import importlib
 import pytest
 
 from src.distributed import grad_reduce as grad_reduce_mod
-from src.distributed.expert_parallel import config as ep_config_mod
-from src.distributed.expert_parallel import dispatcher as dispatcher_mod
+from src.distributed import rank_uniform_env
+from src.distributed.expert_parallel.deepep import capacity as capacity_mod
+from src.distributed.expert_parallel.deepep import settings as settings_mod
 
 # Knob -> the string spelling of its own default, per src/env.py resolution.
 _KNOBS_AT_DEFAULT = {
@@ -35,16 +36,22 @@ _KNOBS_AT_DEFAULT = {
 }
 
 
-def _reload_settings() -> dict:
-    """Re-resolve the settings from the current environment.
+# The process capacity scope the backends hold; reloading ``capacity`` for its Gin ceiling must not replace it.
+_CAPACITY_SCOPE = capacity_mod.capacity_scope
 
-    The dispatcher's suppliers first — it imports its bucket constant from ``grad_reduce`` and the
-    Gin dispatch ceiling from the EP config leaf, so reloading the dispatcher alone would re-bind
-    their stale values.
-    """
+
+def _reload_modules() -> None:
+    """Re-resolve every supplier of the settings, then the check that binds their values."""
     importlib.reload(grad_reduce_mod)
-    importlib.reload(ep_config_mod)
-    return importlib.reload(dispatcher_mod).rank_uniform_ep_settings()
+    importlib.reload(settings_mod)
+    importlib.reload(capacity_mod).capacity_scope = _CAPACITY_SCOPE
+    importlib.reload(rank_uniform_env)
+
+
+def _reload_settings() -> dict:
+    """Re-resolve the settings from the current environment."""
+    _reload_modules()
+    return rank_uniform_env.rank_uniform_settings()
 
 
 def _settings_with(monkeypatch, env: dict[str, str]) -> dict:
@@ -60,9 +67,7 @@ def _settings_with(monkeypatch, env: dict[str, str]) -> dict:
 def _restore_module():
     """Reload with the ambient environment so a reloaded module never leaks into other tests."""
     yield
-    importlib.reload(grad_reduce_mod)
-    importlib.reload(ep_config_mod)
-    importlib.reload(dispatcher_mod)
+    _reload_modules()
 
 
 def test_default_valued_env_is_not_a_divergence(monkeypatch):

@@ -52,14 +52,13 @@ from transformers import AutoConfig
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.config_export import finalize_exported_config
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, WEIGHT_FILE_IGNORE_PATTERNS, copy_checkpoint_aux_files
-from src.checkpoint.tool_io import (
-    header_numel,
-    iter_checkpoint_shard_entries,
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, WEIGHT_FILE_IGNORE_PATTERNS
+from src.checkpoint.offline_export import (
+    copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
-    stored_tensor_nbytes,
 )
+from src.checkpoint.reading import header_nbytes, header_numel, iter_checkpoint_shard_entries
 from src.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
 from src.log import configure_cli_logging
 from src.model_loading.dtype import DTYPE_BY_NAME
@@ -116,7 +115,7 @@ class _TensorReader:
 
     def nbytes(self, key: str) -> int:
         """Storage size of ``key`` from the safetensors header alone — no tensor read."""
-        return stored_tensor_nbytes(self._handle(key), key)
+        return header_nbytes(self._handle(key).get_slice(key))
 
     def numel(self, key: str) -> int:
         """Element count of ``key`` from the safetensors header alone — no tensor read."""

@@ -35,7 +35,9 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed.expert_parallel import dispatcher as dispatcher_mod
+from src.distributed.expert_parallel.deepep import backends as backends_mod
+from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
+from src.distributed.expert_parallel.deepep.capacity import capacity_scope
 from src.runtime.consensus import RankConsensus
 from tests.common.gloo import new_groups, run_gloo_ranks
 
@@ -92,17 +94,17 @@ def _record_deep_ep(patcher: pytest.MonkeyPatch, buffer: type = _RecordingBuffer
     """DeepEP replaced by ``buffer`` and registries of the test's own; without ``collectives`` the capacity
     all-reduce is a no-op too."""
     _RecordingBuffer.destroyed = []
-    patcher.setattr(dispatcher_mod, "deep_ep", lambda: SimpleNamespace(ElasticBuffer=buffer))
+    patcher.setattr(backends_mod, "deep_ep", lambda: SimpleNamespace(ElasticBuffer=buffer))
     patcher.setattr(dispatcher_mod, "deep_ep_available", lambda: True)
-    patcher.setattr(dispatcher_mod._SharedArena, "_REGISTRY", {})
+    patcher.setattr(backends_mod._Arena, "_registry", {})
     # Every test relies on the layers of a group sharing one buffer.
-    patcher.setattr(dispatcher_mod, "_CAPACITY_DEDUP_ENABLED", True)
-    patcher.setattr(dispatcher_mod, "_CAPACITY_CACHE", {})
-    patcher.setattr(dispatcher_mod, "_LIVE_DISPATCHERS", weakref.WeakValueDictionary())
+    patcher.setattr(backends_mod, "EP_CAPACITY_DEDUP", True)
+    capacity_scope.clear()
+    patcher.setattr(dispatcher_mod, "_live_dispatchers", weakref.WeakValueDictionary())
     real_tensor = torch.tensor
-    patcher.setattr(dispatcher_mod.torch, "tensor", lambda data, **kw: real_tensor(data, **{**kw, "device": "cpu"}))
+    patcher.setattr(backends_mod.torch, "tensor", lambda data, **kw: real_tensor(data, **{**kw, "device": "cpu"}))
     if not collectives:
-        patcher.setattr(dispatcher_mod.dist, "all_reduce", lambda *a, **kw: None)
+        patcher.setattr(backends_mod.dist, "all_reduce", lambda *a, **kw: None)
     patcher.setenv("EP_DISABLE_GIN", "1")
 
 
@@ -115,7 +117,7 @@ def recorded_deep_ep(monkeypatch):
 def _layer(group, hidden: int = HIDDEN) -> dispatcher_mod.DeepEPDispatcher:
     """A layer's dispatcher on ``group`` that has dispatched once, claiming that group's buffer."""
     ep_config = SimpleNamespace(
-        expert_tp_size=1, process_group=group, ep_size=2, num_nodes=1, node_local=True, ep_buffer_backend="elastic"
+        expert_tp_size=1, dispatch_ep_group=group, ep_size=2, spans_domains=False, ep_buffer_backend="elastic"
     )
     dispatcher = dispatcher_mod.DeepEPDispatcher(ep_config, NUM_EXPERTS, hidden)
     dispatcher._ensure_buffer(TOKENS, TOP_K)
@@ -133,7 +135,7 @@ def _rank_holding(groups: dict[str, _Group], reclaimed: tuple[str, ...]) -> dict
 
 
 def _registered() -> list[str]:
-    return [arena.group.name for arena in dispatcher_mod._SharedArena._REGISTRY.values()]
+    return [arena.group.name for arena in backends_mod._Arena._registry.values()]
 
 
 def _consensus(peer_unclaimed: dict[str, bool], asked: list[tuple[str, bool]]):
@@ -157,16 +159,16 @@ def test_teardown_frees_every_buffer_in_build_order(reclaimed):
 
     assert _RecordingBuffer.destroyed == list(MODELS)
     assert _registered() == []
-    assert all(layer._destroyed for layers in live.values() for layer in layers)
+    assert not any(layer._live for layers in live.values() for layer in layers)
 
 
 def test_the_sweep_frees_only_what_no_rank_of_its_group_claims(monkeypatch):
     """This rank has reclaimed every layer; a peer on the first group still claims that group's buffer."""
     asked = []
-    monkeypatch.setattr(dispatcher_mod, "rank_consensus", _consensus({"first": False, "second": True}, asked))
+    monkeypatch.setattr(backends_mod, "rank_consensus", _consensus({"first": False, "second": True}, asked))
     _rank_holding({name: _Group(name) for name in MODELS}, reclaimed=MODELS)
 
-    assert dispatcher_mod.free_unclaimed_ep_buffers() == 1
+    assert backends_mod.free_unclaimed_ep_buffers() == 1
     assert asked == [("first", True), ("second", True)], "each buffer is agreed on by its own group, in build order"
     assert _RecordingBuffer.destroyed == ["second"]
     assert _registered() == ["first"]
@@ -180,7 +182,7 @@ def test_destroying_the_live_layers_frees_their_buffer_only_once_no_rank_claims_
     """A dropped model and the live one share a buffer on one group; this rank has reclaimed the dropped
     model, a peer has not, so destroying the live layers leaves the buffer to teardown."""
     asked = []
-    monkeypatch.setattr(dispatcher_mod, "rank_consensus", _consensus({"shared": False}, asked))
+    monkeypatch.setattr(backends_mod, "rank_consensus", _consensus({"shared": False}, asked))
     group = _Group("shared")
     dropped = [_layer(group) for _ in range(LAYERS_PER_MODEL)]
     live = [_layer(group) for _ in range(LAYERS_PER_MODEL)]
@@ -203,7 +205,7 @@ def test_a_mode_change_frees_the_old_buffer_only_once_no_rank_claims_it(monkeypa
     """The live layer moves to a deterministic buffer while a peer still claims the old one for a model it
     has not collected: the old buffer stays registered until teardown."""
     asked = []
-    monkeypatch.setattr(dispatcher_mod, "rank_consensus", _consensus({"shared": False}, asked))
+    monkeypatch.setattr(backends_mod, "rank_consensus", _consensus({"shared": False}, asked))
     group = _Group("shared")
     dropped = [_layer(group) for _ in range(LAYERS_PER_MODEL)]
     live = _layer(group)
@@ -241,7 +243,7 @@ def _teardown_rank(rank: int, out_dir: str) -> None:
                 gc.collect()
             for layer in models["second"]:
                 layer.destroy()
-            dispatcher_mod.free_unclaimed_ep_buffers()
+            backends_mod.free_unclaimed_ep_buffers()
             dispatcher_mod.destroy_all_dispatchers()
         finally:
             gc.enable()

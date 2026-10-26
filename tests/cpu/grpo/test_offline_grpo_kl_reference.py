@@ -20,8 +20,8 @@ import src.trainers.grpo.mixins.offline_reference as reference_logps_module
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
 from tests.common.ep_stubs import StubEPLayerBase

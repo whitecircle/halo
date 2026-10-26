@@ -15,8 +15,13 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
-from src.checkpoint.adapters import cast_adapter_state_to_save_dtype
+import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers every family's balancing slot
+from src.checkpoint.writing import adapter_save_dtype_caster
 from src.distributed.checkpoint.peft import PeftAdapterSaver
+from src.models.moe_balancing import is_balancing_state_key
+from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
+
+ALL_FAMILIES = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES, **TINY_DENSE_FAMILIES}
 
 
 class _Gate(nn.Module):
@@ -68,11 +73,30 @@ def test_adapter_cast_keeps_balancing_tensors_at_trained_dtype():
         bias_key: torch.full((4,), 0.5, dtype=torch.float32),
         "attn.lora_A.weight": torch.randn(4, 8, dtype=torch.float32),
     }
-    cast = cast_adapter_state_to_save_dtype(state)
+    caster = adapter_save_dtype_caster()
+    cast = {key: caster(key, t) for key, t in state.items()}
     assert cast[bias_key].dtype == torch.float32
     assert cast["attn.lora_A.weight"].dtype == torch.bfloat16, (
         "non-balancing tensor was not cast — the contract test would be vacuous"
     )
+
+
+def test_an_adapter_file_keeps_exactly_the_balancing_tensors_a_full_checkpoint_keeps():
+    """Over every family's real key layout, a ``modules_to_save`` clone's tensor keeps its trained dtype
+    exactly when the same tensor would in a full checkpoint; everything else goes to the save dtype."""
+    cast = adapter_save_dtype_caster()
+    kept_families = set()
+    for name, family in ALL_FAMILIES.items():
+        torch.manual_seed(0)
+        for key, tensor in tiny_family_model(family).state_dict().items():
+            module, _, leaf = key.rpartition(".")
+            stored = cast(f"base_model.model.{module}.modules_to_save.default.{leaf}", tensor.float())
+            expected = torch.float32 if is_balancing_state_key(key) else torch.bfloat16
+            assert stored.dtype == expected, (name, key)
+            assert cast(f"base_model.model.{module}.lora_A.weight", tensor.float()).dtype == torch.bfloat16
+            if expected == torch.float32:
+                kept_families.add(name)
+    assert {"gpt_oss", "glm4_moe_lite", "laguna", "zaya"} <= kept_families, kept_families
 
 
 if __name__ == "__main__":

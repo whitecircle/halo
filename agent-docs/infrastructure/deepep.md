@@ -20,8 +20,8 @@ IPC over NVLink) stays selectable for intranode EP via `ep_buffer_backend`.
 ## Prerequisites
 
 - NVLink for intranode communication: Blackwell (B200/B300) or Hopper (H100/H200).
-- RDMA is required for cross-node EP via the Gin backend (`DeepEPDispatcher.is_inter_node`, set when
-  `num_nodes > 1` and `node_local=False`); intra-node runs the non-Gin path and needs no RDMA.
+- RDMA is required for cross-node EP via the Gin backend (`EPConfig.spans_domains`: more than one NVLink
+  domain and `node_local=False`); intra-node runs the non-Gin path and needs no RDMA.
 - Python 3.12 (`requires-python = ">=3.12,<3.13"`); PyTorch 2.11+ (`pyproject.toml` pins `torch>=2.11.0,<2.12.0`); CUDA 12.3+ (image 13.2);
   ninja (nvcc device linking under `-rdc=true`).
 - **NCCL 2.30.4+** — the Gin backend's floor; `uv.lock` pins the exact version every image shares. `torch 2.11+cu130` ships `nvidia-nccl-cu13==2.28.9`.
@@ -87,8 +87,9 @@ The two coordination timeouts decide which rank gives up on a join first. A node
 aborts its process group while its peers still hold budget, and the survivors then die on the *next*
 collective and blame it. The rest are wire parameters both ends of the all-to-all share.
 
-`verify_rank_uniform_env` gathers them in distributed setup, **before the weight load**, so a mismatch
-fails at startup rather than at the first EP collective. It refuses a job whose ranks disagree
+`agree_rank_uniform_env` (`src/distributed/rank_uniform_env.py`) gathers them in distributed setup,
+**before the weight load**, so a mismatch fails at startup rather than at the first EP collective;
+`load_distributed_model` repeats it first thing as a latched backstop. It refuses a job whose ranks disagree
 (`Rank-uniform toolkit environment differs across ranks`, naming rank 0's values).
 
 It compares the **resolved** settings, not the raw strings, so a knob left unset and the same knob
@@ -156,8 +157,10 @@ and as the real number for a single-domain group (an NVL72 `ep64` is single-doma
 the NVLink barrier alone on its garbage collector's schedule burns the whole
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` budget and aborts the job with `cudaErrorLaunchFailure`. A dropped
 dispatcher only relinquishes its claim, so which claims remain differs between ranks until each has
-collected, and no free is decided from them alone: `destroy_all_dispatchers()` frees every buffer in the
-order it was built, claimed or not, and every other free (the `free_unclaimed_ep_buffers()` sweep, a
+collected, and no free is decided from them alone: `destroy_all_dispatchers()`
+(`src/distributed/expert_parallel/deepep/dispatcher.py`) drops every live claim and then frees every
+buffer in the order it was built, claimed or not (`free_all_ep_buffers()`), and every other free (the
+`free_unclaimed_ep_buffers()` sweep in `deepep/backends.py`, a
 layer's `destroy()` as `cleanup_ep` calls it, a top-k or determinism change moving a layer to a new
 buffer) happens only once no rank of the buffer's group still claims it
 (`tests/cpu/parallelism/test_ep_buffer_teardown_order.py`,
@@ -188,7 +191,8 @@ The reuse guard compares each layer's local token count against the cached capac
 rank-local. The rank that outgrows the arena raises while its peers reach the dispatch collective, and
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` bounds that wait rather than hanging the job.
 
-The same raise fires when the per-forward generation that scopes the cache stops advancing. A forward
+The same raise fires when the per-forward generation that scopes the cache (`capacity_scope`, a
+`CapacityScope` in `src/distributed/expert_parallel/deepep/capacity.py`) stops advancing. A forward
 pre-hook bumps it, so it must sit on the **outermost** module the loop calls. The trainer
 re-registers it after PEFT wrapping: a task-typed `PeftModel` reaches the
 model it wraps through `.forward()`, which runs no pre-hook on it.
@@ -210,7 +214,8 @@ Grouping rules, safe shapes and multi-node multi-group EP:
 ## Transport backend
 
 `ep_buffer_backend` selects the transport for the EP all-to-all. The dispatcher hides the choice behind one
-interface (`_DeepEPBackend`), so it is transparent to the MoE layer and the autograd path.
+interface (`DeepEPBackend`, built by `build_ep_backend` in `src/distributed/expert_parallel/deepep/backends.py`),
+so it is transparent to the MoE layer and the autograd path.
 
 | `ep_buffer_backend` | Buffer | Transport | Dispatch limit | Cross-node |
 |---|---|---|---|---|
@@ -316,9 +321,10 @@ sequence means the activation kernel or an OOM, not the all-to-all.
 
 ## How the toolkit drives it
 
-The toolkit uses `DeepEPDispatcher` (`src/distributed/expert_parallel/dispatcher.py`), not the raw buffer. It
-owns the `ElasticBuffer` lifetime, selects the Gin / non-Gin backend from topology, lazily sizes the buffer,
-and pads hidden for the combine kernel. `dispatch` / `combine` are autograd-aware (`autograd.py`): the
+The toolkit uses `DeepEPDispatcher` (`src/distributed/expert_parallel/deepep/dispatcher.py`), not the raw
+buffer. It claims a shared buffer through its backend, which selects the Gin / non-Gin path from topology,
+lazily sizes the buffer and pads hidden for the combine kernel. `dispatch` / `combine` are autograd-aware
+(the functions beside the dispatcher): the
 dispatch backward is a combine and the combine backward is a dispatch that reuses the cached layout via the
 `handle`.
 

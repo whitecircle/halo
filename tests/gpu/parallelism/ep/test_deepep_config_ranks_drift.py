@@ -26,8 +26,8 @@ Requirements:
     - DeepEP installed (both prebuilt images ship it). Builds no model and no buffer.
 """
 
-from src.distributed.expert_parallel.config import DEEPEP_V1_CONFIG_RANKS
-from src.distributed.expert_parallel.extension import deep_ep
+from src.distributed.expert_parallel.deepep.backends import deep_ep
+from src.distributed.expert_parallel.deepep.capacity import DEEPEP_V1_CONFIG_RANKS
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
 

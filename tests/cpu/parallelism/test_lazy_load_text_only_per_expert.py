@@ -47,13 +47,14 @@ def checkpoint(tmp_path_factory) -> str:
 @pytest.fixture(autouse=True)
 def _stub_ep_patching(monkeypatch):
     monkeypatch.setattr(ep_lazy_loader, "patch_moe_model_for_ep", lambda model, *a, **k: model)
-    monkeypatch.setattr(ep_lazy_loader, "create_ep_buffers", lambda *a, **k: None)
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
 def test_a_text_only_lazy_load_reads_every_expert(checkpoint, ep_size):
     reference = AutoModelForCausalLM.from_pretrained(checkpoint, dtype=RUN_DTYPE).state_dict()
-    ep_config = EPConfig(ep_size=ep_size, world_size=ep_size, gpus_per_node=ep_size)
+    ep_config = EPConfig(
+        ep_size=ep_size, stage_world_size=ep_size, nvlink_domain_size=ep_size, experts_fsdp_managed=ep_size == 1
+    )
 
     lazy = load_ep_model_lazy(
         checkpoint,

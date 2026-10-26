@@ -51,16 +51,15 @@ def checkpoint(tmp_path_factory) -> str:
 
 @pytest.fixture(autouse=True)
 def _stub_ep_patching(monkeypatch):
-    """EP patching and buffer creation need DeepEP + process groups; the load itself does not."""
+    """EP patching needs DeepEP + process groups; the load itself does not."""
     monkeypatch.setattr(ep_lazy_loader, "patch_moe_model_for_ep", lambda model, *a, **k: model)
-    monkeypatch.setattr(ep_lazy_loader, "create_ep_buffers", lambda *a, **k: None)
 
 
 def _load_seq_cls(path: str, run_dtype: torch.dtype, seed: int = SEED):
     torch.manual_seed(seed)  # the run seeds identically on every rank before the load
     return load_ep_model_lazy(
         path,
-        EPConfig(ep_size=1, world_size=1, gpus_per_node=1),
+        EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True),
         AutoConfig.from_pretrained(path, trust_remote_code=False),
         dtype=run_dtype,
         trust_remote_code=False,

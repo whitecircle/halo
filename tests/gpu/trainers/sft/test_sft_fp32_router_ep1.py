@@ -34,7 +34,7 @@ from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 from trl import SFTConfig
 
-from src.checkpoint.format import load_full_state_dict
+from src.checkpoint.reading import load_full_state_dict
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.fsdp import reshard_fsdp2_modules

@@ -24,7 +24,7 @@ from torch.distributed.tensor import DTensor
 from src.checkpoint.adapters import (
     EXPERT_LORA_CONFIG_KEY,
     MIXED_EXPERT_LORA_PEFT_TYPE,
-    cast_adapter_state_to_save_dtype,
+    adapter_weight_paths,
     is_expert_lora_key,
     lora_scaling_mismatch,
     read_adapter_file,
@@ -33,21 +33,21 @@ from src.checkpoint.format import (
     ADAPTER_BIN_FILE,
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
-    PROVENANCE_GPT_OSS_SINKS,
     TRAINING_PROVENANCE_FILE,
-    adapter_weight_paths,
 )
 from src.checkpoint.model_card import tag_model_card
+from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
+from src.checkpoint.writing import adapter_save_dtype_caster
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.expert_parallel.expert_weights import (
     apply_ep_lora_adapters,
     gather_ep_lora_adapters,
 )
 from src.log import KEY_PREVIEW_COUNT
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import stamped_sinks_policy
 from src.models.unwrapping import (
@@ -86,7 +86,10 @@ def _adapter_file_state(ctx: CheckpointContext, state: dict) -> dict:
     """The adapter tensors a hand-written adapter file holds: at the save dtype for an export, so an
     fp32-master run (``fp32_experts`` / ``fp32_non_ep_params``) does not write a 2x adapter; at the
     live dtype for a training checkpoint, whose fp32 adapters must resume unrounded."""
-    return state if ctx.training_checkpoint else cast_adapter_state_to_save_dtype(state)
+    if ctx.training_checkpoint:
+        return state
+    cast = adapter_save_dtype_caster()
+    return {key: cast(key, t) for key, t in state.items()}
 
 
 def expert_lora_config_fields(spec: ExpertLoraSpec) -> dict:

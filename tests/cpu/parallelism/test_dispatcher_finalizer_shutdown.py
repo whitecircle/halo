@@ -23,7 +23,7 @@ import sys
 
 import pytest
 
-from src.distributed.expert_parallel.dispatcher import DeepEPDispatcher
+from src.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
 
 
 class _Dispatcher:

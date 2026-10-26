@@ -32,9 +32,10 @@ def _ep_config(*, world_size, domain_size, ep_size, expert_tp_size, scope):
     return EPConfig(
         ep_size=ep_size,
         expert_tp_size=expert_tp_size,
-        world_size=world_size,
-        gpus_per_node=domain_size,
+        stage_world_size=world_size,
+        nvlink_domain_size=domain_size,
         node_local=scope == "node",
+        experts_fsdp_managed=ep_size * expert_tp_size == 1,
     )
 
 

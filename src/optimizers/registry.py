@@ -1,6 +1,5 @@
-"""Toolkit optimizer names: the ``optim: <name>`` → builder map, and the HuggingFace
-``OptimizerNames`` extension that lets a config select them.
-"""
+"""Toolkit optimizer names: the ``optim: <name>`` builder map and the ``OptimizerNames`` members that
+let a config select them."""
 
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -8,19 +7,17 @@ from typing import Any
 import torch
 from transformers.training_args import OptimizerNames
 
-from src.optimizers.flash_adamw import build_flash_adamw_optimizer
-from src.optimizers.muon import build_muon_optimizer
+from src.optimizers.flash_adamw import flash_adamw_optimizer_from_args
+from src.optimizers.muon import muon_optimizer_from_args
 
-# HF's stock AdamW names, whose foreach/fused kernels accept one tensor type per group. They are both
-# what AdamWBF16 auto-replaces and what create_optimizer rejects over a mixed plain/DTensor parameter
-# set.
+# HF's stock AdamW names, whose foreach/fused kernels take one tensor type per group: what AdamWBF16
+# auto-replaces, and what create_optimizer rejects over a mixed plain/DTensor parameter set.
 STOCK_ADAMW_OPTIMIZERS: tuple[str, ...] = ("adamw_torch_fused", "adamw_torch")
-
-# Custom optimizers selected by ``optim: <name>`` in YAML, mapping name → (builder, description).
-# ``bf16`` and the ``fp32_non_ep_params`` split are branches in create_optimizer instead.
+# ``optim: <name>`` → (builder, description); AdamWBF16 and the ``fp32_non_ep_params`` split are
+# create_optimizer branches instead.
 NAMED_OPTIMIZER_BUILDERS: dict[str, tuple[Callable[[torch.nn.Module, Any, Sequence[str]], Any], str]] = {
-    "muon": (build_muon_optimizer, "Muon (Newton-Schulz orthogonalization)"),
-    "flash_adamw": (build_flash_adamw_optimizer, "FlashAdamW (quantized states, ~5B/param)"),
+    "muon": (muon_optimizer_from_args, "Muon (Newton-Schulz orthogonalization)"),
+    "flash_adamw": (flash_adamw_optimizer_from_args, "FlashAdamW (quantized states, ~5B/param)"),
 }
 
 
@@ -33,10 +30,8 @@ def optim_name(optim) -> str:
 def register_custom_optimizers():
     """Add genuine ``OptimizerNames`` members for the custom optimizers (``optim: muon|flash_adamw``).
 
-    Uses ``extend_enum``-style surgery, since transformers offers no extension point for optimizer
-    names. A plain string attribute is not enough: ``OptimizerNames(name)`` would return a ``str``,
-    ``OptimizerNames.MUON`` would raise, and the name would stay out of the argparse ``choices`` built
-    from member iteration, so a pure-CLI ``--optim muon`` would be rejected.
+    transformers offers no extension point, and a plain string attribute is not enough: the argparse
+    ``choices`` come from member iteration, so a pure-CLI ``--optim muon`` would be rejected.
     """
     for name in NAMED_OPTIMIZER_BUILDERS:
         if name in OptimizerNames._value2member_map_:

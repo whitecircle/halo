@@ -10,12 +10,10 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional, get_args
 
 from src.distributed.context_parallel.config import CPConfig
-from src.distributed.expert_parallel.config import (
-    EPConfig,
-    ExpertLoraSpec,
+from src.distributed.expert_parallel.config import EPBufferBackend, EPConfig
+from src.distributed.expert_parallel.deepep.capacity import (
     ep_dispatch_capacity,
     padded_wire_hidden,
-    reject_expert_lora_with_expert_tp,
     reject_legacy_backend_topology,
     reject_oversized_dispatch,
 )
@@ -43,6 +41,7 @@ from src.env import is_accelerate_launch
 from src.kernels.lowp.spec import LowpPrecision, LowpSpec
 from src.models.config_access import text_config
 from src.models.context_window import context_window_from_config
+from src.models.moe.expert_lora_spec import ExpertLoraSpec, reject_expert_lora_with_expert_tp
 from src.models.moe_balancing import (
     ROUTER_EXPERT_COUNT_FIELDS,
     get_first_router_field,
@@ -61,8 +60,6 @@ PP_DEFAULT_SCHEDULE: PPSchedule = "1f1b"
 
 EPScope = Literal["auto", "node", "global"]
 EP_SCOPES: tuple[str, ...] = get_args(EPScope)
-EPBufferBackend = Literal["auto", "elastic", "legacy"]
-EP_BUFFER_BACKENDS: tuple[str, ...] = get_args(EPBufferBackend)
 
 # Axis → CLI flag: rejection messages quote the flag the user typed, not the internal field name.
 AXIS_FLAGS: dict[str, str] = {
@@ -366,8 +363,10 @@ class ParallelismConfig:
             raise ValueError(f"ep_scope must be one of {EP_SCOPES}, got {self.ep_scope!r}")
         # The dispatcher's own check runs after the whole model has loaded, and returns early at
         # ep_size <= 1 — so a hand-built config's typo would never surface.
-        if self.ep_buffer_backend not in EP_BUFFER_BACKENDS:
-            raise ValueError(f"ep_buffer_backend must be one of {EP_BUFFER_BACKENDS}, got {self.ep_buffer_backend!r}")
+        if self.ep_buffer_backend not in get_args(EPBufferBackend):
+            raise ValueError(
+                f"ep_buffer_backend must be one of {get_args(EPBufferBackend)}, got {self.ep_buffer_backend!r}"
+            )
         if self.max_concurrent_loading is not None and self.max_concurrent_loading < 0:
             raise ValueError(
                 f"max_concurrent_loading must be >= 0 (0 = all ranks in parallel, null = derive from "
@@ -489,10 +488,9 @@ class ParallelismConfig:
 
     @property
     def experts_fsdp_managed(self) -> bool:
-        """Mirrors :attr:`EPConfig.experts_fsdp_managed` for the call sites that run before (or
-        without) an ``EPConfig`` — the FSDP-ignored set, the PP stage wrap, and this class's own
-        validators. Both must give the same answer: the EP layer's grad hooks and FSDP's
-        reduce-scatter each assume the other is not syncing the experts."""
+        """Whether FSDP2 shards the replicated experts, its reduce-scatter their only sync, in place of the
+        EP layer's grad hooks. The one verdict: :class:`EPConfig` receives it, and the FSDP-ignored set,
+        the PP stage wrap and this class's validators read it here."""
         return self.fsdp_shard_ep1_experts and self.ep_group_size == 1
 
     @property
@@ -869,7 +867,7 @@ class ParallelismConfig:
         """Reject a ``legacy`` (DeepEP V1) backend this topology cannot drive — at CONFIG time.
 
         The rules themselves live with the V1 limits they read
-        (:func:`~src.distributed.expert_parallel.config.reject_legacy_backend_topology`); the
+        (:func:`~src.distributed.expert_parallel.deepep.capacity.reject_legacy_backend_topology`); the
         dispatcher applies the same function to a hand-built ``EPConfig``, but only inside
         ``EPMoELayerBase.__init__`` — after the checkpoint download and the model load on every rank.
         They are pure arithmetic over the declared topology, so they belong before any of that.
@@ -1091,7 +1089,7 @@ class ParallelismConfig:
                 capacity,
                 num_topk=num_topk,
                 padded_hidden=padded_wire_hidden(hidden),
-                is_inter_node=self.requires_rdma,
+                spans_domains=self.requires_rdma,
             )
         except ValueError as exc:
             cp_note = f" ({budget} / context_parallel_size={self.cp_size})" if self.cp_size > 1 else ""
@@ -1361,11 +1359,10 @@ class ParallelismConfig:
                 ep_size=self.ep_size,
                 ep_group_size=self.ep_group_size,
                 # EP lives inside one pipeline stage: tile stage_world_size from this stage's base.
-                world_size=self.stage_world_size,
-                rank_offset=self.stage_base_rank,
+                stage_world_size=self.stage_world_size,
+                stage_base_rank=self.stage_base_rank,
                 node_local=self.is_node_local_ep,
-                # Locality unit = NVLink domain; EPConfig's "node" abstraction maps onto it.
-                gpus_per_node=self.nvlink_domain_size,
+                nvlink_domain_size=self.nvlink_domain_size,
                 # The router is skipped by the fp32_non_ep_params upcast; bf16 there would trip
                 # FSDP2's uniform-dtype check against the fp32 dense params.
                 fp32_router=self.ep_fp32_router or self.fp32_non_ep_params,
@@ -1374,7 +1371,7 @@ class ParallelismConfig:
                 use_grouped_gemm=self.use_grouped_gemm,
                 fp32_grad_reduce=self.fp32_grad_reduce,
                 expert_lora=self.expert_lora,
-                fsdp_shard_ep1_experts=self.fsdp_shard_ep1_experts,
+                experts_fsdp_managed=self.experts_fsdp_managed,
                 ep_buffer_backend=self.ep_buffer_backend,
             )
         return self._ep_config

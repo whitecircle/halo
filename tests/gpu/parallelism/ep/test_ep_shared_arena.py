@@ -23,7 +23,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from src.distributed.expert_parallel import dispatcher as dispatcher_mod
+from src.distributed.expert_parallel.deepep import backends as backends_mod
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import ensure_model_downloaded
@@ -71,7 +71,7 @@ def arena_bytes(model):
             continue
         counted.add(id(backend.buffer))
         total += deep_ep.ElasticBuffer.get_buffer_size_hint(
-            layer.dispatcher.ep_group, backend._capacity, backend._padded_hidden, backend._num_topk
+            layer.dispatcher.ep_group, backend._arena.capacity, backend._padded_hidden, backend._num_topk
         )
     return total
 
@@ -154,14 +154,14 @@ def run(ctx):
     # per-layer arena that sharing replaces.
     for layer in ep_layers(model):
         layer.dispatcher.destroy()
-    dedup_was = dispatcher_mod._CAPACITY_DEDUP_ENABLED
-    dispatcher_mod._CAPACITY_DEDUP_ENABLED = False
+    dedup_was = backends_mod.EP_CAPACITY_DEDUP
+    backends_mod.EP_CAPACITY_DEDUP = False
     try:
         loss_private, grads_private = forward_backward(model, batch)
         private = live_arenas(model)
         private_arena_bytes = arena_bytes(model)
     finally:
-        dispatcher_mod._CAPACITY_DEDUP_ENABLED = dedup_was
+        backends_mod.EP_CAPACITY_DEDUP = dedup_was
 
     log(
         f"private: {len(private)} distinct ElasticBuffer across {num_layers} layers, "

@@ -26,9 +26,9 @@ uv pip install -e ".[flash-optimizers]"   # or: pip install flashoptim
 
 Without the package, `optim: flash_adamw` raises an import error stating what to install.
 
-The YAML/trainer path (`build_flash_adamw_optimizer` in `src/optimizers/flash_adamw.py`) wires `learning_rate`, `weight_decay`, `betas` (from `adam_beta1`/`adam_beta2`), and `eps` (from `adam_epsilon`). Only `master_weight_bits` is not read from `TrainingArguments`, so over YAML it stays at its default. To override it, construct directly: `create_flash_adamw_optimizer(model, lr=..., weight_decay=..., master_weight_bits=24)` in `src/optimizers/flash_adamw.py`. The wrapper splits parameters into weight-decay groups (`decay_parameters` get `weight_decay`, the rest `0.0`).
+The YAML/trainer path (`flash_adamw_optimizer_from_args` in `src/optimizers/flash_adamw.py`) wires `learning_rate`, `weight_decay`, `betas` (from `adam_beta1`/`adam_beta2`), and `eps` (from `adam_epsilon`). Only `master_weight_bits` is not read from `TrainingArguments`, so over YAML it stays at its default. To override it, construct directly: `build_flash_adamw_optimizer(model, lr=..., weight_decay=..., master_weight_bits=24)` in `src/optimizers/flash_adamw.py`. The wrapper splits parameters into weight-decay groups (`decay_parameters` get `weight_decay`, the rest `0.0`).
 
-`create_flash_adamw_optimizer` defaults: `lr=1e-3`, `betas=(0.9, 0.999)`, `eps=1e-8`, `weight_decay=0.01`, `master_weight_bits=24` (24 = bf16 + 8-bit correction, 32 = full fp32, `None` = no master weights).
+`build_flash_adamw_optimizer` defaults: `lr=1e-3`, `betas=(0.9, 0.999)`, `eps=1e-8`, `weight_decay=0.01`, `master_weight_bits=24` (24 = bf16 + 8-bit correction, 32 = full fp32, `None` = no master weights).
 
 ## Benchmark
 

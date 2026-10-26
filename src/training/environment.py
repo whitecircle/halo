@@ -19,17 +19,12 @@ import torch.distributed as dist
 from accelerate.logging import get_logger
 from transformers import set_seed
 
-from src.checkpoint.format import (
-    REFERENCE_CACHE_DIR_NAME,
-    has_adapter_weight_file,
-    has_whole_model_weight_file,
-    is_sharded_checkpoint,
-    missing_resume_adapter_reason,
-    resume_adapter_dir,
-)
+from src.checkpoint.adapters import has_adapter_weight_file, missing_resume_adapter_reason, resume_adapter_dir
+from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
+from src.checkpoint.reading import has_whole_model_weight_file, is_ep_sharded_checkpoint
 from src.data.pipeline.processing import ensure_cache_dir
 from src.distributed.checkpoint.coordination import resolve_resume_checkpoint
-from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
+from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from src.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME
 from src.model_loading.dtype import configure_float32_matmul_precision
 from src.models.patches.attention import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
@@ -220,7 +215,7 @@ def _checkpoint_has_full_model_weights(checkpoint: str) -> bool:
     takes precedence over any whole-model file beside it: a directory carrying both is a gathered
     save torn by a later sharded one, so its gathered half is stale.
     """
-    return has_whole_model_weight_file(checkpoint) and not is_sharded_checkpoint(checkpoint)
+    return has_whole_model_weight_file(checkpoint) and not is_ep_sharded_checkpoint(checkpoint)
 
 
 def _classify_resume_checkpoint(checkpoint: str) -> str:
@@ -232,7 +227,7 @@ def _classify_resume_checkpoint(checkpoint: str) -> str:
 
     The merged class is read off the marker its save writes last, never inferred from the files
     beside it: its weights are as loadable as a full fine-tune's. Both adapter spellings count
-    (:func:`~src.checkpoint.format.has_adapter_weight_file`): ``PeftAdapterSaver`` falls back to
+    (:func:`~src.checkpoint.adapters.has_adapter_weight_file`): ``PeftAdapterSaver`` falls back to
     ``adapter_model.bin``, and the loader restores either."""
     merged_adapter_dir = resume_adapter_dir(checkpoint)
     if merged_adapter_dir is not None:

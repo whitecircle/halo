@@ -20,7 +20,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from trl import ModelConfig
 
 import src.distributed.loading.vlm_setup as vlm_setup
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR, checkpoint_source_ref
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, config_schema_source
 from src.distributed.checkpoint.loader import weights_read_from
 from src.distributed.loading.frozen_models import load_reference_model_for_on_policy_grpo
 from src.training.environment import prepare_distributed_resume
@@ -92,7 +92,7 @@ def test_a_resumed_policy_names_the_base_and_holds_the_checkpoint_weights(tmp_pa
     )
     assert _same_weights(policy, trained), "the policy itself must still resume from the checkpoint"
     assert weights_read_from(policy) == checkpoint, "the resume's skip-the-reload decision reads this"
-    assert checkpoint_source_ref(policy) == checkpoint, "the export's config schema source reads this"
+    assert config_schema_source(policy) == checkpoint, "the export's config schema source reads this"
 
 
 def test_a_resumed_runs_toolkit_reference_is_the_base(tmp_path, monkeypatch):

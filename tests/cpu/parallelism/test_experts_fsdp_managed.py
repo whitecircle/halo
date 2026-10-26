@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""``experts_fsdp_managed`` is one predicate, and both config objects must answer it identically.
+"""``experts_fsdp_managed`` is one verdict, ``ParallelismConfig``'s, and the ``EPConfig`` it builds carries it.
 
 Whether FSDP2 owns the experts (``ep_group_size == 1`` + ``fsdp_shard_ep1_experts``) or the EP
 layer's own grad hooks do decides FSDP-ignored membership, whether the expert/router hooks register
-at all, the grad-norm bucket, and whether ``fp32_experts`` does anything. It is one predicate rather
-than a condition spelled by hand at each call site, and its call sites read two different config
-objects. If ``ParallelismConfig`` and the ``EPConfig`` it builds ever disagree, the experts are
-either synced twice (reduce-scatter *and* hooks) or not at all — and neither raises, so only a test
-catches it.
+at all, the grad-norm bucket, and whether ``fp32_experts`` does anything. Its call sites read two
+different config objects. If ``ParallelismConfig`` and the ``EPConfig`` it builds ever disagree, the
+experts are either synced twice (reduce-scatter *and* hooks) or not at all — and neither raises, so
+only a test catches it.
 
 Usage:
     python tests/cpu/parallelism/test_experts_fsdp_managed.py
@@ -15,7 +14,6 @@ Usage:
 
 import pytest
 
-from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.parallelism_config import ParallelismConfig
 
 WORLD = 8
@@ -56,12 +54,9 @@ def test_only_truly_replicated_experts_are_fsdp_managed(ep_size, expert_tp_size,
 @pytest.mark.parametrize("shard_ep1", [True, False])
 @pytest.mark.parametrize(("ep_size", "expert_tp_size"), EP_SHAPES)
 def test_parallelism_config_and_ep_config_agree(ep_size, expert_tp_size, shard_ep1):
-    """The mirror on ``ParallelismConfig`` must match the ``EPConfig`` the layers actually read."""
+    """The verdict on ``ParallelismConfig`` must be the one the ``EPConfig`` the layers read carries."""
     config = _config(ep_size, expert_tp_size, shard_ep1)
-    # Build the EPConfig the way ParallelismConfig does, minus the process groups (no CPU backend).
-    ep_config = EPConfig.__new__(EPConfig)
-    ep_config.ep_group_size = config.ep_group_size
-    ep_config.fsdp_shard_ep1_experts = config.fsdp_shard_ep1_experts
+    ep_config = config.create_ep_config()
 
     assert ep_config.experts_fsdp_managed is config.experts_fsdp_managed, (
         f"ep_size={ep_size} expert_tp_size={expert_tp_size} shard_ep1={shard_ep1}: "

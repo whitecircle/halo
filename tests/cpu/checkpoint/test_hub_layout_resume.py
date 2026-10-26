@@ -45,7 +45,7 @@ from transformers import Trainer, TrainingArguments
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  # the config export reads the EP roster
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
