@@ -1,5 +1,5 @@
 """Process logging: the root handler and third-party suppression installed at package import, CLI
-verbosity for standalone tools, and the warn-once helper.
+verbosity for standalone tools, the warn-once helper, list previews, and the run-log names under ``output_dir``.
 
 The body is stdlib-only, but importing this module executes ``src/__init__.py`` (torch,
 transformers) like any other module in the package.
@@ -7,11 +7,15 @@ transformers) like any other module in the package.
 
 import logging
 import sys
-from collections.abc import Hashable
+from collections.abc import Hashable, Sequence
 from typing import Any
 
 # How many offending keys a message lists before truncating.
 KEY_PREVIEW_COUNT = 5
+
+# The run's log directory under ``output_dir``, and the console tee's file in it.
+RUN_LOG_DIR_NAME = "log"
+RUN_LOG_FILE = "run.log"
 
 _SILENCED_LOGGERS = (
     "faiss",
@@ -88,3 +92,12 @@ def warn_once(
     seen.add(key)
     logger.warning(message, *args)
     return True
+
+
+def preview(items: Sequence[object], n: int = KEY_PREVIEW_COUNT) -> str:
+    """The first ``n`` of ``items`` joined by commas, then ``... (+N more)`` for the ones left out."""
+    if n < 1:
+        raise ValueError(f"preview needs n >= 1, got {n}")
+    shown = ", ".join(str(item) for item in items[:n])
+    hidden = len(items) - n
+    return f"{shown}, ... (+{hidden} more)" if hidden > 0 else shown

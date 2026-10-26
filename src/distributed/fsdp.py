@@ -91,8 +91,7 @@ def _reject_unreachable_decoder_layers(model: nn.Module) -> None:
         f"FSDP2 found no decoder-layer list on {type(inner).__name__}: none of "
         f"{DECODER_LAYER_LIST_ATTRS} is reachable from it, so the whole model would be wrapped as one "
         f"shard group and all-gathered for the entire forward instead of per layer. Add this family's "
-        f"spelling to DECODER_LAYER_LIST_ATTRS (src/models/structure.py), which every "
-        f"layer-list consumer reads."
+        f"spelling to DECODER_LAYER_LIST_ATTRS, which every layer-list consumer reads."
     )
 
 

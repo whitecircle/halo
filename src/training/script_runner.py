@@ -3,14 +3,13 @@
 The backbone (``init_training_script`` → ``load_script_datasets`` → ``load_script_model`` →
 ``apply_distributed_trainer_config`` → ``run_trainer``) plus the helpers that must behave identically
 at every call site: window pins, tokenizer/attention resolution, the run's modality verdict, callback
-assembly, the ``reject_*`` guards and the rank-0 backend probe. Parsing tuples, collators, and trainer
+assembly, the TRL dataset-prep refusal and the rank-0 backend probe. Parsing tuples, collators, and trainer
 construction stay in the scripts.
 """
 
 import asyncio
 import inspect
 from collections.abc import Callable, Sequence
-from dataclasses import MISSING, fields
 from typing import Any, NamedTuple
 
 import torch
@@ -21,6 +20,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizer, PreTrainedTokeniz
 from src.callbacks.generate_examples import GenerateExamplesCallback
 from src.callbacks.parameter_stats import ParameterStatsCallback
 from src.callbacks.wiring import build_perf_callbacks, reorder_integration_callbacks_last
+from src.config_validation import reject_non_default_args, reject_unsupported_args
 from src.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
 from src.data.pipeline.processing import log_dataset_examples, resolve_map_num_proc
 from src.data.sources.loading import is_presharded_dataset_load, load_datasets, reject_image_columns
@@ -451,16 +451,6 @@ def padded_workload_attn_implementation(
     return "sdpa" if sinks_reset else None
 
 
-def reject_unsupported_args(context: str, **unsupported) -> None:
-    """Raise on parsed knobs this script cannot honor.
-
-    Shared config dataclasses expose fields no single script implements; ignoring one would train
-    something other than what the config states. Only truthy values are reported, since an unset
-    field is not a request.
-    """
-    _reject_ignored_fields(context, sorted(name for name, value in unsupported.items() if value))
-
-
 def reject_trl_dataset_prep_args(
     context: str, sft_config, *unread_fields: str, render_remedy: str | None = None
 ) -> None:
@@ -484,34 +474,6 @@ def reject_trl_dataset_prep_args(
         "dataset_kwargs",
         *unread_fields,
     )
-
-
-def reject_non_default_args(context: str, args, *field_names: str) -> None:
-    """Raise on parsed knobs this script cannot honor, judged against their declared default.
-
-    :func:`reject_unsupported_args` reads a request off truthiness, which cannot express a knob whose
-    own default is truthy (``num_eval_examples=50`` would reject every run). Every name must be a
-    defaulted field of ``args``: a typo would leave the guard unable to fire, so it raises here.
-    """
-    defaults: dict[str, Any] = {}
-    for declared in fields(type(args)):
-        if declared.default is not MISSING:
-            defaults[declared.name] = declared.default
-        elif declared.default_factory is not MISSING:
-            defaults[declared.name] = declared.default_factory()
-    undeclared = sorted(name for name in field_names if name not in defaults)
-    if undeclared:
-        raise ValueError(f"{undeclared} are not defaulted fields of {type(args).__name__} — the guard cannot fire")
-    _reject_ignored_fields(context, sorted(name for name in field_names if getattr(args, name) != defaults[name]))
-
-
-def _reject_ignored_fields(context: str, set_fields: list[str]) -> None:
-    """Shared raise for both rejection forms, so they report the same way."""
-    if set_fields:
-        raise ValueError(
-            f"{context} does not support these config fields (they would be silently ignored): "
-            f"{set_fields}. Remove them from the YAML."
-        )
 
 
 def verify_backend_on_rank0(probe: Callable[[], object], what: str) -> None:

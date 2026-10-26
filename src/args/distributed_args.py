@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass, field
 
-from src.args.validation import RangeValidatedConfig, present, require_int
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.config_validation import RangeValidatedConfig, present, require_int
 from src.distributed.parallelism_config import EPBufferBackend, EPScope, LowpPrecision, PPSchedule
 
 
@@ -20,46 +20,38 @@ class DistributedArguments(RangeValidatedConfig):
     expert_parallel_size: int = field(
         default=1,
         metadata={
-            "help": "Expert distribution size — how many distinct expert subsets to create. "
-            "Full EP group size = expert_parallel_size * expert_tensor_parallel_size. "
-            "For node-local EP, ep_group_size must divide the NVLink domain "
-            "(nvlink_domain_size; = gpus_per_node on a standard node, = the rack via "
-            "NVLINK_DOMAIN_SIZE on NVL72). For cross-node EP, ep_group_size must divide "
-            "world_size. Number of experts will be auto-detected from model."
+            "help": "Expert-parallel size: the ranks one DeepEP all-to-all spans, each holding num_experts / "
+            "expert_parallel_size experts (> 1 enables EP on a MoE model). The EP group of expert_parallel_size × "
+            "expert_tensor_parallel_size ranks must divide the NVLink domain when node-local, or world_size when "
+            "cross-node. See agent-docs/parallelism/expert-parallelism.md#ep-grouping."
         },
     )
 
     ep_scope: EPScope = field(
         default="auto",
         metadata={
-            "help": "EP scope for multi-node training. "
-            "'auto': node-local if ep_group_size <= the NVLink domain (nvlink_domain_size; "
-            "= gpus_per_node normally, = the rack on NVL72), else cross-node "
-            "(ep_group_size = expert_parallel_size * expert_tensor_parallel_size). "
-            "'node': EP groups within one NVLink domain (NVLink only, fastest). "
-            "'global': EP groups span NVLink domains (uses RDMA, more distribution)."
+            "help": "Where EP groups sit: 'node' keeps each inside one NVLink domain, 'global' spans domains over "
+            "RDMA, and 'auto' picks 'node' when the EP group (expert_parallel_size × expert_tensor_parallel_size) "
+            "fits the domain. See agent-docs/parallelism/expert-parallelism.md#ep-grouping."
         },
     )
 
     save_sharded_ep: bool = field(
         default=False,
         metadata={
-            "help": "Save EP checkpoints as per-rank expert shards (every rank writes its own slice "
-            "in parallel) instead of the gathered HF-standard checkpoint. Buys write bandwidth at the "
-            "price of an artifact nothing loads: scripts/after_training/merge_ep_shards.py must run "
-            "before resume or serving, and the merge carries no optimizer state — pair it with "
-            "save_only_model. If False (default), each layer's experts are gathered and streamed to "
-            "one writer, producing a checkpoint from_pretrained loads as it stands."
+            "help": "Save EP checkpoints as per-rank expert shards written in parallel instead of the gathered HF "
+            "checkpoint from_pretrained loads. Nothing loads the shards until "
+            "scripts/after_training/merge_ep_shards.py merges them, without optimizer state, so pair it with "
+            "save_only_model. See agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp."
         },
     )
 
     save_max_shard_size: str = field(
         default=DEFAULT_MAX_SHARD_SIZE,
         metadata={
-            "help": "Max size of one safetensors shard the distributed save paths write (e.g. '5GB'). "
-            "The gathered EP/TP/FSDP2 writers read it; HF's own save_pretrained uses its own default. "
-            "A sharded EP save writes one file per rank by design, so it bounds neither those shards "
-            "nor the merge: merge_ep_shards.py sizes its output from its own --max_shard_size flag."
+            "help": "Largest safetensors shard the gathered EP/TP/FSDP2/CP saves write, like '5GB'; HF's own "
+            "save_pretrained keeps its default. A sharded EP save writes one file per rank regardless, and "
+            "merge_ep_shards.py sizes its output by its own --max_shard_size."
         },
     )
 
@@ -74,117 +66,88 @@ class DistributedArguments(RangeValidatedConfig):
     allow_optimizer_warm_restart: bool = field(
         default=False,
         metadata={
-            "help": "Resume only. When restoring per-rank optimizer shards that match this run's "
-            "topology fails on any rank (an unreadable shard, a CUDA OOM while applying it), or the "
-            "checkpoint holds the optimizer half of an interrupted save, continue with a freshly "
-            "initialized optimizer (weights, step and LR schedule still resume) instead of raising on "
-            "every rank. Off by default: a warm restart resets the optimizer moments "
-            "mid-run. A changed parallelism layout and a checkpoint saved without optimizer state are "
-            "not failures; see agent-docs/reference/checkpoints.md for every resume outcome."
+            "help": "On resume, continue with a freshly initialized optimizer (weights, step and LR schedule still "
+            "resume) when restoring this topology's optimizer shards fails on a rank, or the checkpoint holds an "
+            "interrupted save's optimizer state. Off, both raise on every rank, since a warm restart resets the "
+            "optimizer moments mid-run. "
+            "See agent-docs/reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun."
         },
     )
 
     merge_expert_lora_on_save: bool = field(
         default=False,
         metadata={
-            "help": "When training native grouped-LoRA on EP experts, fold the LoRA delta into the "
-            "base on save so the checkpoint is a fully-merged, servable HF model. Covers both "
-            "halves of a mixed run: the expert deltas inside each family's gather, and any "
-            "attention adapters into each tensor as it is written, out of place, so the frozen base "
-            "is never changed and training continues. Each training checkpoint also keeps the "
-            "unmerged adapter in "
-            "resume_adapter/, which resume restores onto the base. If False (default), a standalone "
-            "adapter file is written and the frozen base is left unchanged (reload pairs the adapter "
-            "with the base model)."
+            "help": "Fold the native expert LoRA delta, and any attention adapters, into the base on save so each "
+            "checkpoint is a merged, servable HF model; the frozen base itself never changes. Training checkpoints "
+            "also keep the unmerged adapter in resume_adapter/ for resume, and false writes a standalone adapter "
+            "file instead. See agent-docs/reference/checkpoints.md#merge-on-save-checkpoints."
         },
     )
 
     fp32_router: bool = field(
         default=False,
         metadata={
-            "help": "Store EP router weights in FP32 for stable optimizer updates. The gate matmul "
-            "then runs in FP32 with autocast explicitly disabled (the router input is upcast), so "
-            "routing decisions are computed at full precision; the rest of the layer stays BF16. "
-            "fp32_non_ep_params turns this on regardless (its upcast skips the router, and a BF16 "
-            "router beside FP32 dense params would trip FSDP2's uniform-dtype check), so leaving "
-            "this False does not keep the router in BF16 there. "
-            "No effect on the gate input at ep_group_size==1 with fsdp_shard_ep1_experts, where FSDP2 "
-            "manages the router and its BF16 param policy owns the compute dtype (the weights are "
-            "still stored FP32). Gemma4 ignores it entirely and warns: its router is a sibling module "
-            "outside the EP wrapper."
+            "help": "Keep EP router weights as FP32 masters with an FP32 routing matmul, except at ep_group_size == 1 "
+            "under fsdp_shard_ep1_experts, where FSDP2's BF16 param policy owns the compute dtype. "
+            "fp32_non_ep_params implies it; Gemma 4 ignores it with a warning. "
+            "See agent-docs/parallelism/expert-parallelism.md#precision-control."
         },
     )
 
     fp32_experts: bool = field(
         default=False,
         metadata={
-            "help": "Store EP expert weights in FP32 for stable optimizer updates. Compute stays in "
-            "BF16 via autocast. Skipped with a warning at ep_group_size==1 with fsdp_shard_ep1_experts "
-            "— FSDP2 manages the replicated experts and its BF16 param policy casts them anyway, so "
-            "the upcast would only mix FP32 params into a BF16 fully_shard group. For FP32 experts in "
-            "that state set fsdp_shard_ep1_experts: false (fp32_non_ep_params is rejected there — its "
-            "upcast skips the experts FSDP manages)."
+            "help": "Keep EP expert weights as FP32 masters; compute stays BF16 under autocast. Skipped with a "
+            "warning at ep_group_size == 1 under fsdp_shard_ep1_experts, where FSDP2's BF16 param policy casts the "
+            "replicated experts anyway: set fsdp_shard_ep1_experts: false for FP32 experts there. "
+            "See agent-docs/parallelism/expert-parallelism.md#precision-control."
         },
     )
 
     fp32_non_ep_params: bool = field(
         default=False,
         metadata={
-            "help": "Store non-expert (dense) parameters in FP32 for stable optimizer updates. "
-            "Compute stays in BF16 via autocast. Useful for mixed precision training stability "
-            "when training non-MoE parts of the model."
+            "help": "Keep non-expert (dense) parameters as FP32 masters for stable optimizer updates; compute stays "
+            "BF16 under autocast. See agent-docs/reference/configuration-reference.md#parallelismconfig."
         },
     )
 
     fp32_grad_reduce: bool = field(
         default=False,
         metadata={
-            "help": "Reduce gradients across ranks in FP32 (FSDP2 reduce_dtype) even when params "
-            "are stored in BF16. Removes the ~10^4x precision loss of summing many bf16 "
-            "gradients; matches TorchTitan/Megatron/DeepSpeed defaults. Independent of "
-            "fp32_non_ep_params (which also moves storage to fp32): set this alone to keep "
-            "BF16 master weights + AdamWBF16 (6 B/param) with fp32 grad reduction. Costs ~2x "
-            "bandwidth on the reduce-scatter collective only. fp32_non_ep_params implies it for "
-            "the FSDP2 reduce dtype ONLY — the EP, TP and QLoRA reductions read this knob "
-            "directly, so set it explicitly to cover them."
+            "help": "Reduce gradients across ranks in FP32 while parameters stay BF16 (the FSDP2 reduce dtype and "
+            "the EP, TP and QLoRA reductions), at about twice the bandwidth on that collective. Independent of "
+            "fp32_non_ep_params, which implies it for the FSDP2 reduce dtype only. "
+            "See agent-docs/optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options."
         },
     )
 
     bf16_optimizer: bool | None = field(
         default=None,
         metadata={
-            "help": "Use AdamWBF16 (bf16 master weights + stochastic rounding, 6 B/param) instead of the "
-            "standard optimizer. None (default) = auto: on when bf16 is set and the optimizer is the "
-            "default AdamW, off under replicated DDP (accelerate MULTI_GPU). True forces it on (e.g. to "
-            "opt in under DDP); False forces the stock AdamW over the parameters as loaded (bf16 under "
-            "bf16: true — round-to-nearest bf16 masters, not fp32; fp32 masters come from "
-            "fp32_non_ep_params or bf16: false) — rejected only where the run "
-            "mixes plain-tensor experts with FSDP2 DTensors (any expert distribution with "
-            "ep_group_size>1 — EP or pure ETP — or ep_size==1 with fsdp_shard_ep1_experts=false), "
-            "since fused AdamW cannot span the two; allowed on dense runs and on ep_size==1 MoE with "
-            "the default FSDP-sharded experts. "
-            "See agent-docs/optimization/bf16-optimizer.md."
+            "help": "Use AdamWBF16 (BF16 master weights with stochastic rounding, 6 B/param); unset = auto, on under "
+            "bf16 with the default AdamW and off under replicated DDP. False builds the stock AdamW over the "
+            "parameters as loaded, BF16 under bf16. See agent-docs/optimization/bf16-optimizer.md#usage."
         },
     )
 
     use_grouped_gemm: bool = field(
         default=True,
         metadata={
-            "help": "Enable F.grouped_mm for batched expert matmuls on SM90+ hardware (default: True). "
-            "When ep_size > 1, controls grouped GEMM inside EP layers. When ep_size = 1, also "
-            "applies EP wrappers for grouped GEMM without distribution. Set False to disable."
+            "help": "Run MoE expert matmuls through F.grouped_mm on SM90+ hardware, wrapping the MoE layers even at "
+            "expert_parallel_size 1, so an MoE model under accelerate launch is rejected at load: launch with "
+            "torchrun or set this false. "
+            "See agent-docs/optimization/grouped-gemm.md#standalone-grouped-gemm-mode."
         },
     )
 
     lowp_precision: LowpPrecision = field(
         default="bf16",
         metadata={
-            "help": "Low-precision matmul compute (mixed precision: bf16/fp32 master weights with "
-            "low-precision GEMM operands — parameters and checkpoints are unchanged). One of "
-            "'bf16' (default, off), 'fp8' (mxfp8), 'fp4' (nvfp4, most accurate) or 'mxfp4' "
-            "(fast fp4). Applies to dense MLP projections "
-            "(gate/up/down) and MoE expert grouped GEMMs; attention, embeddings, lm_head and "
-            "norms stay bf16. See agent-docs/optimization/low-precision-moe-kernels.md."
+            "help": "Low-precision GEMM operands for dense MLP and MoE expert matmuls over BF16/FP32 masters, "
+            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT only, "
+            "and every format runs slower than bf16. "
+            "See agent-docs/optimization/low-precision-moe-kernels.md#usage."
         },
     )
 
@@ -199,289 +162,219 @@ class DistributedArguments(RangeValidatedConfig):
     lowp_apply_moe_experts: bool = field(
         default=True,
         metadata={
-            "help": "Apply lowp_precision to MoE expert grouped GEMMs. Set False to keep experts in "
-            "bf16. The grouped path is the fake-quant reference and stays bf16-speed at "
-            "fine-grained MoE expert shapes; DeepGEMM's native fp8/fp4 kernel is opt-in via "
-            "HALO_DEEPGEMM_NATIVE=1 (plus a roofline/shape gate) and is never auto-routed. See "
-            "agent-docs/optimization/low-precision-moe-kernels.md."
+            "help": "Apply lowp_precision to MoE expert grouped GEMMs; false keeps the experts in bf16. DeepGEMM's "
+            "native kernel is opt-in through HALO_DEEPGEMM_NATIVE=1 and never auto-routed. "
+            "See agent-docs/optimization/low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path."
         },
     )
 
     lowp_keep_first_blocks: int = field(
         default=0,
         metadata={
-            "help": "Leading transformer blocks kept in bf16 under lowp_precision (NVFP4 recipe — the "
-            "first blocks are the most precision-sensitive). Default 0."
+            "help": "Leading transformer blocks kept in bf16 under lowp_precision (the NVFP4 recipe: the first "
+            "blocks are the most precision-sensitive)."
         },
     )
 
     lowp_keep_last_blocks: int = field(
         default=0,
         metadata={
-            "help": "Trailing transformer blocks kept in bf16 under lowp_precision (the NVFP4 recipe "
-            "keeps the last ~8). Default 0."
+            "help": "Trailing transformer blocks kept in bf16 under lowp_precision (the NVFP4 recipe keeps the last "
+            "~8)."
         },
     )
 
     max_concurrent_loading: int | None = field(
         default=None,
         metadata={
-            "help": "Max ranks loading model simultaneously per node. Unset (default) derives it "
-            "from the node width — half of it, capped at 4 — so a 4-GPU tray throttles to 2 instead "
-            "of admitting every rank. Set 1 for fully sequential loading on CPU-RAM-constrained "
-            "machines, 0 for all parallel; any explicit value is used verbatim."
+            "help": "Most ranks per node loading the model at once; unset derives half the node width, capped at 4. "
+            "An explicit value is used verbatim: 1 loads sequentially on CPU-RAM-constrained hosts, 0 all at once. "
+            "See agent-docs/parallelism/multi-node.md#model-loading."
         },
     )
 
     ep_lazy_loading: bool = field(
         default=True,
         metadata={
-            "help": "Expert-parallel model load path. True (default): lazy safetensors slicing from disk "
-            "(meta init, low CPU RAM). False: standard from_pretrained then EP patch "
-            "(higher CPU RAM, no meta-device init)."
+            "help": "Load an EP model by lazy safetensors slicing, each rank reading only its own expert slice "
+            "(meta init, low CPU RAM); false loads with from_pretrained and patches EP afterwards. "
+            "See agent-docs/parallelism/expert-parallelism.md#model-loading."
         },
     )
 
     ep_buffer_backend: EPBufferBackend = field(
         default="auto",
         metadata={
-            "help": "DeepEP transport backend for the EP all-to-all. 'auto' (default) == 'elastic': "
-            "ElasticBuffer over NCCL Gin, cross-node capable (AWS EFA). Its guarded limits are DeepEP's "
-            "32-bit wire index (~175k tokens/rank) and, for a cross-node group, the proxy-Gin ceiling "
-            "(HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK, default 8192 tokens/rank). 'legacy': the original "
-            "deep_ep.Buffer (CUDA IPC P2P over NVLink), numerically identical and intranode only: every "
-            "cross-node EP group is rejected. Pick it for long-context ep8 training, where elastic at "
-            ">=~64k tokens/rank deadlocks its combine against FSDP2, or to A/B the transport. See "
-            "agent-docs/infrastructure/deepep.md."
+            "help": "DeepEP all-to-all transport: 'auto'/'elastic' is the ElasticBuffer over NCCL Gin (cross-node "
+            "capable), 'legacy' the CUDA-IPC Buffer (numerically identical, intranode only). Pick 'legacy' for "
+            "long-context ep8, where elastic at about 64k tokens/rank or more deadlocks its combine against FSDP2. "
+            "See agent-docs/infrastructure/deepep.md#transport-backend."
         },
     )
 
     context_parallel_size: int = field(
         default=1,
         metadata={
-            "help": "Context parallel size for sequence splitting. "
-            "When > 1, sequences are split across cp_size ranks. "
-            "CP is always NVLink-local (must be <= nvlink_domain_size; = gpus_per_node on a "
-            "standard node, = the rack via NVLINK_DOMAIN_SIZE on NVL72). "
-            "NOTE: CP is NOT compatible with padding-free collator or TP."
+            "help": "Context-parallel (Ulysses) size: each sequence is split across this many ranks of one NVLink "
+            "domain. Not compatible with tensor parallelism or the padding-free collator. "
+            "See agent-docs/parallelism/context-parallelism.md#requirements."
         },
     )
 
     tensor_parallel_size: int = field(
         default=1,
         metadata={
-            "help": "Tensor parallel size for attention/embeddings/lm_head. Set to >1 to enable TP. "
-            "Must divide world size evenly. "
-            "If world_size > tp_size, FSDP2 is used for data parallelism. "
-            "NOTE: TP is NOT compatible with CP."
+            "help": "Tensor-parallel size for attention, embeddings and lm_head (> 1 enables TP); it must divide "
+            "world_size, and FSDP2 data-parallelizes across the TP groups. Not compatible with context parallelism."
         },
     )
 
     expert_tensor_parallel_size: int = field(
         default=1,
         metadata={
-            "help": "Expert FFN tensor parallel size (independent of tensor_parallel_size). "
-            "Shards expert FFN weights (gate_up_proj, down_proj) across expert_tp_size ranks "
-            "within NVLink-local groups, reducing per-rank expert memory by expert_tp_size. "
-            "Must divide the NVLink domain (nvlink_domain_size; = gpus_per_node normally, "
-            "= the rack on NVL72). "
-            "Full EP group size = expert_parallel_size * expert_tensor_parallel_size. "
-            "Combines with EP (EP+ETP, node-local) but not with attention "
-            "tensor_parallel_size > 1, and not with context_parallel_size > 1."
+            "help": "Expert-FFN tensor-parallel size: shards each expert's gate_up_proj and down_proj across this "
+            "many ranks of one NVLink domain, cutting per-rank expert memory by the same factor. Combines with "
+            "expert_parallel_size (the EP group is their product), not with tensor or context parallelism. "
+            "See agent-docs/parallelism/expert-tensor-parallelism.md#validation-rules."
         },
     )
 
     pipeline_parallel_size: int = field(
         default=1,
         metadata={
-            "help": "Pipeline parallel size — splits the model's decoder layers into contiguous stages. "
-            "PP is the OUTERMOST parallelism dimension and the only one designed to cross NVLink "
-            "domains: stage boundaries must fall on NVLink-domain boundaries (world_size / "
-            "pipeline_parallel_size must be a multiple of nvlink_domain_size), so only point-to-point "
-            "boundary activations traverse EFA/IB while EP/TP/ETP/CP/FSDP stay domain-local inside each "
-            "stage. Reduces data_parallel_size by pipeline_parallel_size. Requires fixed input shapes "
-            "(padding-free collators are rejected; packing is supported at one packed row per "
-            "microbatch) and a trainer that supports PP; any other script rejects a value > 1 at config "
-            "time. See agent-docs/parallelism/pipeline-parallelism.md."
+            "help": "Pipeline-parallel size: splits the decoder layers into contiguous stages, each a whole number "
+            "of NVLink domains, and divides data_parallel_size by it. Needs fixed input shapes and a trainer that "
+            "supports PP; every other script rejects a value > 1. "
+            "See agent-docs/parallelism/pipeline-parallelism.md#launching."
         },
     )
 
     pipeline_microbatches: int = field(
         default=0,
         metadata={
-            "help": "PP-only: at pipeline_parallel_size=1 any non-default value is rejected at config "
-            "time. Microbatches per optimizer step under pipeline parallelism (the pipeline's own "
-            "gradient accumulation). 0 (default) = auto: gradient_accumulation_steps, raised to "
-            "pipeline_parallel_size when the 1f1b schedule requires it. per_device_train_batch_size "
-            "must be divisible by this."
+            "help": "Microbatches per optimizer step under pipeline parallelism, the pipeline's own gradient "
+            "accumulation; 0 = gradient_accumulation_steps, raised to pipeline_parallel_size where 1f1b needs it. "
+            "per_device_train_batch_size must be divisible by it, and a non-default value is rejected without PP."
         },
     )
 
     pipeline_schedule: PPSchedule = field(
         default="1f1b",
         metadata={
-            "help": "PP-only: at pipeline_parallel_size=1 any non-default value is rejected at config "
-            "time. Pipeline schedule: '1f1b' (default, one-forward-one-backward — lowest activation "
-            "memory, requires pipeline_microbatches >= pipeline_parallel_size) or 'gpipe' (all forwards "
-            "then all backwards — higher activation memory, no microbatch-count constraint)."
+            "help": "Pipeline schedule: '1f1b' (lowest activation memory, needs pipeline_microbatches >= "
+            "pipeline_parallel_size) or 'gpipe' (all forwards then all backwards, no microbatch-count constraint). "
+            "A non-default value is rejected without PP."
         },
     )
 
     pipeline_split: list[int] | None = field(
         default=None,
         metadata={
-            "help": "PP-only: at pipeline_parallel_size=1 any non-default value is rejected at config "
-            "time. Manual per-stage decoder-layer counts under pipeline parallelism, e.g. [19, 17] "
-            "for a 36-layer model at pipeline_parallel_size=2. Must sum to the model's layer count, "
-            "with stage boundaries on the model's layer_types period. Default (null) is the "
-            "head-weighted split: the last stage's layer budget shrinks by the lm_head's "
-            "layer-equivalent cost, so the stages' real compute balances."
+            "help": "Per-stage decoder-layer counts under pipeline parallelism, like [19, 17] for 36 layers at two "
+            "stages, summing to the layer count with boundaries on the layer_types period. Unset = the "
+            "head-weighted split, which shrinks the last stage by the lm_head's layer-equivalent cost; a value is "
+            "rejected without PP."
         },
     )
 
     nvlink_domain_size: int = field(
         default=0,
         metadata={
-            "help": "Number of GPUs reachable over NVLink — the locality unit for node-local "
-            "EP/CP/TP/ETP grouping. 0 (default) = auto: reads the NVLINK_DOMAIN_SIZE env var, "
-            "else falls back to gpus_per_node (one OS node, the standard ≤8-GPU cluster case). "
-            "On GB200/GB300 NVL72 set this (or NVLINK_DOMAIN_SIZE) to the rack's NVLink "
-            "partition size (e.g. 72) to run EP/CP/TP NVLink-wide across OS nodes. The "
-            "NVLINK_DOMAIN_SIZE env var applies to every entrypoint; this arg is the YAML/CLI "
-            "equivalent for every training script."
+            "help": "GPUs one NVLink domain spans, the locality unit of node-local EP/CP/TP/ETP groups; 0 reads "
+            "NVLINK_DOMAIN_SIZE, else gpus_per_node. Set the rack's partition size (72 on GB200/GB300 NVL72) to "
+            "group NVLink-wide across OS nodes. "
+            "See agent-docs/parallelism/multi-node.md#gb200gb300-nvl72-multi-node-nvlink."
         },
     )
 
     fsdp_reshard_after_forward: bool = field(
         default=False,
         metadata={
-            "help": "FSDP2 resharding mode for torchrun data parallelism. "
-            "False (default): SHARD_GRAD_OP behavior — params stay unsharded between "
-            "forward and backward. Faster throughput, higher peak memory. "
-            "True: FULL_SHARD behavior — params resharded after forward. "
-            "Lower peak memory, slightly slower. "
-            "Only affects torchrun modes (not accelerate launch). "
-            "Rejected whenever an expert-distribution group exists (ep_group_size>1 — ep_size>1 OR "
-            "expert_tp_size>1: the backward re-gather can race the DeepEP combine, and pure ETP "
-            "shares that path), under TP with data_parallel_size>1 (the backward re-gather issues a "
-            "plain all-gather on TP-sharded DTensor params), and under PP; allowed on pure DP, CP, "
-            "and ep_size==1 MoE without expert TP."
+            "help": "False (ZeRO-2) keeps FSDP2 params gathered from forward to backward, faster at a higher peak "
+            "memory; true (ZeRO-3) reshards them after forward. Torchrun only, and rejected with an "
+            "expert-distribution group (ep_group_size > 1), TP at data_parallel_size > 1, or PP. "
+            "See agent-docs/parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward."
         },
     )
     fsdp_reshard_after_backward: bool = field(
         default=True,
         metadata={
-            "help": "False keeps FSDP2 params unsharded across a gradient-accumulation window's "
-            "microsteps (torch set_reshard_after_backward, re-armed for the window's last backward): "
-            "FSDP2 otherwise reshards after every microstep's backward and re-all-gathers the full "
-            "model on the next microstep — wasted collectives when nothing changed, and the "
-            "dominant step cost whenever those collectives run over sockets. Leaves one re-gather per "
-            "optimizer step instead of one per "
-            "microstep (so it does nothing at gradient_accumulation_steps=1). The unsharded params (at "
-            "the FSDP param dtype) are the ones ZeRO-2 already holds from forward to backward, kept "
-            "between microsteps and freed at the window's last backward, so peak memory is unchanged. "
-            "Plain-DP/CP/EP torchrun path only; "
-            "rejected with fsdp_reshard_after_forward=True, TP, or PP."
+            "help": "False keeps FSDP2 params unsharded across a gradient-accumulation window's microsteps, one "
+            "re-all-gather per optimizer step instead of one per microstep, at unchanged peak memory. Torchrun "
+            "DP/CP/EP only; rejected with fsdp_reshard_after_forward, TP or PP. "
+            "See agent-docs/parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward."
         },
     )
     fsdp_defer_grad_sync: bool = field(
         default=False,
         metadata={
-            "help": "True skips FSDP2's gradient reduce-scatter on a gradient-accumulation window's "
-            "microsteps 1..n-1 (torch set_requires_gradient_sync, re-armed for the window's last "
-            "backward), so each optimizer step reduces once instead of once per microstep. Does "
-            "nothing at gradient_accumulation_steps=1, and holds one full unsharded gradient copy "
-            "per GPU across the window at the reduce dtype (2 B/param; 4 B/param when the reduce runs "
-            "in fp32: fp32_grad_reduce, fp32_non_ep_params or an fp32 run); peak memory rises by that "
-            "copy less the sharded gradient the default holds anyway. Torchrun FSDP2 path only; "
-            "rejected under PP, TP with data_parallel_size=1, QLoRA, and fsdp_reshard_after_forward=True "
-            "(ZeRO-3 exists to shard that gradient)."
+            "help": "Skip FSDP2's gradient reduce-scatter on a gradient-accumulation window's microsteps 1..n-1, "
+            "reducing once per optimizer step at the cost of one unsharded gradient copy per GPU held across the "
+            "window. Torchrun FSDP2 only; rejected under PP, TP at data_parallel_size 1, QLoRA and "
+            "fsdp_reshard_after_forward. "
+            "See agent-docs/parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync."
         },
     )
     fsdp_shard_ep1_experts: bool = field(
         default=True,
         metadata={
-            "help": "At ep_group_size==1 only (ep_size * expert_tp_size, i.e. the experts are truly "
-            "replicated): FSDP-shard the MoE experts (reduce-scatter is their sole gradient sync; the "
-            "EP layer skips its own hooks). True (default): frees memory that grows with DP "
-            "(gpt-oss-20b on 8 GPUs at batch 1: -59% peak memory at +1.8% throughput), "
-            "grad-equivalent. False: every DP rank keeps a full copy. No effect when "
-            "ep_group_size>1 — that includes pure ETP (ep_size==1, expert_tp_size>1), where the "
-            "experts are sharded across the ETP group rather than replicated. RL-safe (the engine "
-            "weight-sync gather, vLLM or SGLang, materializes the shards with full_tensor before "
-            "reshaping) under both "
-            "ZeRO2 and ZeRO3."
+            "help": "At ep_group_size == 1, where the experts are truly replicated, FSDP-shard them so their "
+            "reduce-scatter is the sole gradient sync, freeing memory that grows with DP at unchanged gradients. "
+            "False keeps a full expert copy per rank; no effect at ep_group_size > 1, pure ETP included. "
+            "See agent-docs/parallelism/data-parallelism.md#ep1-expert-sharding."
         },
     )
     use_hsdp: bool = field(
         default=False,
         metadata={
-            "help": "Hybrid Sharded Data Parallel for the standard DP path (pure DP or CP; EP, TP "
-            "and Expert-TP are rejected). False (default): 1D FSDP full-shards non-expert params "
-            "across every DP rank — "
-            "every all-gather / reduce-scatter crosses the inter-node fabric. True: shard within "
-            "each NVLink domain and replicate across domains, so the bandwidth-heavy shard "
-            "collectives stay on NVLink and only one gradient all-reduce crosses RDMA per step. "
-            "Shard width and replica count are derived from the topology automatically. Trades "
-            "memory (a per-domain param replica) for inter-node bandwidth; a no-op on a single "
-            "node."
+            "help": "Hybrid sharded data parallel on the pure DP/CP path: shard within each NVLink domain and "
+            "replicate across domains, so only one gradient all-reduce crosses RDMA per step. Trades a per-domain "
+            "parameter replica for inter-node bandwidth; rejected with EP, TP or Expert-TP, and a no-op on one "
+            "domain. See agent-docs/parallelism/data-parallelism.md#hsdp-hybrid-sharded-data-parallel."
         },
     )
 
     init_from_scratch: bool = field(
         default=False,
         metadata={
-            "help": "Train from scratch (random init) instead of fine-tuning pretrained weights. "
-            "When True, the model is built from the architecture/config of model_name_or_path "
-            "with FRESHLY-INITIALIZED random weights (transformers _init_weights), reusing that "
-            "id's tokenizer and config — no checkpoint weights are loaded. Pretraining is "
-            "step-based: set max_steps and a warmup+decay LR schedule. Supported for dense "
-            "data-parallel / FSDP2 training; EP/TP/CP from-scratch is not yet supported "
-            "(see agent-docs/training-methods/pretraining.md)."
+            "help": "Build the model from model_name_or_path's config with freshly initialized random weights, "
+            "reusing its tokenizer, instead of loading the pretrained weights. Dense data-parallel/FSDP2 only; pair "
+            "it with max_steps and a warmup-plus-decay schedule. "
+            "See agent-docs/training-methods/pretraining.md#random-initialization."
         },
     )
     reset_sinks: bool = field(
         default=True,
         metadata={
-            "help": "GptOss only (ignored elsewhere). True (default): neutralize the attention sinks for "
-            "fine-tuning — filled with dtype min and frozen (zero softmax mass), or removed under "
-            "flash_attention_2. False: keep the pretrained sinks live and FROZEN, the on-policy RL "
-            "setting (the trainer scores with the sinks the rollout engine serves). Live sinks accept only "
-            "a sink-carrying attention implementation — flash_attention_4 on Blackwell, flex_attention or "
-            "eager on Hopper; a sink-dropping one (FA2/SDPA) is rejected, since dropping the sink column "
-            "shifts every logprob by nats. Live sinks are refused under Context Parallelism (its kernels "
-            "never see the column)."
+            "help": "GptOss only: true neutralizes the attention sinks for fine-tuning; false keeps the pretrained "
+            "sinks live and frozen, the on-policy RL setting, which needs a sink-carrying attention implementation "
+            "and no context parallelism. See agent-docs/models/gpt-oss.md#attention-sinks."
         },
     )
     train_sinks: bool = field(
         default=False,
         metadata={
-            "help": "GptOss only: keep the live sinks TRAINABLE (default: False; requires reset_sinks: false, "
-            "the contradiction is rejected). Full fine-tuning under flash_attention_4 (the fused kernel "
-            "emits no sink gradient, so grad-requiring sinks run through an exact sink-less + "
-            "sigmoid(lse - sink) rescale) or eager (native gradient); flex_attention and FA3 are rejected "
-            "(no usable sink gradient). Refused by adapter (PEFT) runs and by weight-sync RL."
+            "help": "GptOss only: train the live sinks (requires reset_sinks: false) under full fine-tuning with "
+            "flash_attention_4 or eager. Refused with flex_attention, FA3, adapter runs and weight-sync RL. "
+            "See agent-docs/models/gpt-oss.md#attention-sinks."
         },
     )
 
     text_only_model: bool = field(
         default=False,
         metadata={
-            "help": "Load a multimodal checkpoint through its text-only CausalLM class instead of the "
-            "vision-bearing wrapper (Qwen3.5/3.6: Qwen3_5MoeForCausalLM vs ...ForConditionalGeneration). "
-            "Drops the vision tower and any MTP tail from the build and restores the config-honored "
-            "output_router_logits path, so moe_balancing: aux_loss works where the wrapper's forward "
-            "never consults the flag. For text-only datasets; a VLM dataset needs the wrapper."
+            "help": "Load a multimodal checkpoint through its text-only CausalLM class (Qwen3.5/3.6: "
+            "Qwen3_5MoeForCausalLM), dropping the vision tower and any MTP tail from the build and the export. For "
+            "text-only datasets; it also restores the output_router_logits path moe_balancing: aux_loss needs. "
+            "See agent-docs/reference/configuration-reference.md#distributedarguments-model--from-scratch."
         },
     )
 
     fp32_output_conversion: bool = field(
         default=False,
         metadata={
-            "help": "Keep accelerate's fp32 output conversion wrapper (default: False = off). "
-            "The wrapper converts model outputs (logits) from bf16 to fp32, "
-            "which can cause OOM for long sequences (e.g., 25k tokens × 200k vocab = 18+ GiB). "
-            "Safe to leave off when the model is loaded in bf16 — forward/backward run in bf16 anyway."
+            "help": "Keep accelerate's wrapper that converts model outputs (the logits) to fp32. Off by default: "
+            "the upcast can OOM on long sequences, and a bf16 model needs no fp32 outputs."
         },
     )
 

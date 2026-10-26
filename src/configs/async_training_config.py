@@ -7,7 +7,7 @@ from math import isfinite
 from typing import Any, Literal
 
 from src.args.mixins import AdvantageShapingArguments, ChunkedLogprobsArguments, GRPOEarlyStopArguments
-from src.args.validation import require_finite, require_int, require_positive, require_positive_int
+from src.config_validation import require_finite, require_int, require_positive, require_positive_int
 from src.configs.rollout_config import (
     DEFAULT_EPISODE_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
@@ -102,53 +102,43 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     num_rollout_workers: int = field(
         default=64,
         metadata={
-            "help": "Ray environment actors (per training rank). The actors are async, so one handles "
-            "many concurrent episodes — this is NOT the HTTP-concurrency limit (max_concurrent_rollouts "
-            "is). Size it to the CPU-side env cost (tool execution, verifier grading). Created per rank, "
-            "so cluster-wide total = world_size × this (divided by world_size when ray_address is set); "
-            "an actor needs 1 free CPU at placement only — the sandbox gate, not Ray, bounds CPU use."
+            "help": "Ray environment actors per training rank; each is async and runs many episodes, so this is no "
+            "concurrency limit (max_concurrent_rollouts is). Size it to the CPU-side environment cost; with "
+            "ray_address set each rank takes this // world_size, at least 1. "
+            "See agent-docs/infrastructure/ray.md#pool-sizing."
         },
     )
 
     max_concurrent_rollouts: int | None = field(
         default=None,
         metadata={
-            "help": "Per-rank asyncio-semaphore cap on rollouts in flight — the real generation-throughput "
-            "throttle. Server-pool load = this × world_size ÷ num_servers (under TP every rank collects a full batch). Size it to the per-rank "
-            "rollout demand of one generation cycle (per_device_train_batch_size × steps_per_generation, "
-            "which itself defaults to gradient_accumulation_steps) with ~2× headroom for prefetch; raising "
-            "it past the actual rollout count does nothing. "
-            "Default: 4 × this rank's share of the rollout workers (num_rollout_workers ÷ world_size on a shared Ray "
-            "cluster, all of them locally), clamped to ≥ that share."
+            "help": "Per-rank cap on rollouts in flight, the generation-throughput throttle; size it to one "
+            "generation cycle's per-rank demand with about 2× prefetch headroom. Unset = 4 × this rank's share of "
+            "the rollout workers, and an explicit value below that share is raised to it. "
+            "See agent-docs/reference/configuration-reference.md#asynctrainingconfig."
         },
     )
     eval_rollout_batch_size: int | None = field(
         default=None,
         metadata={
-            "help": "Rows per rank in one evaluation rollout round (rows, not prompts: the eval sampler has already "
-            "repeated each prompt num_generations_eval times). Eval rounds run without prefetch, so a round's wall "
-            "time is its slowest episode and per_device_eval_batch_size-sized rounds idle the servers between them; "
-            "size it to what the servers sustain: rows × world_size requests are in flight at once, and a turn "
-            "that decodes slower than request_timeout allows fails the episode; a multiple of num_generations_eval, at "
-            "most max_concurrent_rollouts (a wider round is refused at startup). The final round's padding is never "
-            "rolled out or scored. It bounds the loader's batch, "
-            "not eval peak memory: the loss forward still chunks per_device_eval_batch_size rows, but the round's "
-            "widest completion sets the padded width. None leaves the round at the eval batch."
+            "help": "Rows per rank in one evaluation rollout round (each prompt already repeated "
+            "num_generations_eval times), a multiple of num_generations_eval and at most max_concurrent_rollouts. "
+            "Unset leaves the round at the eval batch. "
+            "See agent-docs/training-methods/async-grpo/evaluation.md#during-training."
         },
     )
 
-    ray_address: str | None = field(default=None, metadata={"help": "Ray cluster address. None for local mode."})
+    ray_address: str | None = field(
+        default=None, metadata={"help": "Ray cluster address; unset starts a local Ray instance on each rank."}
+    )
 
     rollout_backend: RolloutBackend = field(
         default=VLLM_BACKEND,
         metadata={
-            "help": "Inference engine serving rollouts and receiving weight updates. Both support "
-            "generation, NCCL weight sync, `train_on_sampled_tokens` and `routing_replay: rollout`. "
-            "'sglang' does not support `rollout_max_thinking_tokens` (the trainer wires neither of SGLang's "
-            "budget mechanisms; harmony models have none server-side), needs cuMem parity on "
-            "the server (NCCL_CUMEM_ENABLE=1, which docker-compose.sglang.yml sets), and must be served "
-            "from the NCCL-aligned Dockerfile.sglang image — the stock upstream image ships a "
-            "different NCCL than the trainer and cannot form the weight-sync group."
+            "help": "Inference engine serving rollouts and receiving the weight updates. 'sglang' refuses "
+            "rollout_max_thinking_tokens and must be served from the NCCL-aligned Dockerfile.sglang image with "
+            "NCCL_CUMEM_ENABLE=1. "
+            "See agent-docs/training-methods/async-grpo/setup.md#rollout-backend."
         },
     )
 
@@ -164,20 +154,15 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     rollout_server_configs: list[dict[str, Any]] | None = field(
         default=None,
         metadata={
-            "help": "List of rollout-server configs for multi-server setup (engine per rollout_backend). "
-            "Each config is a dict with 'url' and optional 'group_port' and 'group_host' "
-            "(the weight-transfer master address the serving node dials back to; defaults to the "
-            "resolution chain arg → VLLM_GROUP_HOST/SGLANG_GROUP_HOST → loopback-if-local → "
-            "default-route NIC). Example: [{'url': 'http://node1:8000', 'group_port': 51216}]. "
-            "If set, overrides rollout_server_url for weight sync."
+            "help": "Rollout servers of a multi-server run, each a dict with 'url' and optional 'group_port' and "
+            "'group_host' (the weight-transfer address the serving node dials back to), like "
+            "[{'url': 'http://node1:8000', 'group_port': 51216}]. Overrides rollout_server_url."
         },
     )
 
     sync_weights_every_n_steps: int = field(
         default=1,
-        metadata={
-            "help": "Sync weights to the rollout server(s) every N training steps. Must be >= 1 (1 = every step)."
-        },
+        metadata={"help": "Sync weights to the rollout servers every N training steps, N >= 1."},
     )
 
     rollout_temperature: float = field(
@@ -191,9 +176,9 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     rollout_top_k: int = field(
         default=DEFAULT_ROLLOUT_TOP_K,
         metadata={
-            "help": "Top-k sampling for rollout generation: an int, -1 (off) or >= 1; 0 is refused, since SGLang "
-            "rejects it, and so are a bool and a float. Sent on every request, as are rollout_min_p and "
-            "rollout_repetition_penalty: both engines fill an omitted one from the model's generation_config.json."
+            "help": "Top-k sampling for rollouts: -1 (off) or an int >= 1, since SGLang rejects 0. Sent on every "
+            "request, like rollout_min_p and rollout_repetition_penalty: both engines fill an omitted one from "
+            "generation_config.json."
         },
     )
 
@@ -208,62 +193,47 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     rollout_repetition_penalty: float = field(
         default=DEFAULT_ROLLOUT_REPETITION_PENALTY,
         metadata={
-            "help": "Repetition penalty for rollout generation, in (0, 2]; 1 = off. The sampling log-probs "
-            "carry it and the trainer's recomputed ones do not, so a value other than 1 is refused at "
-            "startup under a sequence-level ratio (isr_geo_band_*, isr_opsm_delta)."
+            "help": "Repetition penalty for rollouts, in (0, 2]; 1 = off. Refused other than 1 under a "
+            "sequence-level ratio (isr_geo_band_*, isr_opsm_delta), since the trainer's recomputed log-probs do not "
+            "carry it."
         },
     )
 
     rollout_max_tokens: int = field(
         default=DEFAULT_ROLLOUT_MAX_TOKENS,
         metadata={
-            "help": "Max tokens per single-turn generation (one /chat/completions call). The whole "
-            "multi-turn trajectory accumulates across turns, bounded by rollout_max_episode_tokens where set and "
-            "by the model's context window (shared with vLLM); a trajectory exceeding the context fails. This "
-            "per-turn bound is verified against the server at startup."
+            "help": "Most tokens one turn generates (one /chat/completions call), checked against the server at "
+            "startup. The trajectory accumulates across turns, bounded by rollout_max_episode_tokens where set and "
+            "by the model's context window, which it fails past. "
+            "See agent-docs/training-methods/async-grpo/episodes.md#trajectory-length."
         },
     )
 
     rollout_max_episode_tokens: int | None = field(
         default=None,
         metadata={
-            "help": "The most tokens one episode may sample over all its assistant turns, reasoning and visible "
-            "output together, recoveries included (null = unbounded: max_turns x rollout_max_tokens). Enforced "
-            "by the engine per turn, never stated to the model: a turn's max_tokens is the smaller of its own "
-            "cap and what the episode has left, its reasoning cap shrinks with it so the turn keeps its answer "
-            "room (rollout_max_tokens less its reasoning cap, or rollout_max_answer_tokens where smaller), and an "
-            "episode left with less than that room starts no further turn and ends truncated, priced like a "
-            "max_turns overflow. Must be >= rollout_max_tokens, so one whole turn fits. Logged as "
-            "episode/output_budget_exhausted: the share of episodes whose budget held no further turn when they "
-            "ended, by the budget or done."
+            "help": "Most tokens one episode may sample over all its turns, reasoning included; unset = max_turns × "
+            "rollout_max_tokens. Enforced by the engine per turn, never stated to the model, and at least "
+            "rollout_max_tokens. See agent-docs/training-methods/async-grpo/episodes.md#episode-output-budget."
         },
     )
 
     rollout_max_thinking_tokens: int | None = field(
         default=None,
         metadata={
-            "help": "Per-turn reasoning-token cap for reasoning models (vLLM thinking_token_budget): caps the "
-            "chain-of-thought, then forces the model to answer with the rest of max_tokens. A level whose profile "
-            "sets a smaller enforced thinking_tokens runs under that instead; under a soft one "
-            "(enforce_thinking_cap: false) this is the ceiling. Requires a reasoning parser on the vLLM server "
-            "(--reasoning-parser qwen3 for Qwen3.x; the openai_gptoss plugin for gpt-oss). None = only a level's "
-            "enforced thinking_tokens, a soft level's ceiling under rollout_max_answer_tokens, or a retry's reserve "
-            "caps reasoning, or nothing does."
+            "help": "Per-turn reasoning-token cap (vLLM thinking_token_budget) that then forces the answer out of "
+            "the rest of the turn; a level's smaller enforced thinking_tokens wins, and under a soft level it is "
+            "the ceiling. Needs a reasoning parser on the vLLM server; unset leaves reasoning to the levels' "
+            "budgets. See agent-docs/training-methods/async-grpo/reasoning.md#reasoning-budget."
         },
     )
 
     rollout_max_answer_tokens: int | None = field(
         default=None,
         metadata={
-            "help": "The most a turn may generate past its reasoning cap (null = rollout_max_tokens alone bounds "
-            "the turn). A turn's max_tokens becomes the smaller of rollout_max_tokens and its reasoning cap plus "
-            "this, the cap being its level's enforced budget, a soft level's ceiling (rollout_max_tokens less this, "
-            "where rollout_max_thinking_tokens is unset) or, on a retry, the reserve; under rollout_max_episode_tokens "
-            "a turn starts only while the episode has its answer room left (the smaller of this and rollout_max_tokens "
-            "less the turn's reasoning cap). Enforced per turn, never stated to the model. Every "
-            "episode needs a reasoning cap: a drawable level with no thinking_tokens while "
-            "rollout_max_thinking_tokens is unset is refused. On SGLang, which enforces no reasoning cap, it bounds "
-            "the whole turn at the cap plus this. Must be an int in [1, rollout_max_tokens)."
+            "help": "Most a turn may generate past its reasoning cap, never stated to the model: an int in "
+            "[1, rollout_max_tokens), unset = rollout_max_tokens alone bounds the turn. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#answer-room."
         },
     )
 
@@ -271,46 +241,37 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=DEFAULT_REASONING_END_TOKEN,
         metadata={
             "help": "The string the server's reasoning parser ends reasoning with, encoded as vLLM encodes it "
-            f"({REASONING_END_TOKEN_EXAMPLES}). "
-            "Wherever a vLLM thinking budget can bind, a forced run of its ids gets ratio 0 in the loss (a marker "
-            "holding none of the tokenizer's added tokens only warns). Where it is one token, a turn's reasoning "
-            "is counted as its sampled ids up to and including it, the count episode/thinking_cap_turns reads."
+            f"({REASONING_END_TOKEN_EXAMPLES}). Wherever a vLLM thinking budget can bind, the trainer gives a "
+            "forced run of its ids ratio 0 in the loss. "
+            "See agent-docs/training-methods/async-grpo/objective.md#forced-reasoning-closes."
         },
     )
 
     train_on_sampled_tokens: bool = field(
         default=True,
         metadata={
-            "help": "Train env-GRPO on the ACTUAL sampled generation token ids (captured from the server's "
-            "logprobs) rather than re-tokenizing a chat-template re-render of the parsed trajectory. "
-            "Model-agnostic and fully faithful — it eliminates every re-tokenization mismatch (tool-call "
-            "rendering, argument whitespace, reasoning re-render). Each assistant turn is its own training "
-            "row (prompt = the history the server built for that turn, completion = that turn's sampled "
-            "ids), sharing the trajectory's advantage. On vLLM the server must run with "
-            "`--return-tokens-as-token-ids` (docker-compose.vllm.yml passes it); SGLang captures per "
-            "request and needs no flag. All-or-nothing per trajectory: one uncaptured turn falls that "
-            "whole trajectory back to a single re-tokenized row. Default on."
+            "help": "Train on the server's sampled token ids, each assistant turn its own row sharing the "
+            "trajectory's advantage, instead of re-tokenizing a chat-template re-render. vLLM needs "
+            "--return-tokens-as-token-ids (SGLang no flag), and a trajectory with an uncaptured turn falls back to "
+            "one re-tokenized row. See agent-docs/training-methods/async-grpo/objective.md#training-rows."
         },
     )
     max_train_row_tokens: int | None = field(
         default=None,
         metadata={
-            "help": "Longest training row (prompt + completion tokens) a training rank takes; None = no cap beyond "
-            "the context check. A per-turn row over it is left out of the batch (the episode's other turns still "
-            "train); a whole-trajectory row over it trains as a zero-weight row. Logged as "
-            "sampling/rows_over_cap_frac: rows left out over rows left out plus rows that train. A memory bound "
-            "for the training ranks — must be above rollout_max_tokens — below the context check, which rejects "
-            "rows the served model could not have produced."
+            "help": "Longest training row (prompt + completion tokens) a training rank takes, above "
+            "rollout_max_tokens; unset = no cap beyond the context check. A per-turn row over it leaves the batch, "
+            "a whole-trajectory row trains at zero weight. "
+            "See agent-docs/training-methods/async-grpo/episodes.md#training-row-cap."
         },
     )
 
     isr_geo_band_min: float | None = field(
         default=None,
         metadata={
-            "help": "TRAJECTORY geometric-mean band: mask a whole trajectory when exp(mean log-ratio "
-            "over its corrected tokens) leaves [isr_geo_band_min, isr_geo_band_max] (NeMo-RL seq-mask-tis, "
-            "slime MIS). Aggregated per trajectory across all its turn rows (drift compounds over the "
-            "episode). Set both to activate; start [0.99, 1.01]."
+            "help": "Trajectory geometric-mean band: mask a whole trajectory when exp(mean log-ratio) over its "
+            "corrected tokens leaves [isr_geo_band_min, isr_geo_band_max]. Set both to activate. "
+            "See agent-docs/training-methods/async-grpo/objective.md#trust-region-masks."
         },
     )
     isr_geo_band_max: float | None = field(
@@ -320,41 +281,25 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     isr_veto_min: float | None = field(
         default=None,
         metadata={
-            "help": "Catastrophic-token veto: mask a whole trajectory when ANY corrected token's raw IS "
-            "ratio falls below this (verl/slime use ~1e-4 — such a token marks a sequence the ratio can "
-            "no longer honestly correct). None (default) = off."
+            "help": "Catastrophic-token veto: mask a whole trajectory when any corrected token's raw IS ratio falls "
+            "below this (verl and slime use about 1e-4). Unset = off."
         },
     )
     isr_opsm_delta: float | None = field(
         default=None,
         metadata={
-            "help": "DeepSeek-V3.2 Off-Policy Sequence Masking: mask NEGATIVE-advantage trajectories "
-            "whose |mean log-ratio| vs the sampling policy exceeds this many nats (positives never "
-            "masked). None (default) = off."
+            "help": "Off-policy sequence masking (DeepSeek-V3.2): mask negative-advantage trajectories whose |mean "
+            "log-ratio| against the sampling policy exceeds this many nats; positives are never masked. Unset = "
+            "off."
         },
     )
     isr_engine_reference: bool = field(
         default=False,
         metadata={
-            "help": "Re-score every training row on the rollout engine under the weights just synced "
-            "(one prefill per row through the completions prompt_logprobs echo) and feed the mask "
-            "stages (isr_geo_band/isr_veto/isr_opsm) the log-ratio between the engine's current and "
-            "sampling log-probs instead of the trainer-vs-engine one. That removes the trainer<->engine "
-            "disagreement from the stages; the engine's own decode-vs-prefill disagreement stays in "
-            "the reference (measured -0.003 nats/token at sampling entropy 0.36 with identical weights, "
-            "against -0.0003 for trainer-vs-engine-prefill), and like every such floor it grows with "
-            "entropy, so the band still needs room above it. The IS weight itself stays "
-            "trainer-vs-sampling. Logged as sampling/engine_logratio_mean (staleness plus the "
-            "decode-vs-prefill floor), sampling/numerics_logratio_mean (trainer minus engine-prefill) "
-            "and sampling/engine_rescore_coverage. Requires the IS correction, rollout_temperature "
-            "and rollout_top_p of 1.0 and rollout_top_k / rollout_min_p / rollout_repetition_penalty off "
-            "(prefill log-probs are the raw distribution); vLLM re-scores through "
-            "the completions prompt_logprobs echo, SGLang through /generate with logprob_start_len. The "
-            "server must hold headroom for that pass: vLLM materializes an fp32 log-softmax over the "
-            "vocabulary for every prefill chunk of a prompt_logprobs request (max_num_batched_tokens x "
-            "vocab x 4 B — 8 GB at 8192 x 248k, outside its memory profile), so serve with "
-            "--gpu-memory-utilization <= 0.80 or a smaller --max-num-batched-tokens; at 0.90 the "
-            "engine dies of CUDA OOM under load."
+            "help": "Re-score every training row on the rollout engine under the just-synced weights, so the mask "
+            "stages read the engine's current-vs-sampling log-ratio without the trainer-vs-engine disagreement. "
+            "Requires the IS correction and plain sampling (temperature and top-p 1, no top-k, min-p or repetition "
+            "penalty). See agent-docs/training-methods/async-grpo/objective.md#engine-reference."
         },
     )
 
@@ -362,55 +307,37 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default="none",
         metadata={
             "help": "MoE routing replay: pin the update pass's top-k expert selection to a recorded mask, "
-            "re-deriving gate weights from live router scores (removes the discontinuous routing-flip "
-            "component of the pass-to-pass policy divergence; Qwen 'Routing Replay' / DeepSeek 'Keep "
-            "Routing'). 'none' (default) = off; 'recompute' (R2) = capture the mask in the trainer's own "
-            "no-grad logprob-recompute pass and replay it in the update + GC-recompute forwards; "
-            "'rollout' (R3, EXPERIMENTAL) = replay the rollout ENGINE's mask, removing the full "
-            "cross-engine routing discontinuity — requires train_on_sampled_tokens and a capture-capable "
-            "server: vLLM >= 0.22 with --enable-return-routed-experts and a non-FlashInfer MoE backend "
-            "(--moe-backend triton), or SGLang with --enable-return-routed-experts and "
-            "--moe-runner-backend triton (the triton_kernel/flashinfer runners bypass the capture hook); "
-            "positions the engine did not cover (e.g. prefix-cache hits) keep natural routing. Validate "
-            "capture coverage on your serving shape before a long run. "
-            "MoE-with-EP-wrappers only; Gemma4 and Zaya are rejected (see _supports_routing_replay)."
+            "re-deriving gate weights from live router scores. 'none' (the default) is off, 'recompute' (R2) "
+            "records the trainer's own no-grad recompute pass and 'rollout' (R3, experimental) the rollout engine's "
+            "routing. "
+            "See agent-docs/training-methods/async-grpo/objective.md#routing-replay."
         },
     )
 
     skip_update_masked_frac: float | None = field(
         default=None,
         metadata={
-            "help": "Trust-region circuit breaker (KL-free): when the fraction of IS-corrected "
-            "trajectories fully masked by the geo-band/veto/OPSM stages, OR the fraction of corrected "
-            "tokens masked (the masked trajectories are the long ones), exceeds this, ZERO the step's "
-            "advantages and SKIP its optimizer step (gradients dropped to None, so Adam's momentum "
-            "cannot step the weights either) instead of training on the unmasked survivors. At high "
-            "masked fractions the survivors are a selection-biased sample (exactly the rows where the "
-            "drifted policy still agrees with the rollout), so continuing to train amplifies the drift; "
-            "skipping holds the policy still until the next weight-sync re-anchors the rollouts. Logged "
-            "as `sampling/update_skipped` with `sampling/is_masked_traj_frac` / "
-            "`sampling/is_masked_token_frac`. None (default) = off; 0.3-0.5 is a sane range."
+            "help": "Trust-region circuit breaker: when the mask stages fully mask more than this fraction of the "
+            "IS-corrected trajectories, or mask more than this fraction of the corrected tokens, zero the round's "
+            "advantages and skip its optimizer steps instead of training on the survivors. Unset = off; 0.3-0.5 is "
+            "a sane range. See agent-docs/training-methods/async-grpo/objective.md#breaker."
         },
     )
     early_stop_on_skipped_updates: bool = field(
         default=False,
         metadata={
-            "help": "Early stop (GRPOEarlyStopArguments): end training once the trust-region breaker "
-            "(`skip_update_masked_frac`) skipped every update on `early_stop_patience` readings in a row (one "
-            "generation round each at `logging_steps: 1`). Past that the policy is frozen where the rollouts no "
-            "longer agree with it, and the run only spends compute. Raises without `skip_update_masked_frac`."
+            "help": "Early stop: end training once the trust-region breaker skipped every update on "
+            "early_stop_patience readings in a row. Requires skip_update_masked_frac. "
+            "See agent-docs/training-methods/async-grpo/monitoring.md#early-stop."
         },
     )
 
     truncation_alarm_rate: float | None = field(
         default=0.25,
         metadata={
-            "help": "Warn when the share of a rollout round's episodes that ended truncated "
-            "(`episode/truncation_rate`: the max_turns cap, the episode output budget, or a cut turn past its "
-            "recoveries) rises over "
-            "this, and log `episode/truncation_alarm` (1 over, 0 under) every round. Past it the turn or "
-            "token budget, not the task, ends a large share of episodes. The warning repeats only after the rate "
-            "has dropped back under. In [0, 1); None = off."
+            "help": "Warn when a rollout round's episode/truncation_rate (episodes ended by the turn or token "
+            "budget, not the task) rises over this, logging episode/truncation_alarm every round. In [0, 1); unset "
+            "= off."
         },
     )
 
@@ -419,82 +346,63 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
     drop_degenerate_groups: bool = field(
         default=True,
         metadata={
-            "help": "Drop GRPO groups whose completions ALL settled the same environment reward (grade, "
-            "shaping and external scores; the trainer's reasoning price and floor excluded: length regularizers, "
-            "with which a group tied on everything else would train on its members' reasoning lengths alone). Such "
-            "a group has no task contrast to learn from, and its tokens would still inflate the loss normalizer and "
-            "dilute the groups that do carry signal. "
-            "Masking them restores the effective batch size (the cheap half of DAPO's dynamic sampling: "
-            "drop, without resampling replacements). Logged as `sampling/degenerate_group_frac`. Default on."
+            "help": "Drop GRPO groups whose completions all settled the same environment reward (the reasoning "
+            "price and floor left out), which carry no task contrast yet dilute the loss normalizer. Logged as "
+            "sampling/degenerate_group_frac. See agent-docs/training-methods/async-grpo/objective.md#advantages."
         },
     )
 
     rollout_stop_tokens: list[str] = field(
         default_factory=list,
         metadata={
-            "help": "Special-token strings that end a turn's generation, resolved to ids via the tokenizer "
-            "and sent as the engine's `stop_token_ids`. Set to the model's tool-call terminator so a turn "
-            "stops when the model emits its call and the environment runs it — without this a model whose "
-            "terminator is not an eos (e.g. gpt-oss `<|call|>` under harmony-disabled serving) keeps "
-            "generating, hallucinating the tool result and playing out the whole episode in one turn "
-            "(huge, off-policy-noisy completions). Empty (default) = only the model's eos stops a turn."
+            "help": "Special-token strings that end a turn, sent as the engine's stop_token_ids; list the model's "
+            "tool-call terminator when it is no eos (gpt-oss <|call|> under harmony-disabled serving). Empty = only "
+            "eos stops a turn. See agent-docs/training-methods/async-grpo/episodes.md#tool-calls."
         },
     )
 
     rollout_chat_template_kwargs: dict[str, Any] = field(
         default_factory=dict,
         metadata={
-            "help": "Chat-template variables sent with every rollout request as `chat_template_kwargs` and applied "
-            "to the trainer's own renders, so both sides see one template state. The stock Qwen3.6 template reads "
-            "`preserve_thinking`: with the env's `carry_reasoning`, the carried reasoning stays rendered "
-            "even after a user message (a recovery nudge). `reasoning_effort`, `reasoning_budget` and "
-            "`reasoning_budget_soft` are refused here: all are per episode; the level travels as the request's "
-            "top-level field (SGLang also gets an exact nested copy, the spelling it lets override that field), the "
-            "budget and whether it is soft are added to the nested form per request."
+            "help": "Chat-template variables sent with every rollout request (chat_template_kwargs) and applied to "
+            "the trainer's own renders, so both sides see one template state. reasoning_effort, reasoning_budget "
+            "and reasoning_budget_soft are refused here, being per episode. "
+            "See agent-docs/training-methods/async-grpo/episodes.md#chat-template."
         },
     )
 
     reasoning_price: dict[str, float] | None = field(
         default=None,
         metadata={
-            "help": "Per effort level, the reward units an episode pays per 1,000 reasoning tokens, summed over its "
-            "assistant turns (null = off). Must map exactly the three effort levels, low, medium and high (refused at "
-            "trainer construction otherwise, as is an environment whose reasoning_effort is unset); price the lowest "
-            "level highest, so the same trace costs most where little reasoning was asked. Capped by "
-            "reasoning_price_cap. Logged as reward/reasoning_price."
+            "help": "Per effort level (exactly low, medium and high), the reward units an episode pays per 1,000 "
+            "reasoning tokens, capped by reasoning_price_cap; unset = off. Price the lowest level highest, so the "
+            "same trace costs most where little reasoning was asked. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#price."
         },
     )
     reasoning_price_past_budget: bool = field(
         default=False,
         metadata={
-            "help": "Price only the reasoning tokens each turn spends past its level's soft per-turn budget (a level "
-            "with enforce_thinking_cap: false), summed over turns, instead of every reasoning token: the soft "
-            "budget's ceiling, free within it. Needs reasoning_price; a run where a drawable level's budget is "
-            "enforced or unset is refused at trainer construction."
+            "help": "Price only the reasoning tokens each turn spends past its level's soft budget instead of every "
+            "reasoning token. Needs reasoning_price and a soft budget on every drawable level. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#price-past-the-budget."
         },
     )
     reasoning_price_cap: float = field(
         default=DEFAULT_REASONING_PRICE_CAP,
         metadata={
-            "help": "Cap of reasoning_price per episode, in reward units: a long trace cannot outweigh the task "
-            "reward. Keep it, plus reasoning_floor, below what the environment charges for the decisions it "
-            "prices (a resubmission, in code contests); under reasoning_price_past_budget each alone, since an "
-            "episode then pays one at most."
+            "help": "Cap of reasoning_price per episode, in reward units, so a long trace cannot outweigh the task "
+            "reward. Keep it, plus reasoning_floor, below what the environment charges for the decisions it prices. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#price."
         },
     )
     reasoning_floor: float = field(
         default=0.0,
         metadata={
-            "help": "Weight of the reasoning under-use floor (0 = off): an episode whose reasoning tokens, summed "
-            "over its turns, fall short of three quarters of its per-turn thinking budget (its level's "
-            "thinking_tokens, enforced or soft, an enforced one clamped by rollout_max_thinking_tokens) pays "
-            "-weight x shortfall / that reference. The one term that pays for more reasoning; it resists "
-            "reasoning shrinking toward nothing. Keep it, plus "
-            "reasoning_price_cap while the price is on, below what the environment charges for the decisions it "
-            "prices (a resubmission, in code contests); under reasoning_price_past_budget each alone, since an "
-            "episode then pays one at most. An episode with no thinking budget is free of it, and a "
-            "run where no drawable level sets one and rollout_max_thinking_tokens is unset is refused at trainer "
-            "construction. Logged as reward/reasoning_floor."
+            "help": "Weight of the reasoning under-use floor (0 = off): an episode reasoning less than three "
+            "quarters of its per-turn thinking budget pays -weight × shortfall / that three-quarter target. Keep it, plus "
+            "reasoning_price_cap, below what the environment charges for the decisions it prices. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#floor."
         },
     )
 
@@ -527,15 +435,10 @@ class AsyncTrainingConfig(AdvantageShapingArguments, GRPOEarlyStopArguments, Chu
         default=DEFAULT_EPISODE_TIMEOUT_SECONDS,
         metadata={
             "help": (
-                "Deadline for one rollout episode in seconds of engine-serving time (a weight-sync pause is "
-                "credited back). Bounds the WHOLE episode "
-                "(generation + tool execution + grading), unlike request_timeout which bounds a single "
-                "HTTP call. Without it a wedged tool/sandbox blocks its rank forever, and the other ranks "
-                "block behind it at the next collective. A timed-out episode is cancelled and counted in "
-                "episode/error_rate. The default sits at two thirds of the "
-                f"{DEFAULT_NCCL_TIMEOUT_MINUTES}-min default NCCL watchdog so a straggler is cancelled "
-                f"with ~{DEFAULT_NCCL_TIMEOUT_MINUTES // 3} min of margin; raise DIST_NCCL_TIMEOUT_MINUTES "
-                "before raising this."
+                "Deadline in seconds for one whole rollout episode (generation, tools, grading), with "
+                "weight-sync pauses credited back; a timed-out episode is canceled and counted in "
+                "episode/error_rate. It must stay under the NCCL watchdog: the default is two thirds of the "
+                f"{DEFAULT_NCCL_TIMEOUT_MINUTES}-min default, so raise DIST_NCCL_TIMEOUT_MINUTES before raising it."
             )
         },
     )

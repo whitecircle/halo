@@ -6,7 +6,7 @@ Rollouts differ from the trainer's policy by the engine↔trainer numerics gap, 
 
 ## Training rows
 
-`train_on_sampled_tokens` (default on) trains on the ids the model sampled. Each assistant turn is its own row (the engine's rendered prompt ids, then the turn's sampled ids), sharing the trajectory's advantage.
+`train_on_sampled_tokens` (default on) trains on the ids the model sampled, which removes every re-tokenization mismatch (tool-call rendering, argument whitespace, reasoning re-render). Each assistant turn is its own row (the engine's rendered prompt ids, then the turn's sampled ids), sharing the trajectory's advantage.
 
 vLLM returns the ids under `--return-tokens-as-token-ids` (SGLang needs no flag); the [importance-sampling correction](#importance-sampling-correction) also needs `--logprobs-mode processed_logprobs`.
 
@@ -61,7 +61,7 @@ The `isr_*` stages mask rather than reweight: a masked token loses its policy-gr
 | `isr_veto_min` | Mask a trajectory if any corrected token's raw ratio drops below it. | `sampling/is_veto_masked_frac` |
 | `isr_opsm_delta` | Mask negative-advantage trajectories drifting past N nats. | `sampling/is_opsm_masked_frac` |
 
-The geometric band needs both bounds, `0 < min < 1 < max`. The code-contests recipes run it at `[0.95, 1.05]` with `isr_veto_min: 1.0e-4` and `isr_opsm_delta: 0.05`.
+The geometric band (NeMo-RL's seq-mask-tis, slime's MIS) needs both bounds, `0 < min < 1 < max`; `[0.99, 1.01]` is a starting point. The veto follows verl and slime (~`1e-4`), and the negative-advantage mask is DeepSeek-V3.2's off-policy sequence masking. The code-contests recipes run it at `[0.95, 1.05]` with `isr_veto_min: 1.0e-4` and `isr_opsm_delta: 0.05`.
 
 **Size the geometric band above the numerical floor.** Trainer and engine are different bf16 stacks, so their mean log-ratio is negative at identical weights: ~0.002 nats/token at sampling entropy 0.4, ~0.04 at 1.0. A band inside that floor masks every step. Sustained masking at low entropy is a disagreement to fix, not a band to widen.
 
@@ -71,11 +71,13 @@ TRL's `off_policy_mask_threshold` is refused: this trainer never emits the batch
 
 `skip_update_masked_frac` (`(0, 1]`, off by default) needs at least one stage. It trips when `sampling/is_masked_traj_frac` or `sampling/is_masked_token_frac` passes it. A tripped round zeroes its advantages and drops its gradients (`sampling/update_skipped`).
 
+Past a high masked fraction the survivors are a selection-biased sample, the rows where the drifted policy still agrees with the rollout, so training on them amplifies the drift; skipping holds the policy still until the next weight sync re-anchors the rollouts. `0.3`–`0.5` is a sane range.
+
 ### Engine reference
 
-`isr_engine_reference: true` (off in the recipes) takes the trainer↔engine floor out of the stages: each training round the engine re-scores every train row that carries sampling log-probs, under the weights it last received, and the stages read that log-ratio. The engine's own decode-vs-prefill gap stays in it, so the band still needs room.
+`isr_engine_reference: true` (off in the recipes) takes the trainer↔engine floor out of the stages: each training round the engine re-scores every train row that carries sampling log-probs, under the weights it last received, and the stages read that log-ratio. The engine's own decode-vs-prefill gap stays in it (−0.003 nats/token at sampling entropy 0.36 with identical weights, against −0.0003 for trainer-vs-engine-prefill) and grows with entropy, so the band still needs room.
 
-It needs `rollout_temperature` and `rollout_top_p` of `1.0`, with `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off, and costs one prefill per row ([Throughput](../../infrastructure/rollout-servers.md#throughput)). A startup probe refuses a server whose prompt log-probs are inconsistent across CUDA-graph prefill sizes, the garbage unpatched vLLM 0.26.0 returns under MTP ([vLLM server patches](../../infrastructure/rollout-servers.md#vllm-server-patches)).
+It needs `rollout_temperature` and `rollout_top_p` of `1.0`, with `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off, and costs one prefill per row, for which a vLLM server needs memory headroom ([Throughput](../../infrastructure/rollout-servers.md#throughput)). A startup probe refuses a server whose prompt log-probs are inconsistent across CUDA-graph prefill sizes, the garbage unpatched vLLM 0.26.0 returns under MTP ([vLLM server patches](../../infrastructure/rollout-servers.md#vllm-server-patches)).
 
 ## Advantages
 
@@ -91,7 +93,7 @@ A trajectory's advantage is its total reward minus the mean over its group's val
 
 A non-finite reward or advantage fails the step on every rank.
 
-`drop_degenerate_groups` defaults **on** here (off for online GRPO): it drops a group whose members all settled the same environment reward, which would only inflate the DAPO normalizer (`sampling/degenerate_group_frac`). The trainer's [reasoning floor and price](reasoning.md#reasoning-length-reward) are left out of that comparison, so reasoning length alone never breaks a tie.
+`drop_degenerate_groups` defaults **on** here (off for online GRPO): it drops a group whose members all settled the same environment reward, which would only inflate the DAPO normalizer (`sampling/degenerate_group_frac`), the cheap half of DAPO's dynamic sampling (drop, without resampling replacements). The trainer's [reasoning floor and price](reasoning.md#reasoning-length-reward) are left out of that comparison, so reasoning length alone never breaks a tie.
 
 `mask_truncated_completions` is enforced here, not in TRL's generation path; the recipes leave it off.
 
@@ -129,10 +131,10 @@ A non-finite mass raises on every rank, knob on or off. The balance raises unles
 
 ## Routing replay
 
-`routing_replay` pins the update pass's top-k expert selection to a recorded mask, so the gradient forward trains through the routing the IS ratios were computed on.
+`routing_replay` pins the update pass's top-k expert selection to a recorded mask, so the gradient forward trains through the routing the IS ratios were computed on. Gate weights are re-derived from the live router scores, so replay removes only the discontinuous routing-flip part of the pass-to-pass divergence (Qwen's Routing Replay, DeepSeek's Keep Routing).
 
 - `recompute` (R2) captures the mask in the trainer's no-grad log-prob pass, so it needs a config that runs that pass: the IS correction, a nonzero `beta`, `num_iterations > 1`, or misaligned gradient accumulation.
-- `rollout` (R3) replays the engine's own selection; it needs `train_on_sampled_tokens` and a capture-capable server. The gpt-oss `-ep1` recipes ship it.
+- `rollout` (R3, experimental) replays the engine's own selection; it needs `train_on_sampled_tokens` and a capture-capable server. Positions the engine did not cover (prefix-cache hits) keep natural routing, so check the capture coverage on your serving shape before a long run. The gpt-oss `-ep1` recipes ship it.
 
 Both need MoE EP wrappers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of selections the live top-k would have flipped.
 

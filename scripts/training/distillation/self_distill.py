@@ -31,6 +31,7 @@ from trl import ModelConfig, SFTConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.mixins import format_field_names
 from src.args.self_distill_args import SelfDistillationArguments
+from src.config_validation import reject_non_default_args
 from src.data.collators.self_distill import (
     SelfDistillTextCollator,
     audit_self_distill_row,
@@ -63,7 +64,6 @@ from src.training.script_runner import (
     install_resolved_tokenizer,
     load_script_datasets,
     log_script_dataset_examples,
-    reject_non_default_args,
     reject_trl_dataset_prep_args,
     resolve_vlm_run,
     run_trainer,

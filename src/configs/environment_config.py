@@ -4,7 +4,7 @@ knobs are in AsyncTrainingConfig."""
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.args.validation import RangeValidatedConfig
+from src.config_validation import RangeValidatedConfig
 from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms
 
 
@@ -16,39 +16,35 @@ class EnvironmentConfig(RangeValidatedConfig):
     environment_type: str = field(
         default="react_math",
         metadata={
-            "help": "Environment registry name, resolved through src/environments/registry.py "
-            "(get_registered_environments() lists the live set, which custom register_environment() "
-            "calls extend; an unknown name raises with the available names)."
+            "help": "Environment registry name: get_registered_environments() lists the live set, which "
+            "custom register_environment() calls extend; an unknown name raises with the available names."
         },
     )
 
     rewards: list[dict[str, Any]] = field(
         default_factory=lambda: [{"source": "environment"}],
         metadata={
-            "help": "Reward terms, each {source, name (required for judge/reward_model), weight?, exponent?, ...}, "
-            "summed into the episode reward as weight x score^exponent over a score in [0, 1]: 'environment' (the "
-            "environment's own grade, logged as reward/objective), 'judge' (a generative judge; model, requirements "
-            "or checks, view, ...) and 'reward_model' (a served Bradley-Terry model; url, model, backend, ...). The "
-            "environment's per-turn and shaping terms add on top. YAML-only; see "
-            "agent-docs/training-methods/grpo/rewards/README.md."
+            "help": "Reward terms, each {source, name?, weight?, exponent?, ...}, summed into the episode reward as "
+            "weight × score^exponent: 'environment' (the environment's own grade), 'judge' or 'reward_model'. The "
+            "environment's per-turn and shaping terms add on top; YAML-only. "
+            "See agent-docs/training-methods/grpo/rewards/README.md#environment-arm."
         },
     )
 
     max_turns: int | None = field(
         default=None,
         metadata={
-            "help": "Maximum environment turns per episode. None (default) keeps the environment "
-            "class's own default: code_contests 15, codeforces 15, swe 20, exam_qa 8; "
-            "every other environment 10."
+            "help": "Maximum environment turns per episode, an int >= 1. Unset keeps the environment class's own "
+            "default. See agent-docs/training-methods/async-grpo/environments/README.md#registry."
         },
     )
 
     environment_kwargs: dict[str, Any] = field(
         default_factory=dict,
         metadata={
-            "help": "Env-specific kwargs passed through to the registry factory. "
-            "Examples: {search_backend: duckduckgo}, {open_book: true}, "
-            "{timeout_per_test: 10}, {mcp_server: filesystem}."
+            "help": "Environment-specific kwargs passed to the registry factory, like {search_backend: duckduckgo} "
+            "or {timeout_per_test: 10}. "
+            "See agent-docs/training-methods/async-grpo/environments/README.md#configuration."
         },
     )
 
@@ -95,7 +91,7 @@ class EnvironmentConfig(RangeValidatedConfig):
         """Merge the reward terms and turn budget with ``environment_kwargs`` into the dict passed to
         ``resolve_environment(environment_type, config)``."""
         # Only an explicitly configured turn cap is forwarded; injecting the dataclass default would
-        # override the per-class defaults (listed in the ``max_turns`` help).
+        # override the per-class defaults.
         config = {key: value for key, value in self._core_env_config().items() if value is not None}
         config.update(self.environment_kwargs)
         return config

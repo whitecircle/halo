@@ -337,5 +337,14 @@ def test_a_reward_with_no_terms_is_refused():
     assert len(RewardComposer([EnvironmentTerm()]).terms) == 1
 
 
+def test_the_rlvr_arm_admits_its_graders_and_the_external_scorers_only():
+    """The RLVR arm runs its two graders and scores the judge and reward-model terms externally; it has
+    no environment whose grade an environment term would read."""
+    args = RLVROnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, {"source": "format"}, JUDGE_SPEC, RM_SPEC])
+    assert [type(term) for term in args.reward_terms] == [AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm]
+    with pytest.raises(ValueError, match="unknown reward source 'environment'"):
+        RLVROnlineGRPOScriptArguments(rewards=[{"source": "environment"}])
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

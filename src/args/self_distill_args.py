@@ -5,7 +5,7 @@ from typing import ClassVar
 
 from src.args.mixins import DEFAULT_ANSWER_FIELD, SDPGArguments, SelfDistillationLoss, format_field_names
 from src.args.sft_args import SFTScriptArguments
-from src.args.validation import require_finite, require_positive
+from src.config_validation import require_finite, require_positive
 
 
 @dataclass
@@ -32,12 +32,12 @@ class SelfDistillationArguments(SFTScriptArguments, SDPGArguments):
     sdpg_answer_field: str | None = field(
         default=DEFAULT_ANSWER_FIELD,
         metadata={
-            "help": "Dataset field holding the ground-truth answer for the hint (required while sdpg_beta_base > 0)."
+            "help": "Dataset column holding the ground-truth answer for the hint, required while sdpg_beta_base > 0."
         },
     )
     privileged_solution_field: str | None = field(
         default="solution",
-        metadata={"help": "Optional dataset field with a reference solution for {solution}."},
+        metadata={"help": "Optional dataset column holding a reference solution, which fills {solution}."},
     )
 
     reference_kl_coef: float = field(
@@ -62,7 +62,7 @@ class SelfDistillationArguments(SFTScriptArguments, SDPGArguments):
     confidence_field: str | None = field(
         default=None,
         metadata={
-            "help": "Dataset field with a per-sample confidence in [0, 1]. When set, the "
+            "help": "Dataset column holding a per-sample confidence in [0, 1]. When set, the "
             "SFT and OPD losses are weighted by confidence**confidence_power, divided by its mean over "
             "the train split, mirroring the soft-weighted (w_conf) SFT arm."
         },

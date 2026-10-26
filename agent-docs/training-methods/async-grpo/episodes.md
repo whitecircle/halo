@@ -25,7 +25,7 @@ sampling fields reach no sampler and are refused when set ([Rollout backend](set
 | Knob | Default | Effect |
 |---|---|---|
 | `rollout_max_tokens` | `32768` | caps **one turn**, reasoning and answer together |
-| `max_turns` | `null`: the environment class's own (15 on `code_contests` / `codeforces`, 20 on `swe`, 8 on `exam_qa`, 10 elsewhere) | an episode that burns them ends truncated |
+| `max_turns` | `null`: the environment class's own ([per environment](environments/README.md#registry)) | an episode that burns them ends truncated |
 | `rollout_max_episode_tokens` | `null`: `max_turns × rollout_max_tokens` | caps what an **episode's** assistant turns sample together, recovery turns included; at least `rollout_max_tokens` |
 | `max_prompt_length` | `null` | drops dataset rows whose rendered prompt exceeds it |
 | `max_train_row_tokens` | `null`: no cap beyond the context check | memory bound on a training row; must exceed `rollout_max_tokens` |

@@ -6,7 +6,7 @@ from typing import Literal
 from transformers import TrainingArguments
 
 from src.args.mixins import DatasetNumProcArguments
-from src.args.validation import RangeValidatedConfig, present, require_finite, require_int, require_positive
+from src.config_validation import RangeValidatedConfig, present, require_finite, require_int, require_positive
 
 
 @dataclass
@@ -20,17 +20,16 @@ class DistillationConfig(DatasetNumProcArguments, RangeValidatedConfig, Training
     ] = field(
         default="kl_divergence",
         metadata={
-            "help": "Distillation loss type. Options: kl_divergence, mse, soft_cross_entropy, "
-            "cosine_similarity, jensen_shannon, slim"
+            "help": "Distillation loss: kl_divergence, mse, soft_cross_entropy, cosine_similarity, jensen_shannon "
+            "or slim."
         },
     )
     distill_temperature: float = field(
         default=1.0,
         metadata={
             "help": "Softmax temperature for the temperature-based distillation losses "
-            "(kl_divergence, soft_cross_entropy, jensen_shannon, slim). IGNORED by mse and "
-            "cosine_similarity, whose definitions take no temperature — call_divergence forwards it "
-            "only to losses that declare it."
+            "(kl_divergence, soft_cross_entropy, jensen_shannon, slim). Ignored by mse and "
+            "cosine_similarity, whose definitions take no temperature."
         },
     )
     distill_alpha: float = field(
@@ -51,8 +50,8 @@ class DistillationConfig(DatasetNumProcArguments, RangeValidatedConfig, Training
     max_length: int | None = field(
         default=2048,
         metadata={
-            "help": "Maximum tokenized sequence length. Over-length conversations are dropped, not "
-            "truncated. null / non-positive resolves to the student's context window at launch."
+            "help": "Maximum tokenized sequence length; an over-length conversation is dropped, not truncated. "
+            "Unset or non-positive = the student's context window."
         },
     )
 

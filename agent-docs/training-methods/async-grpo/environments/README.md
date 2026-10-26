@@ -12,19 +12,21 @@ An episode ends when the environment reports it done, or at `max_turns`.
 
 `environment_type` resolves through `src/environments/registry.py`. `get_registered_environments()` lists the live set; `register_environment` extends it ([Custom Environments](custom.md)).
 
-| `environment_type` | Class | Tools |
-|---|---|---|
-| `react_math` | `ReActEnvironment` | `calculate`, `python` |
-| `react_search` | `ReActEnvironment` | `web_search` |
-| `native_math` | `NativeToolUseEnvironment` | `calculate`, `python` |
-| `native_coding` | `NativeToolUseEnvironment` | `python_repl` |
-| `native_combined` | `NativeToolUseEnvironment` | `calculate`, `python`, `web_search`, file ops |
-| `qa_search` | `NativeToolUseEnvironment` (factory) | `web_search` (+ `python` under `include_python_tools`) |
-| `exam_qa` | `ExamQAEnvironment` | none; `web_search` under `open_book` |
-| `swe` | `SweEnvironment` | `run_code`, `run_bash_command`, workspace file ops |
-| `code_contests` | `CodeContestsEnvironment` | scratchpad test tool, `submit_solution` |
-| `codeforces` | `CodeContestsEnvironment` | same, graded by token comparison |
-| `mcp` | `NativeMCPClientEnvironment` | whatever the server advertises |
+| `environment_type` | Class | Tools | Default `max_turns` |
+|---|---|---|---|
+| `react_math` | `ReActEnvironment` | `calculate`, `python` | 10 |
+| `react_search` | `ReActEnvironment` | `web_search` | 10 |
+| `native_math` | `NativeToolUseEnvironment` | `calculate`, `python` | 10 |
+| `native_coding` | `NativeToolUseEnvironment` | `python_repl` | 10 |
+| `native_combined` | `NativeToolUseEnvironment` | `calculate`, `python`, `web_search`, file ops | 10 |
+| `qa_search` | `NativeToolUseEnvironment` (factory) | `web_search` (+ `python` under `include_python_tools`) | 10 |
+| `exam_qa` | `ExamQAEnvironment` | none; `web_search` under `open_book` | 8 |
+| `swe` | `SweEnvironment` | `run_code`, `run_bash_command`, workspace file ops | 20 |
+| `code_contests` | `CodeContestsEnvironment` | scratchpad test tool, `submit_solution` | 15 |
+| `codeforces` | `CodeContestsEnvironment` | same, graded by token comparison | 15 |
+| `mcp` | `NativeMCPClientEnvironment` | whatever the server advertises | 10 |
+
+The last column is the class's own turn budget, which `max_turns: null` keeps.
 
 The ReAct presets parse the action out of the text. Every other environment uses native tool calls, so the server needs the family's `--tool-call-parser` ([Tool calls](../episodes.md#tool-calls)).
 
@@ -64,7 +66,7 @@ Every environment accepts these. `max_turns` and `rewards` are top-level fields;
 
 | Knob | Default | Effect |
 |---|---|---|
-| `max_turns` | class default: 10; `exam_qa` 8, code contests 15, `swe` 20 | Turns before the episode truncates; ≥ 1 |
+| `max_turns` | the class default ([Registry](#registry)) | Turns before the episode truncates; ≥ 1 |
 | `rewards` | `[{source: environment}]` | The reward terms ([Reward Terms](../../grpo/rewards/README.md)) |
 | `tool_success_reward` / `tool_error_penalty` | `0.05` / `0.1` (`mcp` pays `0.1`; code contests `0` / `0`) | Paid per successful tool call, charged per failed one, logged as `reward/turn_shaping`. A call a sandbox outage ended is unpriced ([Sandbox faults](sandbox.md#sandbox-faults)) |
 | `tool_reward_cap` | `tool_success_reward × max_turns` | Episode cap on successful-call pay, so call spam cannot out-earn the objective |

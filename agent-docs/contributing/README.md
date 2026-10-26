@@ -125,6 +125,11 @@ make train METHOD=preference/smpo CONFIG=<config>    # METHOD defaults to sft
   [Trainer Architecture](../reference/trainer-architecture.md).
 - **Naming, named constants, module order, comments and docstrings** follow the Code style section
   of `CLAUDE.md`.
+- **A field help is short; the docs hold the long form.** A config or script-argument field's `help`
+  gives the effect and what the default means in one or two sentences, optionally closed by a
+  `See agent-docs/<page>#<heading>.` pointer, which the reference check resolves. Rationale,
+  measurements and interaction rules go to the
+  [Configuration Reference](../reference/configuration-reference.md) or the method's own page.
 
 ## AI-assisted contributions
 
@@ -188,6 +193,12 @@ manifest.
     own top-level name, a `module.name = fake` assignment included, must target a name some function reads
     when it runs, one of that module or, outside the tests, one reading it through the module object;
     patching a name the module only binds intercepts nothing, so the test would pass whatever the code does.
+
+- **A message names symbols, not source paths.** `tests/cpu/conventions/test_messages_name_symbols.py`
+  fails a string in `src/` or `scripts/` that names a file of the package by path, from the repo root or
+  from the package's: an error, a warning or a field help names the function, class or constant its reader
+  acts on (`DECODER_LAYER_LIST_ATTRS`, `LigerFamilySpec`), which a move leaves valid. Docstrings are exempt,
+  and a `scripts/` tool a user runs keeps its path.
 
 - **A move rewrites every reference in the same change.** One symbol keeps one import path, so moving a
   module or a symbol rewrites the imports that name it (a `from` line split per destination), its

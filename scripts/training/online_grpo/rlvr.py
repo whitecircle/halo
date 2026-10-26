@@ -17,6 +17,7 @@ from trl import GRPOConfig, ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.mixins import RLRRArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
+from src.config_validation import reject_non_default_args, reject_unsupported_args
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
 from src.data.pipeline.rendered import render_generation_prompt
@@ -48,8 +49,6 @@ from src.training.script_runner import (
     load_script_model,
     log_script_dataset_examples,
     padded_workload_attn_implementation,
-    reject_non_default_args,
-    reject_unsupported_args,
     run_trainer,
     verify_backend_on_rank0,
 )

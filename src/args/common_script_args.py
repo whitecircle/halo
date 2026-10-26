@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from src.args.validation import (
+from src.config_validation import (
     RangeValidatedConfig,
     present,
     require_finite,
@@ -47,10 +47,9 @@ class CommonScriptArguments(RangeValidatedConfig):
     test_size: float | None = field(
         default=None,
         metadata={
-            "help": "Test split proportion (like 0.05). Leave empty to keep the dataset's own split: "
-            "set on a dataset that already carries a test split, the two splits are concatenated and "
-            "re-split at this proportion. Ignored (warned) on a sharded or pre-processed dataset, "
-            "whose split was fixed at preparation time."
+            "help": "Test split proportion, like 0.05; unset keeps the dataset's own split. Set on a dataset that "
+            "already has a test split, it concatenates the two and re-splits, and it is ignored (warned) on a "
+            "sharded or pre-processed dataset."
         },
     )
     project_name: str = field(
@@ -60,23 +59,23 @@ class CommonScriptArguments(RangeValidatedConfig):
             "CLEARML_PROJECT; leave it out to take the per-script default rather than nulling it."
         },
     )
-    pad_token: str | None = field(default=None, metadata={"help": "Special pad token"})
-    bos_token: str | None = field(default=None, metadata={"help": "Special bos token"})
-    eos_token: str | None = field(default=None, metadata={"help": "Special eos token"})
+    pad_token: str | None = field(default=None, metadata={"help": "Override for the tokenizer's pad token."})
+    bos_token: str | None = field(default=None, metadata={"help": "Override for the tokenizer's bos token."})
+    eos_token: str | None = field(default=None, metadata={"help": "Override for the tokenizer's eos token."})
     chat_template: str | None = field(
         default=None,
         metadata={
-            "help": "Chat template for the model. Can be either: "
-            "(1) a path to a .jinja/.jinja2/.j2 file, or "
-            "(2) the template string directly. "
-            "If not provided, uses the tokenizer's default template."
+            "help": "Chat template: a path to a .jinja/.jinja2/.j2 file, or the template string itself. Unset uses "
+            "the tokenizer's own template."
         },
     )
     force_chat_template: bool = field(
         default=False,
-        metadata={"help": "Force custom chat template even if tokenizer already has one"},
+        metadata={"help": "Use chat_template even when the tokenizer ships its own."},
     )
-    added_special_tokens: list[str] | None = field(default=None, metadata={"help": "Additional special tokens"})
+    added_special_tokens: list[str] | None = field(
+        default=None, metadata={"help": "Special tokens added to the tokenizer's existing extra-special set."}
+    )
     tokenizer_backend: TokenizerBackend = field(
         default="hf",
         metadata={
@@ -86,57 +85,55 @@ class CommonScriptArguments(RangeValidatedConfig):
     tools_field: str | None = field(
         default=None,
         metadata={
-            "help": "Field in dataset with tool definitions (list of dicts or "
-            "JSON string) to pass to apply_chat_template. Scripts that "
-            "don't render chat templates from rows reject it up front."
+            "help": "Dataset column holding tool definitions (a list of dicts or a JSON string) passed to "
+            "apply_chat_template. Scripts that don't render chat templates from rows reject it up front."
         },
     )
     unfreeze_layers_patterns: list[str] | None = field(
         default=None,
-        metadata={"help": "Patterns of layer names needed to be unfreeze for learning"},
+        metadata={
+            "help": "Freeze the whole model, then unfreeze the modules whose full names match these fnmatch patterns."
+        },
     )
     freeze_layers_patterns: list[str] | None = field(
         default=None,
-        metadata={"help": "Patterns of layer names to freeze (applied after unfreeze)"},
+        metadata={
+            "help": "Freeze the parameters whose full names match these fnmatch patterns, applied after unfreezing."
+        },
     )
     enable_efficiency_metrics: bool = field(
         default=False,
         metadata={
-            "help": "Enable EfficiencyCallback (per-step time, TPS, MFU/S-MFU, peak memory). "
-            "Off by default — MFU/S-MFU values can be misleading for trainers that "
-            "consume multiple sequences per step (DPO/SMPO/Reward forward both chosen "
-            "and rejected; Distillation also forwards a teacher). Set true in any "
-            "YAML to enable. Auto-sets include_num_input_tokens_seen='all' when on."
+            "help": "Enable EfficiencyCallback (step time, tokens/s, MFU/S-MFU, peak memory), which sets "
+            "include_num_input_tokens_seen='all'. Off by default: MFU is misleading on trainers that forward "
+            "several sequences per step (DPO, SMPO, reward, distillation). "
+            "See agent-docs/training-methods/callbacks.md#efficiencycallback."
         },
     )
     enable_moe_metrics: bool = field(
         default=True,
         metadata={
-            "help": "Enable MoEMetricsCallback (per-expert load distribution, dead-expert fraction, "
-            "first/last layer skew). Auto-no-op for non-MoE models. Needs output_router_logits, which "
-            "it enables only under moe_balancing=aux_loss; otherwise it reports only if already on. "
-            "Not wired at all under a bias_update balancing mode (RouterBiasBalancingCallback carries "
-            "the load metrics there) nor under pipeline parallelism, whose stage forwards return bare "
-            "tensors without router_logits — moe_balancing=bias_update is the route to load metrics under PP."
+            "help": "Enable MoEMetricsCallback (per-expert load, dead-expert fraction, first/last-layer skew); a "
+            "no-op on dense models. It turns on output_router_logits only under moe_balancing: aux_loss, and is not "
+            "wired under a bias balancing mode (whose callback logs the load) or pipeline parallelism. "
+            "See agent-docs/training-methods/callbacks.md#moemetricscallback."
         },
     )
     num_full_model_params: float | None = field(
         default=None,
         metadata={
-            "help": "Total parameters in the full model (across all EP/TP ranks). When set, "
-            "EfficiencyCallback computes distributed efficiency = params_ratio * mfu. "
-            "Auto-detected from local params when EP/TP not used; leave None for DP-only."
+            "help": "Total parameter count across all EP/TP ranks; EfficiencyCallback then reports distributed "
+            "efficiency = params_ratio × MFU. Leave unset on data-parallel runs, whose local count is the whole "
+            "model."
         },
     )
     report_mfu_diagnostics: bool = field(
         default=False,
         metadata={
-            "help": "Add MFU / S-MFU / achieved-TFLOPS to the headline training log. Off by "
-            "default: tokens/s/GPU (with cluster tokens/s, peak memory, step time) is the "
-            "reported and gated throughput metric — MFU's denominator (peak device FLOPS) "
-            "shifts with GPU/dtype/kernel and the MoE numerator is ambiguous, so it is a "
-            "misleading headline. The values are still computed every step (available on "
-            "EfficiencyCallback for diagnostics); this only controls headline visibility."
+            "help": "Add MFU, S-MFU and achieved TFLOPS to the headline training log; they are computed every step "
+            "either way. Off by default: tokens/s/GPU is the reported throughput metric, and MFU is misleading "
+            "across GPUs, dtypes and MoE models. "
+            "See agent-docs/reference/configuration-reference.md#commonscriptarguments."
         },
     )
     log_decoded_samples: bool = field(
@@ -150,45 +147,36 @@ class CommonScriptArguments(RangeValidatedConfig):
     save_completions: bool = field(
         default=True,
         metadata={
-            "help": "GRPO family (online/env): persist per-step rollout completions/trajectories to "
-            "<output_dir>/completions/completions_<step>.parquet (prompt, rendered completion, reward, "
-            "advantage) and, under wandb, a `completions` table — DECOUPLED from "
-            "console logging. This is the durable generation record; keep it on to inspect what the "
-            "policy produced. The rich per-sample CONSOLE table stays gated by TRL's `log_completions` "
-            "(set that True only to also spam the console). Text is rendered from detokenized message "
-            "content, unaffected by train_on_sampled_tokens (raw ids feed the loss only). Ignored by "
-            "non-generating trainers (SFT, offline GRPO). Default on."
+            "help": "GRPO family: write each step's rollout completions and trajectories to "
+            "<output_dir>/completions/completions_<step>.parquet, plus a wandb completions table. Independent of "
+            "TRL's console-only log_completions; ignored by trainers that do not generate. "
+            "See agent-docs/training-methods/async-grpo/monitoring.md#saved-trajectories."
         },
     )
     moe_balancing: BalancingMode = field(
         default="auto",
         metadata={
-            "help": "MoE router balancing: 'auto' (default; resolved per model), 'bias_update' "
-            "(DeepSeek-V3 sign update into the family's own checkpoint slot; raises where the family "
-            "has none), 'bias_update_transient' (the same update in a trainer-only side-buffer no "
-            "export carries), 'aux_loss' (the model's switch-style aux loss at "
-            "router_aux_loss_coef) or 'none'. Both bias modes are downgraded to 'none' on the "
-            "weight-sync RL scripts. Per-family resolution and slots: "
-            "agent-docs/training-methods/callbacks.md#moe-balancing-modes."
+            "help": "MoE router balancing: 'auto' (resolved per model), 'bias_update' (DeepSeek-V3 sign update into "
+            "the family's own checkpoint slot), 'bias_update_transient' (the same update in a side-buffer no export "
+            "carries), 'aux_loss' (the model's aux loss at router_aux_loss_coef) or 'none'. Both bias modes are "
+            "downgraded to 'none' on the weight-sync RL scripts. "
+            "See agent-docs/training-methods/callbacks.md#moe-balancing-modes."
         },
     )
     router_balancing_rate: float = field(
         default=1.0e-3,
         metadata={
-            "help": "Sign-step magnitude (gamma) for RouterBiasBalancingCallback when "
-            "moe_balancing resolves to bias_update or bias_update_transient. DeepSeek-V3 paper "
-            "used 1e-3. Ignored under every other resolved mode — including on the on-policy "
-            "weight-sync RL scripts, where both bias modes are downgraded to 'none' and this knob "
-            "is therefore unreachable."
+            "help": "Sign-step magnitude (gamma) of RouterBiasBalancingCallback under a bias_update mode; the "
+            "DeepSeek-V3 paper used 1e-3. Ignored under every other resolved mode, so also on the weight-sync RL "
+            "scripts."
         },
     )
     enable_torch_profiler: bool = field(
         default=False,
         metadata={
-            "help": "Enable TorchProfilerCallback — captures a short window of training steps "
-            "with torch.profiler and writes per-rank Chrome traces, flame-graph stacks, "
-            "an optional memory timeline, and a top-ops table. Off by default (adds "
-            "overhead during the active window). See agent-docs/reference/debugging.md."
+            "help": "Enable TorchProfilerCallback: per-rank Chrome traces, flame-graph stacks, an optional memory "
+            "timeline and a top-ops table over a short window of steps. Off by default for the overhead of its "
+            "active window. See agent-docs/reference/debugging.md#1a-torchprofiler--gpuoperator-trace."
         },
     )
     profiler_output_dir: str = field(
@@ -210,8 +198,8 @@ class CommonScriptArguments(RangeValidatedConfig):
     profiler_ranks: str = field(
         default="0",
         metadata={
-            "help": "Which global ranks profile: '0' (default), 'all', or a comma list like '0,8'. "
-            "Use 'all' to capture every rank when diagnosing rank skew / stragglers."
+            "help": "Which global ranks profile: '0', 'all' or a comma list like '0,8'. "
+            "Use 'all' to capture every rank when diagnosing rank skew or stragglers."
         },
     )
     profiler_record_memory_snapshot: bool = field(

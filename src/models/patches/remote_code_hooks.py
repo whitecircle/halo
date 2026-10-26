@@ -95,7 +95,8 @@ def _write_module_cache_whole() -> None:
     if bound is not shutil:
         raise RuntimeError(
             "transformers.dynamic_module_utils no longer reaches shutil as a module attribute, so its "
-            "module-cache copies cannot be made whole; update src/models/patches/remote_code_hooks.py."
+            "module-cache copies cannot be made whole; update _write_module_cache_whole for this "
+            "transformers release."
         )
     transformers.dynamic_module_utils.shutil = SimpleNamespace(copyfile=_copyfile_whole, **{_WHOLE_COPY_MARKER: True})
 

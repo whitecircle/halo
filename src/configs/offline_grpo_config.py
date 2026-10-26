@@ -6,7 +6,7 @@ from typing import Literal
 from transformers import TrainingArguments
 
 from src.args.mixins import ChunkedLogprobsArguments, DatasetNumProcArguments, ModelInitKwargsArguments
-from src.args.validation import RangeValidatedConfig, present, require_finite, require_int, require_positive_int
+from src.config_validation import RangeValidatedConfig, present, require_finite, require_int, require_positive_int
 
 
 @dataclass
@@ -22,34 +22,29 @@ class OfflineGRPOConfig(
     max_prompt_length: int | None = field(
         default=512,
         metadata={
-            "help": "Prompt budget in tokens; a longer prompt is LEFT-truncated (the tokens nearest "
-            "the completion are kept). None = no cap. Required under pipeline parallelism."
+            "help": "Prompt budget in tokens; a longer prompt is left-truncated, keeping the tokens nearest the "
+            "completion. Unset = no cap, which pipeline parallelism refuses."
         },
     )
     max_completion_length: int | None = field(
         default=None,
         metadata={
-            "help": "Completion budget in tokens; a longer stored completion is truncated from the end. "
-            "None (default) = no cap. Also the loss normalizer constant for loss_type='dr_grpo', and "
-            "required under pipeline parallelism — both reject None rather than normalize by a "
-            "default nobody chose."
+            "help": "Completion budget in tokens; a longer stored completion is truncated from the end. Unset = no "
+            "cap, which loss_type='dr_grpo' (its normalizer) and pipeline parallelism refuse."
         },
     )
     max_length: int | None = field(
         default=None,
         metadata={
-            "help": "Fixed total (prompt + completion) sequence length under pipeline parallelism; every "
-            "batch is padded to it because the pipeline's P2P buffer shapes freeze on the first step. "
-            "None defaults to max_prompt_length + max_completion_length. Nothing reads it off PP (the "
-            "budget there is max_prompt_length + max_completion_length), so setting it without "
-            "pipeline_parallel_size > 1 is rejected at trainer construction rather than silently "
-            "ignored."
+            "help": "Fixed total row length under pipeline parallelism, every batch padded to it; unset = "
+            "max_prompt_length + max_completion_length. Rejected at trainer construction without pipeline "
+            "parallelism. See agent-docs/reference/configuration-reference.md#offlinegrpoconfig."
         },
     )
 
     kl_beta: float = field(
         default=0.0,
-        metadata={"help": "Coefficient of the KL penalty to the reference policy. 0 (default) = no KL term."},
+        metadata={"help": "Coefficient of the KL penalty to the reference policy; 0 = no KL term."},
     )
 
     disable_dropout: bool = field(
@@ -58,66 +53,58 @@ class OfflineGRPOConfig(
     )
     padding_value: int | None = field(
         default=None,
-        metadata={"help": "Pad token id used by the collator. None takes the processing class's pad token."},
+        metadata={"help": "Pad token id used by the collator; unset takes the processing class's pad token."},
     )
     advantage_method: Literal["z_norm", "minmax", "quantile_norm", "quantile_uniform", "robust"] = field(
         default="quantile_norm",
         metadata={
-            "help": "How rewards map to advantages: 'z_norm' (z-score), 'minmax' ([-1,1]), "
-            "'quantile_norm' (default), 'quantile_uniform' ([-1,1]), 'robust' (median/IQR, "
-            "outlier-resistant)."
+            "help": "How rewards map to advantages: 'z_norm' (z-score), 'minmax' ([-1, 1]), 'quantile_norm' "
+            "(inverse normal CDF of ranks), 'quantile_uniform' ([-1, 1]) or 'robust' (median/IQR, outlier-resistant)."
         },
     )
     best_completion_emphasis: float | str = field(
         default=0.0,
         metadata={
-            "help": "Boost the best completion(s) per group. 0.0 (default) = none; a float > 1.0 = "
-            "fixed boost (1.5 = +50%); 'auto' = std-adaptive 3.0 + 2.0*std/(1+std) (3.0 at std=0 → "
-            "5.0 as std→∞). Applies to all advantage methods. Values in (0.0, 1.0] are rejected: the "
-            "consumer only applies a factor > 1.0, so they would silently do nothing."
+            "help": "Boost of the best completion(s) per group: 0.0 = off, a float > 1.0 a fixed boost (1.5 = "
+            "+50%), 'auto' std-adaptive. A value in (0.0, 1.0] is rejected as a silent no-op. "
+            "See agent-docs/reference/configuration-reference.md#offlinegrpoconfig."
         },
     )
     min_log_prob: float | None = field(
         default=-3.0,
         metadata={
             "help": "Clip floor for completion tokens with negative advantages (-3.0 ≈ 5% probability); "
-            "prevents instability from extremely low-probability tokens. None = no clipping."
+            "prevents instability from extremely low-probability tokens. Unset = no clipping."
         },
     )
     initial_min_log_prob: float | None = field(
         default=None,
         metadata={
-            "help": "When set, linearly schedules min_log_prob from this start value to its final value "
-            "over training (None = constant). Requires min_log_prob — without a final value to "
-            "schedule toward no scheduler is added (warned). Recommend ~the mean CE loss on the SFT data."
+            "help": "When set, linearly schedules min_log_prob from this start value to its final value over "
+            "training; it needs min_log_prob. A start near the mean CE loss on the SFT data works."
         },
     )
     drop_degenerate_groups: bool = field(
         default=False,
         metadata={
-            "help": "Drop groups whose completions all scored EXACTLY the same reward (and groups with "
-            "fewer than two completions) at tokenization. Every advantage method maps such a group to "
-            "all-zero advantages, so its rows carry no gradient yet still dilute the loss normalizer "
-            "and spend forward compute. Near-ties are kept — the rank-based advantage methods train "
-            "them with full-scale advantages. Applies to train and eval datasets alike."
+            "help": "Drop groups whose completions all scored exactly the same reward, or that hold fewer than two, "
+            "at tokenization: their all-zero advantages carry no gradient yet dilute the loss normalizer. Near-ties "
+            "are kept, since the rank-based advantage methods train them at full scale."
         },
     )
     loss_type: Literal["grpo", "bnpo", "dr_grpo"] = field(
         default="bnpo",
         metadata={
-            "help": "Loss normalization, all group-weighted: 'grpo' (per-sequence average then weighted "
-            "group mean, sequence-focused), 'bnpo' (default; global weighted token average, "
-            "token-focused — token-level like online 'dapo' but not equivalent to it, no importance ratios), "
-            "'dr_grpo' (normalized by effective batch size and max completion length — length-bias-free)."
+            "help": "Loss normalization, all group-weighted: 'grpo' (per-sequence average, then weighted group "
+            "mean), 'bnpo' (global weighted token average, token-level like online 'dapo' without importance "
+            "ratios) or 'dr_grpo' (normalized by effective batch size and max completion length, length-bias-free)."
         },
     )
     policy_gradient_formulation: Literal["prob_weighted", "reinforce"] = field(
         default="prob_weighted",
         metadata={
-            "help": "Per-token policy gradient: 'prob_weighted' (default) L=-(π·A), ∇L=-A·π·∇log π — "
-            "high-probability tokens get larger gradients, conservative, NOT online GRPO's importance "
-            "ratios; 'reinforce' L=-(log π·A), ∇L=-A·∇log π — unscaled, more aggressive, less stable "
-            "offline."
+            "help": "Per-token policy gradient: 'prob_weighted' (L = -π·A, conservative, with no importance ratio) "
+            "or 'reinforce' (L = -log π·A, unscaled, more aggressive and less stable offline)."
         },
     )
 

@@ -363,16 +363,15 @@ def _apply_liger_for_standard_models(
         if requested_kernels:
             raise ValueError(
                 f"liger_kernel_config requests {sorted(requested_kernels)} for model_type={model_type}, "
-                f"but no Liger applier covers this family — neither the toolkit registry "
-                f"(src/kernels/liger/families.py) nor liger_kernel's own. Remove the keys and set "
-                f"use_liger_kernel: false, or add a LigerFamilySpec for the family "
-                f"(agent-docs/models/adding-a-model.md)."
+                f"but no Liger applier covers this family — neither LIGER_FAMILY_SPECS nor liger_kernel's "
+                f"own registry. Remove the keys and set use_liger_kernel: false, or add a LigerFamilySpec "
+                f"for the family (agent-docs/models/adding-a-model.md)."
             )
         logger.warning(
             f"No Liger applier for model_type={model_type}: this run trains UNFUSED — RMSNorm, the "
             f"GLU MLPs, cross-entropy and RoPE all run eager, costing throughput and the logits-plane "
-            f"memory a fused loss would save. Add a LigerFamilySpec (src/kernels/liger/families.py), "
-            f"or set use_liger_kernel: false to state the choice."
+            f"memory a fused loss would save. Add a LigerFamilySpec to LIGER_FAMILY_SPECS, or set "
+            f"use_liger_kernel: false to state the choice."
         )
         return None
 

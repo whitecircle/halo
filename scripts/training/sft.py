@@ -23,6 +23,7 @@ from trl import ModelConfig, SFTConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.sft_args import SFTScriptArguments
 from src.callbacks.generate_examples import GenerateExamplesCallback
+from src.config_validation import reject_non_default_args
 from src.data.collators.factory import select_data_collator
 from src.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
 from src.data.pipeline.preprocessed_metadata import load_preprocessed_metadata, validate_preprocessing_compatibility
@@ -56,7 +57,6 @@ from src.training.script_runner import (
     install_resolved_tokenizer,
     load_script_datasets,
     log_script_dataset_examples,
-    reject_non_default_args,
     reject_trl_dataset_prep_args,
     resolve_vlm_run,
     run_trainer,

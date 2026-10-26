@@ -10,7 +10,7 @@ import string
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import Any, ClassVar, Literal, get_args
 
-from src.args.validation import (
+from src.config_validation import (
     RangeValidatedConfig,
     present,
     require_finite,
@@ -58,7 +58,7 @@ class ConversationRenderArguments:
 
     conversation_field: str | None = field(
         default="prompt",
-        metadata={"help": "Field in dataset with conversations (in list of dicts format)"},
+        metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."},
     )
     images_field: str | None = field(
         default=None,
@@ -70,29 +70,31 @@ class ConversationRenderArguments:
     )
     system_prompt: str | None = field(
         default=None,
-        metadata={"help": "Will use system prompt if there is no one in dialogue, set to None to disable"},
+        metadata={"help": "System prompt added to a conversation that has none; unset adds nothing."},
     )
-    train_on_completions_only: bool = field(default=True, metadata={"help": "Do train only on completions or not"})
+    train_on_completions_only: bool = field(
+        default=True, metadata={"help": "Train only on assistant completions, masking the prompt tokens."}
+    )
     assistant_message_template: str | None = field(
         default=None,
         metadata={
-            "help": "The rendered assistant-turn prefix of the model's chat template (e.g. '<|im_start|>assistant\\n'); "
-            "required when train_on_completions_only is on — no default fits every template"
+            "help": "The rendered assistant-turn prefix of the model's chat template, like '<|im_start|>assistant\\n'. "
+            "Required when train_on_completions_only is on, since no default fits every template."
         },
     )
     model_supports_system_role: bool = field(
         default=True,
         metadata={
-            "help": "Flag that indicates if model have support for system prompt. If not, will use user for setting system prompt"
+            "help": "Whether the chat template accepts a system role; false prepends the system prompt to the first "
+            "user message."
         },
     )
     interleaved_thinking: bool = field(
         default=False,
         metadata={
-            "help": "Pass clear_thinking=False to tokenizer.apply_chat_template so historical "
-            "assistant reasoning is preserved. Only meaningful for chat templates with a "
-            "clear_thinking switch — the GLM family among supported models; a no-op for every "
-            "other template. Text-only (the VLM path rejects it)."
+            "help": "Pass clear_thinking=False to apply_chat_template so earlier assistant turns keep their "
+            "reasoning; only templates with that switch (the GLM family) read it. Text-only: the VLM path rejects "
+            "it."
         },
     )
 
@@ -101,8 +103,8 @@ class ConversationRenderArguments:
 class GenerationEvalArguments(RangeValidatedConfig):
     """Eval-time example-generation knobs (SFT, DPO, SMPO, offline GRPO)."""
 
-    generate_eval_examples: bool = field(default=True, metadata={"help": "Do generate examples on eval"})
-    num_eval_examples: int = field(default=50, metadata={"help": "Number of examples to generate on eval phase"})
+    generate_eval_examples: bool = field(default=True, metadata={"help": "Generate text examples during evaluation."})
+    num_eval_examples: int = field(default=50, metadata={"help": "Examples to generate per evaluation."})
 
     def _validate_ranges(self) -> None:
         super()._validate_ranges()
@@ -121,18 +123,14 @@ class PromptDatasetArguments(RangeValidatedConfig):
     max_prompt_length: int | None = field(
         default=None,
         metadata={
-            "help": "Prompt budget in tokens, applied as a dataset FILTER: rows whose rendered prompt "
-            "exceeds it are dropped, never truncated (a truncated prompt loses the question the "
-            "verifier grades against). None (default) = no filtering. On the online (RLVR) arm, when "
-            "BOTH this and the generation budget are set their sum also becomes the tokenizer's "
-            "model_max_length for the run, and leaving either unset leaves the tokenizer's own value "
-            "alone; environmental GRPO pins the model's context window instead, the limit its rollout "
-            "server enforces."
+            "help": "Prompt budget in tokens, applied as a dataset filter: a row whose rendered prompt exceeds it "
+            "is dropped, never truncated. Unset = no filtering. "
+            "See agent-docs/reference/configuration-reference.md#the-tokenizers-window."
         },
     )
     prompt_field: str = field(
         default="prompt",
-        metadata={"help": "Field in the dataset containing the prompt (string or conversation list)"},
+        metadata={"help": "Dataset column holding the prompt, a string or a conversation list."},
     )
 
     def _validate_ranges(self) -> None:
@@ -153,25 +151,25 @@ class RLRRConfig:
 
     mode: RLRRMode = field(
         default="hrr",
-        metadata={"help": "RLRR mode: 'hrr' (hybrid rank correction, Eq. 3) or 'prr' (pure relative, Eq. 4)"},
+        metadata={"help": "RLRR mode: 'hrr' (hybrid rank correction, Eq. 3) or 'prr' (pure relative, Eq. 4)."},
     )
     tau: float = field(
-        default=0.1, metadata={"help": "HRR rank-correction magnitude τ (Eq. 3); too high dilutes the rule reward"}
+        default=0.1, metadata={"help": "HRR rank-correction magnitude τ (Eq. 3); too high dilutes the rule reward."}
     )
     lam: float = field(
         default=2048.0,
         metadata={
-            "help": "Length-bin granularity λ for re-ranking (Eq. 6); correct responses bucketed by floor(len / λ)"
+            "help": "Length-bin granularity λ for re-ranking (Eq. 6): correct responses bucket by floor(len / λ)."
         },
     )
-    xi_pos: float = field(default=1e-3, metadata={"help": "Advantage cap ξ⁺ for incorrect responses (Eq. 5 clip)"})
-    xi_neg: float = field(default=-1e-3, metadata={"help": "Advantage floor ξ⁻ for correct responses (Eq. 5 clip)"})
+    xi_pos: float = field(default=1e-3, metadata={"help": "Advantage cap ξ⁺ for incorrect responses (Eq. 5 clip)."})
+    xi_neg: float = field(default=-1e-3, metadata={"help": "Advantage floor ξ⁻ for correct responses (Eq. 5 clip)."})
     std_normalize: bool = field(
         default=False,
-        metadata={"help": "Divide the centered advantage by the group std (Eq. 1); else F_norm = 1 (Dr.GRPO)"},
+        metadata={"help": "Divide the centered advantage by the group std (Eq. 1); false keeps F_norm = 1 (Dr.GRPO)."},
     )
     length_rerank: bool = field(
-        default=True, metadata={"help": "Apply the length-bin tie-break in hierarchical re-ranking (Eq. 6)"}
+        default=True, metadata={"help": "Apply the length-bin tie-break in hierarchical re-ranking (Eq. 6)."}
     )
     correctness_clip: bool = field(
         default=True,
@@ -179,7 +177,7 @@ class RLRRConfig:
     )
     correctness_threshold: float = field(
         default=0.5,
-        metadata={"help": "A response is correct iff raw reward >= this threshold — the only correctness signal"},
+        metadata={"help": "A response is correct iff its raw reward >= this threshold, the only correctness signal."},
     )
 
     def __post_init__(self) -> None:
@@ -221,7 +219,7 @@ class RLRRArguments(_RLRRTunables, RangeValidatedConfig):
 
     use_rlrr: bool = field(
         default=False,
-        metadata={"help": "Enable RLRR relative-reward advantage shaping (replaces group-normalized advantages)"},
+        metadata={"help": "Enable RLRR relative-reward advantage shaping in place of group-normalized advantages."},
     )
 
     def _validate_ranges(self) -> None:
@@ -250,36 +248,26 @@ class AdvantageShapingArguments(RangeValidatedConfig):
     scale_rewards_std_floor: float = field(
         default=0.0,
         metadata={
-            "help": "Floor on the std divisor in advantage scaling (scale_rewards 'batch'/'group'): "
-            "divide by max(std, floor). A degenerate batch/group (every reward within a few "
-            "hundredths) otherwise divides its own noise by a near-zero std, amplifying it to "
-            "full-scale advantages — the lock-in mechanism of a collapsed run. Healthy batches (std "
-            "well above the floor) are unaffected. 0 (default) = off; ~0.05 on sparse-reward tasks."
+            "help": "Floor on the std divisor of scale_rewards 'batch'/'group' (divide by max(std, floor)), so a "
+            "degenerate batch cannot amplify its noise into full-scale advantages. 0 = off; about 0.05 suits "
+            "sparse-reward tasks. See agent-docs/training-methods/async-grpo/objective.md#advantages."
         },
     )
     drop_degenerate_groups: bool = field(
         default=False,
         metadata={
-            "help": "Mask GRPO groups whose completions ALL scored the same reward out of the loss. "
-            "Their advantage is already 0 (no policy gradient), but their tokens still inflate the "
-            "loss normalizer and dilute the groups that do carry signal (the cheap half of DAPO's "
-            "dynamic sampling: drop, without resampling replacements). Logged as "
-            "`sampling/degenerate_group_frac`."
+            "help": "Mask GRPO groups whose completions all scored the same reward out of the loss: their advantage "
+            "is 0, yet their tokens dilute the loss normalizer. Logged as sampling/degenerate_group_frac. "
+            "See agent-docs/training-methods/async-grpo/objective.md#advantages."
         },
     )
     balance_token_mass: bool = field(
         default=False,
         metadata={
-            "help": "Scale down the heavier sign of each generation round's advantages so the round's "
-            "token-weighted advantage mass nets to zero. Under a token-sum loss a completion pulls with its "
-            "advantage times its trained tokens; where failures run longer than solves the round pushes "
-            "down the tokens the policy sampled and entropy climbs, where solves run longer it sharpens "
-            "the policy. Async GRPO leaves the rows of untrainable turns, which train on a negative advantage "
-            "only, out of the balance and unscaled. Needs `loss_type` `cispo`, `dapo` or `dr_grpo`, "
-            "`top_entropy_quantile` 1.0 and no `off_policy_mask_threshold`, refused otherwise. The pre-balance "
-            "share is logged as "
-            "`advantage/net_token_mass` either way (its sign reads as the entropy push only under a "
-            "token-sum loss) and the applied factor as `advantage/token_mass_scale`. Default off."
+            "help": "Scale down the heavier sign of each generation round's advantages so its token-weighted "
+            "advantage mass nets to zero, against the entropy drift a token-sum loss takes on when failures and "
+            "solves differ in length. Needs loss_type cispo, dapo or dr_grpo, top_entropy_quantile 1.0 and no "
+            "off_policy_mask_threshold. See agent-docs/training-methods/async-grpo/objective.md#token-mass-balance."
         },
     )
 
@@ -336,33 +324,26 @@ class GRPOEarlyStopArguments(RangeValidatedConfig):
     early_stop_entropy_band: list[float] | None = field(
         default=None,
         metadata={
-            "help": "Early stop: end training once TRL's `entropy` metric stays outside this [low, high] band "
-            "for `early_stop_patience` readings in a row. The metric counts a micro-batch whose loss tokens "
-            "were all dropped (degenerate groups, invalid episodes) as 0, so under drops it reads below the "
-            "policy's entropy. A KL-free run drifts in either direction, toward collapse below the band or "
-            "explosion above it, and both start slowly enough to stop on. The band is model-specific: read "
-            "it off a healthy run. None (default) = off."
+            "help": "Early stop: end training once TRL's entropy metric stays outside this [low, high] band for "
+            "early_stop_patience readings in a row; read the band off a healthy run. Unset = off. "
+            "See agent-docs/training-methods/async-grpo/monitoring.md#early-stop."
         },
     )
     early_stop_logratio_gap: float | None = field(
         default=None,
         metadata={
-            "help": "Early stop: end training once the trainer's log-prob gap metric stays above this many "
-            "nats per token for `early_stop_patience` readings in a row (one per generation round: a step "
-            "reusing its round carries none and leaves the count). Env GRPO reads the magnitude "
-            "of its signed mean `sampling/logratio_mean`, online GRPO TRL's mean absolute difference "
-            "`sampling/sampling_logp_difference/mean`; the two read differently, so a threshold does not "
-            "carry from one trainer to the other. The gap grows with entropy, and faster than it once the "
-            "policy flattens, so it is the earlier signal of the two. Needs the vLLM importance-sampling "
-            "correction, which logs it. None (default) = off."
+            "help": "Early stop: end training once the trainer-vs-sampler log-prob gap stays above this many nats "
+            "per token for early_stop_patience readings in a row; needs the importance-sampling correction, which "
+            "logs it. Env GRPO reads the magnitude of sampling/logratio_mean and online GRPO "
+            "sampling/sampling_logp_difference/mean, so a threshold does not carry between them. "
+            "See agent-docs/training-methods/async-grpo/monitoring.md#early-stop."
         },
     )
     early_stop_patience: int = field(
         default=EarlyStopConfig.patience,
         metadata={
-            "help": "Breaching readings in a row an early-stop condition needs before training ends (>= 1). "
-            "A reading is one training log line, so under `logging_steps` > 1 it is the window's mean. "
-            "Refused at a non-default value when no early-stop condition is set."
+            "help": "Breaching readings in a row an early-stop condition needs (>= 1), a reading being one training "
+            "log line. Refused at a non-default value when no early-stop condition is set."
         },
     )
 
@@ -425,10 +406,10 @@ class ChunkedLogprobsArguments:
     use_chunked_grpo_logprobs: bool = field(
         default=False,
         metadata={
-            "help": "Compute per-token log-probs from the backbone hidden state + a vocab-chunked "
-            "softmax instead of full [B, T, vocab] logits — bounds the loss-forward peak by the chunk "
-            "size, not B*T*vocab. For large-vocab models (gpt-oss ~201k) on long completions where the "
-            "full-logits allocation OOMs. Each chunk's log-softmax runs in at least fp32."
+            "help": "Compute per-token log-probs from the backbone hidden state with a vocab-chunked softmax (at "
+            "least fp32) instead of full [B, T, vocab] logits, bounding the loss-forward peak by the chunk size. "
+            "For large-vocab models on long completions, where the full logits OOM. "
+            "See agent-docs/training-methods/async-grpo/performance.md#chunked-log-probs."
         },
     )
 
@@ -451,10 +432,9 @@ class SDPGArguments(RangeValidatedConfig):
     sdpg_hint_template: str = field(
         default=PRIVILEGED_HINT_TEMPLATE,
         metadata={
-            "help": "Hint the TEACHER forward sees after its prompt: appended to the last user turn on "
-            "the self-distillation arm, to the rendered generation prompt on the online arm. A "
-            "str.format template: {answer} on both arms, {solution} on self-distillation only "
-            "(privileged_solution_field). Any other placeholder is refused at parse time."
+            "help": "Hint the teacher forward sees after its prompt (the last user turn on self-distillation, the "
+            "rendered generation prompt online), a str.format template. {answer} fills on both arms, {solution} on "
+            "self-distillation only, and any other placeholder is refused at parse time."
         },
     )
     sdpg_loss: SelfDistillationLoss = field(

@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from transformers import TrainingArguments
 
-from src.optimizers.muon import DEFAULT_SCALAR_BETAS, _is_explicitly_set, build_muon_optimizer
+from src.optimizers.muon import DEFAULT_SCALAR_BETAS, build_muon_optimizer
 
 
 class _TinyModel(nn.Module):
@@ -55,14 +55,6 @@ def test_explicit_beta2_is_forwarded(tmp_path):
 def test_explicit_beta1_is_forwarded(tmp_path):
     """beta1 overrides apply independently of whether beta2 was set."""
     assert _scalar_betas(_args(tmp_path, adam_beta1=0.85)) == (0.85, 0.95)
-
-
-def test_is_explicitly_set_reads_declared_defaults(tmp_path):
-    args = _args(tmp_path, adam_beta2=0.98)
-    assert _is_explicitly_set(args, "adam_beta2") is True
-    assert _is_explicitly_set(args, "adam_beta1") is False
-    with pytest.raises(AttributeError):
-        _is_explicitly_set(args, "not_a_field")
 
 
 if __name__ == "__main__":

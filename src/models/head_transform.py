@@ -268,7 +268,7 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
             f"({declared}; {deviation} on the head-path probe). The hidden-state head paths "
             f"(use_chunked_grpo_logprobs, the last pipeline stage) would score a different "
             f"distribution than the model's own forward. Declare the family's transform on a "
-            f"HeadTransformSpec in src/models/head_transform.py, or run without those paths."
+            f"HeadTransformSpec, or run without those paths."
         )
     return declared
 

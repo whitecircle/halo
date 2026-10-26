@@ -149,7 +149,7 @@ def test_every_roster_family_resolves_an_applier(model_type):
         )
         return
     assert resolve_liger_applier(model_type) is not None, (
-        f"no Liger applier covers {model_type}; add a LigerFamilySpec in src/kernels/liger/families.py"
+        f"no Liger applier covers {model_type}; add a LigerFamilySpec to LIGER_FAMILY_SPECS"
     )
 
 

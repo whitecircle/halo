@@ -17,11 +17,11 @@ class EnvironmentalGRPOScriptArguments(PromptDatasetArguments, CommonScriptArgum
     answer_field: str | None = field(
         default=DEFAULT_ANSWER_FIELD,
         metadata={
-            "help": "Field in dataset containing the expected answer; carried when present. Whether "
-            "an answer is needed at all is the environment's requires_answer declaration."
+            "help": "Dataset column holding the expected answer, carried when present. Whether an answer is needed "
+            "is the environment's requires_answer."
         },
     )
 
     context_fields: list[str] | None = field(
-        default=None, metadata={"help": "Additional fields to pass as context to environment"}
+        default=None, metadata={"help": "Further dataset columns passed to the environment as context."}
     )

@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING
 
 import transformers
 
-from src.distributed.filesystem import RUN_LOG_DIR_NAME
 from src.distributed.runtime import fs_aware_save_rank
+from src.log import RUN_LOG_DIR_NAME, RUN_LOG_FILE
 
 if TYPE_CHECKING:
     # Importing TrainingArguments eagerly pulls the peft/pandas/accelerate stack; the YAML parser
@@ -59,7 +59,7 @@ def install_log_tee(output_dir: str | None) -> None:
         return
 
     log_dir = os.path.join(output_dir, RUN_LOG_DIR_NAME)
-    log_path = os.path.abspath(os.path.join(log_dir, "run.log"))
+    log_path = os.path.abspath(os.path.join(log_dir, RUN_LOG_FILE))
     if _TEE_LOG_PATH is not None:
         if log_path != _TEE_LOG_PATH:
             logger.warning(

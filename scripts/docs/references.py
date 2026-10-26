@@ -321,6 +321,19 @@ def literal_text(node: ast.Constant | ast.JoinedStr, constants: dict[str, str]) 
     return "".join(_field_text(field, constants) for field in node.values)
 
 
+def whole_string_literals(tree: ast.AST) -> list[ast.Constant | ast.JoinedStr]:
+    """The string literals and f-strings of ``tree`` that are no part or format spec of an f-string, which
+    :func:`literal_text` reads with the f-string holding them."""
+    parts = {
+        id(part)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.JoinedStr, ast.FormattedValue))
+        for part in (node.values if isinstance(node, ast.JoinedStr) else [node.format_spec])
+        if part is not None
+    }
+    return [node for node in ast.walk(tree) if is_string_literal(node) and id(node) not in parts]
+
+
 def _may_be_absent(call: ast.Call) -> bool:
     """Whether the patch call lets its attribute be missing (``create=True``, ``raising=False``)."""
     return any(

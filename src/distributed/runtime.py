@@ -709,8 +709,8 @@ def apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
             "torch.distributed.distributed_c10d.default_pg_nccl_timeout is absent on this PyTorch "
             f"build ({torch.__version__}), so DIST_NCCL_TIMEOUT_MINUTES cannot reach the subgroups: "
             "every device-mesh (DP/HSDP/TP) and EP/CP group would fall back to the 10 min NCCL "
-            "watchdog and abort long cross-node collectives (a gathered save at 100B+). Point the "
-            "pin in src/distributed/runtime.py at the renamed symbol."
+            "watchdog and abort long cross-node collectives (a gathered save at 100B+). Point "
+            "apply_default_pg_timeout at the renamed symbol."
         )
     c10d.default_pg_nccl_timeout = timeout
 

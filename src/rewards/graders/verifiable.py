@@ -1,4 +1,5 @@
-"""The RLVR graders — strict ``\\boxed{}`` accuracy and a regex format check — and their reward terms."""
+"""The RLVR graders — strict ``\\boxed{}`` accuracy and a regex format check — their reward terms, and the
+reward sources the RLVR arm admits."""
 
 import re
 from collections.abc import Sequence
@@ -6,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from src.rewards.graders.matching import extract_last_boxed
-from src.rewards.terms import RewardTerm
+from src.rewards.terms import JudgeTerm, RewardModelTerm, RewardTerm, sources_of
 
 DEFAULT_FORMAT_PATTERN = r"<think>.*?</think>\s*<answer>.*?</answer>"
 
@@ -93,3 +94,5 @@ def format_grader(term: FormatTerm):
 
 # Term type → grader builder, for the RLVR arm.
 RLVR_GRADERS = {AccuracyTerm: accuracy_grader, FormatTerm: format_grader}
+# The reward sources the RLVR arm admits: its two graders plus the externally scored terms.
+RLVR_REWARD_SOURCES = sources_of(AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm)

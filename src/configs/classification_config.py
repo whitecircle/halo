@@ -6,7 +6,7 @@ from typing import Literal
 from transformers import TrainingArguments
 
 from src.args.mixins import DatasetNumProcArguments
-from src.args.validation import RangeValidatedConfig, present, require_finite, require_int
+from src.config_validation import RangeValidatedConfig, present, require_finite, require_int
 
 
 @dataclass
@@ -16,9 +16,8 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
     max_length: int | None = field(
         default=1024,
         metadata={
-            "help": "Maximum tokenized sequence length. The training script truncates to it; a raw "
-            "text/label dataset passed straight to the trainer is tokenized untruncated and filtered "
-            "to it instead. null / non-positive resolves to the model's context window at launch."
+            "help": "Maximum tokenized sequence length: the training script truncates to it, while a raw text/label "
+            "dataset handed to the trainer is filtered to it. Unset or non-positive = the model's context window."
         },
     )
     disable_dropout: bool = field(
@@ -36,40 +35,37 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
     loss_type: Literal["cross_entropy", "focal", "label_smoothing_ce"] = field(
         default="cross_entropy",
         metadata={
-            "help": "Loss function type. 'cross_entropy': standard CE (default), "
-            "'focal': focal loss for class imbalance, "
-            "'label_smoothing_ce': CE with label smoothing."
+            "help": "Loss function: 'cross_entropy' (standard CE), 'focal' (focal loss for class imbalance) or "
+            "'label_smoothing_ce' (CE with label smoothing)."
         },
     )
     focal_gamma: float = field(
         default=2.0,
         metadata={
-            "help": "Gamma (focusing parameter) for focal loss. Higher values down-weight easy examples more. "
+            "help": "Focusing parameter (gamma) of the focal loss: higher values down-weight easy examples more. "
             "Ignored unless loss_type='focal'."
         },
     )
     focal_alpha: float | None = field(
         default=None,
         metadata={
-            "help": "Alpha (balancing factor) for focal loss. None means no alpha weighting. "
-            "Ignored unless loss_type='focal'. Multi-label (sigmoid) heads only — on a "
-            "single-label softmax head a scalar alpha is a uniform loss rescale rather than "
-            "balancing, and a non-None value is rejected there."
+            "help": "Alpha (balancing factor) of the focal loss on a multi-label (sigmoid) head; unset = no alpha "
+            "weighting. Rejected on a single-label head, where a scalar alpha only rescales the loss, and ignored "
+            "unless loss_type='focal'."
         },
     )
     label_smoothing: float = field(
         default=0.0,
         metadata={
-            "help": "Label smoothing epsilon for label_smoothing_ce loss. "
-            "Typical values: 0.05-0.1. Ignored unless loss_type='label_smoothing_ce'."
+            "help": "Label-smoothing epsilon of label_smoothing_ce, typically 0.05-0.1. Ignored unless "
+            "loss_type='label_smoothing_ce'."
         },
     )
     class_weights: list[float] | None = field(
         default=None,
         metadata={
-            "help": "Manual class weights as a list of floats (one per class, ordered by label ID). "
-            "Applied to every loss_type (cross_entropy, focal, label_smoothing_ce) and as pos_weight "
-            "on the multi-label BCE. None means equal weights."
+            "help": "Per-class loss weights ordered by label ID, applied to every loss_type and as pos_weight on "
+            "the multi-label BCE. Unset = equal weights."
         },
     )
     derive_class_weights: bool = field(
@@ -90,8 +86,8 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
     compute_per_class_metrics: bool = field(
         default=False,
         metadata={
-            "help": "Log per-class precision, recall, and F1 during evaluation. Single-label "
-            "only — ignored on a multi-label dataset. Can produce many metrics with many classes."
+            "help": "Log per-class precision, recall and F1 during evaluation, many metrics with many classes. "
+            "Single-label only; ignored on a multi-label dataset."
         },
     )
     compute_auc_roc: bool = field(
@@ -101,9 +97,8 @@ class ClassificationConfig(DatasetNumProcArguments, RangeValidatedConfig, Traini
     compute_mcc: bool = field(
         default=True,
         metadata={
-            "help": "Compute Matthews Correlation Coefficient during evaluation. Single-label "
-            "only — ignored on a multi-label dataset. MCC is a balanced metric useful even "
-            "with imbalanced classes."
+            "help": "Compute the Matthews correlation coefficient during evaluation, a balanced metric under class "
+            "imbalance. Single-label only; ignored on a multi-label dataset."
         },
     )
 

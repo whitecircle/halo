@@ -20,19 +20,17 @@ class KTOScriptArguments(CommonScriptArguments):
 
     completion_field: str = field(
         default="completion",
-        metadata={"help": "Dataset field holding the completion (str or list-of-dicts conversation)"},
+        metadata={"help": "Dataset column holding the completion, a string or a conversation list."},
     )
     label_field: str = field(
         default="label",
-        metadata={"help": "Dataset field holding the desirability bool (True=desirable)"},
+        metadata={"help": "Dataset column holding the desirability bool (true = desirable)."},
     )
     images_field: str | None = field(
         default=None,
         metadata={
-            "help": "VLM only: dataset column holding the row's images (HF Image feature list). "
-            "Renamed to 'images' before training — TRL's KTOTrainer reads only the 'images'/'image' "
-            "spelling, both to detect a vision dataset and in its vision collator, so a hub column "
-            "under any other name would train as text with the images dropped. Selecting the vision "
-            "path makes TRL refuse precompute_ref_log_probs and any chosen/rejected column."
+            "help": "VLM only: dataset column holding the row's images, renamed to the 'images' spelling TRL's "
+            "KTOTrainer reads (under any other name they would be dropped). The vision path makes TRL refuse "
+            "precompute_ref_log_probs and any chosen/rejected column."
         },
     )

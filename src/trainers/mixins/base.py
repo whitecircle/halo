@@ -1225,7 +1225,7 @@ class DistributedTrainerMixin(
                 f"them would run on uninitialized memory that also differs across ranks. The load "
                 f"path skipped finalize_loaded_model, or this buffer belongs to a family its fixes "
                 f"do not recompute — extend the _ROTARY_FIXERS / _NON_PERSISTENT_FIXERS chains that "
-                f"finalize_loaded_model runs (src/models/patches/buffer_fixes.py)."
+                f"finalize_loaded_model runs."
             )
 
         model.to(device)

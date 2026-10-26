@@ -58,6 +58,7 @@ jobs:
           tests/cpu/conventions/test_gpu_harness_conventions.py
           tests/cpu/conventions/test_hosted_conventions_are_stdlib.py
           tests/cpu/conventions/test_import_layering.py
+          tests/cpu/conventions/test_messages_name_symbols.py
           tests/cpu/conventions/test_move_kit.py
           tests/cpu/conventions/test_package_inits.py
           tests/cpu/conventions/test_references_resolve.py

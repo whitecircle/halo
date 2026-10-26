@@ -12,7 +12,7 @@ class SFTScriptArguments(ConversationRenderArguments, GenerationEvalArguments, C
     PROJECT_NAME: ClassVar[str] = "sft-tuning"
 
     # SFT does not generate during eval by default (the preference/GRPO trainers do).
-    generate_eval_examples: bool = field(default=False, metadata={"help": "Do generate examples on eval"})
+    generate_eval_examples: bool = field(default=False, metadata={"help": "Generate text examples during evaluation."})
     train_on_last_assistant_only: bool = field(
         default=False,
         metadata={

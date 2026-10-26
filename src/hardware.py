@@ -7,13 +7,13 @@ architecture. MFU and S-MFU percentages divide by a table entry, so a wrong valu
 reported utilization.
 """
 
+import logging
 import subprocess
 from dataclasses import dataclass
 
 import torch
-from transformers.utils import logging
 
-logger = logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def is_blackwell_gpu() -> bool:

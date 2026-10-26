@@ -13,18 +13,8 @@ from src.args.mixins import (
     RLRRArguments,
     SDPGArguments,
 )
-from src.rewards.graders.verifiable import AccuracyTerm, FormatTerm
-from src.rewards.terms import (
-    JudgeTerm,
-    RewardModelTerm,
-    RewardTerm,
-    parse_reward_terms,
-    refuse_veto_judges,
-    sources_of,
-)
-
-# The reward sources the RLVR arm admits: its two graders plus the externally scored terms.
-RLVR_REWARD_SOURCES = sources_of(AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm)
+from src.rewards.graders.verifiable import RLVR_REWARD_SOURCES
+from src.rewards.terms import RewardTerm, parse_reward_terms, refuse_veto_judges
 
 
 @dataclass
@@ -58,11 +48,11 @@ class RLVROnlineGRPOScriptArguments(
 
     answer_field: str = field(
         default=DEFAULT_ANSWER_FIELD,
-        metadata={"help": "Field in the dataset containing the ground truth answer for verification"},
+        metadata={"help": "Dataset column holding the ground-truth answer the rewards verify against."},
     )
     system_prompt: str | None = field(
         default=None,
-        metadata={"help": "System prompt to prepend to all conversations"},
+        metadata={"help": "System prompt prepended to every conversation."},
     )
     # Literal, not str: an unknown level would reach the chat template as an unrecognized string most
     # templates ignore, leaving the run with no steer. The parser's Literal gate covers YAML and CLI;
@@ -72,21 +62,19 @@ class RLVROnlineGRPOScriptArguments(
     reasoning_effort: Literal["low", "medium", "high", "random"] | None = field(
         default=None,
         metadata={
-            "help": "Chat-template reasoning-effort steer (low/medium/high), 'random' (sampled per "
-            "prompt), or None (no steer). Passed via chat_template_kwargs; needs a template that reads "
-            "reasoning_effort (e.g. gpt-oss harmony)."
+            "help": "Chat-template reasoning-effort steer (low/medium/high) or 'random' (sampled per prompt); "
+            "unset = no steer. Passed via chat_template_kwargs, so it needs a template that reads reasoning_effort, "
+            "like gpt-oss harmony."
         },
     )
 
     rewards: list[dict[str, Any]] = field(
         default_factory=lambda: [{"source": "accuracy"}],
         metadata={
-            "help": "Reward terms, each {source, name (required for judge/reward_model), weight?, exponent?, ...}: "
-            "sources 'accuracy' (last \\boxed{} equals the answer), 'format' (pattern), 'judge' (model, "
-            "requirements, view, on_error, reasoning_effort, ...; a veto judge listing checks is refused here, "
-            "having no objective to gate) and 'reward_model' (url, model, backend, view, on_error, ...). Each "
-            "term is one TRL reward function named after it, weighted by its weight; see "
-            "agent-docs/training-methods/grpo/rewards/README.md."
+            "help": "Reward terms, each {source, name?, weight?, exponent?, ...} and one TRL reward function: "
+            "'accuracy' (the last \\boxed{} equals the answer), 'format' (pattern), 'judge' (a veto judge listing "
+            "checks is refused here) or 'reward_model'. YAML-only. "
+            "See agent-docs/training-methods/grpo/rewards/README.md."
         },
     )
 
@@ -94,7 +82,7 @@ class RLVROnlineGRPOScriptArguments(
     # rollouts — the same model re-run with a gold-answer hint — added atop the GRPO loss.
     use_sdpg: bool = field(
         default=False,
-        metadata={"help": "Enable SDPG: privileged-teacher reverse-KL OPD on positive-advantage rollouts"},
+        metadata={"help": "Enable SDPG: a privileged-teacher reverse-KL OPD term on positive-advantage rollouts."},
     )
     opd_positive_advantage_only: bool = field(
         default=True,

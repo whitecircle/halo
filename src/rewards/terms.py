@@ -12,7 +12,7 @@ from dataclasses import dataclass, fields
 from enum import StrEnum
 from typing import Any, ClassVar, Self
 
-from src.args.validation import require_finite, require_positive, require_positive_int
+from src.config_validation import require_finite, require_positive, require_positive_int
 from src.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 
 # Metric key of a term's contribution, ``reward/<name>``; the keys of one reward sum to the reward.

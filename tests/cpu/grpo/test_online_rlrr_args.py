@@ -21,8 +21,8 @@ import pytest
 
 from src.args.mixins import RLRRArguments, RLRRConfig, rlrr_arg_name
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
+from src.config_validation import reject_non_default_args
 from src.training.parser import H4ArgumentParser
-from src.training.script_runner import reject_non_default_args
 from tests.common.repo import REPO_ROOT
 
 RLVR_SCRIPT = REPO_ROOT / "scripts/training/online_grpo/rlvr.py"

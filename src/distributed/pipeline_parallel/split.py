@@ -382,7 +382,7 @@ def validate_model_structure_supports_pp(model: nn.Module) -> None:
         raise ValueError(
             f"Pipeline parallelism needs a transformer backbone with a decoder-layer list, but none "
             f"was found on {type(model).__name__}. Supported layouts are exactly those "
-            f"backbone_with_layers understands (src/models/structure.py)."
+            f"backbone_with_layers understands."
         )
     spec = resolve_pp_spec(backbone)
     if not spec.SUPPORTS_PP:

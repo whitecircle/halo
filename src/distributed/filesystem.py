@@ -49,8 +49,6 @@ _HUB_METADATA_TIMEOUT = datetime.timedelta(minutes=30)
 
 # Sentinel the output-filesystem probe writes under output_dir; dot-prefixed and inert if one leaks.
 OUTPUT_FS_PROBE_PREFIX = ".halo_fs_probe_"
-# The run's own directory under ``output_dir``: run.log plus the decoded dataset samples.
-RUN_LOG_DIR_NAME = "log"
 # Poll budget for a rank waiting to SEE the sentinel: NFS's cached negative lookup can hide it for up
 # to the directory attribute-cache ceiling (``acdirmax``, 60 s), and judging on the first stat would
 # fail a healthy shared mount. Only a wrongly declared run ever pays the whole budget.

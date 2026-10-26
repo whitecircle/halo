@@ -111,7 +111,6 @@ _PACKAGE_INTERNAL = {
 # root -> the final one. A move deletes its entry; a module staying in its unit and member needs none.
 _PENDING_MOVES = {
     "args": "configs",
-    "args.validation": "config_validation",
     "configs.rollout_config": "environments.rollout_config",
     "training": "entrypoints",
     "training.early_stopping": "callbacks.early_stop",

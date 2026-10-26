@@ -120,7 +120,7 @@ A turn the engine cut mid-tool-call shows the partial call after its text, tagge
 
 ## Early stop
 
-Off unless a condition is set. Each condition counts its consecutive breaching readings; when one reaches `early_stop_patience` (default 3), training ends on a verdict taken across ranks.
+Off unless a condition is set. A KL-free run drifts in either direction, toward entropy collapse or explosion, and both start slowly enough to stop on. Each condition counts its consecutive breaching readings; when one reaches `early_stop_patience` (default 3), training ends on a verdict taken across ranks.
 
 - **A reading** is one training log line (the window mean under `logging_steps` > 1). The gap and the [breaker](objective.md#breaker) (table below) come once per generation round, so a step reusing its round leaves their count unchanged.
 - **The stop** skips that step's save and eval (an epoch save included), logs its reason, and exits non-zero on every rank. Resume from a checkpoint taken before the drift began.
@@ -129,11 +129,11 @@ Off unless a condition is set. Each condition counts its consecutive breaching r
 |---|---|---|
 | `early_stop_entropy_band` | `entropy` stays outside `[low, high]` | TRL's `entropy` |
 | `early_stop_logratio_gap` | the trainer-vs-sampler gap stays above it | the magnitude of `sampling/logratio_mean`; needs the IS correction |
-| `early_stop_on_skipped_updates` | the breaker skipped every update | `sampling/update_skipped`; needs `skip_update_masked_frac` |
+| `early_stop_on_skipped_updates` | the breaker skipped every update, leaving the policy frozen where the rollouts disagree with it | `sampling/update_skipped`; needs `skip_update_masked_frac` |
 
 TRL's `entropy` counts a micro-batch whose loss tokens were all dropped (degenerate groups, invalid episodes, padding rows) as 0, so under drops it reads low and moves with the dropped share.
 
-Read the band and the gap off a healthy run; both are model-specific. The gap shows a drift before entropy does.
+Read the band and the gap off a healthy run; both are model-specific. The gap grows with entropy, and faster than it once the policy flattens, so it shows a drift before entropy does.
 
 - The Qwen3.6 vLLM code-contests recipes stop on a band of `[0.12, 0.40]` and a gap of `0.005`.
 - Every code-contests recipe stops on skipped updates.

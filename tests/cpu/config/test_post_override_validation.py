@@ -23,7 +23,7 @@ from src.args.distributed_args import DistributedArguments
 from src.args.mixins import SDPGArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.args.self_distill_args import SelfDistillationArguments
-from src.args.validation import RangeValidatedConfig
+from src.config_validation import RangeValidatedConfig
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.classification_config import ClassificationConfig
 from src.configs.distillation_config import DistillationConfig

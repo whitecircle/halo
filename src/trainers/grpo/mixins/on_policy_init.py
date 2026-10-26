@@ -112,8 +112,8 @@ class OnPolicyGRPOInitMixin:
                     f"beta={self.args.beta} on a policy no PEFT adapter wraps holds a frozen KL reference, and no "
                     f"ref_model was passed: TRL would build {model_id!r} itself in fp32, from the hub's default "
                     "revision, with the default attention and no repair of its non-persistent buffers, biasing the "
-                    "KL against the policy. Pass ref_model=load_reference_model_for_on_policy_grpo(...) "
-                    "(src/distributed/loading/frozen_models.py), as the GRPO training scripts do. Or hold none: "
+                    "KL against the policy. Pass ref_model=load_reference_model_for_on_policy_grpo(...), as the "
+                    "GRPO training scripts do. Or hold none: "
                     f"{self._reference_alternatives.under(self.parallelism_config)}"
                 )
             handed = True

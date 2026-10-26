@@ -22,7 +22,7 @@ environment_kwargs:
 | `code_timeout` | `15.0` s | Wall-clock cap per `run_code` / `run_bash_command` call |
 | `sandbox_backend` / `sandbox_url` | unset | Else `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then local |
 
-`max_turns` defaults to 20 ([common knobs](../README.md#common-knobs)). Reward knobs are the [native protocol's](../protocols/native-tool-use.md#configuration).
+`max_turns` defaults to the class's own budget ([registry](../README.md#registry)). Reward knobs are the [native protocol's](../protocols/native-tool-use.md#configuration).
 
 ## Tools
 

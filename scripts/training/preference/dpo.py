@@ -26,6 +26,7 @@ from trl import DPOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
 from src.args.dpo_args import DPOScriptArguments
+from src.config_validation import reject_unsupported_args
 from src.data.sources.loading import alias_images_column
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.loading.peft_setup import setup_peft_model
@@ -46,7 +47,6 @@ from src.training.script_runner import (
     load_script_datasets,
     padded_workload_attn_implementation,
     prepare_script_preference_data,
-    reject_unsupported_args,
     resolve_vlm_run,
     run_trainer,
 )

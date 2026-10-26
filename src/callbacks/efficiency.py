@@ -669,7 +669,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
             else:
                 logger.warning(
                     f"GPU_PEAK_FLOPS has no {self.state.precision} peak for {self.state.gpu_model}, so MFU, "
-                    f"S-MFU and TFLOP/s are reported as 0. Add the dense peak to src/hardware.py."
+                    f"S-MFU and TFLOP/s are reported as 0. Add the dense peak to its GPU_PEAK_FLOPS entry."
                 )
         else:
             logger.warning("Could not detect the GPU model, so MFU, S-MFU and TFLOP/s are reported as 0.")

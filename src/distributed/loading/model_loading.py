@@ -595,8 +595,7 @@ def _load_pp_stage_model(
             f"exists to remove. Either the checkpoint is not safetensors (convert it), or this "
             f"family's EP layer declares _supports_lazy_loading=False / nests its expert index "
             f"under an extra module (pre-5.14 Zaya checkpoints), in which case the model cannot "
-            f"use PP at all (see src/distributed/expert_parallel/layers/ and "
-            f"agent-docs/parallelism/pipeline-parallelism.md)."
+            f"use PP at all (see agent-docs/parallelism/pipeline-parallelism.md)."
         )
     # Joined, not raised: the healthy ranks would otherwise walk into the stage load's collectives.
     reject_across_ranks(

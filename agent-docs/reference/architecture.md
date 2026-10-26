@@ -15,7 +15,7 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 
 | Layer | Owns | Source | Deeper page |
 |---|---|---|---|
-| Config | YAML parse, toolkit defaults, strict rejection of unknown or retired keys; env knobs read through one seam; the per-method argument/config dataclasses | `src/training/parser.py`, `src/env.py`, `src/args/`, `src/configs/` | [Configuration](../getting-started/configuration.md) |
+| Config | YAML parse, toolkit defaults, strict rejection of unknown or retired keys; env knobs read through one seam; the per-method argument/config dataclasses and the field guards and argument refusals they share | `src/training/parser.py`, `src/env.py`, `src/args/`, `src/configs/`, `src/config_validation.py` | [Configuration](../getting-started/configuration.md) |
 | Trainers | Training loop, loss, gradient clipping, saving | `src/trainers/mixins/` (the spine is `base.py`) | [Trainer Architecture](trainer-architecture.md) |
 | Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `src/distributed/parallelism_config.py`, `src/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
 | Data | Dataset loading, sharding, collators | `src/data/`, `src/data/collators/` | [Dataset Formats](../data/dataset-formats.md) |
@@ -51,7 +51,8 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/data/vlm.py` | the VLM chat render, the processor call and the over-length refusal | the runtime collators, the offline bake and the run-intent probe, so a batch and a bake of one row tokenize identically |
 | `src/data/pipeline/preprocessed_metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts | the training entry points and the loader, which read the stamp without importing the bake that wrote the rows |
 | `src/configs/rollout_config.py` | `RolloutConfig` | built by `AsyncTrainingConfig`, received pickled by the Ray rollout actors — keeping the Ray import out of `src.configs` |
-| `src/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults are its one import beyond the standard library | the argument dataclasses and `EnvironmentConfig`, which parse `rewards:` at config time without pulling in the scorers' SDK client |
+| `src/config_validation.py` | the value guards, the range-validation base, the declared-default comparison and the argument refusals — standard library only | the argument and config dataclasses, the reward terms, the training scripts and the Muon builder |
+| `src/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `src/config_validation.py` guards are its only first-party imports | the argument dataclasses and `EnvironmentConfig`, which parse `rewards:` at config time without pulling in the scorers' SDK client |
 | `src/inference/endpoints.py` | the OpenAI-compatible endpoint defaults and key resolution — `src/env.py` only | the reward terms, the CLI endpoint flag block (`scripts/_common.py`), the judge clients — none imports the SDK to learn a URL |
 | `src/distributed/nccl/addresses.py` | host-address classification (`is_loopback`) — standard library only | the weight-sync clients and the Ray rollout actors — without pulling the client's torch, DTensor and NCCL transport into the actors |
 

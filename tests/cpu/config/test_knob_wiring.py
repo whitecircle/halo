@@ -35,9 +35,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from src.training.parallelism_args import parallelism_config_from_args
 from src.training.script_runner import (
     distributed_trainer_kwargs,
-    reject_non_default_args,
     reject_trl_dataset_prep_args,
-    reject_unsupported_args,
 )
 from tests.common.repo import REPO_ROOT, load_script_module
 
@@ -236,23 +234,6 @@ def test_fp32_non_ep_params_is_the_remedy_the_message_names_and_is_not_itself_re
     assert stub._bf16_optimizer is False
 
 
-# reject_unsupported_args: the shared "would be silently ignored" gate
-
-
-def test_reject_unsupported_args_passes_when_nothing_set():
-    reject_unsupported_args("Some script", tools_field=None, images_field="", train_flag=False)
-
-
-def test_reject_unsupported_args_names_every_set_field():
-    with pytest.raises(ValueError) as excinfo:
-        reject_unsupported_args("Some script", tools_field="tools", images_field=None, train_flag=True)
-    message = str(excinfo.value)
-    assert "Some script" in message
-    assert "tools_field" in message
-    assert "train_flag" in message
-    assert "images_field" not in message  # unset fields are not a request
-
-
 # reject_trl_dataset_prep_args: the knobs only TRL's own dataset prep and collator read
 
 
@@ -291,47 +272,6 @@ def test_each_trl_dataset_prep_refusal_names_its_own_way_out():
     with pytest.raises(ValueError) as rendered:
         reject_trl_dataset_prep_args("Some script", _sft_config(dataset_text_field="messages"), render_remedy="REMEDY")
     assert "REMEDY" in str(rendered.value) and "train_on_completions_only" not in str(rendered.value)
-
-
-# reject_non_default_args: the same gate for knobs whose own default is truthy
-
-
-def test_reject_non_default_args_passes_at_the_declared_defaults():
-    """The whole point: ``num_eval_examples`` defaults to 50 — truthy — so the truthiness gate could
-    never guard it without rejecting every run."""
-    reject_non_default_args("Some script", SelfDistillationArguments(), "generate_eval_examples", "num_eval_examples")
-
-
-def test_reject_non_default_args_rejects_a_changed_truthy_default():
-    args = SelfDistillationArguments()
-    args.num_eval_examples = 8
-    with pytest.raises(ValueError, match="num_eval_examples"):
-        reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
-
-
-def test_reject_non_default_args_still_rejects_a_flipped_flag():
-    args = SelfDistillationArguments()
-    args.generate_eval_examples = True
-    with pytest.raises(ValueError, match="generate_eval_examples"):
-        reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
-
-
-def test_reject_non_default_args_refuses_a_field_the_dataclass_does_not_declare():
-    """A typo'd name is a guard that can never fire — the silent no-op this family exists to stop."""
-    with pytest.raises(ValueError, match="num_gen_exmaples"):
-        reject_non_default_args("Some script", SelfDistillationArguments(), "num_gen_exmaples")
-
-
-def test_self_distill_guards_both_generation_eval_knobs():
-    """Self-distillation keeps its dataset raw, so GenerateExamplesCallback is unreachable there and
-    BOTH knobs are inert. Reading the call keeps the script's guard from losing one silently."""
-    source = (REPO_ROOT / "scripts/training/distillation/self_distill.py").read_text()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "reject_non_default_args":
-            guarded = {arg.value for arg in node.args if isinstance(arg, ast.Constant)}
-            assert {"generate_eval_examples", "num_eval_examples"} <= guarded
-            return
-    raise AssertionError("self_distill.py no longer calls reject_non_default_args")
 
 
 # Per-script rejection of knobs the script cannot honor
@@ -384,6 +324,18 @@ def test_script_rejects_knobs_it_cannot_honor(script, fields):
     """These knobs parse on the listed script but nothing consumes them. Dropping a guard without
     wiring the knob restores the silent no-op, which this catches."""
     assert fields <= _rejected_knobs(script), f"{script} no longer rejects {sorted(fields - _rejected_knobs(script))}"
+
+
+def test_self_distill_guards_both_generation_eval_knobs():
+    """Self-distillation keeps its dataset raw, so GenerateExamplesCallback is unreachable there and
+    BOTH knobs are inert. Reading the call keeps the script's guard from losing one silently."""
+    source = (REPO_ROOT / "scripts/training/distillation/self_distill.py").read_text()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "reject_non_default_args":
+            guarded = {arg.value for arg in node.args if isinstance(arg, ast.Constant)}
+            assert {"generate_eval_examples", "num_eval_examples"} <= guarded
+            return
+    raise AssertionError("self_distill.py no longer calls reject_non_default_args")
 
 
 def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:

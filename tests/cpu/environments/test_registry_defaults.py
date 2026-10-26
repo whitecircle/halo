@@ -3,8 +3,8 @@
 
 The registry must not inject ``max_turns=10`` into every factory call: that silently clobbers
 the per-class defaults. Class defaults win unless the user set ``max_turns`` in the env config —
-and because ``max_turns: null`` is what the shipped templates rely on, the ``EnvironmentConfig``
-help that tells users which default they are getting is held to the classes themselves here.
+and because ``max_turns: null`` is what the shipped templates rely on, the environments overview's
+registry table, which tells users which default they are getting, is held to the classes here.
 
 Run: python tests/cpu/environments/test_registry_defaults.py  (or pytest)
 """
@@ -16,6 +16,10 @@ from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KE
 from src.environments.envs.protocols.react import create_react_math_environment
 from src.environments.registry import get_registered_environments, resolve_environment
 from src.rewards.terms import EnvironmentTerm
+from tests.common.repo import REPO_ROOT
+
+_ENVIRONMENTS_OVERVIEW = REPO_ROOT / "agent-docs/training-methods/async-grpo/environments/README.md"
+_MAX_TURNS_COLUMN = "Default `max_turns`"
 
 # Minimal valid construction kwargs per registered env. ``sandbox_backend`` is declared only by the
 # sandboxed coding envs; passing it to the others raises instead of being absorbed and ignored,
@@ -35,8 +39,8 @@ _ENV_KWARGS = {
 }
 
 # The turn budget each env class declares for itself; anything absent here defaults to the base 10.
-# Written out, not derived: this is the table the user-facing help below is held to, and deriving it
-# from the same classes the help must describe would make that check agree with itself.
+# Written out, not derived: this is the table the environments overview is held to, and deriving it
+# from the same classes the overview must describe would make that check agree with itself.
 _CLASS_DEFAULT_MAX_TURNS = {"code_contests": 15, "codeforces": 15, "swe": 20, "exam_qa": 8}
 
 # The environments whose reward grades ONLY against ``context["answer"]``; everything absent grades
@@ -59,6 +63,25 @@ def _declared_max_turns(env_type: str) -> int:
     return type(resolve_environment(env_type, _ENV_KWARGS[env_type])).DEFAULT_MAX_TURNS
 
 
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _documented_max_turns() -> dict[str, int]:
+    """``environment_type`` → the default ``max_turns`` the environments overview's registry table states."""
+    lines = _ENVIRONMENTS_OVERVIEW.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("| `environment_type` |"))
+    column = _table_cells(lines[start]).index(_MAX_TURNS_COLUMN)
+    documented = {}
+    # Past the header and its separator row, up to the first line that is no table row.
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells = _table_cells(line)
+        documented[cells[0].strip("`")] = int(cells[column])
+    return documented
+
+
 @pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
 def test_class_default_max_turns_wins_when_unconfigured(env_type):
     expected = _CLASS_DEFAULT_MAX_TURNS.get(env_type, _base_default_max_turns())
@@ -68,8 +91,8 @@ def test_class_default_max_turns_wins_when_unconfigured(env_type):
 
 def test_class_default_table_names_every_environment_that_declares_one():
     """Anti-rot: a class that declares its own ``DEFAULT_MAX_TURNS`` must appear in the table above,
-    which is what holds the user-facing help to account. Without this, a new override would ship
-    with no help entry and the help test would pass by not knowing about it."""
+    which is what holds the environments overview to account. Without this, a new override would ship
+    with the base budget in the overview and the docs test would pass by not knowing about it."""
     declared = {
         env_type: _declared_max_turns(env_type)
         for env_type in _ENV_KWARGS
@@ -80,22 +103,22 @@ def test_class_default_table_names_every_environment_that_declares_one():
 
 def test_every_registered_environment_is_covered():
     """A new env_type must arrive with its own turn-budget assertion, else the tables above (and the
-    user-facing help they hold to account) silently stop covering the registry."""
+    environments overview they hold to account) silently stop covering the registry."""
     assert sorted(_ENV_KWARGS) == get_registered_environments()
 
 
-def test_max_turns_help_names_every_environment_that_overrides_the_base_default():
-    """An env that declares its own budget while the help enumerates only the others leaves the
-    shipped template's ``max_turns: null`` documenting no budget at all. The table read here is
-    tied to the classes above, so a new env with its own budget fails until the help says so."""
-    help_text = EnvironmentConfig.__dataclass_fields__["max_turns"].metadata["help"]
-    for env_type, default in _CLASS_DEFAULT_MAX_TURNS.items():
-        assert f"{env_type} {default}" in help_text, (
-            f"EnvironmentConfig.max_turns help does not state that '{env_type}' defaults to "
-            f"{default} turns; a null max_turns then silently picks a budget the user cannot read."
-        )
-    # The catch-all the help states for everything it does not name.
-    assert f"every other environment {_base_default_max_turns()}" in help_text
+def test_the_environments_overview_states_every_environments_turn_budget():
+    """An env missing from the overview's registry table, or listed with a budget its class does not
+    declare, leaves the shipped templates' ``max_turns: null`` documenting the wrong budget. The
+    expectation is tied to the classes above, so a new env or a changed budget fails until the table
+    says so."""
+    expected = {
+        env_type: _CLASS_DEFAULT_MAX_TURNS.get(env_type, _base_default_max_turns()) for env_type in _ENV_KWARGS
+    }
+    assert _documented_max_turns() == expected, (
+        f"{_ENVIRONMENTS_OVERVIEW.relative_to(REPO_ROOT)}'s registry table must state each environment's "
+        f"default max_turns in its '{_MAX_TURNS_COLUMN}' column"
+    )
 
 
 @pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))

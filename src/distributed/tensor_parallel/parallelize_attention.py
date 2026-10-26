@@ -321,8 +321,8 @@ def apply_tp_to_attention_only(
         raise ValueError(
             f"Tensor parallelism found no decoder-layer list on {type(model).__name__}: "
             f"backbone_with_layers could not reach a module holding {DECODER_LAYER_LIST_ATTRS}. "
-            f"TP cannot shard this layout — train it without tensor parallelism, or teach the "
-            f"backbone descent in src/models/structure.py about it."
+            f"TP cannot shard this layout — train it without tensor parallelism, or teach "
+            f"backbone_with_layers to reach its decoder layers."
         )
 
     tp_size = tp_mesh.size()
@@ -374,8 +374,7 @@ def apply_tp_to_attention_only(
             f"this model (model_type={model_type!r}, attention classes {attn_classes}): none are in "
             f"TP_SHARDABLE_ATTENTION_CLASSES, so every weight would stay replicated while the TP mesh "
             f"assumes sharding. This model family does not support TP — use EP (and/or ETP for "
-            f"experts) instead, or add validated entries to "
-            f"src/distributed/tensor_parallel/module_types.py."
+            f"experts) instead, or add validated entries to TP_SHARDABLE_ATTENTION_CLASSES."
         )
 
     # PARTIAL sharding is correct but not free: an unsharded layer's weights are plain replicas, which

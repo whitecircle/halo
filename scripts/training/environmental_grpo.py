@@ -41,6 +41,7 @@ from trl import GRPOConfig, ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
 from src.args.mixins import DEFAULT_ANSWER_FIELD
+from src.config_validation import reject_unsupported_args
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
 from src.data.pipeline.conversation import as_conversation
@@ -78,7 +79,6 @@ from src.training.script_runner import (
     load_script_model,
     log_script_dataset_examples,
     padded_workload_attn_implementation,
-    reject_unsupported_args,
     run_trainer,
     verify_backend_on_rank0,
 )

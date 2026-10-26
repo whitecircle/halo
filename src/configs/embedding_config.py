@@ -5,7 +5,7 @@ from typing import Literal
 
 from sentence_transformers import SentenceTransformerTrainingArguments
 
-from src.args.validation import RangeValidatedConfig, present, require_int, require_positive, require_positive_int
+from src.config_validation import RangeValidatedConfig, present, require_int, require_positive, require_positive_int
 
 
 @dataclass
@@ -27,7 +27,7 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
     ] = field(
         default="mnrl",
         metadata={
-            "help": "Loss function type. 'mnrl': MultipleNegativesRankingLoss (default), "
+            "help": "Loss function type. 'mnrl': MultipleNegativesRankingLoss, "
             "'cached_mnrl': CachedMultipleNegativesRankingLoss, "
             "'cosent': CoSENTLoss, 'angle': AnglELoss, "
             "'cosine_similarity': CosineSimilarityLoss, "
@@ -49,28 +49,24 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
     cached_mnrl_mini_batch_size: int = field(
         default=32,
         metadata={
-            "help": "Rows per gradient-cached sub-forward for loss_type='cached_mnrl'. The whole "
-            "point of that loss is decoupling the in-batch negative set from activation memory: "
-            "lower it to fit a larger effective batch, raise it for throughput. The loss value is "
-            "unaffected."
+            "help": "Rows per gradient-cached sub-forward of loss_type='cached_mnrl': lower it to fit a larger "
+            "effective batch, raise it for throughput. The loss value is unaffected."
         },
     )
 
     matryoshka_dimensions: list[int] | None = field(
         default=None,
         metadata={
-            "help": "Truncation dimensions for Matryoshka loss wrapper. "
-            "E.g., [256, 128, 64, 32]. If set, wraps the base loss with MatryoshkaLoss."
+            "help": "Truncation dimensions, like [256, 128, 64, 32]; when set, the base loss is wrapped in "
+            "MatryoshkaLoss."
         },
     )
 
     matryoshka_weights: list[float] | None = field(
         default=None,
         metadata={
-            "help": "Per-dimension weights for Matryoshka loss. "
-            "Must match matryoshka_dimensions length (and requires it — the weights are read only "
-            "by the MatryoshkaLoss wrapper, which is built from the dimensions). "
-            "None means uniform weights."
+            "help": "Per-dimension Matryoshka loss weights, one per matryoshka_dimensions entry, which it requires. "
+            "Unset = uniform weights."
         },
     )
 
@@ -91,11 +87,9 @@ class EmbeddingConfig(RangeValidatedConfig, SentenceTransformerTrainingArguments
     max_length: int | None = field(
         default=512,
         metadata={
-            "help": "Maximum tokenized sequence length; texts above it are truncated. Installed as "
-            "SentenceTransformers' max_seq_length on both loading paths (it overrides whatever the "
-            "checkpoint's sentence_bert_config.json ships). null / non-positive resolves to the "
-            "backbone's context window — embeddings pool the whole sequence, so keep this small "
-            "unless you really embed long documents."
+            "help": "Maximum tokenized sequence length, installed as SentenceTransformers' max_seq_length over the "
+            "checkpoint's own; longer texts are truncated. Unset or non-positive = the backbone's context window, "
+            "so keep it small unless you embed long documents."
         },
     )
 

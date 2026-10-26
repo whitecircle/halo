@@ -54,7 +54,7 @@ learning_rate: 5.0e-06
 | `min_log_prob` | `-3.0` | Log-prob floor, on negative-advantage rows only |
 | `initial_min_log_prob` | `null` | Linearly schedule that floor from this start |
 | `kl_beta` | `0.0` | k3 KL coefficient (Schulman's KL estimator) ([Reference model](#reference-model)) |
-| `drop_degenerate_groups` | `false` | Drop exactly-tied and singleton groups at tokenization |
+| `drop_degenerate_groups` | `false` | Drop exactly-tied and singleton groups at tokenization, train and eval splits alike |
 | `use_chunked_grpo_logprobs` | `false` | Vocab-chunked log-probs, not full logits |
 | `max_prompt_length` | `512` | Prompt budget, left-truncated; `null` = no cap |
 | `max_completion_length` | `null` | Completion budget, cut from the end; `null` = no cap |

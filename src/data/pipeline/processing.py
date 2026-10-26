@@ -29,7 +29,7 @@ from trl.data_utils import pack_dataset as _trl_pack_dataset
 from src.data.pipeline.row_processors import is_valid_example
 from src.data.sources.dataset_cache import publish_cached_download
 from src.data.sources.paths import eval_split_name
-from src.distributed.filesystem import RUN_LOG_DIR_NAME, store_join_recorded_failure
+from src.distributed.filesystem import store_join_recorded_failure
 from src.distributed.runtime import (
     broadcast_from_rank0,
     fs_aware_load_rank,
@@ -40,7 +40,7 @@ from src.distributed.runtime import (
     is_local_main_process,
 )
 from src.env import env_int
-from src.log import warn_once
+from src.log import RUN_LOG_DIR_NAME, warn_once
 
 logger = logging.getLogger(__name__)
 

@@ -24,6 +24,7 @@ from trl import ModelConfig
 
 from src.args.classification_args import CLFScriptArguments
 from src.args.distributed_args import DistributedArguments
+from src.config_validation import reject_unsupported_args
 from src.configs.classification_config import ClassificationConfig
 from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_json, reject_image_content
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
@@ -48,7 +49,6 @@ from src.training.script_runner import (
     load_script_model,
     log_script_dataset_examples,
     padded_workload_attn_implementation,
-    reject_unsupported_args,
     run_trainer,
 )
 

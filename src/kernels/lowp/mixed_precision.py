@@ -93,7 +93,7 @@ def _warn_if_dense_mlp_unmatched(model: nn.Module, precision: str) -> None:
         logger.warning(
             "lowp_precision=%s with lowp_apply_dense_mlp=true converted NO dense MLP linear: this "
             "model's MLP projections are named %s, not %s — dense low precision will NOT apply. "
-            "Extend MLP_PROJECTIONS (src/kernels/lowp/mixed_precision.py) for this family.",
+            "Extend MLP_PROJECTIONS for this family.",
             precision,
             sorted(linears),
             list(MLP_PROJECTIONS),

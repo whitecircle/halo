@@ -161,7 +161,8 @@ changes.
 | `src/configs/`, `src/args/` (config/arg dataclasses) | `agent-docs/reference/configuration-reference.md` + the method page that owns the config |
 | `src/training/parser.py` (H4ArgumentParser, toolkit defaults, the unknown-key raise) | `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/env.py` (the `env_*` readers, `HALO_DATA_ROOT` / `data_path`), `src/__init__.py` (the import-time process defaults: `HALO_TORCH_NUM_THREADS`, `TOKENIZERS_PARALLELISM`) and any `HALO_`/`DIST_`/`VLLM_`/`SGLANG_`/`NVLINK_`/`EP_` knob wherever it is read | `agent-docs/reference/configuration-reference.md` (Environment variables), `agent-docs/infrastructure/docker.md` |
-| `src/log.py` (root logging setup, CLI verbosity, `warn_once`) | `agent-docs/reference/debugging.md` |
+| `src/config_validation.py` (the value guards, `RangeValidatedConfig`, `differs_from_default`, the argument refusals `reject_unsupported_args` / `reject_non_default_args`) | `agent-docs/reference/configuration-reference.md` |
+| `src/log.py` (root logging setup, CLI verbosity, `warn_once`, `preview`, the run-log names) | `agent-docs/reference/debugging.md` |
 | `src/cli.py` (`halo launch` / `halo run` surface, tool aliases) | `README.md` quick start, `agent-docs/reference/scripts-reference.md` |
 
 ## Entry-script plumbing & clients
@@ -169,7 +170,7 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/training/environment.py` (output-dir validation, HF cache wiring, seed, tracking vars, resume detection) | `agent-docs/getting-started/configuration.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/checkpoints.md` |
-| `src/training/script_runner.py` (the `scripts/training/**` backbone: window pins, tokenizer/attention resolution, the modality verdict (`resolve_vlm_run`), callback assembly, `reject_*` guards incl. the TRL dataset-prep refusal (`reject_trl_dataset_prep_args`), the rank-0 backend probe (`verify_backend_on_rank0`), the context-window apply (`apply_context_window`)) | `agent-docs/reference/scripts-reference.md`, `agent-docs/getting-started/configuration.md` |
+| `src/training/script_runner.py` (the `scripts/training/**` backbone: window pins, tokenizer/attention resolution, the modality verdict (`resolve_vlm_run`), callback assembly, the TRL dataset-prep refusal (`reject_trl_dataset_prep_args`), the rank-0 backend probe (`verify_backend_on_rank0`), the context-window apply (`apply_context_window`)) | `agent-docs/reference/scripts-reference.md`, `agent-docs/getting-started/configuration.md` |
 | `src/training/parallelism_args.py` (`DistributedArguments` → `ParallelismConfig`, the per-script CP/PP/lowp gates) | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md` |
 | `src/training/run_logging.py` (per-rank transformers verbosity, the `run.log` console tee) | `agent-docs/reference/debugging.md` |
 | `src/training/early_stopping.py` (`StopsTrainingEarly`, the marker the script runner reads to exit a stopped run non-zero) | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/reference/scripts-reference.md` |

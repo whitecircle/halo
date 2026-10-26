@@ -8,7 +8,7 @@ from typing import Literal
 from transformers import TrainingArguments
 
 from src.args.mixins import DatasetNumProcArguments, ModelInitKwargsArguments
-from src.args.validation import (
+from src.config_validation import (
     RangeValidatedConfig,
     present,
     require_finite,
@@ -89,25 +89,23 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Ra
     max_length: int | None = field(
         default=1024,
         metadata={
-            "help": "Total sequence budget (prompt + completion) in tokens. null / non-positive "
-            "resolves to the model's context window at launch. Splits into a prompt and a completion "
-            "share via max_prompt_length / max_completion_length."
+            "help": "Total sequence budget (prompt + completion) in tokens, split into the max_prompt_length and "
+            "max_completion_length shares. Unset or non-positive = the model's context window."
         },
     )
     max_prompt_length: int | None = field(
         default=None,
         metadata={
             "help": "Prompt share of max_length; longer prompts are truncated per truncation_mode. "
-            "null (default) = half of the resolved max_length, so the split scales with a "
-            "context-resolved max_length instead of pinning prompts at a small constant."
+            "Unset = half of the resolved max_length, so the split scales with a context-resolved max_length "
+            "instead of pinning prompts at a small constant."
         },
     )
     max_completion_length: int | None = field(
         default=None,
         metadata={
-            "help": "Completion share of max_length; longer completions are truncated (keeping the "
-            "terminal EOS). null (default) = the max_length - max_prompt_length remainder. An "
-            "explicit value must still fit that remainder."
+            "help": "Completion share of max_length; a longer completion is truncated from the end, keeping the "
+            "terminal EOS. Unset = the max_length - max_prompt_length remainder, which an explicit value must fit."
         },
     )
     truncation_mode: Literal["keep_end", "keep_start"] = field(

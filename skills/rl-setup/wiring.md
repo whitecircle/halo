@@ -138,8 +138,8 @@ set it in YAML (e.g. `vllm_group_port: 51216`).
 
 `environment_type` (registry name), `rewards` (the term list, default
 `[{source: environment}]`), `max_turns` (`int | None`, default **`None`** = keep the environment
-class's own default — `code_contests`/`codeforces` 15, `swe` 20, `exam_qa` 8, every other
-environment 10), `environment_kwargs` (per-env dict).
+class's own default, listed per environment in
+`agent-docs/training-methods/async-grpo/environments/README.md#registry`), `environment_kwargs` (per-env dict).
 `to_env_config()` forwards the terms as `reward_terms` plus an explicitly-set `max_turns`,
 merged with `environment_kwargs`, to `resolve_environment(environment_type, config)`.
 
@@ -234,7 +234,7 @@ Config: `examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml`
 (template: `rlvr-online-grpo-template.yaml`). Uses TRL-native vLLM fields
 (`use_vllm: true`, `vllm_mode: server`, `vllm_server_host`, `vllm_server_port`) and the same
 `rewards:` term list, defaulting to `[{source: accuracy}]` — the RLVR graders `accuracy` and
-`format`, plus `judge` / `reward_model` (`src/args/rlvr_online_grpo_args.py`).
+`format`, plus `judge` / `reward_model` (`src/rewards/graders/verifiable.py`).
 
 Server and trainer GPUs must be disjoint (a rank cannot NCCL-broadcast to itself), and the server
 must serve the trained model — bare compose serves `Qwen/Qwen3-0.6B` on GPU 7.

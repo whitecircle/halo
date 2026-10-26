@@ -30,7 +30,7 @@ from src.checkpoint.format import (
 from src.data.pipeline.processing import ensure_cache_dir
 from src.distributed.checkpoint.coordination import resolve_resume_checkpoint
 from src.distributed.expert_parallel.dispatcher import destroy_all_dispatchers
-from src.distributed.filesystem import OUTPUT_FS_PROBE_PREFIX, RUN_LOG_DIR_NAME
+from src.distributed.filesystem import OUTPUT_FS_PROBE_PREFIX
 from src.distributed.runtime import (
     barrier,
     broadcast_from_rank0,
@@ -39,7 +39,7 @@ from src.distributed.runtime import (
     is_global_main_process,
     reject_across_ranks,
 )
-from src.log import KEY_PREVIEW_COUNT
+from src.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME
 from src.models.loading.dtype import configure_float32_matmul_precision
 from src.models.patches.attention import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
 from src.training.parser import is_true_string

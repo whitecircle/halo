@@ -30,6 +30,7 @@ from trl import ModelConfig, RewardConfig
 
 from src.args.distributed_args import DistributedArguments
 from src.args.reward_args import RMScriptArguments
+from src.config_validation import reject_unsupported_args
 from src.data.sources.loading import alias_images_column, alias_tools_column
 from src.data.vlm import is_vlm_run
 from src.distributed.loading.peft_setup import setup_peft_model
@@ -53,7 +54,6 @@ from src.training.script_runner import (
     load_script_model,
     log_script_dataset_examples,
     padded_workload_attn_implementation,
-    reject_unsupported_args,
     run_trainer,
 )
 

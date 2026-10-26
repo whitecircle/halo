@@ -25,8 +25,8 @@ def test_torch_still_exposes_the_new_group_timeout_default():
     assert hasattr(c10d, "default_pg_nccl_timeout"), (
         "torch.distributed.distributed_c10d.default_pg_nccl_timeout is gone on this PyTorch build — "
         "apply_default_pg_timeout can no longer pin the subgroup default, and every DeviceMesh "
-        "(DP/HSDP/TP) subgroup falls back to the 10-minute NCCL watchdog. Update the pin in "
-        "src/distributed/runtime.py to the renamed symbol."
+        "(DP/HSDP/TP) subgroup falls back to the 10-minute NCCL watchdog. Point "
+        "apply_default_pg_timeout at the renamed symbol."
     )
 
 

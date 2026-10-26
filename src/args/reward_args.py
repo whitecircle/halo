@@ -13,13 +13,9 @@ class RMScriptArguments(CommonScriptArguments):
     images_field: str | None = field(
         default=None,
         metadata={
-            "help": "VLM only: dataset column holding the row's image(s) (HF Image feature, single "
-            "or list). Renamed to the 'images' column the vision path reads, so hub datasets that "
-            "store images under another name train without preprocessing. The images are merged "
-            "into the PROMPT conversation (both sides of a pair share it), filling unset "
-            "{'type': 'image'} placeholders in order when the messages carry them and otherwise "
-            "leading the first user turn. Setting it declares the run VLM on a multimodal "
-            "checkpoint; a dataset that already ships an 'images'/'image' column declares it "
-            "without the knob."
+            "help": "VLM only: dataset column holding the row's image(s), renamed to 'images' and merged into the "
+            "prompt conversation both sides of a pair share. Setting it declares the run VLM on a multimodal "
+            "checkpoint, as a dataset with an 'images'/'image' column does without it. "
+            "See agent-docs/training-methods/preference/reward-modeling.md#vision-language."
         },
     )

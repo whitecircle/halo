@@ -49,11 +49,11 @@ from scripts.docs.references import (
     UNKNOWN_FIELD,
     RepoIndex,
     dotted_name,
-    is_string_literal,
     literal_text,
     own_bindings,
     patch_call,
     string_constants,
+    whole_string_literals,
 )
 from tests.common.repo import REPO_ROOT
 from tests.common.sample_tree import spelled, write_sample_tree
@@ -281,14 +281,8 @@ def _scan_python(path: Path, index: RepoIndex) -> list[Finding]:
             findings.append(Finding(line, "patch target", dotted, why or _unread_patch_target(dotted, index)))
         else:
             findings.append(Finding(line, "attribute", dotted, why))
-    # A string an f-string, a format spec or a patch call already accounts for is not read again.
-    accounted = {
-        id(part)
-        for node in ast.walk(tree)
-        if isinstance(node, (ast.JoinedStr, ast.FormattedValue))
-        for part in (node.values if isinstance(node, ast.JoinedStr) else [node.format_spec])
-        if part is not None
-    }
+    # A patch call's target string is read as the target, not again as text.
+    patch_strings = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             findings += [
@@ -305,15 +299,15 @@ def _scan_python(path: Path, index: RepoIndex) -> list[Finding]:
                     findings.append(Finding(node.lineno, "import", name, why))
         elif isinstance(node, ast.Call) and (patch := patch_call(node, owners, constants)):
             if patch.string is not None:
-                accounted.add(id(patch.string))
+                patch_strings.add(id(patch.string))
             unread = _unread_patch_target(patch.target, index) if patch.replaces_binding else None
             findings += [
                 Finding(node.lineno, "patch target", reference.text, reference.why or unread)
                 for reference in index.references(patch.target)
                 if reference.kind == "name"
             ]
-    for node in ast.walk(tree):
-        if is_string_literal(node) and id(node) not in accounted:
+    for node in whole_string_literals(tree):
+        if id(node) not in patch_strings:
             findings += _text_findings(literal_text(node, constants), node.lineno, index, node.end_lineno)
     for line, comments in _comment_blocks(source):
         findings += _text_findings(comments, line, index)

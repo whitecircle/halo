@@ -13,20 +13,19 @@ class DistillScriptArguments(ConversationRenderArguments, CommonScriptArguments)
 
     teacher_model: str | None = field(
         default=None,
-        metadata={"help": "Name or path of the teacher model for distillation"},
+        metadata={"help": "Name or path of the teacher model."},
     )
     teacher_model_revision: str | None = field(
         default=None,
         metadata={
-            "help": "Hub revision for the teacher. The teacher is usually a DIFFERENT repo from the "
-            "student, so it cannot share the student's model_revision — sending one repo's commit to "
-            "another 404s. Defaults to the teacher repo's main."
+            "help": "Hub revision of the teacher; unset = the teacher repo's main. The student's model_revision "
+            "does not carry over, since the teacher is usually another repo."
         },
     )
     # Distillation datasets conventionally ship a "messages" column (SFT's default is "prompt").
     conversation_field: str | None = field(
         default="messages",
-        metadata={"help": "Field in dataset with conversations (in list of dicts format)"},
+        metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."},
     )
 
     def _validate_ranges(self) -> None:

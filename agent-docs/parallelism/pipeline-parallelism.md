@@ -14,6 +14,10 @@ time with `<Trainer> does not support Pipeline Parallelism (PP)`, before a model
 must be a whole number of NVLink domains holding at least two ranks, so a run spans at least two
 domains.
 
+The pipeline's point-to-point buffers freeze their shapes on the first step, so every batch must
+keep one shape: a padding-free collator is refused, and packing runs at one packed row per
+microbatch.
+
 ## Components
 
 - **Config surface.** `ParallelismConfig` declares `pp_size`, `pp_schedule` (`1f1b` / `gpipe`),

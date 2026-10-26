@@ -340,9 +340,9 @@ def quantize_checkpoint(
                         f"{name!r} is a fused 3-D expert tensor, but this checkpoint's model_type "
                         f"{detect_model_types(input_dir) or ['<missing>']} matches no EP layer class, so its "
                         f"contraction axis is unknown. Block-scaling the wrong axis corrupts every "
-                        f"dequantized expert. Register the family (HF_MODEL_TYPES + "
-                        f"HF_FUSED_EXPERT_CONTRACTION_AXIS on its EP layer class in "
-                        f"src/distributed/expert_parallel/layers/), or pass --exclude to skip these weights."
+                        f"dequantized expert. Register the family (HF_MODEL_TYPES and "
+                        f"HF_FUSED_EXPERT_CONTRACTION_AXIS on its EP layer class), or pass --exclude to skip "
+                        f"these weights."
                     )
                 axis = fused_expert_axis
             else:

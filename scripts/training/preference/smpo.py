@@ -25,6 +25,7 @@ from trl import ModelConfig
 
 from src.args.distributed_args import DistributedArguments
 from src.args.smpo_args import SMPOScriptArguments
+from src.config_validation import reject_unsupported_args
 from src.configs.smpo_config import SmoothMarginPOConfig
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
@@ -44,7 +45,6 @@ from src.training.script_runner import (
     load_script_datasets,
     padded_workload_attn_implementation,
     prepare_script_preference_data,
-    reject_unsupported_args,
     resolve_vlm_run,
     run_trainer,
 )

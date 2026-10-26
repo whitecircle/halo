@@ -7,7 +7,6 @@ for the momentum and weight-decay updates (one launch per param).
 import contextlib
 import logging
 from collections.abc import Collection, Sequence
-from dataclasses import MISSING, fields
 from typing import Any
 
 import torch
@@ -21,6 +20,7 @@ from gram_newton_schulz.muon.muon_utils.muon_matrix_split_utils import (
 )
 from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
+from src.config_validation import differs_from_default
 from src.distributed.runtime import is_global_main_process, rank_consensus, to_local
 from src.models.structure import EMBEDDING_HEAD_MARKERS
 from src.optimizers.adamw_bf16 import BLOCK_SIZE, AdamWBF16, require_param_names, sr_param_index, sr_seed_pair
@@ -432,22 +432,6 @@ def create_muon_optimizer(
     )
 
 
-def _is_explicitly_set(args: Any, field_name: str) -> bool:
-    """Whether ``args.<field_name>`` differs from its declared dataclass default (the user set it).
-
-    The training-args classes are dataclasses and HF does not record which fields were provided, so
-    comparing against the declared default is the only available signal.
-    """
-    for f in fields(args):
-        if f.name == field_name:
-            if f.default is MISSING:
-                # Required and default_factory fields have no comparable literal default; a `!=`
-                # against the MISSING sentinel would report every value as explicitly set.
-                raise TypeError(f"{field_name} declares no literal default; _is_explicitly_set cannot probe it")
-            return getattr(args, field_name) != f.default
-    raise AttributeError(f"{type(args).__name__} declares no '{field_name}' field")
-
-
 def build_muon_optimizer(model: torch.nn.Module, args: Any, decay_parameters: Sequence[str]):
     """Muon built from the training args: Newton-Schulz for 2D+ grads, internal AdamW for the rest."""
     # The Adam betas configure only Muon's internal scalar AdamW, whose tuned defaults differ from
@@ -455,8 +439,8 @@ def build_muon_optimizer(model: torch.nn.Module, args: Any, decay_parameters: Se
     # by accident.
     default_beta1, default_beta2 = DEFAULT_SCALAR_BETAS
     scalar_betas = (
-        args.adam_beta1 if _is_explicitly_set(args, "adam_beta1") else default_beta1,
-        args.adam_beta2 if _is_explicitly_set(args, "adam_beta2") else default_beta2,
+        args.adam_beta1 if differs_from_default(args, "adam_beta1") else default_beta1,
+        args.adam_beta2 if differs_from_default(args, "adam_beta2") else default_beta2,
     )
     optimizer = create_muon_optimizer(
         model,
