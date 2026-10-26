@@ -14,6 +14,7 @@ gloo group), the hand-written adapter file, and the trainer seam that marks whic
 
 import dataclasses
 import os
+from functools import partial
 from types import SimpleNamespace
 
 import pytest
@@ -25,15 +26,18 @@ from transformers import CONFIG_MAPPING, AutoModelForCausalLM, Qwen3Config, Qwen
 
 PartialState()  # save_model_config logs through accelerate's logger
 
+import src.checkpoint.parallel.ep as ep
+from src.checkpoint.parallel.adapters import _adapter_file_state
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from src.checkpoint.parallel.pp import save_pp_checkpoint
+from src.checkpoint.parallel.save import save_tp_checkpoint
+from src.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
 from src.checkpoint.reading import load_full_state_dict
-from src.distributed.checkpoint.ep_save import save_ep_model
-from src.distributed.checkpoint.peft import _adapter_file_state
-from src.distributed.checkpoint.save import save_pp_checkpoint
-from src.distributed.checkpoint.tp_save import save_tp_model
-from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
+from src.checkpoint.writing import normalize_gathered_state_dict
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
+from tests.common.checkpoint_io import save_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.cpu.checkpoint.test_pp_sharded_save_roundtrip import PP_SIZE, WORLD_SIZE, _context, _parallelism_config
@@ -86,7 +90,7 @@ def _stream(model, output_dir, *, keep_live_dtype):
         output_dir,
         is_save_rank=True,
         max_shard_size=SHARD_SIZE,
-        keep_live_dtype=keep_live_dtype,
+        normalize=partial(normalize_gathered_state_dict, model, keep_live_dtype=keep_live_dtype),
     )
 
 
@@ -108,9 +112,9 @@ def test_a_training_checkpoint_keeps_fp32_masters_and_an_export_casts_them(tmp_p
         if writer == "gathered":
             _stream(model, out, keep_live_dtype=keep_live_dtype)
         elif writer == "tp":
-            save_tp_model(model, out, keep_live_dtype=keep_live_dtype)
+            save_tp_checkpoint(save_context(model, training_checkpoint=keep_live_dtype), out)
         else:
-            save_ep_model(model, out, keep_live_dtype=keep_live_dtype)
+            save_ep_gathered_checkpoint(save_context(model, training_checkpoint=keep_live_dtype), out)
         state = load_full_state_dict(out)
         experts = _expert_keys(state)
         assert experts, "premise: the fp32 expert bank reached the checkpoint"
@@ -124,6 +128,29 @@ def test_a_training_checkpoint_keeps_fp32_masters_and_an_export_casts_them(tmp_p
             assert all(state[key].dtype == torch.bfloat16 for key in experts)
         # bf16 parameters are written as they live either way.
         assert state["model.embed_tokens.weight"].dtype == torch.bfloat16
+
+
+def test_the_ep_gathered_export_holds_its_replicated_tensors_at_the_save_dtype(tmp_path, monkeypatch):
+    """The save rank holds the whole non-expert chunk at once. Cast as each tensor resolves, an export
+    holds it at the save dtype; cast only when the chunk is written, it holds every fp32 master at its
+    full width and then a bf16 copy beside it."""
+    staged: dict[str, torch.dtype] = {}
+    stream = ep.stream_gathered_checkpoint
+
+    def recording_stream(model, chunks, *args, **kwargs):
+        def recorded():
+            for chunk in chunks:
+                staged.update((key, tensor.dtype) for key, tensor in chunk.items())
+                yield chunk
+
+        return stream(model, recorded(), *args, **kwargs)
+
+    monkeypatch.setattr(ep, "stream_gathered_checkpoint", recording_stream)
+    save_ep_gathered_checkpoint(save_context(_tiny_moe_with_fp32_masters()), str(tmp_path))
+
+    assert staged, "premise: the save streamed its chunks"
+    for name in (FP32_MASTERS[1], FP32_EXPERTS):
+        assert staged[name] == torch.bfloat16, f"{name} was held at {staged[name]} before the write cast it"
 
 
 def _pp_save_worker(rank: int, out_dir: str, training_checkpoint: bool) -> None:
@@ -188,6 +215,10 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
 
     def _find_cp_wrapper(self):
         return None
+
+    def _optimizer_store(self):
+        # Unsharded, as the host's run is: the base Trainer's optimizer.pt stays the optimizer state.
+        return SimpleNamespace(writes_shards=False)
 
     def save_model(self, output_dir=None, _internal_call=False):
         self.saves.append(self._checkpoint_context().training_checkpoint)

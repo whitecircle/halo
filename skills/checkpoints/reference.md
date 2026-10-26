@@ -26,21 +26,21 @@ additionally needs `ep_size` in the index metadata, not just the marker.
 ## Resume — three paths
 
 - **Path A — reload from checkpoint** (only a `use_grouped_gemm: false` run with no EP/ETP/CP/TP):
-  `model_name_or_path` stays the weights source. Under FSDP2 `_load_fsdp2` reshards, reads the whole
+  `model_name_or_path` stays the weights source. Under FSDP2 `load_resume_weights` reshards, reads the whole
   dict on rank 0 via `load_full_state_dict()` and hands it to `set_model_state_dict(broadcast_from_rank0)`,
-  gated on key coverage; a single process or DDP streams it per rank (`_load_streamed`). Both map the
+  gated on key coverage; a single process or DDP streams it per rank. Both map the
   checkpoint onto the live names first (`ModuleLayoutView`, the inverse of the save-side revert), so a
   per-expert expert checkpoint reaches the fused live experts. Accelerate-managed FSDP and the
   sentence-transformers pipeline keep the base Trainer's loader.
 - **Path B — load at construction** (EP, ETP, EP+TP, EP+CP, CP, TP, and at the default
   `use_grouped_gemm: true` every other run, dense included): `resolve_resume_weights_source`
-  (`src/training/environment.py`) repoints the policy's weights source at the checkpoint dir (an
+  (`src/checkpoint/parallel/resume_source.py`) repoints the policy's weights source at the checkpoint dir (an
   adapter-only one keeps the base, and so does a merged one — `merge_expert_lora_on_save` or
   embedding LoRA — whose `resume_adapter.json` marker sends the resume to its `resume_adapter/`), so
   `load_distributed_model()` builds the model from the trained
   weights. `model_config` is not mutated — the DPO/KTO/SDPG reference and the dataset-compat check
   keep the base, so **leave `model_name_or_path` at the base**. An unmerged per-rank save raises
-  here, before construction. The loader then skips the re-read: EP/CP always, `_load_streamed` / `_load_fsdp2` when the model was
+  here, before construction. The loader then skips the re-read: EP/CP always, FSDP2 / TP / single-process when the model was
   constructed from that checkpoint. A model built from anything else makes the loader raise
   (rank-0 verdict, broadcast) under EP/CP when the checkpoint ships base weights (a marked
   merge-on-save checkpoint inverts this: it refuses a model built from itself), and under TP+DP,
@@ -49,12 +49,12 @@ additionally needs `ep_size` in the index metadata, not just the marker.
   (GptOss sinks sliced by `tp_rank`). `load_best_model_at_end` raises for a full fine-tune under CP,
   on a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1` included), and under TP+DP; dense
   FSDP2 and pure TP re-read for it.
-- **Path C — PP** (`_load_pp_stage`, dispatched first): stage-local restore.
+- **Path C — PP** (`restore_pp_stage_weights`, dispatched first): stage-local restore.
 
 All three restore `trainer_state.json`, the LR scheduler from `scheduler.pt` (written even under
-`save_only_model`), LoRA adapters (`restore_adapters`, `src/distributed/checkpoint/peft.py`),
+`save_only_model`), LoRA adapters (`restore_adapters`, `src/checkpoint/parallel/adapters.py`),
 the router-balancing biases
-(`_restore_router_balancing_biases`, `src/trainers/mixins/checkpointing.py`) and the frozen reference
+(`restore_balancing_biases`, `src/checkpoint/parallel/sidecars.py`) and the frozen reference
 scores in `reference_logps.pt` (DPO/KTO precompute, offline GRPO KL; `src/trainers/mixins/reference_logps.py`,
 which validates token digests and settings before attaching them). Optimizer state resumes from the per-rank shards when
 `OptimizerStateFingerprint` matches; a mismatch warm-restarts, and
@@ -62,11 +62,13 @@ shards whose `optimizer_meta.pt` carries no fingerprint at all raise — delete 
 `optimizer_shard_*.pt` + `optimizer_meta.pt` to accept a warm restart. A matched restore that fails
 on any rank (an unreadable shard, a CUDA OOM) raises on every rank unless `allow_optimizer_warm_restart: true`.
 
-Source: `src/distributed/checkpoint/loader.py` (`CheckpointLoader`, `_load_streamed`, `_load_fsdp2`,
-`_load_pp_stage`), `src/distributed/checkpoint/optimizer.py` (`OptimizerShardStore.load` / `.save` /
-`.restore_lr_scheduler`), `src/distributed/checkpoint/fingerprint.py`,
-`src/checkpoint/reading.py` (`load_full_state_dict`), `src/checkpoint/hub_layout.py` (`ModuleLayoutView`).
-`src/trainers/mixins/checkpointing.py::_load_from_checkpoint` is a thin delegate over the loader.
+Source: `src/checkpoint/parallel/resume_weights.py` (`load_resume_weights`),
+`src/checkpoint/parallel/pp.py` (`restore_pp_stage_weights`), `src/checkpoint/parallel/optimizer.py`
+(`OptimizerShardStore.load` / `.save`), `src/checkpoint/parallel/optimizer_meta.py`,
+`src/checkpoint/parallel/sidecars.py` (`restore_lr_scheduler`), `src/checkpoint/reading.py`
+(`load_full_state_dict`), `src/checkpoint/hub_layout.py` (`ModuleLayoutView`).
+`src/trainers/mixins/checkpointing.py::_load_from_checkpoint` runs the base Trainer's load where
+`load_resume_weights` declines.
 
 ## Per-script reference (`scripts/after_training/`)
 
@@ -85,11 +87,11 @@ every tensor at its live dtype), so the stored dtype is what the merge writes. T
   `supported_ep_merge_model_types` (`expert_weights.py`, which also owns `expert_weight_roots` and
   `to_hub_layer_key`) map a checkpoint's `model_type` to the EP layer class via each class's
   `HF_MODEL_TYPES`; the transform itself is that class's `merge_shards_to_hf` (`expert_gather.py`,
-  overridden where the layout differs). Save time gates on `_check_ep_merge_family_supported`
-  (`ep_save.py`), which refuses two cases: a `model_type` no EP layer class claims, and a model
-  whose load converted names the merge cannot respell (`_keys_merge_cannot_respell`: the gathered
-  save reverts them through transformers' save-side conversion, which a key-by-key merge stream
-  cannot apply) — Step-3.7 Flash, Inkling, DeepSeek-V4 and GLM-5 Next hubs, a SigLIP tower
+  overridden where the layout differs). Construction and save time gate on
+  `reject_unmergeable_ep_sharded_save` (`src/checkpoint/parallel/ep.py`), which among its refusals
+  covers two family cases: a `model_type` no EP layer class claims, and a model whose load converted
+  names the merge cannot respell (the gathered save reverts them through transformers' save-side
+  conversion, which a key-by-key merge stream cannot apply) — Step-3.7 Flash, Inkling, DeepSeek-V4 and GLM-5 Next hubs, a SigLIP tower
   (Command A+, LFM2-VL), a legacy Mistral 3 checkpoint. Laguna's renames are the merge's own
   (`to_hub_layer_key`), so it merges, as do the families whose loads convert only the experts.
 - GptOss gate/up are de-interleaved for grouped-GEMM training and re-interleaved on merge; the expert
@@ -198,7 +200,7 @@ wrapper class for Qwen3.5/3.6; SGLang 0.5.17 loads a text-only export as-is.
 ## Training sidecars — `apply_training_sidecars`
 
 `router_balancing_biases.pt` (trained router-balancing biases, written by
-`_persist_router_balancing_biases` in `src/trainers/mixins/checkpointing.py` every save) and `training_provenance.json` (the GptOss sink
+`save_balancing_biases` in `src/checkpoint/parallel/sidecars.py` every save) and `training_provenance.json` (the GptOss sink
 policy) hold training state the weights cannot. `apply_training_sidecars(model, source_dir)`
 (`src/checkpoint/sidecars.py`) is the single seam that re-applies both to an assembled model:
 it restores the balancing tensors **at their trained precision** (a bf16 round trip quantizes away
@@ -251,8 +253,8 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   plain tokenizer otherwise; all three scripts call it, and `resolve_auto_model_class` /
   `auto_load_model` (`src/model_loading/model_preparation.py`) load a multimodal config as the
   full `*ForImageTextToText` wrapper.
-- **Save retains state on the save-rank only** — `save_ep_model`
-  (`src/distributed/checkpoint/ep_save.py`) has all ranks run each gather collective but only the
+- **Save retains state on the save-rank only** — `save_ep_gathered_checkpoint`
+  (`src/checkpoint/parallel/ep.py`) has all ranks run each gather collective but only the
   save rank keeps the tensor (per-node CPU RAM peaks well under 1× model, not gpus_per_node×). TP
   mirrors this, and on the same `is_fs_save_rank()` — never `tp_rank == 0`, which the several TP
   groups a node holds would race on identical files. Don't "optimize" by skipping ranks in the

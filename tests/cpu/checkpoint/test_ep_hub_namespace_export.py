@@ -13,7 +13,7 @@ Swept over every tiny EP family and every multimodal wrapper one ships under, ea
 checkpoint in the spelling its family's whole conversion mapping reverts to
 (:func:`_write_hub_checkpoint`; the hub spelling, as far as transformers' own revert restores it) and
 saved through the real
-``save_ep_model`` after an ``ep_size=1`` EP patch. Per family: the save's keys outside the expert banks
+``save_ep_gathered_checkpoint`` after an ``ep_size=1`` EP patch. Per family: the save's keys outside the expert banks
 are the hub checkpoint's; the artifact reloads, with no missing or unexpected key, into the tensors it
 was saved from (so the per-chunk revert is the whole one); the wrapper-less writer writes the hub
 checkpoint's keys exactly; ``unfuse_moe_experts.py`` turns the save into the hub checkpoint where the
@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import itertools
 from dataclasses import dataclass
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -38,18 +37,16 @@ from transformers.core_model_loading import PrefixChange, WeightConverter, Weigh
 from transformers.integrations.mxfp4 import Mxfp4Dequantize
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
-PartialState()  # save_ep_model logs through accelerate's logger
+PartialState()  # the EP save logs through accelerate's logger
 
-import src.distributed.checkpoint.ep_save as ep_save
+import src.checkpoint.parallel.ep as ep_save
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
 from src.checkpoint.hub_layout import ModuleLayoutView
-from src.distributed.checkpoint.ep_save import (
-    _check_ep_merge_family_supported,
-    _keys_merge_cannot_respell,
-    save_ep_model,
+from src.checkpoint.parallel.ep import (
+    reject_unmergeable_ep_sharded_save,
+    save_ep_gathered_checkpoint,
 )
-from src.distributed.checkpoint.save import save_fsdp2_checkpoint
-from src.distributed.checkpoint.tp_save import save_tp_model
+from src.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_classes,
     experts_container_attrs,
@@ -63,7 +60,7 @@ from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.model_loading.lazy_safetensors.conversion import Concat
 from src.models.param_roles import persistent_buffers
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
-from tests.common.checkpoint_io import loading_problems
+from tests.common.checkpoint_io import loading_problems, save_context
 from tests.common.models import TINY_STEP3P7_CONFIG
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, TinyFamily, tiny_family_model
@@ -120,7 +117,7 @@ def _loaded(name: str, tmp_path) -> _Loaded:
     patch_moe_model_for_ep(model, single_process_ep_config())
     ep_layers = {path: module for path, module in model.named_modules() if isinstance(module, EPMoELayerBase)}
     assert ep_layers, f"{name}: the EP patch wrapped nothing, so no assertion here would reach a gather"
-    save_ep_model(model, ep_dir)
+    save_ep_gathered_checkpoint(save_context(model), ep_dir)
     return _Loaded(
         family, model, safetensors_state_dict(hub_dir), source, safetensors_state_dict(ep_dir), ep_dir, ep_layers
     )
@@ -181,14 +178,7 @@ def test_gathered_save_reloads_into_the_saved_tensors(name, tmp_path):
     assert differing == [], f"{name}: tensors changed through the gathered save: {differing[:5]}"
 
 
-def _save_fsdp2(model: torch.nn.Module, output_dir: str) -> None:
-    ctx = SimpleNamespace(
-        model=model, is_save_rank=True, max_shard_size="5GB", training_checkpoint=False, tokenizer=None
-    )
-    save_fsdp2_checkpoint(ctx, output_dir)
-
-
-_WRAPPERLESS_SAVERS = {"fsdp2": _save_fsdp2, "tp": save_tp_model}
+_WRAPPERLESS_SAVERS = {"fsdp2": save_fsdp2_checkpoint, "tp": save_tp_checkpoint}
 
 
 @pytest.mark.parametrize("saver", _WRAPPERLESS_SAVERS)
@@ -200,7 +190,7 @@ def test_wrapperless_save_writes_the_hub_checkpoint(name, saver, tmp_path):
     _write_hub_checkpoint(family, hub_dir)
     model = _load(family, hub_dir)
 
-    _WRAPPERLESS_SAVERS[saver](model, out_dir)
+    _WRAPPERLESS_SAVERS[saver](save_context(model), out_dir)
 
     written, hub = set(safetensors_state_dict(out_dir)), set(safetensors_state_dict(hub_dir))
     assert written == hub, f"{name}: only written={sorted(written - hub)[:5]}, only hub={sorted(hub - written)[:5]}"
@@ -217,7 +207,7 @@ def test_a_model_without_a_load_record_writes_the_tower_level(name, tmp_path):
     model = tiny_family_model(family).to(torch.bfloat16)
     assert getattr(model, "_weight_conversions", None) is None, "premise: no load recorded conversions"
 
-    save_tp_model(model, out_dir)
+    save_tp_checkpoint(save_context(model), out_dir)
 
     assert set(safetensors_state_dict(out_dir)) == set(safetensors_state_dict(hub_dir))
 
@@ -265,7 +255,7 @@ def test_weight_sync_forwards_what_the_gathered_save_writes(name, tmp_path):
 
 
 @pytest.mark.parametrize("name", list(FAMILIES))
-def test_sharded_save_refused_exactly_where_the_merge_cannot_reproduce_it(name, tmp_path):
+def test_sharded_save_refused_exactly_where_the_merge_cannot_reproduce_it(name, tmp_path, monkeypatch):
     """``merge_ep_shards.py`` writes the live names through the family's ``_EXPORT_KEY_RENAMES`` alone,
     plus each layer's gather: where that is not what the gathered save writes, the sharded save must
     be refused, and only there."""
@@ -281,7 +271,15 @@ def test_sharded_save_refused_exactly_where_the_merge_cannot_reproduce_it(name, 
         merged |= set(gather_ep_layer_weights(path, layer))
 
     reproducible = merged == set(loaded.saved)
-    assert bool(_keys_merge_cannot_respell(loaded.model, layer_cls)) != reproducible, (
+    # The family the live layers name, whatever the config's model_type resolves to.
+    monkeypatch.setattr(ep_save, "resolve_ep_merge_layer_class", lambda model_type: layer_cls)
+    try:
+        reject_unmergeable_ep_sharded_save(loaded.model, world_size=1)
+        refused = False
+    except ValueError as refusal:
+        assert "key-by-key stream cannot" in str(refusal), refusal
+        refused = True
+    assert refused != reproducible, (
         f"{name}: the merge {'would' if reproducible else 'would not'} reproduce the gathered save, "
         f"and the sharded save is {'refused' if not reproducible else 'allowed'} the other way"
     )
@@ -371,7 +369,7 @@ def test_a_dequantizing_load_record_is_not_reverted_as_a_hub_layout(tmp_path):
     ]
     patch_moe_model_for_ep(model, single_process_ep_config())
 
-    save_ep_model(model, ep_dir)
+    save_ep_gathered_checkpoint(save_context(model), ep_dir)
 
     assert set(safetensors_state_dict(ep_dir)) == set(safetensors_state_dict(hub_dir))
 
@@ -390,13 +388,13 @@ def test_a_failing_revert_fails_the_save(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ep_save, "revert_conversions", failing_revert)
     with pytest.raises(RuntimeError, match="no reverse for this chunk"):
-        save_ep_model(model, ep_dir)
+        save_ep_gathered_checkpoint(save_context(model), ep_dir)
 
 
 def test_the_sharded_refusal_is_wired_into_the_family_check(tmp_path):
     loaded = _loaded("cohere2_vision", tmp_path)
     with pytest.raises(ValueError, match="key-by-key stream cannot"):
-        _check_ep_merge_family_supported(loaded.model)
+        reject_unmergeable_ep_sharded_save(loaded.model, world_size=1)
 
 
 def test_command_a_plus_writes_the_tower_vllm_loads(tmp_path):

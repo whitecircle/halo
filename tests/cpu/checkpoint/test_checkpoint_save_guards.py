@@ -1,6 +1,6 @@
-"""CPU tests for the construction-time sharded-save guard.
+"""CPU tests for the sharded-save guard.
 
-``validate_ep_sharded_save`` must fire BEFORE training, not at (or after) the first save:
+``reject_unmergeable_ep_sharded_save`` must fire BEFORE training, not at (or after) the first save:
 (a) a ``model_type`` no registered EP layer class claims can never merge its per-rank shards into a
 loadable checkpoint; (b) ``merge_expert_lora_on_save=True`` is incompatible with the sharded save;
 (c) a run with no EP layers reads the flag nowhere — a refusal, not a no-op; (d) a multi-node job on
@@ -13,12 +13,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.distributed.checkpoint.ep_save as ep_saving_mod
-from src.distributed.checkpoint.ep_save import (
-    _check_ep_merge_family_supported,
-    _check_ep_sharded_save_supported,
-    validate_ep_sharded_save,
-)
+import src.checkpoint.parallel.ep as ep_saving_mod
+from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_layer_class
 from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
@@ -34,14 +30,16 @@ def _fake_model(model_type):
     return model
 
 
+def _fake_ep_model(model_type, world_size=1):
+    """A model of ``model_type`` holding one EP layer on a single EP group spanning ``world_size``."""
+    model = _fake_model(model_type)
+    model.mlp = _FakeEPLayer(world_size)
+    return model
+
+
 def _ep_config(world_size, expert_tp_size=1):
     """ep_config satisfying the topology checks: a single global EP group, no expert TP."""
     return SimpleNamespace(expert_tp_size=expert_tp_size, ep_group_size=world_size, num_ep_groups=1)
-
-
-def _fake_ep_layers(world_size, expert_tp_size=1):
-    """One fake EP layer for the inner checker, which takes the layer list directly."""
-    return [("model.layers.0.mlp", SimpleNamespace(ep_config=_ep_config(world_size, expert_tp_size)))]
 
 
 class _FakeEPLayer(EPMoELayerBase):
@@ -74,7 +72,7 @@ def test_ep_sharded_rejected_on_non_shared_multi_node_fs(monkeypatch):
     model = _fake_model("gpt_oss")
     model.mlp = _FakeEPLayer(world_size=16)
     with pytest.raises(ValueError, match="shared output filesystem"):
-        validate_ep_sharded_save(model, world_size=16)
+        reject_unmergeable_ep_sharded_save(model, world_size=16)
 
 
 def test_ep_sharded_allowed_on_non_shared_single_node(monkeypatch):
@@ -82,13 +80,13 @@ def test_ep_sharded_allowed_on_non_shared_single_node(monkeypatch):
     _non_shared_two_node_fs(monkeypatch)
     model = _fake_model("gpt_oss")
     model.mlp = _FakeEPLayer(world_size=8)
-    validate_ep_sharded_save(model, world_size=8)
+    reject_unmergeable_ep_sharded_save(model, world_size=8)
 
 
 def test_ep_sharded_rejects_merge_expert_lora_at_construction():
     """``merge_expert_lora_on_save`` is gathered-only, and must fail at trainer construction."""
     with pytest.raises(ValueError, match="gathered EP save"):
-        validate_ep_sharded_save(_fake_model("gpt_oss"), world_size=1, merge_expert_lora_on_save=True)
+        reject_unmergeable_ep_sharded_save(_fake_model("gpt_oss"), world_size=1, merge_expert_lora_on_save=True)
 
 
 def test_ep_sharded_rejected_without_ep_layers():
@@ -96,7 +94,7 @@ def test_ep_sharded_rejected_without_ep_layers():
     falls through to the gathered writer while the merge step the user planned waits for shards that
     never exist. A set value that nothing reads is a config that does not do what it says."""
     with pytest.raises(ValueError, match="no EP MoE layers"):
-        validate_ep_sharded_save(_fake_model("gpt_oss"), world_size=1)
+        reject_unmergeable_ep_sharded_save(_fake_model("gpt_oss"), world_size=1)
 
 
 def test_ep_sharded_allowed_with_ep_layers(monkeypatch):
@@ -105,14 +103,14 @@ def test_ep_sharded_allowed_with_ep_layers(monkeypatch):
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     model = _fake_model("gpt_oss")
     model.mlp = _FakeEPLayer(world_size=8)
-    validate_ep_sharded_save(model, world_size=8)
+    reject_unmergeable_ep_sharded_save(model, world_size=8)
 
 
 @pytest.mark.parametrize("model_type", ["gemma4_moe", ""])
 def test_ep_sharded_rejects_unclaimed_model_type(model_type):
     """A model_type no EP layer class claims would train into unmergeable shards — must raise."""
     with pytest.raises(ValueError, match="no registered EP layer class"):
-        _check_ep_merge_family_supported(_fake_model(model_type))
+        reject_unmergeable_ep_sharded_save(_fake_ep_model(model_type))
 
 
 @pytest.mark.parametrize(
@@ -120,23 +118,16 @@ def test_ep_sharded_rejects_unclaimed_model_type(model_type):
     ["gpt_oss", "qwen3_moe", "qwen3_5_moe", "bailing_moe_linear", "glm4_moe_lite", "lfm2_moe", "zaya", "mistral4"],
 )
 def test_ep_sharded_accepts_mergeable_family(model_type):
-    _check_ep_merge_family_supported(_fake_model(model_type))
+    reject_unmergeable_ep_sharded_save(_fake_ep_model(model_type))
 
 
-def test_ep_sharded_family_gate_wired_into_topology_check(monkeypatch):
-    """The shared checker (used by both the validator and _save_ep_sharded) rejects the family."""
+def test_ep_sharded_family_gate_runs_on_a_valid_topology(monkeypatch):
+    """The family gate is not shadowed by the topology checks: an unclaimed family on a valid
+    single-group topology is refused, and a supported one on the same topology passes."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     with pytest.raises(ValueError, match="no registered EP layer class"):
-        _check_ep_sharded_save_supported(_fake_model("nope"), _fake_ep_layers(world_size=8), world_size=8)
-    # A supported family with a valid single-group topology passes the same path.
-    _check_ep_sharded_save_supported(_fake_model("gpt_oss"), _fake_ep_layers(world_size=8), world_size=8)
-
-
-def test_ep_family_gate_is_skipped_when_the_layer_list_is_empty():
-    """The INNER checker takes the EP layer list as an argument and is also called from the save
-    path, where an empty list means "nothing to shard" — it must not judge the family there. The
-    construction-time ``validate_ep_sharded_save`` above owns the "no EP layers at all" refusal."""
-    _check_ep_sharded_save_supported(_fake_model("nope"), [], world_size=8)
+        reject_unmergeable_ep_sharded_save(_fake_ep_model("nope", world_size=8), world_size=8)
+    reject_unmergeable_ep_sharded_save(_fake_ep_model("gpt_oss", world_size=8), world_size=8)
 
 
 def test_model_type_resolves_to_the_declaring_layer_class():
@@ -167,7 +158,7 @@ def test_laguna_inherits_the_glm4_transform_and_is_merge_supported():
     for key, tensor in glm4_merged.items():
         assert torch.equal(laguna_merged[key], tensor), key
 
-    _check_ep_merge_family_supported(_fake_model("laguna"))
+    reject_unmergeable_ep_sharded_save(_fake_ep_model("laguna"))
 
 
 def test_unclaimed_model_type_is_rejected_not_guessed():
@@ -175,7 +166,7 @@ def test_unclaimed_model_type_is_rejected_not_guessed():
     some other family's expert layout."""
     assert resolve_ep_merge_layer_class("qwen3_next_moe") is None
     with pytest.raises(ValueError, match="no registered EP layer class"):
-        _check_ep_merge_family_supported(_fake_model("qwen3_next_moe"))
+        reject_unmergeable_ep_sharded_save(_fake_ep_model("qwen3_next_moe"))
 
 
 if __name__ == "__main__":

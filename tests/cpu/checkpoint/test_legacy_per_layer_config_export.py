@@ -29,7 +29,7 @@ from transformers import CONFIG_MAPPING
 from transformers.models.gemma4.configuration_gemma4 import Gemma4Config, Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
-PartialState()  # save_ep_model logs through accelerate's logger
+PartialState()  # the EP save logs through accelerate's logger
 
 from src.checkpoint.config_export import (
     export_legacy_per_layer_config,
@@ -37,8 +37,9 @@ from src.checkpoint.config_export import (
     save_model_config,
 )
 from src.checkpoint.offline_export import save_full_checkpoint
-from src.distributed.checkpoint.ep_save import save_ep_model
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from tests.common.checkpoint_io import save_context
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config
 
@@ -122,7 +123,7 @@ def test_the_ep_gathered_save_writes_the_flat_form(tmp_path):
     torch.manual_seed(0)
     model = Gemma4ForCausalLM(Gemma4TextConfig(**TINY_GEMMA4_MOE_CONFIG)).to(torch.bfloat16)
     patch_moe_model_for_ep(model, single_process_ep_config())
-    save_ep_model(model, str(tmp_path))
+    save_ep_gathered_checkpoint(save_context(model), str(tmp_path))
     _assert_flat_form(_config_json(str(tmp_path)))
 
 

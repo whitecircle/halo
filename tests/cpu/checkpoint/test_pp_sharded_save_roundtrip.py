@@ -43,14 +43,14 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
 from src.checkpoint.hub_layout import revert_conversions
+from src.checkpoint.parallel.context import CheckpointLoadContext
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from src.checkpoint.parallel.optimizer import OptimizerShardStore
+from src.checkpoint.parallel.pp import is_pp_shard_writer, save_pp_checkpoint
+from src.checkpoint.parallel.resume_weights import load_resume_weights
 from src.checkpoint.reading import checkpoint_shard_files, is_ep_sharded_checkpoint
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.checkpoint.writing import save_dtype_caster
-from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
-from src.distributed.checkpoint.ep_save import save_ep_model
-from src.distributed.checkpoint.loader import CheckpointLoader
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
-from src.distributed.checkpoint.save import is_pp_shard_writer, save_pp_checkpoint
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
@@ -62,8 +62,8 @@ from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_p
 from src.models.attention.gpt_oss_sinks import neutralized_sink_value
 from src.models.param_roles import persistent_buffers
 from src.runtime import dtensor
-from src.runtime.filesystem import is_fs_save_rank
 from src.trainers.mixins.pipeline import stash_wrapper_state
+from tests.common.checkpoint_io import load_context, save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import (
@@ -78,7 +78,7 @@ from tests.common.pp_fakes import hand_built_stage
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.utils import safetensors_state_dict
 
-PartialState()  # save_ep_model logs through accelerate's logger
+PartialState()  # the EP save logs through accelerate's logger
 
 _PC_MOD = "src.distributed.parallelism_config"
 
@@ -154,25 +154,9 @@ def _parallelism_config(pp_size: int = PP_SIZE):
         return ParallelismConfig(pp_size=pp_size, nvlink_domain_size=GPUS_PER_NODE, max_concurrent_loading=0)
 
 
-def _context(stage, config, max_shard_size: str = "5GB") -> CheckpointContext:
-    return CheckpointContext(
-        model=stage,
-        parallelism_config=config,
-        is_pp_mode=True,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        is_ep_tp_mode=False,
-        has_ep_layers=any(isinstance(m, EPMoELayerBase) for m in stage.modules()),
-        fsdp_wrapped=False,
-        accelerate_manages_fsdp=False,
-        is_save_rank=is_fs_save_rank(),
-        max_shard_size=max_shard_size,
-        save_sharded_ep=False,
-        has_expert_lora=False,
-        merge_expert_lora_on_save=False,
-        cp_wrapper=None,
-        tokenizer=None,
-    )
+def _context(stage, config, max_shard_size: str = "5GB"):
+    has_ep_layers = any(isinstance(m, EPMoELayerBase) for m in stage.modules())
+    return save_context(stage, config, has_ep_layers=has_ep_layers, max_shard_size=max_shard_size)
 
 
 def _roundtrip_worker(rank: int, out_dir: str, verdict_path: str) -> None:
@@ -350,7 +334,7 @@ def _per_node_worker(rank: int, root: str, verdict_path: str, name: str) -> None
     with torch.no_grad():
         for param in stage.parameters():
             param.add_(1.0)
-    CheckpointLoader(_load_ctx(stage)).load_model(node_dir)
+    load_resume_weights(_load_ctx(stage), node_dir)
     unsplit = _pp_family_model(name, ep_wrapped=False)
     cast, reference = save_dtype_caster(unsplit), unsplit.state_dict()
     for local, value in stage.state_dict().items():
@@ -361,7 +345,7 @@ def _per_node_worker(rank: int, root: str, verdict_path: str, name: str) -> None
     # A relaunch that hands this stage another stage's node directory has no shard for its layers.
     elsewhere = os.path.join(root, f"node{(node + nodes // 2) % nodes}")
     try:
-        CheckpointLoader(_load_ctx(stage)).load_model(elsewhere)
+        load_resume_weights(_load_ctx(stage), elsewhere)
         problems.append(f"stage {config.pp_rank} resumed from another stage's node directory {elsewhere}")
     except RuntimeError:
         pass
@@ -568,23 +552,9 @@ def test_pp_save_of_a_text_only_multimodal_wrapper_reloads_as_the_wrapper(tmp_pa
 
 
 def _load_context(stage, optimizer, config) -> CheckpointLoadContext:
-    return CheckpointLoadContext(
-        model=stage,
-        optimizer=optimizer,
-        lr_scheduler=None,
-        parallelism_config=config,
-        is_pp_mode=True,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=False,
-        # PP always composes FSDP2 inside a stage, which routes the optimizer through per-rank
-        # shards instead of the base Trainer's optimizer.pt.
-        fsdp_wrapped=True,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=lambda *a, **k: None,
-        super_load_optimizer_and_scheduler=lambda *a, **k: None,
-    )
+    # PP always composes FSDP2 inside a stage, which routes the optimizer through per-rank shards
+    # instead of the base Trainer's optimizer.pt.
+    return load_context(stage, config, optimizer=optimizer, fsdp_wrapped=True)
 
 
 def _stepped_optimizer(stage):
@@ -646,21 +616,10 @@ def test_pp_optimizer_shards_round_trip(tmp_path):
 
 
 def _load_ctx(stage) -> CheckpointLoadContext:
-    return CheckpointLoadContext(
-        model=stage,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=SimpleNamespace(pp_size=4, pp_rank=0, tp_size=1, cp_size=1),
-        is_pp_mode=True,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=False,
-        fsdp_wrapped=False,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=lambda *a, **k: None,
-        super_load_optimizer_and_scheduler=lambda *a, **k: None,
+    config = SimpleNamespace(
+        pp_size=4, pp_rank=0, tp_size=1, cp_size=1, is_pp_mode=True, is_cp_mode=False, is_tp_mode=False
     )
+    return load_context(stage, config)
 
 
 def test_after_training_tools_read_a_pp_checkpoint_whole(tmp_path):
@@ -699,7 +658,7 @@ def test_pp_checkpoint_reloads_onto_a_different_pp_size(tmp_path):
         with torch.no_grad():
             for param in stage.parameters():
                 param.add_(1.0)
-        CheckpointLoader(_load_ctx(stage)).load_model(str(tmp_path))
+        load_resume_weights(_load_ctx(stage), str(tmp_path))
         for local, value in stage.state_dict().items():
             global_name = stage.global_parameter_name(local)
             assert torch.equal(value, reference[global_name]), f"pp_rank={pp_rank} {local}"
@@ -748,7 +707,7 @@ def _family_reload_worker(rank: int, name: str, checkpoint: str, ep_wrapped: boo
                 tensor.add_(1.0)
     # EP experts load only at construction; the stamp passes that gate, and a best-model load still reads.
     setattr(stage, LOADED_WEIGHTS_FROM_ATTR, checkpoint)
-    CheckpointLoader(_load_context(stage, None, config)).load_model(checkpoint, for_best_model=True)
+    load_resume_weights(_load_context(stage, None, config), checkpoint, for_best_model=True)
 
     cast = save_dtype_caster(expected)
     want, got = expected.state_dict(), stage.state_dict()
@@ -778,7 +737,7 @@ def test_pp_save_writes_the_names_and_values_of_the_ep_gathered_save(tmp_path, n
     renames = bool(gathered_export_conversions(_pp_family_model(name)))
     assert renames == (name not in PP_RENAME_FREE), f"premise: {name}'s load renames iff it is not a control"
     ep_dir, pp_dir = str(tmp_path / "ep"), str(tmp_path / "pp")
-    save_ep_model(_pp_family_model(name), ep_dir)
+    save_ep_gathered_checkpoint(save_context(_pp_family_model(name)), ep_dir)
     run_gloo_ranks(_family_save_worker, WORLD_SIZE, name, pp_dir, True)
 
     expected, written = safetensors_state_dict(ep_dir), safetensors_state_dict(pp_dir)

@@ -2,9 +2,9 @@
 
 Enforced: the sharding-agnostic trees (``src/checkpoint/`` and ``src/model_loading/`` outside their ``parallel/``
 halves, ``src/models/``) import no ``src.distributed``, ``torch.distributed`` or loader dispatch; nothing in
-``src/distributed`` imports the loader dispatch (``src/model_loading/parallel/``); the members of
-``src/distributed`` and of the dispatch import each other acyclically; every toolkit env knob is read through
-``src/env.py``.
+``src/distributed`` or ``src/checkpoint/parallel`` imports the loader dispatch (``src/model_loading/parallel/``);
+the members of ``src/distributed`` with ``src/checkpoint/parallel``, and of the dispatch, import each other
+acyclically; every toolkit env knob is read through ``src/env.py``.
 
 The final layer table (``_LAYERS`` and the rules beside it) is laid over today's tree, each module placed where
 it lands through ``_PENDING_MOVES``: a break outside ``_KNOWN_LAYER_BREAKS`` fails, a known one is reported, and
@@ -120,7 +120,6 @@ _PENDING_MOVES = {
     "training.parallelism_args": "configs.parallelism_arguments",
     "training.parser": "configs.parser",
     "diagnostics.weight_sync_transport": "weight_sync.transport_check",
-    "distributed.checkpoint": "checkpoint.parallel",
     "distributed.loading.vlm_setup": "entrypoints.model_setup",
     "distributed.nccl": "weight_sync.transport",
     "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
@@ -140,7 +139,7 @@ _PENDING_MOVES = {
 # one drops its entry; any other break fails.
 _KNOWN_LAYER_BREAKS = frozenset(
     {
-        ("layer order", "checkpoint.parallel.loader", "model_loading.parallel.pp"),
+        ("layer order", "checkpoint.parallel.pp", "model_loading.parallel.pp"),
         ("layer order", "configs.parser", "entrypoints.run_logging"),
         ("layer order", "distributed.expert_parallel.lazy_plan", "model_loading.parallel.fp32_masters"),
         (
@@ -297,11 +296,13 @@ def _env_literals_read_directly(path: Path) -> list[str]:
     return found
 
 
-def _member_graph(imports: Iterable[_Import], package: str) -> dict[str, set[str]]:
-    """Each member of ``package`` (dotted under the package root) -> the other members it imports."""
+def _member_graph(imports: Iterable[_Import], package: str, node=None) -> dict[str, set[str]]:
+    """Each member of ``package`` (dotted under the package root) -> the other members it imports; ``node`` maps
+    a module to its graph node in place of its member."""
+    node = node or (lambda module: _member(module, package))
     graph: dict[str, set[str]] = defaultdict(set)
     for found in imports:
-        importer, imported = _member(found.importer, package), _member(_in_package(found.module) or "", package)
+        importer, imported = node(found.importer), node(_in_package(found.module) or "")
         if importer and imported and importer != imported:
             graph[importer].add(imported)
     return graph
@@ -349,12 +350,20 @@ def _misplaced(module: str) -> str | None:
     return None
 
 
+def _parallelism_package(module: str) -> str | None:
+    """The parallelism package ``module`` (dotted under the package root) sits in: a member of ``distributed``, or
+    the checkpoint tree's collective half; None outside them."""
+    if _is_within(_final_path(module, _PENDING_MOVES), _CHECKPOINT_PARALLEL):
+        return _CHECKPOINT_PARALLEL
+    return _member(module, "distributed")
+
+
 def _lands_below_dispatch(path: Path) -> bool:
-    """Whether a ``src/distributed`` module lands at or below the dispatch's row, outside the dispatch."""
+    """Whether a parallelism-package module lands at or below the dispatch's row, outside the dispatch."""
     module = _module_name(_SRC, path)
     final = _final_path(module, _PENDING_MOVES)
     return (
-        _member(module, "distributed") is not None
+        _parallelism_package(module) is not None
         and _LEVEL.get(_unit(final), 0) <= _LEVEL[_DISPATCH_PACKAGE]
         and not _is_within(final, _DISPATCH_PACKAGE)
     )
@@ -476,8 +485,14 @@ def test_the_sweep_sees_the_dispatch_and_every_parallelism_package():
     """Anti-vacuity: a moved dispatch package leaves nothing to import, and the packages it reaches into must
     all be in the sweep."""
     assert _INDEX.module_source(f"{PACKAGE}.{_DISPATCH_PACKAGE}") is not None, f"no {_DISPATCH_PACKAGE} package"
-    swept = {_member(_module_name(_SRC, path), "distributed") for path in _BELOW_DISPATCH_FILES}
-    assert {"expert_parallel", "context_parallel", "tensor_parallel", "pipeline_parallel", "checkpoint"} <= swept
+    swept = {_parallelism_package(_module_name(_SRC, path)) for path in _BELOW_DISPATCH_FILES}
+    assert {
+        "expert_parallel",
+        "context_parallel",
+        "tensor_parallel",
+        "pipeline_parallel",
+        _CHECKPOINT_PARALLEL,
+    } <= swept
 
 
 @pytest.mark.parametrize("path", _BELOW_DISPATCH_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
@@ -530,14 +545,14 @@ def test_a_type_checking_import_adds_no_edge_and_a_runtime_one_does(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("package", "required"),
+    ("package", "node", "required"),
     [
-        ("distributed", {"checkpoint", "expert_parallel", "pipeline_parallel"}),
-        (_DISPATCH_PACKAGE, {"loader", "frozen_models"}),
+        ("distributed", _parallelism_package, {_CHECKPOINT_PARALLEL, "expert_parallel", "pipeline_parallel"}),
+        (_DISPATCH_PACKAGE, None, {"loader", "frozen_models"}),
     ],
 )
-def test_the_packages_import_their_members_acyclically(package, required):
-    graph = _member_graph(_IMPORTS, package)
+def test_the_packages_import_their_members_acyclically(package, node, required):
+    graph = _member_graph(_IMPORTS, package, node)
     assert required <= set(graph), sorted(graph)
     cycles = _cycles(graph)
     assert not cycles, (

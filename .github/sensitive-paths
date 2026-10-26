@@ -13,6 +13,7 @@ uv.lock
 # Parallelism core
 src/distributed/**
 src/runtime/**
+src/checkpoint/parallel/**
 src/subclass_registry.py
 src/kernels/moe_permute.py
 src/kernels/fused_glu.py

@@ -9,7 +9,7 @@ fused gather is the layout the save must emit; the pre-5.14 per-expert spelling
 silently skip every expert.
 
 This test loads ZAYA1-8B under EP (no training), saves via
-``save_ep_model(sharded=False)``, and on rank 0 verifies:
+``save_ep_gathered_checkpoint``, and on rank 0 verifies:
   1. The saved checkpoint carries the fused expert tensors, two per MoE layer, with the FULL expert
      count on dim 0 (the EP gather reassembled every rank's slice) and no per-expert key at all.
   2. Those tensors are bit-identical to the original base checkpoint's — i.e. EP load (slice) → save
@@ -30,11 +30,13 @@ import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
-from src.distributed.checkpoint.ep_save import save_ep_model
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from src.checkpoint.parallel.save import save_tokenizer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.model_loading.parallel.loader import load_distributed_model
+from tests.common.checkpoint_io import save_context
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
 from tests.common.utils import log
@@ -146,8 +148,10 @@ def run(ctx) -> dict:
     log(f"  ✓ {len(ep_layers)} EP layers, {n_experts} experts each")
 
     # ── [2/3] Save (gathered, fused) ───────────────────────────────
-    log("\n[2/3] Saving via save_ep_model(sharded=False)...")
-    save_ep_model(model, save_dir, tokenizer=tok, sharded=False)
+    log("\n[2/3] Saving via save_ep_gathered_checkpoint...")
+    save_ctx = save_context(model, pc, tokenizer=tok)
+    save_tokenizer(save_ctx, save_dir)
+    save_ep_gathered_checkpoint(save_ctx, save_dir)
     del model
     torch.cuda.empty_cache()
     ctx.barrier()

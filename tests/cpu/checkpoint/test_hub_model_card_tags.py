@@ -36,25 +36,25 @@ from trl import ModelConfig
 from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
 
-import src.distributed.checkpoint.peft as peft_saver
+import src.checkpoint.parallel.adapters as peft_saver
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
 from scripts.after_training import merge_models as merge_models_script
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.training.embedding import build_sentence_transformer
 from src.checkpoint import model_card
-from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, EXPERT_LORA_PEFT_TYPES
+from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
 from src.checkpoint.config_export import finalize_exported_config, save_model_config
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from src.checkpoint.model_card import MalformedModelCardError, tag_model_card
 from src.checkpoint.offline_export import copy_checkpoint_aux_files
+from src.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
 from src.configs.embedding import EmbeddingConfig
-from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.checkpoint.ep_save import save_ep_lora_adapters
-from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.model_loading.model_preparation import apply_run_model_policies
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import save_context
+from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import word_level_tokenizer
 
 PartialState()  # the tools' loads log through accelerate's rank-aware logger
@@ -513,32 +513,17 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     assert "sentence-transformers" in card.data.tags
 
 
-def _cp_adapter_save_context(peft_model) -> CheckpointContext:
+def _cp_adapter_save_context(peft_model):
     """The save rank of a CP LoRA run: the adapter saver writes the files itself."""
-    return CheckpointContext(
-        model=peft_model,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=True,
-        is_tp_mode=False,
-        is_ep_tp_mode=False,
-        has_ep_layers=False,
-        fsdp_wrapped=False,
-        accelerate_manages_fsdp=False,
-        is_save_rank=True,
-        max_shard_size="5GB",
-        save_sharded_ep=False,
-        has_expert_lora=False,
-        merge_expert_lora_on_save=False,
-        cp_wrapper=None,
-        tokenizer=None,
+    return save_context(
+        peft_model, make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2), is_save_rank=True
     )
 
 
 def test_a_hand_written_adapter_save_carries_the_tag(tmp_path):
     """The CP / DTensor / expert-LoRA branches write the adapter files themselves, so no PEFT card."""
     peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
-    PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
+    save_peft_adapters(_cp_adapter_save_context(peft_model), str(tmp_path))
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the hand-written branch wrote the adapter"
     assert metadata_load(tmp_path / CARD) == {"library_name": "peft", "tags": [HALO_TAG]}
 
@@ -565,7 +550,7 @@ def test_the_adapter_savers_card_write_is_fenced(tmp_path, monkeypatch):
     peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
 
     with pytest.raises(OSError, match="No space left"):
-        PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
+        save_peft_adapters(_cp_adapter_save_context(peft_model), str(tmp_path))
 
     assert events[-3:] == ["enter", "card", "barrier"], events
 
@@ -575,11 +560,11 @@ def test_an_adapter_save_onto_a_malformed_card_fails_naming_it(tmp_path):
     peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
     (tmp_path / CARD).write_text(_MALFORMED_CARD)
     with pytest.raises(MalformedModelCardError, match=re.escape(str(tmp_path / CARD))):
-        PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
+        save_peft_adapters(_cp_adapter_save_context(peft_model), str(tmp_path))
 
 
 def test_the_expert_adapter_writer_tags_its_output(tmp_path):
-    save_ep_lora_adapters(_tiny_qwen3(), str(tmp_path), adapter_config={"peft_type": EXPERT_LORA_PEFT_TYPE})
+    save_expert_lora_adapters(save_context(_tiny_qwen3(), is_save_rank=True), str(tmp_path))
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the writer ran"
     assert metadata_load(tmp_path / CARD) == {"tags": [HALO_TAG]}
 

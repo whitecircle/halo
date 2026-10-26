@@ -22,11 +22,11 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimizer_state_dict
 
-import src.distributed.checkpoint.optimizer as optimizer_mod
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
-from src.distributed.checkpoint.optimizer import OptimizerShardStore, expert_replica_writer
+import src.checkpoint.parallel.optimizer as optimizer_mod
+from src.checkpoint.parallel.optimizer import OptimizerShardStore, expert_replica_writer
+from src.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
+from tests.common.checkpoint_io import load_context
 from tests.common.parallelism import make_parallelism_config
 
 # ep2 over 4 ranks = 2 EP groups; the same ep_rank in each group is a replica of the other.
@@ -69,22 +69,7 @@ def _store(model, rank, monkeypatch, *, shared_fs=True) -> OptimizerShardStore:
     monkeypatch.setattr(optimizer_mod, "get_global_rank", lambda: rank)
     monkeypatch.setattr(optimizer_mod, "is_output_shared_filesystem", lambda: shared_fs)
     monkeypatch.setattr(optimizer_mod, "is_global_main_process", lambda: rank == 0)
-    ctx = CheckpointLoadContext(
-        model=model,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=True,
-        fsdp_wrapped=True,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=lambda *a, **k: None,
-        super_load_optimizer_and_scheduler=lambda *a, **k: None,
-    )
-    return OptimizerShardStore(ctx)
+    return OptimizerShardStore(load_context(model, has_ep_layers=True, fsdp_wrapped=True))
 
 
 @pytest.mark.parametrize("rank", sorted(REPLICA_SETS))
@@ -295,9 +280,9 @@ def test_replica_layout_is_fingerprinted():
     resuming under a different one must be refused, not silently pointed at another set's writer."""
     live = _fingerprint(num_ep_groups=2)
     assert live.expert_replica_size == 2
-    mismatches = live.mismatches(_fingerprint(num_ep_groups=4))
+    mismatches = live.mismatches(_fingerprint(num_ep_groups=4).to_dict())
     assert any(field.startswith("expert_replica_size") for field in mismatches), mismatches
-    assert not live.mismatches(_fingerprint(num_ep_groups=2))
+    assert not live.mismatches(_fingerprint(num_ep_groups=2).to_dict())
 
 
 @pytest.mark.parametrize(
@@ -328,18 +313,12 @@ def test_the_fingerprinted_replica_size_is_what_the_dedup_actually_writes(topolo
 
 
 @pytest.mark.parametrize("live_groups", [1, 2, 64])
-def test_a_pre_dedup_meta_is_compatible_with_every_replica_size(live_groups):
-    """A meta written before the field existed must resume under ANY replica layout, not just one.
-
-    Those shards duplicate the expert moments on every rank (nothing was stripped), so they restore
-    whatever the live replica size is. Reading the absent field as a VALUE — 1, say — reports
-    ``saved=1 current=64`` on every rank of a multi-node EP campaign and discards the optimizer state
-    world-wide (a hard raise under PP), for a topology that never changed.
-    """
+def test_a_meta_without_the_replica_size_mismatches_every_layout(live_groups):
+    """No compatibility shape: a meta written before the field existed restores under no replica layout,
+    and the mismatch names the field it lacks."""
     saved = {k: v for k, v in _fingerprint(2).to_dict().items() if k != "expert_replica_size"}
-    parsed = OptimizerStateFingerprint.from_dict(saved)
-    assert parsed is not None and parsed.expert_replica_size is None
-    assert not _fingerprint(live_groups).mismatches(parsed)
+    live = _fingerprint(live_groups)
+    assert live.mismatches(saved) == [f"expert_replica_size: saved='<absent>' current={live.expert_replica_size}"]
 
 
 if __name__ == "__main__":

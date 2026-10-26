@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """The TP resume coverage gate: a checkpoint that matches too little of the live model must raise.
 
-``CheckpointLoader._load_streamed`` writes only the keys the checkpoint and the live model share, so
+The streamed TP reload writes only the keys the checkpoint and the live model share, so
 nothing else reports a bad checkpoint: a foreign key set applies as a no-op and the run trains on
 base weights while logging a successful resume. The gate is the same numel-weighted verdict the
-FSDP2 path uses; these tests drive it through :meth:`CheckpointLoader.load_model` so the wiring is
+FSDP2 path uses; these tests drive it through :func:`load_resume_weights` so the wiring is
 covered, not just the predicate.
 
 Run: ``python tests/cpu/checkpoint/test_tp_resume_coverage_gate.py`` (or ``pytest -m cpu``).
@@ -17,8 +17,8 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.loader import CheckpointLoader
+from src.checkpoint.parallel.resume_weights import load_resume_weights
+from tests.common.checkpoint_io import load_context
 
 
 class _Model(nn.Module):
@@ -31,21 +31,7 @@ class _Model(nn.Module):
 
 
 def _tp_ctx(model):
-    return CheckpointLoadContext(
-        model=model,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=True,
-        has_ep_layers=False,
-        fsdp_wrapped=False,
-        tp_rank=0,
-        tp_size=2,
-        super_load_from_checkpoint=lambda *a, **k: None,
-        super_load_optimizer_and_scheduler=lambda *a, **k: None,
-    )
+    return load_context(model, tp_size=2)
 
 
 def test_a_foreign_checkpoint_raises_and_leaves_the_model_untouched(tmp_path):
@@ -54,7 +40,7 @@ def test_a_foreign_checkpoint_raises_and_leaves_the_model_untouched(tmp_path):
     before = {name: p.detach().clone() for name, p in model.named_parameters()}
 
     with pytest.raises(RuntimeError, match="fewer than half"):
-        CheckpointLoader(_tp_ctx(model)).load_model(str(tmp_path), model)
+        load_resume_weights(_tp_ctx(model), str(tmp_path), model)
 
     for name, param in model.named_parameters():
         assert torch.equal(param, before[name]), f"{name}: a refused resume must not half-apply the checkpoint"
@@ -66,7 +52,7 @@ def test_a_checkpoint_covering_a_minority_of_the_parameters_raises(tmp_path):
     model = _Model()
 
     with pytest.raises(RuntimeError, match="fewer than half"):
-        CheckpointLoader(_tp_ctx(model)).load_model(str(tmp_path), model)
+        load_resume_weights(_tp_ctx(model), str(tmp_path), model)
 
 
 def test_a_majority_checkpoint_loads_what_it_has_and_keeps_the_rest(tmp_path):
@@ -75,7 +61,7 @@ def test_a_majority_checkpoint_loads_what_it_has_and_keeps_the_rest(tmp_path):
     model = _Model()
     head_before = model.head.weight.detach().clone()
 
-    CheckpointLoader(_tp_ctx(model)).load_model(str(tmp_path), model)
+    load_resume_weights(_tp_ctx(model), str(tmp_path), model)
 
     assert torch.equal(model.body.weight, torch.full((16, 16), 3.0))
     assert torch.equal(model.head.weight, head_before)
@@ -88,7 +74,7 @@ def test_a_matching_checkpoint_loads_every_key(tmp_path):
     )
     model = _Model()
 
-    CheckpointLoader(_tp_ctx(model)).load_model(str(tmp_path), model)
+    load_resume_weights(_tp_ctx(model), str(tmp_path), model)
 
     assert torch.equal(model.body.weight, torch.full((16, 16), 3.0))
     assert torch.equal(model.head.weight, torch.full((2, 2), 5.0))

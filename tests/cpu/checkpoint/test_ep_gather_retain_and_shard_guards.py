@@ -26,7 +26,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.checkpoint.ep_save import _check_ep_sharded_save_supported
+from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from src.distributed.expert_parallel import expert_gather
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from tests.common.ep_stubs import StubEPLayerBase
@@ -192,13 +192,9 @@ def test_layer_gather_rejects_a_family_that_ignores_retain(ep_group):
         gather_ep_layer_weights("model.layers.0.mlp", _IgnoresRetainLayer(), retain=False)
 
 
-def _ep_layers(layer):
-    ep_cfg = SimpleNamespace(expert_tp_size=1, ep_group_size=8, num_ep_groups=1)
-    layer.ep_config = ep_cfg
-    return [("model.layers.0.mlp", layer)]
-
-
 def _model_with(layer) -> nn.Module:
+    """A gpt_oss root holding ``layer`` on a single EP group spanning 8 ranks."""
+    layer.ep_config = SimpleNamespace(expert_tp_size=1, ep_group_size=8, num_ep_groups=1)
     root = nn.Module()
     root.config = SimpleNamespace(model_type="gpt_oss", auto_map=None)
     root.mlp = layer
@@ -211,13 +207,13 @@ def test_sharded_save_rejects_native_expert_lora(monkeypatch):
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=True)
     with pytest.raises(ValueError, match="expert LoRA"):
-        _check_ep_sharded_save_supported(_model_with(layer), _ep_layers(layer), world_size=8)
+        reject_unmergeable_ep_sharded_save(_model_with(layer), world_size=8)
 
 
 def test_sharded_save_allowed_without_expert_lora(monkeypatch):
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=False)
-    _check_ep_sharded_save_supported(_model_with(layer), _ep_layers(layer), world_size=8)
+    reject_unmergeable_ep_sharded_save(_model_with(layer), world_size=8)
 
 
 def test_sharded_save_rejects_multiple_ep_groups(monkeypatch):
@@ -225,11 +221,11 @@ def test_sharded_save_rejects_multiple_ep_groups(monkeypatch):
     every expert duplicated. Only a single group spanning the world is mergeable."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=False)
-    ep_layers = _ep_layers(layer)
+    model = _model_with(layer)
     layer.ep_config.ep_group_size = 4
     layer.ep_config.num_ep_groups = 2
     with pytest.raises(ValueError, match="ep_group_size"):
-        _check_ep_sharded_save_supported(_model_with(layer), ep_layers, world_size=8)
+        reject_unmergeable_ep_sharded_save(model, world_size=8)
 
 
 @pytest.mark.parametrize("field", ("ep_group_size", "expert_tp_size"))
@@ -245,10 +241,10 @@ def test_topology_guards_do_not_pass_on_a_config_that_never_declared_the_field(m
     """
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=False)
-    ep_layers = _ep_layers(layer)
+    model = _model_with(layer)
     delattr(layer.ep_config, field)
     with pytest.raises(AttributeError, match=field):
-        _check_ep_sharded_save_supported(_model_with(layer), ep_layers, world_size=8)
+        reject_unmergeable_ep_sharded_save(model, world_size=8)
 
 
 if __name__ == "__main__":

@@ -4,13 +4,13 @@
 The sharded EP layout (``save_sharded_ep: true``) is loadable only through the merge, and the CPU
 suite pins that merge against synthetic shard dicts and a stubbed class-level gather oracle. This
 is the end-to-end pin: on 2 GPUs, each family's tiny model is EP-patched at ``ep_size=2``, saved
-BOTH ways by ``save_ep_model``, the per-rank shards are merged by the real script, and the merged
-directory must be key-and-tensor identical to the gathered one — and load back through the
-toolkit's verified ``from_pretrained``. Any drift between a family's ``merge_shards_to_hf`` and its
-``gather_expert_state_dict`` (a transpose, a lost re-interleave, a hub rename applied on one side
-only, a balancing tensor cast on one side only) shows up as a tensor diff here. A model whose names
-the gathered save reverts to a namespace the key-by-key merge cannot respell must have its sharded
-save refused instead, on every rank.
+BOTH ways (``save_ep_gathered_checkpoint`` / ``save_ep_sharded_checkpoint``), the per-rank shards
+are merged by the real script, and the merged directory must be key-and-tensor identical to the
+gathered one — and load back through the toolkit's verified ``from_pretrained``. Any drift between a
+family's ``merge_shards_to_hf`` and its ``gather_expert_state_dict`` (a transpose, a lost
+re-interleave, a hub rename applied on one side only, a balancing tensor cast on one side only)
+shows up as a tensor diff here. A model whose names the gathered save reverts to a namespace the
+key-by-key merge cannot respell must have its sharded save refused instead, on every rank.
 
 Hermetic: tiny random-init models, no download, and no DeepEP — the transport buffer is built at
 the first dispatch, which a save never issues.
@@ -28,10 +28,11 @@ import torch
 import torch.distributed as dist
 
 from scripts.after_training.merge_ep_shards import merge_ep_shards
-from src.distributed.checkpoint.ep_save import save_ep_model
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sharded_checkpoint
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.model_loading.model_preparation import auto_load_model
+from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
@@ -86,8 +87,8 @@ def _roundtrip(family: str, root: str, device: torch.device, rank: int) -> list[
     )
     model = _ep_patched(family, device)
 
-    save_ep_model(model, gathered_dir, sharded=False)
-    save_ep_model(model, sharded_dir, sharded=True)
+    save_ep_gathered_checkpoint(save_context(model), gathered_dir)
+    save_ep_sharded_checkpoint(save_context(model), sharded_dir)
     dist.barrier()
     if rank != 0:
         return []
@@ -122,7 +123,9 @@ def run(ctx) -> dict:
     for family in _REFUSED:
         # Name-only and raised before any collective, so every rank refuses alike.
         try:
-            save_ep_model(_ep_patched(family, ctx.device), os.path.join(root, family, "sharded"), sharded=True)
+            save_ep_sharded_checkpoint(
+                save_context(_ep_patched(family, ctx.device)), os.path.join(root, family, "sharded")
+            )
         except ValueError as refusal:
             checks[f"{family}_sharded_save_refused"] = "key-by-key stream cannot" in str(refusal)
         else:

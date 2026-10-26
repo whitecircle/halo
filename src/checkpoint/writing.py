@@ -306,3 +306,35 @@ class StreamingShardWriter:
         self._total_bytes += self._pending_bytes
         self._pending = {}
         self._pending_bytes = 0
+
+
+def merge_shard_index(gathered: list[tuple[dict[str, str], int] | None]) -> tuple[dict[str, str], int]:
+    """Fold the gathered fragments into one ``(weight_map, total_size)``, rejecting a collision.
+
+    The combine :func:`~src.runtime.collectives.combine_across_ranks` runs on rank 0, which makes the
+    raise world-uniform. A key claimed by two different files would resolve to whichever fragment
+    merged last and count its bytes twice, producing a checkpoint that loads while holding the wrong
+    writer's tensor; both callers are key-disjoint by construction, so a second claim is a defect.
+
+    Bytes are counted once per file: on per-node storage each node's writer emits the same filenames.
+    """
+    weight_map: dict[str, str] = {}
+    counted_files: set[str] = set()
+    total_size = 0
+    for entry in gathered:
+        if not entry:
+            continue
+        fragment, fragment_bytes = entry
+        for key, shard in fragment.items():
+            if key in weight_map and weight_map[key] != shard:
+                raise RuntimeError(
+                    f"checkpoint shards disagree on {key!r}: claimed by both {weight_map[key]!r} and "
+                    f"{shard!r}. Every key belongs to exactly one writer, so two claims mean the "
+                    f"shard split or the global-name map is wrong."
+                )
+            weight_map[key] = shard
+        files = set(fragment.values())
+        if not files & counted_files:
+            total_size += fragment_bytes
+            counted_files |= files
+    return weight_map, total_size

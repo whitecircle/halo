@@ -46,6 +46,8 @@ FAKE_MTIME = 1_700_000_000.0
 
 
 class _ShardStore:
+    writes_shards = True
+
     def save(self, output_dir):
         with open(os.path.join(output_dir, f"optimizer_shard_{get_global_rank():05d}.pt"), "wb") as fh:
             fh.write(b"shard")

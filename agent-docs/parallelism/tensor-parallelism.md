@@ -307,7 +307,7 @@ GPU-side barrier, not the PyTorch watchdog, so this does **not** bound it.
 
 ## Checkpoint saving
 
-`save_tp_model` (`src/distributed/checkpoint/tp_save.py`) drives TP saving, and it always
+`save_tp_checkpoint` (`src/checkpoint/parallel/save.py`), the ladder's TP rung, always
 gathers: all TP ranks reconstruct full tensors and one save rank writes a standard HF checkpoint, put
 through `normalize_gathered_state_dict` (hub expert layout, save dtype) like the FSDP2 and CP
 writers. There is no per-rank TP save. The write streams through `stream_gathered_checkpoint`, so
@@ -319,7 +319,7 @@ all-gathers the hand-sliced GptOss `sinks` after it. Both are **collective**: ev
 must drive them or the gather hangs.
 
 On resume every TP shape is Path B: the training scripts repoint `model_name_or_path` at the
-checkpoint, so the weights load at construction and `CheckpointLoader._load_streamed` skips the re-read.
+checkpoint, so the weights load at construction and `load_resume_weights` skips the re-read.
 Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the
 checkpoint's full tensors and `distribute_tensor`s them into the live DTensor placements.
 

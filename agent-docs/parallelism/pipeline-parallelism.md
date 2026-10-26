@@ -69,7 +69,7 @@ microbatch.
   the logits it returns and inside the fused head loss. It is the transform the chunked GRPO
   log-probs apply, verified against the family's forward (`src/models/head_transform.py`); a family
   whose forward it does not reproduce is refused by the split gate on every rank.
-- **Checkpoint seam.** `save_pp_checkpoint` (`src/distributed/checkpoint/save.py`) defines the PP
+- **Checkpoint seam.** `save_pp_checkpoint` (`src/checkpoint/parallel/pp.py`) defines the PP
   checkpoint layout: one complete-tensor safetensors shard per stage under the hub's names plus a
   merged standard HF index, loadable via plain `from_pretrained`. A stage is no `PreTrainedModel`
   and names its tensors stage-locally, so `build_pipeline_stage` snapshots the unsplit model's load

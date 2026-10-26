@@ -20,8 +20,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from trl import ModelConfig
 
 import src.distributed.loading.vlm_setup as vlm_setup
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, config_schema_source
-from src.distributed.checkpoint.loader import weights_read_from
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, config_schema_source, weights_read_from
 from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from src.training.environment import prepare_distributed_resume
 from src.training.script_runner import ScriptRuntime, load_script_model

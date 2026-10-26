@@ -28,10 +28,11 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 from trl import ModelConfig, SFTConfig, get_quantization_config
 
-from src.distributed.checkpoint.peft import PeftAdapterSaver, restore_adapters
+from src.checkpoint.parallel.adapters import restore_adapters
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.model_loading.parallel.loader import load_distributed_model
+from src.models.unwrapping import plain_adapter_key
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
@@ -396,9 +397,7 @@ def run_lora_cp_resume(
         saved = load_file(os.path.join(save_dir, "adapter_model.safetensors"))
 
         # Live -> saved (portable) key spelling, derived independently of the remap under test.
-        live_to_saved = {
-            live: PeftAdapterSaver._normalize_cp_adapter_key(live.replace(".default.", ".")) for live in after
-        }
+        live_to_saved = {live: plain_adapter_key(live.replace(".default.", ".")) for live in after}
         matched = {live: key for live, key in live_to_saved.items() if key in saved}
         coverage_ok = len(matched) == len(after) == len(saved) > 0
         checks["saved_keys_cover_live"] = coverage_ok

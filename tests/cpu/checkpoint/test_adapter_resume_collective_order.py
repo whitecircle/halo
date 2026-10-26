@@ -15,22 +15,26 @@ Both halves are pinned here: the load order, and the pick.
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from peft import LoraConfig, get_peft_model
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 
-import src.distributed.checkpoint.coordination as coordination
+import src.checkpoint.parallel.adapters as peft_mod
+import src.checkpoint.parallel.reading as coordination
 from src.checkpoint.adapters import adapter_weight_paths
 from src.checkpoint.format import ADAPTER_WEIGHT_NAMES
-from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.checkpoint.peft import _load_peft_adapter_state
+from src.checkpoint.parallel.adapters import _load_peft_adapter_state, restore_adapters
+from src.checkpoint.parallel.reading import consensus_read
 from src.runtime import dtensor
 from src.runtime.consensus import RankConsensus
+from tests.common.gloo import run_gloo_ranks
 
 # Deliberately NOT sorted: a dict preserves insertion order, which is the adapter file's order.
 UNSORTED_KEYS = (
@@ -150,6 +154,44 @@ def test_disjoint_adapter_files_across_ranks_raise(tmp_path, monkeypatch):
             local={safetensors: True, adapter_bin: False},
             elsewhere={safetensors: False, adapter_bin: True},
         )
+
+
+class _LoraTarget(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc = nn.Linear(4, 4, bias=False)
+
+
+def _restore_under_another_scaling_on_rank1(rank: int, adapter_dir: str, outcome_dir: str) -> None:
+    """Rank 1 runs at twice the LoRA alpha the adapter was saved with; every rank records what it raised
+    and how often it read the adapter file."""
+    reads = []
+    real_read = peft_mod.read_adapter_file
+    peft_mod.read_adapter_file = lambda path: reads.append(path) or real_read(path)
+    model = get_peft_model(_LoraTarget(), LoraConfig(r=2, lora_alpha=4 * (rank + 1), target_modules=["fc"]))
+    try:
+        restore_adapters(adapter_dir, model, is_cp_mode=False)
+        outcome = "restored"
+    except ValueError as e:
+        outcome = str(e)
+    with open(os.path.join(outcome_dir, f"rank{rank}.json"), "w") as fh:
+        json.dump({"outcome": outcome, "reads": len(reads)}, fh)
+
+
+def test_a_scaling_mismatch_on_one_rank_is_refused_on_every_rank_under_the_reads_label(tmp_path):
+    """The read and its scaling refusal are one collective step: the rank whose live scaling differs
+    makes every rank raise the same text, labelled by the read it refused, after one adapter read."""
+    adapter_dir, outcome_dir = tmp_path / "adapter", tmp_path / "outcomes"
+    outcome_dir.mkdir()
+    get_peft_model(_LoraTarget(), LoraConfig(r=2, lora_alpha=4, target_modules=["fc"])).save_pretrained(adapter_dir)
+
+    run_gloo_ranks(_restore_under_another_scaling_on_rank1, 2, str(adapter_dir), str(outcome_dir))
+
+    outcomes = [json.loads((outcome_dir / f"rank{rank}.json").read_text()) for rank in range(2)]
+    assert outcomes[0]["outcome"] == outcomes[1]["outcome"], outcomes
+    assert outcomes[0]["outcome"].startswith("Adapter checkpoint failed on 1 of 2 rank(s) [1]"), outcomes[0]
+    assert "another LoRA scaling" in outcomes[0]["outcome"]
+    assert [outcome["reads"] for outcome in outcomes] == [1, 1], "the adapter file must be read once per rank"
 
 
 if __name__ == "__main__":

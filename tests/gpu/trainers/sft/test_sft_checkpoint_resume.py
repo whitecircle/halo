@@ -41,12 +41,12 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_str
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
-from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import (
     ResumeCapture,
     fixed_batch_loss,
@@ -119,10 +119,9 @@ def _fixed_batch(tokenizer, device, seq_len: int = 64):
 def load_model_for_mode(mode: str, parallelism_config: ParallelismConfig, model_path: str):
     """Load the model for ``mode`` from ``model_path``.
 
-    For EP/CP resume ``model_path`` must be the checkpoint dir: the CheckpointLoader deliberately skips
-    base-weight reload for EP/CP (its docstring: their "weights are reloaded by
-    ``load_distributed_model`` (not here)"), so the trained weights are restored ONLY by loading the model
-    from the checkpoint here. fsdp/tp load from it too: TP via ``is_tp_mode``, fsdp because the default
+    For EP/CP resume ``model_path`` must be the checkpoint dir: load_resume_weights deliberately skips
+    base-weight reload for EP/CP (base weights load only at construction), so the trained weights are
+    restored ONLY by loading the model from the checkpoint here. fsdp/tp load from it too: TP via ``is_tp_mode``, fsdp because the default
     ``use_grouped_gemm`` sets ``needs_ep_wrappers`` even on a dense model.
     """
     if mode == "fsdp":

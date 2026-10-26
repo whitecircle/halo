@@ -36,13 +36,13 @@ from torch.distributed.device_mesh import init_device_mesh
 from transformers import GptOssConfig, GptOssForCausalLM
 
 # Registers the EP export roster the config writer at the end of every gathered save demands —
-# a hand-built model reaches save_tp_model without the load path that pulls this in.
+# a hand-built model reaches save_tp_checkpoint without the load path that pulls this in.
 import src.distributed.expert_parallel.layers.roster  # noqa: F401
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.distributed.checkpoint.tp_save import save_tp_model
+from src.checkpoint.parallel.save import save_tp_checkpoint
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
-from tests.common.checkpoint_io import weight_files
+from tests.common.checkpoint_io import save_context, weight_files
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
@@ -159,7 +159,7 @@ def _disk_checks(save_dir: str, expected: dict[str, torch.Tensor], save_error: s
     """Rank 0's verdict on the artifact — never a raise, which its peers would wait out at the
     broadcast below until the watchdog fires."""
     if save_error is not None:
-        log(f"save_tp_model raised, so there is no artifact to inspect: {save_error}")
+        log(f"save_tp_checkpoint raised, so there is no artifact to inspect: {save_error}")
         return dict.fromkeys(DISK_CHECKS, False)
     try:
         problems = _checkpoint_problems(save_dir, expected)
@@ -202,7 +202,7 @@ def run(ctx) -> dict:
 
     save_error = None
     try:
-        save_tp_model(model, save_dir, max_shard_size=MAX_SHARD_SIZE)
+        save_tp_checkpoint(save_context(model, max_shard_size=MAX_SHARD_SIZE), save_dir)
     except Exception as exc:
         # The writer defers a rank-local failure to a collective, so every rank lands here together
         # and the checks below stay in lockstep.

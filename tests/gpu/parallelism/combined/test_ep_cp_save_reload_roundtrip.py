@@ -6,7 +6,7 @@ wrapper-prefixed EP-layer paths while ``named_parameters()`` yields inner names.
 the wrapper misclassifies every expert param as non-EP: the rank-local expert shard is written
 under the canonical key, gathered full experts land under doubled bogus keys, and the checkpoint
 silently reloads with random-init experts. This test saves through the CP wrapper (the exact
-object ``save_ep_checkpoint`` passes), asserts every expert tensor in the checkpoint has the
+object the saver ladder passes), asserts every expert tensor in the checkpoint has the
 FULL ``[E, ...]`` shape under a canonical key, and asserts the reloaded per-rank CP loss matches
 the pre-save loss.
 
@@ -28,12 +28,14 @@ import torch.distributed as dist
 from safetensors import safe_open
 from transformers import AutoConfig, AutoTokenizer
 
-from src.distributed.checkpoint.ep_save import save_ep_model
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from src.checkpoint.parallel.save import save_tokenizer
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_str
 from src.model_loading.parallel.loader import load_distributed_model
+from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.models import GPT_OSS_20B_PATCHED
@@ -150,8 +152,10 @@ def run(ctx):
         shutil.rmtree(save_dir, ignore_errors=True)
     ctx.barrier()
     log(f"--- Saving (gathered, through the CP wrapper) → {save_dir} ---")
-    # The exact call save_ep_checkpoint makes: the CP WRAPPER with cp_key_remap=True.
-    save_ep_model(model, save_dir, tokenizer=tokenizer, sharded=False, cp_key_remap=True)
+    # The ladder's call: the CP WRAPPER under a CP config, which remaps the CP attention keys.
+    save_ctx = save_context(model, pc, tokenizer=tokenizer)
+    save_tokenizer(save_ctx, save_dir)
+    save_ep_gathered_checkpoint(save_ctx, save_dir)
     ctx.barrier()
 
     # Rank 0 alone reads the written checkpoint; the other ranks leave the key out.

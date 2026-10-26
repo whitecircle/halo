@@ -267,7 +267,7 @@ not activations) — that is the case CP exists for.
 | QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading/parallel/loader.py`, `_reject_cp_explicit_options` |
 | `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_reject_hsdp`, `_reject_fsdp_settings` |
 | `torch_compile` | not gated, and no measured benefit — the all-to-all breaks the graph at every attention layer | — |
-| `save_sharded_ep` | rejected on a CP run — per-rank shards carry `.original_attention.` keys the merge script cannot remap | `validate_ep_sharded_save` |
+| `save_sharded_ep` | rejected on a CP run — per-rank shards carry `.original_attention.` keys the merge script cannot remap | `reject_unmergeable_ep_sharded_save` |
 
 ## Adding a new model
 

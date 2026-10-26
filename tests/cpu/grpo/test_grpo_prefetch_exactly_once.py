@@ -36,6 +36,7 @@ import pytest
 import torch
 
 import src.trainers.grpo.rollout.async_rollouts as async_mod
+import src.trainers.mixins.checkpointing as checkpointing_mod
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as _T
@@ -428,18 +429,21 @@ class _LoadHost(CheckpointingMixin):
 
     def __init__(self):
         self.restored: list[str] = []
+        self.parallelism_config = types.SimpleNamespace(is_pp_mode=False)
 
-    def _checkpoint_loader(self):
-        return types.SimpleNamespace(load_model=lambda checkpoint, model, for_best_model: None)
+    def _checkpoint_load_context(self):
+        return None
 
-    def _restore_router_balancing_biases(self, checkpoint):
-        pass
+    def _top_level_model(self):
+        return None
 
     def _restore_trainer_sidecars(self, checkpoint):
         self.restored.append(checkpoint)
 
 
-def test_a_resume_restores_the_trainer_sidecars_and_a_best_model_load_does_not():
+def test_a_resume_restores_the_trainer_sidecars_and_a_best_model_load_does_not(monkeypatch):
+    monkeypatch.setattr(checkpointing_mod, "load_resume_weights", lambda *args, **kwargs: True)
+    monkeypatch.setattr(checkpointing_mod, "restore_balancing_biases", lambda *args, **kwargs: None)
     host = _LoadHost()
     host._load_from_checkpoint("checkpoint-50")
     host._load_from_checkpoint("checkpoint-25", for_best_model=True)

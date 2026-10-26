@@ -19,9 +19,9 @@ from scripts.training.offline_grpo import _load_kl_reference
 from src.args.distributed_args import DistributedArguments
 from src.args.offline_grpo_args import OfflineGRPOScriptArguments
 from src.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.training.environment import resolve_resume_weights_source
 from src.training.script_runner import ScriptRuntime
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir

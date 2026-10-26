@@ -7,9 +7,9 @@
   there is nothing to fold, accelerate-managed FSDP means the base Trainer owns the save, and a PEFT
   layer the out-of-place fold cannot reproduce would otherwise raise only at the first checkpoint
   save. A mixed attention+expert run is the flag's headline case and must pass —
-  ``save_ep_checkpoint`` folds both halves — so a blanket rejection of the mixed shape fails here.
+  ``save_ep_gathered_checkpoint`` folds both halves — so a blanket rejection of the mixed shape fails here.
 * ``save_model``'s routing — passing that guard is only half the promise. With the flag set, a mixed
-  run must skip ``PeftAdapterSaver`` (which never merges) and reach the EP strategy's merged write
+  run must skip ``save_peft_adapters`` (which never merges) and reach the EP strategy's merged write
   with the attention delta already folded into the base weights being gathered. This is what makes
   "re-save with ``merge_expert_lora_on_save=True``" a real export route for the mixed shape rather
   than an adapter file no tool folds, and it is the behavior
@@ -32,11 +32,12 @@ from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
-import src.distributed.checkpoint.save as save_mod
+import src.checkpoint.parallel.context as context_mod
+import src.checkpoint.parallel.ep as ep_mod
+import src.checkpoint.parallel.save as save_mod
 import src.trainers.mixins.base as mixin_mod
-import src.trainers.mixins.checkpointing as checkpointing_mod
 import src.trainers.mixins.grad_sync as grad_sync_mod
-from src.models.peft_adapters import lora_folded_data
+from src.checkpoint.reading import load_full_state_dict
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.peft_helpers import randomize_adapters
 
@@ -76,7 +77,7 @@ class _StubTrainer:
 
 
 def test_merge_flag_with_attention_peft_passes():
-    """A MIXED run is the flag's headline case: save_ep_checkpoint folds the expert deltas in the
+    """A MIXED run is the flag's headline case: the gathered EP save folds the expert deltas in the
     family gather and the attention deltas via merge_adapter, so it must NOT be rejected."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
     with patch.object(mixin_mod, "has_ep_lora", return_value=True):
@@ -176,7 +177,6 @@ class _SaveRoutingTrainer(_StubTrainer):
     _write_model_payload = DistributedTrainerMixin._write_model_payload
     _mark_model_save_collectives_done = DistributedTrainerMixin._mark_model_save_collectives_done
     _checkpoint_context = DistributedTrainerMixin._checkpoint_context
-    _persist_router_balancing_biases = DistributedTrainerMixin._persist_router_balancing_biases
     _find_cp_wrapper = DistributedTrainerMixin._find_cp_wrapper
     _get_tp_rank = DistributedTrainerMixin._get_tp_rank
 
@@ -193,30 +193,29 @@ def _mixed_run_model():
 
 
 def _run_save(trainer):
-    """Drive ``save_model`` with the two terminal writers faked, and report which one ran.
+    """Drive ``save_model`` with the adapter writer faked and the real merged EP save recorded.
 
-    ``save_ep_model`` records what its walk would put on disk for the LoRA-wrapped projection (the
-    live weight with the ``lora_folds`` it was handed folded in) and the live weight itself, which
-    is what distinguishes a merged write from an adapter-only one.
+    The record holds the merge flag the EP save saw, the LoRA-wrapped projection's weight it wrote, and
+    the live weight after it, which is what distinguishes a merged write from an adapter-only one.
     """
     ep_calls: list[dict] = []
     wrapped = trainer.model.base_model.model.q_proj
 
-    def _fake_save_ep_model(_model, _output_dir, **kwargs):
-        weight = wrapped.base_layer.weight
+    def _recorded_ep_save(ctx, output_dir):
+        ep_mod.save_ep_gathered_checkpoint(ctx, output_dir)
         ep_calls.append(
             {
-                **kwargs,
-                "written_weight": lora_folded_data(weight, kwargs["lora_folds"]).detach().clone(),
-                "live_weight": weight.detach().clone(),
+                "merge_lora": ctx.merges_expert_lora,
+                "written_weight": load_full_state_dict(output_dir)["q_proj.weight"],
+                "live_weight": wrapped.base_layer.weight.detach().clone(),
             }
         )
 
     adapter_saver = MagicMock()
     with (
-        patch.object(checkpointing_mod, "has_ep_lora", return_value=True),
-        patch.object(checkpointing_mod, "PeftAdapterSaver", return_value=adapter_saver),
-        patch.object(save_mod, "save_ep_model", _fake_save_ep_model),
+        patch.object(context_mod, "has_ep_lora", return_value=True),
+        patch.object(save_mod, "save_peft_adapters", adapter_saver),
+        patch.object(save_mod, "save_ep_gathered_checkpoint", _recorded_ep_save),
     ):
         trainer.save_model(trainer.args.output_dir)
     return ep_calls, adapter_saver
@@ -225,11 +224,11 @@ def _run_save(trainer):
 def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
     """The mixed shape's export route: the flag reaches the fold, with BOTH halves in it.
 
-    ``PeftAdapterSaver`` never merges, so a mixed run that lands there gets the resume-only adapter
-    file. The flag must route past it to ``save_ep_checkpoint``, which asks the gather for the
-    expert deltas (``merge_lora``) and hands it the attention fold targets (``lora_folds``) — and
-    the assertion on the written weight is what proves that second half is not just a flag being
-    passed: the base weight the walk would write carries the attention delta, the live one does not.
+    ``save_peft_adapters`` never merges, so a mixed run that lands there gets the resume-only adapter
+    file. The flag must route past it to ``save_ep_gathered_checkpoint``, which asks the gather for the
+    expert deltas (``merge_lora``) and folds the attention adapters into the base weights it writes —
+    and the assertion on the written weight is what proves that second half is not just a flag being
+    passed: the base weight on disk carries the attention delta, the live one does not.
     """
     model = _mixed_run_model()
     trainer = _SaveRoutingTrainer(model, True, str(tmp_path))
@@ -237,11 +236,12 @@ def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
 
     ep_calls, adapter_saver = _run_save(trainer)
 
-    adapter_saver.save.assert_not_called()
+    adapter_saver.assert_not_called()
     assert len(ep_calls) == 1, "the mixed run never reached the merged EP save"
     assert ep_calls[0]["merge_lora"] is True, "expert deltas would not be folded into the gather"
-    assert not torch.equal(ep_calls[0]["written_weight"], unmerged), (
-        "the base weight the walk would write is the frozen one — the attention delta was not folded"
+    written = ep_calls[0]["written_weight"]
+    assert not torch.equal(written, unmerged.to(written.dtype)), (
+        "the base weight on disk is the frozen one — the attention delta was not folded"
     )
     # Folded out of place: the live base is the frozen one during and after the save, and the
     # PeftModel stays unmerged, so the re-save the merge guard recommends is repeatable mid-run.
@@ -261,7 +261,7 @@ def test_adapter_only_save_of_a_mixed_run_goes_to_the_peft_saver(tmp_path):
 
     ep_calls, adapter_saver = _run_save(trainer)
 
-    assert adapter_saver.save.call_count == 1
+    assert adapter_saver.call_count == 1
     assert not ep_calls
 
 

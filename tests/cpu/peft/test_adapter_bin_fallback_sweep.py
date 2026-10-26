@@ -17,28 +17,19 @@ import pytest
 import torch
 
 import src.checkpoint.adapters as adapters_mod
-import src.distributed.checkpoint.peft as peft_mod
 from src.checkpoint.format import ADAPTER_BIN_FILE, ADAPTER_SAFETENSORS_FILE
-from src.distributed.checkpoint.peft import PeftAdapterSaver
-
-WRITERS = pytest.mark.parametrize(
-    "module, write",
-    [(peft_mod, PeftAdapterSaver._write_adapter_state_dict), (adapters_mod, adapters_mod.write_adapter_file)],
-    ids=["PeftAdapterSaver", "write_adapter_file"],
-)
 
 
 def _failing_save(*args, **kwargs):
     raise OSError("No space left on device")
 
 
-@WRITERS
-def test_bin_fallback_removes_the_stale_safetensors(tmp_path, monkeypatch, module, write):
+def test_bin_fallback_removes_the_stale_safetensors(tmp_path, monkeypatch):
     stale = tmp_path / ADAPTER_SAFETENSORS_FILE
     stale.write_bytes(b"previous save's adapter")
-    monkeypatch.setattr(module, "safetensors_save_file", _failing_save)
+    monkeypatch.setattr(adapters_mod, "safetensors_save_file", _failing_save)
 
-    write({"w": torch.ones(2)}, str(tmp_path))
+    adapters_mod.write_adapter_file({"w": torch.ones(2)}, str(tmp_path))
 
     assert (tmp_path / ADAPTER_BIN_FILE).exists()
     assert not stale.exists(), (
@@ -47,22 +38,20 @@ def test_bin_fallback_removes_the_stale_safetensors(tmp_path, monkeypatch, modul
     )
 
 
-@WRITERS
-def test_a_non_contiguous_adapter_tensor_still_writes_safetensors(tmp_path, module, write):
+def test_a_non_contiguous_adapter_tensor_still_writes_safetensors(tmp_path):
     """safetensors refuses a non-contiguous tensor, and the adapter file is written as one dict —
     so a single view (a gathered DTensor adapter, a ``modules_to_save`` clone) would cost the whole
     adapter the ``.bin`` fallback, which every reader then has to be told about."""
-    write({"w": torch.ones(4, 2).t()}, str(tmp_path))
+    adapters_mod.write_adapter_file({"w": torch.ones(4, 2).t()}, str(tmp_path))
 
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).exists()
     assert not (tmp_path / ADAPTER_BIN_FILE).exists(), "a view fell back to the .bin format"
 
 
-@WRITERS
-def test_bin_fallback_sweep_failure_is_loud_and_keeps_the_bin(tmp_path, monkeypatch, caplog, module, write):
+def test_bin_fallback_sweep_failure_is_loud_and_keeps_the_bin(tmp_path, monkeypatch, caplog):
     stale = tmp_path / ADAPTER_SAFETENSORS_FILE
     stale.write_bytes(b"previous save's adapter")
-    monkeypatch.setattr(module, "safetensors_save_file", _failing_save)
+    monkeypatch.setattr(adapters_mod, "safetensors_save_file", _failing_save)
 
     real_remove = os.remove
 
@@ -71,9 +60,9 @@ def test_bin_fallback_sweep_failure_is_loud_and_keeps_the_bin(tmp_path, monkeypa
             raise OSError("Operation not permitted")
         real_remove(path)
 
-    monkeypatch.setattr(module.os, "remove", failing_remove)
-    with caplog.at_level("WARNING", logger=module.logger.name):
-        write({"w": torch.ones(2)}, str(tmp_path))
+    monkeypatch.setattr(adapters_mod.os, "remove", failing_remove)
+    with caplog.at_level("WARNING", logger=adapters_mod.logger.name):
+        adapters_mod.write_adapter_file({"w": torch.ones(2)}, str(tmp_path))
 
     assert (tmp_path / ADAPTER_BIN_FILE).exists(), "a failed sweep must not lose the .bin that carries the state"
     assert any("stale" in record.message for record in caplog.records)

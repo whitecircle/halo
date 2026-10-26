@@ -39,9 +39,9 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_MARKER_FILE,
     ROUTER_BALANCING_BIASES_FILE,
     prefetch_pending_filename,
-    write_resume_adapter_marker,
 )
 from src.checkpoint.reading import iter_checkpoint_shard_entries
+from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import load_script_module
 
@@ -332,7 +332,7 @@ def test_end_to_end_linear_merge_qwen3_5():
         (a / RESUME_ADAPTER_DIR).mkdir()
         (a / RESUME_ADAPTER_DIR / ADAPTER_CONFIG_FILE).write_text("{}")
         save_file({"lora_A": torch.ones(2, 2)}, str(a / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE))
-        write_resume_adapter_marker(str(a))
+        mark_resume_adapter(str(a))
 
         mm.merge_models(
             model_specs=[str(a), str(b)],

@@ -45,22 +45,20 @@ from trl.trainer.utils import disable_dropout_in_model
 
 import src.trainers.embedding.sentence_transformers_compat  # noqa: F401  installs ST's gradient-checkpointing signatures
 from src.checkpoint.adapters import (
-    adapter_weight_paths,
-    lora_scaling_mismatch,
     missing_resume_adapter_reason,
-    read_adapter_file,
     resume_adapter_dir,
     resume_adapter_on_own_weights_reason,
     unmarked_merged_checkpoint_reason,
 )
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
+from src.checkpoint.parallel.adapters import read_adapter_across_ranks
+from src.checkpoint.parallel.completeness import mark_resume_adapter_complete
+from src.checkpoint.parallel.context import CheckpointContext
+from src.checkpoint.parallel.resume_weights import built_from_checkpoint_across_ranks, load_resume_weights
+from src.checkpoint.parallel.save import save_checkpoint, save_tokenizer
+from src.checkpoint.parallel.writing import gather_saveable_tensors
 from src.checkpoint.writing import write_gathered_checkpoint
 from src.configs.embedding import EmbeddingConfig
-from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
-from src.distributed.checkpoint.save import mark_resume_adapter_complete, save_checkpoint
-from src.distributed.checkpoint.write import gather_saveable_tensors
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.log import KEY_PREVIEW_COUNT
@@ -614,7 +612,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         trainable tensors unfolded, at their live dtype and under the top-level model's parameter
         names, in :data:`~src.checkpoint.format.RESUME_ADAPTER_DIR`; each save rank writes the marker
         the resume classifies on once its own copy is complete. With any older marker removed before
-        the save began (:func:`~src.distributed.checkpoint.save.remove_stale_completion_markers`), a failed
+        the save began (:func:`~src.checkpoint.parallel.completeness.remove_stale_completion_markers`), a failed
         write leaves the checkpoint unmarked. The final ``save_model`` export carries neither.
         Collective.
         """
@@ -639,7 +637,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     def _load_from_checkpoint(
         self, resume_from_checkpoint: str, model: nn.Module = None, *, for_best_model: bool = False
     ) -> None:
-        """Resume an injected-LoRA run from its checkpoint's resume adapter; the mixin's loader otherwise.
+        """Resume an injected-LoRA run from its checkpoint's resume adapter, any other run's weights into the backbone.
 
         The checkpoint's weights are the fold and already hold the delta, so they are never read:
         the run was rebuilt from the base with fresh adapters, and its trainable tensors are
@@ -662,11 +660,19 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             # The loader reshards what it is handed, the backbone; the FSDP2 root group is the whole
             # SentenceTransformer, whose eval forward before a best-model load leaves it unsharded.
             reshard_fsdp2_modules(self._top_level_model())
-            super()._load_from_checkpoint(resume_from_checkpoint, model, for_best_model=for_best_model)
-            return
-        if not marked:
+            # Every save writes the backbone's names, so the weights load into the backbone; an unsharded
+            # reload stays with sentence-transformers' own, which rebuilds the whole pipeline. The
+            # optimizer store keeps the SentenceTransformer, whose parameters the optimizer steps.
+            ctx = dataclasses.replace(
+                self._checkpoint_load_context(), model=self._get_unwrapped_model(), base_owns_whole_weight_load=True
+            )
+            if not load_resume_weights(ctx, resume_from_checkpoint, model, for_best_model=for_best_model):
+                # Called on the class: super() would re-enter the mixin's load.
+                SentenceTransformerTrainer._load_from_checkpoint(self, resume_from_checkpoint)
+        elif not marked:
             raise ValueError(unmarked_merged_checkpoint_reason(resume_from_checkpoint))
-        self._restore_injected_lora(resume_from_checkpoint)
+        else:
+            self._restore_injected_lora(resume_from_checkpoint)
         self._restore_state_beside_weights(resume_from_checkpoint, for_best_model=for_best_model)
 
     def _restore_injected_lora(self, checkpoint: str) -> None:
@@ -681,19 +687,13 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         ``distribute_tensor``, a mesh collective issued in sorted key order on every rank.
         """
         adapter_dir = os.path.join(checkpoint, RESUME_ADAPTER_DIR)
-        # realpath resolves node-locally, so rank 0's verdict is the world's.
-        if broadcast_from_rank0(built_from_checkpoint(weights_read_from(self._get_unwrapped_model()), checkpoint)):
+        if built_from_checkpoint_across_ranks(self._get_unwrapped_model(), checkpoint):
             raise ValueError(resume_adapter_on_own_weights_reason(checkpoint))
-        saved, path = consensus_read(
-            adapter_weight_paths(adapter_dir), read_adapter_file, what="Resume adapter", checkpoint=checkpoint
+        saved, path = read_adapter_across_ranks(
+            adapter_dir, checkpoint=checkpoint, what="Resume adapter", attention=self._injected_lora_config().to_dict()
         )
         if path is None:
             raise RuntimeError(missing_resume_adapter_reason(checkpoint))
-        reject_across_ranks(
-            lora_scaling_mismatch(adapter_dir, self._injected_lora_config().to_dict()),
-            "Injected-LoRA resume",
-            ValueError,
-        )
         model = self._top_level_model()
         # Best-model loads follow an eval forward that left the FSDP2 tree unsharded.
         reshard_fsdp2_modules(model)
@@ -705,22 +705,6 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         del saved
         if is_global_main_process():
             logger.info(f"Restored {len(live)} injected-LoRA tensors from {path}")
-
-    def _checkpoint_loader(self) -> CheckpointLoader:
-        """The mixin's weight loader, re-pointed at the backbone the savers write.
-
-        Every save writes the ``auto_model`` backbone's names (:meth:`_checkpoint_context`), so a
-        loader handed the ``SentenceTransformer``, whose names carry its ``0.<module>.`` prefix, would
-        match none of them, and the FSDP2 / TP coverage gates would refuse every full fine-tune reload.
-        An unsharded reload stays with sentence-transformers' own, which rebuilds the whole pipeline,
-        its modules past the backbone included. The optimizer store keeps the ``SentenceTransformer``,
-        whose parameters the optimizer steps.
-        """
-        return CheckpointLoader(
-            dataclasses.replace(
-                self._checkpoint_load_context(), model=self._get_unwrapped_model(), base_owns_whole_weight_load=True
-            )
-        )
 
     def _checkpoint_context(self) -> CheckpointContext:
         """The mixin's context, re-pointed at the backbone.
@@ -752,14 +736,13 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         # say) does not leave the peers blocked.
         with barrier_on_exit():
             if self._has_injected_lora(backbone):
+                save_tokenizer(ctx, output_dir)
                 # Gather on all ranks (collective); only the writer retains (else N× host RAM per node).
                 state_dict = gather_saveable_tensors(
                     backbone, retain=ctx.is_save_rank, items=_folded_backbone_items(backbone)
                 )
                 if ctx.is_save_rank:
                     write_gathered_checkpoint(backbone, state_dict, output_dir, max_shard_size=ctx.max_shard_size)
-                    if ctx.tokenizer is not None:
-                        ctx.tokenizer.save_pretrained(output_dir)
                 del state_dict
             elif not save_checkpoint(ctx, output_dir):
                 # No active parallelism left to gather: ST's own writer handles the plain-tensor

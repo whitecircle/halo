@@ -9,7 +9,7 @@ gated rank and local on everyone else — a desync that surfaces far from its ca
 out in an unrelated barrier.
 
 The two sites that invite the shape are ``persistent_buffers`` (a writer-only PEFT unmerge goes
-collective alone and the peer dies in DeepEP teardown) and ``CheckpointLoader._load_fsdp2``'s rank-0
+collective alone and the peer dies in DeepEP teardown) and ``load_resume_weights``' FSDP2 rank-0
 coverage gate. Both read live FQNs from ``named_parameters()``/``named_buffers()`` instead, which
 touch no state dict.
 

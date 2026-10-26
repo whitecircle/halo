@@ -17,7 +17,7 @@ refuses the resume instead). Those reloads are:
     a model whose classes FSDP2 has swapped for its own ``FSDP<Name>``.
 
 Each case saves through the FSDP2 writer from an FSDP2-wrapped model (CPU, a one-rank fake process
-group) and reloads through :meth:`CheckpointLoader.load_model`, comparing every live tensor with the
+group) and reloads through :func:`load_resume_weights`, comparing every live tensor with the
 trained one. The per-expert hubs are the cases that fail without the conversion; the fused hubs and the
 dense models must load unchanged. The reload also reads layouts the model's own load never met, as
 ``from_pretrained`` does: the module layout an EP-gathered save writes, and a per-expert checkpoint of
@@ -45,15 +45,15 @@ from transformers import Trainer, TrainingArguments
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  # the config export reads the EP roster
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
+from src.checkpoint.parallel.context import CheckpointLoadContext
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from src.checkpoint.parallel.resume_weights import load_resume_weights
+from src.checkpoint.parallel.save import save_fsdp2_checkpoint
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.loader import CheckpointLoader
-from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.param_roles import persistent_buffers
-from src.training.environment import resolve_resume_weights_source
-from tests.common.checkpoint_io import written_keys
+from tests.common.checkpoint_io import load_context, save_context, written_keys
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
@@ -123,10 +123,7 @@ def _perturbed(model, seed: int):
 
 def _save_fsdp2(model, mesh, checkpoint: str) -> None:
     """The FSDP2 writer's save of ``model``, wrapped as a plain FSDP2 run wraps it."""
-    ctx = SimpleNamespace(
-        model=_fsdp2(model, mesh), is_save_rank=True, max_shard_size="5GB", training_checkpoint=True, tokenizer=None
-    )
-    save_fsdp2_checkpoint(ctx, checkpoint)
+    save_fsdp2_checkpoint(save_context(_fsdp2(model, mesh), training_checkpoint=True), checkpoint)
 
 
 @pytest.fixture(scope="module", params=sorted(CASES))
@@ -144,23 +141,11 @@ def trained(request, tmp_path_factory):
     return request.param, family, hub, checkpoint, state
 
 
-def _ctx(
-    model, *, fsdp_wrapped=False, is_tp_mode=False, fallback=None, base_owns_whole_weight_load=False
-) -> CheckpointLoadContext:
-    return CheckpointLoadContext(
-        model=model,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=is_tp_mode,
-        has_ep_layers=False,
-        fsdp_wrapped=fsdp_wrapped,
-        tp_rank=0,
+def _ctx(model, *, fsdp_wrapped=False, is_tp_mode=False, base_owns_whole_weight_load=False) -> CheckpointLoadContext:
+    return load_context(
+        model,
         tp_size=2 if is_tp_mode else 1,
-        super_load_from_checkpoint=fallback,
-        super_load_optimizer_and_scheduler=None,
+        fsdp_wrapped=fsdp_wrapped,
         base_owns_whole_weight_load=base_owns_whole_weight_load,
     )
 
@@ -172,17 +157,18 @@ def _reload(shape: str, family, hub: str, checkpoint: str, tmp_path) -> dict[str
     if shape.startswith("fsdp2"):
         with fake_process_group_mesh(0, 1) as mesh:
             model = _fsdp2(_load(family, hub), mesh)
-            CheckpointLoader(_ctx(model, fsdp_wrapped=True)).load_model(checkpoint, model, for_best_model=best_model)
+            load_resume_weights(_ctx(model, fsdp_wrapped=True), checkpoint, model, for_best_model=best_model)
             return _live_state(model)
     model = _load(family, hub)
     if shape == "tp_best_model":
-        CheckpointLoader(_ctx(model, is_tp_mode=True)).load_model(checkpoint, model, for_best_model=True)
+        load_resume_weights(_ctx(model, is_tp_mode=True), checkpoint, model, for_best_model=True)
         return _live_state(model)
-    # The base Trainer's own loader is the fallback a single-process run would otherwise take.
-    base_trainer = Trainer(model=model, args=TrainingArguments(output_dir=str(tmp_path), report_to=[], use_cpu=True))
-    CheckpointLoader(_ctx(model, fallback=base_trainer._load_from_checkpoint)).load_model(
-        checkpoint, model, for_best_model=best_model
-    )
+    # The base Trainer's own loader is the one a single-process run takes where the reload declines.
+    if not load_resume_weights(_ctx(model), checkpoint, model, for_best_model=best_model):
+        base_trainer = Trainer(
+            model=model, args=TrainingArguments(output_dir=str(tmp_path), report_to=[], use_cpu=True)
+        )
+        base_trainer._load_from_checkpoint(checkpoint, model)
     return _live_state(model)
 
 
@@ -260,7 +246,7 @@ def test_an_init_from_scratch_run_saves_the_hub_layout_and_resumes_from_it(name,
         # load_distributed_model's stamp for a model that read no weights.
         setattr(resumed, LOADED_WEIGHTS_FROM_ATTR, None)
         _fsdp2(resumed, mesh)
-        CheckpointLoader(_ctx(resumed, fsdp_wrapped=True)).load_model(checkpoint, resumed)
+        load_resume_weights(_ctx(resumed, fsdp_wrapped=True), checkpoint, resumed)
         reloaded = _live_state(resumed)
 
     stale = _stale(state, reloaded)
@@ -273,13 +259,8 @@ def test_a_reload_the_base_loader_owns_stays_with_it(trained):
     _, family, hub, checkpoint, _ = trained
     model = _load(family, hub)
     before = _live_state(model)
-    calls = []
 
-    CheckpointLoader(
-        _ctx(model, fallback=lambda *a, **k: calls.append(a), base_owns_whole_weight_load=True)
-    ).load_model(checkpoint, model)
-
-    assert calls == [(checkpoint, model)]
+    assert load_resume_weights(_ctx(model, base_owns_whole_weight_load=True), checkpoint, model) is False
     assert all(torch.equal(tensor, before[key]) for key, tensor in _live_state(model).items())
 
 

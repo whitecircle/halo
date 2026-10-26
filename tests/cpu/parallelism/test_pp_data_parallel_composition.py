@@ -20,8 +20,8 @@ from unittest.mock import patch
 
 import pytest
 
+from src.checkpoint.parallel.pp import is_pp_shard_writer
 from src.distributed import mesh as mesh_mod
-from src.distributed.checkpoint.save import is_pp_shard_writer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.lowp.spec import LowpSpec
 from tests.common.parallelism import built_ep_config, make_parallelism_config
@@ -136,12 +136,12 @@ def test_the_non_shared_fs_writer_set_is_one_rank_per_node_per_stage():
     writes its shard k times, which is duplication, never a missing shard."""
     world, domain, pp = 32, 8, 2
     configs = [_config(rank=r, world=world, nvlink_domain_size=domain, pp_size=pp) for r in range(world)]
-    with patch("src.distributed.checkpoint.save.is_local_main_process", side_effect=lambda: False):
+    with patch("src.checkpoint.parallel.pp.is_local_main_process", side_effect=lambda: False):
         shared = [is_pp_shard_writer(c, shared_fs=True) for c in configs]
     assert [r for r, w in enumerate(shared) if w] == [0, 16], shared  # stage_local_rank == 0
     for rank, c in enumerate(configs):
         with patch(
-            "src.distributed.checkpoint.save.is_local_main_process",
+            "src.checkpoint.parallel.pp.is_local_main_process",
             side_effect=lambda rank=rank: rank % GPUS == 0,
         ):
             assert is_pp_shard_writer(c, shared_fs=False) == (rank % GPUS == 0)

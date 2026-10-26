@@ -197,7 +197,7 @@ def resolve_model_source(
 
 
 def _detect_checkpoint_format(path: str) -> str:
-    """``ep_sharded`` for a ``save_ep_model(sharded=True)`` checkpoint, else ``huggingface``; a torn index raises."""
+    """``ep_sharded`` for a ``save_ep_sharded_checkpoint`` checkpoint, else ``huggingface``; a torn index raises."""
     index = read_checkpoint_index(path, missing_ok=True)
     return EP_SHARDED_FORMAT if index_declares_ep_shards(index) else "huggingface"
 

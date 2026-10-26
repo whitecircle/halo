@@ -29,9 +29,9 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     SCHEDULER_STATE_FILE,
-    write_resume_adapter_marker,
 )
-from src.training.environment import _classify_resume_checkpoint
+from src.checkpoint.parallel.resume_source import classify_resume_weights
+from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import load_script_module
 from tests.common.tiny_models import word_level_tokenizer
@@ -60,19 +60,17 @@ def _training_checkpoint(path) -> str:
     save_file(
         {"x.experts.down_proj.lora_A": torch.ones(2, 2)}, str(path / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE)
     )
-    write_resume_adapter_marker(str(path))
+    mark_resume_adapter(str(path))
     for name in (TRAINER_STATE_NAME, SCHEDULER_STATE_FILE, "rng_state_0.pth", REFERENCE_LOGPS_FILE):
         (path / name).write_bytes(name.encode())
-    assert _classify_resume_checkpoint(str(path)) == "merged_adapter", "premise: the source resumes from its adapter"
+    assert classify_resume_weights(str(path)) == "merged_adapter", "premise: the source resumes from its adapter"
     return str(path)
 
 
 def _assert_no_resume_state(out) -> None:
     carried = [name for name in RESUME_STATE if (out / name).exists()]
     assert not carried, f"the new base carries its source run's resume state: {carried}"
-    assert _classify_resume_checkpoint(str(out)) == "full", (
-        "a resume from the new base must build from its own weights"
-    )
+    assert classify_resume_weights(str(out)) == "full", "a resume from the new base must build from its own weights"
 
 
 def test_a_vocab_patch_of_a_training_checkpoint_carries_no_resume_state(tmp_path, monkeypatch):

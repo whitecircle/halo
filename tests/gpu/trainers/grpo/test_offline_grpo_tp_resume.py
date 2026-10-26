@@ -27,13 +27,13 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import (
     TP_RESUME_PROBE_TEXT,
     ResumeCapture,

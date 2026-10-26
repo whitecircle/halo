@@ -58,11 +58,11 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
 )
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.distributed.context_parallel.config import CPConfigError
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
-from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir, world_all

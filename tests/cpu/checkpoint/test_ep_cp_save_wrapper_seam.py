@@ -4,10 +4,10 @@
 ``UlyssesModel`` overrides ``named_parameters()``/``state_dict()`` to yield inner-model
 names but not ``named_modules()``. A save that walks the wrapper therefore sees EP-layer module
 paths prefixed with the wrapper's ``model.`` level while parameter names stay clean, so the
-expert classification in ``_save_ep_gathered`` never matches: every expert param takes the non-EP
+expert classification in ``save_ep_gathered_checkpoint`` never matches: every expert param takes the non-EP
 branch (the rank-local shard is written under the canonical key), the gathered full experts land
 under doubled bogus keys, and persistent buffers save under wrapper-prefixed keys that never
-reload. ``save_ep_model`` must unwrap the CP wrapper; ``validate_ep_sharded_save`` must reject
+reload. ``save_ep_gathered_checkpoint`` must unwrap the CP wrapper; ``reject_unmergeable_ep_sharded_save`` must reject
 sharded EP saves on a CP-patched model (the sharded path has no CP key remap).
 
 Run: ``python tests/cpu/checkpoint/test_ep_cp_save_wrapper_seam.py`` (or ``pytest -m cpu``).
@@ -23,13 +23,15 @@ import torch.nn as nn
 from accelerate import PartialState
 from safetensors import safe_open
 
-from src.distributed.checkpoint.ep_save import save_ep_model, validate_ep_sharded_save
+from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save, save_ep_gathered_checkpoint
 from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.models.unwrapping import unwrap_toolkit_wrappers
+from tests.common.checkpoint_io import save_context
 from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.parallelism import make_parallelism_config
 
-PartialState()  # save_ep_model's accelerate logger needs accelerate state initialized
+PartialState()  # the EP save's accelerate logger needs accelerate state initialized
 
 NUM_EXPERTS = 4
 NUM_LOCAL_EXPERTS = 2  # simulates an ep2 rank: local params hold E/ep experts, the gather returns E
@@ -113,7 +115,9 @@ def test_gathered_ep_save_unwraps_cp_wrapper(tmp_path):
     inner = _build_inner()
     wrapper = _wrap(inner)
 
-    save_ep_model(wrapper, str(tmp_path), sharded=False, cp_key_remap=True)
+    save_ep_gathered_checkpoint(
+        save_context(wrapper, make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2)), str(tmp_path)
+    )
 
     ckpt = tmp_path / "model.safetensors"
     assert ckpt.is_file(), "gathered EP save wrote no model.safetensors"
@@ -141,16 +145,16 @@ def test_sharded_ep_save_rejected_under_cp():
     """A CP-patched model must be rejected for sharded EP saves — the sharded path has no CP key
     remap, so the shards would carry raw '.original_attention.' keys the merge cannot fix."""
     with pytest.raises(ValueError, match="Context Parallelism"):
-        validate_ep_sharded_save(_build_inner(cp_patched_attention=True), world_size=2)
+        reject_unmergeable_ep_sharded_save(_build_inner(cp_patched_attention=True), world_size=2)
     # Same check through the CP wrapper (the trainer validates before any save).
     with pytest.raises(ValueError, match="Context Parallelism"):
-        validate_ep_sharded_save(_wrap(_build_inner(cp_patched_attention=True)), world_size=2)
+        reject_unmergeable_ep_sharded_save(_wrap(_build_inner(cp_patched_attention=True)), world_size=2)
 
 
 def test_sharded_ep_save_allowed_without_cp():
     """Control: the identical topology without CP patching passes the CP gate (and the rest of the
     sharded-save validation for a supported family / single spanning EP group)."""
-    validate_ep_sharded_save(_build_inner(cp_patched_attention=False), world_size=2)
+    reject_unmergeable_ep_sharded_save(_build_inner(cp_patched_attention=False), world_size=2)
 
 
 if __name__ == "__main__":

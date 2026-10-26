@@ -40,13 +40,12 @@ from src.checkpoint.adapters import has_adapter_weight_file
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, SAFETENSORS_INDEX_FILE
 from src.checkpoint.reading import read_checkpoint_index
 from src.checkpoint.writing import cast_to_save_dtype
-from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.parallel.loader import load_distributed_model
 from src.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
-from src.models.unwrapping import strip_peft_adapter_segment
+from src.models.unwrapping import plain_adapter_key, strip_peft_adapter_segment
 from src.runtime.collectives import barrier
 from tests.common.ep_reference import ep_layers
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
@@ -434,7 +433,7 @@ def adapter_save_checks(save_dir: str, rank: int) -> dict[str, bool]:
 def _portable_adapter_key(name: str) -> str:
     """A live adapter param name in the spelling the saver writes: adapter segment dropped, CP-wrapper
     artifacts stripped. Idempotent, so a plain reloaded model's names land on the same keys."""
-    return PeftAdapterSaver._normalize_cp_adapter_key(strip_peft_adapter_segment(name))
+    return plain_adapter_key(strip_peft_adapter_segment(name))
 
 
 def verify_adapter_reload(

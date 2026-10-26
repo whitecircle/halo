@@ -23,8 +23,7 @@ import torch
 from safetensors.torch import safe_open
 
 from src.checkpoint.format import STREAM_PART_PREFIX
-from src.checkpoint.writing import StreamingShardWriter, save_sharded_state_dict, write_merged_index
-from src.distributed.checkpoint.write import merge_shard_index
+from src.checkpoint.writing import StreamingShardWriter, merge_shard_index, save_sharded_state_dict, write_merged_index
 
 PREFIX = "model-pp00000-of-00002"
 

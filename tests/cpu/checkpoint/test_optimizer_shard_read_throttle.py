@@ -31,9 +31,11 @@ import pytest
 import torch.distributed as dist
 import torch.nn as nn
 
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
+from src.checkpoint.parallel.context import CheckpointLoadContext
+from src.checkpoint.parallel.optimizer import OptimizerShardStore
+from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
+from tests.common.parallelism import make_parallelism_config
 
 WORLD_SIZE = 2
 # The read each rank simulates. Long enough that concurrent reads would overlap unmistakably, short
@@ -44,28 +46,9 @@ PG_TIMEOUT_SEC = 60
 SLOW_READ_SECONDS = 6
 
 
-class _Config:
-    """The one field the store reads off the parallelism config here."""
-
-    max_concurrent_loading = 1
-
-
 def _context(model: nn.Module) -> CheckpointLoadContext:
-    return CheckpointLoadContext(
-        model=model,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=_Config(),
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=False,
-        fsdp_wrapped=True,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=lambda *a, **k: None,
-        super_load_optimizer_and_scheduler=lambda *a, **k: None,
-    )
+    config = make_parallelism_config(world_size=WORLD_SIZE, gpus_per_node=WORLD_SIZE, max_concurrent_loading=1)
+    return load_context(model, config, fsdp_wrapped=True)
 
 
 def _worker(rank: int, tmp_dir: str) -> None:

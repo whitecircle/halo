@@ -37,11 +37,10 @@ from transformers import (
 PartialState()  # save_model_config logs through accelerate's logger
 
 from src.checkpoint.hub_layout import save_pretrained_layout
+from src.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint
 from src.checkpoint.reading import load_full_state_dict
 from src.checkpoint.writing import write_gathered_checkpoint
-from src.distributed.checkpoint.save import save_fsdp2_checkpoint
-from src.distributed.checkpoint.tp_save import save_tp_model
-from tests.common.checkpoint_io import written_keys
+from tests.common.checkpoint_io import save_context, written_keys
 from tests.common.models import TINY_QWEN35_MOE_CONFIG
 
 
@@ -160,7 +159,7 @@ def test_a_hub_layout_source_keeps_the_conversions_its_load_used(tmp_path):
 
 
 def test_the_gathered_tp_writer_writes_the_hub_layout(tmp_path):
-    """``save_tp_model`` streams through the shared gathered writer, so it applies
+    """``save_tp_checkpoint`` streams through the shared gathered writer, so it applies
     the same revert seam — a wrapper-less MoE under pure TP otherwise exports the fused keys vLLM
     rejects (GLM-4/LFM-2) or silently drops (Laguna). Driven end to end here, not by asserting the
     call, so a TP path that stopped sharing the writer still fails."""
@@ -168,7 +167,7 @@ def test_the_gathered_tp_writer_writes_the_hub_layout(tmp_path):
     fused_key = next(k for k in model.state_dict() if k.endswith("mlp.experts.gate_up_proj"))
     expected = model.state_dict()[fused_key].to(torch.bfloat16)
 
-    save_tp_model(model, str(tmp_path))
+    save_tp_checkpoint(save_context(model), str(tmp_path))
 
     _assert_hub_expert_layout(written_keys(str(tmp_path)))
     # The artifact round-trips through from_pretrained (the load conversion re-fuses the experts).
@@ -183,7 +182,7 @@ def test_the_gathered_tp_writer_applies_the_save_dtype(tmp_path):
     model = _tiny_qwen3_moe()  # from_config → fp32 params
     assert model.get_input_embeddings().weight.dtype == torch.float32, "premise: fp32 masters"
 
-    save_tp_model(model, str(tmp_path))
+    save_tp_checkpoint(save_context(model), str(tmp_path))
 
     state = load_full_state_dict(str(tmp_path))
     assert state["model.embed_tokens.weight"].dtype == torch.bfloat16, "weights must export at the save dtype"
@@ -242,10 +241,11 @@ _SOURCES = {
 
 
 def _save_fsdp2(model, output_dir: str) -> None:
-    ctx = SimpleNamespace(
-        model=model, is_save_rank=True, max_shard_size="5GB", training_checkpoint=False, tokenizer=None
-    )
-    save_fsdp2_checkpoint(ctx, output_dir)
+    save_fsdp2_checkpoint(save_context(model), output_dir)
+
+
+def _save_tp(model, output_dir: str) -> None:
+    save_tp_checkpoint(save_context(model), output_dir)
 
 
 def _save_pretrained(model, output_dir: str) -> None:
@@ -255,7 +255,7 @@ def _save_pretrained(model, output_dir: str) -> None:
 
 _SAVERS = {
     "fsdp2": _save_fsdp2,
-    "tp": save_tp_model,
+    "tp": _save_tp,
     "gathered": _write_gathered,
     "save_pretrained": _save_pretrained,
 }

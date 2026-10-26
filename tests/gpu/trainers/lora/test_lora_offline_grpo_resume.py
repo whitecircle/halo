@@ -49,13 +49,13 @@ from peft import PeftModel
 from safetensors.torch import load_file
 from transformers import AutoTokenizer, TrainerCallback
 
-import src.distributed.checkpoint.optimizer as optimizer_store_mod
+import src.checkpoint.parallel.optimizer as optimizer_store_mod
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.unwrapping import find_peft_model
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import ensure_model_downloaded, pin_deterministic_ep_dispatch, shared_scratch_dir

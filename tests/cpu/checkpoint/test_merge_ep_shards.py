@@ -3,7 +3,7 @@
 
 Verifies that EP-internal weight formats are correctly converted to
 HuggingFace checkpoint format for all supported MoE architectures. These
-transforms are the contract between ``_save_ep_sharded`` and
+transforms are the contract between ``save_ep_sharded_checkpoint`` and
 ``from_pretrained`` — a wrong transpose or stale key here produces a
 checkpoint that silently loads garbage (or fails to load at all), so the
 tests assert exact shapes AND values, not just key presence.
@@ -32,6 +32,7 @@ from src.checkpoint.format import (
     ROUTER_BALANCING_BIASES_FILE,
     SCHEDULER_STATE_FILE,
 )
+from src.checkpoint.parallel.resume_source import classify_resume_weights
 from src.checkpoint.writing import StreamingShardWriter
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, resolve_ep_merge_layer_class
 
@@ -50,7 +51,6 @@ from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.training.environment import _classify_resume_checkpoint
 
 # The whole-dict oracle the streamed merge is pinned against (test-only; see its module docstring).
 from tests.common.ep_merge_oracle import post_process_merged_weights
@@ -634,11 +634,11 @@ def test_the_merged_directory_is_the_resume_source_the_shards_are_not():
         for name in sidecars:
             with open(os.path.join(input_dir, name), "wb") as f:
                 f.write(name.encode())
-        assert _classify_resume_checkpoint(input_dir) == "invalid"
+        assert classify_resume_weights(input_dir) == "invalid"
 
         merge_ep_shards(input_dir, output_dir, verbose=False)
 
-        assert _classify_resume_checkpoint(output_dir) == "full"
+        assert classify_resume_weights(output_dir) == "full"
         for name in sidecars:
             path = os.path.join(output_dir, name)
             assert os.path.isfile(path), f"{name} was dropped by the merge"

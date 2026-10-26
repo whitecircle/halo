@@ -1,6 +1,6 @@
 """Saved PEFT adapters as an artifact: the file layout and its writers and readers, the resume-adapter
 refusals and the expert-LoRA shape gates. Producing an adapter from a live sharded model belongs to
-:mod:`src.distributed.checkpoint.peft`.
+:mod:`src.checkpoint.parallel.adapters`.
 """
 
 from __future__ import annotations

@@ -6,7 +6,7 @@ A mixed run trains two adapter kinds at once: stock PEFT on the attention projec
 grouped LoRA on the EP experts (grouped ``[E, K, r]`` tensors PEFT cannot wrap). Its adapter-only
 save is resume-only — no merge tool folds it, because ``PeftModel.merge_and_unload`` drops every
 expert delta. ``merge_expert_lora_on_save`` therefore routes the write through
-``save_ep_checkpoint``, which folds BOTH halves: the expert deltas inside each family's gather,
+``save_ep_gathered_checkpoint``, which folds BOTH halves: the expert deltas inside each family's gather,
 and the attention deltas into each base tensor as it is written, out of place.
 
 Each check fails when a piece of that wiring breaks:
@@ -46,12 +46,11 @@ from safetensors import safe_open
 from trl import SFTConfig
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_int, env_str
-from src.models.unwrapping import plain_peft_param_name
+from src.models.unwrapping import find_peft_model, plain_peft_param_name
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
@@ -290,7 +289,7 @@ def run(ctx) -> dict:
     before = _weight_snapshot(unwrapped)
 
     log("\n[3/5] Saving merged checkpoint (both halves folded)...")
-    # No barrier after this: save_ep_model ends on DeferredRankFailure.reject(), a collective, so
+    # No barrier after this: the gathered EP save ends on DeferredRankFailure.reject(), a collective, so
     # the ranks are already in step.
     trainer.save_model(merged_dir)
 

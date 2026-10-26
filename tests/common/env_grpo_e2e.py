@@ -37,13 +37,13 @@ import torch
 from transformers import AutoTokenizer
 from trl import GRPOConfig
 
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.configs.environment_config import EnvironmentConfig
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.env import env_int, env_str
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.trajectory_tokenize import SAMPLED_IDS_MISSING_WARNING
-from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.models import QWEN3_30B_A3B

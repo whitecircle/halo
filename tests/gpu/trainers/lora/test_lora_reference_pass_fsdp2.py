@@ -28,9 +28,9 @@ from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.unwrapping import find_peft_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main

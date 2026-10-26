@@ -28,10 +28,10 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     SCHEDULER_STATE_FILE,
-    write_resume_adapter_marker,
 )
+from src.checkpoint.parallel.resume_source import classify_resume_weights
 from src.checkpoint.reading import resolve_checkpoint_weights
-from src.training.environment import _classify_resume_checkpoint
+from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 
 _RESUME_ENTRIES = (
@@ -54,7 +54,7 @@ def _merged_training_checkpoint(path: Path) -> Path:
         {"model.layers.0.mlp.experts.down_proj.lora_A": torch.ones(2, 4)}, str(adapter_dir / ADAPTER_SAFETENSORS_FILE)
     )
     (adapter_dir / ADAPTER_CONFIG_FILE).write_text(json.dumps({"peft_type": EXPERT_LORA_PEFT_TYPE}))
-    write_resume_adapter_marker(str(path))
+    mark_resume_adapter(str(path))
     (path / REFERENCE_LOGPS_FILE).write_bytes(REFERENCE_LOGPS_FILE.encode())
     (path / SCHEDULER_STATE_FILE).write_bytes(SCHEDULER_STATE_FILE.encode())
     return path
@@ -66,7 +66,7 @@ def test_a_converted_merged_checkpoint_resumes_like_its_source(tmp_path):
 
     convert_to_bf16(str(source), str(out), "causal_lm")
 
-    assert _classify_resume_checkpoint(str(out)) == "merged_adapter", (
+    assert classify_resume_weights(str(out)) == "merged_adapter", (
         "without its marker a resume refuses the converted directory as a merged checkpoint missing its adapter"
     )
     for entry in _RESUME_ENTRIES:

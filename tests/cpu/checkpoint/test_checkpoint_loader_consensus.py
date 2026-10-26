@@ -1,4 +1,4 @@
-"""CPU tests for the rank-uniform resume decisions of CheckpointLoader and OptimizerShardStore.
+"""CPU tests for the rank-uniform resume decisions of load_resume_weights and OptimizerShardStore.
 
 Every file-readability decision that gates a collective (or a warm-restart) must be consensus'd —
 a rank-local branch hangs peers in DTensor collectives or silently diverges optimizer state. These
@@ -16,6 +16,7 @@ tests exercise the single-process decision logic and, via monkeypatched consensu
 """
 
 import os
+import re
 import shutil
 from types import SimpleNamespace
 
@@ -29,15 +30,17 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-import src.distributed.checkpoint.loader as loader_mod
-import src.distributed.checkpoint.optimizer as optimizer_mod
-import src.distributed.checkpoint.peft as peft_mod
+import src.checkpoint.parallel.adapters as peft_mod
+import src.checkpoint.parallel.optimizer as optimizer_mod
+import src.checkpoint.parallel.resume_weights as loader_mod
 from src.checkpoint.hub_layout import ModuleLayoutView
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.loader import CheckpointLoader
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
-from src.distributed.checkpoint.peft import restore_adapters
+from src.checkpoint.parallel.adapters import restore_adapters
+from src.checkpoint.parallel.optimizer import OptimizerShardStore
+from src.checkpoint.parallel.resume_weights import load_resume_weights
+from src.checkpoint.parallel.sidecars import restore_lr_scheduler
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.tensor_parallel.plain_params import register_hand_sliced
+from tests.common.checkpoint_io import load_context
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 
 
@@ -71,23 +74,17 @@ def _ctx(
     is_tp_mode=False,
     fsdp_wrapped=False,
     has_ep_layers=False,
-    fallback=None,
     lr_scheduler=None,
     tp_rank=0,
 ):
-    return CheckpointLoadContext(
-        model=model,
+    return load_context(
+        model,
+        tp_size=2 if is_tp_mode else 1,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=is_tp_mode,
         has_ep_layers=has_ep_layers,
         fsdp_wrapped=fsdp_wrapped,
         tp_rank=tp_rank,
-        tp_size=2 if is_tp_mode else 1,
-        super_load_from_checkpoint=fallback or _Recorder(),
         super_load_optimizer_and_scheduler=_Recorder(),
     )
 
@@ -98,12 +95,8 @@ def test_tp_torn_checkpoint_falls_back_uniformly(tmp_path):
     (tmp_path / "model.safetensors").write_bytes(b"not a safetensors file")
     model = _TinyModel()
     before = model.fc.weight.detach().clone()
-    fallback = _Recorder()
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True, fallback=fallback))
+    assert load_resume_weights(_ctx(model, is_tp_mode=True), str(tmp_path), model) is False  # must not raise
 
-    loader.load_model(str(tmp_path), model)  # must not raise
-
-    assert len(fallback.calls) == 1
     assert torch.equal(model.fc.weight, before)
 
 
@@ -114,24 +107,14 @@ def test_tp_negative_rank0_verdict_forces_fallback(tmp_path, monkeypatch):
     model = _TinyModel()
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     monkeypatch.setattr(loader_mod, "broadcast_from_rank0", lambda local: False)
-    fallback = _Recorder()
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True, fallback=fallback))
-
-    loader.load_model(str(tmp_path), model)
-
-    assert len(fallback.calls) == 1
+    assert load_resume_weights(_ctx(model, is_tp_mode=True), str(tmp_path), model) is False
     assert not torch.equal(model.fc.weight, torch.ones(4, 4))
 
 
 def test_tp_readable_checkpoint_loads(tmp_path):
     model = _TinyModel()
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
-    fallback = _Recorder()
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True, fallback=fallback))
-
-    loader.load_model(str(tmp_path), model)
-
-    assert fallback.calls == []
+    assert load_resume_weights(_ctx(model, is_tp_mode=True), str(tmp_path), model) is True
     assert torch.equal(model.fc.weight, torch.ones(4, 4))
 
 
@@ -156,10 +139,10 @@ def _dtensor_model():
 
 def _simulate_non_rank0(monkeypatch, decisions):
     """A non-zero rank's view: no local rank-0 work, rank 0's broadcast answers replayed in call
-    order — (1) sharded-resume rejection, (2) readability probe, (3) constructed-from-checkpoint,
-    and on the genuine load (4) rank 0's on-disk and live-name key counts."""
-    monkeypatch.setattr(loader_mod, "is_global_main_process", lambda: False)
+    order — (1) readability probe, (2) constructed-from-checkpoint, and on the genuine load (3) rank 0's
+    on-disk and live-name key counts. The sharded-resume refusal is ``rank0_verdict``'s own, real here."""
     answers = iter(decisions)
+    monkeypatch.setattr(loader_mod, "is_global_main_process", lambda: False)
     monkeypatch.setattr(loader_mod, "broadcast_from_rank0", lambda local: next(answers))
 
 
@@ -168,11 +151,11 @@ def test_tp_skip_verdict_reads_nothing_on_non_rank0(tmp_path, single_rank_gloo, 
     weights, so a non-zero rank must decide the skip BEFORE reading the checkpoint — there is no
     file here at all, so a read would raise."""
     model = _dtensor_model()
-    setattr(model, loader_mod.LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
-    _simulate_non_rank0(monkeypatch, decisions=[False, True, True])
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True))
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
+    _simulate_non_rank0(monkeypatch, decisions=[True, True])
+    ctx = _ctx(model, is_tp_mode=True)
 
-    loader.load_model(str(tmp_path), model)
+    load_resume_weights(ctx, str(tmp_path), model)
 
     assert torch.equal(model.fc.weight.to_local(), torch.zeros(4, 4))
 
@@ -181,23 +164,23 @@ def test_tp_dp_refuses_a_model_not_built_from_the_checkpoint_without_reading(tmp
     """FSDP2 over TP is a 2-D placement ``distribute_tensor`` does not invert for packed projections,
     so TP+DP only ever resumes a model constructed from the checkpoint — refused before any read."""
     model = _dtensor_model()
-    _simulate_non_rank0(monkeypatch, decisions=[False, True, False])
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True, fsdp_wrapped=True))
+    _simulate_non_rank0(monkeypatch, decisions=[True, False])
+    ctx = _ctx(model, is_tp_mode=True, fsdp_wrapped=True)
 
     with pytest.raises(RuntimeError, match="constructed FROM the checkpoint"):
-        loader.load_model(str(tmp_path), model)
+        load_resume_weights(ctx, str(tmp_path), model)
 
 
 def test_tp_dp_best_model_reload_is_refused_naming_the_export(tmp_path, single_rank_gloo):
     """The best-model reload can never be the constructed-from-checkpoint skip, so under TP+DP it is
     refused outright — the message must point at exporting the best checkpoint directly."""
     model = _dtensor_model()
-    setattr(model, loader_mod.LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True, fsdp_wrapped=True))
+    ctx = _ctx(model, is_tp_mode=True, fsdp_wrapped=True)
 
     with pytest.raises(RuntimeError, match="load_best_model_at_end"):
-        loader.load_model(str(tmp_path), model, for_best_model=True)
+        load_resume_weights(ctx, str(tmp_path), model, for_best_model=True)
 
 
 def test_tp_distributes_the_checkpoint_into_the_live_dtensor(tmp_path, single_rank_gloo, monkeypatch):
@@ -206,10 +189,10 @@ def test_tp_distributes_the_checkpoint_into_the_live_dtensor(tmp_path, single_ra
     trained weights instead of skipping."""
     model = _dtensor_model()
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
-    _simulate_non_rank0(monkeypatch, decisions=[False, True, False, (1, 1)])
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True))
+    _simulate_non_rank0(monkeypatch, decisions=[True, False, (1, 1)])
+    ctx = _ctx(model, is_tp_mode=True)
 
-    loader.load_model(str(tmp_path), model)
+    load_resume_weights(ctx, str(tmp_path), model)
 
     assert torch.equal(model.fc.weight.to_local(), torch.ones(4, 4))
 
@@ -219,11 +202,11 @@ def test_tp_best_model_reload_reads_even_when_built_from_the_checkpoint(tmp_path
     constructed-from-checkpoint skip must not apply — or the export silently carries the LAST
     weights."""
     model = _dtensor_model()
-    setattr(model, loader_mod.LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, str(tmp_path))
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True))
+    ctx = _ctx(model, is_tp_mode=True)
 
-    loader.load_model(str(tmp_path), model, for_best_model=True)
+    load_resume_weights(ctx, str(tmp_path), model, for_best_model=True)
 
     assert torch.equal(model.fc.weight.to_local(), torch.ones(4, 4))
 
@@ -233,10 +216,10 @@ def test_tp_plain_non_rank0_still_reads_for_the_genuine_load(tmp_path, monkeypat
     non-zero rank on the genuine load path must still read its node's copy."""
     model = _TinyModel()
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
-    _simulate_non_rank0(monkeypatch, decisions=[False, True, False, (1, 1)])
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True))
+    _simulate_non_rank0(monkeypatch, decisions=[True, False, (1, 1)])
+    ctx = _ctx(model, is_tp_mode=True)
 
-    loader.load_model(str(tmp_path), model)
+    load_resume_weights(ctx, str(tmp_path), model)
 
     assert torch.equal(model.fc.weight, torch.ones(4, 4))
 
@@ -258,10 +241,15 @@ def test_a_node_copy_short_of_an_expert_is_refused_before_any_write(tmp_path, mo
     shutil.copy(full / "config.json", short)
     # Rank 0 reads the whole copy: every disk key, and the same live names the short copy maps to.
     rank0_counts = (len(state), len(ModuleLayoutView(model, state).keys))
-    _simulate_non_rank0(monkeypatch, decisions=[False, True, False, rank0_counts])
+    _simulate_non_rank0(monkeypatch, decisions=[True, False, rank0_counts])
 
-    with pytest.raises(RuntimeError, match="per-node copy is incomplete"):
-        CheckpointLoader(_ctx(model, is_tp_mode=True)).load_model(str(short), model)
+    refusal = (
+        f"TP checkpoint resume from {short}: fewer than half of the live model's PARAMETERS match the "
+        f"checkpoint's keys on at least one rank — resume would silently continue from base weights. The "
+        f"checkpoint was written for a different model or wrapper layout, or a per-node copy is incomplete."
+    )
+    with pytest.raises(RuntimeError, match=f"^{re.escape(refusal)}$"):
+        load_resume_weights(_ctx(model, is_tp_mode=True), str(short), model)
 
     for name, param in model.named_parameters():
         assert torch.equal(param, before[name]), f"{name}: a refused reload must not half-apply the checkpoint"
@@ -276,9 +264,9 @@ def test_tp_hand_sliced_param_takes_its_rank_slice(tmp_path):
         {"fc.weight": torch.ones(4, 4), "sinks": torch.arange(4, dtype=torch.float32)},
         os.path.join(tmp_path, "model.safetensors"),
     )
-    loader = CheckpointLoader(_ctx(model, is_tp_mode=True, tp_rank=1))
+    ctx = _ctx(model, is_tp_mode=True, tp_rank=1)
 
-    loader.load_model(str(tmp_path), model)
+    load_resume_weights(ctx, str(tmp_path), model)
 
     assert torch.equal(model.sinks, torch.tensor([2.0, 3.0]))
     assert torch.equal(model.fc.weight, torch.ones(4, 4))
@@ -292,10 +280,13 @@ def test_fsdp2_resume_with_no_matching_keys_raises(tmp_path):
     model = _TinyModel()
     before = model.fc.weight.detach().clone()
     save_file({"totally.wrong.key": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
-    loader = CheckpointLoader(_ctx(model, fsdp_wrapped=True))
-
-    with pytest.raises(RuntimeError, match="fewer than half of the"):
-        loader.load_model(str(tmp_path), model)
+    refusal = (
+        f"FSDP2 checkpoint resume from {tmp_path}: fewer than half of the live model's PARAMETERS match the "
+        f"checkpoint's keys — resume would silently continue from base weights. The checkpoint was written "
+        f"for a different model or wrapper layout (a different expert namespace, most likely)."
+    )
+    with pytest.raises(RuntimeError, match=f"^{re.escape(refusal)}$"):
+        load_resume_weights(_ctx(model, fsdp_wrapped=True), str(tmp_path), model)
 
     assert torch.equal(model.fc.weight, before)
 
@@ -315,10 +306,10 @@ def test_fsdp2_resume_below_half_coverage_raises(tmp_path):
     model = _ThreeLayerModel()
     before = {n: p.detach().clone() for n, p in model.named_parameters()}
     save_file({"fc1.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
-    loader = CheckpointLoader(_ctx(model, fsdp_wrapped=True))
+    ctx = _ctx(model, fsdp_wrapped=True)
 
     with pytest.raises(RuntimeError, match="fewer than half of the"):
-        loader.load_model(str(tmp_path), model)
+        load_resume_weights(ctx, str(tmp_path), model)
 
     for n, p in model.named_parameters():
         assert torch.equal(p, before[n])
@@ -334,11 +325,11 @@ def test_fsdp2_resume_majority_coverage_loads_and_keeps_absent(tmp_path):
         {"fc1.weight": torch.ones(4, 4), "fc2.weight": torch.full((4, 4), 2.0)},
         os.path.join(tmp_path, "model.safetensors"),
     )
-    loader = CheckpointLoader(_ctx(model, fsdp_wrapped=True))
+    ctx = _ctx(model, fsdp_wrapped=True)
 
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path}/pg_init")
     try:
-        loader.load_model(str(tmp_path), model)
+        load_resume_weights(ctx, str(tmp_path), model)
     finally:
         dist.destroy_process_group()
 
@@ -355,9 +346,9 @@ def test_fsdp2_resume_with_matching_keys_reaches_the_load(tmp_path, monkeypatch)
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     applied = _Recorder()
     monkeypatch.setattr(loader_mod, "set_model_state_dict", applied)
-    loader = CheckpointLoader(_ctx(model, fsdp_wrapped=True))
+    ctx = _ctx(model, fsdp_wrapped=True)
 
-    loader.load_model(str(tmp_path), model)
+    load_resume_weights(ctx, str(tmp_path), model)
 
     assert len(applied.calls) == 1
     assert set(applied.calls[0][0][1]) == {"fc.weight"}
@@ -467,9 +458,7 @@ def _scheduler(model):
 def test_scheduler_missing_file_warm_restarts(tmp_path):
     """No scheduler.pt anywhere is a legitimate warm restart (save_only_model runs) — False, no raise."""
     model = _TinyModel()
-    loader = OptimizerShardStore(_ctx(model, lr_scheduler=_scheduler(model)))
-
-    assert loader.restore_lr_scheduler(str(tmp_path)) is False
+    assert restore_lr_scheduler(_scheduler(model), None, str(tmp_path)) is False
 
 
 def test_scheduler_torn_file_raises(tmp_path):
@@ -478,10 +467,8 @@ def test_scheduler_torn_file_raises(tmp_path):
     skips ahead (effective-LR desync from the resumed step)."""
     (tmp_path / "scheduler.pt").write_bytes(b"not a torch file")
     model = _TinyModel()
-    loader = OptimizerShardStore(_ctx(model, lr_scheduler=_scheduler(model)))
-
     with pytest.raises(RuntimeError, match="torn/corrupt"):
-        loader.restore_lr_scheduler(str(tmp_path))
+        restore_lr_scheduler(_scheduler(model), None, str(tmp_path))
 
 
 def test_scheduler_readable_file_restores(tmp_path):
@@ -494,9 +481,7 @@ def test_scheduler_readable_file_restores(tmp_path):
 
     model = _TinyModel()
     sched = _scheduler(model)
-    loader = OptimizerShardStore(_ctx(model, lr_scheduler=sched))
-
-    assert loader.restore_lr_scheduler(str(tmp_path)) is True
+    assert restore_lr_scheduler(sched, None, str(tmp_path)) is True
     assert sched.last_epoch == src_sched.last_epoch
     assert sched.get_last_lr() == src_sched.get_last_lr()
 
@@ -504,10 +489,7 @@ def test_scheduler_readable_file_restores(tmp_path):
 def test_scheduler_none_with_present_file_returns_false(tmp_path):
     """No live scheduler to restore into: even a present (garbage) file is not an error."""
     (tmp_path / "scheduler.pt").write_bytes(b"garbage")
-    model = _TinyModel()
-    loader = OptimizerShardStore(_ctx(model))
-
-    assert loader.restore_lr_scheduler(str(tmp_path)) is False
+    assert restore_lr_scheduler(None, None, str(tmp_path)) is False
 
 
 def test_adapter_attn_state_without_peft_model_raises(tmp_path):
@@ -559,9 +541,9 @@ def test_ep_adapter_only_resume_accepts_hub_loaded_base(tmp_path, monkeypatch):
     base, so demanding construction from the checkpoint would make every EP/CP adapter resume DOA."""
     restored = _adapter_only_checkpoint(tmp_path, monkeypatch)
     model = _NamedSourceModel("org/base-model")
-    loader = CheckpointLoader(_ctx(model, has_ep_layers=True))
+    ctx = _ctx(model, has_ep_layers=True)
 
-    loader.load_model(str(tmp_path), model)  # must not raise
+    load_resume_weights(ctx, str(tmp_path), model)  # must not raise
 
     assert len(restored.calls) == 1, "the adapters are the trained state — they must still be restored"
 
@@ -572,9 +554,9 @@ def test_ep_adapter_only_best_model_reload_is_allowed(tmp_path, monkeypatch):
     sets the flag die after training instead of exporting."""
     restored = _adapter_only_checkpoint(tmp_path, monkeypatch)
     model = _NamedSourceModel("org/base-model")
-    loader = CheckpointLoader(_ctx(model, has_ep_layers=True))
+    ctx = _ctx(model, has_ep_layers=True)
 
-    loader.load_model(str(tmp_path), model, for_best_model=True)  # must not raise
+    load_resume_weights(ctx, str(tmp_path), model, for_best_model=True)  # must not raise
 
     assert len(restored.calls) == 1
 
@@ -584,9 +566,9 @@ def test_ep_best_model_reload_refuses_a_base_weight_checkpoint(tmp_path):
     in place under EP/CP — so the best-model export would silently carry the LAST weights."""
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     model = _NamedSourceModel("org/base-model")
-    loader = CheckpointLoader(_ctx(model, has_ep_layers=True))
+    ctx = _ctx(model, has_ep_layers=True)
     with pytest.raises(ValueError, match="load_best_model_at_end"):
-        loader.load_model(str(tmp_path), model, for_best_model=True)
+        load_resume_weights(ctx, str(tmp_path), model, for_best_model=True)
 
 
 def test_ep_base_weight_checkpoint_demands_construction_from_it(tmp_path):
@@ -594,9 +576,9 @@ def test_ep_base_weight_checkpoint_demands_construction_from_it(tmp_path):
     a model constructed from anywhere else would silently keep its current weights."""
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     model = _NamedSourceModel("org/base-model")
-    loader = CheckpointLoader(_ctx(model, has_ep_layers=True))
+    ctx = _ctx(model, has_ep_layers=True)
     with pytest.raises(ValueError, match="constructed FROM the checkpoint"):
-        loader.load_model(str(tmp_path), model)
+        load_resume_weights(ctx, str(tmp_path), model)
 
 
 # The resume skip is keyed on where the weights were READ, not on config._name_or_path.
@@ -613,12 +595,12 @@ class _ScratchInitModel(_NamedSourceModel):
 
 
 def _fsdp2_resume_applied(tmp_path, monkeypatch, model) -> _Recorder:
-    """Run ``_load_fsdp2`` with the DTensor distribution stubbed (it needs a process group), and
+    """Run the FSDP2 reload with the DTensor distribution stubbed (it needs a process group), and
     report whether the weights were applied."""
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
     applied = _Recorder()
     monkeypatch.setattr(loader_mod, "set_model_state_dict", applied)
-    CheckpointLoader(_ctx(model, fsdp_wrapped=True))._load_fsdp2(str(tmp_path), model)
+    load_resume_weights(_ctx(model, fsdp_wrapped=True), str(tmp_path), model)
     return applied
 
 

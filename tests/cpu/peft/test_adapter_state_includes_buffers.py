@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Adapter saves must carry the buffers of ``modules_to_save`` clones.
 
-``PeftAdapterSaver._resolve_adapter_state`` feeds PEFT a pre-resolved state dict filtered to
+``resolve_adapter_state`` feeds PEFT a pre-resolved state dict filtered to
 adapter-relevant names. PEFT serializes a ``modules_to_save`` clone via its WHOLE state dict —
 parameters and buffers — so a router/gate carrying a balancing buffer (``e_score_correction_bias``,
 an adopted GptOss ``router.bias``) would KeyError the lookup at the first ``save_steps`` if the
@@ -16,8 +16,8 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers every family's balancing slot
+from src.checkpoint.parallel.adapters import resolve_adapter_state
 from src.checkpoint.writing import adapter_save_dtype_caster
-from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.models.moe_balancing import is_balancing_state_key
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
@@ -48,7 +48,7 @@ class _Tiny(nn.Module):
 
 def test_modules_to_save_buffer_survives_adapter_state():
     peft_model = get_peft_model(_Tiny(), LoraConfig(target_modules=["attn"], modules_to_save=["gate"], r=4))
-    state = PeftAdapterSaver._resolve_adapter_state(peft_model)
+    state = resolve_adapter_state(peft_model)
     buffer_keys = [k for k in state if k.endswith("e_score_correction_bias")]
     assert buffer_keys, f"modules_to_save buffer missing from adapter state: {sorted(state)}"
     assert torch.equal(state[buffer_keys[0]], torch.full((4,), 0.5))
@@ -59,7 +59,7 @@ def test_non_persistent_buffers_stay_out_of_adapter_state():
     """A non-persistent cache recomputes on load; serializing it would reload it stale on resume —
     the filter feeds PEFT persistent buffers only, like every other checkpoint writer."""
     peft_model = get_peft_model(_Tiny(), LoraConfig(target_modules=["attn"], modules_to_save=["gate"], r=4))
-    state = PeftAdapterSaver._resolve_adapter_state(peft_model)
+    state = resolve_adapter_state(peft_model)
     leaked = [k for k in state if "score_cache" in k]
     assert not leaked, f"non-persistent buffer leaked into the adapter file: {leaked}"
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """A mixed attention+expert LoRA adapter must never load as a stock PEFT adapter.
 
-``PeftAdapterSaver._save_with_expert_lora`` writes ONE adapter file holding stock-PEFT attention
+``save_peft_adapters`` writes ONE adapter file holding stock-PEFT attention
 tensors alongside native EP grouped expert tensors (``<layer>.experts.<attr>.lora_{A,B}``), which
 PEFT cannot wrap. ``PeftModel.load_adapter`` filters ``missing_keys`` and never reads
 ``unexpected_keys``, so under a ``peft_type: LORA`` label stock PEFT loads the attention half,
@@ -42,8 +42,6 @@ from src.checkpoint.adapters import (
     write_mixed_adapter_config,
 )
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
-from src.distributed.checkpoint import peft as distributed_peft
-from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 
 # Exactly the keys gather_ep_lora_adapters emits under a PeftModel: the layer path it walks is
@@ -64,22 +62,14 @@ class _TinyLM(nn.Module):
         return self.q_proj(x)
 
 
-@pytest.fixture(
-    params=[PeftAdapterSaver._write_mixed_adapter_config, write_mixed_adapter_config],
-    ids=["PeftAdapterSaver", "write_mixed_adapter_config"],
-)
-def mixed_writer(request):
-    return request.param
-
-
-def _write_mixed_adapter(directory, *, writer=None, spec=SPEC, stock_label: bool = False) -> dict:
+def _write_mixed_adapter(directory, *, spec=SPEC, stock_label: bool = False) -> dict:
     """Write a mixed adapter dir the way the saver does, and return its config dict."""
     peft_model = get_peft_model(_TinyLM(), LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj"]))
     peft_config = peft_model.peft_config["default"]
     if stock_label:
         peft_config.save_pretrained(str(directory))  # the stock-PEFT writer, labelling the dir ``LORA``
     else:
-        writer(peft_config, spec, str(directory))
+        write_mixed_adapter_config(peft_config, spec, str(directory))
 
     state = {name: param.detach() for name, param in peft_model.state_dict().items() if "lora_" in name}
     state[EXPERT_KEY_A] = torch.randn(4, 8, 2)
@@ -95,9 +85,9 @@ def test_expert_keys_are_classified_as_expert_adapters():
     assert is_expert_lora_key(EXPERT_KEY_A) and is_expert_lora_key(EXPERT_KEY_B)
 
 
-def test_stock_peft_cannot_load_the_mixed_adapter(tmp_path, mixed_writer):
+def test_stock_peft_cannot_load_the_mixed_adapter(tmp_path):
     """The load raises instead of silently returning an attention-only model."""
-    _write_mixed_adapter(tmp_path, writer=mixed_writer)
+    _write_mixed_adapter(tmp_path)
     with pytest.raises(KeyError, match=MIXED_EXPERT_LORA_PEFT_TYPE):
         PeftModel.from_pretrained(_TinyLM(), str(tmp_path))
 
@@ -116,36 +106,34 @@ def test_stock_peft_drops_expert_keys_without_warning(tmp_path):
     assert not noticed, [str(w.message) for w in noticed]
 
 
-def test_mixed_config_keeps_every_lora_field(tmp_path, mixed_writer):
+def test_mixed_config_keeps_every_lora_field(tmp_path):
     """Re-typing must not cost the LoRA fields — the directory stays self-describing."""
-    config = _write_mixed_adapter(tmp_path, writer=mixed_writer)
+    config = _write_mixed_adapter(tmp_path)
     assert config["r"] == 8
     assert config["lora_alpha"] == 16
     assert set(config["target_modules"]) == {"q_proj"}
     assert config["peft_type"] == MIXED_EXPERT_LORA_PEFT_TYPE
 
 
-def test_mixed_config_records_the_expert_half(tmp_path, mixed_writer):
+def test_mixed_config_records_the_expert_half(tmp_path):
     """The expert adapters have their own r/alpha/rslora/projections; scaling depends on all of them."""
-    config = _write_mixed_adapter(tmp_path, writer=mixed_writer)
-    assert (
-        config["ep_expert_lora"] == expert_lora_config_fields(SPEC) == distributed_peft.expert_lora_config_fields(SPEC)
-    )
+    config = _write_mixed_adapter(tmp_path)
+    assert config["ep_expert_lora"] == expert_lora_config_fields(SPEC)
     assert config["ep_expert_lora"]["use_rslora"] is True
     assert config["ep_expert_lora"]["expert_projections"] == ["gate", "up"]
 
 
-def test_merge_guard_reports_the_mixed_shape(tmp_path, mixed_writer):
+def test_merge_guard_reports_the_mixed_shape(tmp_path):
     """The message must name the shape AND the save that folds it.
 
     ``merge_expert_lora_on_save`` covers the mixed shape too — ``save_model`` routes it past
-    ``PeftAdapterSaver`` to ``save_ep_checkpoint``, which folds the expert deltas in the family
+    ``save_peft_adapters`` to ``save_ep_gathered_checkpoint``, which folds the expert deltas in the family
     gather and the attention deltas into each tensor it writes
     (``tests/cpu/peft/test_merge_expert_lora_save_guard.py`` pins that routing). Calling the shape
     resume-only and sending the user back to a retrain with expert-only ``lora_target_modules``
     costs a full run for what a re-save produces.
     """
-    _write_mixed_adapter(tmp_path, writer=mixed_writer)
+    _write_mixed_adapter(tmp_path)
     with pytest.raises(ValueError, match="MIXED attention\\+expert") as excinfo:
         assert_no_expert_lora_adapter(str(tmp_path))
     message = str(excinfo.value)

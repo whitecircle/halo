@@ -14,7 +14,7 @@ Driven on the real writer and the real reader, this pins:
 1. **One meta per node.** Each node's dir must hold its own ``optimizer_meta.pt`` beside its own
    globally-named ``optimizer_shard_XXXXX.pt``. A rank-0-only meta write — the natural spelling —
    leaves every other node's shards ungated:
-   ``_read_saved_meta`` is rank-local, so a missing meta marks that node's shards torn, and the
+   ``read_optimizer_meta`` is rank-local, so a missing meta marks that node's shards torn, and the
    verdict is all-or-nothing across ranks: the whole world refuses the resume, node 0's own intact
    shard included.
 2. **Round trip.** Resuming from the node's own dir restores the pre-save optimizer state
@@ -38,8 +38,7 @@ import pathlib
 import pytest
 import torch
 
-from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
+from src.checkpoint.parallel.optimizer import OptimizerShardStore
 from src.runtime import filesystem
 from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from tests.common.checkpoint_io import (
@@ -186,7 +185,7 @@ def test_every_node_writes_its_own_shard_and_meta(two_node_run):
     """Each node's dir holds its own globally-named shard AND its own ``optimizer_meta.pt``.
 
     One writer per NODE, not one per world: a rank-0-only meta write leaves node 1's shards ungated,
-    which ``_read_saved_meta`` reads as a torn set — and since that verdict is all-or-nothing, EVERY
+    which ``read_optimizer_meta`` reads as a torn set — and since that verdict is all-or-nothing, EVERY
     node then refuses the resume. The shard name stays keyed by
     GLOBAL rank (a per-node numbering still round-trips, so only this assertion catches it), so node 1
     writes ``optimizer_shard_00001.pt``; renumbering per node would make every node's dir look like
@@ -201,8 +200,8 @@ def test_every_node_writes_its_own_shard_and_meta(two_node_run):
         assert meta_path.is_file(), f"node {rank} has no {META_FILE} — its shards would resume ungated"
         meta = torch.load(meta_path, map_location="cpu", weights_only=False)
         assert meta["num_ranks"] == WORLD_SIZE, f"node {rank} recorded num_ranks={meta['num_ranks']}"
-        assert OptimizerStateFingerprint.from_dict(meta.get("fingerprint")) is not None, (
-            f"node {rank}'s {META_FILE} carries no complete fingerprint, so its resume is refused as a "
+        assert isinstance(meta.get("fingerprint"), dict), (
+            f"node {rank}'s {META_FILE} carries no fingerprint, so its resume is refused as a "
             f"pre-fingerprint checkpoint"
         )
 

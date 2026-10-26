@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 _PP_LOAD_LABEL = "Stage-aware pipeline load"
 
 # Why a stage finds its own tensors absent from a per-node pipeline checkpoint: each node's directory
-# holds only the shards of the stages that node ran (src/distributed/checkpoint/save.py).
+# holds only the shards of the stages that node ran (src/checkpoint/parallel/save.py).
 PER_NODE_PLACEMENT_REMEDY = (
     "A per-node pipeline checkpoint resumes only onto the same topology and rank placement; for "
     "anything else gather every node's directory onto one filesystem first."

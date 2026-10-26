@@ -499,8 +499,8 @@ gathered layer and one pending shard (`save_max_shard_size`, default `5GB`), not
 checkpoint. At gpt-oss-120b (ep8) that peak is ~11 GB on the writer; at Qwen3.5-397B-A17B (ep64)
 ~26 GB.
 
-The plain FSDP2, CP and TP gathered saves stream the same way, one decoder layer at a time
-(`stream_gathered_checkpoint`): ~22 GB on the writer at 397B instead of the whole 794 GB state dict.
+The plain FSDP2, CP and TP gathered saves stream through the same writer
+(`stream_gathered_checkpoint`), one decoder layer at a time: ~22 GB on the writer at 397B instead of the whole 794 GB state dict.
 
 **Sharded exists for write bandwidth, not for memory.** N ranks write their own slice in parallel,
 so the pause at each save is bounded by one rank's shard instead of by the whole artifact funneled
@@ -515,8 +515,8 @@ it with `save_only_model: true`, as every shipped sharded config does.
 bounds the gathered save; the merged artifact takes `merge_ep_shards.py --max_shard_size`.
 
 **Sharded** writes `model-{rank:05d}-of-{world_size:05d}.safetensors` plus an index carrying
-`ep_size`. `validate_ep_sharded_save()` rejects it **at trainer construction** whenever any of these
-holds:
+`ep_size`. `reject_unmergeable_ep_sharded_save()` rejects it **at trainer construction** (and again at
+the save) whenever any of these holds:
 
 - `ep_group_size != world_size`, `expert_tp_size > 1`, or CP;
 - native expert LoRA or `merge_expert_lora_on_save`;
@@ -575,7 +575,7 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | QLoRA / `load_in_4bit` | rejected — the EP loaders materialize plain de-quantized weights, losing `Params4bit` | `model_loading/parallel/loader.py` |
 | fp32 training (`bf16: false`) | rejected at `expert_parallel_size > 1` — DeepEP's buffer carries 2-byte tokens; FP32 storage comes from the `fp32_*` masters ([Precision control](#precision-control)) | `reject_unsupported_run` |
 | `use_peft` / LoRA | attention adapters are fine; a PEFT `LoraLayer` **inside** an EP layer is rejected — expert LoRA must go through the native grouped adapters | `_validate_lora_ep_compatibility` |
-| expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads (`EPConfig` re-checks hand-built configs at group construction); rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_reject_expert_tp`, `_validate_lora_tp_compatibility`, `ep_save.py` |
+| expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads (`EPConfig` re-checks hand-built configs at group construction); rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_reject_expert_tp`, `_validate_lora_tp_compatibility`, `src/checkpoint/parallel/ep.py` |
 | `use_grouped_gemm: false` | drops the wrappers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `_validate_expert_lora_realized` |
 | `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_reject_fsdp_settings` |
 | `use_hsdp` | rejected — EP already shards over the EP group | `_reject_hsdp` |
@@ -583,7 +583,7 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/loader.py` |
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `load_rules.py`, `ParallelismValidationMixin` |
-| `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `validate_ep_sharded_save` |
+| `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `reject_unmergeable_ep_sharded_save` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`. `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family declaring `_supports_gradient_checkpointing = False` | `_setup_ep_gradient_checkpointing` |
 | `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`_supports_lazy_loading = False`); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `expert_parallel/loading.py` |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the wrappers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `src/model_loading/liger/dispatch.py` |

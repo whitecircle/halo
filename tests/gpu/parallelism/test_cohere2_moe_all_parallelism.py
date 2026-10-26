@@ -34,9 +34,11 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from transformers.models.cohere2_moe import Cohere2MoeConfig, Cohere2MoeForCausalLM
 
-from src.distributed.checkpoint.ep_save import save_ep_model
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from src.checkpoint.parallel.save import save_tokenizer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
+from tests.common.checkpoint_io import save_context
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main
@@ -208,7 +210,9 @@ def run_mode(
         dist.barrier()
 
         log(f"  Saving EP model to {save_dir}")
-        save_ep_model(model, str(save_dir), tokenizer=tokenizer, sharded=False)
+        save_ctx = save_context(model, pc, tokenizer=tokenizer)
+        save_tokenizer(save_ctx, str(save_dir))
+        save_ep_gathered_checkpoint(save_ctx, str(save_dir))
         dist.barrier()
 
         if rank == 0:

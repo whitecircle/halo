@@ -3,7 +3,7 @@
 
 Context parallelism respells every adapter key: the Ulysses wrapper adds a ``model.`` level and an
 ``.original_attention.`` segment, so the tensors a CP run holds are not the tensors stock PEFT
-resolves. :meth:`PeftAdapterSaver._normalize_cp_adapter_key` exists to undo that; unit coverage of
+resolves. :func:`~src.models.unwrapping.plain_adapter_key` exists to undo that; unit coverage of
 the normalization alone does not reach the claim it is FOR — that
 ``scripts/after_training/merge_peft_adapters.py`` can take the written directory and produce a
 loadable, actually-adapted HF checkpoint. Every intermediate step can be individually correct while
@@ -41,14 +41,15 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 from trl import ModelConfig
 
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
+from src.checkpoint.parallel.adapters import _cp_normalized_config, save_peft_adapters
 from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars
-from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.model_loading.parallel.peft_setup import build_peft_config
 from src.models.attention.gpt_oss_sinks import SinksPolicy
+from tests.common.checkpoint_io import save_context
+from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import load_script_module
 from tests.common.tiny_models import word_level_tokenizer
 
@@ -80,26 +81,9 @@ def _build_base(base_dir: Path) -> None:
     word_level_tokenizer(("hello", "world")).save_pretrained(base_dir)
 
 
-def _cp_context(model) -> CheckpointContext:
+def _cp_context(model):
     """The save context a CP+LoRA run builds."""
-    return CheckpointContext(
-        model=model,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=True,
-        is_tp_mode=False,
-        is_ep_tp_mode=False,
-        has_ep_layers=False,
-        fsdp_wrapped=False,
-        accelerate_manages_fsdp=False,
-        is_save_rank=True,
-        max_shard_size="5GB",
-        save_sharded_ep=False,
-        has_expert_lora=False,
-        merge_expert_lora_on_save=False,
-        cp_wrapper=None,
-        tokenizer=None,
-    )
+    return save_context(model, make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2))
 
 
 def _train_cp_adapter(base_dir: Path, adapter_dir: Path) -> dict[str, torch.Tensor]:
@@ -134,7 +118,7 @@ def _train_cp_adapter(base_dir: Path, adapter_dir: Path) -> dict[str, torch.Tens
             lora_b = module.lora_B["default"].weight.detach().to(torch.bfloat16).float()
             deltas[f"model.layers.{layer_index}.self_attn.{target}.weight"] = (lora_b @ lora_a) * scaling
 
-    PeftAdapterSaver().save(_cp_context(peft_model), peft_model, str(adapter_dir))
+    save_peft_adapters(_cp_context(peft_model), str(adapter_dir))
     return deltas
 
 
@@ -206,7 +190,7 @@ def test_cp_saved_exclusions_are_spelled_for_a_plain_model():
         assert peft_config.exclude_modules == wrapped_spelling
         peft_model = get_peft_model(wrapper, peft_config)
 
-        PeftAdapterSaver().save(_cp_context(peft_model), peft_model, str(adapter))
+        save_peft_adapters(_cp_context(peft_model), str(adapter))
 
         saved = json.loads((adapter / ADAPTER_CONFIG_FILE).read_text())
         assert saved["exclude_modules"] == ["model.layers.0.self_attn.q_proj"]
@@ -232,12 +216,12 @@ def test_cp_saved_all_linear_targets_are_spelled_for_a_plain_model():
     }
     all_linear = LoraConfig(r=_LORA_R, lora_alpha=_LORA_ALPHA, target_modules=set(wrapped))
 
-    saved = PeftAdapterSaver._cp_normalized_config(all_linear)
+    saved = _cp_normalized_config(all_linear)
 
     assert saved.target_modules == ["model.layers.0.self_attn.q_proj", "model.layers.1.self_attn.v_proj"]
     assert all_linear.target_modules == wrapped, "the live config was respelled"
     by_name = LoraConfig(r=_LORA_R, lora_alpha=_LORA_ALPHA, target_modules=list(_TARGETS))
-    assert PeftAdapterSaver._cp_normalized_config(by_name) is by_name
+    assert _cp_normalized_config(by_name) is by_name
 
 
 def test_saved_cp_adapter_records_its_base_model():

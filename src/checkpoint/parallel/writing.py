@@ -1,17 +1,103 @@
-"""The collective half of a checkpoint write."""
+"""The collective half of a gathered checkpoint write: the retain-gated gather and the streamed writer.
+
+Resolving a DTensor is a mesh-wide collective every rank must enter, while only the writer pays the
+host copy.
+"""
 
 from __future__ import annotations
 
+import itertools
 import logging
+import re
+from collections.abc import Callable, Iterable, Iterator
+from functools import partial
 
 import torch
 import torch.nn as nn
 
-from src.checkpoint.writing import save_dtype_caster
+from src.checkpoint.config_export import save_model_config
+from src.checkpoint.writing import (
+    StreamingShardWriter,
+    is_tie_reconcile_key,
+    reconcile_tie_word_embeddings,
+    save_dtype_caster,
+)
 from src.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
+from src.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
+from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
+from src.models.param_roles import persistent_buffers
+from src.runtime.consensus import DeferredRankFailure
+from src.runtime.dtensor import resolve_retained
 from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
+
+# One decoder layer is the chunk a streamed save converts as a unit; see :func:`conversion_chunk_key`.
+_LAYER_CHUNK_RE = re.compile(rf"^(.*\.(?:{'|'.join(DECODER_LAYER_LIST_ATTRS)})\.\d+)\.")
+
+
+def saveable_items(
+    model: nn.Module, items: Iterable[tuple[str, torch.Tensor]] | None = None
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """``items`` when given, else the parameter + persistent-buffer walk a gathered save writes."""
+    if items is not None:
+        return items
+    return itertools.chain(
+        ((name, param.data) for name, param in model.named_parameters()),
+        persistent_buffers(model),
+    )
+
+
+def gather_saveable_tensors(
+    model: nn.Module, *, retain: bool, items: Iterable[tuple[str, torch.Tensor]] | None = None
+) -> dict[str, torch.Tensor]:
+    """COLLECTIVE: everything a gathered save writes for ``model`` — :func:`saveable_items` and the GptOss
+    sinks — resolved, kept only where ``retain``.
+
+    Non-persistent buffers (rotary caches, masks) are recomputed on load and stay out. GptOss under
+    FA2 drops ``sinks`` from ``named_parameters()``; they are re-emitted neutralized so the reload
+    matches, and a live sink is left alone.
+    """
+    state_dict = resolve_retained(saveable_items(model, items), retain=retain)
+    if retain:
+        for name, tensor in neutralized_gpt_oss_sinks(model).items():
+            state_dict.setdefault(name, tensor)
+    return state_dict
+
+
+def conversion_chunk_key(name: str) -> str:
+    """The group ``name`` must be save-converted with: its decoder-layer prefix, else ``""``.
+
+    :func:`~src.checkpoint.hub_layout.revert_to_load_layout` cannot take one tensor at a time: a reverse
+    fusion (a vision tower's q/k/v into ``in_proj``, a per-expert hub split) needs every source key of
+    that entry together. Conversion entries are declared per layer and never straddle two, and
+    everything outside the layer list shares one chunk, so both chunks stay closed.
+    """
+    match = _LAYER_CHUNK_RE.match(name)
+    return match.group(1) if match else ""
+
+
+def chunked_saveable_tensors(
+    model: nn.Module,
+    *,
+    retain: bool,
+    items: Iterable[tuple[str, torch.Tensor]] | None = None,
+) -> Iterator[dict[str, torch.Tensor]]:
+    """COLLECTIVE: :func:`gather_saveable_tensors`, yielded in conversion-closed chunks instead of one dict.
+
+    The chunk plan is built from names only, so every rank builds the same one; the writer's host RAM
+    peaks at one decoder layer plus one pending shard rather than the whole model.
+    """
+    pairs = list(saveable_items(model, items))
+    # The sinks FA2 dropped from named_parameters() join the walk in their own layer's chunk rather
+    # than a trailing pass, so every rank still builds the same chunk sequence.
+    present = {name for name, _tensor in pairs}
+    pairs += [(name, t) for name, t in neutralized_gpt_oss_sinks(model).items() if name not in present]
+    groups: dict[str, list[tuple[str, torch.Tensor]]] = {}
+    for name, tensor in pairs:
+        groups.setdefault(conversion_chunk_key(name), []).append((name, tensor))
+    for group in groups.values():
+        yield resolve_retained(group, retain=retain)
 
 
 def gather_hand_sliced_params(
@@ -36,3 +122,59 @@ def gather_hand_sliced_params(
 
     if gathered_count > 0 and is_global_main_process():
         logger.info(f"All-gathered {gathered_count} TP-sharded non-DTensor params")
+
+
+def stream_gathered_checkpoint(
+    model: nn.Module,
+    chunks: Iterable[dict[str, torch.Tensor]],
+    output_dir: str,
+    *,
+    is_save_rank: bool,
+    max_shard_size: str,
+    normalize: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]],
+) -> tuple[int, int]:
+    """COLLECTIVE: write a gathered save straight to safetensors parts, then its config and index.
+
+    ``chunks`` is a retain-gated gather driven to exhaustion on every rank; ``normalize`` brings each
+    chunk to its on-disk names and dtypes, which is why the chunks are conversion-closed. Host RAM stays
+    at one chunk plus one pending shard. A failing write is deferred to a collective, so it raises on
+    every rank rather than stranding the peers in the next chunk's gather. Returns ``(tensors, bytes)``
+    written, zeros off the save rank.
+    """
+    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=is_save_rank)
+    guard = DeferredRankFailure(f"gathered checkpoint write to {output_dir}")
+    # Held across the stream only where the reconcile below can act on them: an untied config makes
+    # it a no-op, and these are two of the largest tensors in the checkpoint.
+    keep_tied = getattr(getattr(model, "config", None), "tie_word_embeddings", False)
+    tied: dict[str, torch.Tensor] = {}
+    written = 0
+
+    def stage(chunk: dict[str, torch.Tensor]) -> None:
+        nonlocal written
+        for key, tensor in normalize(chunk).items():
+            if keep_tied and is_tie_reconcile_key(key):
+                tied[key] = tensor
+            writer.add(key, tensor)
+            written += 1
+
+    for chunk in chunks:
+        # The generator is driven on every rank (its gathers are collective); only the writer has a
+        # chunk to normalize, and only it can fail the deferred guard on one.
+        if is_save_rank:
+            guard.run(partial(stage, chunk))
+        del chunk  # released before the next chunk is gathered
+    # Collective. A stream that failed anywhere stops the job here rather than finalizing an index
+    # over tensors that were never written.
+    guard.reject()
+
+    finalize = DeferredRankFailure(f"gathered checkpoint finalize in {output_dir}")
+    total_bytes = 0
+    if is_save_rank:
+        if hasattr(model, "config"):
+            # Must precede the config write, which persists the flag this may clear.
+            reconcile_tie_word_embeddings(model, tied)
+            finalize.run(partial(save_model_config, model, output_dir))
+        # The index is the last thing written: the parts are only a checkpoint once it names them.
+        total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
+    finalize.reject()
+    return written, total_bytes

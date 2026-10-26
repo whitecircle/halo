@@ -52,9 +52,9 @@ from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
-import src.distributed.checkpoint.optimizer as optimizer_store_mod
+import src.checkpoint.parallel.optimizer as optimizer_store_mod
+from src.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
 from src.checkpoint.reading import load_full_state_dict
-from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
@@ -260,8 +260,8 @@ def _verify_checkpoint_files(ckpt_dir: str, world_size: int, pc: ParallelismConf
         problems.append("missing optimizer_meta.pt")
     else:
         meta = torch.load(os.path.join(ckpt_dir, "optimizer_meta.pt"), map_location="cpu", weights_only=False)
-        saved_fp = OptimizerStateFingerprint.from_dict(meta.get("fingerprint"))
-        if saved_fp is None:
+        saved_fp = meta.get("fingerprint")
+        if not isinstance(saved_fp, dict):
             problems.append("optimizer_meta.pt carries no fingerprint")
         else:
             expected = OptimizerStateFingerprint.capture(pc, optimizer, world_size)

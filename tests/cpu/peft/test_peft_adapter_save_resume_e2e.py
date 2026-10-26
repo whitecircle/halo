@@ -2,8 +2,8 @@
 """CP+PEFT adapter round trip through the REAL writer and the REAL loader, file on disk included.
 
 ``tests/cpu/peft/test_peft_cp_adapter_keys.py`` pins the key algebra (normalize / remap) and
-``test_adapter_state_includes_buffers.py`` pins ``_resolve_adapter_state``, but both stop short of
-the artifact: neither calls :meth:`PeftAdapterSaver.save` nor :func:`_load_peft_adapter_state`, the
+``test_adapter_state_includes_buffers.py`` pins ``resolve_adapter_state``, but both stop short of
+the artifact: neither calls :func:`save_peft_adapters` nor :func:`_load_peft_adapter_state`, the
 function resume actually runs. So the three contracts that only hold END TO END are pinned here:
 
 * a ``modules_to_save`` router's balancing buffer reaches ``adapter_model.safetensors`` — a filter
@@ -37,14 +37,19 @@ from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, TRAINING_PROVENANCE_FILE
+from src.checkpoint.parallel.adapters import (
+    _load_peft_adapter_state,
+    remap_cp_adapter_keys_to_live,
+    save_peft_adapters,
+)
 from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
-from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.checkpoint.peft import PeftAdapterSaver, _load_peft_adapter_state, remap_cp_adapter_keys_to_live
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
 from src.models.param_roles import persistent_buffers
+from tests.common.checkpoint_io import save_context
+from tests.common.parallelism import make_parallelism_config
 
 _LORA_KWARGS = {"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], "bias": "none"}
 NUM_EXPERTS = 6
@@ -97,25 +102,10 @@ def _cp_peft_model() -> PeftModel:
     return get_peft_model(wrapper, LoraConfig(modules_to_save=["gate"], **_LORA_KWARGS))
 
 
-def _context(peft_model: PeftModel, *, is_save_rank: bool = True) -> CheckpointContext:
+def _context(peft_model: PeftModel, *, is_save_rank: bool = True):
     """The save context a CP+LoRA run builds: CP on, no EP, this rank writes."""
-    return CheckpointContext(
-        model=peft_model,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=True,
-        is_tp_mode=False,
-        is_ep_tp_mode=False,
-        has_ep_layers=False,
-        fsdp_wrapped=False,
-        accelerate_manages_fsdp=False,
-        is_save_rank=is_save_rank,
-        max_shard_size="5GB",
-        save_sharded_ep=False,
-        has_expert_lora=False,
-        merge_expert_lora_on_save=False,
-        cp_wrapper=None,
-        tokenizer=None,
+    return save_context(
+        peft_model, make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2), is_save_rank=is_save_rank
     )
 
 
@@ -129,7 +119,7 @@ def _train_adapters(peft_model: PeftModel) -> None:
 
 
 def _save_adapter(peft_model: PeftModel, output_dir: str, **ctx_kwargs) -> dict[str, torch.Tensor]:
-    PeftAdapterSaver().save(_context(peft_model, **ctx_kwargs), peft_model, output_dir)
+    save_peft_adapters(_context(peft_model, **ctx_kwargs), output_dir)
     return load_file(os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
 
 
@@ -287,7 +277,7 @@ def test_non_save_rank_writes_no_adapter_and_no_provenance():
     peft_model = _cp_peft_model()
     setattr(peft_model.get_base_model(), SINKS_POLICY_ATTR, SinksPolicy.NEUTRALIZED)
     with tempfile.TemporaryDirectory() as tmp:
-        PeftAdapterSaver().save(_context(peft_model, is_save_rank=False), peft_model, tmp)
+        save_peft_adapters(_context(peft_model, is_save_rank=False), tmp)
         assert not os.path.isfile(os.path.join(tmp, ADAPTER_SAFETENSORS_FILE))
         assert not os.path.isfile(os.path.join(tmp, TRAINING_PROVENANCE_FILE))
 

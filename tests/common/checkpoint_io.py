@@ -16,9 +16,11 @@ optimizer and scheduler state the checkpoint restored, snapshotted before the fi
 name what a save must have left on disk before any of that is read.
 
 The CPU tests of the per-rank optimizer shard store save and resume a tiny model through
-:func:`shard_store_context`, which routes it to the sharded path without FSDP.
+:func:`shard_store_context`, which routes it to the sharded path without FSDP; a test driving a saver
+builds its context with :func:`save_context`.
 """
 
+import json
 import math
 import os
 
@@ -28,10 +30,17 @@ from transformers import TrainerCallback
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.utils import CONFIG_NAME
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
+from src.checkpoint.format import (
+    DEFAULT_MAX_SHARD_SIZE,
+    RESUME_ADAPTER_DIR,
+    RESUME_ADAPTER_MARKER_FILE,
+    SAFETENSORS_INDEX_FILE,
+)
+from src.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
 from src.checkpoint.reading import has_whole_model_weight_file, load_full_state_dict
-from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.fsdp import reshard_fsdp2_modules
+from src.runtime.filesystem import is_fs_save_rank
+from tests.common.parallelism import make_parallelism_config
 from tests.common.peft_helpers import snapshot_adapters, unwrap
 from tests.common.utils import local_optimizer_state, log, optimizer_state_matches
 
@@ -57,6 +66,12 @@ def written_keys(output_dir: str) -> set[str]:
     state = load_full_state_dict(output_dir)
     assert state is not None, f"no checkpoint at {output_dir}"
     return set(state)
+
+
+def mark_resume_adapter(checkpoint_dir: str) -> None:
+    """Mark ``checkpoint_dir`` as a merged save whose resume adapter is complete, as the save's last write does."""
+    with open(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE), "w") as fh:
+        json.dump({"adapter_dir": RESUME_ADAPTER_DIR}, fh)
 
 
 def loading_problems(info: dict) -> dict[str, list]:
@@ -206,31 +221,74 @@ def _base_trainer_fallback(*_args, **_kwargs) -> None:
     raise AssertionError("the base-Trainer optimizer path ran; the sharded per-rank path was expected")
 
 
+def load_context(
+    model: nn.Module,
+    parallelism_config=None,
+    *,
+    tp_size: int = 1,
+    optimizer=None,
+    lr_scheduler=None,
+    has_ep_layers: bool = False,
+    fsdp_wrapped: bool = False,
+    tp_rank: int = 0,
+    super_load_optimizer_and_scheduler=_base_trainer_fallback,
+    allow_optimizer_warm_restart: bool = False,
+    base_owns_whole_weight_load: bool = False,
+) -> CheckpointLoadContext:
+    """A resume context over a real ``ParallelismConfig``: ``parallelism_config`` when given, else one
+    ``tp_size``-way TP node (one rank at the default). The base-Trainer optimizer load raises unless
+    the test hands its own."""
+    return CheckpointLoadContext(
+        model=model,
+        optimizer=optimizer,
+        lr_scheduler=lr_scheduler,
+        parallelism_config=parallelism_config
+        or make_parallelism_config(world_size=tp_size, gpus_per_node=tp_size, tp_size=tp_size),
+        has_ep_layers=has_ep_layers,
+        fsdp_wrapped=fsdp_wrapped,
+        tp_rank=tp_rank,
+        super_load_optimizer_and_scheduler=super_load_optimizer_and_scheduler,
+        allow_optimizer_warm_restart=allow_optimizer_warm_restart,
+        base_owns_whole_weight_load=base_owns_whole_weight_load,
+    )
+
+
 def shard_store_context(
     model: nn.Module, optimizer, parallelism_config, *, lr_scheduler=None, allow_optimizer_warm_restart=False
 ) -> CheckpointLoadContext:
     """A load context that sends a CPU model through the per-rank optimizer shard store.
 
     No FSDP on CPU, and none is needed: ``get_optimizer_state_dict`` on a plain module returns the
-    full local view, which is what a per-rank shard holds. The base-Trainer fallbacks raise, so a test
+    full local view, which is what a per-rank shard holds. The base-Trainer fallback raises, so a test
     cannot pass by taking the unsharded route.
     """
-    return CheckpointLoadContext(
-        model=model,
+    return load_context(
+        model,
+        parallelism_config,
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
-        parallelism_config=parallelism_config,
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=False,
         fsdp_wrapped=True,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=_base_trainer_fallback,
-        super_load_optimizer_and_scheduler=_base_trainer_fallback,
         allow_optimizer_warm_restart=allow_optimizer_warm_restart,
     )
+
+
+def save_context(model: nn.Module, parallelism_config=None, **fields) -> CheckpointContext:
+    """A saver's context for ``model`` over a real ``ParallelismConfig`` (one process unless given), the save
+    rank the runtime resolves, and every other field at a plain save's value unless ``fields`` sets it."""
+    defaults = {
+        "model": model,
+        "parallelism_config": parallelism_config or make_parallelism_config(world_size=1, gpus_per_node=1),
+        "has_ep_layers": False,
+        "toolkit_fsdp2": False,
+        "accelerate_manages_fsdp": False,
+        "is_save_rank": is_fs_save_rank(),
+        "max_shard_size": DEFAULT_MAX_SHARD_SIZE,
+        "save_sharded_ep": False,
+        "has_expert_lora": False,
+        "cp_wrapper": None,
+        "tokenizer": None,
+    }
+    return CheckpointContext(**(defaults | fields))
 
 
 class RestorePointSnapshot(TrainerCallback):

@@ -24,12 +24,12 @@ from accelerate import PartialState
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
-PartialState()  # save_ep_model logs through accelerate's logger
+PartialState()  # the EP save logs through accelerate's logger
 
-from src.distributed.checkpoint.ep_save import save_ep_model
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from tests.common.checkpoint_io import written_keys
+from tests.common.checkpoint_io import save_context, written_keys
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config
 
@@ -53,7 +53,7 @@ def _saved_pair(tmp_path):
     """The EP-gathered artifact and the plain ``save_pretrained`` reference, from identical weights."""
     reference, model = _tiny_gemma4_moe(), _ep_patched(_tiny_gemma4_moe())
     ep_dir, reference_dir = str(tmp_path / "ep"), str(tmp_path / "reference")
-    save_ep_model(model, ep_dir)
+    save_ep_gathered_checkpoint(save_context(model), ep_dir)
     reference.save_pretrained(reference_dir)
     return reference, ep_dir, reference_dir
 
@@ -75,7 +75,7 @@ def test_persistent_buffers_survive_the_gathered_save(tmp_path):
     for index in range(LAYERS):
         model.model.layers[index].layer_scalar.fill_(0.25 * (index + 1))
     ep_dir = str(tmp_path / "ep")
-    save_ep_model(model, ep_dir)
+    save_ep_gathered_checkpoint(save_context(model), ep_dir)
 
     written = written_keys(ep_dir)
     persistent = {name for name in model.state_dict() if name.endswith("layer_scalar")}

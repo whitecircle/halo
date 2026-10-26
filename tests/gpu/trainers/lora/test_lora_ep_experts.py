@@ -265,7 +265,7 @@ def run(ctx) -> dict:
     checks["roundtrip_restores_adapters"] = roundtrip_ok
     log(f"  gather/load round-trip exact: {roundtrip_ok}")
 
-    # --- Check 5: trainer.save_model() writes a standalone adapter file (save_ep_lora_adapters) ---
+    # --- Check 5: trainer.save_model() writes a standalone adapter file (save_expert_lora_adapters) ---
     log("\n[+] trainer.save_model() adapter-only write...")
     apply_ep_lora_adapters(unwrapped, gathered)  # restore the trained adapters (zeroed above)
     save_dir = os.path.join(ctx.output_dir, "adapter")

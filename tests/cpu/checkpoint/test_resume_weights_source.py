@@ -17,17 +17,9 @@ Run: python tests/cpu/checkpoint/test_resume_weights_source.py  (or: pytest -m c
 import json
 
 import pytest
-from accelerate import PartialState
 
-from src.training.environment import (
-    _checkpoint_has_full_model_weights,
-    _classify_resume_checkpoint,
-    resolve_resume_weights_source,
-)
+from src.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
 from tests.common.parallelism import make_parallelism_config
-
-# The resolver logs through the accelerate logger, which requires an initialized state.
-PartialState()
 
 BASE = "org/base-model"
 
@@ -66,24 +58,24 @@ def _write_index(path, fmt=None):
 
 def test_full_weights_single_safetensors(tmp_path):
     _touch(tmp_path / "model.safetensors")
-    assert _checkpoint_has_full_model_weights(str(tmp_path)) is True
+    assert classify_resume_weights(str(tmp_path)) == "full"
 
 
 def test_full_weights_gathered_index(tmp_path):
     # Gathered HF shard index (no per-rank "format") is directly loadable.
     _write_index(tmp_path / "model.safetensors.index.json", fmt=None)
-    assert _checkpoint_has_full_model_weights(str(tmp_path)) is True
+    assert classify_resume_weights(str(tmp_path)) == "full"
 
 
 def test_full_weights_legacy_bin(tmp_path):
     _touch(tmp_path / "pytorch_model.bin")
-    assert _checkpoint_has_full_model_weights(str(tmp_path)) is True
+    assert classify_resume_weights(str(tmp_path)) == "full"
 
 
 def test_sharded_index_is_not_full(tmp_path):
     # A per-rank EP save reuses the index filename but holds partial tensors: merge first.
     _write_index(tmp_path / "model.safetensors.index.json", fmt="ep_sharded")
-    assert _checkpoint_has_full_model_weights(str(tmp_path)) is False
+    assert classify_resume_weights(str(tmp_path)) != "full"
 
 
 def test_sharded_index_beside_a_gathered_file_is_not_full(tmp_path):
@@ -92,17 +84,17 @@ def test_sharded_index_beside_a_gathered_file_is_not_full(tmp_path):
     and resume off pre-sharded-save weights with no error anywhere."""
     _touch(tmp_path / "model.safetensors")
     _write_index(tmp_path / "model.safetensors.index.json", fmt="ep_sharded")
-    assert _checkpoint_has_full_model_weights(str(tmp_path)) is False
-    assert _classify_resume_checkpoint(str(tmp_path)) == "invalid"
+    assert classify_resume_weights(str(tmp_path)) != "full"
+    assert classify_resume_weights(str(tmp_path)) == "invalid"
 
 
 def test_adapter_only_is_not_full(tmp_path):
     _touch(tmp_path / "adapter_model.safetensors")
-    assert _checkpoint_has_full_model_weights(str(tmp_path)) is False
+    assert classify_resume_weights(str(tmp_path)) != "full"
 
 
 def test_empty_dir_is_not_full(tmp_path):
-    assert _checkpoint_has_full_model_weights(str(tmp_path)) is False
+    assert classify_resume_weights(str(tmp_path)) != "full"
 
 
 def test_no_checkpoint_returns_base(tmp_path):
@@ -137,7 +129,7 @@ def test_ep_adapter_only_stays_base(tmp_path):
 
 
 def test_ep_adapter_bin_only_stays_base(tmp_path):
-    """PeftAdapterSaver falls back to adapter_model.bin when the safetensors write fails; that
+    """save_peft_adapters falls back to adapter_model.bin when the safetensors write fails; that
     checkpoint must resume like any adapter save, not raise as 'invalid'."""
     _touch(tmp_path / "adapter_model.bin")
     assert resolve_resume_weights_source(str(tmp_path), _model_config(), _mode(ep=True)) == BASE
@@ -145,20 +137,20 @@ def test_ep_adapter_bin_only_stays_base(tmp_path):
 
 @pytest.mark.parametrize("adapter_name", ["adapter_model.safetensors", "adapter_model.bin"])
 def test_classify_accepts_both_adapter_filenames(tmp_path, adapter_name):
-    """The classifier must accept every filename PeftAdapterSaver can write (the loader restores
+    """The classifier must accept every filename save_peft_adapters can write (the loader restores
     both); classifying the .bin fallback 'invalid' would make those checkpoints un-resumable."""
     _touch(tmp_path / adapter_name)
-    assert _classify_resume_checkpoint(str(tmp_path)) == "adapter"
+    assert classify_resume_weights(str(tmp_path)) == "adapter"
 
 
 def test_classify_full_beats_adapter(tmp_path):
     _touch(tmp_path / "model.safetensors")
     _touch(tmp_path / "adapter_model.bin")
-    assert _classify_resume_checkpoint(str(tmp_path)) == "full"
+    assert classify_resume_weights(str(tmp_path)) == "full"
 
 
 def test_classify_empty_is_invalid(tmp_path):
-    assert _classify_resume_checkpoint(str(tmp_path)) == "invalid"
+    assert classify_resume_weights(str(tmp_path)) == "invalid"
 
 
 def test_ep_unmerged_sharded_checkpoint_raises(tmp_path):

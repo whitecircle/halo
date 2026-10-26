@@ -11,6 +11,7 @@ layout, the same tie-consistency verdict. Only the part BOUNDARIES differ, which
 """
 
 import os
+from functools import partial
 
 import pytest
 import torch
@@ -21,19 +22,19 @@ PartialState()  # save_model_config logs through accelerate's logger
 
 from safetensors import safe_open
 
+import src.checkpoint.parallel.save as checkpoint_save_mod
+import src.checkpoint.parallel.writing as checkpoint_write_mod
 import src.checkpoint.writing as writing_mod
-import src.distributed.checkpoint.tp_save as tp_checkpoint_mod
-import src.distributed.checkpoint.write as checkpoint_write_mod
-from src.checkpoint.reading import load_full_state_dict
-from src.checkpoint.writing import StreamingShardWriter, write_gathered_checkpoint
-from src.distributed.checkpoint.tp_save import save_tp_model
-from src.distributed.checkpoint.write import (
+from src.checkpoint.parallel.save import save_tp_checkpoint
+from src.checkpoint.parallel.writing import (
     chunked_saveable_tensors,
     conversion_chunk_key,
     stream_gathered_checkpoint,
 )
+from src.checkpoint.reading import load_full_state_dict
+from src.checkpoint.writing import StreamingShardWriter, normalize_gathered_state_dict, write_gathered_checkpoint
 from src.distributed.tensor_parallel.plain_params import register_hand_sliced
-from tests.common.checkpoint_io import weight_files
+from tests.common.checkpoint_io import save_context, weight_files
 
 SHARD_SIZE = "64KB"
 
@@ -70,6 +71,7 @@ def _stream(model, output_dir, *, is_save_rank=True, max_shard_size=SHARD_SIZE):
         output_dir,
         is_save_rank=is_save_rank,
         max_shard_size=max_shard_size,
+        normalize=partial(normalize_gathered_state_dict, model),
     )
 
 
@@ -158,9 +160,9 @@ def test_a_tp_hand_sliced_param_is_written_once_at_its_gathered_width(tmp_path, 
         if retain:
             state_dict[key] = torch.ones(4)
 
-    monkeypatch.setattr(tp_checkpoint_mod, "gather_hand_sliced_params", _gathered)
+    monkeypatch.setattr(checkpoint_save_mod, "gather_hand_sliced_params", _gathered)
 
-    save_tp_model(model, str(tmp_path))
+    save_tp_checkpoint(save_context(model), str(tmp_path))
 
     written = [name for part in weight_files(str(tmp_path)) for name in _keys_in(tmp_path / part)]
     assert written.count(key) == 1, f"{key} was written {written.count(key)} times across the shard files"

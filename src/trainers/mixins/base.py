@@ -22,9 +22,8 @@ from accelerate.utils import DataLoaderConfiguration
 from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY
 from trl.trainer.utils import disable_dropout_in_model
 
+from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
-from src.distributed.checkpoint.ep_save import validate_ep_sharded_save
-from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.context_parallel.ulysses_model import UlyssesModel, find_ulysses_model
 from src.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
@@ -57,7 +56,7 @@ from src.models.config_access import config_sources, snapshot_special_token_ids
 from src.models.moe_balancing import ep_wraps_experts
 from src.models.peft_adapters import lora_fold_targets
 from src.models.segment_markers import reject_compressed_kv_rows
-from src.models.unwrapping import unwrap_framework_wrappers
+from src.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import adamw_bf16_optimizer_from_args
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
 from src.optimizers.registry import (
@@ -604,7 +603,7 @@ class DistributedTrainerMixin(
 
         # Fail fast at construction on an unsupported sharded-save shape rather than hours in.
         if self.save_sharded_ep:
-            validate_ep_sharded_save(
+            reject_unmergeable_ep_sharded_save(
                 self.model, merge_expert_lora_on_save=self.parallelism_config.merge_expert_lora_on_save
             )
 
@@ -701,7 +700,8 @@ class DistributedTrainerMixin(
 
         - **No native expert adapters built** (dense models, MoE runs with no expert projection in
           ``lora_target_modules``, ``expert_tp_size > 1``). There is nothing to fold, and an
-          attention-only run saves adapters via :class:`PeftAdapterSaver`, which never merges.
+          attention-only run saves adapters via
+          :func:`~src.checkpoint.parallel.adapters.save_peft_adapters`, which never merges.
         - **Accelerate-managed FSDP v1.** Params are flat-param shards the base Trainer's save
           serializes, so the gather would write shard views.
         - **A PEFT layer the out-of-place fold cannot reproduce** (trainable tokens, LoRA on

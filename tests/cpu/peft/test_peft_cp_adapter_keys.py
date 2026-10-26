@@ -27,13 +27,18 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.distributed.checkpoint.peft import PeftAdapterSaver, remap_cp_adapter_keys_to_live
+from src.checkpoint.parallel.adapters import remap_cp_adapter_keys_to_live
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.models.param_roles import persistent_buffers
+from src.models.unwrapping import plain_adapter_key
 
 _LORA_KWARGS = {"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], "bias": "none"}
+
+
+def _plain_keys(state: dict) -> dict:
+    return {plain_adapter_key(key): value for key, value in state.items()}
 
 
 def _tiny_qwen3():
@@ -94,7 +99,7 @@ def test_root_state_dict_matches_named_parameters_spelling():
 def test_saver_normalization_yields_vanilla_keys():
     """The portability contract: normalized CP adapter keys equal exactly what the same LoRA on the
     UNWRAPPED model spells — what lets a CP-trained adapter load for non-CP inference."""
-    cp_saved = PeftAdapterSaver._normalize_cp_adapter_keys(get_peft_model_state_dict(_cp_peft_model()))
+    cp_saved = _plain_keys(get_peft_model_state_dict(_cp_peft_model()))
     vanilla_keys = set(get_peft_model_state_dict(get_peft_model(_tiny_qwen3(), LoraConfig(**_LORA_KWARGS))))
     assert set(cp_saved) == vanilla_keys
 
@@ -103,7 +108,7 @@ def test_normalize_strips_cp_artifacts_injectively():
     """Over the REAL live key set: normalization removes ``.original_attention.`` and the extra
     ``model.`` level, changes every CP key, and stays injective (the resume remap is unambiguous)."""
     live = sorted(name.replace(".default.", ".") for name in _live_lora_keys(_cp_peft_model()))
-    normalized = [PeftAdapterSaver._normalize_cp_adapter_key(key) for key in live]
+    normalized = [plain_adapter_key(key) for key in live]
 
     assert len(set(normalized)) == len(live)
     assert all(n != k for n, k in zip(normalized, live, strict=True))
@@ -118,10 +123,10 @@ def test_normalize_collapses_top_level_lm_head():
     backbone key (3 ``model.`` levels ending in ``layers.``) must NOT re-collapse."""
     cp_head = "base_model.model.model.lm_head.modules_to_save.default.weight"
     plain_head = "base_model.model.lm_head.modules_to_save.default.weight"
-    assert PeftAdapterSaver._normalize_cp_adapter_key(cp_head) == plain_head
-    assert PeftAdapterSaver._normalize_cp_adapter_key(plain_head) == plain_head
+    assert plain_adapter_key(cp_head) == plain_head
+    assert plain_adapter_key(plain_head) == plain_head
     plain_backbone = "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
-    assert PeftAdapterSaver._normalize_cp_adapter_key(plain_backbone) == plain_backbone
+    assert plain_adapter_key(plain_backbone) == plain_backbone
 
 
 def test_resume_remap_recovers_live_keys():
@@ -129,7 +134,7 @@ def test_resume_remap_recovers_live_keys():
     namespace the adapter loader resolves — ``named_parameters()`` spelling sans the adapter-name
     segment — with none left in the portable namespace."""
     peft_model = _cp_peft_model()
-    saved = PeftAdapterSaver._normalize_cp_adapter_keys(get_peft_model_state_dict(peft_model))
+    saved = _plain_keys(get_peft_model_state_dict(peft_model))
     assert saved, "no adapter tensors to save"
 
     remapped = remap_cp_adapter_keys_to_live(saved, peft_model)
@@ -150,7 +155,7 @@ def test_resume_roundtrip_loads_every_saved_tensor():
         for name, param in trained.named_parameters():
             if ".lora_" in name:
                 param.add_(torch.randn_like(param))
-    saved = PeftAdapterSaver._normalize_cp_adapter_keys(get_peft_model_state_dict(trained))
+    saved = _plain_keys(get_peft_model_state_dict(trained))
 
     fresh = _cp_peft_model()
     trained_lora = {n: p for n, p in trained.named_parameters() if ".lora_" in n}
@@ -173,7 +178,7 @@ def test_resume_roundtrip_loads_every_saved_tensor():
 
 def test_resume_remap_covers_modules_to_save_buffers():
     """A ``modules_to_save`` clone serializes its persistent buffers (a router's balancing bias —
-    the reason ``_resolve_adapter_state`` chains ``persistent_buffers``). The resume remap must map
+    the reason ``resolve_adapter_state`` chains ``persistent_buffers``). The resume remap must map
     them back to live spelling exactly like parameters; a live map built from ``named_parameters()``
     alone leaves the buffer in portable spelling, the loader reports it unexpected, and the bias
     silently resumes at init."""
@@ -182,7 +187,7 @@ def test_resume_remap_covers_modules_to_save_buffers():
     wrapper = UlyssesModel(model, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     peft_model = get_peft_model(wrapper, LoraConfig(modules_to_save=["lm_head"], **_LORA_KWARGS))
 
-    saved = PeftAdapterSaver._normalize_cp_adapter_keys(get_peft_model_state_dict(peft_model))
+    saved = _plain_keys(get_peft_model_state_dict(peft_model))
     assert any(key.endswith("balancing_bias") for key in saved), (
         "modules_to_save clone did not serialize its persistent buffer — the remap case is vacuous"
     )
@@ -209,7 +214,7 @@ def test_resume_remap_covers_embedding_adapters():
     }
     assert live_embedding, "no ParameterDict embedding adapter was injected — the case is vacuous"
 
-    saved = PeftAdapterSaver._normalize_cp_adapter_keys(get_peft_model_state_dict(peft_model))
+    saved = _plain_keys(get_peft_model_state_dict(peft_model))
     remapped = remap_cp_adapter_keys_to_live(saved, peft_model)
 
     expected = {name.removesuffix(".default") for name in live_embedding}

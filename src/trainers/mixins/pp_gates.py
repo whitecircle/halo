@@ -39,7 +39,7 @@ def reject_pp_peft(peft_config, explicit_param_trainer: str | None = None) -> No
     is an explicit ctor parameter the mixin's kwargs-based rejection cannot see).
 
     Injection itself would work on a stage; the checkpoint path does not. The adapter save runs
-    through ``PeftAdapterSaver`` ahead of the PP saver, so it writes stage-local layer indices from
+    through ``save_peft_adapters`` ahead of the PP saver, so it writes stage-local layer indices from
     the save rank alone, the PP resume path never reaches the adapter restore, and
     ``layers_to_transform`` / ``all-linear`` would select re-based layers and the stage head.
     """

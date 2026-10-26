@@ -27,11 +27,12 @@ import pytest
 import torch.nn as nn
 from transformers import TrainerState
 
+import src.checkpoint.parallel.save as save_mod
 import src.trainers.mixins.checkpointing as checkpointing_mod
-from src.distributed.checkpoint.context import CheckpointContext
 from src.runtime.consensus import DeferredRankFailure
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
+from tests.common.checkpoint_io import save_context
 from tests.common.repo import REPO_ROOT
 
 
@@ -121,25 +122,8 @@ class _SaveModelTrainer(DistributedTrainerMixin):
         return self.ctx
 
 
-def _context(model) -> CheckpointContext:
-    return CheckpointContext(
-        model=model,
-        parallelism_config=SimpleNamespace(is_pp_mode=False),
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        is_ep_tp_mode=False,
-        has_ep_layers=False,
-        fsdp_wrapped=True,
-        accelerate_manages_fsdp=False,
-        is_save_rank=True,
-        max_shard_size="5GB",
-        save_sharded_ep=False,
-        has_expert_lora=False,
-        merge_expert_lora_on_save=False,
-        cp_wrapper=None,
-        tokenizer=None,
-    )
+def _context(model):
+    return save_context(model, toolkit_fsdp2=True, is_save_rank=True)
 
 
 def test_save_model_marks_its_collectives_done_on_the_strategy_exit(tmp_path, monkeypatch):
@@ -152,15 +136,11 @@ def test_save_model_marks_its_collectives_done_on_the_strategy_exit(tmp_path, mo
 
 
 def test_save_model_marks_its_collectives_done_on_the_adapter_exit(tmp_path, monkeypatch):
-    """The PEFT branch skips the strategy ladder; unmarked, every adapter run's saves would
+    """The ladder's PEFT rung writes adapters only; unmarked, every adapter run's saves would
     take the immediate-raise path even for a failure the fence could have made uniform."""
     saved = []
-    monkeypatch.setattr(checkpointing_mod, "find_peft_model", lambda model: object())
-    monkeypatch.setattr(
-        checkpointing_mod,
-        "PeftAdapterSaver",
-        lambda: SimpleNamespace(save=lambda ctx, peft_model, out: saved.append(out)),
-    )
+    monkeypatch.setattr(save_mod, "find_peft_model", lambda model: object())
+    monkeypatch.setattr(save_mod, "save_peft_adapters", lambda ctx, out: saved.append(out))
     trainer = _SaveModelTrainer(_context(nn.Linear(4, 4)))
 
     trainer.save_model(str(tmp_path))
@@ -175,11 +155,9 @@ def test_a_payload_override_keeps_the_shared_steps_around_it(tmp_path, monkeypat
     stay the mixin's, in that order on every rank."""
     order = []
     monkeypatch.setattr(checkpointing_mod, "save_checkpoint", lambda ctx, out: pytest.fail("ran the mixin's ladder"))
+    monkeypatch.setattr(checkpointing_mod, "save_balancing_biases", lambda *args, **kwargs: order.append("sidecar"))
 
     class _OwnLayout(_SaveModelTrainer):
-        def _persist_router_balancing_biases(self, output_dir):
-            order.append("sidecar")
-
         def _write_model_payload(self, ctx, output_dir, _internal_call):
             order.append(("payload", output_dir, _internal_call, self._model_save_collectives_done))
 

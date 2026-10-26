@@ -14,28 +14,29 @@ Per-rank optimizer shards restore only into the exact topology that wrote them, 
 - shards missing on a subset under a matching fingerprint → torn checkpoint → raise;
 - non-sharded modes (no mixin FSDP2, no pure TP — replicated optimizer state) → base Trainer path.
 
-Consensus outcomes that cannot occur single-process are simulated by monkeypatching the module's
-``rank_consensus`` / ``all_ranks_ok`` helpers.
+Consensus outcomes that cannot occur single-process are simulated by monkeypatching ``rank_consensus``.
 """
 
 import os
+from dataclasses import fields
 
 import pytest
 import torch
 import torch.nn as nn
 
-import src.distributed.checkpoint.coordination as coordination_mod
-import src.distributed.checkpoint.optimizer as optimizer_mod
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
+import src.checkpoint.parallel.optimizer as optimizer_mod
+import src.checkpoint.parallel.reading as coordination_mod
+from src.checkpoint.parallel.optimizer import OptimizerShardStore
+from src.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
+from src.checkpoint.parallel.sidecars import restore_lr_scheduler
 from src.runtime.consensus import RankConsensus
+from tests.common.checkpoint_io import load_context
 
 
 def _stub_consensus(patcher, fake) -> None:
-    """Stub the consensus the resume gates ask, in BOTH modules that ask it: the direct
-    ``rank_consensus`` calls and the shared ``all_ranks_ok`` helper the gates go through. Stubbing
-    one alone answers half the gates from a real single-process world and the rest from the stub."""
+    """Stub the consensus the resume gates ask, in BOTH modules that ask it: the store's own gates and the
+    shared reads (``consensus_read``). Stubbing one alone answers half the gates from a real single-process
+    world and the rest from the stub."""
     patcher.setattr(optimizer_mod, "rank_consensus", fake)
     patcher.setattr(coordination_mod, "rank_consensus", fake)
 
@@ -64,7 +65,7 @@ class _StubParallelismConfig:
         fsdp_shard_ep1_experts=True,
         ep_scope="node",
         use_grouped_gemm=True,
-        hsdp=False,
+        use_hsdp=False,
         nvlink_domain_size=8,
     ):
         self.ep_size = ep_size
@@ -74,8 +75,11 @@ class _StubParallelismConfig:
         self.fsdp_shard_ep1_experts = fsdp_shard_ep1_experts
         self.ep_scope = ep_scope
         self.use_grouped_gemm = use_grouped_gemm
-        self.use_hsdp = hsdp
+        self.use_hsdp = use_hsdp
         self.nvlink_domain_size = nvlink_domain_size
+        self.is_pp_mode = False
+        self.is_cp_mode = cp_size > 1
+        self.is_tp_mode = tp_size > 1
 
 
 def _ctx(
@@ -84,24 +88,17 @@ def _ctx(
     *,
     lr_scheduler=None,
     parallelism_config=None,
-    is_cp_mode=False,
     has_ep_layers=False,
     fsdp_wrapped=True,
     super_optim=None,
 ):
-    return CheckpointLoadContext(
-        model=model,
+    return load_context(
+        model,
+        parallelism_config or _StubParallelismConfig(),
         optimizer=optimizer,
         lr_scheduler=lr_scheduler,
-        parallelism_config=parallelism_config,
-        is_pp_mode=False,
-        is_cp_mode=is_cp_mode,
-        is_tp_mode=False,
         has_ep_layers=has_ep_layers,
         fsdp_wrapped=fsdp_wrapped,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=_Recorder(),
         super_load_optimizer_and_scheduler=super_optim or _Recorder(),
     )
 
@@ -123,7 +120,7 @@ def _sgd(model):
 
 
 def _live_fp(optimizer, parallelism_config=None, world_size=1):
-    return OptimizerStateFingerprint.capture(parallelism_config, optimizer, world_size)
+    return OptimizerStateFingerprint.capture(parallelism_config or _StubParallelismConfig(), optimizer, world_size)
 
 
 def test_capture_maps_config_fields():
@@ -144,24 +141,26 @@ def test_capture_without_parallelism_config_defaults():
 
 def test_dict_round_trip():
     fp = _live_fp(_sgd(_TinyModel()), _StubParallelismConfig(ep_size=2, cp_size=2), world_size=4)
-    assert OptimizerStateFingerprint.from_dict(fp.to_dict()) == fp
+    assert fp.mismatches(fp.to_dict()) == []
 
 
-@pytest.mark.parametrize("payload", [None, "not-a-dict", 7, {}, {"world_size": 2}, {"ep_size": 1}])
-def test_from_dict_rejects_incomplete_payloads(payload):
-    """Anything short of a complete fingerprint dict is a pre-fingerprint/foreign meta → None, which
-    the resume gate refuses."""
-    assert OptimizerStateFingerprint.from_dict(payload) is None
+@pytest.mark.parametrize("field", [field.name for field in fields(OptimizerStateFingerprint)])
+def test_a_saved_fingerprint_missing_a_field_mismatches(field):
+    """No compatibility shapes: a meta written before a field existed, or under its old name, differs
+    from every live run and warm-restarts (raises under PP) as any topology change does."""
+    live = _live_fp(_sgd(_TinyModel()))
+    saved = {name: value for name, value in live.to_dict().items() if name != field}
+    assert any(mismatch.startswith(f"{field}: saved='<absent>'") for mismatch in live.mismatches(saved))
 
 
-def test_from_dict_ignores_unknown_keys():
-    data = {**_live_fp(_sgd(_TinyModel())).to_dict(), "future_field": 123}
-    assert OptimizerStateFingerprint.from_dict(data) is not None
+def test_a_saved_field_the_live_run_lacks_mismatches():
+    live = _live_fp(_sgd(_TinyModel()))
+    assert live.mismatches({**live.to_dict(), "future_field": 123}) == ["future_field: saved=123 current='<absent>'"]
 
 
 def test_shape_preserving_topology_knobs_are_fingerprinted():
     """These four change WHICH rank owns which slice (ep_scope, nvlink_domain_size), what the expert
-    params are NAMED (use_grouped_gemm), or the FSDP mesh rank (hsdp) while every tensor shape stays
+    params are NAMED (use_grouped_gemm), or the FSDP mesh rank (use_hsdp) while every tensor shape stays
     identical — so nothing downstream can catch them. Without them in the fingerprint the restore
     succeeds and reports success on permuted or silently reinitialized state."""
     sgd = _sgd(_TinyModel())
@@ -169,23 +168,19 @@ def test_shape_preserving_topology_knobs_are_fingerprinted():
     for field, other in (
         ("ep_scope", "global"),
         ("use_grouped_gemm", False),
-        ("hsdp", True),
+        ("use_hsdp", True),
         ("nvlink_domain_size", 4),
     ):
-        saved = OptimizerStateFingerprint.from_dict({**live.to_dict(), field: other})
-        assert saved is not None, field
-        assert any(m.startswith(f"{field}:") for m in live.mismatches(saved)), field
+        assert any(m.startswith(f"{field}:") for m in live.mismatches({**live.to_dict(), field: other})), field
 
 
 def test_mismatches_names_fields_with_values():
     live = _live_fp(_sgd(_TinyModel()), _StubParallelismConfig(ep_size=1), world_size=2)
-    saved = OptimizerStateFingerprint.from_dict({**live.to_dict(), "ep_size": 2, "optimizer_class": "AdamWBF16"})
-    assert saved is not None
-    mismatched = live.mismatches(saved)
+    mismatched = live.mismatches({**live.to_dict(), "ep_size": 2, "optimizer_class": "AdamWBF16"})
     assert len(mismatched) == 2
     assert any(m.startswith("ep_size:") and "saved=2" in m and "current=1" in m for m in mismatched)
     assert any(m.startswith("optimizer_class:") and "AdamWBF16" in m for m in mismatched)
-    assert live.mismatches(live) == []
+    assert live.mismatches(live.to_dict()) == []
 
 
 def test_matching_fingerprint_restores(tmp_path, monkeypatch):
@@ -395,16 +390,16 @@ def test_other_ranks_shard_files_raise_permutation_without_fingerprint(tmp_path,
         OptimizerShardStore(_ctx(model, optimizer)).load(str(tmp_path))
 
 
-@pytest.mark.parametrize("mode_kwargs", [{"has_ep_layers": True}, {"is_cp_mode": True}])
-def test_ep_and_cp_modes_restore_optimizer_state(tmp_path, monkeypatch, mode_kwargs):
+@pytest.mark.parametrize("mode", ["ep", "cp"])
+def test_ep_and_cp_modes_restore_optimizer_state(tmp_path, monkeypatch, mode):
     model = _TinyModel()
     optimizer = _sgd(model)
-    pc = _StubParallelismConfig(ep_size=2 if "has_ep_layers" in mode_kwargs else 1)
+    pc = _StubParallelismConfig(ep_size=2 if mode == "ep" else 1, cp_size=2 if mode == "cp" else 1)
     _write_checkpoint(tmp_path, fingerprint=_live_fp(optimizer, pc).to_dict())
     restore = _Recorder()
     monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", restore)
 
-    ctx = _ctx(model, optimizer, parallelism_config=pc, fsdp_wrapped=True, **mode_kwargs)
+    ctx = _ctx(model, optimizer, parallelism_config=pc, has_ep_layers=mode == "ep", fsdp_wrapped=True)
     OptimizerShardStore(ctx).load(str(tmp_path))
 
     assert len(restore.calls) == 1
@@ -435,8 +430,7 @@ def test_save_optimizer_shards_writes_fingerprint_meta(tmp_path):
 
     assert os.path.isfile(os.path.join(tmp_path, "optimizer_shard_00000.pt"))
     meta = torch.load(os.path.join(tmp_path, "optimizer_meta.pt"), weights_only=False)
-    saved_fp = OptimizerStateFingerprint.from_dict(meta["fingerprint"])
-    assert saved_fp == OptimizerStateFingerprint.capture(pc, optimizer, 1)
+    assert meta["fingerprint"] == OptimizerStateFingerprint.capture(pc, optimizer, 1).to_dict()
     assert meta["num_ranks"] == 1
 
 
@@ -530,10 +524,10 @@ def test_a_peer_without_the_fingerprint_raises_on_every_rank(tmp_path, monkeypat
     asked: list[bool] = []
 
     def peer_lacks_the_fingerprint(local):
-        # Call 1 is the shard-presence probe; call 2 is the fingerprint question, the only one the
-        # peer answers differently.
+        # Calls 1-3 are the shard-presence probe and the meta's torn and rank-count gates; call 4 is the
+        # fingerprint question, the only one the peer answers differently.
         asked.append(local)
-        return RankConsensus(False, True) if len(asked) == 2 else RankConsensus(local, local)
+        return RankConsensus(False, True) if len(asked) == 4 else RankConsensus(local, local)
 
     monkeypatch.setattr(optimizer_mod, "rank_consensus", peer_lacks_the_fingerprint)
     restore = _Recorder()
@@ -542,7 +536,7 @@ def test_a_peer_without_the_fingerprint_raises_on_every_rank(tmp_path, monkeypat
     with pytest.raises(RuntimeError, match="no topology fingerprint"):
         OptimizerShardStore(_ctx(model, optimizer)).load(str(tmp_path))
 
-    assert asked[1] is True, "this rank's own meta carried a fingerprint; only the peer's did not"
+    assert asked[3] is True, "this rank's own meta carried a fingerprint; only the peer's did not"
     assert restore.calls == []
 
 
@@ -598,7 +592,7 @@ def test_resume_applies_the_restored_schedule_lr_to_the_optimizer(tmp_path):
     scheduler = _scheduler(optimizer)
     assert optimizer.param_groups[0]["lr"] == pytest.approx(0.1), "premise: a fresh run starts at step-0 LR"
 
-    assert OptimizerShardStore(_ctx(model, optimizer, lr_scheduler=scheduler)).restore_lr_scheduler(str(tmp_path))
+    assert restore_lr_scheduler(scheduler, optimizer, str(tmp_path))
 
     assert scheduler.last_epoch == 3
     assert optimizer.param_groups[0]["lr"] == pytest.approx(trained_lr), (
@@ -626,7 +620,7 @@ def test_restored_schedule_lr_is_applied_per_param_group(tmp_path):
     optimizer = torch.optim.SGD(live_groups)
     scheduler = _scheduler(optimizer)
 
-    OptimizerShardStore(_ctx(live_model, optimizer, lr_scheduler=scheduler)).restore_lr_scheduler(str(tmp_path))
+    restore_lr_scheduler(scheduler, optimizer, str(tmp_path))
 
     assert [g["lr"] for g in optimizer.param_groups] == pytest.approx(trained)
     assert trained[0] != pytest.approx(trained[1]), "premise: the groups must carry distinct LRs"

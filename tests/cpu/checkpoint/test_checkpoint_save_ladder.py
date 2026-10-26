@@ -1,103 +1,134 @@
 #!/usr/bin/env python
 """CPU test: which saver a checkpoint context routes to.
 
-``select_checkpoint_saver`` follows one precedence exactly — PP before everything (a stage is a
-partial model), EP (incl. EP+TP / EP+CP / EP+ETP) before CP, CP before TP, TP before plain FSDP2,
-and ``None`` when no mode owns the save. A drift here silently routes a save through the wrong
-gather path, so this asserts the ROUTE — the function that will run — for every mode combination.
+``select_checkpoint_saver`` follows one precedence exactly — PEFT adapters first (unless a merged
+base or accelerate's FSDP owns the save), then PP (a stage is a partial model), standalone expert
+LoRA adapters, EP (sharded past one rank when asked, else gathered; incl. EP+TP / EP+CP) before CP,
+CP before TP, TP before plain FSDP2, and ``None`` when no mode owns the save. A drift here silently
+routes a save through the wrong gather path, so this asserts the ROUTE — the function that will
+run — for every mode combination.
 
     python tests/cpu/checkpoint/test_checkpoint_save_ladder.py
 """
 
 import pytest
 import torch.nn as nn
+from peft import LoraConfig, get_peft_model
 
-import src.distributed.checkpoint.save as save_mod
-from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.checkpoint.peft import find_peft_model
-from src.distributed.checkpoint.save import (
+import src.checkpoint.parallel.save as save_mod
+from src.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
+from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sharded_checkpoint
+from src.checkpoint.parallel.pp import save_pp_checkpoint
+from src.checkpoint.parallel.save import (
     save_checkpoint,
     save_cp_checkpoint,
-    save_ep_checkpoint,
     save_fsdp2_checkpoint,
-    save_pp_checkpoint,
     save_tp_checkpoint,
     select_checkpoint_saver,
 )
+from src.models.unwrapping import find_peft_model
+from tests.common.checkpoint_io import save_context
+from tests.common.parallelism import make_parallelism_config
+
+_PP = {"world_size": 4, "gpus_per_node": 2, "pp_size": 2}
+_CP = {"world_size": 2, "gpus_per_node": 2, "cp_size": 2}
+_TP = {"world_size": 2, "gpus_per_node": 2, "tp_size": 2}
+_TP_DP = {"world_size": 4, "gpus_per_node": 4, "tp_size": 2}
+_EP_TP = {"world_size": 4, "gpus_per_node": 4, "ep_size": 2, "tp_size": 2}
+_MERGE = {"world_size": 1, "gpus_per_node": 1, "merge_expert_lora_on_save": True}
 
 
-def _ctx(**flags) -> CheckpointContext:
-    """Build a CheckpointContext with all flags False/defaults, overridden by kwargs."""
-    base = {
-        "model": nn.Linear(2, 2),
-        "parallelism_config": None,
-        "is_pp_mode": False,
-        "is_cp_mode": False,
-        "is_tp_mode": False,
-        "is_ep_tp_mode": False,
-        "has_ep_layers": False,
-        "fsdp_wrapped": False,
-        "accelerate_manages_fsdp": False,
-        "is_save_rank": True,
-        "max_shard_size": "5GB",
-        "save_sharded_ep": False,
-        "has_expert_lora": False,
-        "merge_expert_lora_on_save": False,
-        "cp_wrapper": None,
-        "tokenizer": None,
-    }
-    base.update(flags)
-    return CheckpointContext(**base)
+class _Tiny(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(2, 2)
 
 
-# (description, flags, saver that must run) — precedence + every mode. None = nobody owns the save.
+def _ctx(topology: dict | None = None, *, peft: bool = False, **fields):
+    """A saver context on the real config of ``topology`` (one process when omitted), ``fields`` set;
+    ``peft`` hands it a PeftModel."""
+    model = get_peft_model(_Tiny(), LoraConfig(r=1, target_modules=["proj"])) if peft else _Tiny()
+    config = make_parallelism_config(**topology) if topology else None
+    return save_context(model, config, is_save_rank=True, **fields)
+
+
+_EXPERT_LORA = {"has_ep_layers": True, "has_expert_lora": True}
+
+# (description, topology, fields, saver that must run) — precedence + every mode. None = nobody owns the save.
 CASES = [
-    ("PP", {"is_pp_mode": True}, save_pp_checkpoint),
+    ("PEFT adapters", None, {"peft": True}, save_peft_adapters),
     (
-        "PP beats EP/CP/TP/FSDP2 (a stage is a partial model)",
-        {"is_pp_mode": True, "has_ep_layers": True, "is_cp_mode": True, "is_tp_mode": True, "fsdp_wrapped": True},
+        "PEFT beats PP, EP and FSDP2 (adapter-only)",
+        _PP,
+        {"peft": True, "has_ep_layers": True, "toolkit_fsdp2": True},
+        save_peft_adapters,
+    ),
+    ("PEFT under accelerate-managed FSDP falls through", None, {"peft": True, "accelerate_manages_fsdp": True}, None),
+    (
+        "PEFT with merged expert LoRA takes the EP save",
+        _MERGE,
+        {"peft": True, **_EXPERT_LORA},
+        save_ep_gathered_checkpoint,
+    ),
+    ("PP", _PP, {}, save_pp_checkpoint),
+    (
+        "PP beats expert LoRA, EP layers and FSDP2 (a stage is a partial model)",
+        _PP,
+        {**_EXPERT_LORA, "toolkit_fsdp2": True},
         save_pp_checkpoint,
     ),
-    ("EP-only", {"has_ep_layers": True}, save_ep_checkpoint),
-    ("EP+TP", {"has_ep_layers": True, "is_ep_tp_mode": True, "is_tp_mode": True}, save_ep_checkpoint),
-    ("EP+CP", {"has_ep_layers": True, "is_cp_mode": True}, save_ep_checkpoint),
-    ("EP+ETP (is_ep_tp_mode)", {"is_ep_tp_mode": True}, save_ep_checkpoint),
-    ("CP-only", {"is_cp_mode": True, "cp_wrapper": object()}, save_cp_checkpoint),
-    ("CP beats TP", {"is_cp_mode": True, "cp_wrapper": object(), "is_tp_mode": True}, save_cp_checkpoint),
-    ("CP with no live wrapper falls through", {"is_cp_mode": True}, None),
-    ("TP-only", {"is_tp_mode": True}, save_tp_checkpoint),
-    ("TP+DP (fsdp_wrapped)", {"is_tp_mode": True, "fsdp_wrapped": True}, save_tp_checkpoint),
-    ("FSDP2 dense", {"fsdp_wrapped": True}, save_fsdp2_checkpoint),
-    ("accelerate-managed FSDP", {"fsdp_wrapped": False, "accelerate_manages_fsdp": True}, None),
-    ("plain / DDP", {}, None),
+    ("expert LoRA adapters", None, _EXPERT_LORA, save_expert_lora_adapters),
+    ("expert LoRA beats EP+TP", _EP_TP, _EXPERT_LORA, save_expert_lora_adapters),
+    ("merged expert LoRA takes the EP save", _MERGE, _EXPERT_LORA, save_ep_gathered_checkpoint),
+    ("EP-only", None, {"has_ep_layers": True}, save_ep_gathered_checkpoint),
+    ("EP+TP", _EP_TP, {"has_ep_layers": True}, save_ep_gathered_checkpoint),
+    ("EP+CP", _CP, {"has_ep_layers": True}, save_ep_gathered_checkpoint),
+    ("EP+TP before its layers are found (EP group + TP mode)", _EP_TP, {}, save_ep_gathered_checkpoint),
+    ("CP-only", _CP, {"cp_wrapper": object()}, save_cp_checkpoint),
+    ("CP with no live wrapper falls through", _CP, {}, None),
+    ("TP-only", _TP, {}, save_tp_checkpoint),
+    ("TP+DP (toolkit FSDP2)", _TP_DP, {"toolkit_fsdp2": True}, save_tp_checkpoint),
+    ("FSDP2 dense", None, {"toolkit_fsdp2": True}, save_fsdp2_checkpoint),
+    ("accelerate-managed FSDP", None, {"accelerate_manages_fsdp": True}, None),
+    ("plain / DDP", None, {}, None),
 ]
 
 
-@pytest.mark.parametrize("desc,flags,expected", CASES)
-def test_ladder_routes_each_mode(desc, flags, expected):
-    saver = select_checkpoint_saver(_ctx(**flags))
+@pytest.mark.parametrize("desc,topology,fields,expected", CASES)
+def test_ladder_routes_each_mode(desc, topology, fields, expected):
+    saver = select_checkpoint_saver(_ctx(topology, **fields))
     assert saver is expected, f"{desc}: routed to {getattr(saver, '__name__', saver)}"
 
 
-@pytest.mark.parametrize("desc,flags,expected", CASES)
-def test_save_checkpoint_reports_whether_a_mode_owned_the_save(desc, flags, expected, monkeypatch):
+@pytest.mark.parametrize("desc,topology,fields,expected", CASES)
+def test_save_checkpoint_reports_whether_a_mode_owned_the_save(desc, topology, fields, expected, monkeypatch):
     """The bool the trainers branch on: False sends ``save_model`` to the base Trainer, and a mode
     that owns the save must never return it — under TP the base save gathers every DTensor from the
     one rank it runs on and then barriers the WORLD, hanging the job."""
     ran = []
     for name in (
+        "save_peft_adapters",
         "save_pp_checkpoint",
-        "save_ep_checkpoint",
+        "save_expert_lora_adapters",
+        "save_ep_sharded_checkpoint",
+        "save_ep_gathered_checkpoint",
         "save_cp_checkpoint",
         "save_tp_checkpoint",
         "save_fsdp2_checkpoint",
     ):
         monkeypatch.setattr(save_mod, name, lambda ctx, out, _n=name: ran.append(_n))
 
-    handled = save_checkpoint(_ctx(**flags), "/never/written")
+    handled = save_checkpoint(_ctx(topology, **fields), "/never/written")
 
     assert handled is (expected is not None), desc
     assert ran == ([expected.__name__] if expected is not None else []), desc
+
+
+@pytest.mark.parametrize("world_size, expected", [(2, save_ep_sharded_checkpoint), (1, save_ep_gathered_checkpoint)])
+def test_a_sharded_ep_save_needs_more_than_one_rank(world_size, expected, monkeypatch):
+    """``save_sharded_ep`` picks the per-rank shards; one rank has nothing to shard and gathers."""
+    monkeypatch.setattr(save_mod, "get_global_world_size", lambda: world_size)
+    assert select_checkpoint_saver(_ctx(has_ep_layers=True, save_sharded_ep=True)) is expected
 
 
 def test_find_peft_model_none_for_plain_module():

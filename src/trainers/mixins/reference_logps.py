@@ -15,7 +15,7 @@ from datasets import Dataset
 
 from src.checkpoint.atomic import atomic_torch_save
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.distributed.checkpoint.coordination import consensus_read
+from src.checkpoint.parallel.reading import consensus_read
 from src.runtime.collectives import barrier_on_exit
 from src.runtime.consensus import DeferredRankFailure, rank_consensus, reject_across_ranks, reject_divergent_settings
 from src.runtime.filesystem import is_fs_save_rank

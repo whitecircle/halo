@@ -1,7 +1,9 @@
-"""Hand-built collectives over the default group: the backend's tensor device, barriers, broadcasts
-and fixed-order group creation."""
+"""Hand-built collectives over the default group: the backend's tensor device, barriers, broadcasts,
+fixed-order group creation and the rank-0 combine of per-rank Python objects."""
 
+from collections.abc import Callable
 from contextlib import contextmanager
+from typing import Any, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -12,6 +14,8 @@ from src.runtime.ranks import has_process_group, is_multi_rank_run
 
 # NCCL has no 16-bit-integer type; such tensors ride the wire as a lossless uint8 bit view.
 _NCCL_UNSUPPORTED_DTYPES = (torch.int16, torch.uint16)
+
+_Combined = TypeVar("_Combined")
 
 
 def collective_device(group: dist.ProcessGroup | None = None) -> torch.device:
@@ -68,3 +72,40 @@ def build_groups(rank_lists: list[list[int]], *, mine: int, what: str) -> dist.P
     if my_group is None:
         raise RuntimeError(f"Rank {dist.get_rank()} was not assigned a {what} (index {mine}).")
     return my_group
+
+
+def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined], *, what: str) -> _Combined:
+    """COLLECTIVE: ``combine`` every rank's ``payload`` on rank 0 and return the result on every rank.
+
+    Rank 0 gathers, combines and broadcasts the one result; an all-gather would leave every rank holding
+    one payload per rank of something only the result needs. The combine's failure travels in the result's
+    place, so it raises on every rank. Without a process group, ``combine([payload])``.
+    """
+    if not has_process_group():
+        return combine([payload])
+
+    # Non-None on rank 0 alone, as ``gather_object`` requires.
+    gathered: list[Any] | None = [None] * dist.get_world_size() if dist.get_rank() == 0 else None
+    dist.gather_object(payload, gathered, dst=0)
+
+    # Any exception, not just the one the combine raises on purpose: one escaping rank 0 here would leave
+    # every peer in the next collective until the watchdog fires.
+    outcome: list[Any] = [None]
+    if gathered is not None:
+        try:
+            outcome[0] = combine(gathered)
+        except Exception as failure:
+            # Re-boxed because the failure travels by pickle and only its message is load-bearing.
+            outcome[0] = (
+                failure
+                if type(failure) is RuntimeError
+                else RuntimeError(f"merging {what} failed on rank 0: {type(failure).__name__}: {failure}")
+            )
+    dist.broadcast_object_list(outcome, src=0)
+
+    combined = outcome[0]
+    if isinstance(combined, RuntimeError):
+        raise combined
+    if combined is None:
+        raise RuntimeError(f"the merge of {what} never reached this rank: rank 0 broadcast no verdict.")
+    return combined

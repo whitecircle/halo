@@ -153,7 +153,6 @@ class _Fsdp2SaveTrainer:
     save_model = DistributedTrainerMixin.save_model
     _write_model_payload = DistributedTrainerMixin._write_model_payload
     _checkpoint_context = DistributedTrainerMixin._checkpoint_context
-    _persist_router_balancing_biases = DistributedTrainerMixin._persist_router_balancing_biases
     _find_cp_wrapper = DistributedTrainerMixin._find_cp_wrapper
     _get_tp_rank = DistributedTrainerMixin._get_tp_rank
     _mark_model_save_collectives_done = DistributedTrainerMixin._mark_model_save_collectives_done

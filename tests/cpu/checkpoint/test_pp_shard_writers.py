@@ -16,8 +16,8 @@ NVLink domain spans nine OS nodes, and launch nodes running several stages.
 
 import pytest
 
-from src.distributed.checkpoint import save as save_mod
-from src.distributed.checkpoint.save import is_pp_shard_writer
+from src.checkpoint.parallel import pp as pp_mod
+from src.checkpoint.parallel.pp import is_pp_shard_writer
 from tests.common.parallelism import make_parallelism_config
 
 
@@ -69,7 +69,7 @@ def test_non_shared_fs_writes_one_shard_per_node(world_size, gpus_per_node, pp_s
     writers = []
     for rank, config in enumerate(configs):
         # is_local_main_process() reads the launcher's LOCAL_RANK; emulate each rank's view.
-        monkeypatch.setattr(save_mod, "is_local_main_process", lambda r=rank: r % gpus_per_node == 0)
+        monkeypatch.setattr(pp_mod, "is_local_main_process", lambda r=rank: r % gpus_per_node == 0)
         if is_pp_shard_writer(config, shared_fs=False):
             writers.append(config)
     assert len(writers) == n_nodes, f"every node needs its own checkpoint, got {len(writers)} of {n_nodes}"
@@ -107,7 +107,7 @@ def test_a_launch_node_running_several_stages_writes_each_of_them(
     configs = _configs(world_size, gpus_per_node, pp_size, gpus_per_node)
     writers = []
     for rank, config in enumerate(configs):
-        monkeypatch.setattr(save_mod, "is_local_main_process", lambda r=rank: r % launch_node == 0)
+        monkeypatch.setattr(pp_mod, "is_local_main_process", lambda r=rank: r % launch_node == 0)
         if is_pp_shard_writer(config, shared_fs=False):
             writers.append(rank)
     for node in range(world_size // launch_node):

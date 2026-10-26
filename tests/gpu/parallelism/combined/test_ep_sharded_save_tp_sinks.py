@@ -11,7 +11,7 @@ Nothing downstream can repair that: ``merge_ep_shards.py`` passes non-rank-suffi
 through, so the merged checkpoint carries a truncated ``self_attn.sinks``.
 
 On 2 GPUs this builds a tiny real ``GptOssForCausalLM``, applies the real TP sink sharding over a
-real 2-rank ``tp`` mesh, saves with ``save_ep_model(sharded=True)``, and asserts the written shard
+real 2-rank ``tp`` mesh, saves with ``save_ep_sharded_checkpoint``, and asserts the written shard
 holds every head's sink at its pre-shard value. (No EP layers are needed — the sinks travel the
 non-expert path either way, which is the seam under test; that keeps this hermetic: no model
 download, no DeepEP.)
@@ -32,8 +32,9 @@ from safetensors.torch import load_file
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import GptOssConfig, GptOssForCausalLM
 
-from src.distributed.checkpoint.ep_save import save_ep_model
+from src.checkpoint.parallel.ep import save_ep_sharded_checkpoint
 from src.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
+from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log
@@ -109,7 +110,7 @@ def run(ctx) -> dict:
         shutil.rmtree(save_dir, ignore_errors=True)
     ctx.barrier()
 
-    save_ep_model(model, save_dir, sharded=True)
+    save_ep_sharded_checkpoint(save_context(model), save_dir)
     ctx.barrier()
 
     # Only rank 0 writes the non-expert params, so only it can check them. Verdict travels back

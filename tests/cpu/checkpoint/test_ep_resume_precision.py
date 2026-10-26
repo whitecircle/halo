@@ -13,6 +13,7 @@ gloo ranks with a CPU mesh, so their sharded attention is compared whole.
 
 import datetime
 import re
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,11 +29,11 @@ import src.model_loading.parallel.cp as cp_loading
 import src.model_loading.parallel.loader as model_loading
 import src.model_loading.parallel.tp as tp_loading
 import src.model_loading.parallel.whole_model as whole_model
+from src.checkpoint.parallel.resume_weights import load_resume_weights
+from src.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
 from src.checkpoint.reading import StreamingCheckpointReader, load_full_state_dict
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
-from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
+from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, built_from_checkpoint, weights_read_from
+from src.checkpoint.writing import normalize_gathered_state_dict
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
@@ -45,6 +46,7 @@ from src.model_loading.parallel.loader import _load_ep_model, _load_pp_stage_mod
 from src.model_loading.parallel.model_source import ModelSource
 from src.model_loading.parallel.tp import load_ep_tp_model, load_tp_moe_model
 from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import TINY_MOE_FAMILIES
 
@@ -117,7 +119,7 @@ def _checkpoint(tmp_path, family, *, stored_fp32=True, tied=False, legacy_bin=Fa
         output_dir,
         is_save_rank=True,
         max_shard_size="64KB",
-        keep_live_dtype=True,
+        normalize=partial(normalize_gathered_state_dict, model, keep_live_dtype=True),
     )
     state = load_full_state_dict(output_dir)
     if stored_fp32:
@@ -561,23 +563,11 @@ def test_pp_resume_reload_of_a_constructed_stage_writes_exactly_its_values(
             if name in mapped:
                 tensor.zero_()
 
-    context = CheckpointLoadContext(
-        model=stage,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=SimpleNamespace(pp_size=PP_SIZE, pp_rank=pp_rank, tp_size=1, cp_size=1),
-        is_pp_mode=True,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=True,
-        fsdp_wrapped=False,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=None,
-        super_load_optimizer_and_scheduler=None,
+    pc = SimpleNamespace(
+        pp_size=PP_SIZE, pp_rank=pp_rank, tp_size=1, cp_size=1, is_pp_mode=True, is_cp_mode=False, is_tp_mode=False
     )
     # The read the resume skips; a best-model load takes it unconditionally.
-    CheckpointLoader(context).load_model(path, for_best_model=True)
+    load_resume_weights(load_context(stage, pc, has_ep_layers=True), path, for_best_model=True)
 
     reloaded = stage.state_dict()
     assert reloaded.keys() == constructed.keys()

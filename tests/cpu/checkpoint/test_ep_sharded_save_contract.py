@@ -30,8 +30,9 @@ from safetensors.torch import save_file
 
 from src.checkpoint import reading
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
+from src.checkpoint.parallel.ep import save_ep_sharded_checkpoint
 from src.checkpoint.reading import checkpoint_shard_files, header_nbytes, reject_partial_checkpoint
-from src.distributed.checkpoint.ep_save import _save_ep_sharded
+from tests.common.checkpoint_io import save_context
 from tests.common.ep_stubs import StubEPLayerBase
 
 PartialState()  # the EP save logs through accelerate's logger
@@ -90,7 +91,7 @@ def test_index_total_size_counts_the_bytes_actually_written(tmp_path):
     model = _stub_model()
     live_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
 
-    _save_ep_sharded(model, str(tmp_path))
+    save_ep_sharded_checkpoint(save_context(model, is_save_rank=True), str(tmp_path))
 
     with open(tmp_path / SAFETENSORS_INDEX_FILE) as f:
         index = json.load(f)
@@ -108,8 +109,8 @@ def test_a_per_rank_shard_is_one_file_and_the_save_says_so(tmp_path, caplog):
     user believing a cap applied. The save writes one file and reports the knob it does not read."""
     model = _stub_model()
 
-    with caplog.at_level(logging.INFO, logger="src.distributed.checkpoint.ep_save"):
-        _save_ep_sharded(model, str(tmp_path), max_shard_size="1KB")
+    with caplog.at_level(logging.INFO, logger="src.checkpoint.parallel.ep"):
+        save_ep_sharded_checkpoint(save_context(model, is_save_rank=True, max_shard_size="1KB"), str(tmp_path))
 
     assert _shard_files(tmp_path) == ["model-00000-of-00001.safetensors"], "one shard per rank, cap or no cap"
     assert any("save_max_shard_size" in record.getMessage() for record in caplog.records), (

@@ -6,7 +6,7 @@ The predicate gates resume paths inside rank-0 decision/broadcast patterns, so a
 strand peer ranks in the collective; the downstream read-consensus surfaces the torn checkpoint
 with the real cause).
 
-``load_full_state_dict`` reads the SAME file on every rank (``CheckpointLoader`` TP resume calls it
+``load_full_state_dict`` reads the SAME file on every rank (``load_resume_weights``' TP resume calls it
 world-wide after a rank-0 readability probe). It must therefore parse the index exactly once and
 diagnose a torn one explicitly, instead of asking the tolerant predicate and then re-opening the
 file for an unguarded ``json.load`` that surfaces a bare ``JSONDecodeError`` from whichever rank
@@ -23,6 +23,7 @@ import torch
 from safetensors.torch import save_file
 
 from src.checkpoint.format import EP_SHARDED_FORMAT, ep_sharded_index_metadata
+from src.checkpoint.parallel.reading import reject_ep_sharded_resume
 from src.checkpoint.reading import (
     ep_sharded_checkpoint_reason,
     is_ep_sharded_checkpoint,
@@ -98,15 +99,19 @@ def test_load_full_state_dict_rejects_per_rank_shards(tmp_path):
 
 
 def test_every_ep_sharded_refusal_gives_one_reason(tmp_path):
-    """The resume reader and the tools' gate refuse the same artifact, so they tell the user one thing."""
+    """The resume reader, the resume refusal and the tools' gate refuse the same artifact, so they tell the
+    user one thing."""
     payload = json.dumps({"metadata": {"format": "ep_sharded"}, "weight_map": {"w": "model-00001.safetensors"}})
     checkpoint_dir = _write_index(tmp_path, payload)
-    with pytest.raises(ValueError) as resume:
+    with pytest.raises(ValueError) as read:
         load_full_state_dict(checkpoint_dir)
+    with pytest.raises(ValueError) as resume:
+        reject_ep_sharded_resume(checkpoint_dir)
     with pytest.raises(ValueError) as tool:
         reject_partial_checkpoint(checkpoint_dir)
 
-    assert str(resume.value) == str(tool.value) == ep_sharded_checkpoint_reason(checkpoint_dir)
+    reason = ep_sharded_checkpoint_reason(checkpoint_dir)
+    assert str(read.value) == str(resume.value) == str(tool.value) == reason
     assert "per-rank sharded checkpoint" in str(tool.value) and "merge_ep_shards" in str(tool.value)
 
 

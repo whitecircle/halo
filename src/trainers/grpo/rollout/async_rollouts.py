@@ -26,7 +26,7 @@ from trl.extras.profiling import profiling_context
 
 from src.checkpoint.atomic import atomic_torch_save
 from src.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_filename
-from src.distributed.checkpoint.coordination import consensus_read
+from src.checkpoint.parallel.reading import consensus_read
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import RolloutManager, ray_init_kwargs
 from src.runtime.collectives import broadcast_from_rank0

@@ -25,16 +25,15 @@ from peft import LoraConfig, get_peft_model
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 
-from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
-from src.distributed.checkpoint.peft import PeftAdapterSaver
-from src.distributed.checkpoint.save import save_checkpoint, save_resume_adapter
+from src.checkpoint.parallel.adapters import save_resume_adapter
+from src.checkpoint.parallel.optimizer import OptimizerShardStore
+from src.checkpoint.parallel.save import save_checkpoint
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create_mixed_precision_policy_v2
 from src.model_loading.dtype import cast_parameters_to_run_dtype
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from tests.common.checkpoint_io import shard_store_context
+from tests.common.checkpoint_io import save_context, shard_store_context
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 from tests.common.equivalence.revisions import (
     RAISED,
@@ -115,27 +114,15 @@ ARTIFACT_CASES = tuple(
 )
 
 
-def _context(model, *, training: bool, **flags) -> CheckpointContext:
-    fields = {
-        "model": model,
-        "parallelism_config": make_parallelism_config(world_size=1, gpus_per_node=1),
-        "is_pp_mode": False,
-        "is_cp_mode": False,
-        "is_tp_mode": False,
-        "is_ep_tp_mode": False,
-        "has_ep_layers": False,
-        "fsdp_wrapped": False,
-        "accelerate_manages_fsdp": False,
-        "is_save_rank": True,
-        "max_shard_size": "5GB",
-        "save_sharded_ep": False,
-        "has_expert_lora": False,
-        "merge_expert_lora_on_save": False,
-        "cp_wrapper": None,
-        "tokenizer": word_level_tokenizer(),
-        "training_checkpoint": training,
-    }
-    return CheckpointContext(**(fields | flags))
+def _context(model, parallelism_config=None, *, training: bool, **fields):
+    return save_context(
+        model,
+        parallelism_config,
+        is_save_rank=True,
+        tokenizer=word_level_tokenizer(),
+        training_checkpoint=training,
+        **fields,
+    )
 
 
 def _shard(model, mesh: DeviceMesh, dtype: torch.dtype, ignored: Iterable = ()) -> None:
@@ -166,16 +153,19 @@ def _save_case(case: ArtifactCase, directory: Path, mesh: DeviceMesh) -> None:
         torch.manual_seed(ADAPTER_SEED)
         randomize_adapters(model)
         _shard(model, mesh, dtype)
-        PeftAdapterSaver().save(_context(model, training=training, fsdp_wrapped=True), model, str(directory))
+        save_checkpoint(_context(model, training=training, toolkit_fsdp2=True), str(directory))
         return
     if case.mode in ("fsdp2", "cp_fsdp2"):
         _shard(model, mesh, dtype)
+    config = None
     if case.mode == "fsdp2":
-        flags = {"fsdp_wrapped": True}
+        flags = {"toolkit_fsdp2": True}
     elif case.mode in CP_MODES:
-        flags = {"is_cp_mode": True, "cp_wrapper": unpatched_cp_wrapper(model)}
+        config = make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2)
+        flags = {"cp_wrapper": unpatched_cp_wrapper(model)}
     elif case.mode == "tp":
-        flags = {"is_tp_mode": True}
+        config = make_parallelism_config(world_size=2, gpus_per_node=2, tp_size=2)
+        flags = {}
     else:
         expert_lora = ExpertLoraSpec(r=8, alpha=16.0) if case.mode in EXPERT_LORA_MODES else None
         ep_config = single_process_ep_config(expert_lora=expert_lora, fp32_router=dtype != torch.float32)
@@ -185,19 +175,21 @@ def _save_case(case: ArtifactCase, directory: Path, mesh: DeviceMesh) -> None:
             randomize_adapters(model)
         ep_params = [param for _, layer in named_ep_layers(model) for param in layer.parameters()]
         _shard(model, mesh, dtype, ignored=() if case.mode == "ep1" else ep_params)
-        flags = {
-            "has_ep_layers": True,
-            "has_expert_lora": expert_lora is not None,
-            "merge_expert_lora_on_save": case.mode == "ep_expert_lora_merged",
-            "parallelism_config": make_parallelism_config(world_size=1, gpus_per_node=1, expert_lora=expert_lora),
-        }
-    ctx = _context(model, training=training, **flags)
+        config = make_parallelism_config(
+            world_size=1,
+            gpus_per_node=1,
+            expert_lora=expert_lora,
+            merge_expert_lora_on_save=case.mode == "ep_expert_lora_merged",
+        )
+        flags = {"has_ep_layers": True, "has_expert_lora": expert_lora is not None}
+    ctx = _context(model, config, training=training, **flags)
     if not save_checkpoint(ctx, str(directory)):
         raise RuntimeError(f"no saver owns the {case.mode} save")
     if training and case.mode == "ep_expert_lora_merged":
         save_resume_adapter(ctx, str(directory))
     if training and case.mode in FULL_WEIGHT_MODES:
-        _save_optimizer_shards(model, ctx.parallelism_config, directory)
+        # The shards record the one-process topology they are written on, whichever mode the save took.
+        _save_optimizer_shards(model, make_parallelism_config(world_size=1, gpus_per_node=1), directory)
 
 
 @contextlib.contextmanager

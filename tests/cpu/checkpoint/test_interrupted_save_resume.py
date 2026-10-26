@@ -70,6 +70,9 @@ class _StateNeverWritten(TrainerState):
 class _ShardSaveStopped:
     """Stands in for ``OptimizerShardStore.save``, stopping the way a preemption would."""
 
+    def __init__(self, writes_shards: bool):
+        self.writes_shards = writes_shards
+
     def save(self, output_dir):
         raise _Preempted("optimizer shard save stopped (simulated preemption)")
 
@@ -104,7 +107,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
                 fh.write(b"new run")
 
     def _optimizer_store(self):
-        return _ShardSaveStopped()
+        return _ShardSaveStopped(self._fsdp_wrapped)
 
     def _persist_trainer_sidecars(self, checkpoint_dir):
         pass

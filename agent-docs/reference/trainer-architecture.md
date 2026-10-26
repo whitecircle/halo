@@ -500,21 +500,22 @@ accelerate-managed FSDP v1 does not create dynamic subclasses and is unaffected.
 
 ## Checkpoint save and load
 
-Weight save/load lives in `src/distributed/checkpoint/`. `save_model()` builds a
-`CheckpointContext` snapshot (the one place trainer internals are read) and hands it to
-`save_checkpoint()`, whose `select_checkpoint_saver()` ladder returns the per-mode `CheckpointSaver`
-(`None` = fall through to `Trainer.save_model`). The ladder reads rank-uniform config only, so every
-rank picks the identical saver.
+Weight saves and loads live in `src/checkpoint/parallel/`.
+`save_model()` builds a `CheckpointContext` snapshot (`CheckpointContext.capture`, the one place
+trainer internals are read) and hands it to `save_checkpoint()`, which writes the tokenizer and runs
+the `CheckpointSaver` its `select_checkpoint_saver()` ladder picks — PEFT and expert-LoRA adapters
+included (`None` = fall through to `Trainer.save_model`). The ladder reads rank-uniform state only,
+so every rank picks the identical saver.
 
-Weight resume is driven by `CheckpointLoader` and the per-rank optimizer shards by
-`OptimizerShardStore`, both built over the mixin's `_checkpoint_load_context()` (the
-`_load_from_checkpoint` / `_load_optimizer_and_scheduler` / `_load_best_model` hooks are thin
-delegators).
+Weight resume goes through `load_resume_weights()` and the per-rank optimizer shards through
+`OptimizerShardStore` (`src/checkpoint/parallel/`), both over the mixin's `_checkpoint_load_context()`;
+where `load_resume_weights()` declines, `_load_from_checkpoint` runs the base Trainer's own load, and
+`_load_best_model` routes through it too.
 
-Around it the mixin keeps the non-weight parts of a checkpoint: `_save_checkpoint` (which defers
-`save_total_limit` rotation until the new checkpoint is complete),
-`_persist_lr_scheduler_for_resume`, and `_persist_router_balancing_biases` /
-`_restore_router_balancing_biases` for the `router_balancing_biases.pt` sidecar.
+Around it the mixin orchestrates the non-weight parts of a checkpoint: `_save_checkpoint` (which
+defers `save_total_limit` rotation until the new checkpoint is complete, and lets the shard store
+replace the base's `optimizer.pt`), and the LR-scheduler and `router_balancing_biases.pt` sidecars of
+`src/checkpoint/parallel/sidecars.py`.
 `_persist_trainer_sidecars` is a trainer's own hook, called on every rank before rotation, and
 `_restore_trainer_sidecars` its read-back, called on every rank of a resume (never a best-model
 load). The shared reference mixin overrides the write for DPO/KTO and offline GRPO's `reference_logps.pt`.

@@ -47,7 +47,7 @@ by write throughput on one rank rather than by host RAM.
 The parallel-write escape hatch covers the flagship pure-EP layouts only. `save_sharded_ep` requires
 a single EP group spanning all ranks (`ep_group_size == world_size`, exactly what
 `ep16`/`ep32`/`ep64 --ep_scope=global` run) and a shared output filesystem on multi-node.
-`validate_ep_sharded_save` refuses replicated-EP layouts (multiple EP groups), ETP, CP and expert
+`reject_unmergeable_ep_sharded_save` refuses replicated-EP layouts (multiple EP groups), ETP, CP and expert
 LoRA. Dense, FSDP2, CP and TP have no parallel-write mode at all.
 
 `merge_ep_shards.py` reassembles the artifact, streaming group by group: peak host RAM is one merged

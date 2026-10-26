@@ -35,8 +35,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-import src.distributed.checkpoint.optimizer as optimizer_mod
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
+import src.checkpoint.parallel.optimizer as optimizer_mod
+from src.checkpoint.parallel.optimizer import OptimizerShardStore
 from src.runtime.filesystem import fs_aware_makedirs
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from tests.common.checkpoint_io import (

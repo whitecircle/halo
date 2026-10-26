@@ -4,6 +4,7 @@ wrapped tree as plain hub-model ones. Rank-local.
 
 import torch
 from accelerate.utils import extract_model_from_parallel, is_peft_model
+from peft import PeftModel
 
 # The module level a ``PeftModel`` inserts above the base model, in live names and saved adapter
 # keys alike, and the one ``UlyssesModel`` inserts (its ``_toolkit_inner_model_attr``).
@@ -110,3 +111,34 @@ def strip_cp_attention_level(key: str) -> str:
     gathered saves, the pipeline stage shard, PEFT adapters) must apply it, or ``from_pretrained`` leaves the
     attention weights randomly initialized."""
     return key.replace(f".{CP_ATTENTION_INNER_ATTR}.", ".")
+
+
+def plain_adapter_key(key: str) -> str:
+    """Strip CP-wrapper key-path artifacts (extra ``model.`` level, ``.original_attention.``) from
+    a single adapter key so it loads onto a non-CP model.
+
+    Not :func:`plain_module_name`: that maps MODULE paths to the plain hub tree and
+    drops the PEFT prefix entirely, while adapter keys must KEEP it and additionally carry the
+    attention-wrapper artifact and the shallower ``modules_to_save`` lm_head depth handled below.
+    """
+    new_key = strip_cp_attention_level(key)
+    if new_key.startswith("model.model."):
+        new_key = new_key[len("model.") :]
+    elif "base_model.model.model.model." in new_key:
+        new_key = new_key.replace("base_model.model.model.model.", "base_model.model.model.")
+    elif new_key.startswith("base_model.model.model.lm_head."):
+        # A ``modules_to_save`` lm_head sits ABOVE the backbone — one fewer ``model.`` level
+        # than the backbone keys the rule above collapses. A plain key can never spell lm_head
+        # at this depth (plain is ``base_model.model.lm_head.``), so the collapse is unambiguous
+        # and the normalization stays idempotent.
+        new_key = new_key.replace("base_model.model.model.lm_head.", "base_model.model.lm_head.", 1)
+    return new_key
+
+
+def find_peft_model(model) -> PeftModel | None:
+    """Find a PeftModel in the (already-unwrapped) model hierarchy."""
+    if isinstance(model, PeftModel):
+        return model
+    if hasattr(model, "model"):
+        return find_peft_model(model.model)
+    return None

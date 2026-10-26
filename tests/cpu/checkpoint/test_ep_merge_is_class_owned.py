@@ -7,7 +7,7 @@ gather override) and still be rejected by ``save_sharded_ep=True`` despite a per
 layout.
 
 The property pinned here: a family that declares its layout in its OWN layer module is merge-supported
-immediately — no edit to ``expert_weights.py``, ``ep_save.py`` or ``merge_ep_shards.py``. The
+immediately — no edit to ``expert_weights.py``, ``checkpoint/parallel/ep.py`` or ``merge_ep_shards.py``. The
 synthetic family below is registered at test time and must be supported end to end.
 
 Run: pytest tests/cpu/checkpoint/test_ep_merge_is_class_owned.py
@@ -21,7 +21,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.checkpoint.ep_save import _check_ep_merge_family_supported
+from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from src.distributed.expert_parallel import expert_weights as ew
 from src.distributed.expert_parallel.expert_weights import (
     resolve_ep_merge_layer_class,
@@ -131,9 +131,17 @@ def test_declaring_both_per_expert_attributes_is_rejected_at_class_creation():
                 return hidden_states
 
 
-def _fake_model(model_type):
+def _fake_model(model_type, layer_cls):
+    """A ``model_type`` root holding one ``layer_cls`` layer on a single-rank EP group; the heavy layer
+    ``__init__`` (process groups, DeepEP buffers) is skipped, since the sharded-save gate reads only the
+    topology and the expert-LoRA predicate."""
+    layer = layer_cls.__new__(layer_cls)
+    nn.Module.__init__(layer)
+    layer.ep_config = SimpleNamespace(expert_tp_size=1, ep_group_size=1, num_ep_groups=1)
+    layer._expert_lora_attrs = ()
     model = nn.Module()
     model.config = SimpleNamespace(model_type=model_type, auto_map=None)
+    model.mlp = layer
     return model
 
 
@@ -142,7 +150,7 @@ def test_new_family_is_merge_supported_with_no_shared_file_edit(new_family):
     construction-time ``save_sharded_ep`` gate accepts it, and it lists as supported."""
     assert resolve_ep_merge_layer_class("some_new_moe") is new_family
     assert "some_new_moe" in supported_ep_merge_model_types()
-    _check_ep_merge_family_supported(_fake_model("some_new_moe"))  # must not raise
+    reject_unmergeable_ep_sharded_save(_fake_model("some_new_moe", new_family), world_size=1)  # must not raise
 
 
 def test_new_family_merge_output_equals_its_own_gathered_save(new_family):

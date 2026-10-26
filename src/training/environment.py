@@ -19,11 +19,9 @@ import torch.distributed as dist
 from accelerate.logging import get_logger
 from transformers import set_seed
 
-from src.checkpoint.adapters import has_adapter_weight_file, missing_resume_adapter_reason, resume_adapter_dir
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
-from src.checkpoint.reading import has_whole_model_weight_file, is_ep_sharded_checkpoint
+from src.checkpoint.parallel.resume_source import resolve_resume_checkpoint, resolve_resume_weights_source
 from src.data.pipeline.processing import ensure_cache_dir
-from src.distributed.checkpoint.coordination import resolve_resume_checkpoint
 from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from src.kernels.jit_cache import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
 from src.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME
@@ -206,92 +204,6 @@ def detect_resume_checkpoint(training_config) -> str | None:
         if not getattr(training_config, "overwrite_output_dir", False):
             _validate_output_dir_across_ranks(training_config.output_dir)
     return checkpoint
-
-
-def _checkpoint_has_full_model_weights(checkpoint: str) -> bool:
-    """Whether ``checkpoint`` holds directly-loadable full model weights.
-
-    A sharded EP save reuses the index filename but holds only partial tensors, and that rejection
-    takes precedence over any whole-model file beside it: a directory carrying both is a gathered
-    save torn by a later sharded one, so its gathered half is stale.
-    """
-    return has_whole_model_weight_file(checkpoint) and not is_ep_sharded_checkpoint(checkpoint)
-
-
-def _classify_resume_checkpoint(checkpoint: str) -> str:
-    """Classify a resume checkpoint as ``"merged_adapter"`` (a ``merge_expert_lora_on_save`` or
-    injected-LoRA embedding checkpoint, resumed from its resume adapter), ``"merged_adapter_missing"``
-    (marked, but that adapter directory holds no adapter file), ``"full"`` (loadable weights),
-    ``"adapter"`` (adapter-only), or ``"invalid"`` (none of these, e.g. an unmerged sharded save). Pure
-    function of the on-disk layout.
-
-    The merged class is read off the marker its save writes last, never inferred from the files
-    beside it: its weights are as loadable as a full fine-tune's. Both adapter spellings count
-    (:func:`~src.checkpoint.adapters.has_adapter_weight_file`): ``PeftAdapterSaver`` falls back to
-    ``adapter_model.bin``, and the loader restores either."""
-    merged_adapter_dir = resume_adapter_dir(checkpoint)
-    if merged_adapter_dir is not None:
-        return "merged_adapter" if has_adapter_weight_file(merged_adapter_dir) else "merged_adapter_missing"
-    if _checkpoint_has_full_model_weights(checkpoint):
-        return "full"
-    if has_adapter_weight_file(checkpoint):
-        return "adapter"
-    return "invalid"
-
-
-def resolve_resume_weights_source(checkpoint: str | None, model_config, parallelism_config) -> str:
-    """The ``model_name_or_path`` the policy model should load weights from on resume.
-
-    The Trainer's loader skips the checkpoint weight reload under the EP wrappers (their fused params
-    cannot ingest HF-format keys) and CP, and a TP model constructed from the checkpoint skips the
-    re-read entirely, so those resumes return the checkpoint dir. Under the default
-    ``use_grouped_gemm`` that covers every torchrun resume, dense included.
-
-    ``model_config`` is left unchanged so reference/teacher models and the dataset-compat check still
-    resolve the base path. No-resume, adapter-only and merged-with-resume-adapter cases return the
-    base, onto which the resume restores the adapter; a merged checkpoint's own weights already hold
-    that delta, so building from them would apply it twice. A checkpoint that is neither loadable nor
-    an adapter raises, since training would otherwise continue from the base weights. Decided on
-    rank 0 and broadcast for FS-agnostic consistency.
-    """
-    base = model_config.model_name_or_path
-    if checkpoint is None:
-        return base
-    # TP is listed on its own rather than riding on ``needs_ep_wrappers`` (true only via
-    # ``use_grouped_gemm``), so turning that knob off still leaves TP resume working.
-    if not (parallelism_config.needs_ep_wrappers or parallelism_config.is_cp_mode or parallelism_config.is_tp_mode):
-        return base
-
-    decision = _classify_resume_checkpoint(checkpoint) if is_global_main_process() else None
-    decision = broadcast_from_rank0(decision)
-
-    if decision == "invalid":
-        raise ValueError(
-            f"Cannot resume {parallelism_config.mode_string or 'EP/CP'} training from '{checkpoint}': "
-            f"it has no directly-loadable full weights (model.safetensors[.index.json] / "
-            f"pytorch_model.bin) and no adapter checkpoint (adapter_model.safetensors/.bin). "
-            f"The EP/CP checkpoint loader skips "
-            f"the weight reload, so training would silently continue from BASE weights. If this is a "
-            f"sharded EP checkpoint, merge it first (scripts/after_training/merge_ep_shards.py) and "
-            f"resume from the merged directory."
-        )
-    if decision == "merged_adapter_missing":
-        # Before the policy load, which would build the whole base only for the loader to refuse.
-        raise ValueError(missing_resume_adapter_reason(checkpoint))
-    if decision == "full":
-        if is_global_main_process():
-            logger.info(
-                f"EP/CP resume: loading policy weights from checkpoint '{checkpoint}' "
-                f"(the Trainer checkpoint loader skips the EP/CP weight reload)."
-            )
-        return checkpoint
-    if decision == "merged_adapter" and is_global_main_process():
-        logger.info(
-            f"Resume: '{checkpoint}' holds merged weights for serving; the policy loads the base "
-            f"'{base}' and the resume restores the checkpoint's resume adapter onto it."
-        )
-    # "adapter" / "merged_adapter": frozen base stays at model_name_or_path; the resume restores the adapter.
-    return base
 
 
 def prepare_distributed_resume(training_config, model_config, parallelism_config) -> tuple[str | None, str]:

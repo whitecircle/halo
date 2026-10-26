@@ -18,7 +18,6 @@ import torch.nn as nn
 from accelerate.logging import get_logger
 from peft import PeftModel
 
-from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_rules import reject_accelerate_launch
@@ -35,6 +34,7 @@ from src.models.moe_balancing import (
     mark_router_logits_forced_off,
 )
 from src.models.peft_adapters import tuner_adapter_param_ids
+from src.models.unwrapping import find_peft_model
 
 logger = get_logger(__name__)
 
@@ -405,7 +405,7 @@ class ParallelismValidationMixin:
         the end of training.
 
         Pure TP reloads through ``distribute_tensor`` into the live DTensor placements
-        (:meth:`~src.distributed.checkpoint.loader.CheckpointLoader._load_streamed`). TP+DP composes
+        (:func:`~src.checkpoint.parallel.resume_weights.load_resume_weights`). TP+DP composes
         FSDP2 over TP, whose 2-D placement ``distribute_tensor`` does not invert for packed
         projections, so its loader refuses every reload except the constructed-from-checkpoint skip.
         """

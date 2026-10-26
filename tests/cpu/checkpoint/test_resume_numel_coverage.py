@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.checkpoint.loader import resume_numel_coverage
+from src.checkpoint.parallel.resume_weights import resume_numel_coverage
 
 
 class _MoEish(nn.Module):

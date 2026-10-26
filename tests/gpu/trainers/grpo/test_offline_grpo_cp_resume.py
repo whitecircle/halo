@@ -17,6 +17,7 @@ import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.checkpoint.reading import load_full_state_dict
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
@@ -33,7 +34,6 @@ from src.models.attention.gpt_oss_sinks import (
 from src.optimizers.adamw_bf16 import AdamWBF16
 from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main

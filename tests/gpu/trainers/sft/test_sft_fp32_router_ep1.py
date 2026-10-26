@@ -34,13 +34,13 @@ from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 from trl import SFTConfig
 
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.checkpoint.reading import load_full_state_dict
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
-from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import (
     RestorePointSnapshot,
     ResumeCapture,

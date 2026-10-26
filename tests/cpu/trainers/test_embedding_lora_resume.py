@@ -72,6 +72,7 @@ from transformers import (
 from transformers.trainer_utils import rotate_checkpoints
 from trl import ModelConfig
 
+import src.checkpoint.parallel.adapters as peft_mod
 import src.trainers.embedding.trainer as embedding_module
 import src.trainers.mixins.checkpointing as checkpointing_mod
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
@@ -86,13 +87,13 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
 )
+from src.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
+from src.checkpoint.parallel.resume_weights import resume_numel_coverage
 from src.checkpoint.reading import resolve_checkpoint_weights
 from src.configs.embedding import EmbeddingConfig
-from src.distributed.checkpoint.loader import resume_numel_coverage
 from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime import filesystem
 from src.trainers.embedding.trainer import EmbeddingTrainer
-from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
 from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.embedding_lora_resume import backbone_prefix
@@ -207,6 +208,7 @@ def _host(model) -> EmbeddingTrainer:
     """The trainer methods under test over ``model``, without the trainer's construction."""
     host = object.__new__(EmbeddingTrainer)
     host.model = model
+    host.parallelism_config = ParallelismConfig()
     return host
 
 
@@ -334,7 +336,7 @@ def test_the_final_export_is_a_serving_artifact_without_resume_state(run):
 def test_the_marker_sends_the_policy_load_to_the_base(run, use_grouped_gemm):
     """The fold is as loadable as a full fine-tune's weights; building from it and restoring the
     adapters would apply the delta twice. The default ``use_grouped_gemm`` takes the classifier."""
-    assert _classify_resume_checkpoint(run.checkpoint) == "merged_adapter"
+    assert classify_resume_weights(run.checkpoint) == "merged_adapter"
     model_config = SimpleNamespace(model_name_or_path=run.base)
     config = ParallelismConfig(use_grouped_gemm=use_grouped_gemm)
     assert resolve_resume_weights_source(run.checkpoint, model_config, config) == run.base
@@ -474,15 +476,20 @@ def test_a_resume_adapter_for_another_adapter_layout_is_refused(run, tmp_path, l
 
 
 @pytest.mark.parametrize("lora", [{"lora_alpha": 2 * LORA_ALPHA}, {"use_rslora": True}], ids=["other-alpha", "rslora"])
-def test_a_resume_under_another_lora_scaling_is_refused(run, tmp_path, lora):
+def test_a_resume_under_another_lora_scaling_is_refused(run, tmp_path, lora, monkeypatch):
     """The adapters would restore by name and shape and every delta would be rescaled: the scaling the
-    run saved with is recorded beside its resume adapter and held to the live one."""
+    run saved with is recorded beside its resume adapter and held to the live one, through the same
+    collective read the adapter restore of every other run uses, which reads the file once."""
+    reads = []
+    real_read = peft_mod.read_adapter_file
+    monkeypatch.setattr(peft_mod, "read_adapter_file", lambda path: reads.append(path) or real_read(path))
     trainer = _trainer(_lora_model(run.base, seed=2, **lora), tmp_path / "out")
     before = snapshot_trainable(trainer.model)
 
     with pytest.raises(ValueError, match="another LoRA scaling"):
         trainer._load_from_checkpoint(run.checkpoint)
     assert all(torch.equal(value, before[key]) for key, value in snapshot_trainable(trainer.model).items())
+    assert len(reads) == 1, f"the resume adapter was read {len(reads)} times through the shared read"
 
 
 def test_a_resume_adapter_without_its_recorded_scaling_is_refused(run, tmp_path):
@@ -777,7 +784,6 @@ def test_lora_outside_the_backbone_is_refused_at_construction(run, tmp_path):
 def _wrapped_host(model: SentenceTransformer, *, fsdp: bool) -> EmbeddingTrainer:
     host = _host(model)
     host._fsdp_wrapped = fsdp
-    host.parallelism_config = ParallelismConfig()
     return host
 
 
@@ -820,7 +826,7 @@ def test_a_save_over_a_marked_directory_leaves_no_stale_marker(run, tmp_path, mo
     _copy(run.checkpoint, checkpoint)
     _trainer(SentenceTransformer(run.base, device="cpu"), tmp_path / "out", max_steps=SAVE_AT_STEP).train()
     assert resume_adapter_dir(str(checkpoint)) is None
-    assert _classify_resume_checkpoint(str(checkpoint)) == "full"
+    assert classify_resume_weights(str(checkpoint)) == "full"
 
     torn = tmp_path / "torn" / f"checkpoint-{SAVE_AT_STEP}"
     _copy(run.checkpoint, torn)
@@ -855,7 +861,7 @@ def test_a_bf16_conversion_keeps_the_resume_state_and_resumes_like_its_source(ru
 
     convert_to_bf16(run.checkpoint, out, "base")
 
-    assert _classify_resume_checkpoint(out) == "merged_adapter"
+    assert classify_resume_weights(out) == "merged_adapter"
     source_adapter = os.path.join(run.checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE)
     with (
         open(source_adapter, "rb") as source,
@@ -901,13 +907,13 @@ def test_a_new_base_built_from_the_checkpoint_carries_none_of_its_resume_state(r
 
     for out in (patched, merged_adapter, merged):
         assert _resume_state(out) == [], f"{out.name} carries its source run's resume state"
-        assert _classify_resume_checkpoint(str(out)) == "full"
+        assert classify_resume_weights(str(out)) == "full"
 
 
 # --- full fine-tune -------------------------------------------------------------------------
 
 
-def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path):
+def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path, monkeypatch):
     """Every save writes the backbone's names, so the loader a full fine-tune resumes through must
     hold the backbone: handed the SentenceTransformer (``0.<module>.*``) it matches none of them, and
     the FSDP2 / TP reloads refuse the checkpoint at their coverage gate. The optimizer store keeps the
@@ -918,7 +924,12 @@ def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path):
     checkpoint = str(tmp_path / "out" / f"checkpoint-{SAVE_AT_STEP}")
     trainer = _trainer(SentenceTransformer(base, device="cpu"), tmp_path / "resumed")
 
-    loader_model = trainer._checkpoint_loader().ctx.model
+    contexts = []
+    monkeypatch.setattr(
+        embedding_module, "load_resume_weights", lambda ctx, *args, **kwargs: contexts.append(ctx) or True
+    )
+    trainer._load_from_checkpoint(checkpoint)
+    loader_model = contexts[0].model
     covered, unmatched, _matched, _total = resume_numel_coverage(
         loader_model, resolve_checkpoint_weights(checkpoint).key_set()
     )

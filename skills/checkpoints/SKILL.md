@@ -31,7 +31,7 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
 
 - **Resume: set `resume_from_checkpoint: true` (or a `checkpoint-N` path) and re-run the same
   command; leave `model_name_or_path` at the base.** The scripts repoint the policy's weights at the
-  checkpoint themselves (`resolve_resume_weights_source`, `src/training/environment.py`) under
+  checkpoint themselves (`resolve_resume_weights_source`, `src/checkpoint/parallel/resume_source.py`) under
   EP/ETP/EP+TP/EP+CP/CP/TP and, at the default `use_grouped_gemm: true`, every run, dense included
   (an adapter-only checkpoint, and a merged one — `merge_expert_lora_on_save` or embedding LoRA —
   through its `resume_adapter.json` marker, keeps the base and restores the adapter). The base keeps feeding the
@@ -48,7 +48,7 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
   `load_full_state_dict`; DDP and accelerate-managed FSDP via the base Trainer loader).
   A model built from anything but the checkpoint (a custom
   script) makes the loader **refuse the resume** under EP/CP and TP+DP rather than continue on the base
-  weights (`loader.py`); only an adapter-only checkpoint, which ships no base weights to check
+  weights (`load_resume_weights`); only an adapter-only checkpoint, which ships no base weights to check
   against, still resumes quietly. A merge-on-save checkpoint inverts the check: it refuses a model
   built from its own merged weights (the delta would apply twice), and an unmarked merged checkpoint
   under an adapter run raises. `load_best_model_at_end` is refused for a full fine-tune under CP, on
@@ -68,7 +68,7 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
 | TP-only | loadable | — (no per-rank TP save) | use directly |
 | EP — every family (each layer class in `src/distributed/expert_parallel/layers/` declares its own `HF_MODEL_TYPES`; read them there, and `supported_ep_merge_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
 | CP / EP+CP | loadable | **rejected** — `save_sharded_ep` raises under Ulysses attention | use gathered directly |
-| ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — plain `ep2` on 8, or EP+TP with `ep_size < world_size`), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), a load that converted names the merge cannot respell (Step-3.7 Flash, a vendor namespace, a SigLIP tower), PP, multi-node non-shared output FS | loadable | **rejected at construction** (`validate_ep_sharded_save`, re-checked at save; PP by the pipeline gate) | use gathered directly |
+| ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — plain `ep2` on 8, or EP+TP with `ep_size < world_size`), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), a load that converted names the merge cannot respell (Step-3.7 Flash, a vendor namespace, a SigLIP tower), PP, multi-node non-shared output FS | loadable | **rejected at construction** (`reject_unmergeable_ep_sharded_save`, re-checked at save; PP by the pipeline gate) | use gathered directly |
 | PP | per-stage parts + merged index under the hub's names, loadable and servable as the EP-gathered save | — | use directly |
 
 Extra normalizers: **`convert_to_bf16.py`** (fp32→bf16, keeps norms fp32), **`quantize_to_lowp.py`**
@@ -112,16 +112,17 @@ python -c "import json; ix=json.load(open('<out>/model.safetensors.index.json'))
 
 `agent-docs/reference/checkpoints.md` is the documented behavior — check it first. The code is the **ultimate**
 authority: when a doc, this skill, `reference.md`, or memory disagrees with the code — or you are unsure —
-read the actual file before you assert or act. Save/load orchestration lives in
-`src/distributed/checkpoint/` — `save.py` (the mode ladder + per-mode save,
-incl. PP), `write.py` (the shared streaming writer every gathered save funnels through),
-`loader.py` (every resume path), `fingerprint.py` (the optimizer-shard topology gate),
-`optimizer.py` (the per-rank optimizer shards + LR scheduler), `peft.py` (`restore_adapters`),
-`context.py` (the trainer-state snapshot, mode flags included, the savers and loader read),
-`coordination.py` (the rank consensus shared by the resume paths).
+read the actual file before you assert or act. Saving and resuming live in `src/checkpoint/parallel/`.
+Saves: `save.py` (the flat saver ladder, the tokenizer write, the streamed FSDP2/CP/TP rungs), `ep.py`
+(the EP gathered and sharded saves), `pp.py` (the PP stage saves and their resume), `adapters.py` (the PEFT
+and expert-LoRA adapter saves, `restore_adapters`), `writing.py` (the shared streaming writer every gathered
+save funnels through), `context.py` (the trainer-state snapshots the savers and the resume read).
+Resumes: `resume_weights.py` (`load_resume_weights`, every weight resume path), `resume_source.py` (which
+checkpoint, which weights), `optimizer.py` / `optimizer_meta.py` (the per-rank optimizer shards and their
+topology gate), `sidecars.py` (LR scheduler, router balancing biases), `completeness.py` (completion
+markers), `reading.py` (the rank consensus reads shared by the resume paths).
 Per-mode mechanics:
-`src/distributed/checkpoint/ep_save.py`, `src/distributed/expert_parallel/expert_weights.py`,
-`src/distributed/checkpoint/tp_save.py`, `src/checkpoint/` (`format.py` the shared on-disk names, `reading.py` the
+`src/distributed/expert_parallel/expert_weights.py`, `src/checkpoint/` (`format.py` the shared on-disk names, `reading.py` the
 layout cascade and raw reads, `hub_layout.py` the hub's tensor names on save, `config_export.py` the config
 contract, `adapters.py` the saved-PEFT shape, `adapter_merge.py` the shared `merge_adapter_into_base`,
 `sidecars.py` the training sidecars, `offline_export.py` the tool-side model directory, `atomic.py` the staged,

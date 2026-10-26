@@ -688,7 +688,7 @@ def load_ep_model_lazy(
     # its own experts, and its expert range decides which keys it fuses and how long each slice is. A
     # torn shard, a checkpoint short of one rank's experts, an OOM in the fuse — each raises on that
     # rank alone while its peers sit in the collective below until the NCCL watchdog fires, blaming
-    # the collective for a disk error. Same discipline as the save side (see checkpoint.ep_save.save_ep_model).
+    # the collective for a disk error. Same discipline as the save side (save_ep_gathered_checkpoint).
     guard = DeferredRankFailure(f"EP lazy load from {model_name_or_path}")
     masters = guard.run(lambda: fp32_master_param_keys(model, ep_config, keep_non_ep=keep_fp32_params)) or frozenset()
     # Before the fusion replaces parameters: the coverage check groups tied aliases by identity.

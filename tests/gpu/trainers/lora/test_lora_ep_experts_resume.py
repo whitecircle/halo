@@ -129,7 +129,7 @@ def run(ctx) -> dict:
     corrupted = gather_ep_lora_adapters(unwrapped)
     corrupt_differs = any(not torch.equal(adapters_saved[k].cpu(), corrupted[k].cpu()) for k in adapters_saved)
 
-    trainer._load_from_checkpoint(checkpoint)  # CheckpointLoader.load_model -> restore_adapters
+    trainer._load_from_checkpoint(checkpoint)  # load_resume_weights -> restore_adapters
     trainer._load_optimizer_and_scheduler(checkpoint)
     restored = gather_ep_lora_adapters(unwrapped)
 

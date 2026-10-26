@@ -44,9 +44,9 @@ from src.checkpoint.format import (
     ROUTER_BALANCING_BIASES_FILE,
     WEIGHT_FILE_IGNORE_PATTERNS,
     prefetch_pending_filename,
-    write_resume_adapter_marker,
 )
 from src.checkpoint.offline_export import copy_checkpoint_aux_files
+from tests.common.checkpoint_io import mark_resume_adapter
 
 SKIPPED = (
     "model.safetensors",
@@ -174,7 +174,7 @@ def test_a_merged_checkpoint_resume_adapter_travels_with_the_sidecars(tmp_path, 
     save_file(
         {"a.experts.down_proj.lora_A": torch.ones(2, 2)}, str(src / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE)
     )
-    write_resume_adapter_marker(str(src))
+    mark_resume_adapter(str(src))
     (src / "config.json").write_text("{}")
     out = tmp_path / "out"
     out.mkdir()

@@ -17,7 +17,8 @@ background upload of the directory as it stands, waits for the complete checkpoi
 
 The trainer here is a stub over ``BaseTrainerSave``, HF's save in its own order (the checkpoint
 directory, optimizer.pt/.bin, the trainer state, then the real rotation — rotation-last being the
-hazard under test), and a recording shard writer stands in for ``OptimizerShardStore.save``.
+hazard under test), and the real ``OptimizerShardStore`` writes the shards, recording the window its
+write begins in.
 
     python tests/cpu/checkpoint/test_checkpoint_rotation_ordering.py
 """
@@ -32,21 +33,31 @@ import torch.nn as nn
 from transformers import TrainerState
 from transformers.trainer_utils import rotate_checkpoints
 
-import src.distributed.checkpoint.optimizer as optimizer_mod
+import src.checkpoint.parallel.optimizer as optimizer_mod
 import src.trainers.mixins.checkpointing as checkpointing_mod
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
+from src.checkpoint.parallel.optimizer import OptimizerShardStore
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
+from tests.common.checkpoint_io import load_context
 
 OPTIMIZER_FILES = ("optimizer.pt", "optimizer.bin")
 
 
-class _RecordingShardWriter:
-    """Stands in for OptimizerShardStore.save: records what the world looked like at
-    shard-write time (the preemption window under test), then writes the shard + meta files."""
+def _stepped_store_context(*, fsdp_wrapped: bool = True):
+    """A load context over a live model+optimizer that holds state to save."""
+    model = nn.Linear(4, 4)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+    model.weight.grad = torch.zeros_like(model.weight)
+    optimizer.step()
+    return load_context(model, optimizer=optimizer, fsdp_wrapped=fsdp_wrapped)
 
-    def __init__(self, trainer, fail=False):
+
+class _RecordingStore(OptimizerShardStore):
+    """The real shard store, recording what the world looked like when its write began (the preemption
+    window under test)."""
+
+    def __init__(self, trainer, *, fsdp_wrapped: bool, fail: bool):
+        super().__init__(_stepped_store_context(fsdp_wrapped=fsdp_wrapped))
         self.trainer = trainer
         self.fail = fail
 
@@ -60,10 +71,7 @@ class _RecordingShardWriter:
                 os.path.isdir(os.path.join(self.trainer.run_dir, "checkpoint-1")),
             )
         )
-        with open(os.path.join(output_dir, "optimizer_shard_00000.pt"), "wb") as fh:
-            fh.write(b"shard")
-        with open(os.path.join(output_dir, "optimizer_meta.pt"), "wb") as fh:
-            fh.write(b"meta")
+        super().save(output_dir)
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
@@ -79,8 +87,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
         )
         self._fsdp_wrapped = fsdp_wrapped
         self.lr_scheduler = None
-        # ``store``: the REAL OptimizerShardStore, for the cases whose verdict is its own.
-        self._shard_writer = store or _RecordingShardWriter(self, fail=fail_shards)
+        self._shard_store = store or _RecordingStore(self, fsdp_wrapped=fsdp_wrapped, fail=fail_shards)
 
     def save_model(self, output_dir=None, _internal_call=False):
         """The base save's first step, recording the rotation limit the base save runs under."""
@@ -110,7 +117,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
         )
 
     def _optimizer_store(self):
-        return self._shard_writer
+        return self._shard_store
 
     def _checkpoint_context(self):
         return "checkpoint context"
@@ -228,29 +235,7 @@ def test_the_checkpoint_push_uploads_the_complete_checkpoint(tmp_path, monkeypat
 
 
 def _real_store_over_a_stepped_optimizer() -> OptimizerShardStore:
-    """The production writer over a live model+optimizer — no stub in the path under test."""
-    model = nn.Linear(4, 4)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-    model.weight.grad = torch.zeros_like(model.weight)
-    optimizer.step()
-    noop = lambda *args, **kwargs: None  # noqa: E731 — the base-Trainer fallbacks are never reached here
-    return OptimizerShardStore(
-        CheckpointLoadContext(
-            model=model,
-            optimizer=optimizer,
-            lr_scheduler=None,
-            parallelism_config=None,
-            is_pp_mode=False,
-            is_cp_mode=False,
-            is_tp_mode=False,
-            has_ep_layers=False,
-            fsdp_wrapped=True,
-            tp_rank=0,
-            tp_size=1,
-            super_load_from_checkpoint=noop,
-            super_load_optimizer_and_scheduler=noop,
-        )
-    )
+    return OptimizerShardStore(_stepped_store_context())
 
 
 def test_an_unproducible_optimizer_state_keeps_the_previous_checkpoint(tmp_path, monkeypatch):

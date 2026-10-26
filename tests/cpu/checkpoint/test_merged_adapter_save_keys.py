@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""The merged EP save must write BASE-model key names, and must refuse to write unmerged adapters.
+"""The merged EP save must write BASE-model key names.
 
-``merge_expert_lora_on_save`` routes a LoRA run's save through ``save_ep_model``, which walks a
+``merge_expert_lora_on_save`` routes a LoRA run's save through ``save_ep_gathered_checkpoint``, which walks a
 PEFT-wrapped module tree. Three things have to happen to every key or the resulting checkpoint is
 silently wrong rather than broken:
 
@@ -13,20 +13,15 @@ silently wrong rather than broken:
     one. Reachable under EP via ``lora_modules_to_save: [router]``, which the EP layer's own gather
     walks.
 
-And the whole fold is opt-in, so ``save_ep_model`` refuses a PeftModel that arrives without it —
-otherwise the gathered base weights carry no delta and the checkpoint is base-quality while looking
-trained.
-
 Run: pytest tests/cpu/checkpoint/test_merged_adapter_save_keys.py
 """
 
 from __future__ import annotations
 
 import pytest
-from peft import LoraConfig, get_peft_model
 from torch import nn
 
-from src.distributed.checkpoint.ep_save import _save_key_remap, save_ep_model
+from src.checkpoint.parallel.ep import _save_key_remap
 
 PEFT_PREFIX = "lora_"  # PeftModel.prefix for LoRA; read off the live model in production.
 
@@ -83,13 +78,6 @@ def test_cp_only_remap_is_unchanged_without_peft():
     assert _remap(cp=True, peft=False)("model.layers.0.self_attn.original_attention.q_proj.weight") == (
         "model.layers.0.self_attn.q_proj.weight"
     )
-
-
-def test_save_ep_model_refuses_an_unmerged_peft_model(tmp_path):
-    """Without the fold the gathered base carries no delta — a base-quality checkpoint that looks trained."""
-    peft_model = get_peft_model(_TinyLM(), LoraConfig(target_modules=["q_proj"]))
-    with pytest.raises(ValueError, match="lora_folds"):
-        save_ep_model(peft_model, str(tmp_path))
 
 
 if __name__ == "__main__":

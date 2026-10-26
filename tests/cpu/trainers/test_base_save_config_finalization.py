@@ -104,33 +104,25 @@ class _Trainer(CheckpointingMixin, _BaseTrainer):
         self.model.config = types.SimpleNamespace(model_type=BAILING)
         self.model._name_or_path = ""
         self._pristine_special_token_ids = []
-
-    def _persist_router_balancing_biases(self, output_dir):
-        pass
+        self.parallelism_config = types.SimpleNamespace(is_pp_mode=False)
 
     def _top_level_model(self):
         # The mixin reshards FSDP2 modules before writing; a bare Module makes that a no-op here.
         return torch.nn.Module()
 
     def _checkpoint_context(self):
-        return types.SimpleNamespace(
-            model=self.model,
-            tokenizer=None,
-            has_expert_lora=False,
-            merge_expert_lora_on_save=False,
-            accelerate_manages_fsdp=False,
-        )
+        return types.SimpleNamespace(model=self.model, tokenizer=None)
 
 
 def test_the_base_save_path_finalizes_the_config_it_just_wrote(tmp_path, monkeypatch):
     """The wiring, end to end: no parallelism strategy claims the save, so the base Trainer writes —
     and the mixin owes that directory the same three rewrites the parallel writers apply."""
     module = "src.trainers.mixins.checkpointing"
-    monkeypatch.setattr(f"{module}.find_peft_model", lambda model: None)
     # False = no parallelism strategy claimed the write, so the base Trainer's save runs.
     monkeypatch.setattr(f"{module}.save_checkpoint", lambda ctx, output_dir: False)
     monkeypatch.setattr(f"{module}.fs_aware_makedirs", lambda path: Path(path).mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr(f"{module}.restore_special_token_ids", lambda ids: None)
+    monkeypatch.setattr(f"{module}.save_balancing_biases", lambda *args, **kwargs: None)
 
     trainer = _Trainer(str(tmp_path))
     trainer.save_model()

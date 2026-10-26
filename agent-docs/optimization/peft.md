@@ -401,8 +401,8 @@ disables entropy logging.
 
 ## Checkpoint saving
 
-`save_model()` saves only adapter weights (~MB). `PeftAdapterSaver` (`src/distributed/checkpoint/peft.py`)
-handles every mixin-managed mode. Two routes bypass it: an accelerate-managed FSDP run, where the base
+`save_model()` saves only adapter weights (~MB). `save_peft_adapters` (`src/checkpoint/parallel/adapters.py`),
+the saver ladder's first rung, handles every mixin-managed mode. Two routes bypass it: an accelerate-managed FSDP run, where the base
 Trainer's save owns the sharded layout, and `merge_expert_lora_on_save`, which goes through the gathered EP
 save instead. Per mode:
 
@@ -410,7 +410,7 @@ save instead. Per mode:
   gathered across the EP group into the same adapter file. Pure ETP carries attention adapters only;
   expert LoRA raises at `expert_tp_size > 1`.
 
-    An **expert-only** run has no PEFT model at all, so `save_ep_checkpoint` writes the adapter with a
+    An **expert-only** run has no PEFT model at all, so `save_expert_lora_adapters` writes the adapter with a
     synthesized config instead: `peft_type: EXPERT_LORA`, the base model path, and every field the delta
     depends on (`r`, `lora_alpha`, `lora_dropout`, `use_rslora`, `expert_projections`).
 
@@ -441,7 +441,7 @@ holding `.experts.<attr>.lora_{A,B}` keys is refused too.
 
 **Resume:** EP/CP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
 from the checkpoint's `adapter_model.safetensors` (a merged checkpoint's `resume_adapter/`; not from the base reload) by
-`restore_adapters` (`src/distributed/checkpoint/peft.py`), which `CheckpointLoader` calls. Resuming expert adapters into a run that does not build them (EP off,
+`restore_adapters` (`src/checkpoint/parallel/adapters.py`), which `load_resume_weights` calls. Resuming expert adapters into a run that does not build them (EP off,
 `use_grouped_gemm: false`, or the expert projections dropped from `lora_target_modules`) raises rather than
 discarding them. So does a changed LoRA scaling: resume compares the scaling inputs the saved
 `adapter_config.json` records (`lora_alpha`, `use_rslora`, `use_dora`, `alpha_pattern`, and the expert

@@ -1210,7 +1210,7 @@ def test_expert_lora_reaches_validation_through_the_builder():
 
     The PP rejection keys on this field, so an assignment made after ``__post_init__`` sails past
     every validator: the run then trains to completion and its PP save writes only frozen base
-    weights, because the EP export skips the adapter keys and ``PeftAdapterSaver`` never engages
+    weights, because the EP export skips the adapter keys and ``save_peft_adapters`` never engages
     (expert-only LoRA leaves no attention ``PeftModel`` to find). Nothing errors, at any point.
     """
     spec = ExpertLoraSpec(r=8, alpha=16.0)

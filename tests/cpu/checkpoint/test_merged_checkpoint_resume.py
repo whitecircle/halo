@@ -35,10 +35,10 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, TrainerState
 
-import src.distributed.checkpoint.ep_save as saving_mod
-import src.distributed.checkpoint.loader as loader_mod
-import src.distributed.checkpoint.peft as peft_mod
-import src.distributed.checkpoint.save as save_mod
+import src.checkpoint.parallel.adapters as peft_mod
+import src.checkpoint.parallel.ep as saving_mod
+import src.checkpoint.parallel.resume_weights as loader_mod
+import src.checkpoint.parallel.save as save_mod
 import src.trainers.mixins.checkpointing as checkpointing_mod
 from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE, resume_adapter_dir
 from src.checkpoint.format import (
@@ -46,18 +46,17 @@ from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     SAFETENSORS_WEIGHTS_FILE,
-    write_resume_adapter_marker,
 )
+from src.checkpoint.parallel.adapters import restore_adapters, save_resume_adapter
+from src.checkpoint.parallel.context import CheckpointLoadContext
+from src.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
+from src.checkpoint.parallel.resume_weights import load_resume_weights
 from src.checkpoint.reading import load_full_state_dict
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
-from src.distributed.checkpoint.loader import CheckpointLoader
-from src.distributed.checkpoint.peft import restore_adapters
-from src.distributed.checkpoint.save import save_resume_adapter
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.training.environment import _classify_resume_checkpoint, resolve_resume_weights_source
 from tests.common.base_save import BaseTrainerSave
+from tests.common.checkpoint_io import load_context, mark_resume_adapter, save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
 from tests.common.peft_helpers import randomize_adapters
@@ -101,9 +100,10 @@ class _TokenizerSpy:
 class _ExpertLoraLayer(StubEPLayerBase):
     """An EP layer carrying native grouped expert LoRA, as an expert-only adapter run builds it."""
 
-    def __init__(self):
+    def __init__(self, spec: ExpertLoraSpec | None = None):
         super().__init__()
         self._expert_lora_attrs = frozenset({"gate_up_proj"})
+        self.ep_config = SimpleNamespace(expert_lora=spec)
 
 
 class _ExpertOnlyModel(nn.Module):
@@ -141,23 +141,15 @@ def _tiny_peft_model(
     return get_peft_model(model, LoraConfig(r=4, lora_alpha=lora_alpha, target_modules=list(target_modules)))
 
 
-def _save_context(model, *, tokenizer=None) -> CheckpointContext:
-    return CheckpointContext(
-        model=model,
-        parallelism_config=SimpleNamespace(expert_lora=SPEC),
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        is_ep_tp_mode=False,
+def _save_context(model, *, tokenizer=None):
+    config = make_parallelism_config(world_size=1, gpus_per_node=1, expert_lora=SPEC, merge_expert_lora_on_save=True)
+    return save_context(
+        model,
+        config,
         has_ep_layers=True,
-        fsdp_wrapped=True,
-        accelerate_manages_fsdp=False,
+        toolkit_fsdp2=True,
         is_save_rank=True,
-        max_shard_size="5GB",
-        save_sharded_ep=False,
         has_expert_lora=True,
-        merge_expert_lora_on_save=True,
-        cp_wrapper=None,
         tokenizer=tokenizer,
     )
 
@@ -167,29 +159,12 @@ def _merged_checkpoint(path, *, marked: bool) -> str:
     os.makedirs(path, exist_ok=True)
     save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(path, SAFETENSORS_WEIGHTS_FILE))
     if marked:
-        write_resume_adapter_marker(str(path))
+        mark_resume_adapter(str(path))
     return str(path)
 
 
 def _load_context(model) -> CheckpointLoadContext:
-    def unreachable(*args, **kwargs):
-        raise AssertionError("the EP/CP skip path must not fall through to the base Trainer loader")
-
-    return CheckpointLoadContext(
-        model=model,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=True,
-        fsdp_wrapped=True,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=unreachable,
-        super_load_optimizer_and_scheduler=unreachable,
-    )
+    return load_context(model, has_ep_layers=True, fsdp_wrapped=True)
 
 
 def _built_from(model: nn.Module, source: str) -> nn.Module:
@@ -202,8 +177,8 @@ def _built_from(model: nn.Module, source: str) -> nn.Module:
 
 
 def test_expert_only_resume_adapter_is_the_standalone_adapter_save(tmp_path, monkeypatch):
-    """Expert-only runs have no PeftModel: the resume adapter is ``save_ep_lora_adapters``' artifact."""
-    monkeypatch.setattr(saving_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    """Expert-only runs have no PeftModel: the resume adapter is ``save_expert_lora_adapters``' artifact."""
+    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
 
     save_resume_adapter(_save_context(_ExpertOnlyModel()), checkpoint)
@@ -228,12 +203,12 @@ def test_a_failed_adapter_write_leaves_no_marker(tmp_path, monkeypatch):
     """The marker is the resume's verdict, so it must never outrun its adapter: a checkpoint whose
     adapter write failed has to stay unmarked, where the loader refuses it as a merged checkpoint
     without its adapter, rather than marked and missing the file it promises."""
-    monkeypatch.setattr(saving_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
 
     def full_disk(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(saving_mod, "save_file", full_disk)
+    monkeypatch.setattr(peft_mod, "safetensors_save_file", full_disk)
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
 
     with pytest.raises(OSError, match="No space left"):
@@ -266,10 +241,10 @@ class _RunTrainer(DistributedTrainerMixin, BaseTrainerSave):
 
 def _abandoned_merged_step(run_dir: str, monkeypatch) -> str:
     """checkpoint-3 as a completed merge-on-save of a trajectory a resume then abandoned."""
-    monkeypatch.setattr(saving_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     _RunTrainer(run_dir, "abandoned")._save_checkpoint(model=None, trial=None)
     checkpoint = os.path.join(run_dir, "checkpoint-3")
-    assert _classify_resume_checkpoint(checkpoint) == "merged_adapter", "premise: the first save completed"
+    assert classify_resume_weights(checkpoint) == "merged_adapter", "premise: the first save completed"
     return checkpoint
 
 
@@ -286,7 +261,7 @@ def _assert_resaved_unmarked(checkpoint: str, *, completed: bool) -> None:
             "the stopped re-save publishes a trainer state that vouches for it"
         )
     assert resume_adapter_dir(checkpoint) is None, "the abandoned run's marker survived the re-save"
-    assert _classify_resume_checkpoint(checkpoint) == "full"
+    assert classify_resume_weights(checkpoint) == "full"
 
 
 def test_a_resave_torn_before_its_adapter_leaves_the_step_unmarked(tmp_path, monkeypatch):
@@ -300,7 +275,7 @@ def test_a_resave_torn_before_its_adapter_leaves_the_step_unmarked(tmp_path, mon
     def full_disk(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(saving_mod, "save_file", full_disk)
+    monkeypatch.setattr(peft_mod, "safetensors_save_file", full_disk)
     with pytest.raises(OSError, match="No space left"):
         _RunTrainer(str(tmp_path), "resumed")._save_checkpoint(model=None, trial=None)
 
@@ -319,7 +294,7 @@ def test_a_resave_by_a_run_that_writes_no_marker_removes_the_old_one(tmp_path, m
 
 
 def test_mixed_resume_adapter_round_trips_through_the_adapter_restore(tmp_path, monkeypatch):
-    """A mixed run's resume adapter is ``PeftAdapterSaver``'s mixed artifact, and the restore reads it
+    """A mixed run's resume adapter is ``save_peft_adapters``' mixed artifact, and the restore reads it
     back bit-equal onto fresh adapters."""
     monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     trained = _tiny_peft_model(seed=1)
@@ -370,12 +345,11 @@ class _ExpertLoraModel(_ExpertOnlyModel):
 
     def __init__(self, spec: ExpertLoraSpec):
         super().__init__()
-        self.experts = _ExpertLoraLayer()
-        self.experts.ep_config = SimpleNamespace(expert_lora=spec)
+        self.experts = _ExpertLoraLayer(spec)
 
 
 def test_the_adapter_restore_refuses_another_expert_lora_scaling(tmp_path, monkeypatch):
-    monkeypatch.setattr(saving_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     applied = _Recorder()
     monkeypatch.setattr(peft_mod, "apply_ep_lora_adapters", applied)
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
@@ -400,10 +374,10 @@ def test_the_marker_not_the_files_classifies_a_merged_checkpoint(tmp_path):
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
     os.makedirs(os.path.join(checkpoint, RESUME_ADAPTER_DIR))
     save_file(dict(EXPERT_STATE), os.path.join(checkpoint, RESUME_ADAPTER_DIR, ADAPTER_SAFETENSORS_FILE))
-    assert _classify_resume_checkpoint(checkpoint) == "full"
+    assert classify_resume_weights(checkpoint) == "full"
 
     _merged_checkpoint(checkpoint, marked=True)
-    assert _classify_resume_checkpoint(checkpoint) == "merged_adapter"
+    assert classify_resume_weights(checkpoint) == "merged_adapter"
 
 
 def test_a_marked_checkpoint_resumes_the_policy_from_the_base(tmp_path):
@@ -434,7 +408,7 @@ def test_a_marked_checkpoint_restores_its_resume_adapter_onto_the_base(tmp_path,
     monkeypatch.setattr(loader_mod, "restore_adapters", restored)
     model = _built_from(nn.Linear(4, 4), BASE)
 
-    CheckpointLoader(_load_context(model)).load_model(checkpoint, model)
+    load_resume_weights(_load_context(model), checkpoint, model)
 
     assert len(restored.calls) == 1
     (source, _model), _ = restored.calls[0]
@@ -448,7 +422,7 @@ def test_a_marked_checkpoint_refuses_a_model_built_from_its_merged_weights(tmp_p
     model = _built_from(nn.Linear(4, 4), checkpoint)
 
     with pytest.raises(ValueError, match="delta would apply twice"):
-        CheckpointLoader(_load_context(model)).load_model(checkpoint, model)
+        load_resume_weights(_load_context(model), checkpoint, model)
     assert not restored.calls
 
 
@@ -459,7 +433,7 @@ def test_a_marked_checkpoint_without_its_adapter_raises(tmp_path):
     model = _built_from(nn.Linear(4, 4), BASE)
 
     with pytest.raises(RuntimeError, match="holds no adapter file"):
-        CheckpointLoader(_load_context(model)).load_model(checkpoint, model)
+        load_resume_weights(_load_context(model), checkpoint, model)
 
 
 def test_an_unmarked_merged_checkpoint_refuses_an_adapter_run(tmp_path):
@@ -471,7 +445,7 @@ def test_an_unmarked_merged_checkpoint_refuses_an_adapter_run(tmp_path):
     _built_from(model.get_base_model(), checkpoint)
 
     with pytest.raises(ValueError, match="without its resume adapter"):
-        CheckpointLoader(_load_context(model)).load_model(checkpoint, model)
+        load_resume_weights(_load_context(model), checkpoint, model)
 
 
 def test_an_unmarked_merged_checkpoint_refuses_an_expert_only_adapter_run(tmp_path):
@@ -481,7 +455,7 @@ def test_an_unmarked_merged_checkpoint_refuses_an_expert_only_adapter_run(tmp_pa
     model = _built_from(nn.Sequential(_ExpertLoraLayer()), checkpoint)
 
     with pytest.raises(ValueError, match="without its resume adapter"):
-        CheckpointLoader(_load_context(model)).load_model(checkpoint, model)
+        load_resume_weights(_load_context(model), checkpoint, model)
 
 
 def test_an_unmarked_full_checkpoint_still_resumes_a_full_fine_tune(tmp_path):
@@ -490,7 +464,7 @@ def test_an_unmarked_full_checkpoint_still_resumes_a_full_fine_tune(tmp_path):
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
     model = _built_from(nn.Linear(4, 4), checkpoint)
 
-    CheckpointLoader(_load_context(model)).load_model(checkpoint, model)
+    load_resume_weights(_load_context(model), checkpoint, model)
 
 
 # --- the merged save leaves the run untouched ------------------------------------------------
@@ -507,7 +481,7 @@ def _trained_bf16_peft_model(**kwargs) -> PeftModel:
 def _merged_save(model: PeftModel, out_dir) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     """The real merged EP save of ``model``: what it wrote, and PEFT's own merge of a copy of ``model``."""
     expected = copy.deepcopy(model).merge_and_unload().state_dict()
-    save_mod.save_ep_checkpoint(_save_context(model), str(out_dir))
+    saving_mod.save_ep_gathered_checkpoint(_save_context(model), str(out_dir))
     return load_full_state_dict(str(out_dir)), expected
 
 
@@ -576,12 +550,12 @@ def test_the_final_export_carries_no_resume_adapter(tmp_path, monkeypatch):
     down to the merged EP write, so a resume-adapter write moved into any of it leaves the adapter
     directory the last assertion reads."""
     merged_writes, resume_writes = _Recorder(), _Recorder()
-    monkeypatch.setattr(save_mod, "save_ep_model", merged_writes)
+    monkeypatch.setattr(save_mod, "save_ep_gathered_checkpoint", merged_writes)
     monkeypatch.setattr(checkpointing_mod, "save_resume_adapter", resume_writes)
 
     _SaveModelTrainer(_save_context(_ExpertOnlyModel())).save_model(str(tmp_path / "final"))
 
-    assert merged_writes.calls and merged_writes.calls[0][1]["merge_lora"], "premise: the merged save ran"
+    assert merged_writes.calls and merged_writes.calls[0][0][0].merges_expert_lora, "premise: the merged save ran"
     assert not resume_writes.calls
     assert resume_adapter_dir(str(tmp_path / "final")) is None
 

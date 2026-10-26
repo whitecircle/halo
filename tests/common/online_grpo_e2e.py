@@ -38,12 +38,12 @@ from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import GRPOConfig
 
+from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.ep_reference import ep_layers

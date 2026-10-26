@@ -6,11 +6,12 @@ from step 0, an orphaned shard).
 
 from __future__ import annotations
 
-import json
-import os
 import re
 
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME, VIDEO_PROCESSOR_NAME
+
+from src.checkpoint.atomic import withheld_file_name
 
 # Per-file cap for gathered safetensors saves, shared by every save path and the arg default.
 DEFAULT_MAX_SHARD_SIZE = "5GB"
@@ -31,23 +32,32 @@ _EP_SHARD_FILE_RE = re.compile(
 )
 # A renaming writer's in-flight parts: outside HF's final pattern, inside the sweep's glob.
 STREAM_PART_PREFIX = "model-streaming"
+# A PP checkpoint's part names. Each stage picks its own prefix without coordinating with the other writers: a
+# global "k-of-n" counter is not derivable locally once a stage emits a variable number of parts.
+PP_WRAPPER_PART_PREFIX = "model-wrapper"
 LEGACY_WEIGHTS_FILE = "pytorch_model.bin"
 # Every filename that makes a directory a whole-model checkpoint, in the layout cascade's order.
 WHOLE_MODEL_WEIGHT_FILES = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE, LEGACY_WEIGHTS_FILE)
 
 # HF Trainer's own filenames, spelled here because ``transformers.trainer`` is a ~1 s import.
 TRAINER_STATE_FILE = "trainer_state.json"
+# Where the base save's trainer_state.json waits until every other file of the checkpoint is on disk.
+UNCOMMITTED_TRAINER_STATE_FILE = withheld_file_name(TRAINER_STATE_FILE)
 SCHEDULER_STATE_FILE = "scheduler.pt"
 # HF Trainer's replicated optimizer state, which the sharded modes deliberately replace.
 OPTIMIZER_STATE_FILES = ("optimizer.pt", "optimizer.bin")
 # Written after every rank's optimizer shard, so its presence vouches for a complete shard set.
 OPTIMIZER_META_FILE = "optimizer_meta.pt"
+# The warm-restart remedies name the per-rank optimizer shards by this glob, so every filename derives from it.
+OPTIMIZER_SHARD_GLOB = "optimizer_shard_*.pt"
 ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
 REFERENCE_LOGPS_FILE = "reference_logps.pt"
 # An output_dir entry the run keeps beside its checkpoints and never exports, like the Trainer's Hub push.
 RUN_INTERNAL_PREFIX = "_"
 REFERENCE_CACHE_DIR_NAME = f"{RUN_INTERNAL_PREFIX}reference_cache"
 INCOMPLETE_CHECKPOINTS_DIR_NAME = f"{RUN_INTERNAL_PREFIX}incomplete_checkpoints"
+# The step directories HF's own ``get_last_checkpoint`` recognizes, and no others.
+CHECKPOINT_STEP_DIR_RE = re.compile(rf"^{PREFIX_CHECKPOINT_DIR}-(\d+)$")
 PREFETCH_PENDING_PREFIX = "prefetch_pending"
 
 # PEFT's adapter filenames, spelled here because ``peft`` is a multi-second import; weights in
@@ -67,6 +77,14 @@ PROCESSOR_FILES = (PROCESSOR_NAME, IMAGE_PROCESSOR_NAME, VIDEO_PROCESSOR_NAME)
 # top of weights already holding its delta; the marker's presence alone is the resume verdict.
 RESUME_ADAPTER_DIR = "resume_adapter"
 RESUME_ADAPTER_MARKER_FILE = "resume_adapter.json"
+# The files that vouch for a checkpoint, each written last in its own half: the trainer state (and its
+# uncommitted spelling), the meta that vouches for the optimizer shard set, and the resume adapter marker.
+CHECKPOINT_COMPLETION_MARKERS = (
+    TRAINER_STATE_FILE,
+    UNCOMMITTED_TRAINER_STATE_FILE,
+    OPTIMIZER_META_FILE,
+    RESUME_ADAPTER_MARKER_FILE,
+)
 # Resume state the aux copy drops by name when it drops the resume sidecars.
 UNSUFFIXED_RESUME_ENTRIES = (TRAINER_STATE_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
 
@@ -93,6 +111,11 @@ def ep_shard_filename(rank: int, world_size: int) -> str:
     return SAFETENSORS_SHARD_PATTERN.format(suffix=f"-{rank:05d}-of-{world_size:05d}")
 
 
+def optimizer_shard_filename(rank: int) -> str:
+    """Filename of one rank's optimizer-state shard."""
+    return OPTIMIZER_SHARD_GLOB.replace("*", f"{rank:05d}")
+
+
 def prefetch_pending_filename(rank: int, world_size: int) -> str:
     """Filename of one rank's pending prefetch rounds; the world size in it keeps a resume at another
     width from reading another layout's prompts."""
@@ -115,6 +138,11 @@ def stream_part_filename(prefix: str, part_index: int) -> str:
     return f"{prefix}-{part_index:05d}.safetensors"
 
 
+def pp_stage_part_prefix(pp_rank: int, pp_size: int) -> str:
+    """The part-name prefix of pipeline stage ``pp_rank``'s checkpoint shards."""
+    return f"model-pp{pp_rank:05d}-of-{pp_size:05d}"
+
+
 def index_declares_ep_shards(index: dict) -> bool:
     """Whether a parsed safetensors index marks a per-rank EP save (a gathered or PP index carries no
     marker)."""
@@ -125,13 +153,3 @@ def index_declares_ep_shards(index: dict) -> bool:
 def ep_sharded_index_metadata(total_size: int, ep_size: int) -> dict:
     """The index ``metadata`` block a per-rank EP save writes, carrying the :data:`EP_SHARDED_FORMAT` marker."""
     return {"total_size": total_size, "ep_size": ep_size, "format": EP_SHARDED_FORMAT}
-
-
-def write_resume_adapter_marker(checkpoint_dir: str) -> None:
-    """Mark ``checkpoint_dir`` as resuming from its :data:`RESUME_ADAPTER_DIR`, not its weights.
-
-    The caller writes it only once that directory is complete, so a marked checkpoint carries its
-    adapter.
-    """
-    with open(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE), "w") as fh:
-        json.dump({"adapter_dir": RESUME_ADAPTER_DIR}, fh, indent=2)

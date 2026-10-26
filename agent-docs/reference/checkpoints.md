@@ -1,9 +1,12 @@
 # Checkpoints and Training Resume
 
-Saving and loading live in `src/distributed/checkpoint/`. The trainer's `save_model()` hands a
-`CheckpointContext` to `save_checkpoint()`, whose `select_checkpoint_saver()` ladder returns the
-per-mode saver that gathers or reconstructs the full model before writing; `CheckpointLoader` restores weights and `OptimizerShardStore` the per-rank
-optimizer shards + LR scheduler. A `PeftModel` is dispatched to `PeftAdapterSaver` ahead of the ladder.
+Saving and resuming live in `src/checkpoint/parallel/`. The trainer's `save_model()` hands a
+`CheckpointContext` (`CheckpointContext.capture`) to `save_checkpoint()`, which writes the tokenizer and
+then runs the one saver its `select_checkpoint_saver()` ladder picks — PEFT adapters, PP, expert-LoRA
+adapters, EP sharded or gathered, CP, TP, FSDP2, first match. Every saver takes `(ctx, output_dir)`. On
+resume `load_resume_weights()` restores the weights (or declines to the base Trainer's own load),
+`OptimizerShardStore` the per-rank optimizer shards, and `sidecars.py` the LR scheduler and the router
+balancing biases.
 
 The **save rank** follows the **output** side of the filesystem declaration
 (`DIST_OUTPUT_SHARED_FILESYSTEM`, falling back to the `DIST_SHARED_FILESYSTEM` umbrella, default
@@ -12,23 +15,25 @@ rank 0** writes its own copy.
 
 | Mode | Saver | Which rank saves | Collective |
 |------|-------|------------------|------------|
+| **PEFT adapters** | `save_peft_adapters` — adapter weights only ([PEFT saving](#peft-lora-saving)) | Save rank | `full_tensor()` of DTensor adapters |
 | **[PP / PP+EP](../parallelism/pipeline-parallelism.md)** | `save_pp_checkpoint` — each stage writes its own complete tensors | one writer per stage (`stage_local_rank == 0`; per node on a non-shared FS) | world-wide index exchange |
-| **EP** (incl. ETP, EP+CP, EP+TP) | `save_ep_checkpoint` → `save_ep_model()` | Save rank | EP all-gather (+ `full_tensor()` under TP) |
-| **EP sharded** | each rank writes its expert shard | All ranks | `exchange_shard_index` (gather to rank 0, broadcast back) |
+| **Expert LoRA** (adapter-only) | `save_expert_lora_adapters` — the gathered grouped adapters | Save rank | EP all-gather |
+| **EP** (incl. ETP, EP+CP, EP+TP) | `save_ep_gathered_checkpoint` | Save rank | EP all-gather (+ `full_tensor()` under TP) |
+| **EP sharded** | `save_ep_sharded_checkpoint` — each rank writes its expert shard | All ranks | `combine_across_ranks` (gather to rank 0, broadcast back) |
 | **TP** (HF-native or selective) | `save_tp_checkpoint` — reconstruct DTensors, then all-gather the hand-sliced GptOss `sinks` (which the parameter walk skips: it would emit this rank's slice under the same key) | Save rank | `DTensor.full_tensor()` |
 | **CP** | `save_cp_checkpoint` — remap Ulysses wrapper keys to HF paths | Save rank | `full_tensor()` |
 | **FSDP2** (plain torchrun DP) | `save_fsdp2_checkpoint` — stream the gathered chunks | Save rank | `full_tensor()` |
 | **Single-GPU / accelerate** (no EP layers) | no saver (the ladder returns `None`) → HF Trainer default | Main process | None |
 
 Selection reads what the model **is**, not the configured sizes. A model carrying EP layers takes
-`save_ep_checkpoint` even at `ep_size == 1` (experts replicated, FSDP2-sharded), so an ep1 MoE run
+the EP rung even at `ep_size == 1` (experts replicated, FSDP2-sharded), so an ep1 MoE run
 writes through the expert gather rather than a plain gathered write. The verdict is the same for
 every trainer.
 
 `EmbeddingTrainer` runs the same ladder with the checkpoint context re-pointed from the
 `SentenceTransformer` `nn.Sequential` at the `auto_model` backbone, then writes the ST pipeline
-config beside it. Its in-place-injected LoRA is not a `PeftModel`, so `PeftAdapterSaver` never sees
-it: that branch skips the ladder, folds the adapter into the gathered state dict and writes it
+config beside it. Its in-place-injected LoRA is not a `PeftModel`, so the PEFT rung never sees
+it: that branch skips the ladder (writing the tokenizer through the same `save_tokenizer`), folds the adapter into the gathered state dict and writes it
 through `write_gathered_checkpoint`. How it resumes, LoRA or full fine-tune:
 [Embedding — Saving](../training-methods/embedding.md#saving).
 
@@ -44,9 +49,13 @@ Under EP the same `retain` flag is threaded into each family's `gather_expert_st
 expert all-gathers stay on every rank; the layout assembly after them runs only where the result is
 kept. A family that returns tensors anyway is rejected, not obeyed.
 
-Every ladder save then **streams** through `StreamingShardWriter`: FSDP2, CP and TP via
-`stream_gathered_checkpoint`, one conversion-closed chunk (a decoder layer) at a time; EP by writing
-each MoE layer out as it is gathered.
+Every gathered save then **streams** through `stream_gathered_checkpoint`: FSDP2, CP and TP one
+conversion-closed chunk (a decoder layer) at a time, EP its non-expert tensors and then each MoE
+layer as it is gathered.
+
+The tokenizer is written once per save, before the weights (`save_tokenizer`): a save stopped after
+its index names the weight files is already loadable, and it carries the tokenizer it loads with. A
+failed tokenizer write raises on every rank.
 
 The writer never holds more than one chunk plus one pending shard, so host memory stays well under
 1× model ([measured peaks](../parallelism/expert-parallelism.md#checkpointing)). That is what makes
@@ -258,7 +267,7 @@ most exports reach it only after their weights are on disk.
   single-GPU / DDP fallback and the export tools' `save_full_checkpoint` end with.
 - **Exports built from a source directory** tag in `copy_checkpoint_aux_files`, which also covers the
   tools that carry `config.json` across as-is.
-- **Adapter saves** tag in `PeftAdapterSaver` and the EP expert-adapter writer, whichever branch
+- **Adapter saves** tag in `save_peft_adapters` and `save_expert_lora_adapters`, whichever branch
   wrote the files.
 - **TRL's per-checkpoint card** (`output_dir/README.md`, which TRL builds from its `_tag_names`
   alone) gets the tag from the checkpointing mixin's `create_model_card`.
@@ -348,7 +357,7 @@ only after `reattach_vision_tower.py` ([Qwen3.5/3.6](../models/qwen3_5.md)).
 
 ### Expert parallelism (EP, EP+TP, EP+CP)
 
-`save_ep_model()` (`src/distributed/checkpoint/ep_save.py`) owns all three, over three param
+`save_ep_gathered_checkpoint()` (`src/checkpoint/parallel/ep.py`) owns all three, over three param
 classes: EP expert weights, gathered by `gather_ep_layer_weights()` with local → global expert
 re-indexing; DTensor params (EP+TP attention, embeddings, `lm_head`, and FSDP2-sharded params such as
 the router under ep1 sharding), resolved via `full_tensor()`; and manually TP-sharded plain tensors
@@ -387,8 +396,8 @@ own loader applies. A canonical checkpoint (an EP resume of a toolkit save) load
 
 **Sharded (`save_sharded_ep: true`)** writes each rank's expert shard keyed by global rank, with
 global rank 0 adding non-expert params and the index. Because the shards are global-rank-keyed and
-`merge_ep_shards.py` needs them co-located, `validate_ep_sharded_save()` **fails fast at trainer
-construction** on any of:
+`merge_ep_shards.py` needs them co-located, `reject_unmergeable_ep_sharded_save()` **fails fast at
+trainer construction** (and again at the save) on any of:
 
 - **Multiple EP groups / DP replicas** (`ep_group_size != world_size`): replicas share an `ep_rank`
   and the same expert slice, so the merge would concatenate duplicated experts.
@@ -446,7 +455,7 @@ are on [Scripts](scripts-reference.md#post-training-scripts).
 
 Two TP implementations exist: **HF-native TP** (`tp_plan="auto"`, dense) and **DTensor TP**
 (`parallelize_module()`, the MoE attention-only path incl. EP+TP). Both place their sharded params
-as DTensors, so `save_tp_model()` (`src/distributed/checkpoint/tp_save.py`) reconstructs
+as DTensors, so `save_tp_checkpoint()` (`src/checkpoint/parallel/save.py`) reconstructs
 either with one `full_tensor()` walk.
 
 The gather is a collective every TP rank must enter, and GptOss `sinks` need the separate
@@ -472,10 +481,10 @@ the trainer's `_find_cp_wrapper()`, which finds it in both the plain and PEFT-ne
 
 ## PEFT (LoRA) saving
 
-`PeftAdapterSaver` (`src/distributed/checkpoint/peft.py`) is dispatched before the saver ladder
-except in two cases: accelerate-managed FSDP (adapters are flat-param shards there, so the base
-Trainer's save owns the layout) and `merge_expert_lora_on_save`, which wants a merged base and so
-takes the mode's saver even with adapters present. Only adapter weights are saved.
+`save_peft_adapters` (`src/checkpoint/parallel/adapters.py`) is the ladder's first rung except in two
+cases: accelerate-managed FSDP (adapters are flat-param shards there, so the base Trainer's save owns
+the layout) and `merge_expert_lora_on_save`, which wants a merged base and so takes the mode's saver
+even with adapters present. Only adapter weights are saved.
 
 | Mode | LoRA params | Saving rank | Collective |
 |------|-------------|-------------|:----------:|
@@ -499,7 +508,7 @@ the collective-free CP branch.
 
 Under EP the native grouped expert adapters are gathered across the EP group into the same
 `adapter_model.safetensors`. `merge_expert_lora_on_save` routes the save away from this path
-entirely, to `save_ep_checkpoint`'s merged gathered checkpoint (see
+entirely, to `save_ep_gathered_checkpoint`'s merged checkpoint (see
 [PEFT](../optimization/peft.md#checkpoint-saving)), whose training checkpoints still resume from their
 adapters ([Merge-on-save checkpoints](#merge-on-save-checkpoints)).
 
@@ -524,8 +533,8 @@ an external load raises instead of loading the attention half alone
 A `merge_expert_lora_on_save` checkpoint serves from its merged weights (stock `from_pretrained`)
 but cannot resume from them: the bf16 fold loses part of the delta, and the optimizer moments belong
 to the adapters. So `_save_checkpoint` adds the unmerged adapter to every training checkpoint, in
-`resume_adapter/`, through the writer the non-merged save uses (`PeftAdapterSaver` for a mixed run,
-`save_ep_lora_adapters` for expert-only). The root marker `resume_adapter.json` follows once every
+`resume_adapter/`, through the writer the non-merged save uses (`save_peft_adapters` for a mixed run,
+`save_expert_lora_adapters` for expert-only). The root marker `resume_adapter.json` follows once every
 save rank's copy is complete. Every checkpoint save first clears its step's directory of an earlier
 save's markers ([Interrupted saves](#interrupted-saves)), so a save that stops before its own adapter
 lands is unmarked rather than vouching for the abandoned run's adapter.
@@ -649,8 +658,8 @@ WandB does **not** auto-continue the same run — export `WANDB_RUN_ID` (see [Mu
 | Mode | Path | Weight loading | Optimizer | Notes |
 |------|------|----------------|-----------|-------|
 | **FSDP2** (standard DP) | A at `use_grouped_gemm: false`, else B | Path A: `load_full_state_dict()` → `ModuleLayoutView` → `set_model_state_dict(broadcast_from_rank0)` into DTensor params. Path B: the weights are already in the model from construction and the loader skips the re-read | Per-rank FSDP2 shards | Exact resume, same world size |
-| **Single process / DDP** | A at `use_grouped_gemm: false`, else B | Path A: each rank streams the whole weights into its own copy through `ModuleLayoutView` (`_load_streamed`, the TP loader). Accelerate-managed FSDP and a sentence-transformers pipeline keep the base Trainer's own loader | The base Trainer's `optimizer.pt` | Exact resume |
-| **TP** | B | Weights load at construction and `_load_streamed` skips the re-read. Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the checkpoint's full tensors and `distribute_tensor`s them into its own DTensor placements; TP+DP instead raises for a model not constructed from the checkpoint | Per-rank shards | Exact resume, same world size |
+| **Single process / DDP** | A at `use_grouped_gemm: false`, else B | Path A: each rank streams the whole weights into its own copy through `ModuleLayoutView` (the streamed reload of `load_resume_weights`, the TP loader). Accelerate-managed FSDP and a sentence-transformers pipeline keep the base Trainer's own loader | The base Trainer's `optimizer.pt` | Exact resume |
+| **TP** | B | Weights load at construction and `load_resume_weights` skips the re-read. Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the checkpoint's full tensors and `distribute_tensor`s them into its own DTensor placements; TP+DP instead raises for a model not constructed from the checkpoint | Per-rank shards | Exact resume, same world size |
 | **CP** | B | Skipped — weights via `load_distributed_model()` | Per-rank shards (matching fingerprint) | Checkpoint has HF keys, model has CP wrapper keys |
 | **EP / ETP / EP+CP / EP+TP** | B | Skipped in the loader — the trained weights load at construction because the model source points at the checkpoint | Per-rank shards (matching fingerprint) | Checkpoint holds the hub-spelled full expert tensors, not the renamed rank-local slices the EP model registers |
 | **[PP / PP+EP](../parallelism/pipeline-parallelism.md)** | B at the default `use_grouped_gemm`, else stage-aware A | Path B: the stage loader read the trained tensors at construction and the reload is skipped. Path A (and a best-model load): each rank maps the merged index's hub names onto the unsplit model's (`ModuleLayoutView`, with the conversions the stage snapshotted at its build), then onto its stage's through `global_parameter_name`, and reads only those; a missing stage-retained tensor raises, and so does a stage shard absent from this node's copy, naming the per-node placement. On per-node output storage the locally-absent cross-stage tensors are skipped — the stage build drops them anyway | Per-rank shards, gated on the fingerprint **and** `pp_stage_partition` | Any topology drift **raises** (no warm-restart fallback). PP+EP expert weights load at construction only, so a stage not built from the resume directory raises, on every rank at once |
@@ -667,8 +676,8 @@ only after the run had already restarted.
 A full-finetune Path-B resume from a checkpoint that is neither directly loadable nor an adapter (an
 unmerged per-rank save) **raises** rather than silently continuing from base weights.
 
-Because the Path-B base is rebuilt fresh, `CheckpointLoader` restores adapters separately
-(`restore_adapters`, `src/distributed/checkpoint/peft.py`): native EP expert adapters (keyed
+Because the Path-B base is rebuilt fresh, `load_resume_weights` restores adapters separately
+(`restore_adapters`, `src/checkpoint/parallel/adapters.py`): native EP expert adapters (keyed
 `<layer>.experts.<attr>.lora_*`) sliced per rank, PEFT attention adapters via
 `set_peft_model_state_dict`, read from the checkpoint root or a merged checkpoint's
 `resume_adapter/`. That call warns on partial matches and raises if *every* saved key is unmatched,
@@ -729,7 +738,7 @@ saves](#interrupted-saves)) and raising when only incomplete ones exist; an expl
 any rank; unset / `false` returns `None`. When auto-detection finds no checkpoint the run is fresh, so
 the non-empty-`output_dir` guard re-runs — set `overwrite_output_dir: true` to bypass it.
 
-The pick is `resolve_resume_checkpoint()` (`src/distributed/checkpoint/coordination.py`), which
+The pick is `resolve_resume_checkpoint()` (`src/checkpoint/parallel/resume_source.py`), which
 `trainer.train(resume_from_checkpoint=True)` calls too, so a Python-API resume takes the same
 checkpoint as a scripted one; the base Trainer would take the highest-numbered directory, complete or
 not. Every FS-aware save rank lists its own `output_dir`, and rank 0 merges the lists and broadcasts
@@ -815,9 +824,6 @@ every other fingerprint field does. It records how many shards the dedup collaps
 is `1` wherever no writer runs: every dense run, and every `ep1` run at the default
 `fsdp_shard_ep1_experts`.
 
-A meta carrying no `expert_replica_size` reads as compatible with any replica size rather than as
-`1` — those shards carry every rank's own copy.
-
 Both reads of a resume — this rank's shard and, for a replica follower, the writer's — run under the
 node's `max_concurrent_loading` throttle. Unthrottled, a node peaks at `local_world_size ×
 (own + writer)` shards in host RAM, and one writer's file is opened by one reader per follower (63 of
@@ -839,11 +845,14 @@ params registered; HF evaluates immediately before the end-of-training save unde
 no optimizer state.
 
 The fingerprint is broader than the sizes: **`world_size`, `pp_size`, `ep_size`, `cp_size`, `tp_size`,
-`expert_tp_size`, `ep_scope`, `nvlink_domain_size`, `hsdp`, `use_grouped_gemm`,
+`expert_tp_size`, `ep_scope`, `nvlink_domain_size`, `use_hsdp`, `use_grouped_gemm`,
 `fsdp_shard_ep1_experts`, `expert_replica_size`, and the optimizer class** — a run that changes any one of them (a flipped
 `use_grouped_gemm`, a different `ep_scope`) warm-restarts even at the same GPU count.
 
-A fingerprint mismatch falls back to warm restart with a warning naming the differing fields.
+A fingerprint mismatch falls back to warm restart with a warning naming the differing fields. The
+fields are named as `ParallelismConfig`'s and the saved key set must match exactly: a meta written
+under an older fingerprint schema (a field it lacks reads `saved='<absent>'`) mismatches like any
+topology change.
 
 Shards absent on every rank warm-restart only when nothing proves state was written. If the
 directory still holds other ranks' `optimizer_shard_*.pt` or a fingerprint-matched
@@ -859,7 +868,7 @@ restore failures below do (`allow_optimizer_warm_restart` takes the warm restart
 - shards whose `optimizer_meta.pt` is missing or unreadable. The meta is written, staged and
   renamed, only after every rank's shard, so its absence is a save killed between the two (or a meta
   deleted alone). Checked ahead of the rank-count gate, so it never reads as a world-size change.
-- the base Trainer's `optimizer.pt` with no shards beside it. The mixin deletes that rank-0 view only
+- the base Trainer's `optimizer.pt` with no shards beside it. `OptimizerShardStore.save` deletes that rank-0 view only
   once its per-rank replacement is on disk, so it marks a save killed before its shards — or a
   checkpoint written by a non-sharded run, which cannot restore into per-rank shards either.
 

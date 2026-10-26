@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The checkpoint index is merged on rank 0 alone, and its verdict reaches every rank.
 
-``exchange_shard_index`` gathers the weight map to rank 0 rather than ``all_gather_object``-ing it,
+``combine_across_ranks`` gathers the weight map to rank 0 rather than ``all_gather_object``-ing it,
 which would leave EVERY rank holding one fragment per rank of a map only the index writer ever reads — at 512
 ranks, 512 copies of the entire key space on each of 512 ranks, for a file one of them writes.
 
@@ -20,14 +20,19 @@ Run: pytest tests/cpu/checkpoint/test_shard_index_exchange.py
 import pytest
 import torch.distributed as dist
 
-from src.distributed.checkpoint import write as checkpoint_write
-from src.distributed.checkpoint.write import exchange_shard_index
+from src.checkpoint.writing import merge_shard_index
+from src.runtime.collectives import combine_across_ranks
 
 WORLD_SIZE = 4
 
 
+def _exchange(payload, combine=merge_shard_index):
+    """The index exchange a checkpoint writer makes: its ``(weight map, bytes)`` fragment, or ``None``."""
+    return combine_across_ranks(payload, combine, what="the checkpoint index")
+
+
 class _FakeWorld:
-    """One process standing in for ``WORLD_SIZE`` ranks running ``exchange_shard_index``.
+    """One process standing in for ``WORLD_SIZE`` ranks exchanging the index with ``combine_across_ranks``.
 
     Every rank's payload is known up front, so ``gather_object`` can serve rank 0 the whole table
     while the peers only announce that they joined. ``broadcast_object_list`` routes through one box
@@ -38,8 +43,9 @@ class _FakeWorld:
     peer allocated nothing: torch requires it to be ``None`` anywhere but the destination.
     """
 
-    def __init__(self, payloads: list[tuple[dict[str, str], int] | None]):
+    def __init__(self, payloads: list[tuple[dict[str, str], int] | None], combine=merge_shard_index):
         self.payloads = payloads
+        self.combine = combine
         self.rank = 0
         self.box: list[object] = [None]
         self.gather_lists: dict[int, list | None] = {}
@@ -56,7 +62,7 @@ class _FakeWorld:
         monkeypatch.setattr(dist, "all_gather_object", self._banned_all_gather)
 
     def _banned_all_gather(self, *args, **kwargs):
-        raise AssertionError("exchange_shard_index must gather to rank 0, not all-gather to everyone")
+        raise AssertionError("combine_across_ranks must gather to rank 0, not all-gather to everyone")
 
     def _gather_object(self, obj, object_gather_list=None, dst=0, group=None):
         del group
@@ -86,11 +92,8 @@ class _FakeWorld:
         outcomes: list[object] = []
         for rank in range(WORLD_SIZE):
             self.rank = rank
-            payload = self.payloads[rank]
             try:
-                outcomes.append(
-                    exchange_shard_index(*(payload if payload else ({}, 0)), contribute=payload is not None)
-                )
+                outcomes.append(_exchange(self.payloads[rank], self.combine))
             except RuntimeError as exc:
                 outcomes.append(exc)
         return outcomes
@@ -146,7 +149,7 @@ def test_only_rank_zero_allocates_the_gather_list(monkeypatch):
 
 
 def test_a_non_writer_still_joins_both_collectives(monkeypatch):
-    """``contribute=False`` is a rank that wrote nothing, not a rank that sits the exchange out.
+    """A ``None`` payload is a rank that wrote nothing, not a rank that sits the exchange out.
 
     PP non-writers outnumber writers by ``stage_world_size - 1``. One skipping the gather or the
     broadcast desynchronizes the world for the rest of the run.
@@ -167,13 +170,12 @@ def test_any_merge_failure_reaches_every_rank_not_just_rank_zero(monkeypatch):
     raise. A malformed fragment (a ``TypeError``) escaping on rank 0 leaves the peers in the
     broadcast and then the barrier until the watchdog fires, which is the failure a single merging
     rank invites and this exchange exists to keep impossible."""
-    world = _FakeWorld(_stage_payloads())
-    world.install(monkeypatch)
 
     def _malformed(_gathered):
         raise TypeError("fragment is not a (weight_map, bytes) pair")
 
-    monkeypatch.setattr(checkpoint_write, "merge_shard_index", _malformed)
+    world = _FakeWorld(_stage_payloads(), combine=_malformed)
+    world.install(monkeypatch)
 
     outcomes = world.run_all()
 
@@ -229,7 +231,7 @@ def test_without_a_process_group_the_lone_fragment_is_the_index(monkeypatch):
     """A single-process save (no dist) must still get a merged index, not a raw fragment list."""
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
 
-    assert exchange_shard_index({"a": "f0.safetensors"}, 100) == ({"a": "f0.safetensors"}, 100)
+    assert _exchange(({"a": "f0.safetensors"}, 100)) == ({"a": "f0.safetensors"}, 100)
 
 
 def test_a_lost_broadcast_raises_instead_of_returning_an_empty_index(monkeypatch):
@@ -240,11 +242,11 @@ def test_a_lost_broadcast_raises_instead_of_returning_an_empty_index(monkeypatch
     """
     world = _FakeWorld(_stage_payloads())
     world.install(monkeypatch)
-    monkeypatch.setattr(checkpoint_write.dist, "broadcast_object_list", lambda object_list, src=0, group=None: None)
+    monkeypatch.setattr(dist, "broadcast_object_list", lambda object_list, src=0, group=None: None)
 
     world.rank = 1
     with pytest.raises(RuntimeError, match="never reached this rank"):
-        exchange_shard_index({}, 0, contribute=False)
+        _exchange(None)
 
 
 if __name__ == "__main__":

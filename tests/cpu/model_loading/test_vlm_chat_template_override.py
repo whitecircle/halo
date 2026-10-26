@@ -21,11 +21,12 @@ import torch.nn as nn
 from accelerate import PartialState
 from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGeneration
 
+from src.checkpoint.parallel.save import save_checkpoint
 from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading.tokenizer_setup import configure_run_tokenizer
 from src.training.script_runner import install_resolved_tokenizer
+from tests.common.checkpoint_io import save_context
 from tests.common.models import QWEN3_5_9B, TINY_QWEN35_CONFIG
 from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_processor
@@ -53,14 +54,7 @@ def _setup_run(args: CommonScriptArguments, processor=None):
 
 
 def _export(processing_class, output_dir: str) -> None:
-    ctx = SimpleNamespace(
-        model=nn.Linear(4, 4),
-        is_save_rank=True,
-        max_shard_size="5GB",
-        training_checkpoint=False,
-        tokenizer=processing_class,
-    )
-    save_fsdp2_checkpoint(ctx, output_dir)
+    save_checkpoint(save_context(nn.Linear(4, 4), toolkit_fsdp2=True, tokenizer=processing_class), output_dir)
 
 
 def test_a_training_run_renders_and_exports_its_override(tmp_path):

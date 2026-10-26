@@ -5,5 +5,5 @@ wrapper, so an eager ``__init__`` would make importing *any* ``src.distributed``
 job reading :class:`~src.distributed.parallelism_config.ParallelismConfig`, a callback reading a
 class-declared contract — pull the whole tree. Import from the owning module
 (``...expert_parallel.moe_layer.layer``, ``.config``, ``.expert_weights``, ``.layers``, ``.lazy_loader``, …);
-the EP saver is :mod:`src.distributed.checkpoint.ep_save`.
+the EP saver is :mod:`src.checkpoint.parallel.ep`.
 """

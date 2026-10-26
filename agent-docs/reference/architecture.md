@@ -23,7 +23,7 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Callbacks | Throughput, MoE load, router-bias balancing | `src/callbacks/`, `src/hardware.py` (GPU detection + peak-FLOPs table) | [Callbacks](../training-methods/callbacks.md) |
 | Diagnostics | Opt-in and off by default: py-spy capture, torch-profiler traces, CUDA memory snapshots, EP span timing, the weight-sync transport preflight | `src/diagnostics/` | [Debugging](debugging.md) |
 | Kernels | Grouped GEMM, the fused GLU and MoE permute kernels, chunked fp32 log-probs, Liger, Flash Attention and FlexAttention on sliding-window layers, low-precision quantization | `src/kernels/`, `src/models/attention/selection.py`, `src/models/attention/sdpa_flex_sliding.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
-| Checkpoints | The per-mode saver ladder, weight resume, per-rank optimizer shards + LR scheduler, PEFT adapters, load-coverage gate — over the sharding-agnostic on-disk layer | `src/distributed/checkpoint/`, `src/checkpoint/`, `src/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
+| Checkpoints | The flat saver ladder and its rungs (PEFT and expert-LoRA adapters, PP, EP, CP, TP, FSDP2), weight resume, per-rank optimizer shards + LR scheduler, load-coverage gate — over the sharding-agnostic on-disk layer | `src/checkpoint/parallel/`, `src/checkpoint/`, `src/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
 | Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `src/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
 | Models | The sharding-agnostic model side: module-tree introspection, composite-config access, the context window, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, and the sequence-classification heads transformers does not ship (`src/models/seq_cls_heads.py`, registered by an import in `src/model_loading/model_preparation.py`) | `src/models/` | [Adding a Model](../models/adding-a-model.md) |
 | Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the family patches and run policies every loaded model takes, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, remote-code compatibility, the post-load buffer repair, Liger applied at load, and the lazy safetensors core the EP and PP loaders share. Above it, `parallel/` holds the parallelism-aware loads: the `load_distributed_model` dispatcher (`loader.py`), the refusals it runs before any weight (`load_rules.py`), the `ModelSource` every rank agrees on (`model_source.py`), the whole-model load core (`whole_model.py`), the TP and CP loaders (`tp.py`, `cp.py`), the frozen reference and teacher loads, and the PEFT and freeze-pattern setup | `src/model_loading/` | [Models](../models/README.md) |
@@ -55,8 +55,9 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules | the loader, the preprocessing pipeline and the scripts — without a boto3 import |
 | `src/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected | the S3 dataset cache and the per-shard cache of a sharded pre-processed dataset, so their crash and staleness semantics cannot drift |
 | `src/data/sources/s3_client.py` | the boto3 `S3Client`, the s3fs control-file reads and the default-bucket helpers | the loader, the preprocessing pipeline, `ShardedDatasetLoader`, the inference scripts and the `scripts/before_training/s3_datasets.py` CLI |
-| `src/distributed/checkpoint/write.py` | the collective half of a write: retain-gated DTensor resolve of params AND buffers (with the neutralized GptOss sinks), the streamed part writer, the shard-index exchange | the FSDP2/EP gathered save, the TP state dict and the CP save — the leg every gathered writer must run symmetrically or hang |
-| `src/distributed/checkpoint/coordination.py` | the rank consensus a resume shares: the pick of the checkpoint (and the move of incomplete ones out of rotation's sight), then the reads its two halves agree on | resume detection (`src/training/environment.py`, the trainer's `train(resume_from_checkpoint=True)`), `checkpoint/loader.py` (weights) and `checkpoint/optimizer.py` (optimizer shards) |
+| `src/checkpoint/parallel/writing.py` | the collective half of a gathered write: retain-gated DTensor resolve of params AND buffers (with the neutralized GptOss sinks), the conversion-closed chunks and the streamed writer they feed | the FSDP2, CP, TP and EP gathered saves, the PP stage writes and the embedding save — the leg every gathered writer must run symmetrically or hang |
+| `src/checkpoint/parallel/reading.py` | the two reads a resume shares: one file every rank agrees on (`consensus_read`), and a checkpoint's shards opened on every rank (`joined_streaming_reader`) | the weight resume, the optimizer shards, the adapter restore and the sidecars |
+| `src/checkpoint/parallel/resume_source.py` | which checkpoint a run resumes from (the newest complete on every rank, incomplete ones moved out of rotation's sight) and which weights its policy is built from | resume detection (`src/training/environment.py`, the trainer's `train(resume_from_checkpoint=True)`) |
 | `src/data/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use | written by the preprocessing pipeline, read by `ShardedDatasetLoader` |
 | `src/data/vlm.py` | the VLM chat render, the processor call and the over-length refusal | the runtime collators, the offline bake and the run-intent probe, so a batch and a bake of one row tokenize identically |
 | `src/data/pipeline/preprocessed_metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts | the training entry points and the loader, which read the stamp without importing the bake that wrote the rows |
@@ -122,9 +123,10 @@ from inside `expert_parallel/`, and everything else reaches them through layer i
 
 `src/model_loading/parallel/` sits above all four: `load_distributed_model` picks the per-mode loader
 off a `ParallelismConfig`, so it is the one place that reaches into every implementation, and the rest
-of `src/model_loading/` stays sharding-agnostic. `checkpoint/` sits above them too: its saver ladder
-and the EP and TP savers (`ep_save.py`, `tp_save.py`) gather through each implementation. The packages
-of `src/distributed` import each other acyclically
+of `src/model_loading/` stays sharding-agnostic. The collective checkpoint half, `src/checkpoint/parallel/`
+(the saver ladder in `save.py`, the EP saves in `ep.py`, the PP saves in `pp.py`, the adapter saves in
+`adapters.py`, and the resume beside them), sits above them too: it gathers through each implementation.
+These packages import each other acyclically
 (`tests/cpu/conventions/test_import_layering.py`).
 
 No parallelism package imports `src/model_loading/parallel/`, so
@@ -177,7 +179,7 @@ trainer.train()  ── HF training loop, DDP wrapping skipped
    │  • callbacks: EfficiencyCallback (tokens/s/GPU), MoEMetricsCallback,
    │               RouterBiasBalancingCallback
    ▼
-trainer.save_model  ── save_checkpoint (src/distributed/checkpoint/) gathers shards → HF checkpoint
+trainer.save_model  ── save_checkpoint (src/checkpoint/parallel/) gathers shards → HF checkpoint
 ```
 
 The parser applies `use_liger_kernel: true`, `bf16: true` and `logging_nan_inf_filter: false` when
