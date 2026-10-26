@@ -110,7 +110,8 @@ by identity (`get_input_embeddings`).
 
 Families are registered in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`), one
 `PPFamilySpec` per family keyed by its backbone class. A spec with `validated=True` is registered: its
-stages reproduce the unsplit model on the pipeline GPU tier. A spec with a `refusal` is refused with
+stages reproduce the unsplit model on the pipeline GPU tier, and `tests/cpu/conventions/test_pp_family_roster.py`
+holds every such family to a GPU row that runs it, a MoE one also with its experts distributed. A spec with a `refusal` is refused with
 its reason. A backbone no spec registers is refused by name —
 `<Backbone> is not registered for pipeline parallelism (PP_FAMILY_SPECS); registered: ...`.
 `reject_unsupported_pp_structure` (`model_rules.py`) runs, in order: the decoder-layer probe, the
@@ -206,7 +207,10 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
   dispatch.
 - The equivalence gate (`tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py`, the EP modes of
   `test_pp_combos_8gpu.py`) compares against a bf16 ep1 twin with both sides on the unfused
-  expert-output sum, since the fused un-permute rounds a rank's local top-k sum once.
+  expert-output sum, since the fused un-permute rounds a rank's local top-k sum once. The other
+  validated pipeline MoE families (Qwen3.5/3.6-MoE, Step-3.7, DeepSeek-V4, GLM-5 Next) are scored
+  against their unsplit ep1 twin through the real trainer at `ep2` in `test_pp_family_vs_reference.py`;
+  `tests/cpu/conventions/test_pp_family_roster.py` requires a PP+EP row of every validated MoE family.
 
 ## PP + ETP (MoE)
 
@@ -222,6 +226,10 @@ data-parallel replicas.
 - The equivalence gate (`tests/gpu/parallelism/pp/test_pp_etp_vs_unsplit.py`) runs in **fp32**: ETP
   reorders the summation producing each expert's output, which in bf16 flips near-tied top-k picks
   with no sync bug present.
+- Save, export and exact resume are covered by `test_pp_ep_resume.py --mode etp2` and, on CPU, by the
+  gloo case `test_pp_plus_etp_exports_unsplit_experts_under_global_names`
+  (`tests/cpu/checkpoint/test_pp_sharded_save_roundtrip.py`), which requires the stage's writer to export
+  each expert whole under global layer names.
 
 ## Rejected combinations
 

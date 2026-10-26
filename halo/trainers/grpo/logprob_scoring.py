@@ -7,7 +7,7 @@ under the family's verified head transform; TRL's ``_compute_loss`` runs unchang
 
 import inspect
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -77,8 +77,11 @@ def full_logits_verdict(
     )
 
 
-def dense_row_spans(attention_mask: torch.Tensor) -> list[tuple[int, int]]:
-    """Real-token span ``[lo, hi)`` per row of a padded batch, as the dense per-row path forwards it.
+def dense_row_spans(
+    attention_mask: torch.Tensor, completion_width: int = 0
+) -> tuple[list[tuple[int, int]], list[int]]:
+    """Real-token span ``[lo, hi)`` per row of a padded batch, as the dense per-row path forwards it, and each
+    row's real-token count in the mask's last ``completion_width`` columns (zeros when that is 0).
 
     Every reader of the per-row widths derives them here, the <2-token widening included (a 1-token
     span is widened by a neighbour so the next-token shift leaves at least one position).
@@ -100,7 +103,14 @@ def dense_row_spans(attention_mask: torch.Tensor) -> list[tuple[int, int]]:
         if hi - lo < 2:
             lo, hi = (lo - 1, hi) if lo > 0 else (lo, hi + 1)
         spans.append((lo, hi))
-    return spans
+    if completion_width <= 0:
+        return spans, [0] * len(spans)
+    return spans, mask[:, -completion_width:].sum(dim=1).tolist()
+
+
+def _completion_window(parts: Sequence[torch.Tensor], width: int) -> torch.Tensor:
+    """Each row's leading ``part`` zero-padded to ``width`` along its first dim, stacked ``(rows, width, ...)``."""
+    return torch.stack([F.pad(part, (0, 0) * (part.dim() - 1) + (0, width - part.size(0))) for part in parts])
 
 
 def rows_forward_densely(model, batch_size: int) -> bool:
@@ -117,6 +127,22 @@ class LogprobScoringMixin:
     """Trainer-agnostic GRPO log-prob scoring: the chunked sweep (batched, per-row dense, CP-sharded), the
     full-logits memory guard and the KL reference policy. Hosts provide ``temperature``, ``accelerator``,
     ``args``, ``model``, ``ref_model`` and ``_use_chunked_grpo_logprobs``."""
+
+    # Armed by :meth:`_capturing_completion_logits`: where the scoring forward also leaves its logits.
+    _completion_logits_sink: list[torch.Tensor] | None = None
+
+    @contextmanager
+    def _capturing_completion_logits(self) -> Iterator[list[torch.Tensor]]:
+        """Yield a list the scoring forwards run inside the block append their completion logits to: one
+        ``(rows, logits_to_keep, V)`` tensor per forwarded sub-batch, in row order, the family head's own
+        output before the temperature, carrying the forward's graph. A host whose loss also needs the
+        logits reads them here instead of forwarding the policy a second time."""
+        sink: list[torch.Tensor] = []
+        self._completion_logits_sink = sink
+        try:
+            yield sink
+        finally:
+            self._completion_logits_sink = None
 
     def _resolve_chunked_head_transform(self) -> None:
         """Verify the policy's head path at construction when the chunked sweep will score it, so a
@@ -227,48 +253,47 @@ class LogprobScoringMixin:
                 logps, entropies = sweep(hidden, completion_ids, compute_entropy)
                 all_logps.append(logps)
                 all_entropies.append(entropies)
+                if self._completion_logits_sink is not None:
+                    self._completion_logits_sink.append(self._head_logits(unwrapped_model, hidden))
                 continue
-            # Dense rows: the sweep covers each row's real completion tokens only and the window's zero
-            # tail is masked downstream, so the head pays the row's length, not the padded width.
-            hidden, n_comps = self._dense_last_hidden_state(unwrapped_model, ids, mask, logits_to_keep)
-            for row, n_comp in enumerate(n_comps):
-                width = max(n_comp, 1)
-                logps, entropies = sweep(
-                    hidden[row : row + 1, :width], completion_ids[row : row + 1, :width], compute_entropy
-                )
-                window = (0, logits_to_keep - logps.size(1))
-                all_logps.append(F.pad(logps, window))
-                all_entropies.append(F.pad(entropies, window) if compute_entropy else None)
+            # Dense rows: one sweep over every row's real completion tokens, the window's zero tail masked
+            # downstream, so the head pays the rows' lengths, not the padded width, and runs once.
+            hidden, widths = self._dense_last_hidden_state(unwrapped_model, ids, mask, logits_to_keep)
+            targets = torch.cat([row_ids[:width] for row_ids, width in zip(completion_ids, widths, strict=True)])
+            logps, entropies = sweep(hidden, targets, compute_entropy)
+            all_logps.append(_completion_window(logps.split(widths), logits_to_keep))
+            all_entropies.append(
+                _completion_window(entropies.split(widths), logits_to_keep) if compute_entropy else None
+            )
+            if self._completion_logits_sink is not None:
+                window = _completion_window(hidden.split(widths), logits_to_keep)
+                self._completion_logits_sink.append(self._head_logits(unwrapped_model, window))
 
         logps = torch.cat(all_logps, dim=0)
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
         return logps, entropies
 
+    def _head_logits(self, unwrapped_model, hidden: torch.Tensor) -> torch.Tensor:
+        """The logits the family's head path computes for ``hidden``; called inside the redirected forward,
+        where FSDP2 has gathered the head."""
+        return self._head_transform(unwrapped_model).project(unwrapped_model.get_output_embeddings(), hidden)
+
     def _dense_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Per-row, unpadded backbone forward -> completion hidden ``(rows, logits_to_keep, H)`` plus each
-        row's real completion-token count.
+        """Per-row, unpadded backbone forward -> every row's completion hidden states, concatenated
+        ``(sum(widths), H)``, and each row's width: its real completion-token count, at least 1 so every
+        row stays autograd-connected (a pruned row drops its FSDP/EP backward collectives).
 
         Each row trimmed to its real span with ``attention_mask=None`` keeps FA4 on its dense kernel and
         restores RoPE positions ``[0, len)``; every supported family's attention is relative, so the
         log-probs match the padded forward, and one forward per row keeps the FSDP/EP collective count in step.
         """
-        spans = dense_row_spans(attention_mask)
-        # Every row's completion count in one D2H: read inside the loop this is another sync per row.
-        if logits_to_keep > 0:
-            n_comps = attention_mask[:, -logits_to_keep:].bool().sum(dim=1).tolist()
-        else:
-            n_comps = [0] * attention_mask.size(0)
-        outputs = []
-        for i, (lo, hi) in enumerate(spans):
-            n_comp = int(n_comps[i])
-            dense_ids = input_ids[i : i + 1, lo:hi]
-            hidden = self._backbone_hidden_state(unwrapped_model, dense_ids, None, max(n_comp, 1))  # (1, >=1, H)
-            # Every row stays autograd-connected: a pruned row drops its FSDP/EP backward collectives.
-            n_keep = max(n_comp, 1)
-            out = hidden.new_zeros(1, logits_to_keep, hidden.size(-1))
-            out[:, :n_keep] = hidden[:, -n_keep:]
-            outputs.append(out)
-        return torch.cat(outputs, dim=0), [int(n) for n in n_comps]
+        spans, n_comps = dense_row_spans(attention_mask, logits_to_keep)
+        widths = [max(n_comp, 1) for n_comp in n_comps]
+        rows = [
+            self._backbone_hidden_state(unwrapped_model, input_ids[i : i + 1, lo:hi], None, width)[0, -width:]
+            for i, ((lo, hi), width) in enumerate(zip(spans, widths, strict=True))
+        ]
+        return torch.cat(rows), widths
 
     def _backbone_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
         """One sub-forward, opening its own EP capacity scope first: it enters the backbone directly, past
@@ -379,18 +404,16 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
     # The modality inputs are the rest of TRL's full-logits scorer's parameters: derived from its
     # signature rather than hand-listed, so a release adding one does not slip past this gate into the
     # text-only chunked path.
-    _CHUNK_TEXT_KEYS = frozenset(
-        (
-            "self",
-            "model",
-            "input_ids",
-            "attention_mask",
-            "logits_to_keep",
-            "batch_size",
-            "compute_entropy",
-            "compute_aux_loss",
-        )
-    )
+    _MODALITY_KEYS = frozenset(inspect.signature(GRPOTrainer._full_logits_logps).parameters) - {
+        "self",
+        "model",
+        "input_ids",
+        "attention_mask",
+        "logits_to_keep",
+        "batch_size",
+        "compute_entropy",
+        "compute_aux_loss",
+    }
 
     @profiling_decorator
     def _get_per_token_logps_and_entropies(
@@ -419,8 +442,7 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
                 self.args.per_device_train_batch_size if self.model.training else self.args.per_device_eval_batch_size
             )
         chunked = self._use_chunked_grpo_logprobs
-        modality_keys = inspect.signature(GRPOTrainer._full_logits_logps).parameters.keys() - self._CHUNK_TEXT_KEYS
-        is_multimodal = any(kwargs.get(k) is not None for k in modality_keys)
+        is_multimodal = any(kwargs.get(k) is not None for k in self._MODALITY_KEYS)
         # Mixed full (image) / chunked (text) paths across ranks diverge FSDP2's collectives and deadlock
         # backward, so any multimodal batch routes all ranks to the full forward; text-only models skip this.
         if chunked and self._model_accepts_multimodal:
@@ -428,7 +450,7 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
         if not chunked or is_multimodal:
             # TRL's own dispatch would send a use_liger_kernel run to its chunked head, which skips the
             # family's head transform and the EP capacity scope.
-            with self._writable_logits(model):
+            with self._writable_logits(model), self._capturing_forward_logits(model, logits_to_keep):
                 return self._full_logits_logps(
                     model,
                     input_ids,
@@ -452,6 +474,21 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
             cached = config is not None and config_declares_multimodality(config)
             self._model_accepts_multimodal_cache = cached
         return cached
+
+    @contextmanager
+    def _capturing_forward_logits(self, model, logits_to_keep: int) -> Iterator[None]:
+        """While a sink is armed, append the completion logits of every forward of ``model`` in the block."""
+        sink = self._completion_logits_sink
+        if sink is None:
+            yield
+            return
+        handle = model.register_forward_hook(
+            lambda _module, _inputs, output: sink.append(output.logits[:, :-1][:, -logits_to_keep:])
+        )
+        try:
+            yield
+        finally:
+            handle.remove()
 
     @contextmanager
     def _writable_logits(self, model):

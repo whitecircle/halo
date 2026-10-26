@@ -14,6 +14,7 @@ Run: pytest tests/cpu/config/test_sdpg_args.py
 import math
 import re
 import sys
+import types
 from unittest import mock
 
 import pytest
@@ -47,7 +48,8 @@ def _online_teacher_hint(template: str, answer: str) -> str:
     """The hint text the on-policy trainer's own formatter appends to a one-token prompt."""
     trainer = object.__new__(DistributedSDPGTrainer)
     trainer.processing_class = _CharTokenizer()
-    trainer.sdpg_hint_template = template
+    # A stand-in block: the formatter must be probed with templates the real block refuses.
+    trainer.sdpg = types.SimpleNamespace(sdpg_hint_template=template)
     trainer.sdpg_answer_field = "answer"
     trainer._warned_missing_answer = set()
     prompt_ids = torch.tensor([[ord("Q")]])

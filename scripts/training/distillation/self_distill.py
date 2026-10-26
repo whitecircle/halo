@@ -12,8 +12,8 @@ approximation (scores a fixed dataset; the faithful on-policy SDPG runs via
 ``teacher_distill.py``.
 
 Dataset: raw SFT conversations (``conversation_field``) plus a privileged answer field (VLM adds an
-``images`` column). The collator tokenizes the student and teacher (hinted) branches at collation
-time, so a pre-tokenized dataset is not usable here.
+``images`` column). The text path tokenizes the student and teacher (hinted) branches once at prep, the VLM
+collator at collation time; a pre-tokenized dataset is not usable here.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/distillation/self_distill.py \\
@@ -37,6 +37,7 @@ from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     audit_self_distill_row,
     confidence_normalizer,
+    encode_self_distill_row,
     format_field_names,
     privileged_hint,
     teacher_history,
@@ -122,10 +123,26 @@ def _confidence_normalizer(train_dataset, eval_dataset, args) -> float | None:
     return confidence_normalizer(train_dataset, eval_dataset, args.confidence_field, args.confidence_power)
 
 
+def _encode_text_rows(collator, dataset, split: str, num_proc, keep: tuple[str, ...]):
+    """``dataset`` rendered, tokenized and labelled per branch (:func:`encode_self_distill_row`),
+    every column but ``keep`` replaced, so collation only pads. The collator's length and alignment contract
+    raises here, world-uniform: at collate time only the rank drawing the bad row would raise, and its peers
+    hang in the step's collectives until the watchdog."""
+    return coordinated_map(
+        dataset,
+        encode_self_distill_row,
+        desc=f"Tokenizing self-distill {split} rows",
+        num_proc=num_proc,
+        remove_columns=[column for column in dataset.column_names if column not in keep],
+        fn_kwargs={"collator": collator},
+        cache_key_extras=collator.cache_signature(),
+    )
+
+
 def _audit_rows(collator, train_dataset, eval_dataset, num_proc) -> None:
-    """Run every row through the collator's contract (text: length and alignment; VLM: alignment) now,
-    where a raise is world-uniform: at collate time only the rank drawing the bad row raises, and its
-    peers hang in the step's collectives until the watchdog.
+    """Run every row through the VLM collator's alignment contract now, where a raise is world-uniform: at
+    collate time only the rank drawing the bad row raises, and its peers hang in the step's collectives
+    until the watchdog.
 
     Every input column is removed from the map's output: the function still reads them, but a map
     writes each column it leaves in place to its cache file, so the audit would store a full copy of
@@ -145,6 +162,8 @@ def _audit_rows(collator, train_dataset, eval_dataset, num_proc) -> None:
 
 
 def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_config, num_proc, hint_template):
+    """Text path: the splits encoded once at prep (:func:`_encode_text_rows`), the confidence column kept for
+    the collator's weights."""
     train_dataset = ds["train"]
     eval_dataset = ds.get("test")
     collator = SelfDistillTextCollator(
@@ -161,8 +180,12 @@ def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_conf
         model_config=model_config,
         **text_render_kwargs(args),
     )
-    _audit_rows(collator, train_dataset, eval_dataset, num_proc)
-    return train_dataset, eval_dataset, collator
+    keep = (args.confidence_field,) if args.confidence_field else ()
+    return (
+        _encode_text_rows(collator, train_dataset, "train", num_proc, keep),
+        None if eval_dataset is None else _encode_text_rows(collator, eval_dataset, "eval", num_proc, keep),
+        collator,
+    )
 
 
 def _build_vlm_dataset_and_collator(ds, args, processor, tokenizer, max_length, num_proc, model_config, hint_template):
@@ -309,14 +332,14 @@ def main():
     if sft_config.packing or sft_config.padding_free:
         raise ValueError(
             "packing / padding_free are not supported for self-distillation: the SelfDistill "
-            "collators tokenize the student and teacher branches at collation time and always "
-            "right-pad, so both are forced off below. Remove them from the YAML."
+            "collators pad one row per conversation in each branch, which OPD pairs row by row, so "
+            "both are forced off below. Remove them from the YAML."
         )
     # eval_packing has nothing to narrow with packing refused above.
     reject_trl_dataset_prep_args("Self-distillation", sft_config, "eval_packing")
 
-    # The SelfDistill collator tokenizes the raw branches at collation time, so the raw conversation
-    # and privileged columns have to survive HF's remove_unused_columns=True, which would strip them.
+    # The teacher branch, the confidence column and the VLM path's raw columns are no forward kwargs, so
+    # they have to survive HF's remove_unused_columns=True, which would strip them.
     sft_config.remove_unused_columns = False
 
     context = init_training_script(

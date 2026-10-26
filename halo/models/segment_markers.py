@@ -10,12 +10,13 @@ from dataclasses import dataclass
 import torch
 from transformers.utils.import_utils import is_causal_conv1d_available, is_flash_linear_attention_available
 
-from halo.models.attention.layout import GDN_MODEL_TYPE_PREFIXES, compressed_layer_types
+from halo.models.attention.layout import (
+    GDN_MODEL_TYPE_PREFIXES,
+    SHORT_CONV_MODEL_TYPE_PREFIXES,
+    compressed_layer_types,
+)
 from halo.models.config_access import model_type_matches
-
-# Families whose forward never passes ``position_ids`` into mask construction, so on a dense backend a
-# packed row runs as one causal sequence; packing is refused for them.
-DENSE_PACKING_LEAK_MODEL_TYPES = frozenset({"gpt_oss"})
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 
 # transformers' own predicates selecting its segment-aware GatedDeltaNet kernels (a bare ``find_spec``
 # would drop the ``fla>=0.2.2`` floor and the CUDA-capable-torch conjunct); the torch fallbacks ignore
@@ -37,13 +38,20 @@ class SegmentMarkers:
     cu_seq_lens: bool = False
 
 
+def has_dense_packing_leak(model_config) -> bool:
+    """Whether a packed row runs as one causal sequence on a dense backend: the family's forward passes no
+    ``position_ids`` into mask construction (``MoEFamilySpec.dense_packing_leaks``), read through a VLM wrapper."""
+    spec = find_moe_family_spec_for_config(model_config)
+    return spec is not None and spec.dense_packing_leaks
+
+
 def segment_markers_for(model_config) -> SegmentMarkers:
     """The markers this model's mixers need to keep a multi-document row's documents apart; family-gated,
     read through the text sub-config so a VLM wrapper resolves like its decoder."""
     if model_config is None:
         return SegmentMarkers()
     return SegmentMarkers(
-        seq_idx=model_type_matches(model_config, "lfm2", *GDN_MODEL_TYPE_PREFIXES),
+        seq_idx=model_type_matches(model_config, *SHORT_CONV_MODEL_TYPE_PREFIXES, *GDN_MODEL_TYPE_PREFIXES),
         cu_seq_lens=model_type_matches(model_config, *GDN_MODEL_TYPE_PREFIXES),
     )
 

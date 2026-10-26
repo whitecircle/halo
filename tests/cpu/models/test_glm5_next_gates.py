@@ -150,7 +150,7 @@ def test_tp_shards_zero_layers_and_raises():
     assert "Glm5NextTextLinearAttention" not in TP_SHARDABLE_ATTENTION_CLASSES
     model = _tiny_text_model()
     with fake_process_group_mesh(rank=0, world_size=2) as mesh:
-        with pytest.raises(ValueError, match="sharded ZERO attention layers"):
+        with pytest.raises(ValueError, match="ZERO attention layers"):
             apply_tp_to_attention_only(model, mesh)
 
 

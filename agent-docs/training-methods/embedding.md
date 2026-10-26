@@ -89,7 +89,7 @@ Under FSDP2 (torchrun), TP or EP the trainer refuses at construction a parameter
 
 ## What to watch
 
-Metrics come from a separate `torch.no_grad()` encoding pass on logging steps, capped at 256 samples per padded text group; evaluation runs it every batch under an `eval_` prefix (`eval_embed/norm`, …).
+Metrics read the sentence embeddings the loss forward already computed (no extra forward), over the first 256 rows of each text group: on logging steps, and on every eval batch under an `eval_` prefix (`eval_embed/norm`, …).
 
 The eval values are this rank's per-batch means averaged over its batches, logged from rank 0, and not reduced over ranks. Where the eval loader pads its final round with repeats of the split's first rows (TP or ETP over more than one data-parallel replica with a CLI `--dataloader_drop_last=false`; a pre-sharded split is cut to the shortest rank's length and padded by nothing), those rows enter that round's means and its in-batch ranking candidates; plain DP and pure EP, which require `dataloader_drop_last: true`, drop the incomplete round instead.
 

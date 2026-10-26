@@ -388,5 +388,5 @@ class RoutingReplayMixin:
         paths, where the mask tiles ``rows × seq`` directly."""
         if not self._replay_row_spans:
             return None
-        attention_mask = torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=1)
-        return dense_row_spans(attention_mask)
+        spans, _ = dense_row_spans(torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=1))
+        return spans

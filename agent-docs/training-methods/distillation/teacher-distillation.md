@@ -90,5 +90,5 @@ Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/te
 Failure signatures:
 
 - A tokenizer-mismatch raise before the teacher loads (repeated at construction) — the teacher is from another tokenizer family, or `added_special_tokens` grew the student's tokenizer; a raise naming fewer logit rows than the tokenizer — one model's embedding is smaller than the tokenizer.
-- OOM on the first step — both models are resident. Use PEFT on the student, gradient checkpointing, or a smaller `max_length`.
+- OOM on the first step — both models are resident, beside the student's and the teacher's `[tokens, vocab]` logits ([memory](README.md)). Use PEFT on the student, gradient checkpointing, or a smaller `max_length`.
 - Most rows dropped at prep — `max_length` drops over-length conversations rather than truncating them.

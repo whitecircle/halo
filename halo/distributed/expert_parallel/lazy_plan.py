@@ -23,6 +23,7 @@ from halo.model_loading.dtype import resolve_load_dtype
 from halo.model_loading.lazy_safetensors.conversion import Concat
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
+from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError
 from halo.models.moe.config_fields import require_expert_count
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
 from halo.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_fusion_map
@@ -252,7 +253,14 @@ def lazy_load_prologue(
 
     logger.info(f"[Rank {rank}] Instantiating model on meta device...")
     with fs_aware_main_first(meta_init_phase):
-        model = build_meta_shell(bool(missing_shard_files))
+        try:
+            model = build_meta_shell(bool(missing_shard_files))
+        except MetaShellBuildError as e:
+            raise RuntimeError(
+                f"{e} There is no safe fallback: instantiating this architecture from the checkpoint would "
+                f"materialize every tensor in host RAM. Under EP, load it with ep_lazy_loading=False; a pipeline "
+                f"stage has no whole-model load, so the architecture cannot run under PP."
+            ) from e
 
     model_keys = set(model.state_dict().keys())
     disk_to_model, conversion_fanout = family_key_mapping(model, list(weight_map.keys()))

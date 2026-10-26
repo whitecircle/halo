@@ -175,11 +175,11 @@ def test_both_text_renderers_go_through_the_shared_render(monkeypatch):
         train_on_completions_only=False,
     )
     with pytest.raises(_SharedRenderReached):
-        collator._render(_PROMPT, row)
+        collator.encode_row(row)
 
 
 def test_the_shared_render_applies_the_system_fold_to_both_renderers():
-    """The fold is shared policy: prove it reaches the collator's own render."""
+    """The fold is shared policy: prove it reaches both branches the collator renders."""
     tokenizer = _RenderTokenizer()
     row = {"messages": _PROMPT}
     collator = SelfDistillTextCollator(
@@ -191,10 +191,12 @@ def test_the_shared_render_applies_the_system_fold_to_both_renderers():
         system_prompt="be terse",
         model_supports_system_role=False,
     )
-    collator._render(list(_PROMPT), row)
-    folded = tokenizer.calls[-1]["conversation"]
-    assert [m["role"] for m in folded] == ["user"], "the collator skipped the system fold"
-    assert folded[0]["content"].startswith("be terse"), folded[0]["content"]
+    collator.encode_row(row)
+    assert len(tokenizer.calls) == 2, "the student and teacher branches each render once"
+    for call in tokenizer.calls:
+        folded = call["conversation"]
+        assert [m["role"] for m in folded] == ["user"], "the collator skipped the system fold"
+        assert folded[0]["content"].startswith("be terse"), folded[0]["content"]
 
 
 def test_the_shared_render_keeps_a_template_emitted_bos():

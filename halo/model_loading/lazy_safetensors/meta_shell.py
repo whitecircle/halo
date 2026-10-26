@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 _ATTN_IMPLEMENTATION_CHECK = "_check_and_adjust_attn_implementation"
 
 
+class MetaShellBuildError(RuntimeError):
+    """A model class that cannot be built from its config on the meta device; each caller states what that
+    blocks and any setting past it."""
+
+
 def _resolve_remote_code_class(model_class, config, trust_remote_code: bool, revision: str | None):
     """The concrete remote-code model class, resolved from the config's hub id at the run's ``revision``.
 
@@ -109,11 +114,8 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
             ) from e
         # On the fallback path the caller's warning has already named the from_pretrained failure;
         # on the config_only path this build is the only attempt, so the message claims no more.
-        raise RuntimeError(
-            f"Lazy loading could not build a config-only meta-device shell for {model_class.__name__} "
-            f"({type(e).__name__}: {e}). There is no safe fallback — instantiating this "
-            f"architecture from the checkpoint would materialize every tensor in host RAM. Load it "
-            f"with ep_lazy_loading=False (PP: without a lazy stage load)."
+        raise MetaShellBuildError(
+            f"Could not build a config-only meta-device shell for {model_class.__name__} ({type(e).__name__}: {e})."
         ) from e
     _apply_fp32_dtype_plan(model, dtype)
     return model

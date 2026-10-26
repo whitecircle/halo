@@ -20,20 +20,16 @@ from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS, backbone_with_laye
 
 logger = logging.getLogger(__name__)
 
-# The attention classes the plan below is validated on; transformers >= 5 dispatches backends through the
-# attention interface, so one entry covers a family.
+# The MoE attention classes the plan below is validated on; transformers >= 5 dispatches backends through the
+# attention interface, so one entry covers a family. A dense model takes HF's own ``tp_plan`` instead.
 TP_SHARDABLE_ATTENTION_CLASSES = frozenset(
     {
         "Cohere2MoeAttention",
         "GptOssAttention",
         "Qwen3MoeAttention",
-        "Qwen3Attention",
         "Glm4MoeLiteAttention",
         "Lfm2MoeAttention",
         "Qwen3_5MoeAttention",
-        "Qwen3_5Attention",
-        # Qwen3-VL text tower.
-        "Qwen3VLTextAttention",
         # Mistral4 (mistral3 VLM backbone), MLA: only q_b_proj / kv_b_proj are colwise-shardable.
         "Mistral4Attention",
     }
@@ -100,6 +96,19 @@ def _per_head_norm_modules(attn: nn.Module, plan: dict) -> list[nn.Module]:
     ]
 
 
+def _attention_tp_plan(attn: nn.Module) -> dict:
+    """The planned projections ``attn`` holds, each with its TP style. ``is not None``: a plan entry naming a
+    present-but-None attribute would shard nothing."""
+    return {name: style() for name, style in _ATTENTION_TP_STYLES.items() if getattr(attn, name, None) is not None}
+
+
+def _is_tp_shardable(attn: nn.Module | None) -> bool:
+    """Whether the plan shards ``attn``: a validated class holding at least one planned projection."""
+    return (
+        attn is not None and type(attn).__name__ in TP_SHARDABLE_ATTENTION_CLASSES and bool(_attention_tp_plan(attn))
+    )
+
+
 def _tp_decoder_layers(model: nn.Module, cfg, tp_size: int) -> nn.ModuleList:
     """The decoder layers TP shards, their attention heads checked to divide ``tp_size``. Only these: the
     embed_tokens/lm_head stay replicated, since DTensor-sharding them faults cuBLAS under EP+TP."""
@@ -118,6 +127,30 @@ def _tp_decoder_layers(model: nn.Module, cfg, tp_size: int) -> nn.ModuleList:
     return layers
 
 
+def _reject_zero_shardable(layers: nn.ModuleList, cfg, tp_size: int) -> None:
+    """Refuse a TP run whose plan shards no decoder layer's attention: every weight would stay replicated while
+    the (dp, tp) mesh assumes sharding, a silent memory blowup and a wrong DP gradient denominator."""
+    if tp_size <= 1 or any(_is_tp_shardable(_find_attention(layer)[0]) for layer in layers):
+        return
+    model_type = getattr(cfg, "model_type", "unknown")
+    attn_classes = sorted({type(a).__name__ for a in (_find_attention(layer)[0] for layer in layers) if a})
+    raise ValueError(
+        f"Tensor parallelism (tensor_parallel_size={tp_size}) shards ZERO attention layers on "
+        f"this model (model_type={model_type!r}, attention classes {attn_classes}): none are in "
+        f"TP_SHARDABLE_ATTENTION_CLASSES, so every weight would stay replicated while the TP mesh "
+        f"assumes sharding. This model family does not support TP — use EP (and/or ETP for "
+        f"experts) instead, or add validated entries to TP_SHARDABLE_ATTENTION_CLASSES."
+    )
+
+
+def reject_unshardable_tp_model(model: nn.Module, tp_size: int) -> None:
+    """Refuse a model whose decoder heads ``tp_size`` cannot split or whose attention the selective plan shards
+    in no layer, as :func:`apply_tp_to_attention_only` does. Reads the module tree alone, so a meta-device shell
+    answers before any weight loads."""
+    cfg = getattr(model, "config", None)
+    _reject_zero_shardable(_tp_decoder_layers(model, cfg, tp_size), cfg, tp_size)
+
+
 def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int:
     """Shard the attention modules of ``model`` over the ``tp`` dim of ``device_mesh`` (1-D, or 2-D with DP);
     returns how many were parallelized. MoE blocks are never visited."""
@@ -125,6 +158,7 @@ def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int
     tp_size = tp_mesh.size()
     cfg = getattr(model, "config", None)
     layers = _tp_decoder_layers(model, cfg, tp_size)
+    _reject_zero_shardable(layers, cfg, tp_size)
     patched = 0
     per_head_norms: list[nn.Module] = []
     unsharded: Counter[str] = Counter()
@@ -141,9 +175,7 @@ def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int
             unsharded[class_name] += 1
             continue
 
-        # ``is not None``: a plan entry naming a present-but-None attribute would shard nothing.
-        plan = {name: style() for name, style in _ATTENTION_TP_STYLES.items() if getattr(attn, name, None) is not None}
-
+        plan = _attention_tp_plan(attn)
         if plan:
             _parallelize_or_raise(attn, tp_mesh, plan, f"layer {layer_idx} {attn_name} ({class_name})")
             patched += 1
@@ -155,19 +187,6 @@ def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int
 
         if hasattr(attn, "sinks") and isinstance(attn.sinks, nn.Parameter):
             shard_sinks_param(model, attn, attn_name, tp_mesh, log_first=(layer_idx == 0))
-
-    # Zero shardable layers under tp_size>1 leaves the model replicated while the (dp, tp) mesh assumes
-    # sharding: silent memory blowup and a wrong DP gradient denominator.
-    if tp_size > 1 and patched == 0:
-        model_type = getattr(cfg, "model_type", "unknown")
-        attn_classes = sorted({type(a).__name__ for a in (_find_attention(layer)[0] for layer in layers) if a})
-        raise ValueError(
-            f"Tensor parallelism (tensor_parallel_size={tp_size}) sharded ZERO attention layers on "
-            f"this model (model_type={model_type!r}, attention classes {attn_classes}): none are in "
-            f"TP_SHARDABLE_ATTENTION_CLASSES, so every weight would stay replicated while the TP mesh "
-            f"assumes sharding. This model family does not support TP — use EP (and/or ETP for "
-            f"experts) instead, or add validated entries to TP_SHARDABLE_ATTENTION_CLASSES."
-        )
 
     # Partial sharding trains correctly (the replicas' gradients are AVG-reduced) but saves less memory than
     # 1/tp_size; a warning, not a raise, so the hybrid families keep TP on their attention layers.

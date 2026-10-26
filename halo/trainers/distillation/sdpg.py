@@ -12,7 +12,7 @@ import torch
 from halo.data.collators.self_distill import format_field_names, privileged_hint
 from halo.log import warn_once
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.trainers.distillation.divergences import global_token_mean
+from halo.trainers.distillation.divergences import global_token_mean, token_divergence
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from halo.trainers.evaluation import split_rows_head
 from halo.trainers.grpo.online import DistributedGRPOTrainer
@@ -68,9 +68,9 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTr
         # Every rank constructs the trainer, so this raise is world-uniform; a per-rollout raise would
         # leave the peers of the rank that drew the bad row waiting in the next collective.
         columns = getattr(self.train_dataset, "column_names", None)
-        hints_the_answer = "answer" in format_field_names(self.sdpg_hint_template)
+        hints_the_answer = "answer" in format_field_names(self.sdpg.sdpg_hint_template)
         if (
-            self.sdpg_beta_base != 0.0
+            self.sdpg.sdpg_beta_base != 0.0
             and hints_the_answer
             and columns is not None
             and self.sdpg_answer_field not in columns
@@ -87,7 +87,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTr
         # Answers in prompt row order, aligned 1:1 with rollout rows (RepeatSampler already expanded).
         answers = [x.get(self.sdpg_answer_field) for x in inputs]
         output = super()._generate_and_score_completions(inputs)
-        if self.sdpg_beta_base != 0.0:
+        if self.sdpg.sdpg_beta_base != 0.0:
             output["teacher_prompt_ids"], output["teacher_prompt_mask"] = self._build_teacher_prompts(
                 output["prompt_ids"], output["prompt_mask"], answers
             )
@@ -99,7 +99,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTr
         rows = []
         for i in range(prompt_ids.size(0)):
             real = prompt_ids[i][prompt_mask[i].bool()].tolist()
-            hint = privileged_hint(self.sdpg_hint_template, answer=answers[i])
+            hint = privileged_hint(self.sdpg.sdpg_hint_template, answer=answers[i])
             if hint is None:
                 # Warned, not raised: this runs per rollout row on one rank.
                 warn_once(
@@ -121,27 +121,41 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTr
         return ids, mask
 
     def _compute_loss(self, model, inputs):
-        loss = super()._compute_loss(model, inputs)
-        if self.sdpg_beta_base == 0.0:
-            return loss
+        if self.sdpg.sdpg_beta_base == 0.0:
+            return super()._compute_loss(model, inputs)
         if "teacher_prompt_ids" not in inputs:
             raise RuntimeError(
-                f"sdpg_beta_base={self.sdpg_beta_base} but the batch carries no teacher_prompt_ids, so "
+                f"sdpg_beta_base={self.sdpg.sdpg_beta_base} but the batch carries no teacher_prompt_ids, so "
                 f"the OPD term would be skipped and the step would train plain GRPO. "
                 f"_generate_and_score_completions builds them; an override of it, or of the batch "
                 f"buffering, must keep the teacher_prompt_* keys, or set sdpg_beta_base: 0 to drop the term."
             )
 
+        # The GRPO loss forward hands its completion logits back, so the student runs forward and backward once.
+        with self._capturing_completion_logits() as student_logits:
+            loss = super()._compute_loss(model, inputs)
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
-        student_logits = self._completion_logits(
-            model, inputs["prompt_ids"], inputs["prompt_mask"], completion_ids, completion_mask
-        )
+        rows = [part.size(0) for part in student_logits]
+        if sum(rows) != completion_ids.size(0) or any(
+            part.size(1) != completion_ids.size(1) for part in student_logits
+        ):
+            raise RuntimeError(
+                f"The OPD term reads the student's completion logits off the GRPO loss forward, which handed "
+                f"back {[tuple(part.shape[:2]) for part in student_logits]} for a {tuple(completion_ids.shape)} "
+                f"completion batch: TRL's _compute_loss no longer scores the policy through "
+                f"_get_per_token_logps_and_entropies, or an override forwards around it. Keep the loss forward "
+                f"on that scorer, or set sdpg_beta_base: 0 to drop the term."
+            )
         with privileged_teacher_pass(model):
             teacher_logits = self._completion_logits(
                 model, inputs["teacher_prompt_ids"], inputs["teacher_prompt_mask"], completion_ids, completion_mask
             )
-
-        opd_per_token = self.sdpg_loss_fn(student_logits, teacher_logits, self.sdpg_temperature).sum(-1)
+        opd_per_token = torch.cat(
+            [
+                token_divergence(self.sdpg_loss_fn, student, teacher, self.sdpg.sdpg_temperature)
+                for student, teacher in zip(student_logits, teacher_logits.split(rows), strict=True)
+            ]
+        )
 
         # The tokens the GRPO loss trains: a tool-output token is attention-valid but never trained.
         gate = positive_advantage_gate(
@@ -165,7 +179,8 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTr
 
         Where the forward takes ``logits_to_keep`` (TRL's ``model_kwarg_keys``, as its own GRPO forward
         reads them) the head stops at the last ``C + 1`` positions, so the prompt's ``[B, P, V]`` rows are
-        never built. The prefixes differ in length; aligning on the sequence end pairs the two forwards' rows.
+        never built. The prefixes differ in length; aligning on the sequence end pairs these rows with the
+        loss forward's.
         """
         keep = completion_ids.size(1) + 1
         input_ids = torch.cat([prefix_ids, completion_ids], dim=1)

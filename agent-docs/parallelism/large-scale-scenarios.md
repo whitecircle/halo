@@ -162,7 +162,8 @@ Only two loaders shard at load time: `WeightAction.EXPERT_SHARD`
 Every other branch of `_dispatch_model_loading` materializes all 396.8 B on one GPU: **794 GB, never
 starts**. That kills plain FSDP2, pure TP (MoE TP has no shard-aware load), pure ETP (`ep_size == 1`
 sets `experts_per_rank = num_experts`, so every rank reads every expert) and pure CP before any
-memory argument.
+memory argument. A dense model meets the same ceiling: plain FSDP2/DDP loads it whole onto every GPU,
+and TP is the route past one GPU ([Data Parallelism](data-parallelism.md#fsdp2-strategy-by-mode)).
 
 The EP lazy loader slices by **`ep_size`, not `X`** — ETP partners share `dispatch_ep_rank` and load
 the same experts at full intermediate width. The intermediate dim is split later, at EP patching

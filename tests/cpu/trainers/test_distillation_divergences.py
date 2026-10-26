@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The divergence registry, the gold-token gathers, the token reduction and the SDPG beta schedule
+"""The divergence registry, the gold-token gathers, the token means and the SDPG beta schedule
 (``halo/trainers/distillation/divergences.py``).
 
 Pure tensor math, so the assertions are closed-form values, symmetry and bound properties, the
@@ -180,11 +180,11 @@ def test_masked_token_mean_weights_each_sample_by_its_own_token_mean():
     loss = torch.tensor([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]])
     mask = torch.tensor([[1, 1, 0], [0, 1, 1]])
     assert masked_token_mean(loss, mask, torch.tensor([2.0, 0.5])).item() == pytest.approx(7.75)
-    assert masked_token_mean(loss.unsqueeze(-1).expand(2, 3, 4), mask).item() == pytest.approx(4 * 13.25)
+    assert masked_token_mean(loss, mask).item() == pytest.approx(13.25)
 
 
 def test_masked_token_mean_of_an_empty_mask_is_zero_not_nan():
-    assert masked_token_mean(torch.ones(1, 4, 8), torch.zeros(1, 4)).item() == 0.0
+    assert masked_token_mean(torch.ones(1, 4), torch.zeros(1, 4)).item() == 0.0
 
 
 def _gradient_norms_across_temperature(loss_fn, seed=0):

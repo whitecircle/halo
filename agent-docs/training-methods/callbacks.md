@@ -42,13 +42,13 @@ Tracks token throughput, step time and GPU memory; tokens/s/GPU is the headline.
 
 Memory keys take no prefix: `allocated_gb`, `reserved_gb`, `peak_allocated_gb`, `training_peak_allocated_gb`; `num_full_model_params` adds `distributed_efficiency`.
 
-Off by default: utilization misleads for multi-sequence trainers — DPO / SMPO / reward forward both chosen and rejected, distillation also the teacher. Turning it on sets `include_num_input_tokens_seen="all"`, whose exact accounting costs a world all-gather plus a host sync per micro-batch; a warning fires from world size 64 up.
+Off by default: utilization misleads for multi-sequence trainers — DPO / SMPO / reward forward both chosen and rejected, distillation also the teacher. Turning it on sets `include_num_input_tokens_seen="all"`: each micro-batch adds its input shape on the host and the trainer sums the window over the world once per optimizer step (HF's own count gathers and syncs on every micro-batch).
 
 The peak is keyed on `lowp_precision` where low-precision compute is on, since bf16 masters name a peak the GEMMs never run at. S-MFU scales the expert term by `(top_k / num_experts) × ep_size`; `expert_tp_size` already divides the local expert params.
 
 Throughput is measured only where the collator emits `input_ids`. SMPO and embedding emit none, so every step falls back to a padded-length estimate (`per_device_train_batch_size × gradient_accumulation_steps × max_seq × 0.8`) behind one warning — a figure that reads as measured but is not.
 
-Three cumulative token counters nest: `num_input_tokens_seen` (HF's, padding included), `num_attended_tokens_seen` (SFT only, de-duplicated across TP/ETP/CP) and `num_unmasked_output_tokens_seen` (`labels != -100`, or the completion mask). Only the first survives a resume, via `trainer_state.json`; it also drives throughput, so tokens/s counts padding.
+Three cumulative token counters nest: `num_input_tokens_seen` (HF's, padding included), `num_attended_tokens_seen` (SFT, DPO, KTO and reward, each batch counted once across its TP/ETP/CP group) and `num_unmasked_output_tokens_seen` (`labels != -100`, or the completion mask). Only the first survives a resume, via `trainer_state.json`; it also drives throughput, so tokens/s counts padding.
 
 ### MoEMetricsCallback
 

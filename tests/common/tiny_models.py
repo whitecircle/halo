@@ -212,7 +212,7 @@ class TinyFamily:
     ``build`` takes the text-config overrides (vocab and special-token ids) and returns the random-init
     model; ``load_class`` is the stock class ``from_pretrained`` reads its checkpoint back with.
     ``ulysses_cp`` is False where Ulysses CP refuses the family at load (a sequence-axis mixer or
-    compressor it cannot shard, or an attention with no flash kernel). ``attention_targets`` names the
+    compressor it cannot shard, or an attention no Ulysses wrapper implements). ``attention_targets`` names the
     attention projections LoRA adapts where the checkpoint index cannot (hub key names that differ
     from the module tree, or projections not spelled ``*_proj``). ``cp_attn_implementation`` is the
     label a family loads with under CP where the auto-selected flash label is refused (remote code
@@ -289,10 +289,7 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "deepseek_v4": TinyFamily(_tiny_deepseek_v4, ulysses_cp=False, attention_targets=("q_a_proj", "o_b_proj")),
     # Its attention is not one the Ulysses wrapper implements.
     "gemma4_text": TinyFamily(_tiny_gemma4, text_overrides={"max_position_embeddings": 512}, ulysses_cp=False),
-    # Its MLA head shapes have no flash kernel, so the auto-selected attention is sdpa.
-    "glm4_moe_lite": TinyFamily(
-        _causal(Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, TINY_GLM4_MOE_LITE_CONFIG), ulysses_cp=False
-    ),
+    "glm4_moe_lite": TinyFamily(_causal(Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, TINY_GLM4_MOE_LITE_CONFIG)),
     # KDA linear attention: a causal conv and a recurrent scan along the sequence.
     "glm5_next": TinyFamily(
         _composite(Glm5NextConfig, Glm5NextForConditionalGeneration, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG),

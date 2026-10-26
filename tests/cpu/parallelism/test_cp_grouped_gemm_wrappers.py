@@ -49,6 +49,8 @@ def _dispatched_wraps_experts(*, use_grouped_gemm: bool, config) -> bool:
         ),
         patch.object(loading.AutoConfig, "from_pretrained", lambda *args, **kwargs: config),
         patch.object(loading.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: SimpleNamespace()),
+        # The module-tree gate has its own test; it would refuse the eager label standing in for attention.
+        patch.object(loading, "reject_unsupported_structure", lambda *args, **kwargs: None),
         patch.object(loading, "load_cp_model", stop),
         pytest.raises(_Dispatched) as dispatched,
     ):

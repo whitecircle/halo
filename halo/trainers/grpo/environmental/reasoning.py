@@ -17,6 +17,7 @@ from halo.models.config_access import config_model_types
 from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 from halo.runtime.ranks import is_global_main_process
+from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,10 @@ class ReasoningBudgetMixin:
         if cfg.rollout_backend == SGLANG_BACKEND or not has_thinking_budget(self._efforts_by_level()):
             return None
         model_config = getattr(unwrap_framework_wrappers(self.model), "config", None)
-        reject_unenforceable_thinking_budget(config_model_types(model_config), cfg.rollout_backend)
+        reject_unenforceable_thinking_budget(
+            config_model_types(model_config),
+            resolve_weight_sync_client(cfg.rollout_backend).UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES,
+        )
         also_lost = (
             ", and the closes the engine forces at a thinking cap stay in the policy loss"
             if self._any_episode_capped

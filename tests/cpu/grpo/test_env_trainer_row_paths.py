@@ -68,7 +68,10 @@ def _trainer(cap: int | None = None, per_turn: bool = True, context_limit: int =
     trainer._batch_errors = BatchBuildFence()
     trainer._warned_once = set()
     trainer.async_config = types.SimpleNamespace(
-        rollout_chat_template_kwargs={}, max_train_row_tokens=cap, train_on_sampled_tokens=per_turn
+        rollout_chat_template_kwargs={},
+        max_train_row_tokens=cap,
+        train_on_sampled_tokens=per_turn,
+        drop_degenerate_groups=False,
     )
     trainer._carry_reasoning = False
     trainer._rows_over_cap = 0
@@ -79,7 +82,6 @@ def _trainer(cap: int | None = None, per_turn: bool = True, context_limit: int =
     trainer.eos_token_id = 2
     trainer.pad_token_id = 0
     trainer._render_messages_to_ids = _flat_render
-    trainer._drop_degenerate_groups = False
     trainer.args = types.SimpleNamespace(mask_truncated_completions=False)
     trainer.accelerator = types.SimpleNamespace(gather=lambda x: x)
     return trainer

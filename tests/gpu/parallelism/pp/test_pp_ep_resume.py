@@ -1,22 +1,28 @@
 #!/usr/bin/env python
-"""PP+EP checkpoint resume through the real DistributedSFTTrainer (pp2 × ep2, gpt-oss tiny MoE).
+"""PP+EP and PP+ETP checkpoint save, resume and export through the real DistributedSFTTrainer (gpt-oss tiny
+MoE): pp2 × ep2 (``--mode ep2``, the default) or pp2 × etp2 (``--mode etp2``, every expert on both ranks of a
+stage at half the FFN width).
 
-The EP-specific resume seams on top of the dense PP resume test:
+The expert-specific seams on top of the dense PP resume test:
 
+  * the export: the checkpoint's merged index reloads through stock ``from_pretrained`` with no missing,
+    unexpected or mis-shaped key and reproduces the pipeline's loss on its final weights, so each stage
+    wrote its experts whole (dispatch-EP slices or expert-TP shards gathered) under global names;
   * PP+EP weight resume loads at construction (the loader cannot ingest HF-format keys into the
-    fused per-rank expert layout), so the resume trainer's model is built from_pretrained(ckpt) —
+    per-rank expert layout), so the resume trainer's model is built from_pretrained(ckpt) —
     exactly what prepare_distributed_resume arranges in the training scripts;
   * the construction guard: a model built from base weights must be rejected by the load path
     (its experts would silently resume from base weights);
   * router balancing biases restore through the stage's global_parameter_name remap — post-load
     biases bitwise equal the saved global-named entries for this stage's layers (without the
     remap, stage 1 would look up stage 0's names and keep zero biases);
-  * EP expert optimizer moments (plain per-rank tensors) restore bitwise from this rank's shard;
+  * expert optimizer moments (plain per-rank tensors) restore bitwise from this rank's shard, an exact
+    resume with no warm restart;
   * end-to-end: train(resume) continues to completion with finite losses.
 
 Topology: 4 GPUs as 2 simulated NVLink domains of 2, moe_balancing=bias_update.
 
-Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ep_resume.py
+Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ep_resume.py [--mode etp2]
 """
 
 import json
@@ -31,6 +37,7 @@ from trl import SFTConfig
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.unwrapping import unwrap_toolkit_wrappers
+from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
@@ -40,15 +47,20 @@ from tests.common.pp_trainers import (
     build_pp_args,
     build_sft_rows,
     losses_identical_across_ranks,
+    probe_step,
+    reload_reproduces_probe_loss,
     restored_moments_match_shard,
 )
 from tests.common.utils import log
 
 PP_SIZE = 2
-EP_SIZE = 2
 SEQ_LEN = 64
 N_STEPS = 8
 SAVE_STEP = 4
+BATCH = 4
+# The expert axis inside each two-rank stage.
+MODES = {"ep2": {"ep_size": 2}, "etp2": {"expert_tp_size": 2}}
+MODE = "ep2"
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_ep_resume")
@@ -56,8 +68,9 @@ def run(ctx):
     checks, metrics = {}, {}
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
     config = ParallelismConfig(
-        world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, ep_size=EP_SIZE
+        world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, **MODES[MODE]
     )
+    rows = build_sft_rows(TINY_GPTOSS_CONFIG["vocab_size"])
 
     root = shared_output_dir(ctx)
 
@@ -71,16 +84,14 @@ def run(ctx):
             SFTConfig,
             os.path.join(root, subdir),
             max_steps=max_steps,
-            per_device_train_batch_size=4,
+            per_device_train_batch_size=BATCH,
             max_length=SEQ_LEN,
             save_strategy="steps" if save_steps else "no",
             save_steps=save_steps or 500,
             bf16=True,
             gradient_checkpointing=False,  # resume compares optimizer state, not the checkpoint path
         )
-        return build_bias_balanced_sft_trainer(
-            model, args, config, tokenizer, build_sft_rows(TINY_GPTOSS_CONFIG["vocab_size"])
-        )
+        return build_bias_balanced_sft_trainer(model, args, config, tokenizer, rows)
 
     # ── train 4 steps, checkpoint at step 4 (EP gather + biases + optimizer shards) ─────────────
     trainer_a = build_trainer("runA", SAVE_STEP, save_steps=SAVE_STEP)
@@ -108,6 +119,23 @@ def run(ctx):
         and os.path.isfile(os.path.join(ckpt, f"optimizer_shard_{rank:05d}.pt"))
         and os.path.isfile(os.path.join(ckpt, "router_balancing_biases.pt"))
     )
+
+    # ── the export: the merged index reloads unsplit and scores the final weights as the pipeline does ──
+    # The save is the run's last step, so one more pipeline step with no update scores the saved weights.
+    probe_batch, probe_loss = probe_step(trainer_a, rows, BATCH)
+    exported = False
+    if rank == 0:
+        reloaded, info = GptOssForCausalLM.from_pretrained(
+            ckpt, dtype=torch.bfloat16, attn_implementation="eager", output_loading_info=True
+        )
+        problems = loading_problems(info)
+        log(f"[export] loading problems: {problems or 'none'}")
+        exported = not problems and reload_reproduces_probe_loss(
+            reloaded.to(ctx.device), probe_batch, rows, config.data_parallel_size, probe_loss, ctx.device
+        )
+    flag = torch.tensor([float(exported)], device=ctx.device)
+    dist.broadcast(flag, src=0)
+    checks["export_reloads_unsplit_and_reproduces_the_probe_loss"] = bool(flag.item())
 
     # ── the construction guard: a base-built model must be rejected by the load path ────────────
     trainer_base = build_trainer("runBase", N_STEPS)
@@ -167,4 +195,10 @@ def run(ctx):
 
 
 if __name__ == "__main__":
+    if "--mode" in sys.argv:
+        i = sys.argv.index("--mode")
+        MODE = sys.argv[i + 1]
+        del sys.argv[i : i + 2]
+    if MODE not in MODES:
+        raise SystemExit(f"--mode must be one of {sorted(MODES)}, got {MODE!r}")
     sys.exit(run())

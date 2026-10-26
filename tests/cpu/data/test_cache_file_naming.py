@@ -19,9 +19,16 @@ from tokenizers.models import WordLevel
 from tokenizers.processors import TemplateProcessing
 from transformers import ProcessorMixin
 
-from halo.data.collators.self_distill import SelfDistillTextCollator
-from halo.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY
+from halo.data.collators.self_distill import (
+    SelfDistillTextCollator,
+    encode_self_distill_row,
+    privileged_hint,
+    require_aligned_responses,
+    teacher_history,
+)
+from halo.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, build_completion_only_labels
 from halo.data.pipeline import map_cache_key
+from halo.data.pipeline.chat_render import render_conversation, tokenize_rendered
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.map_cache_key import (
     CACHE_KEY_ATTR,
@@ -781,9 +788,9 @@ def test_non_processor_carrying_a_tokenizer_is_not_keyed_as_that_tokenizer():
     ],
 )
 def test_self_distill_cache_signature_covers_every_render_knob(knob, value):
-    """The self-distill audit map keys on ``collator.cache_signature()``; a knob missing from it
-    lets a stale cache skip the audit, and the over-length raise reverts to collate time — where it
-    is rank-local and hangs the peers in the step's collectives."""
+    """The self-distill prep maps key on ``collator.cache_signature()``; a knob missing from it serves
+    the token ids and labels the text encoding wrote under its previous value, or lets a stale cache
+    skip the VLM audit, whose refusals then revert to collate time, rank-local, hanging the peers."""
     baseline = {
         "tokenizer": _LeafTok(),
         "max_length": 2048,
@@ -805,16 +812,16 @@ def test_self_distill_cache_signature_covers_every_render_knob(knob, value):
     assert baseline[knob] != value, "the variant must actually differ from the baseline"
     fp_base = kwargs_fingerprint(SelfDistillTextCollator(**baseline).cache_signature())
     fp_variant = kwargs_fingerprint(SelfDistillTextCollator(**{**baseline, knob: value}).cache_signature())
-    assert fp_base != fp_variant, f"{knob} changes what the audit accepts but not the cache key"
+    assert fp_base != fp_variant, f"{knob} changes what the prep map writes or accepts but not the cache key"
 
 
 def test_the_self_distill_audit_map_threads_the_collator_signature_into_its_cache_key():
-    """The signature above only protects the audit if the script actually passes it.
+    """The signature above only protects the prep maps if the script actually passes it.
 
-    ``audit_self_distill_row`` takes the collator through ``fn_kwargs``, where it fingerprints by
-    class name alone — so without ``cache_key_extras`` a stale cache skips the audit after any
-    render knob changes, and the over-length raise reverts to collate time, where it is rank-local
-    and hangs the peers in the step's collectives.
+    ``encode_self_distill_row`` and ``audit_self_distill_row`` take the collator through
+    ``fn_kwargs``, where it fingerprints by class name alone — so without ``cache_key_extras`` a
+    stale cache serves the previous knobs' encoding, or skips the audit, after any render knob
+    changes.
     """
     calls = [
         node
@@ -823,13 +830,35 @@ def test_the_self_distill_audit_map_threads_the_collator_signature_into_its_cach
         and getattr(node.func, "id", None) == "coordinated_map"
         and any(kw.arg == "fn_kwargs" and "collator" in ast.unparse(kw.value) for kw in node.keywords)
     ]
-    assert calls, "no self-distill audit map takes the collator through fn_kwargs"
+    assert calls, "no self-distill prep map takes the collator through fn_kwargs"
     for call in calls:
         # Presence, not spelling: hoisting the signature to a local, or adding the same guard to
-        # another audit map, is a correct refactor that an exact-source pin would fail.
+        # another prep map, is a correct refactor that an exact-source pin would fail.
         assert any(kw.arg == "cache_key_extras" for kw in call.keywords), (
-            f"the audit map at line {call.lineno} does not key on the collator's render knobs"
+            f"the prep map at line {call.lineno} does not key on the collator's render knobs"
         )
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        render_conversation,
+        tokenize_rendered,
+        build_completion_only_labels,
+        teacher_history,
+        privileged_hint,
+        require_aligned_responses,
+    ],
+    ids=lambda helper: helper.__name__,
+)
+def test_the_self_distill_encode_map_key_covers_the_encoder_source(helper, monkeypatch):
+    """The text encode map writes the token ids and labels training reads, and its key folds in only the
+    source of the first-party helpers its function reaches by bare name: an encoder behind a collator
+    method drops out, and an edited render or label rule would serve the previous encoder's rows."""
+    before = function_cache_id(encode_self_distill_row)
+    getsource = inspect.getsource
+    monkeypatch.setattr(inspect, "getsource", lambda func: getsource(func) + ("\n# edited" if func is helper else ""))
+    assert function_cache_id(encode_self_distill_row) != before, f"editing {helper.__name__} keeps the cache key"
 
 
 def test_the_worker_count_is_a_named_parameter_not_a_cache_keyed_kwarg():

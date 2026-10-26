@@ -258,15 +258,9 @@ class StepBatchMixin:
         )
         # ``completion_mask`` is attention-valid (env/tool tokens conditioned sampling), ``tool_mask`` the loss
         # mask: conflating them hides tool output from attention. A fully masked row stays invisible to both.
-        completion_mask = pad(
-            [
-                torch.ones_like(row.completion_mask) if row.completion_mask.any() else row.completion_mask
-                for row in rows
-            ],
-            padding_value=0,
-            padding_side="right",
-        )
         tool_mask = pad([row.completion_mask for row in rows], padding_value=0, padding_side="right")
+        real = pad([torch.ones_like(row.completion_mask) for row in rows], padding_value=0, padding_side="right")
+        completion_mask = real & tool_mask.any(dim=1, keepdim=True)
         sampling_logps = has_sampling = None
         if self._is_correction:
             # A turn missing sampling log-probs keeps ratio ≡ 1 for that row alone: has_sampling masks its zeros.
@@ -348,7 +342,7 @@ class StepBatchMixin:
         if self._runs_logprob_recompute:
             # Capture is scoped to this call: the ref-logps forward that follows is a different policy.
             replay_spans = (
-                dense_row_spans(attention_mask)
+                dense_row_spans(attention_mask)[0]
                 if self._routing_injector is not None and self._replay_row_spans and mode == "train"
                 else None
             )
@@ -414,7 +408,7 @@ class StepBatchMixin:
             num_generations,
             self.args.scale_rewards,
             valid_mask=episode_state == 1,
-            std_floor=self._scale_rewards_std_floor,
+            std_floor=self.async_config.scale_rewards_std_floor,
         )
         return episode_state, traj_advantages, rows.to_rows(traj_advantages)
 
@@ -475,7 +469,7 @@ class StepBatchMixin:
             # An env-invalid episode's forced failure-reward advantage is noise, so its tokens go too.
             drop_traj = ~valid_mask
             world.fraction("sampling/invalid_episode_frac", drop_traj.sum(), drop_traj.numel())
-            if self._drop_degenerate_groups:
+            if self.async_config.drop_degenerate_groups:
                 # Judged on the environment's reward: the trainer's reasoning terms are length regularizers,
                 # and a group tied on everything else would train on its members' reasoning lengths alone.
                 env_rewards = torch.tensor([r.total_reward for r in rows.rollout_results], device=device)
@@ -518,7 +512,7 @@ class StepBatchMixin:
             ratio,
             self.accelerator.gather,
             self._metrics["train"],
-            self._balance_token_mass,
+            self.async_config.balance_token_mass,
             negative_only=negative_only,
         )
         if balance is not None:

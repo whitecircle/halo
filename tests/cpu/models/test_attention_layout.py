@@ -277,8 +277,9 @@ def test_grouping_sums_widths_per_rule_without_changing_the_total():
             LayerAttention("none", 0.0),
         )
     )
-    grouped = layout.grouped()
+    grouped = layout.grouped
     assert {(g.kind, g.width) for g in grouped} == {("full", 300.0), ("window", 50.0), ("none", 0.0)}
+    assert layout.grouped is grouped, "every batch's costing reads the one merge, not a rebuilt one"
     assert layout.flops_per_token(16) == pytest.approx(SCORE_PASSES * (300.0 * 16 + 50.0 * 8), rel=1e-12)
     assert "2×full + 1×window(8)" in layout.describe()
 

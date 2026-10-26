@@ -21,7 +21,8 @@ from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4Mo
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.kernels.fused_glu import GluCombine, clamped_silu_mul_eager, resolve_clamped_glu_mul
 from halo.model_loading.buffer_repair import finalize_loaded_model
-from halo.models.attention.selection import _model_is_deepseek_v4
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.selection import resolve_attn_implementation
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.moe.expert_layout import ExpertLayout
 from halo.models.moe.family_specs import find_moe_family_spec
@@ -93,9 +94,13 @@ def test_tiny_config_save_load_roundtrip():
 # Eager-only guards
 
 
-def test_model_is_deepseek_v4_detection():
-    assert _model_is_deepseek_v4(_tiny_config())
-    assert not _model_is_deepseek_v4(type("Cfg", (), {"model_type": "gpt_oss"})())
+@pytest.mark.parametrize("requested", [None, "flash_attention_2", "sdpa", "flex_attention"])
+def test_every_requested_attention_resolves_to_eager(requested):
+    """The family spec declares DeepSeek-V4 eager-only, so no request (or auto-detection) reaches a kernel that
+    drops its sink column or misreads its compressor's KV."""
+    assert find_moe_family_spec("deepseek_v4").eager_only_attention
+    resolved = resolve_attn_implementation(_tiny_config(), requested, torch.bfloat16, sinks_policy=SinksPolicy.LIVE)
+    assert resolved == "eager"
 
 
 def test_collator_factory_refuses_multi_document_rows():

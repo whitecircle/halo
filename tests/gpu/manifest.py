@@ -187,6 +187,8 @@ _PRECOMPUTE_SWEEP_FAMILIES = tuple(family for family in _TINY_MOE_FAMILIES if fa
 # The MoE families of the CP roster, one tiny model per Ulysses wrapper class beside the dense qwen3;
 # tests/cpu/conventions/test_tiny_family_roster.py holds them to tests/common/equivalence/cp_equivalence.py.
 _CP_MOE_FAMILIES = ("bailing_moe", "cohere2_moe", "glm4_moe_lite", "gpt_oss", "mistral4", "qwen3_5_moe_text")
+# The pipeline-registered MoE families test_pp_family_vs_reference.py runs (GPT-OSS has its own PP suites).
+_PP_MOE_FAMILIES = ("deepseek_v4", "glm5_next", "qwen3_5_moe_text", "step3p7")
 # The families whose attention the selective-TP path shards; tests/cpu/conventions/test_tiny_family_roster.py
 # holds this to halo/distributed/tensor_parallel/parallelize_attention.py.
 _TP_FAMILIES = ("cohere2_moe", "glm4_moe_lite", "gpt_oss", "lfm2_moe", "mistral4", "qwen3_5_moe_text", "qwen3_moe")
@@ -387,6 +389,9 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/cp/test_cp_train_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "cp", "qwen3"), timeout=1000
+    ),
+    "parallelism/cp/test_cp_vlm.py": TestSpec(
+        nproc=2, markers=("gpu", "full", "2gpu", "vlm", "cp", "qwen3"), timeout=1000
     ),
     # Tiny models, one per Ulysses wrapper class, each row carrying only its own family marker.
     "parallelism/cp/test_cp_family_vs_reference.py": TestSpec(
@@ -677,6 +682,23 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/pp/test_pp_etp_vs_unsplit.py": TestSpec(
         nproc=8, markers=("gpu", "full", "8gpu", "pp", "etp", "moe", "gptoss"), timeout=1500
     ),
+    # The pipeline-registered MoE families tiny_family_model builds, through the real trainer against their unsplit
+    # ep1 twin: Qwen3.5-MoE on the ep1 grouped-GEMM wrappers, and each family with its experts distributed.
+    "parallelism/pp/test_pp_family_vs_reference.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "pp", "ep", "moe", *_family_markers(_PP_MOE_FAMILIES)),
+        timeout=1500,
+        args_matrix=(
+            Row("--family qwen3_5_moe_text --ep-size 1", markers=("gpu", "full", "4gpu", "pp", "moe", "qwen3")),
+            *(
+                Row(
+                    f"--family {family} --ep-size 2",
+                    markers=("gpu", "full", "4gpu", "pp", "ep", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
+                )
+                for family in _PP_MOE_FAMILIES
+            ),
+        ),
+    ),
     "parallelism/pp/test_pp_ep_gc_equivalence.py": TestSpec(
         nproc=4, markers=("gpu", "core", "4gpu", "pp", "ep", "moe", "gptoss"), timeout=1800
     ),
@@ -702,8 +724,12 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/pp/test_pp_resume.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
     ),
+    # pp2 × ep2 and pp2 × etp2: save, export reload, exact resume. Markers are the union across the matrix.
     "parallelism/pp/test_pp_ep_resume.py": TestSpec(
-        nproc=4, markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss"), timeout=1500
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "pp", "ep", "etp", "moe", "gptoss"),
+        timeout=1500,
+        args_matrix=("--mode ep2", "--mode etp2"),
     ),
     "parallelism/pp/test_pp_offline_grpo.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
@@ -793,9 +819,6 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/tp/test_tp_gathered_save_sinks.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "gptoss"), timeout=600
-    ),
-    "parallelism/tp/test_vlm_parallelism.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "vlm", "tp", "cp", "qwen3"), timeout=1000
     ),
     # ── trainers ──
     "trainers/grpo/test_environmental_grpo_benchmarks.py": TestSpec(

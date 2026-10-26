@@ -347,11 +347,13 @@ def run_unsplit_reference(model, rows: torch.Tensor, labels: torch.Tensor, devic
 
     ep_modules = named_ep_layers(model)
     expert_grads = {name: gather_expert_grads(m, device=device) for name, m in ep_modules}
+    # Under the GPT-OSS spelling only; another family's router compares by name with the other parameters.
     router_grads = {
         name: torch.cat(
             [grads[f"{name}.router.{p}"].float().flatten() for p in sorted(n for n, _ in m.router.named_parameters())]
         )
         for name, m in ep_modules
+        if hasattr(m, "router")
     }
     expert_param_names = {f"{name}.{attr}" for name, m in ep_modules for attr, _ in m.expert_named_params()}
 
@@ -365,6 +367,22 @@ def run_unsplit_reference(model, rows: torch.Tensor, labels: torch.Tensor, devic
 def fp32_reference(rows: torch.Tensor, labels: torch.Tensor, device, dp_size: int) -> UnsplitReference:
     """fp32 unsplit raw-HF reference on the same bf16-rounded weights (absolute-scale anchor)."""
     return run_unsplit_reference(build_moe_model().float().to(device), rows, labels, device, dp_size)
+
+
+def apply_single_process_ep1(model, rank: int, *, use_grouped_gemm: bool = True):
+    """``model`` with the ep1 EP wrappers on a single-process EPConfig whose hooks and dispatch stay inert;
+    stage_world_size=1 with stage_base_rank=rank keeps its group creation collective-consistent (every rank
+    creates every single-rank group in the same order)."""
+    config = EPConfig(
+        ep_size=1,
+        stage_world_size=1,
+        stage_base_rank=rank,
+        node_local=True,
+        nvlink_domain_size=1,
+        use_grouped_gemm=use_grouped_gemm,
+        experts_fsdp_managed=True,
+    )
+    return apply_ep_layers(model, config)
 
 
 def ep1_reference(
@@ -382,28 +400,15 @@ def ep1_reference(
     reference an fp32 distributed run is gated against: the expert compute is the per-expert loop
     over plain torch ops, so no kernel is asked to run outside the dtype it supports.
     """
-    model = build_moe_model(dtype)
-    # A single-process ep1 EPConfig whose hooks and dispatch stay inert; stage_world_size=1 with
-    # stage_base_rank=rank keeps its group creation collective-consistent (every rank creates every
-    # single-rank group in the same order).
-    config = EPConfig(
-        ep_size=1,
-        stage_world_size=1,
-        stage_base_rank=rank,
-        node_local=True,
-        nvlink_domain_size=1,
-        use_grouped_gemm=use_grouped_gemm,
-        experts_fsdp_managed=True,
-    )
-    apply_ep_layers(model, config)
+    model = apply_single_process_ep1(build_moe_model(dtype), rank, use_grouped_gemm=use_grouped_gemm)
     return run_unsplit_reference(model.to(device), rows, labels, device, dp_size)
 
 
 def bf16_twin_reference(ctx, rows: torch.Tensor, labels: torch.Tensor) -> UnsplitReference:
     """bf16 ep1-wrapper twin: identical routing, grouped-mm kernels and expert-output rounding → tight
     per-expert/router gates. Pins the process to the unfused expert-output sum first
-    (:func:`_pin_unfused_expert_sum`), which the EP run under test then shares."""
-    _pin_unfused_expert_sum(ctx)
+    (:func:`pin_unfused_expert_sum`), which the EP run under test then shares."""
+    pin_unfused_expert_sum(ctx)
     return ep1_reference(rows, labels, ctx.device, dp_size=1, rank=ctx.rank)
 
 
@@ -417,7 +422,7 @@ class _UnfusedWeightedUnpermute:
         return weighted.new_zeros((inv_map.shape[0], weighted.shape[-1])).index_add(0, sorted_token_idx, weighted)
 
 
-def _pin_unfused_expert_sum(ctx) -> None:
+def pin_unfused_expert_sum(ctx) -> None:
     """Run every EP layer in this process on the unfused expert-output sum, which rounds each weighted
     expert output to bf16 before adding. With two experts per token those two adds commute, so the ep1
     twin and an EP run that splits a token's experts across ranks (each partial rounded, then summed by

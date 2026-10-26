@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """CPU tests for the token-accuracy contract the toolkit's own Liger appliers must honour.
 
-TRL's ``SFTTrainer.compute_loss`` sets ``return_token_accuracy=True`` on every forward whenever
-``use_liger_kernel`` is on — the toolkit default — and reads ``outputs.token_accuracy`` back. An
-applier that returns a plain ``MoeCausalLMOutputWithPast`` has no such field, so
-``mean_token_accuracy`` is silently absent for the whole run and TRL warns once per step telling the
-user to report it to the liger-kernel repository, which did not write the forward.
+The SFT trainer, as TRL's ``SFTTrainer.compute_loss`` does, sets ``return_token_accuracy=True`` on every
+forward whenever ``use_liger_kernel`` is on — the toolkit default — and reads ``outputs.token_accuracy``
+back. An applier that returns a plain ``MoeCausalLMOutputWithPast`` has no such field, so
+``mean_token_accuracy`` is silently absent for the whole run.
 
 Run: ``pytest -m cpu tests/cpu/model_loading/test_liger_token_accuracy.py``
 """

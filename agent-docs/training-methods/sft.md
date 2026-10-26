@@ -106,7 +106,7 @@ The VLM collator never truncates: a batch whose vision plus text tokens exceed `
 
 Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`, `--pipeline_parallel_size`. EP+CP, EP+TP, EP+ETP, PP+EP and PP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md) composes with the expert axes only). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP.
 
-Under CP a batch whose length is not a multiple of `cp_size` is right-padded in `compute_loss`, and a tokenizer with no `pad_token_id` raises there rather than padding with vocabulary token 0. The loss normalizes over the CP group's tokens; metrics come off the local chunk, reduced once per log ([details](../reference/trainer-architecture.md#cp-loss-and-metrics-in-sft)).
+Under CP a batch whose length is not a multiple of `cp_size` is right-padded in `compute_loss`, and a tokenizer with no `pad_token_id` raises there rather than padding with vocabulary token 0. The loss normalizes over the CP group's tokens; metrics come off the local chunk. In every mode the metrics are reduced once per log, not per micro-batch ([details](../reference/trainer-architecture.md#sft-loss-and-metrics)).
 
 See [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility) and [Supported Models](../models/README.md#compatibility-matrix).
 

@@ -1,5 +1,6 @@
 """The refusals a load runs before it reads a weight: the run against its launcher and dtype, the model's
-``config.json`` against the parallelism shape, then the quantized, from-scratch and low-precision options.
+``config.json`` against the parallelism shape, the quantized, from-scratch and low-precision options, then the
+module tree CP and selective TP need, read off a meta-device shell.
 
 ``ParallelismConfig`` is model-blind, so these rules are otherwise reached only minutes and several
 collectives into a job (expert assignment after the EP groups exist, the first DeepEP dispatch).
@@ -7,8 +8,11 @@ collectives into a job (expert assignment after the EP groups exist, the first D
 
 from __future__ import annotations
 
+import copy
+
 import torch
 
+from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.expert_parallel.deepep.capacity import (
     ep_dispatch_capacity,
     padded_wire_hidden,
@@ -16,8 +20,14 @@ from halo.distributed.expert_parallel.deepep.capacity import (
 )
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import reject_accelerate_launch
-from halo.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
+from halo.distributed.tensor_parallel.parallelize_attention import (
+    reject_unshardable_tp_model,
+    validate_tp_head_divisibility,
+)
 from halo.env import is_accelerate_launch
+from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, instantiate_on_meta
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.model_loading.parallel.tp import uses_attention_only_tp
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from halo.models.config_access import text_config
 from halo.models.context_window import context_window_from_config
@@ -229,3 +239,47 @@ def reject_unsupported_load(
                 "lowp_precision requires bf16/fp32 master weights, but dtype=float16. "
                 "Set bf16 (the toolkit default) — low precision affects only the GEMM operands."
             )
+
+
+def reject_unsupported_structure(
+    pc: ParallelismConfig,
+    source: ModelSource,
+    model_class,
+    model_config,
+    attn_implementation: str,
+    dtype: torch.dtype,
+    *,
+    trust_remote_code: bool,
+) -> None:
+    """Refuse a module tree CP or selective TP cannot run, on a meta-device shell before any weight read: the
+    Ulysses refusals (sequence-axis layers, attention class, flash label, head counts) and the TP head split and
+    zero-shard check, the predicates the CP wrap and the TP sharding run again on the loaded model.
+
+    Config-only, so every rank reaches the same verdict.
+    """
+    attention_only_tp = uses_attention_only_tp(pc, model_config)
+    if not (pc.is_cp_mode or attention_only_tp):
+        return
+    # On a copy: the build writes its dtype and attention onto the config it is handed. Built with the run's
+    # attention, since remote code may pick its attention class by it (Bailing's per-backend classes).
+    try:
+        shell = instantiate_on_meta(
+            source.local_dir,
+            model_class,
+            copy.deepcopy(model_config),
+            dtype,
+            trust_remote_code=trust_remote_code,
+            config_only=True,
+            attn_implementation=attn_implementation,
+            revision=source.revision,
+        )
+    except MetaShellBuildError as e:
+        mode = "Context Parallelism" if pc.is_cp_mode else "Attention-only tensor parallelism"
+        raise RuntimeError(
+            f"{e} {mode} checks the module tree on this shell before any weight is read, so the architecture "
+            f"cannot run under {mode}."
+        ) from e
+    if pc.is_cp_mode:
+        reject_unsupported_ulysses_model(shell, pc.cp_size)
+    if attention_only_tp:
+        reject_unshardable_tp_model(shell, pc.tp_size)

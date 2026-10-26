@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from transformers import PretrainedConfig, Qwen3Config
+from transformers import Glm4MoeLiteConfig, PretrainedConfig, Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo import hardware
@@ -25,6 +25,7 @@ from halo.distributed.context_parallel import ulysses_attention as cp_base_layer
 from halo.model_loading.parallel import loader as model_loading
 from halo.models.attention import selection as attention_mod
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
 # Every ``model_type`` transformers actually registers for an FA4-NaN attention stack. Listed
@@ -191,6 +192,42 @@ def test_the_cp_flex_fallback_labels_the_kernel_ulysses_runs(hopper, nan_prone, 
             init_from_scratch=False,
         )
     assert resolved == label
+
+
+def _resolve_on_blackwell(config, requested, dtype=torch.bfloat16, **pc_fields) -> str:
+    """The loader's attention for ``config`` on a Blackwell host whose FA4 build imports."""
+    with (
+        patch.object(attention_mod, "_detect_attention_impl", lambda: "flash_attention_4"),
+        patch.object(attention_mod, "is_blackwell_gpu", lambda: True),
+        patch.object(attention_mod, "is_hopper_gpu", lambda: False),
+        patch.object(attention_mod, "logger"),
+    ):
+        return model_loading._resolve_run_attention(
+            config,
+            make_parallelism_config(world_size=2, gpus_per_node=2, **pc_fields),
+            requested,
+            dtype,
+            sinks_policy=SinksPolicy.NEUTRALIZED,
+            reset_sinks=True,
+            init_from_scratch=False,
+        )
+
+
+@pytest.mark.parametrize("requested", [None, "flash_attention_4"])
+def test_cp_labels_the_flash_kernel_ulysses_runs_for_an_fa4_nan_family(requested):
+    """Ulysses vetoes FA4 for an FA4-backward-NaN family and runs FA2 on Blackwell, so under CP the label is FA2;
+    the SDPA the resolver picks without CP is a label Ulysses refuses after the whole load."""
+    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**TINY_GLM4_MOE_LITE_CONFIG), requested, cp_size=2) == (
+        "flash_attention_2"
+    )
+    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**TINY_GLM4_MOE_LITE_CONFIG), requested) == "sdpa"
+
+
+def test_cp_keeps_the_half_precision_refusal_for_an_fa4_nan_family():
+    """Only the NaN demotion takes the CP kernel's label: an fp32 run has no flash kernel at all, under CP or not."""
+    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**TINY_GLM4_MOE_LITE_CONFIG), None, torch.float32, cp_size=2) == (
+        "sdpa"
+    )
 
 
 def test_detect_attn_impl_on_cpu_host_is_silent_fa2():

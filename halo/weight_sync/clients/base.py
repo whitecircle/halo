@@ -141,6 +141,8 @@ class WeightSyncClientBase(ABC):
     CO_LOADED_PARAM_GROUPS: tuple[tuple[str, ...], ...] = ()
     # Families whose exported router balancing bias the engine's loader drops at serve time.
     DROPPED_BALANCING_BIAS_MODEL_TYPES: frozenset[str] = frozenset()
+    # ``model_type`` → why the engine accepts a thinking budget for the family that it can never enforce.
+    UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES: Mapping[str, str] = {}
     # Whether :meth:`score_completion_logprobs` can re-score under the engine's current weights.
     SUPPORTS_ENGINE_RESCORE = True
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal that follows.

@@ -239,7 +239,8 @@ parallel-vs-baseline bound.
 **Models.** There is no per-family "supports TP" flag. Selective TP shards exactly the attention
 classes in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`), and
 a `tp_size > 1` run that shards **zero** layers raises, naming the model's attention classes; that
-is how the [unsupported families](#supported-models) are rejected.
+is how the [unsupported families](#supported-models) are rejected. The check runs on a meta-device shell
+before any weight is read (`reject_unsupported_structure`), and again when the plan is applied.
 
 A run that shards *some* layers (hybrid stacks — Qwen3.5/3.6 `GatedDeltaNet`, LFM-2 short-conv)
 only **warns**: numerics stay correct, but the unsharded layers keep a full replica per rank, so

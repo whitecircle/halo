@@ -75,15 +75,16 @@ def batch_host(
     )
     host.accelerator = types.SimpleNamespace(gather=lambda x: x)
     host.async_config = AsyncTrainingConfig(
-        train_on_sampled_tokens=False, skip_update_masked_frac=skip_update_masked_frac
+        train_on_sampled_tokens=False,
+        skip_update_masked_frac=skip_update_masked_frac,
+        balance_token_mass=balance_token_mass,
+        scale_rewards_std_floor=std_floor,
     )
     host._carry_reasoning = False
     host._is_correction = is_correction
     host._forced_close_ids = forced_close_ids
     host._is_mask_config = is_mask_config or ISMaskConfig()
     host._breaker_tripped_this_step = False
-    host._balance_token_mass = balance_token_mass
-    host._drop_degenerate_groups = False
     host._empty_rollout_steps = 0
     host._routing_injector = None
     host._batch_errors = BatchBuildFence()
@@ -91,7 +92,6 @@ def batch_host(
     host.num_iterations = 1
     host.beta = beta
     host.num_generations = host.num_generations_eval = num_generations
-    host._scale_rewards_std_floor = std_floor
     host.pad_token_id, host.eos_token_id = 0, 2
     host._tokenize_step_rows = lambda results: [[r] for r in rows]
     host._get_per_token_logps_and_entropies = lambda model, ids, mask, keep, compute_entropy: (policy, None, None)

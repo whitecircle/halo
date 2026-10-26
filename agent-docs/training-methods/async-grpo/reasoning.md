@@ -49,7 +49,8 @@ Any reasoning cap on vLLM needs a reasoning parser on the server, which enforces
 Model Runner V2 ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)). A vLLM cap on Mistral 4 is
 refused at trainer construction and when an eval loads a training config: vLLM serves the family with its
 `mistral_common` tokenizer, which encodes the `[THINK]`/`[/THINK]` markers as plain text, so the budget would
-never start counting ([Mistral4](../../models/mistral4.md#serving)).
+never start counting ([Mistral4](../../models/mistral4.md#serving)). The fact is the vLLM client's
+`UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES` (`halo/weight_sync/clients/vllm.py`).
 
 ### Enforced and soft budgets
 

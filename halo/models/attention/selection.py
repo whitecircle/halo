@@ -26,6 +26,7 @@ from halo.models.attention.gpt_oss_sinks import (
 from halo.models.attention.layout import GDN_MODEL_TYPE_PREFIXES, declares_attention_heads, resolve_head_dim
 from halo.models.config_access import model_type_matches, set_config_field_run_scoped, text_config
 from halo.models.model_classes import mapped_model_class
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -127,19 +128,17 @@ def has_head_dim_beyond_flash(model_config) -> bool:
     return declares_attention_heads(model_config) and resolve_head_dim(model_config) > FLASH_MAX_HEAD_DIM
 
 
-def _model_is_deepseek_v4(model_config) -> bool:
-    """Whether this is DeepSeek-V4 (eager-only: head_dim=512 exceeds every FA kernel, SDPA drops the
-    learnable sinks, and the compressor concatenates KV entries after the mask is built)."""
-    return model_type_matches(model_config, "deepseek_v4")
-
-
 def is_fa4_backward_nan_prone(model_config) -> bool:
-    """Whether the FA4 backward emits NaN gradients for this model (256-wide qk heads, partially rotated).
+    """Whether the FA4 backward emits NaN gradients for this model (256-wide qk heads, partially rotated): a MoE
+    family's spec says, and every GatedDeltaNet family without one (dense Qwen3.5, Qwen3-Next) is.
 
     Keyed on the family, not the numbers: Qwen3-Next declares ``head_dim: 256`` with a partial-rotary
     factor, while MLA GLM-4 MoE Lite reaches 256 as ``qk_nope_head_dim + qk_rope_head_dim``.
     """
-    return model_type_matches(model_config, *GDN_MODEL_TYPE_PREFIXES, "glm4_moe_lite")
+    spec = find_moe_family_spec_for_config(model_config)
+    if spec is not None:
+        return spec.fa4_backward_nan_prone
+    return model_type_matches(model_config, *GDN_MODEL_TYPE_PREFIXES)
 
 
 def _attn_impl_handles_sinks(attn_impl: str) -> bool:
@@ -243,10 +242,12 @@ def resolve_attn_implementation(
     dtype: torch.dtype,
     *,
     sinks_policy: SinksPolicy,
+    fa4_nan_fallback: str = "sdpa",
 ) -> str:
     """The attention backend for ``model_config``: auto-detected when ``attn_implementation`` is None,
     narrowed by the per-family kernel limits (fp32, FA4 backward NaN, DeepSeek-V4, heads past the flash
-    cap), then validated. Parallelism-specific overrides stay with the caller that knows the topology.
+    cap), then validated. Parallelism-specific overrides stay with the caller that knows the topology,
+    among them ``fa4_nan_fallback``, the label an FA4-backward-NaN family takes in place of FA4.
     """
     attn_implementation = attn_implementation or _detect_attention_impl()
 
@@ -263,16 +264,16 @@ def resolve_attn_implementation(
         if is_global_main_process():
             logger.warning(
                 "FlashAttention-4 produces NaN gradients for this model's head_dim-256 partial-rotary "
-                "attention; falling back to attn_implementation='sdpa'."
+                f"attention; falling back to attn_implementation='{fa4_nan_fallback}'."
             )
-        attn_implementation = "sdpa"
+        attn_implementation = fa4_nan_fallback
 
     # Force eager before from_pretrained rejects the auto-detected FA default.
-    if attn_implementation != "eager" and _model_is_deepseek_v4(model_config):
+    spec = find_moe_family_spec_for_config(model_config)
+    if attn_implementation != "eager" and spec is not None and spec.eager_only_attention:
         if is_global_main_process():
             logger.warning(
-                f"DeepSeek-V4 supports only eager attention (head_dim=512 exceeds FA's {FLASH_MAX_HEAD_DIM} cap; SDPA/flex "
-                f"cannot carry the sink column + compressor KV concat); overriding "
+                f"{spec.model_types[0]} supports only eager attention ({spec.eager_only_attention}); overriding "
                 f"attn_implementation='{attn_implementation}' to 'eager'."
             )
         attn_implementation = "eager"

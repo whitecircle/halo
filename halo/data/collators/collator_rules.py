@@ -8,9 +8,8 @@ from halo.models.attention.selection import (
     effective_attn_implementation,
     is_flash_attn_implementation,
 )
-from halo.models.config_access import model_type_matches
 from halo.models.segment_markers import (
-    DENSE_PACKING_LEAK_MODEL_TYPES,
+    has_dense_packing_leak,
     reject_compressed_kv_rows,
     require_segment_aware_kernels,
     segment_markers_for,
@@ -35,8 +34,7 @@ def _reject_dense_attention_rows(model_config, *, padding_free: bool, packing: b
             f"token count. Use packing: true instead (same isolation, and it raises tokens per "
             f"row on any kernel), or a model that resolves to flash attention."
         )
-    # model_type_matches reads the text sub-config too, so a VLM wrapper cannot slip the gate.
-    if packing and model_type_matches(model_config, *DENSE_PACKING_LEAK_MODEL_TYPES):
+    if packing and has_dense_packing_leak(model_config):
         raise ValueError(
             f"packing=True on attn_implementation={attn_impl!r} is refused for "
             f"model_type={getattr(model_config, 'model_type', None)!r}: this family's forward does not pass "

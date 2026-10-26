@@ -5,7 +5,8 @@ DistributedSDPGTrainer layers a privileged-teacher reverse-KL OPD term onto the 
 The GRPO loop itself is covered elsewhere; here we test the pieces SDPG adds and that must be correct
 for the OPD to align: ``_build_teacher_prompts`` (left-padded ``[prompt + hint]``), the completion
 logits both forwards are read at, and the OPD term itself — the gate on positive advantages and on
-the tokens the GRPO loss trains, its token mean and its grad-accum scaling.
+the tokens the GRPO loss trains, its token mean and its grad-accum scaling — read off the student's
+one forward, the GRPO loss's own, on every scorer path.
 
 A real tokenizer is needed for the hint encoding; the test skips when none is cached.
 
@@ -13,6 +14,7 @@ Run: pytest tests/cpu/trainers/test_sdpg_trainer.py
 """
 
 import types
+from collections import defaultdict
 from unittest import mock
 
 import pytest
@@ -21,7 +23,8 @@ from datasets import Dataset
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from halo.trainers.distillation.divergences import reverse_kl_loss
+from halo.configs.distillation import SDPGArguments
+from halo.trainers.distillation.divergences import global_token_mean, reverse_kl_loss
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer, positive_advantage_gate
 from halo.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
@@ -32,7 +35,7 @@ def _bare_trainer(tokenizer):
     """A DistributedSDPGTrainer shell with only the attributes the unit-under-test reads."""
     t = object.__new__(DistributedSDPGTrainer)
     t.processing_class = tokenizer
-    t.sdpg_hint_template = "\n[Hint] answer: {answer}\n"
+    t.sdpg = SDPGArguments(sdpg_hint_template="\n[Hint] answer: {answer}\n")
     t.sdpg_answer_field = "answer"
     t._warned_missing_answer = set()
     return t
@@ -131,7 +134,7 @@ def test_a_batch_without_teacher_prompts_raises_while_opd_is_on(monkeypatch, bet
     train plain GRPO; with it off (``sdpg_beta_base: 0``) no teacher prompt is built or needed."""
     monkeypatch.setattr(DistributedGRPOTrainer, "_compute_loss", lambda self, model, inputs: torch.tensor(1.0))
     t = object.__new__(DistributedSDPGTrainer)
-    t.sdpg_beta_base = beta
+    t.sdpg = SDPGArguments(sdpg_beta_base=beta)
     if raises:
         with pytest.raises(RuntimeError, match="teacher_prompt_ids"):
             t._compute_loss(None, {})
@@ -206,12 +209,21 @@ class _ContextTable(nn.Module):
         return types.SimpleNamespace(logits=self.table[(input_ids + shift) % 64][:, -logits_to_keep:])
 
 
+def _scored_grpo_loss(self, model, inputs):
+    """TRL's GRPO loss as far as SDPG sees it: one student forward of ``[prompt ⧺ completion]`` through the
+    full-logits scorer's capture, and a constant loss."""
+    with self._capturing_forward_logits(model, inputs["completion_ids"].size(1)):
+        self._completion_logits(
+            model, inputs["prompt_ids"], inputs["prompt_mask"], inputs["completion_ids"], inputs["completion_mask"]
+        )
+    return torch.tensor(1.0)
+
+
 def _opd_trainer(model, *, positive_advantage_only: bool) -> tuple[DistributedSDPGTrainer, dict]:
     """A bare SDPG trainer over ``model`` (beta 0.5, grad-accum 2) recording what it stores."""
     trainer = object.__new__(DistributedSDPGTrainer)
     trainer.model = model
-    trainer.sdpg_beta_base, trainer.sdpg_beta_warmup_steps, trainer.sdpg_beta_decay_steps = 0.5, 0, 0
-    trainer.sdpg_temperature = 1.0
+    trainer.sdpg = SDPGArguments(sdpg_beta_base=0.5, sdpg_temperature=1.0)
     trainer.sdpg_loss_fn = reverse_kl_loss
     trainer.opd_positive_advantage_only = positive_advantage_only
     trainer.state = types.SimpleNamespace(global_step=3, max_steps=10)
@@ -261,7 +273,7 @@ def _per_token_opd(trainer, model, inputs) -> torch.Tensor:
 def test_the_opd_term_is_gated_to_trained_tokens_of_positive_advantage_rows(monkeypatch):
     """``beta * mean_{gated tokens} sum_v KL`` divided by grad-accum, the gate being the GRPO loss's
     own token mask (a tool-output token is attention-valid but untrained) on rows with advantage > 0."""
-    monkeypatch.setattr(DistributedGRPOTrainer, "_compute_loss", lambda self, model, inputs: torch.tensor(1.0))
+    monkeypatch.setattr(DistributedGRPOTrainer, "_compute_loss", _scored_grpo_loss)
     model = _ContextTable().train()
     trainer, stored = _opd_trainer(model, positive_advantage_only=True)
     inputs = _opd_inputs()
@@ -279,7 +291,7 @@ def test_the_opd_term_is_gated_to_trained_tokens_of_positive_advantage_rows(monk
 def test_an_eval_split_s_padding_rows_leave_the_opd_mean(monkeypatch):
     """Row 2 pads the eval split's final round: the OPD mean (no grad-accum division in eval) runs over
     rows 0 and 1's trained tokens alone, stored with their two rows as the weight."""
-    monkeypatch.setattr(DistributedGRPOTrainer, "_compute_loss", lambda self, model, inputs: torch.tensor(1.0))
+    monkeypatch.setattr(DistributedGRPOTrainer, "_compute_loss", _scored_grpo_loss)
     model = _ContextTable().eval()
     trainer, stored = _opd_trainer(model, positive_advantage_only=False)
     trainer.eval_split_rows = lambda num_rows: 2
@@ -291,6 +303,100 @@ def test_an_eval_split_s_padding_rows_leave_the_opd_mean(monkeypatch):
     torch.testing.assert_close(loss.detach(), 1.0 + 0.5 * opd)
     torch.testing.assert_close(stored["opd_loss"], opd)
     assert stored["rows"] == 2
+
+
+def test_a_loss_forward_that_hands_back_no_logits_raises(monkeypatch):
+    """A scorer path that stops capturing would leave OPD without a student; it raises, never reforwards."""
+    monkeypatch.setattr(DistributedGRPOTrainer, "_compute_loss", lambda self, model, inputs: torch.tensor(1.0))
+    trainer, _ = _opd_trainer(_ContextTable().train(), positive_advantage_only=True)
+    with pytest.raises(RuntimeError, match="reads the student's completion logits off the GRPO loss forward"):
+        trainer._compute_loss(trainer.model, _opd_inputs())
+
+
+_GRAD_ACCUM = 2
+
+
+def _real_loss_trainer(model, *, chunked: bool, batch_size: int) -> DistributedSDPGTrainer:
+    """A bare SDPG trainer whose ``_compute_loss`` runs TRL's own GRPO loss through the toolkit's scorers."""
+    trainer, _ = _opd_trainer(model, positive_advantage_only=True)
+    trainer.args = types.SimpleNamespace(
+        per_device_train_batch_size=batch_size,
+        per_device_eval_batch_size=batch_size,
+        report_to=[],
+        delta=None,
+        use_bias_correction_kl=False,
+    )
+    trainer.accelerator = types.SimpleNamespace(
+        unwrap_model=lambda module: module,
+        is_main_process=False,
+        gather=lambda tensor: tensor,
+        reduce=lambda tensor, reduction: tensor,
+    )
+    trainer._use_chunked_grpo_logprobs = chunked
+    trainer.model_kwarg_keys = {"input_ids", "attention_mask", "logits_to_keep"}
+    trainer.temperature = 0.9
+    trainer._entropy_bonus_enabled = trainer.aux_loss_enabled = trainer.use_vllm = False
+    trainer.top_entropy_quantile, trainer.off_policy_mask_threshold = 1.0, None
+    trainer.importance_sampling_level, trainer.loss_type, trainer.beta = "token", "grpo", 0.0
+    trainer.epsilon_low = trainer.epsilon_high = 0.2
+    trainer.current_gradient_accumulation_steps = _GRAD_ACCUM
+    trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+    return trainer
+
+
+def _real_inputs() -> dict[str, torch.Tensor]:
+    inputs = _opd_inputs()
+    inputs.pop("tool_mask")
+    inputs["completion_ids"] = inputs["completion_ids"] + 100
+    return inputs
+
+
+@pytest.mark.parametrize(
+    ("chunked", "batch_size"),
+    [(False, 3), (True, 3), (True, 1)],
+    ids=["full-logits", "chunked-padded", "chunked-dense"],
+)
+def test_the_student_runs_once_and_the_loss_matches_two_forwards(chunked, batch_size):
+    """TRL's loss forward hands the OPD term its completion logits, so the student's backbone runs with grad
+    once per scorer call (one padded batch, or one per dense row) instead of once more for OPD; the loss
+    and every gradient match the GRPO loss plus the OPD term over a separate student forward."""
+    torch.manual_seed(0)
+    model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")).train()
+    inputs = _real_inputs()
+    grad_forwards = []
+    model.model.register_forward_hook(lambda *_: grad_forwards.append(torch.is_grad_enabled()))
+
+    trainer = _real_loss_trainer(model, chunked=chunked, batch_size=batch_size)
+    loss = trainer._compute_loss(model, inputs)
+    rows = inputs["completion_ids"].size(0)
+    assert grad_forwards.count(True) == (rows if batch_size == 1 else 1)
+    assert grad_forwards.count(False) == 1, "the privileged teacher forward"
+    loss.backward()
+    grads = {name: param.grad.clone() for name, param in model.named_parameters() if param.grad is not None}
+    model.zero_grad()
+
+    reference = _real_loss_trainer(model, chunked=chunked, batch_size=batch_size)
+    grpo = DistributedGRPOTrainer._compute_loss(reference, model, inputs)
+    student = reference._completion_logits(
+        model, inputs["prompt_ids"], inputs["prompt_mask"], inputs["completion_ids"], inputs["completion_mask"]
+    )
+    with torch.no_grad():
+        teacher = reference._completion_logits(
+            model.eval(),
+            inputs["teacher_prompt_ids"],
+            inputs["teacher_prompt_mask"],
+            inputs["completion_ids"],
+            inputs["completion_mask"],
+        )
+    model.train()
+    gate = positive_advantage_gate(inputs["completion_mask"].float(), inputs["advantages"], True)
+    opd = global_token_mean(reverse_kl_loss(student, teacher, 1.0).sum(-1), gate)
+    expected = grpo + 0.5 * opd / _GRAD_ACCUM
+    torch.testing.assert_close(loss.detach(), expected.detach(), atol=1e-5, rtol=1e-4)
+    expected.backward()
+    for name, param in model.named_parameters():
+        if name in grads:
+            torch.testing.assert_close(grads[name], param.grad, atol=1e-5, rtol=1e-3, msg=name)
 
 
 if __name__ == "__main__":

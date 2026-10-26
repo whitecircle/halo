@@ -78,7 +78,10 @@ Inside an allowed set, `reject_invalid_composition` checks the layout against th
 - **Model shape.** `reject_unsupported_model` reads `config.json` before any weight: `num_experts`
   divisible by `ep_size`, `expert_tp_size` dividing the expert FFN width, head counts divisible by
   `tp_size`, and the declared per-rank token budget under DeepEP's dispatch ceilings
-  ([DeepEP backend](expert-parallelism.md#deepep-backend)).
+  ([DeepEP backend](expert-parallelism.md#deepep-backend)). Then `reject_unsupported_structure` checks a
+  meta-device shell of the model, still before any weight: the Ulysses refusals and CP head counts under CP
+  ([Context Parallelism](context-parallelism.md#requirements)), and the zero-shard check under selective TP
+  ([Tensor Parallelism](tensor-parallelism.md#limitations)).
 
 ## Communication and data flow
 

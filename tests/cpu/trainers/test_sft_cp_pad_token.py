@@ -33,7 +33,6 @@ def _inputs(seq_len):
 class _CPHost(SimpleNamespace):
     """Fake ``self`` carrying only what the CP branch of ``compute_loss`` reads."""
 
-    _compute_cp_loss = DistributedSFTTrainer._compute_cp_loss
     _pad_to_cp_multiple = DistributedSFTTrainer._pad_to_cp_multiple
 
 
@@ -44,7 +43,7 @@ def _trainer(processing_class, cp_size=2):
         cp_config=SimpleNamespace(cp_rank=0),
         processing_class=processing_class,
         model=SimpleNamespace(training=True),
-        _cp_metrics={"train": WorldMetrics()},
+        _loss_metrics={"train": WorldMetrics()},
     )
 
 

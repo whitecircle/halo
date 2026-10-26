@@ -284,14 +284,18 @@ def _family_rows(path: Path, *required: str) -> dict[str, dict[str, str]]:
     return rows
 
 
+def _modeling_classes(model_type: str) -> frozenset[str]:
+    """The names the modeling module of the family ``model_type`` names defines."""
+    if model_type in _REMOTE_CODE_CLASSES:
+        return _REMOTE_CODE_CLASSES[model_type]
+    module = model_type_to_module_name(model_type)
+    return frozenset(vars(importlib.import_module(f"transformers.models.{module}.modeling_{module}")))
+
+
 def _derived_family_verdicts(model_type: str) -> dict[str, str]:
     """The EP/ETP/CP/TP/PP verdicts the registries give the family ``model_type`` names, read off the classes its
     modeling module defines."""
-    if model_type in _REMOTE_CODE_CLASSES:
-        classes = _REMOTE_CODE_CLASSES[model_type]
-    else:
-        module = model_type_to_module_name(model_type)
-        classes = frozenset(vars(importlib.import_module(f"transformers.models.{module}.modeling_{module}")))
+    classes = _modeling_classes(model_type)
     is_moe = find_moe_family_spec(model_type) is not None
     # CP needs a wrapped attention class and no layer carrying state along the sequence axis.
     cp = bool(classes & ULYSSES_ATTENTION_MAP.keys()) and not classes & _UNSUPPORTED_SEQUENCE_AXIS_LAYERS.keys()
@@ -330,6 +334,15 @@ def test_family_table_matches_the_registries(path: Path, label_column: str):
         if rows[label][axis] != verdict
     ]
     assert not mismatches, f"{path.name} family table disagrees with the code: {mismatches}"
+
+
+def test_the_tp_accept_list_names_only_moe_family_attention():
+    """Selective TP is the MoE path: a dense model shards off its config's own HF plan, so a dense attention class
+    in the accept-list is consulted by no load while it reads as TP support."""
+    model_types = [row["`model_type`"] for row in _family_rows(_MODELS_INDEX, "Model Family", "`model_type`").values()]
+    moe_classes = frozenset().union(*(_modeling_classes(mt) for mt in model_types if find_moe_family_spec(mt)))
+    stray = sorted(TP_SHARDABLE_ATTENTION_CLASSES - moe_classes)
+    assert not stray, f"TP_SHARDABLE_ATTENTION_CLASSES entries no MoE family's modeling module defines: {stray}"
 
 
 def test_human_trainer_table_matches_the_support_flags():

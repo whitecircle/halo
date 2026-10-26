@@ -30,7 +30,7 @@ The estimate is a floor: it covers one forward chunk, a single-row fallback traj
 
 The sweep applies the family's head transform (Gemma's softcap, Cohere's `logit_scale`, Granite's `logits_scaling`, Inkling's μP division and vocabulary cut), verified against the family's own forward at construction (`halo/models/head_transform.py`). A mismatch is refused; a new family declares its transform ([Adding a Model](../../models/adding-a-model.md#declare-the-head-transform)).
 
-Under FA4, or at `per_device_train_batch_size: 1`, rows are trimmed to their real span before the backbone forward and the head sweep.
+Under FA4, or at `per_device_train_batch_size: 1`, rows are trimmed to their real span before the backbone forward, one forward per row, and one head sweep then covers every row's real completion tokens.
 
 ## Context budget
 

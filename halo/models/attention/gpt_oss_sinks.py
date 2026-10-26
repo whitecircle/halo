@@ -17,9 +17,10 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 
-from halo.models.config_access import model_type_matches, text_config
+from halo.models.config_access import text_config
 from halo.models.model_classes import mapped_model_class
 from halo.models.module_tree import backbone_with_layers
+from halo.models.moe.family_specs import GPT_OSS, find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,7 @@ def uses_gpt_oss_sinks(model_config) -> bool:
     Narrower than "has attention sinks": DeepSeek-V4 carries them too but runs eager, which applies the
     sink column itself; widening this would reset its pretrained sinks.
     """
-    return model_type_matches(model_config, "gpt_oss")
+    return find_moe_family_spec_for_config(model_config) is GPT_OSS
 
 
 def install_sdpa_for_reset_sinks(model_config) -> bool:

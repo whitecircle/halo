@@ -31,19 +31,33 @@ def at_least_fp32(logits: torch.Tensor) -> torch.Tensor:
 
 
 def checkpointed_chunks(
-    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    rows: torch.Tensor,
-    labels: torch.Tensor,
-    chunk_rows: int,
+    fn: Callable[..., torch.Tensor], *tensors: torch.Tensor, chunk_rows: int
 ) -> Iterator[torch.Tensor]:
-    """``fn(rows[chunk], labels[chunk])`` per chunk of ``chunk_rows`` along dim 0, each under a
+    """``fn(*(t[chunk] for t in tensors))`` per chunk of ``chunk_rows`` along dim 0, each under a
     non-reentrant checkpoint, so backward holds no chunk's fp32 state.
 
     The chunks come from one ``split`` per input, whose backward concatenates their gradients once; a
     slice per chunk would instead zero-fill a whole-input gradient in each chunk's backward.
     """
-    for row_chunk, label_chunk in zip(rows.split(chunk_rows), labels.split(chunk_rows), strict=True):
-        yield checkpoint(fn, row_chunk, label_chunk, use_reentrant=False)
+    for chunk in zip(*(tensor.split(chunk_rows) for tensor in tensors), strict=True):
+        yield checkpoint(fn, *chunk, use_reentrant=False)
+
+
+def map_token_chunks(fn: Callable[..., torch.Tensor], *tensors: torch.Tensor) -> torch.Tensor:
+    """``fn`` over :func:`checkpointed_chunks` of aligned ``[T, ...]`` or ``[B, T, ...]`` tensors, the
+    first a logits plane whose width sizes the chunks, returning ``[T]`` or ``[B, T]``.
+
+    Rows are taken one sequence at a time, so a non-contiguous view such as ``logits[..., :-1, :]`` is
+    never copied whole.
+    """
+    first = tensors[0]
+    if first.dim() == 2:
+        chunk_rows = logit_chunk_rows(first.size(-1))
+        return torch.cat(list(checkpointed_chunks(fn, *tensors, chunk_rows=chunk_rows)))
+    if first.size(0) == 0:
+        # Nothing to stack: one empty chunk keeps the result's dtype.
+        return map_token_chunks(fn, *(tensor.flatten(0, 1) for tensor in tensors)).view(first.shape[:2])
+    return torch.stack([map_token_chunks(fn, *row) for row in zip(*tensors, strict=True)])
 
 
 def _logprob_chunk(chunk_logits: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
@@ -59,8 +73,7 @@ def selective_logprobs(
 
     TRL's ``selective_log_softmax`` contract for one index per position, minus that function's bf16
     branch, which returns bf16 log-probs: a ``row_mask`` zero yields a zero log-prob there. Every
-    chunk is checkpointed, short rows included, so backward holds no fp32 state; rows are taken one at
-    a time, so a non-contiguous view such as ``logits[..., :-1, :]`` is never copied whole.
+    chunk is checkpointed (:func:`map_token_chunks`), short rows included, so backward holds no fp32 state.
     """
     if logits.dim() != 3 or index.shape != logits.shape[:-1]:
         raise ValueError(
@@ -69,13 +82,7 @@ def selective_logprobs(
         )
     if row_mask is not None and row_mask.shape != index.shape:
         raise ValueError(f"row_mask {tuple(row_mask.shape)} must match index {tuple(index.shape)}.")
-    chunk_rows = logit_chunk_rows(logits.size(-1))
-    logps = torch.stack(
-        [
-            torch.cat(list(checkpointed_chunks(_logprob_chunk, row_logits, row_index, chunk_rows)))
-            for row_logits, row_index in zip(logits, index, strict=True)
-        ]
-    )
+    logps = map_token_chunks(_logprob_chunk, logits, index)
     return logps if row_mask is None else logps.masked_fill(row_mask == 0, 0.0)
 
 

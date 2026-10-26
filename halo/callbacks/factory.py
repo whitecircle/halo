@@ -14,12 +14,8 @@ from halo.callbacks.torch_profiler import TorchProfilerCallback
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.moe.balancing import BIAS_UPDATE_MODES, BalancingMode
 from halo.models.moe.config_fields import resolve_moe_routing
-from halo.runtime.ranks import get_global_world_size
 
 logger = logging.getLogger(__name__)
-
-# World size past which exact token accounting's per-micro-batch all-gather is worth warning about.
-_EXACT_TOKEN_COUNT_WORLD_WARN = 64
 
 
 def _metric_log_period(training_config) -> int:
@@ -56,16 +52,6 @@ def build_run_callbacks(
     if args.enable_efficiency_metrics:
         # After TrainingArguments.__post_init__, so the bool is never coerced into the tri-state.
         training_config.include_num_input_tokens_seen = "all"
-        # HF counts inside the micro-batch loop with a world all-gather plus a host sync each time.
-        if get_global_world_size() >= _EXACT_TOKEN_COUNT_WORLD_WARN:
-            logger.warning(
-                "enable_efficiency_metrics=true turns on exact token accounting, which adds a "
-                "world all-gather and a host sync per micro-batch (%d per optimizer step at this "
-                "gradient_accumulation_steps) across %d ranks. Set enable_efficiency_metrics=false "
-                "for production runs at this scale; the throughput numbers are a calibration tool.",
-                getattr(training_config, "gradient_accumulation_steps", 1),
-                get_global_world_size(),
-            )
         callbacks.append(
             EfficiencyCallback(
                 parallelism_config=parallelism_config,

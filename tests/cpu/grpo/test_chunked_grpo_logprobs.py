@@ -17,6 +17,7 @@ from transformers import Gemma2Config, Gemma2ForCausalLM, LlamaConfig, LlamaForC
 from trl import GRPOTrainer
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
+import halo.trainers.grpo.logprob_scoring as logprob_scoring
 from halo.kernels import head_logprobs
 from halo.kernels.head_logprobs import VOCAB_TILE, chunked_head_logprobs
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
@@ -154,16 +155,16 @@ def _dense_batch():
 
 def test_dense_empty_row_stays_connected_to_graph():
     # A disconnected zeros row gets its backward pruned, so the FSDP/EP grad collectives vanish only on
-    # the rank that padded more dummy rows — a NCCL deadlock. The shape assert covers the widened span.
+    # the rank that padded more dummy rows — a NCCL deadlock. The width covers the widened span.
     harness = _DenseHarness(hidden_size=8)
     input_ids, attention_mask, ltk = _dense_batch()
 
-    out, n_comps = harness._dense_last_hidden_state(None, input_ids, attention_mask, ltk)
-    assert out.shape == (2, ltk, 8)
-    assert n_comps == [2, 0]
+    out, widths = harness._dense_last_hidden_state(None, input_ids, attention_mask, ltk)
+    assert out.shape == (3, 8)
+    assert widths == [2, 1]
 
     harness.param.grad = None
-    out[1].sum().backward()  # the dummy row alone must still reach the param
+    out.split(widths)[1].sum().backward()  # the dummy row alone must still reach the param
     assert harness.param.grad is not None and harness.param.grad.abs().sum() > 0, (
         "empty (n_comp==0) row is disconnected from the model graph — its backward would be pruned, "
         "desyncing FSDP/EP collectives across ranks"
@@ -174,13 +175,12 @@ def test_dense_real_row_values_unchanged_by_fix():
     # Keeping the empty row connected must not perturb a real row's values.
     harness = _DenseHarness(hidden_size=8)
     input_ids, attention_mask, ltk = _dense_batch()
-    out, _n_comps = harness._dense_last_hidden_state(None, input_ids, attention_mask, ltk)
+    out, widths = harness._dense_last_hidden_state(None, input_ids, attention_mask, ltk)
 
     expected_real = harness.param.detach() + 1.0
-    torch.testing.assert_close(out[0, 0], expected_real)
-    torch.testing.assert_close(out[0, 1], expected_real)
-    # Row 1 connects position 0 only; its value is irrelevant (masked downstream), position 1 stays zero.
-    assert torch.count_nonzero(out[1, 1]) == 0
+    real = out.split(widths)[0]
+    torch.testing.assert_close(real[0], expected_real)
+    torch.testing.assert_close(real[1], expected_real)
 
 
 class _EmbeddingBackboneHarness(ChunkedGRPOLogprobsMixin):
@@ -246,6 +246,74 @@ def test_single_row_dense_sweep_matches_padded_batch_on_real_positions():
 
     logps_dense.sum().backward()
     assert dense.model.lm_head.weight.grad is not None and dense.embed.weight.grad is not None
+
+
+def test_dense_rows_share_one_head_sweep_that_matches_each_rows_own(monkeypatch):
+    """FA4 forwards a multi-row batch densely, one backbone call per row; the head then runs once over
+    every row's real completion tokens, not once per row (each call zero-fills a full fp32 ``[V, H]``
+    head gradient in backward), with each row's log-probs, entropies and gradients unchanged."""
+    sweeps = []
+    real_sweep = logprob_scoring.chunked_head_logprobs
+
+    def counting_sweep(hidden, *args, **kwargs):
+        sweeps.append(tuple(hidden.shape))
+        return real_sweep(hidden, *args, **kwargs)
+
+    monkeypatch.setattr(logprob_scoring, "chunked_head_logprobs", counting_sweep)
+    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
+    dense = _EmbeddingBackboneHarness("flash_attention_4")
+    logps, entropies = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 2, True)
+    assert dense.forward_calls == [((1, 7), True), ((1, 4), True)], "one dense backbone call per row"
+    assert sweeps == [(6, 8)], f"one head sweep over 4 + 2 real completion tokens, got {sweeps}"
+
+    reference = _EmbeddingBackboneHarness("flash_attention_4")
+    hidden, widths = reference._dense_last_hidden_state(reference.model, input_ids, attention_mask, ltk)
+    weight = reference.model.lm_head.weight
+    reference_loss = 0.0
+    for row, part in enumerate(hidden.split(widths)):
+        row_logps, row_entropies = real_sweep(
+            part, weight, input_ids[row, -ltk:][: part.size(0)], None, 1.0, compute_entropy=True
+        )
+        torch.testing.assert_close(logps[row, : part.size(0)], row_logps)
+        torch.testing.assert_close(entropies[row, : part.size(0)], row_entropies)
+        reference_loss = reference_loss + (row_logps * completion_mask[row, : part.size(0)]).sum()
+    assert torch.count_nonzero(logps[~completion_mask]) == 0
+    reference_loss.backward()
+    (logps * completion_mask).sum().backward()
+    torch.testing.assert_close(dense.model.lm_head.weight.grad, weight.grad)
+    torch.testing.assert_close(dense.embed.weight.grad, reference.embed.weight.grad)
+
+
+@pytest.mark.parametrize("attn_impl", ["sdpa", "flash_attention_4"], ids=["padded", "dense"])
+def test_an_armed_sweep_hands_back_the_heads_completion_logits(attn_impl):
+    """A host that reads the loss forward's logits (SDPG's OPD term) gets the head's ``(rows, ltk, V)``
+    output on every real completion position, from the same hidden states the sweep scored, carrying
+    their graph; unarmed, nothing is built."""
+    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
+    harness = _EmbeddingBackboneHarness(attn_impl)
+    harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+    assert harness._completion_logits_sink is None
+
+    with harness._capturing_completion_logits() as captured:
+        harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+    assert harness._completion_logits_sink is None, "the sink must disarm on exit"
+    assert len(captured) == 1 and captured[0].shape == (2, ltk, harness.model.lm_head.out_features)
+    want = harness.model.lm_head(harness.embed(input_ids)[:, :-1][:, -ltk:])
+    torch.testing.assert_close(captured[0][completion_mask], want[completion_mask])
+    captured[0][completion_mask].sum().backward()
+    assert harness.embed.weight.grad is not None and harness.model.lm_head.weight.grad is not None
+
+
+def test_an_armed_full_logits_forward_hands_back_its_completion_logits():
+    """On the full-logits path the capture reads the model's own output, sliced as TRL slices it."""
+    input_ids, attention_mask, _, ltk = _ragged_batch()
+    harness = _RealBackboneHarness("eager")
+    with harness._capturing_completion_logits() as captured, harness._capturing_forward_logits(harness.model, ltk):
+        logits = harness.model(input_ids=input_ids, attention_mask=attention_mask).logits
+    with harness._capturing_forward_logits(harness.model, ltk):
+        harness.model(input_ids=input_ids, attention_mask=attention_mask)
+    assert len(captured) == 1, "an unarmed forward appends nothing"
+    torch.testing.assert_close(captured[0], logits[:, :-1][:, -ltk:])
 
 
 class _ModeResolutionHarness(ChunkedGRPOLogprobsMixin):
@@ -316,10 +384,12 @@ def _trl_loss_forward(harness, model, ids, mask, logits_to_keep, **overrides):
     return harness._get_per_token_logps_and_entropies(model, ids, mask, logits_to_keep, **(kwargs | overrides))
 
 
-def test_trls_text_loss_forward_takes_the_chunked_path_and_gets_three_values():
+def test_trls_text_loss_forward_takes_the_chunked_path_and_gets_three_values(monkeypatch):
+    """The modality gate reads TRL's scorer signature once, at class creation, not on every call."""
     harness = _ModeResolutionHarness()
     ids, mask = torch.zeros(2, 6, dtype=torch.long), torch.ones(2, 6, dtype=torch.long)
 
+    monkeypatch.setattr(logprob_scoring.inspect, "signature", lambda *_: pytest.fail("signature read per call"))
     logps, entropies, aux_loss = _trl_loss_forward(harness, harness.model, ids, mask, 3)
 
     assert harness.resolved == [1], "a text batch left the chunked sweep"

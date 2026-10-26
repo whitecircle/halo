@@ -19,6 +19,7 @@ from halo.environments.rollout_config import (
     resolve_rollout_stop_token_ids,
 )
 from halo.models.config_access import config_model_types
+from halo.weight_sync.registry import resolve_weight_sync_client
 
 # The training script's config classes an eval reads its contract from: the environment's, the rollout's, and the
 # model's (its tokenizer resolves the stop tokens and the reasoning close). The YAML's other keys (training
@@ -60,7 +61,10 @@ class TrainingContract:
             hf_config = AutoConfig.from_pretrained(
                 model.model_name_or_path, revision=model.model_revision, trust_remote_code=model.trust_remote_code
             )
-            reject_unenforceable_thinking_budget(config_model_types(hf_config), cfg.rollout_backend)
+            reject_unenforceable_thinking_budget(
+                config_model_types(hf_config),
+                resolve_weight_sync_client(cfg.rollout_backend).UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES,
+            )
         tokenizer = None
         if budgeted or cfg.rollout_stop_tokens:
             tokenizer = AutoTokenizer.from_pretrained(

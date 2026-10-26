@@ -394,12 +394,16 @@ class DistributedTrainerMixin(
         barrier()
 
     def _restore_trl_overrides(self) -> None:
-        """Take back what TRL's constructor changed: the router aux-loss config fields, the deferred Liger flag and
-        HF's inferred loss-kwargs scaling where the loss is its own mean; snapshot the config of a model passed
-        by id, which TRL only now loaded."""
+        """Take back what TRL's constructor changed: the router aux-loss config fields, the deferred Liger flag,
+        HF's inferred loss-kwargs scaling where the loss is its own mean and the TP width TRL's token counter
+        divides by; snapshot the config of a model passed by id, which TRL only now loaded."""
         # Declared-only, so a trainer that has not adopted the attribute keeps whatever HF inferred.
         if self.LOSS_IS_OWN_MEAN:
             self.model_accepts_loss_kwargs = False
+        # TRL reads the ranks sharing a batch off accelerate's parallelism config, which the toolkit's accelerator
+        # never carries, so its world-gathered attended-token counter would count a TP/ETP/CP batch once per rank.
+        if hasattr(self, "_tp_size"):
+            self._tp_size = self.parallelism_config.non_dp_replication_factor
         # TRL's entropy guard needs the flag to skip logits access when FusedLinearCE yields logits=None.
         if self._deferred_liger_kernel:
             self.args.use_liger_kernel = True
@@ -571,7 +575,12 @@ class DistributedTrainerMixin(
 
     def log(self, logs: dict[str, float], start_time: float | None = None):
         """COLLECTIVE: add the parallelism fields and the run's loss-token total (a world gather) to the log after
-        the first step."""
+        the first step, and log TRL's attended-token counter as ``num_attended_tokens_seen``, the name beside
+        ``num_input_tokens_seen`` (padding included) and ``num_unmasked_output_tokens_seen`` (loss tokens)."""
+        if hasattr(self, "_tp_size"):
+            for mode_metrics in self._metrics.values():
+                if "num_tokens" in mode_metrics:
+                    mode_metrics["num_attended_tokens_seen"] = mode_metrics.pop("num_tokens")
         if hasattr(self, "state") and self.state.global_step != 0:
             logs.update(_parallelism_log_fields(self.parallelism_config, self._ep_config, bool(self._ep_layers())))
             self._drain_unmasked_output_tokens()

@@ -151,14 +151,11 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # An eval round is the whole eval set; TRL's one-generation-batch buffer would keep its tail only.
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
-        self._drop_degenerate_groups = cfg.drop_degenerate_groups
-        self._scale_rewards_std_floor = cfg.scale_rewards_std_floor
-        reject_inert_std_floor(self.args.scale_rewards, self._scale_rewards_std_floor)
+        reject_inert_std_floor(self.args.scale_rewards, cfg.scale_rewards_std_floor)
         # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
         reject_off_policy_mask_threshold(self.args)
         reject_vespo_loss(self.args)
-        self._balance_token_mass = cfg.balance_token_mass
-        if self._balance_token_mass:
+        if cfg.balance_token_mass:
             reject_unbalanceable_token_mass(self.args)
         self._arm_update_breaker()
         self._warned_once: set[str] = set()

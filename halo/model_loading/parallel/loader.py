@@ -26,11 +26,17 @@ from halo.model_loading.parallel.load_rules import (
     reject_unsupported_load,
     reject_unsupported_model,
     reject_unsupported_run,
+    reject_unsupported_structure,
 )
 from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
 from halo.model_loading.parallel.pp import load_pp_stage_model
-from halo.model_loading.parallel.tp import load_ep_tp_model, load_tp_model, load_tp_moe_model
+from halo.model_loading.parallel.tp import (
+    load_ep_tp_model,
+    load_tp_model,
+    load_tp_moe_model,
+    uses_attention_only_tp,
+)
 from halo.model_loading.parallel.whole_model import cast_loaded_parameters, load_whole_model, warm_attention_kernels
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import patch_flex_attention_compile
@@ -58,12 +64,23 @@ def _backend_sinks_policy(sinks_policy: SinksPolicy, init_from_scratch: bool) ->
 
 
 def resolve_policy_attn_implementation(
-    model_config, requested: str | None, dtype: torch.dtype, *, sinks_policy: SinksPolicy, init_from_scratch: bool
+    model_config,
+    requested: str | None,
+    dtype: torch.dtype,
+    *,
+    sinks_policy: SinksPolicy,
+    init_from_scratch: bool,
+    fa4_nan_fallback: str = "sdpa",
 ) -> str:
     """The attention backend :func:`load_distributed_model` resolves for a policy from its config, dtype and GPU,
-    before the Context Parallelism swap: what a run can check before any weight loads."""
+    before the Context Parallelism swap: what a run can check before any weight loads. ``fa4_nan_fallback`` is
+    :func:`resolve_attn_implementation`'s."""
     return resolve_attn_implementation(
-        model_config, requested, dtype, sinks_policy=_backend_sinks_policy(sinks_policy, init_from_scratch)
+        model_config,
+        requested,
+        dtype,
+        sinks_policy=_backend_sinks_policy(sinks_policy, init_from_scratch),
+        fa4_nan_fallback=fa4_nan_fallback,
     )
 
 
@@ -79,8 +96,15 @@ def _resolve_run_attention(
 ) -> str:
     """The attention implementation the model is built with: resolved against this model and dtype,
     swapped to FlashAttention under CP, and passed through the family patches."""
+    # The kernel Ulysses runs, whatever the label: it vetoes FA4 for the FA4-backward-NaN families itself.
+    cp_flash = preferred_flash_impl(allow_fa4=not is_fa4_backward_nan_prone(model_config)) if pc.is_cp_mode else None
     attn_implementation = resolve_policy_attn_implementation(
-        model_config, requested, dtype, sinks_policy=sinks_policy, init_from_scratch=init_from_scratch
+        model_config,
+        requested,
+        dtype,
+        sinks_policy=sinks_policy,
+        init_from_scratch=init_from_scratch,
+        fa4_nan_fallback=cp_flash or "sdpa",
     )
 
     # CP (Ulysses) always runs flash_attn_func; label the config with the kernel it will actually use.
@@ -91,21 +115,20 @@ def _resolve_run_attention(
                 "but this model resolved to flex_attention under dtype=float32 (fp32 training). "
                 "Train in bf16/fp16, or drop Context Parallelism for fp32 runs."
             )
-        cp_fa = preferred_flash_impl(allow_fa4=not is_fa4_backward_nan_prone(model_config))
         if is_global_main_process():
             logger.warning(
                 f"flex_attention is not supported with Context Parallelism (Ulysses always uses "
-                f"flash_attn). Switching to {cp_fa}."
+                f"flash_attn). Switching to {cp_flash}."
             )
         # Re-validated, not assigned: the substitute must clear the same sink-capability matrix, or a
         # run keeping live sinks (reset_sinks=false) silently moves to a sink-dropping kernel.
         attn_implementation = validate_attn_implementation(
-            model_config, cp_fa, _backend_sinks_policy(sinks_policy, init_from_scratch)
+            model_config, cp_flash, _backend_sinks_policy(sinks_policy, init_from_scratch)
         )
         if not is_flash_attn_implementation(attn_implementation):
             raise ValueError(
                 f"Context Parallelism runs attention through flash_attn regardless of the config's "
-                f"label, but this model accepts neither {cp_fa} nor any other FlashAttention "
+                f"label, but this model accepts neither {cp_flash} nor any other FlashAttention "
                 f"implementation (it fell back to '{attn_implementation}'). The labelled config "
                 f"would not describe the kernel Ulysses actually calls. Train this model without "
                 f"Context Parallelism."
@@ -226,9 +249,9 @@ def _dispatch_model_loading(
                 f"Model loaded for PP stage {pc.pp_rank}/{pc.pp_size} (ep={pc.ep_size}, dp={pc.data_parallel_size})"
             )
         return model
-    if pc.has_ep_group and pc.is_tp_mode:
-        return load_ep_tp_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
-    if pc.is_tp_mode and has_routed_experts(from_pretrained_kwargs["config"]):
+    if uses_attention_only_tp(pc, model_config):
+        if pc.has_ep_group:
+            return load_ep_tp_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
         return load_tp_moe_model(
             *rung, preserve_checkpoint_precision=preserve_checkpoint_precision, wraps_experts=wraps_experts
         )
@@ -366,6 +389,15 @@ def load_distributed_model(
         sinks_policy=sinks_policy,
         reset_sinks=reset_sinks,
         init_from_scratch=init_from_scratch,
+    )
+    reject_unsupported_structure(
+        parallelism_config,
+        source,
+        model_class,
+        model_config,
+        attn_implementation,
+        dtype,
+        trust_remote_code=trust_remote_code,
     )
 
     if use_liger_kernel:

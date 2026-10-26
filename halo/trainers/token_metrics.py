@@ -1,7 +1,9 @@
-"""Per-batch token accounting: the loss mask, loss-contributing tokens and each batch's attention-score work.
+"""Per-batch token accounting: the loss mask, loss-contributing tokens, HF's input-token count, each batch's
+attention-score work and HF's floating-point estimate.
 
-Nothing syncs the host per micro-batch: counts fold into on-device accumulators, the token total gathers
-once per log step and the attention work is read once per optimizer step, once a callback binds as its sink.
+Nothing syncs the host per micro-batch: counts fold into host or on-device accumulators, the input tokens sum
+over the world once per optimizer step, the loss tokens once per log step and the attention work is read once
+per optimizer step, once a callback binds as its sink.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import torch
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +39,36 @@ class TokenMetricsMixin:
     # Set by the first ``training_step``: the efficiency callback binds here and hands over the layout.
     _attention_work_bound: bool = False
     _attention_layout = None
+    # ``(model, non-embedding parameter count)`` for :meth:`floating_point_ops`, set on its first call.
+    _flops_parameter_count: tuple | None = None
+    # This rank's input tokens since the last optimizer step, for :meth:`_track_num_input_tokens`.
+    _window_input_tokens: int = 0
+
+    def _track_num_input_tokens(self, inputs) -> None:
+        """COLLECTIVE at an accumulation window's last micro-batch: HF's ``state.num_input_tokens_seen``. In its
+        ``"all"`` mode the count is a shape, so each micro-batch adds it on the host and the window's world sum
+        lands once per optimizer step, before the step's callbacks, logs and saves read it, where HF gathers it
+        and reads it back on every micro-batch. The other modes stay HF's."""
+        if self.args.include_num_input_tokens_seen != "all":
+            super()._track_num_input_tokens(inputs)
+            return
+        main_input = getattr(self.model, "main_input_name", "input_ids")
+        if main_input in inputs:
+            self._window_input_tokens += inputs[main_input].numel()
+        if self.accelerator.sync_gradients:
+            (window_tokens,) = world_sums([self._window_input_tokens])
+            self.state.num_input_tokens_seen += int(window_tokens)
+            self._window_input_tokens = 0
+
+    def floating_point_ops(self, inputs) -> int:
+        """HF's estimate for ``state.total_flos``, ``6 × main-input tokens × non-embedding parameters``, with the
+        parameter count walked once per model rather than over every module and parameter on each micro-batch."""
+        main_input = getattr(self.model, "main_input_name", "input_ids")
+        if main_input not in inputs or not hasattr(self.model, "num_parameters"):
+            return 0
+        if self._flops_parameter_count is None or self._flops_parameter_count[0] is not self.model:
+            self._flops_parameter_count = (self.model, self.model.num_parameters(exclude_embeddings=True))
+        return 6 * inputs[main_input].numel() * self._flops_parameter_count[1]
 
     def _extract_document_lengths(self, inputs):
         """Token length of every document the batch's attention scores (zeros allowed), or ``None`` without

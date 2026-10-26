@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
+from trl.trainer.utils import pad
 
 from halo.data.completion_spans import build_completion_only_labels
 from halo.data.pipeline.chat_render import render_conversation, tokenize_rendered
@@ -152,8 +153,9 @@ class SelfDistillBranchMixin:
         return self.hint_template is not None
 
     def cache_signature(self) -> dict[str, Any]:
-        """Every knob this collator renders with, for the audit map's cache key: a map fingerprint reads the
-        collator riding ``fn_kwargs`` by its class name alone, so a changed knob would serve a stale audit."""
+        """Every knob this collator renders with, for the cache key of the prep map it rides (the text encoding,
+        the VLM audit): a map fingerprint reads the collator riding ``fn_kwargs`` by its class name alone, so a
+        changed knob would serve stale rows."""
         return dict(vars(self))
 
     def _teacher_history(self, history: list[dict[str, Any]], example: dict[str, Any]) -> list[dict[str, Any]]:
@@ -174,10 +176,12 @@ class SelfDistillBranchMixin:
 
 
 class SelfDistillTextCollator(SelfDistillBranchMixin):
-    """Text collator for SDPG-style self-distillation (arXiv:2606.04036): raw conversation rows to the student
-    batch and a ``teacher_*`` branch carrying the gold-answer hint, whose response tokens match
-    (:func:`require_aligned_responses`); ``hint_template=None`` builds no teacher branch. Optionally emits
-    ``confidence_weights``.
+    """Text collator for SDPG-style self-distillation (arXiv:2606.04036): the student batch and a ``teacher_*``
+    branch carrying the gold-answer hint, whose response tokens match (:func:`require_aligned_responses`);
+    ``hint_template=None`` builds no teacher branch. Optionally emits ``confidence_weights``.
+
+    A row is rendered, tokenized and labelled once (:func:`encode_self_distill_row`, mapped at prep), so
+    collation pads; a raw conversation row is encoded on the spot.
     """
 
     def __init__(
@@ -217,75 +221,102 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         self.train_on_completions_only = train_on_completions_only
         self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
 
-    def audit_row(self, example: dict[str, Any]) -> dict[str, Any]:
-        """Collate one raw row through the whole collate-time contract; returns no columns. Mapped at prep
-        (:func:`audit_self_distill_row`), where a raise is world-uniform; at collate time it is rank-local."""
-        self([example])
-        return {}
+    def encode_row(self, example: dict[str, Any]) -> dict[str, list[int]]:
+        """One raw row's encoding, as the prep map writes it (:func:`encode_self_distill_row`)."""
+        return encode_self_distill_row(example, self)
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        student = self._tokenize([ex[self.conversation_field] for ex in examples], examples, branch="student")
-        batch = {
-            "input_ids": student["input_ids"],
-            "attention_mask": student["attention_mask"],
-            "labels": self._build_labels(student["input_ids"], student["attention_mask"]),
-        }
+        rows = [example if "input_ids" in example else self.encode_row(example) for example in examples]
+        batch = self._pad(rows, "")
         if self.builds_teacher_branch:
-            histories = [self._teacher_history(ex[self.conversation_field], ex) for ex in examples]
-            teacher = self._tokenize(histories, examples, branch="teacher")
-            batch["teacher_input_ids"] = teacher["input_ids"]
-            batch["teacher_attention_mask"] = teacher["attention_mask"]
-            batch["teacher_labels"] = self._build_labels(teacher["input_ids"], teacher["attention_mask"])
+            batch.update(self._pad(rows, "teacher_"))
             require_aligned_responses(batch)
         self._add_confidence_weights(batch, examples)
         return batch
 
-    def _tokenize(
-        self, histories: list[list[dict[str, Any]]], rows: list[dict[str, Any]], branch: str
-    ) -> dict[str, torch.Tensor]:
-        texts = [self._render(history, row) for history, row in zip(histories, rows, strict=True)]
-        # NEVER truncate — see the raise below. tokenize_rendered single-sources the rendered specials:
-        # a bare add_special_tokens=True double-BOSes templates that emit BOS themselves.
-        rows = [tokenize_rendered(self.tokenizer, text) for text in texts]
-        encoded = self.tokenizer.pad(rows, padding=True, return_tensors="pt")
-        longest = int(encoded["attention_mask"].sum(dim=-1).max())
-        if longest > self.max_length:
-            raise ValueError(
-                f"Self-distillation {branch} branch contains a {longest}-token sequence, "
-                f"{longest - self.max_length} tokens over max_length={self.max_length}. Truncating would "
-                f"cut response tokens that must stay byte-identical between student and teacher (OPD row "
-                f"alignment). Raise max_length (the teacher needs headroom for the privileged hint) or "
-                f"drop over-length rows before training."
-            )
-        return encoded
+    def _pad(self, rows: list[dict[str, list[int]]], prefix: str) -> dict[str, torch.Tensor]:
+        """One branch's encoded rows padded on the tokenizer's side, as ``tokenizer.pad`` pads them."""
+        side = self.tokenizer.padding_side
+        input_ids = [torch.tensor(row[f"{prefix}input_ids"]) for row in rows]
+        return {
+            f"{prefix}input_ids": pad(input_ids, padding_value=self.tokenizer.pad_token_id, padding_side=side),
+            f"{prefix}attention_mask": pad([torch.ones_like(ids) for ids in input_ids], padding_side=side),
+            f"{prefix}labels": pad(
+                [torch.tensor(row[f"{prefix}labels"]) for row in rows],
+                padding_value=LABEL_IGNORE_INDEX,
+                padding_side=side,
+            ),
+        }
 
-    def _render(self, history: list[dict[str, Any]], row: dict[str, Any]) -> str:
-        """Chat-template one conversation through the SFT text pipeline's renderer."""
-        return render_conversation(
-            self.tokenizer,
+
+def _encode_branch(
+    collator: SelfDistillTextCollator, conversation: list[dict[str, Any]], row: dict[str, Any], branch: str
+) -> tuple[list[int], list[int]]:
+    """One branch's token ids, refused rather than truncated past ``max_length``, and its labels: everything
+    outside the completions masked with ``train_on_completions_only``."""
+    rendered = render_conversation(
+        collator.tokenizer,
+        conversation,
+        row,
+        conversation_field=collator.conversation_field,
+        system_prompt=collator.system_prompt,
+        model_supports_system_role=collator.model_supports_system_role,
+        interleaved_thinking=collator.interleaved_thinking,
+        tools_field=collator.tools_field,
+    )
+    # tokenize_rendered single-sources the rendered specials: a bare add_special_tokens=True double-BOSes
+    # templates that emit BOS themselves.
+    input_ids = torch.tensor([tokenize_rendered(collator.tokenizer, rendered)["input_ids"]])
+    if input_ids.size(1) > collator.max_length:
+        raise ValueError(
+            f"Self-distillation {branch} branch contains a {input_ids.size(1)}-token sequence, "
+            f"{input_ids.size(1) - collator.max_length} tokens over max_length={collator.max_length}. Truncating "
+            f"would cut response tokens that must stay byte-identical between student and teacher (OPD row "
+            f"alignment). Raise max_length (the teacher needs headroom for the privileged hint) or "
+            f"drop over-length rows before training."
+        )
+    labels = build_completion_only_labels(
+        input_ids,
+        collator.tokenizer,
+        collator.response_prompt_template,
+        collator.train_on_completions_only,
+        attention_mask=torch.ones_like(input_ids),
+        eos_token_ids=collator.eos_token_ids,
+    )
+    return input_ids[0].tolist(), labels[0].tolist()
+
+
+def encode_self_distill_row(example: dict[str, Any], collator: SelfDistillTextCollator) -> dict[str, list[int]]:
+    """One raw row's ``input_ids`` and ``labels`` per branch (``teacher_*`` for the hinted one): an over-length
+    branch or misaligned responses raise. Mapped at prep, where a raise is world-uniform; at collate time it is
+    rank-local.
+
+    Module level, as ``num_proc`` map workers reject bound methods, and calling every helper by bare name, so the
+    map's cache key folds in their source (:mod:`halo.data.pipeline.map_cache_key`). The collator rides
+    ``fn_kwargs`` for its knobs, which key the map through :meth:`~SelfDistillBranchMixin.cache_signature`.
+    """
+    history = example[collator.conversation_field]
+    branches = [("student", "", history)]
+    if collator.builds_teacher_branch:
+        hinted = teacher_history(
             history,
-            row,
-            conversation_field=self.conversation_field,
-            system_prompt=self.system_prompt,
-            model_supports_system_role=self.model_supports_system_role,
-            interleaved_thinking=self.interleaved_thinking,
-            tools_field=self.tools_field,
+            example,
+            hint_template=collator.hint_template,
+            answer_field=collator.answer_field,
+            solution_field=collator.solution_field,
         )
-
-    def _build_labels(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        """Pad masked, and with ``train_on_completions_only`` everything outside the completions."""
-        return build_completion_only_labels(
-            input_ids,
-            self.tokenizer,
-            self.response_prompt_template,
-            self.train_on_completions_only,
-            attention_mask=attention_mask,
-            eos_token_ids=self.eos_token_ids,
+        branches.append(("teacher", "teacher_", hinted))
+    encoded = {}
+    for branch, prefix, conversation in branches:
+        encoded[f"{prefix}input_ids"], encoded[f"{prefix}labels"] = _encode_branch(
+            collator, conversation, example, branch
         )
+    if collator.builds_teacher_branch:
+        require_aligned_responses({key: torch.tensor([value]) for key, value in encoded.items()})
+    return encoded
 
 
 def audit_self_distill_row(example: dict[str, Any], collator) -> dict[str, Any]:
-    """Module-level seam for mapping a SelfDistill collator's ``audit_row`` (text or VLM) with
-    ``num_proc`` workers, which reject bound methods (every worker would pickle ``self``). The collator
-    rides ``fn_kwargs`` instead — its tokenizer, processor and config pickle cleanly."""
+    """Module-level seam for mapping the VLM collator's ``audit_row`` (:func:`encode_self_distill_row`'s
+    counterpart, which writes no columns) with ``num_proc`` workers."""
     return collator.audit_row(example)

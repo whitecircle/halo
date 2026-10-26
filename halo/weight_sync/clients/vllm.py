@@ -60,12 +60,18 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             "(agent-docs/models/mistral4.md#serving)"
         ),
         "deepseek_v4": (
-            f"{ENGINE_RELEASE}'s DeepSeek-V4 loader targets the fp8/fp4-packed release layout, which no gather can emit"
+            f"{ENGINE_RELEASE}'s deepseek_v4 loader maps per-expert w1/w2/w3 names where the gather emits the fused pair"
         ),
         **unservable_bailing_model_types(ENGINE_RELEASE),
     }
     # The Laguna loader registers the bias under an internal name and skips the exported hub key.
     DROPPED_BALANCING_BIAS_MODEL_TYPES = frozenset({"laguna"})
+    UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES = {
+        "mistral4": (
+            f"{ENGINE_RELEASE} serves it with its mistral_common tokenizer, which encodes the [THINK] and [/THINK] "
+            "markers as plain text while the model writes them as control tokens"
+        ),
+    }
     INTERRUPTED_UPDATE_STATE = (
         "a model that is part old weights and part new, with any layer that straddled the last chunk "
         "boundary materialized from UNINITIALIZED storage by the layerwise reload"

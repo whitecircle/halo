@@ -4,12 +4,12 @@
 ``GptOssModel.forward`` builds its causal masks from a ``mask_kwargs`` dict that omits
 ``position_ids``, so ``masking_utils`` never sees the packed boundaries and a packed row runs as
 ONE dense causal sequence on eager/SDPA/flex. The collator
-factory therefore REFUSES packing + non-varlen for this family (``DENSE_PACKING_LEAK_MODEL_TYPES``)
+factory therefore REFUSES packing + non-varlen for this family (``MoEFamilySpec.dense_packing_leaks``)
 — the varlen kernels are its production path and do isolate (they read cu_seqlens from
 position_ids delivered at the attention interface).
 
 The defect-pin half asserts the leak EXISTS: when a transformers upgrade fixes gpt-oss upstream,
-it fails first — the signal to drop the family from the table and retire the gate.
+it fails first — the signal to clear the family's flag and retire the gate.
 
     python tests/cpu/models/test_gptoss_dense_packing_leak.py
 """
@@ -23,7 +23,7 @@ from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.packing import DataCollatorWithPacking
-from halo.models.segment_markers import DENSE_PACKING_LEAK_MODEL_TYPES
+from halo.models.segment_markers import has_dense_packing_leak
 
 SEED = 1234
 
@@ -59,8 +59,7 @@ def test_dense_leak_defect_pin(attn_impl):
 
     Direction matters: doc A precedes doc B, so causality already hides doc B from doc A; the leak
     is doc B attending BACK into doc A. If this drift ever reads 0.0, transformers fixed gpt-oss's
-    mask plumbing upstream — remove "gpt_oss" from DENSE_PACKING_LEAK_MODEL_TYPES and retire this
-    test."""
+    mask plumbing upstream — clear ``GPT_OSS.dense_packing_leaks`` and retire this test."""
     torch.manual_seed(SEED)
     model = GptOssForCausalLM(_tiny_config()).eval()
     # Post-construction write: transformers' _sdpa_can_dispatch refuses gpt-oss at _from_config, but the
@@ -81,7 +80,7 @@ def test_dense_leak_defect_pin(attn_impl):
     drift = (base[0, lens[0] :] - swapped[0, lens[0] :]).abs().max().item()
     assert drift > 1e-3, (
         f"gpt-oss {attn_impl} isolated packed documents — transformers fixed the mask plumbing "
-        "upstream; remove 'gpt_oss' from DENSE_PACKING_LEAK_MODEL_TYPES and retire this defect pin"
+        "upstream; clear GPT_OSS.dense_packing_leaks and retire this defect pin"
     )
 
 
@@ -95,7 +94,7 @@ def test_factory_refuses_dense_packing_for_gpt_oss(attn_impl):
 
 def test_factory_refuses_the_composite_wrapper_too():
     """A VLM wrapper around a leaking family must not slip the gate on its wrapper-level
-    model_type — ``model_type_matches`` reads the text sub-config."""
+    model_type — the family spec is read off the text sub-config."""
 
     class _CompositeConfig:
         model_type = "gpt_oss_mm"
@@ -123,7 +122,7 @@ def test_factory_only_warns_for_isolating_families_on_dense():
     test_mistral4_packed_isolation) keeps the warn-not-raise behavior."""
     config = Mistral4Config(num_hidden_layers=1)
     config._attn_implementation = "sdpa"
-    assert config.model_type not in DENSE_PACKING_LEAK_MODEL_TYPES
+    assert not has_dense_packing_leak(config)
     collator = select_data_collator(_mock_tokenizer(), packing=True, model_config=config)
     assert isinstance(collator, DataCollatorWithPacking)
 

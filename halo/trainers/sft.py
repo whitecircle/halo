@@ -1,5 +1,5 @@
-"""Distributed SFT trainer: TRL's SFTTrainer under the trainer spine, with tree packing, router aux-loss weighting
-and its own CP loss and metrics."""
+"""Distributed SFT trainer: TRL's SFTTrainer under the trainer spine, with tree packing, router aux-loss weighting,
+the CP loss and its own loss metrics, folded across the world once per log."""
 
 import inspect
 import logging
@@ -11,7 +11,7 @@ from transformers import Trainer
 from trl import SFTTrainer
 from trl.trainer.utils import entropy_from_logits
 
-from halo.distributed.context_parallel.sequence_chunks import cp_chunk_bounds, cp_shift_against_full_labels
+from halo.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
@@ -48,29 +48,33 @@ def _replace_chunked_nll_loss_type(training_args) -> None:
 
 
 @torch.no_grad()
-def _record_cp_metrics(
-    metrics: WorldMetrics, outputs, full_labels, full_attention_mask, cp_rank: int, cp_size: int, *, training: bool
+def _record_loss_metrics(
+    metrics: WorldMetrics, outputs, inputs, labels, cp_shard: tuple[int, int] | None, *, training: bool
 ) -> None:
-    """Record one micro-batch's CP metrics over this rank's chunk, nothing without labels or logits. A non-final
-    rank's last logit predicts the next chunk's first token, as in the loss."""
-    if full_labels is None or outputs.logits is None:
-        return
-    shift_logits, shift_labels = cp_shift_against_full_labels(outputs.logits, full_labels, cp_rank, cp_size)
-    mask = shift_labels != LABEL_IGNORE_INDEX
-    correct = (shift_logits.argmax(dim=-1) == shift_labels) & mask
-    metrics.fraction("mean_token_accuracy", correct.sum(), mask.sum())
-
-    per_token_entropy = entropy_from_logits(outputs.logits)
-    if full_attention_mask is not None:
-        start, end = cp_chunk_bounds(full_attention_mask.size(1), cp_rank, cp_size)
-        local_attention_mask = full_attention_mask[:, start:end]
-        attended_tokens = local_attention_mask.sum()
-        metrics.fraction("entropy", torch.sum(per_token_entropy * local_attention_mask), attended_tokens)
-    else:
-        attended_tokens = outputs.logits.shape[0] * outputs.logits.shape[1]
-        metrics.fraction("entropy", per_token_entropy.sum(), per_token_entropy.numel())
-    # Only train accumulates the run's token counter; eval contributes a structural zero.
-    metrics.sum("attended_tokens", attended_tokens * int(training))
+    """Record one micro-batch's metrics for the per-log flush, issuing no collective and no host read: next-token
+    accuracy and entropy over the supervised tokens (accuracy from Liger's fused loss when the forward skipped the
+    logits), the batch's attended tokens and the router aux loss. ``cp_shard`` is this rank's ``(cp_rank,
+    cp_size)`` when the logits cover its chunk alone; a non-final rank's last logit then predicts the next chunk's
+    first token, as in the loss."""
+    logits = getattr(outputs, "logits", None)
+    if labels is not None and logits is not None:
+        if cp_shard is not None:
+            shift_logits, shift_labels = cp_shift_against_full_labels(logits, labels, *cp_shard)
+        else:
+            # Prompt-learning adapters prepend virtual-token logits the labels do not cover.
+            shift_logits, shift_labels = logits[:, logits.size(1) - labels.size(1) : -1], labels[:, 1:]
+        mask = shift_labels != LABEL_IGNORE_INDEX
+        tokens = mask.sum()
+        metrics.fraction("mean_token_accuracy", ((shift_logits.argmax(dim=-1) == shift_labels) & mask).sum(), tokens)
+        metrics.fraction("entropy", (entropy_from_logits(shift_logits) * mask).sum(), tokens)
+    elif labels is not None and getattr(outputs, "token_accuracy", None) is not None:
+        tokens = (labels[:, 1:] != LABEL_IGNORE_INDEX).sum()
+        metrics.fraction("mean_token_accuracy", outputs.token_accuracy * tokens, tokens)
+    # The whole batch on every rank, padding-free rows by their length: the flush divides the world sum by the ranks
+    # sharing a batch. Only train advances the run's counter; eval contributes a structural zero.
+    attention_mask = inputs.get("attention_mask")
+    attended = attention_mask.sum() if attention_mask is not None else inputs["input_ids"].numel()
+    metrics.sum("attended_tokens", attended * int(training))
 
     aux_loss = getattr(outputs, "aux_loss", None)
     if aux_loss is not None:
@@ -90,6 +94,9 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
     # False lets loss-only eval take Liger's fused-CE ``skip_logits`` path; a subclass whose loss reads
     # ``outputs.logits`` must flip it (lce_forward returns None there, and raises without labels).
     LOSS_READS_LOGITS: ClassVar[bool] = False
+    # False for a subclass whose own loss records none of the loss metrics below: their per-log flush would be a
+    # world collective carrying nothing.
+    RECORDS_LOSS_METRICS: ClassVar[bool] = True
 
     def __init__(self, *args, **kwargs):
         _replace_chunked_nll_loss_type(get_ctor_config(args, kwargs, _CTOR_POSITIONS))
@@ -104,56 +111,56 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
             self.model_accepts_loss_kwargs = False
         self._configure_distributed_modes()
 
-        # Per-mode CP metrics awaiting their once-per-log flush (:meth:`_drain_cp_metrics`).
-        self._cp_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
+        # Per-mode loss metrics awaiting their once-per-log flush (:meth:`_drain_loss_metrics`).
+        self._loss_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        """TRL's loss with the router aux term weighed at its coefficient and the attended-token counter corrected
-        for replicated ranks; under CP, the wrapper's chunk loss (:meth:`_compute_cp_loss`)."""
+        """The model's loss on the inputs TRL's ``SFTTrainer.compute_loss`` prepares, the router aux term weighed at
+        its coefficient; under CP, the wrapper's loss on this rank's chunk. Its metrics are recorded for the
+        once-per-log flush (:meth:`_drain_loss_metrics`) where TRL gathers and reads them per micro-batch."""
         self._warn_once_on_empty_labels(inputs)
-        if self.parallelism_config.is_cp_mode:
-            loss, outputs = self._compute_cp_loss(model, inputs)
-            return (loss, outputs) if return_outputs else loss
-
-        prev_tokens = self._total_train_tokens
-
-        tree_plan = inputs.get(TREE_ATTENTION_KEY)
-        with expert_load_token_weights(None if tree_plan is None else tree_plan["leaf_count"]):
-            loss, outputs = super().compute_loss(
-                model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
-            )
-        loss = self._weigh_router_aux_loss(model, loss, outputs, num_items_in_batch)
-        # TRL's gather().sum() counts a TP/ETP group's identical batch once per rank.
-        non_dp_factor = self.parallelism_config.non_dp_replication_factor
-        added = self._total_train_tokens - prev_tokens
-        if non_dp_factor > 1 and self.model.training and added > 0:
-            self._total_train_tokens = prev_tokens + added // non_dp_factor
-            self._metrics["train"]["num_tokens"] = [self._total_train_tokens]
-        # TRL's num_tokens counts attended (non-padding) tokens, apart from num_input_tokens_seen (padding
-        # included) and num_unmasked_output_tokens_seen (loss tokens only).
-        for mode_metrics in self._metrics.values():
-            if "num_tokens" in mode_metrics:
-                mode_metrics["num_attended_tokens_seen"] = mode_metrics.pop("num_tokens")
+        prediction_loss_only = inputs.pop("_prediction_loss_only", None)
+        inputs["use_cache"] = False
+        config = self.parallelism_config
+        cp_shard = (self.cp_config.cp_rank, config.cp_size) if config.is_cp_mode else None
+        if cp_shard is not None:
+            self._pad_to_cp_multiple(inputs)
+        # Set aside: HF pops the labels under a label smoother or a compute_loss_func.
+        labels = inputs.get("labels")
+        if cp_shard is not None:
+            # No num_items_in_batch: per-token loss scaling is wrong under CP.
+            loss, outputs = Trainer.compute_loss(self, model, inputs, return_outputs=True)
+        else:
+            self._add_trl_forward_inputs(inputs, prediction_loss_only)
+            tree_plan = inputs.get(TREE_ATTENTION_KEY)
+            with expert_load_token_weights(None if tree_plan is None else tree_plan["leaf_count"]):
+                loss, outputs = Trainer.compute_loss(
+                    self, model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+                )
+            loss = self._weigh_router_aux_loss(model, loss, outputs, num_items_in_batch)
+        training = self.model.training
+        _record_loss_metrics(
+            self._loss_metrics["train" if training else "eval"], outputs, inputs, labels, cp_shard, training=training
+        )
         return (loss, outputs) if return_outputs else loss
 
-    def _compute_cp_loss(self, model, inputs):
-        """The CP wrapper's loss on this rank's chunk, its metrics folded into the per-log sums; no
-        ``num_items_in_batch``, since per-token loss scaling is wrong under CP."""
-        self._pad_to_cp_multiple(inputs)
-        full_labels, full_attention_mask = inputs.get("labels"), inputs.get("attention_mask")
-        inputs["use_cache"] = False
-        loss, outputs = Trainer.compute_loss(self, model, inputs, return_outputs=True)
-        training = self.model.training
-        _record_cp_metrics(
-            self._cp_metrics["train" if training else "eval"],
-            outputs,
-            full_labels,
-            full_attention_mask,
-            self.cp_config.cp_rank,
-            self.parallelism_config.cp_size,
-            training=training,
-        )
-        return loss, outputs
+    def _add_trl_forward_inputs(self, inputs, prediction_loss_only: bool | None) -> None:
+        """The forward inputs ``SFTTrainer.compute_loss`` adds: the router logits where TRL weighs the aux loss and,
+        under Liger, the fused loss's skip-logits verdict, its token accuracy and DFT's token scaling."""
+        if self.aux_loss_enabled:
+            inputs["output_router_logits"] = True
+        if self.args.use_liger_kernel:
+            inputs["skip_logits"] = (
+                self.model.training
+                or self.args.prediction_loss_only
+                or (
+                    self.compute_metrics is None
+                    and self.preprocess_logits_for_metrics is None
+                    and prediction_loss_only is not False
+                )
+            )
+            inputs["return_token_accuracy"] = True
+            inputs["use_token_scaling"] = self.args.loss_type == "dft"
 
     def _pad_to_cp_multiple(self, inputs) -> None:
         """Pad every sequence column in place to a multiple of ``context_parallel_size``, with the tokenizer's
@@ -203,22 +210,25 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         return loss - forward_added * hf_loss_scale + target
 
     def log(self, logs: dict[str, float], start_time: float | None = None):
-        """Fold the deferred CP metric sums into ``_metrics`` before the base trainer averages them."""
-        self._drain_cp_metrics()
+        """Fold the deferred loss-metric sums into ``_metrics`` before the base trainer averages them."""
+        self._drain_loss_metrics()
         super().log(logs, start_time)
 
-    def _drain_cp_metrics(self):
-        """COLLECTIVE under CP: fold this log window's CP metrics across the world in one flush and emit them. A
-        window with no CP forward anywhere (the final log of a run, or a mode that never ran) emits nothing rather
-        than a 0.0 accuracy, a verdict every rank reads off the same flushed result."""
-        if not self.parallelism_config.is_cp_mode:
+    def _drain_loss_metrics(self):
+        """COLLECTIVE outside PP: fold this log window's loss metrics across the world in one flush and emit them.
+        A window with no loss forward anywhere (the final log of a run, or a mode that never ran) emits nothing
+        rather than a 0.0 accuracy, a verdict every rank reads off the same flushed result. The pipeline schedule
+        computes no loss here and records nothing, so a PP run skips the flush, as does a subclass whose loss
+        records none (:attr:`RECORDS_LOSS_METRICS`)."""
+        if self._pp_runner is not None or not self.RECORDS_LOSS_METRICS:
             return
         mode = "train" if self.model.training else "eval"
-        world = self._cp_metrics[mode].flush()
+        world = self._loss_metrics[mode].flush()
         if not world:
             return
-        # One token per CP rank, distinct sequences per DP group and no TP+CP, so this cannot double-count.
-        self._total_train_tokens += int(world.pop("attended_tokens"))
+        # Every rank records its whole batch, which the ranks of a TP/ETP/CP group share.
+        attended = int(world.pop("attended_tokens")) // self.parallelism_config.non_dp_replication_factor
+        self._total_train_tokens += attended
         self._metrics[mode]["num_attended_tokens_seen"] = [self._total_train_tokens]
         for key, value in world.items():
             self._metrics[mode][key].append(value)

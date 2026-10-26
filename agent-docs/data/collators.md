@@ -161,8 +161,9 @@ non-attention mixer carries state along the sequence regardless of any mask.
 Two families are refused outright in `select_data_collator`. Both checks read the text sub-config
 too, so a composite (VLM) wrapper is covered:
 
-- **GPT-OSS** (`DENSE_PACKING_LEAK_MODEL_TYPES` in `halo/models/segment_markers.py`): packing on a
-  non-varlen backend raises. Pin `flash_attention_2` or turn packing off.
+- **GPT-OSS** (`dense_packing_leaks` on its `MoEFamilySpec`, read by `has_dense_packing_leak` in
+  `halo/models/segment_markers.py`): packing on a non-varlen backend raises. Pin `flash_attention_2` or turn
+  packing off.
 - **DeepSeek-V4**, or any model whose `layer_types` declare a compressed-KV layer (the
   `"compressed"` kind in `halo/models/attention/layout.py`: `compressed_sparse_attention`,
   `heavily_compressed_attention`): `packing` and `padding_free` raise on every backend

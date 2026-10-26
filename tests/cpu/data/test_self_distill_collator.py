@@ -4,8 +4,9 @@
 OPD pairs the k-th supervised token of the student branch with the k-th of the hinted teacher
 branch, so both must supervise the same tokens in the same order while the teacher sequence is
 longer by the hint; a row breaking that raises at prep, world-uniform, rather than distilling across
-shifted tokens. Confidence weights divide by ONE dataset normalizer, so they weight rows at any
-batch size. A real tokenizer is needed for chat templating; tests skip when one is not cached.
+shifted tokens. The text path encodes each row once at prep and collation only pads, to the batch the
+whole-batch collation built. Confidence weights divide by ONE dataset normalizer, so they weight rows at
+any batch size. A real tokenizer is needed for chat templating; tests skip when one is not cached.
 
 Run: pytest tests/cpu/data/test_self_distill_collator.py
 """
@@ -17,6 +18,7 @@ import pytest
 import torch
 from datasets import Dataset, DatasetDict
 
+import halo.data.collators.self_distill as self_distill_collator
 from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     confidence_normalizer,
@@ -25,6 +27,8 @@ from halo.data.collators.self_distill import (
     teacher_history,
 )
 from halo.data.collators.vlm import SelfDistillVLMDataCollator
+from halo.data.completion_spans import build_completion_only_labels
+from halo.data.pipeline.chat_render import render_conversation, tokenize_rendered
 from halo.data.pipeline.vlm_rows import _filter_vlm_over_length
 from tests.common.models import QWEN3_0_6B
 from tests.common.repo import load_script_module
@@ -111,30 +115,80 @@ def test_student_and_teacher_supervise_the_same_response_tokens():
         assert torch.equal(student, teacher)
 
 
-def test_supervising_the_prompt_is_refused_at_the_audit():
+def test_supervising_the_prompt_is_refused_at_the_encoding():
     """With the prompt in the labels the hint shifts every pair after it onto another token."""
     tokenizer = _tokenizer()
     collator = _collator(tokenizer, train_on_completions_only=False, response_prompt_template=None)
     with pytest.raises(ValueError, match="not the same sequence"):
-        collator.audit_row(_row())
+        collator.encode_row(_row())
 
 
-def test_the_audit_writes_no_copy_of_its_input(tmp_path, monkeypatch):
-    """The audit returns no columns, so its cache artifact must carry none: a map writes every column
-    it leaves in place, so a VLM split's image bytes would be copied per node on a non-shared FS."""
+def _whole_batch_collation(collator, rows):
+    """The batch the collator built from raw rows before rows were encoded at prep, spelled out: render and
+    tokenize each row, ``tokenizer.pad`` the branch, then label the padded batch."""
+    batch = {}
+    branches = [("", [row["messages"] for row in rows])]
+    if collator.builds_teacher_branch:
+        branches.append(("teacher_", [collator._teacher_history(row["messages"], row) for row in rows]))
+    for prefix, histories in branches:
+        texts = [
+            render_conversation(collator.tokenizer, history, row, conversation_field="messages")
+            for history, row in zip(histories, rows, strict=True)
+        ]
+        encoded = collator.tokenizer.pad(
+            [tokenize_rendered(collator.tokenizer, text) for text in texts], padding=True, return_tensors="pt"
+        )
+        batch[f"{prefix}input_ids"], batch[f"{prefix}attention_mask"] = encoded["input_ids"], encoded["attention_mask"]
+        batch[f"{prefix}labels"] = build_completion_only_labels(
+            encoded["input_ids"],
+            collator.tokenizer,
+            MARKER,
+            True,
+            attention_mask=encoded["attention_mask"],
+            eos_token_ids=collator.eos_token_ids,
+        )
+    return batch
+
+
+@pytest.mark.parametrize("padding_side", ["right", "left"])
+def test_collating_rows_encoded_at_prep_builds_the_whole_batch_collation(padding_side, monkeypatch):
+    """Collation pads the rows ``encode_row`` produced, rendering nothing, into the batch the whole-batch
+    collation of the raw rows builds, on either padding side."""
+    tokenizer = _tokenizer()
+    tokenizer.padding_side = padding_side
+    collator = _collator(tokenizer)
+    rows = [_row(), _row("capital of France, in one word please?", "Paris, the city of light")]
+    encoded = [collator.encode_row(row) for row in rows]
+    assert set(encoded[0]) == {"input_ids", "labels", "teacher_input_ids", "teacher_labels"}
+
+    monkeypatch.setattr(self_distill_collator, "render_conversation", lambda *a, **k: pytest.fail("rendered"))
+    batch = collator(encoded)
+    monkeypatch.undo()
+
+    expected = _whole_batch_collation(collator, rows)
+    assert batch.keys() == expected.keys()
+    for key, value in expected.items():
+        assert torch.equal(batch[key], value), key
+    assert batch["input_ids"].shape[1] != batch["teacher_input_ids"].shape[1], "the rows must need padding"
+
+
+def test_the_text_encoding_keeps_only_the_encoded_columns(tmp_path, monkeypatch):
+    """The map stores each row's token ids and labels and the columns asked to be kept, not a copy of the
+    raw row: every column it leaves in place is written to its cache file on every node."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
-    script = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_audit")
-    produced = []
-    real_map = script.coordinated_map
-    monkeypatch.setattr(script, "coordinated_map", lambda *args, **kwargs: produced.append(real_map(*args, **kwargs)))
-    rows = [_row(payload="x" * 4096), _row("capital of France?", "Paris", payload="y" * 4096)]
-    split = Dataset.from_list(rows)
+    script = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_encode")
+    rows = [_row(payload="x" * 4096, confidence=0.5), _row("capital of France?", "Paris", payload="y", confidence=1.0)]
 
-    script._audit_rows(_collator(_tokenizer()), split, None, 1)
+    encoded = script._encode_text_rows(_collator(_tokenizer()), Dataset.from_list(rows), "train", 1, ("confidence",))
 
-    (audited,) = produced
-    (artifact,) = audited.cache_files
-    assert Dataset.from_file(artifact["filename"]).column_names == []
+    (artifact,) = encoded.cache_files
+    assert sorted(Dataset.from_file(artifact["filename"]).column_names) == [
+        "confidence",
+        "input_ids",
+        "labels",
+        "teacher_input_ids",
+        "teacher_labels",
+    ]
 
 
 def test_no_teacher_branch_is_built_with_the_opd_term_off():
@@ -155,8 +209,8 @@ def test_an_over_length_branch_raises_by_name_instead_of_truncating(max_length):
     collator = _collator(tokenizer, hint_template=hint, max_length=max_length)
     branch = "student" if max_length == 8 else "teacher"
     with pytest.raises(ValueError, match=f"{branch} branch"):
-        collator.audit_row(_row())
-    assert _collator(tokenizer, hint_template=hint, max_length=4096).audit_row(_row()) == {}
+        collator.encode_row(_row())
+    assert _collator(tokenizer, hint_template=hint, max_length=4096).encode_row(_row())
 
 
 def _confidence_split(values):

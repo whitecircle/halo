@@ -3,7 +3,7 @@ turn a reply reports, the captures included, which the two engines request and r
 Transport belongs to the rollout drivers."""
 
 import logging
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -19,10 +19,6 @@ from halo.inference.response import FINISH_REASON_LENGTH, get_finish_reason, get
 from halo.log import warn_once
 
 logger = logging.getLogger(__name__)
-
-# Model types vLLM serves with its mistral_common tokenizer, whose encode() turns the budget's "[THINK]"
-# and "[/THINK]" markers into plain-text pieces while the model writes them as control tokens.
-_VLLM_UNMATCHED_REASONING_MARKER_MODEL_TYPES = frozenset({"mistral4"})
 
 # Backends already warned (once per process) that a per-effort thinking budget reaches no engine field, that
 # their completions carry no ``usage.completion_tokens``, and that a cut call's text could not be decoded.
@@ -328,14 +324,14 @@ def build_payload(
     return payload
 
 
-def reject_unenforceable_thinking_budget(model_types: Iterable[str], backend: str) -> None:
-    """Refuse a thinking budget vLLM accepts but can never enforce for these ``model_types``."""
-    unmatched = sorted(_VLLM_UNMATCHED_REASONING_MARKER_MODEL_TYPES.intersection(model_types))
-    if backend == VLLM_BACKEND and unmatched:
+def reject_unenforceable_thinking_budget(model_types: Iterable[str], unenforceable: Mapping[str, str]) -> None:
+    """Refuse a thinking budget the rollout engine accepts but can never enforce for these ``model_types``;
+    ``unenforceable`` is its client's ``UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES``."""
+    unmatched = sorted(set(model_types) & unenforceable.keys())
+    if unmatched:
+        facts = "; ".join(unenforceable[model_type] for model_type in unmatched)
         raise ValueError(
-            f"vLLM cannot enforce a thinking budget for model_type {unmatched}: it serves this model with its "
-            "mistral_common tokenizer, which encodes the [THINK] and [/THINK] markers as plain text while the "
-            "model writes them as control tokens, so the budget never starts counting and reasoning runs "
-            "uncapped. Unset rollout_max_thinking_tokens and the thinking_tokens of every effort level the "
-            "environment draws, and steer with reasoning_effort instead."
+            f"The rollout engine cannot enforce a thinking budget for model_type {unmatched}: {facts}, so the "
+            "budget never starts counting and reasoning runs uncapped. Unset rollout_max_thinking_tokens and the "
+            "thinking_tokens of every effort level the environment draws, and steer with reasoning_effort instead."
         )

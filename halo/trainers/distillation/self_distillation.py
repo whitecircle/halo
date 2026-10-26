@@ -24,6 +24,7 @@ from halo.trainers.distillation.divergences import (
     place_frozen_scorer,
     require_divergence,
     shifted_token_cross_entropy,
+    token_divergence,
 )
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from halo.trainers.evaluation import split_rows_head
@@ -68,6 +69,8 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
     ROUTER_AUX_LOSS_ADDED_BY = None
     # Same reason: compute_loss reads outputs.logits, so eval must not take the base's skip_logits path.
     LOSS_READS_LOGITS = True
+    # Its loss stores its terms through StoredMetricsMixin and records none of the SFT loss metrics.
+    RECORDS_LOSS_METRICS = False
     PP_REFUSAL = (
         "the privileged-teacher term needs a second, no-grad forward of the WHOLE model per batch on "
         "the hint-carrying sequence (and a third through the frozen reference when reference_kl_coef "
@@ -111,9 +114,9 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         super().__init__(*args, **kwargs)
 
         # Every rank builds the same collator, so this refusal is world-uniform and needs no collective.
-        if self.sdpg_beta_base != 0.0 and not getattr(self.data_collator, "builds_teacher_branch", False):
+        if self.sdpg.sdpg_beta_base != 0.0 and not getattr(self.data_collator, "builds_teacher_branch", False):
             raise ValueError(
-                f"sdpg_beta_base={self.sdpg_beta_base} needs the privileged teacher branch (teacher_* keys) in "
+                f"sdpg_beta_base={self.sdpg.sdpg_beta_base} needs the privileged teacher branch (teacher_* keys) in "
                 f"every batch, and {type(self.data_collator).__name__} builds none. Use a SelfDistill collator "
                 f"built with a hint_template, or set sdpg_beta_base: 0 to drop the term."
             )
@@ -168,7 +171,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         metrics = {"sft_loss": sft_loss.detach()}
 
         # The teacher forward is a collective: config-gated, never batch-gated, so every rank enters it.
-        if self.sdpg_beta_base != 0.0:
+        if self.sdpg.sdpg_beta_base != 0.0:
             self._vision_replay = reuse
             with privileged_teacher_pass(model):
                 teacher_logits = split_rows_head(model(**_teacher_inputs(model_inputs, teacher)).logits, real)
@@ -263,7 +266,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         """``loss_fn`` between the student's and the target's next-token rows at the masked positions,
         the k-th masked row of one paired with the k-th of the other, as a per-sample token mean.
 
-        One gather per side, so the fp32 divergence planes cover the response rows only.
+        One gather per side, so the divergence covers the response rows only.
         """
         student_counts, target_counts = student_mask.sum(-1), target_mask.sum(-1)
         # One mask on both sides (the reference term) pairs trivially. A host check, not a device assert:
@@ -276,6 +279,6 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
             )
         student_rows = student_logits[:, :-1][student_mask]
         target_rows = target_logits[:, :-1][target_mask]
-        per_row = loss_fn(student_rows, target_rows, self.sdpg_temperature).sum(-1)
+        per_row = token_divergence(loss_fn, student_rows, target_rows, self.sdpg.sdpg_temperature)
         per_token = per_row.new_zeros(student_mask.shape).masked_scatter(student_mask, per_row)
         return masked_token_mean(per_token, student_mask, sample_weights)

@@ -79,6 +79,8 @@ def test_the_real_dispatch_hands_each_axis_set_its_loader_and_the_strict_master_
     )
     monkeypatch.setattr(loading.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
     monkeypatch.setattr(loading.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: SimpleNamespace())
+    # The module-tree gate has its own test; it would refuse the eager label standing in for attention under CP.
+    monkeypatch.setattr(loading, "reject_unsupported_structure", lambda *args, **kwargs: None)
     for name in _leaf_loaders():
         monkeypatch.setattr(loading, name, _stopping_loader(name))
     with pytest.raises(_Dispatched) as dispatched:

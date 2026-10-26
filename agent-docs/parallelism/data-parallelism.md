@@ -41,6 +41,10 @@ over. What gets sharded varies:
 | TP (DP == 1, pure TP) | None | Nothing to sync across DP |
 | Single GPU | None | — |
 
+Plain FSDP2 and DDP load the whole model onto every GPU before the wrap, whatever
+`fsdp_reshard_after_forward` says, so a dense model must fit on one GPU at its load dtype; past one GPU,
+TP's HF-native `tp_plan` load shards it as it loads ([Tensor Parallelism](tensor-parallelism.md)).
+
 The plain-DP, CP, EP and EP+TP wraps also leave out the frozen parameters whose dtype no trainable
 parameter shares (a base under differently typed adapters), one parameter at a time, so a trainable child
 of their module stays in its shard group (`_fsdp_exclusions` in `halo/trainers/parallelism/mode_setup.py`). A

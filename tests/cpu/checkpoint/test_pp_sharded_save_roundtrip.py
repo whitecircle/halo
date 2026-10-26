@@ -12,9 +12,9 @@ stage, the smallest config-legal PP topology):
    partial key map on disk and ``from_pretrained`` would randomly initialize the other stages.
 2. **Round trip** — the reloaded model equals the pre-split model tensor for tensor. This catches a
    dropped stage, a stale layer index (stage 1 writing stage 0's names), and a torn index.
-3. **PP+EP composition** — an EP layer's experts are exported by the family gather under
+3. **PP+EP and PP+ETP composition** — an EP layer's experts are exported by the family gather under
    ``experts.*`` and must then pass through the stage's global rename; the stage-local EP state_dict
-   entries (rank-local expert ranges) must NOT reach the checkpoint.
+   entries (rank-local expert ranges, expert-TP shards) must NOT reach the checkpoint.
 4. **Hub namespace** — names and values equal the EP-gathered save (without EP wrappers, the
    save-side revert of the whole model), and both PP reads map them back onto the stage.
 
@@ -26,6 +26,7 @@ names, the same directory reloads onto a DIFFERENT ``pp_size``.
 
 from __future__ import annotations
 
+import datetime
 import itertools
 import json
 import os
@@ -62,7 +63,7 @@ from halo.runtime import dtensor
 from halo.trainers.parallelism.pipeline_trainer import stash_wrapper_state
 from tests.common.checkpoint_io import load_context, save_context
 from tests.common.ep_stubs import StubEPLayerBase
-from tests.common.gloo import run_gloo_ranks
+from tests.common.gloo import new_groups, run_gloo_ranks
 from tests.common.models import (
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
@@ -86,6 +87,8 @@ NUM_EXPERTS = 4
 LOCAL_EXPERTS = 2  # an ep2 rank: the stage-local params hold E/ep experts, the gather returns E
 HIDDEN = 8
 INTER = 6
+ETP_SIZE = 2  # a pure-ETP stage: both ranks hold every expert at INTER / ETP_SIZE
+PG_TIMEOUT = datetime.timedelta(seconds=120)
 
 # Per-node output storage: 8 ranks as 4 simulated nodes of 2, so each stage spans two nodes — the
 # shape where the per-node writer set (one rank per node) differs from the shared one (one per stage).
@@ -142,13 +145,13 @@ def _tiny_qwen3() -> Qwen3ForCausalLM:
     return Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, pad_token_id=0, eos_token_id=1))
 
 
-def _parallelism_config(pp_size: int = PP_SIZE):
+def _parallelism_config(pp_size: int = PP_SIZE, **fields):
     """A real ParallelismConfig for this rank. ``gpus_per_node`` comes from the launcher, so the
     2-nodes-of-2 topology is simulated by patching that one resolver (the idiom of
     tests/cpu/checkpoint/test_pp_shard_writers.py); rank/world come from the live gloo group.
     """
     with patch(f"{_PC_MOD}.get_local_world_size", return_value=GPUS_PER_NODE):
-        return ParallelismConfig(pp_size=pp_size, nvlink_domain_size=GPUS_PER_NODE, max_concurrent_loading=0)
+        return ParallelismConfig(pp_size=pp_size, nvlink_domain_size=GPUS_PER_NODE, max_concurrent_loading=0, **fields)
 
 
 def _context(stage, config, max_shard_size: str = "5GB"):
@@ -392,26 +395,53 @@ class _StubEPLayer(StubEPLayerBase):
         }
 
 
-class _MoEBackbone(nn.Module):
-    """Fake decoder backbone whose every layer carries an EP MoE block."""
+def _full_etp_experts(layer: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Global layer ``layer``'s unsplit ``(gate, up, down)`` experts in matmul convention, integer-valued so the
+    bf16 export holds them exactly."""
+    generator = torch.Generator().manual_seed(layer)
+    shapes = ((NUM_EXPERTS, HIDDEN, INTER), (NUM_EXPERTS, HIDDEN, INTER), (NUM_EXPERTS, INTER, HIDDEN))
+    gate, up, down = (torch.randint(-8, 8, shape, generator=generator).float() for shape in shapes)
+    return gate, up, down
 
-    def __init__(self, n_layers: int, is_first: bool, is_last: bool):
+
+class _ETPStubLayer(StubEPLayerBase):
+    """A pure-ETP rank's experts: every expert, the FFN intermediate dim split ``ETP_SIZE``-way, exported by the
+    real EP gather over the stage's expert-TP group."""
+
+    def __init__(self, layer: int, expert_tp_group, expert_tp_rank: int):
+        super().__init__()
+        self.expert_tp_size = ETP_SIZE
+        self.expert_tp_group = expert_tp_group
+        self.ep_config = SimpleNamespace(ep_size=1, dispatch_ep_group=None)
+        gate, up, down = _full_etp_experts(layer)
+        width = INTER // ETP_SIZE
+        shard = slice(expert_tp_rank * width, (expert_tp_rank + 1) * width)
+        self.gate_proj = nn.Parameter(gate[..., shard].clone())
+        self.up_proj = nn.Parameter(up[..., shard].clone())
+        self.down_proj = nn.Parameter(down[:, shard].clone())
+        self.router = nn.Linear(HIDDEN, NUM_EXPERTS, bias=False)
+
+
+class _MoEBackbone(nn.Module):
+    """Fake decoder backbone whose every layer carries an EP MoE block, ``make_mlp(global layer index)``."""
+
+    def __init__(self, layer_range: range, is_first: bool, is_last: bool, make_mlp):
         super().__init__()
         if is_first:
             self.embed_tokens = nn.Embedding(16, HIDDEN)
         layers = []
-        for _ in range(n_layers):
+        for index in layer_range:
             layer = nn.Module()
-            layer.mlp = _StubEPLayer()
+            layer.mlp = make_mlp(index)
             layers.append(layer)
         self.layers = nn.ModuleList(layers)
         self.norm = nn.LayerNorm(HIDDEN) if is_last else nn.Identity()
 
 
-def _moe_stage(lo: int, hi: int, n_total: int) -> PipelineStageModule:
+def _moe_stage(lo: int, hi: int, n_total: int, make_mlp=lambda _layer: _StubEPLayer()) -> PipelineStageModule:
     is_first, is_last = lo == 0, hi == n_total
     stage = hand_built_stage(
-        _MoEBackbone(hi - lo, is_first, is_last),
+        _MoEBackbone(range(lo, hi), is_first, is_last, make_mlp),
         nn.Linear(HIDDEN, 16, bias=False) if is_last else None,
         is_first=is_first,
         is_last=is_last,
@@ -464,6 +494,54 @@ def test_pp_plus_ep_exports_full_experts_under_global_names(tmp_path):
     FULL expert count, and no rank-local EP state_dict entry leaks through."""
     verdict = str(tmp_path / "verdict.txt")
     run_gloo_ranks(_ep_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
+    with open(verdict) as fh:
+        result = fh.read()
+    assert result == "PASS", result
+
+
+def _etp_worker(rank: int, out_dir: str, verdict_path: str) -> None:
+    config = _parallelism_config(expert_tp_size=ETP_SIZE)
+    stage_ranks = [
+        list(range(base, base + config.stage_world_size)) for base in range(0, WORLD_SIZE, config.stage_world_size)
+    ]
+    expert_tp_group = new_groups(rank, stage_ranks, PG_TIMEOUT)
+    n_total = 4
+    lo, hi = [(0, 2), (2, 4)][config.pp_rank]
+    stage = _moe_stage(lo, hi, n_total, lambda layer: _ETPStubLayer(layer, expert_tp_group, config.stage_local_rank))
+    if rank == 0:
+        os.makedirs(out_dir, exist_ok=True)
+    dist.barrier()
+
+    save_pp_checkpoint(_context(stage, config), out_dir)
+
+    if rank != 0:
+        return
+    written = safetensors_state_dict(out_dir)
+    problems = []
+    for layer in range(n_total):
+        gate, up, down = _full_etp_experts(layer)
+        expected = {
+            f"model.layers.{layer}.mlp.experts.gate_up_proj": torch.cat([gate, up], dim=-1).transpose(1, 2),
+            f"model.layers.{layer}.mlp.experts.down_proj": down.transpose(1, 2),
+        }
+        for key, tensor in expected.items():
+            got = written.get(key)
+            if got is None or not torch.equal(got.float(), tensor):
+                problems.append(f"{key} {'missing' if got is None else 'is not the unsplit experts'}")
+        if f"model.layers.{layer}.mlp.router.weight" not in written:
+            problems.append(f"layer {layer} router missing")
+    leaked = [key for key in written if key.endswith((".mlp.gate_proj", ".mlp.up_proj", ".mlp.down_proj"))]
+    if leaked:
+        problems.append(f"expert-TP shards leaked: {leaked[:3]}")
+    with open(verdict_path, "w") as fh:
+        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
+
+
+def test_pp_plus_etp_exports_unsplit_experts_under_global_names(tmp_path):
+    """PP+ETP: each stage's two expert-TP ranks hold every expert at half the FFN width; the stage's one
+    writer must export them whole, re-based to global layer names, with both ranks in the gather."""
+    verdict = str(tmp_path / "verdict.txt")
+    run_gloo_ranks(_etp_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict, pg_timeout=PG_TIMEOUT)
     with open(verdict) as fh:
         result = fh.read()
     assert result == "PASS", result

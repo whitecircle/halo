@@ -8,7 +8,8 @@ import inspect
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import partial
 from typing import Any
 
@@ -41,7 +42,9 @@ from halo.checkpoint.writing import normalize_gathered_state_dict
 from halo.configs.embedding import EmbeddingConfig
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.log import warn_once
 from halo.models.peft_adapters import lora_fold_targets
+from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import barrier_on_exit
 from halo.runtime.dtensor import resolve_retained
@@ -70,7 +73,7 @@ from halo.trainers.training_args_overrides import keep_all_dataset_columns
 
 logger = logging.getLogger(__name__)
 
-# Metric encoding is a diagnostic re-forward under no_grad; a full batch would double peak activations.
+# Rows per text group the embedding metrics read: their similarity ranking is quadratic in it.
 _METRIC_MAX_SAMPLES = 256
 
 
@@ -107,6 +110,34 @@ def build_embedding_loss(model: SentenceTransformer, config: EmbeddingConfig) ->
         loss = losses.MatryoshkaLoss(model=model, loss=loss, **matryoshka_kwargs)
 
     return loss
+
+
+def _group_samples(inputs: dict[str, Any]) -> list[int]:
+    """The sample count of each text group of a collated batch, in column order: a packed (varlen) group's
+    sequences, a padded group's rows."""
+    samples = []
+    for key, input_ids in inputs.items():
+        if key.endswith("_input_ids"):
+            offsets = inputs.get(f"{key[: -len('input_ids')]}cu_seq_lens_q")
+            samples.append(input_ids.size(0) if offsets is None else offsets.numel() - 1)
+    return samples
+
+
+def _group_heads(chunks: list[torch.Tensor], group_samples: list[int]) -> list[torch.Tensor] | None:
+    """The first :data:`_METRIC_MAX_SAMPLES` rows of each text group, the groups laid back to back over
+    ``chunks`` with ``group_samples`` rows each, or ``None`` when ``chunks`` do not hold exactly those rows."""
+    if not group_samples or sum(chunk.size(0) for chunk in chunks) != sum(group_samples):
+        return None
+    heads: list[list[torch.Tensor]] = [[] for _ in group_samples]
+    starts = [sum(group_samples[:group]) for group in range(len(group_samples))]
+    offset = 0
+    for chunk in chunks:
+        for group, (start, samples) in enumerate(zip(starts, group_samples, strict=True)):
+            begin, end = max(start, offset), min(start + min(samples, _METRIC_MAX_SAMPLES), offset + chunk.size(0))
+            if begin < end:
+                heads[group].append(chunk[begin - offset : end - offset])
+        offset += chunk.size(0)
+    return [torch.cat(parts) for parts in heads]
 
 
 def _apply_umask_mode_to_module(output_dir: str, module_path: str) -> None:
@@ -203,6 +234,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         self._last_metrics_step: int = -1
         self._in_eval_loop: bool = False
         self._eval_embedding_accum: dict[str, list[float]] = {}
+        self._warned: set[str] = set()
         self._configure_distributed_modes()
         backbone = self._backbone_model()
         reject_modules_outside_backbone(
@@ -220,26 +252,51 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         return_outputs: bool = False,
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any]]:
-        """Compute loss, optionally capturing embedding metrics via a separate no-grad encoding pass
-        (decoupled so it works with cached losses like ``cached_mnrl``)."""
-        result = SentenceTransformerTrainer.compute_loss(self, model, inputs, return_outputs, num_items_in_batch)
-
+        """The sentence-transformers loss; on every eval batch and before each log step, the embedding metrics
+        of the sentence embeddings the loss forward computed (:meth:`_capturing_sentence_embeddings`)."""
         is_eval = self._in_eval_loop
-        should_capture = is_eval or self._should_capture_embedding_metrics()
+        group_samples = _group_samples(inputs) if isinstance(inputs, dict) else []
+        if not group_samples or not (is_eval or self._should_capture_embedding_metrics()):
+            return SentenceTransformerTrainer.compute_loss(self, model, inputs, return_outputs, num_items_in_batch)
 
-        if should_capture:
-            metrics = self._encode_and_compute_metrics(model, inputs)
-            if not is_eval:
-                # Advance unconditionally: this gate decides whether a collective forward runs.
-                self._last_metrics_step = self.state.global_step
-            if metrics:
-                if is_eval:
-                    for k, v in metrics.items():
-                        self._eval_embedding_accum.setdefault(k, []).append(v)
-                else:
-                    self._embedding_metrics = metrics
-
+        with self._capturing_sentence_embeddings(model) as chunks:
+            result = SentenceTransformerTrainer.compute_loss(self, model, inputs, return_outputs, num_items_in_batch)
+        if not is_eval:
+            self._last_metrics_step = self.state.global_step
+        heads = _group_heads(chunks, group_samples)
+        if heads is None:
+            warn_once(
+                logger,
+                self._warned,
+                "embedding_metrics",
+                "embed/* metrics skipped: the loss forwarded %d sentence embeddings for text groups of %s samples, "
+                "so its forwards cannot be read group by group.",
+                sum(chunk.size(0) for chunk in chunks),
+                group_samples,
+            )
+            return result
+        metrics = self._compute_embedding_metrics(heads)
+        if is_eval:
+            for k, v in metrics.items():
+                self._eval_embedding_accum.setdefault(k, []).append(v)
+        else:
+            self._embedding_metrics = metrics
         return result
+
+    @contextmanager
+    def _capturing_sentence_embeddings(self, model: SentenceTransformer) -> Iterator[list[torch.Tensor]]:
+        """Yield the list the block's pipeline forwards append their detached sentence embeddings to, in call
+        order. The hook sits on the pipeline's last module, so a forward served from a loss's cache (Matryoshka's
+        smaller dimensions) adds nothing; sentence-transformers' losses forward the text groups in column order,
+        merged candidates column-major and cached losses chunk by chunk, so the rows lie group after group."""
+        chunks: list[torch.Tensor] = []
+        handle = unwrap_framework_wrappers(model)[-1].register_forward_hook(
+            lambda _module, _inputs, features: chunks.append(features["sentence_embedding"].detach())
+        )
+        try:
+            yield chunks
+        finally:
+            handle.remove()
 
     def log(self, logs: dict[str, float], start_time: float | None = None):
         """Inject embedding metrics into logs before delegating to mixin/Trainer."""
@@ -288,80 +345,43 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             return False
         next_step = self.state.global_step + 1
         # state.logging_steps, not args: HF resolves a ratio (0 < logging_steps < 1) against
-        # max_steps there, and max(0.1, 1) would capture on every step, which is a no-grad encode
-        # and a collective under EP/TP.
+        # max_steps there, and max(0.1, 1) would capture on every step.
         return next_step % max(int(self.state.logging_steps), 1) == 0
-
-    def _encode_and_compute_metrics(
-        self,
-        model: SentenceTransformer,
-        inputs: dict[str, torch.Tensor | Any],
-    ) -> dict[str, float]:
-        """No-grad encode each text group in ``inputs`` (``anchor_input_ids`` -> ``anchor_``) and compute quality
-        metrics, capped at ``_METRIC_MAX_SAMPLES`` samples per group."""
-        if not isinstance(inputs, dict):
-            return {}
-        prefixes = [k[: -len("input_ids")] for k in inputs if k.endswith("_input_ids")]
-        if not prefixes:
-            return {}
-
-        # No try/except: ``model(features)`` is a collective, so swallowing on one rank hangs its peers.
-        embeddings: list[torch.Tensor] = []
-        with torch.no_grad():
-            for prefix in prefixes:
-                features = {k[len(prefix) :]: v for k, v in inputs.items() if k.startswith(prefix)}
-                output = model(self._cap_group_samples(features))
-                embeddings.append(output["sentence_embedding"].detach())
-
-        return self._compute_embedding_metrics(embeddings)
-
-    def _cap_group_samples(self, features: dict[str, Any]) -> dict[str, Any]:
-        """Cap one text group at ``_METRIC_MAX_SAMPLES`` samples, or return it whole: only a padded group has a
-        sliceable sample axis, and a flash-attention backbone's packed features (``cu_seq_lens_q``) do not."""
-        input_ids = features["input_ids"]
-        if "cu_seq_lens_q" in features or input_ids.size(0) <= _METRIC_MAX_SAMPLES:
-            return features
-        return {
-            key: value[:_METRIC_MAX_SAMPLES]
-            if isinstance(value, torch.Tensor) and value.size(0) == input_ids.size(0)
-            else value
-            for key, value in features.items()
-        }
 
     @staticmethod
     def _compute_embedding_metrics(embeddings: list[torch.Tensor]) -> dict[str, float]:
         """``embed/norm`` and ``embed/std``; 2+ groups add ``embed/cos_sim``, ``embed/mrr`` and
-        ``embed/recall@{1,3,10}``, 3+ groups ``embed/neg_cos_sim`` and ``embed/triplet_margin``."""
+        ``embed/recall@{1,3,10}``, 3+ groups ``embed/neg_cos_sim`` and ``embed/triplet_margin``; read to the host
+        in one transfer."""
         normed = [F.normalize(e, p=2, dim=1) for e in embeddings]
         anchor_n = normed[0]
 
-        metrics: dict[str, float] = {
-            "embed/norm": embeddings[0].norm(dim=1).mean().item(),
-            "embed/std": embeddings[0].std(dim=0).mean().item(),
+        metrics: dict[str, torch.Tensor] = {
+            "embed/norm": embeddings[0].norm(dim=1).mean(),
+            "embed/std": embeddings[0].std(dim=0).mean(),
         }
 
         if len(normed) >= 2:
             cos_sim = (anchor_n * normed[1]).sum(dim=1)
-            metrics["embed/cos_sim"] = cos_sim.mean().item()
+            metrics["embed/cos_sim"] = cos_sim.mean()
 
             if len(normed) >= 3:
                 neg_cos_sim = (anchor_n * normed[2]).sum(dim=1)
-                metrics["embed/neg_cos_sim"] = neg_cos_sim.mean().item()
-                metrics["embed/triplet_margin"] = (cos_sim - neg_cos_sim).mean().item()
+                metrics["embed/neg_cos_sim"] = neg_cos_sim.mean()
+                metrics["embed/triplet_margin"] = (cos_sim - neg_cos_sim).mean()
 
             candidates_n = torch.cat(normed[1:], dim=0)
             batch_size = anchor_n.size(0)
             sim_matrix = anchor_n @ candidates_n.T
             ranks = (-sim_matrix).argsort(dim=1).argsort(dim=1)
             target_ranks = ranks[torch.arange(batch_size), torch.arange(batch_size)] + 1
-            target_ranks_f = target_ranks.float()
 
-            metrics["embed/mrr"] = (1.0 / target_ranks_f).mean().item()
+            metrics["embed/mrr"] = (1.0 / target_ranks.float()).mean()
             for k in (1, 3, 10):
                 if k <= candidates_n.size(0):
-                    metrics[f"embed/recall@{k}"] = (target_ranks <= k).float().mean().item()
+                    metrics[f"embed/recall@{k}"] = (target_ranks <= k).float().mean()
 
-        return metrics
+        return dict(zip(metrics, torch.stack([value.float() for value in metrics.values()]).tolist(), strict=True))
 
     def _load_from_checkpoint(
         self, resume_from_checkpoint: str, model: nn.Module = None, *, for_best_model: bool = False

@@ -25,6 +25,7 @@ from torch import nn
 from torch.nn.functional import cross_entropy, log_softmax, softmax
 from transformers import Trainer
 
+import halo.kernels.logprobs as logprob_kernels
 import halo.trainers.distillation.teacher_distillation as teacher_distillation
 import scripts.training.distillation.teacher_distill as teacher_distill_script
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -59,7 +60,8 @@ class _TokenTableModel(nn.Module):
         self.device = torch.device("cpu")
 
     def forward(self, input_ids, attention_mask=None, use_cache=None):
-        return types.SimpleNamespace(logits=self.table[input_ids])
+        self.last_logits = self.table[input_ids]
+        return types.SimpleNamespace(logits=self.last_logits)
 
 
 class _Tokenizer:
@@ -197,6 +199,32 @@ def test_slim_takes_its_own_gold_token_weight():
     expected, _, _ = _oracle(trainer, slim=True)
     torch.testing.assert_close(_loss(trainer), expected)
     assert "distillation_coef" not in stored
+
+
+@pytest.mark.parametrize(
+    ("distill_loss", "apply_hard_labels"),
+    [("kl_divergence", True), ("slim", False), ("jensen_shannon", False), ("cosine_similarity", False)],
+)
+def test_backward_holds_no_fp32_vocab_plane_beyond_the_two_logits(monkeypatch, distill_loss, apply_hard_labels):
+    """Every term (divergence, gate, CLM) scores token chunks under a checkpoint, so autograd keeps the
+    student and teacher logits and no fp32 ``[tokens, V]`` plane of its own; two chunks per row here."""
+    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 2 * VOCAB)
+    trainer, _ = _trainer(distill_loss, apply_hard_labels=apply_hard_labels)
+    saved = []
+
+    def record(tensor):
+        saved.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(record, lambda tensor: tensor):
+        _loss(trainer)
+    owned = {model.last_logits.untyped_storage().data_ptr() for model in (trainer.model, trainer.teacher_model)}
+    planes = [
+        tuple(t.shape)
+        for t in saved
+        if t.dtype == torch.float32 and t.dim() and t.size(-1) == VOCAB and t.untyped_storage().data_ptr() not in owned
+    ]
+    assert not planes, f"fp32 vocab-wide tensors held for backward: {planes}"
 
 
 def test_the_hard_label_gate_is_refused_beside_a_loss_that_weights_gold_tokens_itself():

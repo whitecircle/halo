@@ -64,15 +64,14 @@ class SDPGArguments(ValidatedConfig):
         return tuple(f.name for f in fields(SDPGArguments) if f.name not in exclude)
 
     @classmethod
-    def pop_from(cls, kwargs: dict, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
-        """Pop this block's fields but ``exclude`` from trainer ``kwargs``: validated, defaults filled.
+    def pop_from(cls, kwargs: dict, *, exclude: frozenset[str] = frozenset()) -> "SDPGArguments":
+        """The block of this block's fields but ``exclude`` popped from trainer ``kwargs``, validated, every other
+        field its default (an excluded field is applied before the trainer, which never reads it).
 
-        A trainer adopts the result as attributes, so a directly built one runs the OPD schedule the
-        identical YAML run would. A misspelt field stays in ``kwargs``, where the parent's explicit
-        signature rejects it.
+        A trainer holds the result, so a directly built one runs the OPD schedule the identical YAML run
+        would. A misspelt field stays in ``kwargs``, where the parent's explicit signature rejects it.
         """
-        block = cls(**{name: kwargs.pop(name) for name in cls.sdpg_field_names(exclude) if name in kwargs})
-        return block.sdpg_kwargs(exclude=exclude)
+        return cls(**{name: kwargs.pop(name) for name in cls.sdpg_field_names(exclude) if name in kwargs})
 
     def sdpg_kwargs(self, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
         """This block's field values by name, but ``exclude``."""

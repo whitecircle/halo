@@ -20,11 +20,18 @@ from halo.model_loading.parallel.ep import load_ep_model
 from halo.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.parallel.whole_model import load_whole_model
+from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.consensus import DeferredRankFailure
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import get_global_rank, is_global_main_process
 
 logger = logging.getLogger(__name__)
+
+
+def uses_attention_only_tp(pc: ParallelismConfig, model_config) -> bool:
+    """Whether the TP load shards attention alone through :func:`apply_tp_to_attention_only`: a MoE, with or
+    without an EP group. A dense model takes HF's own ``tp_plan``."""
+    return pc.is_tp_mode and (pc.has_ep_group or has_routed_experts(model_config))
 
 
 class _ToolkitMeshViews:

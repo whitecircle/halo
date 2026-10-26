@@ -81,8 +81,9 @@ drops the optimizer shards but not the funnel.
 
 ## Choosing a large-scale layout
 
-- **Dense model, fits with FSDP2**: plain `torchrun` DP (+ TP node-local for very
-  large attention). From-scratch via `init_from_scratch`.
+- **Dense model that fits on one GPU**: plain `torchrun` DP, which loads it whole onto every GPU; past
+  one GPU, TP node-local ([load ceiling](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
+  From-scratch via `init_from_scratch`.
 - **MoE model**: EP (node-local or cross-node / NVL72-wide), optionally + TP for
   attention, or + ETP to also shard each expert's FFN (EP+ETP; each ETP group stays in one NVLink domain), or
   pure ETP (`ep_size=1`) when experts stay replicated. Continued pre-training or

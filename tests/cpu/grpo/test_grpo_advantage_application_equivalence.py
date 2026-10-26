@@ -177,7 +177,7 @@ def _env_application(
     rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, train_on_sampled_tokens)
     me = attach_world_metrics(
         types.SimpleNamespace(
-            _drop_degenerate_groups=drop_degenerate_groups,
+            async_config=types.SimpleNamespace(drop_degenerate_groups=drop_degenerate_groups),
             args=types.SimpleNamespace(mask_truncated_completions=mask_truncated_completions),
             accelerator=types.SimpleNamespace(gather=lambda x: x),
             model=types.SimpleNamespace(training=True),
@@ -215,7 +215,10 @@ def _env_scenario():
 def _env_compute_advantages(rewards, num_generations, valid=None):
     """The per-trajectory advantages of the REAL ``_step_advantages`` on a fake self: ``scale_rewards='none'``,
     no std floor, one row per trajectory; ``valid`` marks the episodes in the baseline (default: all)."""
-    me = types.SimpleNamespace(args=types.SimpleNamespace(scale_rewards="none"), _scale_rewards_std_floor=0.0)
+    me = types.SimpleNamespace(
+        args=types.SimpleNamespace(scale_rewards="none"),
+        async_config=types.SimpleNamespace(scale_rewards_std_floor=0.0),
+    )
     rows = BatchRows(_rollouts([False] * len(rewards), rewards.tolist(), valid), [1] * len(rewards), 0, False)
     _state, traj_advantages, _rows = DistributedAsyncEnvironmentalGRPOTrainer._step_advantages(
         me, rewards, rows, 0, num_generations

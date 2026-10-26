@@ -613,17 +613,17 @@ def test_sdpg_kwargs_are_empty_while_the_gate_is_off():
 
 
 def test_sdpg_trainer_adopts_every_tunable_from_the_dataclass():
-    """Driven through the real ctor: each tunable lands on the trainer under its own name, none leaks
-    past it to the parent, and an omitted one takes the dataclass's default — so a directly built
+    """Driven through the real ctor: each tunable lands in the trainer's ``sdpg`` block under its own name,
+    none leaks past it to the parent, and an omitted one takes the dataclass's default — so a directly built
     trainer (the documented pattern for tests and notebooks) runs the OPD schedule the identical YAML
     run would."""
     trainer, leaked = _construct_sdpg_shell(**_SDPG_TUNABLES)
-    assert {name: getattr(trainer, name) for name in _SDPG_TUNABLES} == _SDPG_TUNABLES
+    assert {name: getattr(trainer.sdpg, name) for name in _SDPG_TUNABLES} == _SDPG_TUNABLES
     assert leaked == {}
 
     defaulted, _ = _construct_sdpg_shell()
     declared = {f.name: f.default for f in dataclasses.fields(SDPGArguments)}
-    assert {name: getattr(defaulted, name) for name in declared} == declared
+    assert {name: getattr(defaulted.sdpg, name) for name in declared} == declared
 
 
 def test_sdpg_trainer_has_no_spelling_of_the_tunables_of_its_own():
@@ -678,10 +678,10 @@ def _construct_self_distill_shell(**kwargs) -> tuple[DistributedSelfDistillation
 
 def test_self_distill_trainer_adopts_every_forwarded_sdpg_field():
     """The offline arm forwards every SDPG field but the dataset-side ones, which the script applies
-    while building the teacher prompts. Driven through the real ctor: each forwarded tunable lands on
-    the trainer under its own name, none leaks to the parent, an omitted one takes the dataclass's
-    default, and a dataset-side field handed to the trainer is NOT swallowed — it reaches the parent,
-    whose explicit signature rejects it, instead of silently never hinting the teacher."""
+    while building the teacher prompts. Driven through the real ctor: each forwarded tunable lands in
+    the trainer's ``sdpg`` block under its own name, none leaks to the parent, an omitted one takes the
+    dataclass's default, and a dataset-side field handed to the trainer is NOT swallowed — it reaches the
+    parent, whose explicit signature rejects it, instead of silently never hinting the teacher."""
     dataset_side = SelfDistillScriptArguments.DATASET_SIDE_SDPG_FIELDS
     assert _self_distill_script_splats_the_builder(), (
         "self_distill.py must splat args.build_sdpg_kwargs() into its trainer call — the trainer pops "
@@ -692,12 +692,12 @@ def test_self_distill_trainer_adopts_every_forwarded_sdpg_field():
     assert forwarded and set(_SDPG_TUNABLES) - set(forwarded) == dataset_side
 
     trainer, leaked = _construct_self_distill_shell(**forwarded)
-    assert {name: getattr(trainer, name) for name in forwarded} == forwarded
+    assert {name: getattr(trainer.sdpg, name) for name in forwarded} == forwarded
     assert leaked == {}
 
     defaulted, _ = _construct_self_distill_shell()
     declared = {f.name: f.default for f in dataclasses.fields(SDPGArguments) if f.name not in dataset_side}
-    assert {name: getattr(defaulted, name) for name in declared} == declared
+    assert {name: getattr(defaulted.sdpg, name) for name in declared} == declared
 
     _, leaked = _construct_self_distill_shell(sdpg_hint_template="the answer is {answer}")
     assert leaked == {"sdpg_hint_template": "the answer is {answer}"}

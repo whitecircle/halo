@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, replace
+from functools import cached_property
 
 import torch
 
@@ -19,6 +20,8 @@ from halo.models.unwrapping import unwrap_toolkit_wrappers
 # Families interleaving GatedDeltaNet (linear-attention) layers with softmax attention; prefixes, so
 # text-tower variants (``qwen3_5_moe_text``) match.
 GDN_MODEL_TYPE_PREFIXES = ("qwen3_5", "qwen3_next")
+# Families interleaving ShortConv layers with softmax attention, dense, MoE and VL alike.
+SHORT_CONV_MODEL_TYPE_PREFIXES = ("lfm2",)
 
 # Score matmul passes per attended key: QK^T and Attn·V forward (2) plus their backward (4). At head
 # width ``heads·(d_qk + d_v)`` this is the PaLM/Megatron ``12·S·H`` (``d_qk = d_v = H / heads``).
@@ -117,7 +120,7 @@ class AttentionLayout:
         lengths = lengths.to(torch.float64)
         own_tokens = lengths if own_tokens is None else own_tokens.to(torch.float64)
         total = torch.zeros((), dtype=torch.float64, device=lengths.device)
-        for layer in self.grouped():
+        for layer in self.grouped:
             per_token = SCORE_PASSES * layer.width * layer.score_keys(lengths)
             if layer.index_width:
                 pooled_keys = lengths / (layer.rate * layer.index_pool)
@@ -131,8 +134,10 @@ class AttentionLayout:
             return 0.0
         return float(self.flops_for_documents(torch.tensor([seq_len], dtype=torch.float64))) / seq_len
 
+    @cached_property
     def grouped(self) -> tuple[LayerAttention, ...]:
-        """Layers sharing a rule merged, widths summed — one vectorized pass per rule."""
+        """Layers sharing a rule merged, widths summed — one vectorized pass per rule; merged once per layout,
+        which every batch's costing reads."""
         merged: dict[LayerAttention, LayerAttention] = {}
         for layer in self.layers:
             rule = replace(layer, width=0.0, index_width=0.0)

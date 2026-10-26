@@ -95,6 +95,9 @@ arch-matched with an FA4 veto for the FA4-backward-NaN families
 **Head divisibility** — `cp_size` must divide both the Q and the KV head count. GPT-OSS (64 Q, 8 KV):
 CP=8 → 8 Q / 1 KV; CP=4 → 16 Q / 2 KV; CP=3 rejected.
 
+These model checks, the sequence-axis refusals below included, run on a meta-device shell of the model
+before any weight is read (`reject_unsupported_structure`), and again on the loaded model at the CP wrap.
+
 **Sequence length** must be a multiple of `cp_size`. `scripts/training/sft.py` sets `pad_to_multiple_of=cp_size`
 and the collator factory routes to a padding collator that rounds each batch up — no manual collator
 construction. A ragged batch that reaches SFT's `compute_loss` anyway is right-padded there, which needs
@@ -245,7 +248,7 @@ alone OOMs at long sequences (it shards experts, not activations) — that is th
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `reject_unsupported_model`, re-checked in `GptOssUlyssesAttention` |
 | `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `reject_cp_trainer_args` |
 | `compute_metrics`, `preprocess_logits_for_metrics` | rejected whenever set, not gated on `eval_strategy` (a direct `evaluate()`/`predict()` reaches the same misaligned chunk-logits path) — eval under CP is loss-only | same |
-| CP's own metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | accumulated locally per micro-batch and reduced once per log, so the metric path adds one collective per log instead of five to six per micro-batch | `halo/trainers/sft.py` (`_drain_cp_metrics`) |
+| SFT's metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | scored on the rank's chunk against the full labels, accumulated locally per micro-batch and reduced once per log, as in every mode ([SFT loss and metrics](../reference/trainer-architecture.md#sft-loss-and-metrics)) | `halo/trainers/sft.py` (`_record_loss_metrics`) |
 | multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/ulysses_model.py` |
 | `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_reject_fsdp_settings` |
 | `accelerate launch` | rejected — CP requires `torchrun` | `reject_unsupported_run` and `reject_accelerate_launch` |

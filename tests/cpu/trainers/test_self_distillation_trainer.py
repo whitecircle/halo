@@ -15,15 +15,21 @@ Run: python tests/cpu/trainers/test_self_distillation_trainer.py
 """
 
 import types
+from unittest import mock
 
 import pytest
 import torch
 from torch import nn
 from torch.nn.functional import cross_entropy
 
+import halo.kernels.logprobs as logprob_kernels
+from halo.configs.distillation import SDPGArguments
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers import world_metrics
 from halo.trainers.distillation.divergences import reverse_kl_loss, unnormalized_kl_loss
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.world_metrics import WorldMetrics
 
 VOCAB = 13
 EOS = 2
@@ -68,8 +74,7 @@ def _trainer(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_c
     trainer = object.__new__(DistributedSelfDistillationTrainer)
     trainer.model = _PositionTable(seed=0)
     trainer._reference_model = _PositionTable(seed=1)
-    trainer.sdpg_beta_base, trainer.sdpg_beta_warmup_steps, trainer.sdpg_beta_decay_steps = BETA, 0, 0
-    trainer.sdpg_temperature = TEMPERATURE
+    trainer.sdpg = SDPGArguments(sdpg_beta_base=BETA, sdpg_temperature=TEMPERATURE)
     trainer.sdpg_loss_fn = reverse_kl_loss
     trainer.reference_kl_coef = reference_kl_coef
     trainer.reference_kl_loss_fn = unnormalized_kl_loss
@@ -200,6 +205,25 @@ def test_a_rank_of_eval_padding_alone_scores_zero():
     assert trainer.compute_loss(trainer.model, _inputs()).item() == 0.0
 
 
+def test_backward_holds_no_fp32_vocab_plane(monkeypatch):
+    """Every term (SFT, OPD, the anchor) scores token chunks under a checkpoint: on bf16 logits autograd
+    keeps no fp32 ``[tokens, V]`` plane, two chunks per row here."""
+    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 2 * VOCAB)
+    trainer = _trainer()
+    trainer.model.to(torch.bfloat16)
+    trainer._reference_model.to(torch.bfloat16)
+    saved = []
+
+    def record(tensor):
+        saved.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(record, lambda tensor: tensor):
+        trainer.compute_loss(trainer.model, _inputs())
+    planes = [tuple(t.shape) for t in saved if t.dtype == torch.float32 and t.dim() and t.size(-1) == VOCAB]
+    assert not planes, f"fp32 vocab-wide tensors held for backward: {planes}"
+
+
 def test_the_anchor_is_off_at_a_zero_coefficient():
     trainer = _trainer(reference_kl_coef=0.0)
     expected, _, _, _ = _oracle(reference_kl_coef=0.0)
@@ -287,6 +311,20 @@ def test_one_mask_on_both_sides_skips_the_count_check(monkeypatch):
     assert compared == []
     _opd(trainer, logits, labels, logits, labels.clone(), None)
     assert compared == [True]
+
+
+@pytest.mark.parametrize(
+    "trainer_cls,flushes", [(DistributedSFTTrainer, 1), (DistributedSelfDistillationTrainer, 0)], ids=["sft", "self"]
+)
+def test_only_a_loss_recording_the_sft_metrics_flushes_them_per_log(trainer_cls, flushes):
+    """The self-distillation loss stores its terms through StoredMetricsMixin and records nothing for the SFT base's
+    per-log loss-metric flush, which would add a world collective carrying nothing to every log."""
+    trainer = object.__new__(trainer_cls)
+    trainer.model = types.SimpleNamespace(training=True)
+    trainer._loss_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
+    with mock.patch.object(world_metrics, "_gathered", return_value=[{}]) as gathered:
+        trainer._drain_loss_metrics()
+    assert gathered.call_count == flushes
 
 
 def _vision_reuse_probe(model_type):

@@ -17,7 +17,7 @@ its concern:
 | `checkpointing.py` | `CheckpointingMixin`: save / resume over an explicit `CheckpointContext`, the LR-scheduler and router-balancing-bias sidecars and a per-trainer sidecar hook |
 | `dataloaders.py` | `DataParallelLoaderMixin`: the parallelism-aware DP-sharded train / eval / test loaders and the pre-sharded length equalization |
 | `evaluation.py` | `EvaluationMixin`: `evaluate` / `evaluation_loop`, the unequal-batch escape hatch, the DP-scoped evaluation gather and the final round's padding cut (`eval_split_rows`) |
-| `token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device per-step accumulator, gathered once per log) and the per-document attention-work accumulator the MFU attention term reads; `effective_loss_mask` |
+| `token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device per-step accumulator, gathered once per log), HF's input-token count (`include_num_input_tokens_seen: all`) added up on the host and summed across the world once per optimizer step, the per-document attention-work accumulator the MFU attention term reads and HF's `total_flos` estimate with its parameter count walked once per model; `effective_loss_mask` |
 | `parallelism/mode_setup.py` | `ModeSetupMixin`: the mode ladder (`_wrap_for_parallel_mode`), every per-mode FSDP2 wrap and the QLoRA sync install, `FsdpExclusions`, the CP wrapper adoption, `reject_unsynced_trainable_params` (COLLECTIVE) |
 | `parallelism/ep_layers.py` | `EPLayersMixin`: the model's EP layers (`_ep_layers()`), their parameter-id sets (one `_param_id_caches` store, cleared after the wrap), EP-safe gradient checkpointing; `resolve_use_reentrant` |
 | `parallelism/grad_sync.py` | `GradientSyncMixin`: the grad-accum window, the QLoRA / deferred-EP / TP-replicated grad sweeps and their step-pre-hooks |
@@ -43,7 +43,10 @@ SMPO) and computes its values over those rows — the distillation and SDPG trai
 `store_batch_metrics`, which weighs a train micro-batch 1; the eval losses read
 the same rows, bar SDPG's GRPO term, which TRL computes over the whole batch.
 TRL's DPO, KTO and reward trainers log through their own `_metrics` and accelerate's gather instead,
-so their eval metrics keep the final round's padding.
+so their eval metrics keep the final round's padding. Their loss call is TRL's, and so are its metric reductions:
+every micro-batch gathers each metric across the world and reads it back to the host (about 15 gathers for DPO,
+14 for KTO, 4 for reward; TRL's GRPO loss, which online and async GRPO and SDPG run, about 8 reductions). The
+cost is latency that grows with the rank count; SFT and the trainers above fold theirs once per log.
 
 Offline GRPO, the embedding trainer, and online and async GRPO keep their own `log` instead:
 offline reads the train/eval bucket off `model.training` rather than the mixin's `"loss" in logs`,
@@ -52,7 +55,7 @@ on-policy trainers decouple the completions table from the metric drain. The emb
 `eval_embed/*` values are rank 0's per-batch means and count a padded final round's repeated rows
 ([Embedding](../training-methods/embedding.md#what-to-watch)).
 
-`WorldMetrics` (`world_metrics.py`) is the one cross-rank metric accumulator: `StoredMetricsMixin`, SFT's CP
+`WorldMetrics` (`world_metrics.py`) is the one cross-rank metric accumulator: `StoredMetricsMixin`, SFT's loss
 metrics, offline GRPO's sign metrics and the GRPO step and rollout metrics record rank-local sums into it, and
 one collective per flush derives each world value. `world_sums` is the one-shot form for a value read outside
 a window (the trust-region breaker, the KL clamp fraction, the prefetch and routing-replay counters).
@@ -461,13 +464,19 @@ HuggingFace infers that flag from the model's forward signature alone — any `*
 returns the batch's own mean therefore declares `LOSS_IS_OWN_MEAN`, which `_configure_distributed_modes`
 applies once for every trainer that declares it.
 
-## CP loss and metrics in SFT
+## SFT loss and metrics
 
-`UlyssesModel.forward()` owns the boundary handling and the globally-normalized sum loss
-([the two corrections](../parallelism/context-parallelism.md)); `_record_cp_metrics()` mirrors the
-boundary handling for accuracy into a `WorldMetrics` window that flushes once per log. `DistributedSFTTrainer` calls base `Trainer.compute_loss`, not
-`SFTTrainer.compute_loss`: the TRL version adds metrics that assume logits cover the full sequence,
-but under CP they cover only the local chunk.
+`DistributedSFTTrainer` calls base `Trainer.compute_loss`, not `SFTTrainer.compute_loss`, which gathers and reads
+its metrics on every micro-batch and assumes the logits cover the whole sequence. It forwards the inputs TRL's
+version prepares (`_add_trl_forward_inputs`; `tests/cpu/trainers/test_sft_trl_loss_inputs.py` pins them to the
+installed TRL) and records accuracy and entropy over the supervised tokens, Liger's fused token accuracy, the
+attended tokens and the router aux loss into a per-mode `WorldMetrics` window (`_record_loss_metrics`) that
+flushes once per log. Under CP, `UlyssesModel.forward()` owns the boundary handling and the globally-normalized
+sum loss ([the two corrections](../parallelism/context-parallelism.md)), and the recorder mirrors the boundary
+handling on the rank's chunk. Every rank records its whole batch's attended tokens, and the flush divides the
+world sum by the ranks sharing a batch (`non_dp_replication_factor`). A subclass whose own loss records none of
+these declares `RECORDS_LOSS_METRICS = False` and skips the flush (self-distillation, which stores its terms through
+`StoredMetricsMixin`).
 
 ## Trainer-specific notes
 

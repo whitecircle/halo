@@ -24,13 +24,14 @@ from unittest import mock
 import pytest
 import torch
 import torch.utils.checkpoint as torch_checkpoint
-from trl import SFTTrainer
+from transformers import Trainer
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.models.gradient_checkpointing import scoped_checkpoint_func
 from halo.models.moe.balancing import expert_load_token_weights
 from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.world_metrics import WorldMetrics
 
 _INDICES = torch.tensor([0, 1, 1, 3])
 _EXPECTED = torch.tensor([1.0, 2.0, 0.0, 1.0])
@@ -98,11 +99,13 @@ def _sft_step_load(inputs: dict) -> list[float]:
     trainer.__dict__.update(
         _warned_empty_labels=True,
         parallelism_config=types.SimpleNamespace(is_cp_mode=False, non_dp_replication_factor=1),
-        _total_train_tokens=0,
-        _metrics={},
+        model=types.SimpleNamespace(training=True),
+        args=types.SimpleNamespace(use_liger_kernel=False),
+        aux_loss_enabled=False,
+        _loss_metrics={"train": WorldMetrics(), "eval": WorldMetrics()},
     )
-    with mock.patch.object(SFTTrainer, "compute_loss", routed):
-        DistributedSFTTrainer.compute_loss(trainer, None, inputs)
+    with mock.patch.object(Trainer, "compute_loss", routed):
+        DistributedSFTTrainer.compute_loss(trainer, None, {"input_ids": torch.zeros(1, 3, dtype=torch.long), **inputs})
     return stub.expert_load_counter.tolist()
 
 

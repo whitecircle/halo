@@ -53,7 +53,7 @@ def _chunked_token_sum(
     total = rows.new_zeros((), dtype=torch.float32)
     if flat_labels.numel() <= chunk_rows:
         return total + fn(rows, flat_labels)
-    for value in checkpointed_chunks(fn, rows, flat_labels, chunk_rows):
+    for value in checkpointed_chunks(fn, rows, flat_labels, chunk_rows=chunk_rows):
         total = total + value
     return total
 

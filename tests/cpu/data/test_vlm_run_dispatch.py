@@ -315,7 +315,7 @@ def test_text_renderer_refuses_an_image_content_part():
 
 
 def test_self_distill_text_collator_refuses_an_image_content_part():
-    """``SelfDistillTextCollator`` renders at collate time rather than in the row map, so the backstop
+    """``SelfDistillTextCollator`` encodes its rows in its own map, not the SFT row map, so the backstop
     has to reach it too — its shipped VLM configs declare no images column and reach the dispatch on
     the conversation column alone."""
     collator = SelfDistillTextCollator(
@@ -327,7 +327,7 @@ def test_self_distill_text_collator_refuses_an_image_content_part():
         model_config=None,
     )
     with pytest.raises(ValueError, match="image content part"):
-        collator._render(IMAGE_TURNS, {})
+        collator.encode_row({"prompt": IMAGE_TURNS})
 
 
 @pytest.mark.parametrize("field", ["prompt", "chosen", "rejected"])

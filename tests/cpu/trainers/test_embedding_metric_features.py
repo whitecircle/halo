@@ -1,102 +1,143 @@
 #!/usr/bin/env python
-"""Tests that the embedding trainer's metrics-encoding pass survives every collated feature shape.
+"""The embedding metrics read the sentence embeddings the loss forward already computed.
 
-``EmbeddingTrainer._encode_and_compute_metrics`` re-encodes each text group of the collated batch
-under ``no_grad``. Sentence-transformers hands it a padded group for an SDPA backbone but a
-packed/varlen group for a flash-attention one (``cu_seq_lens_q`` offsets over a single flattened row,
-plus a scalar ``max_length_q`` and a string ``modality``). Slicing every value positionally crashes on
-the scalars and desynchronizes the offsets from the tokens.
+``embed/*`` (logged before each log step and averaged over every eval batch) used to re-encode each text group
+under ``no_grad``, a second forward of every eval batch. The trainer now records the pipeline's own forwards
+inside the loss: sentence-transformers runs the anchor column alone, the candidate columns merged column-major,
+a cached loss chunk by chunk and Matryoshka once at full width, so the rows lie group after group. Driven
+through the real loss call of each pattern, against an independent per-group encode, counting the backbone's
+forwards.
 
 Run: pytest tests/cpu/trainers/test_embedding_metric_features.py
 """
 
 import pytest
 import torch
+from sentence_transformers import SentenceTransformer, losses
+from sentence_transformers.models import Pooling
+from transformers import Qwen3Config, Qwen3Model
 
-from halo.trainers.embedding.trainer import _METRIC_MAX_SAMPLES, EmbeddingTrainer
+from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
+from halo.trainers.embedding.trainer import _METRIC_MAX_SAMPLES, EmbeddingTrainer, _group_heads, _group_samples
+from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.tiny_models import word_level_tokenizer
 
-_CAP = _METRIC_MAX_SAMPLES
-
-
-class _RecordingModel:
-    """Stands in for the SentenceTransformer forward, recording the features it was handed."""
-
-    def __init__(self, embedding_dim: int = 4):
-        self.embedding_dim = embedding_dim
-        self.seen: list[dict] = []
-
-    def __call__(self, features: dict) -> dict:
-        self.seen.append(features)
-        samples = features["cu_seq_lens_q"].numel() - 1 if "cu_seq_lens_q" in features else len(features["input_ids"])
-        return {
-            "sentence_embedding": torch.arange(samples * self.embedding_dim, dtype=torch.float32).reshape(
-                samples, self.embedding_dim
-            )
-        }
+_WORDS = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel")
+_ROWS = 4
+_COLUMNS = {
+    "anchor": ["alpha bravo", "charlie", "delta echo foxtrot", "golf"],
+    "positive": ["bravo alpha", "charlie delta", "foxtrot", "golf hotel alpha"],
+    "negative": ["hotel", "echo echo", "alpha golf bravo charlie", "delta"],
+}
 
 
-def _trainer() -> EmbeddingTrainer:
-    """The trainer's metrics pass reads only class state, so skip the (model-loading) __init__."""
-    return EmbeddingTrainer.__new__(EmbeddingTrainer)
+def _pipeline() -> SentenceTransformer:
+    torch.manual_seed(0)
+    backbone = PreloadedTransformer(
+        Qwen3Model(Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")), word_level_tokenizer(_WORDS)
+    )
+    model = SentenceTransformer(modules=[backbone, Pooling(backbone.get_embedding_dimension())], device="cpu")
+    return model.eval()
 
 
-def _packed_group(prefix: str, samples: int, tokens: int) -> dict:
-    """One flash-attention (packed/varlen) text group as sentence-transformers collates it."""
-    return {
-        f"{prefix}input_ids": torch.ones(1, tokens, dtype=torch.long),
-        f"{prefix}position_ids": torch.arange(tokens).unsqueeze(0),
-        f"{prefix}seq_idx": torch.zeros(1, tokens, dtype=torch.long),
-        f"{prefix}cu_seq_lens_q": torch.arange(samples + 1, dtype=torch.int32),
-        f"{prefix}cu_seq_lens_k": torch.arange(samples + 1, dtype=torch.int32),
-        f"{prefix}max_length_q": tokens,
-        f"{prefix}max_length_k": tokens,
-        f"{prefix}modality": "message",
+def _inputs(model: SentenceTransformer, columns: tuple[str, ...]) -> dict:
+    """A collated batch as sentence-transformers hands it to ``compute_loss``: ``{column}_{feature}`` keys."""
+    inputs = {}
+    for column in columns:
+        for key, value in model[0].preprocess(_COLUMNS[column]).items():
+            inputs[f"{column}_{key}"] = value
+    return inputs
+
+
+def _eval_trainer(model: SentenceTransformer, loss) -> EmbeddingTrainer:
+    trainer = object.__new__(EmbeddingTrainer)
+    trainer.model, trainer.model_wrapped, trainer.loss = model, None, loss
+    trainer._in_eval_loop, trainer._eval_embedding_accum = True, {}
+    return trainer
+
+
+def _backbone_forwards(model: SentenceTransformer) -> list[int]:
+    calls = []
+    model[0].auto_model.register_forward_hook(lambda *_: calls.append(1))
+    return calls
+
+
+def _reference_metrics(model: SentenceTransformer, inputs: dict, columns: tuple[str, ...]) -> dict[str, float]:
+    """The metrics over an independent encode of each text group alone."""
+    with torch.no_grad():
+        embeddings = [
+            model({key[len(column) + 1 :]: value for key, value in inputs.items() if key.startswith(f"{column}_")})[
+                "sentence_embedding"
+            ]
+            for column in columns
+        ]
+    return EmbeddingTrainer._compute_embedding_metrics(embeddings)
+
+
+_LOSSES = {
+    "mnrl-merged": (lambda model: losses.MultipleNegativesRankingLoss(model), ("anchor", "positive", "negative")),
+    "cached-chunks": (
+        lambda model: losses.CachedMultipleNegativesRankingLoss(model, mini_batch_size=3),
+        ("anchor", "positive", "negative"),
+    ),
+    "matryoshka": (
+        lambda model: losses.MatryoshkaLoss(
+            model, losses.MultipleNegativesRankingLoss(model), matryoshka_dims=[64, 32]
+        ),
+        ("anchor", "positive"),
+    ),
+    "triplet": (lambda model: losses.TripletLoss(model), ("anchor", "positive", "negative")),
+}
+
+
+@pytest.mark.parametrize("loss_name", sorted(_LOSSES))
+def test_eval_metrics_come_from_the_loss_forward_without_a_second_one(loss_name):
+    build_loss, columns = _LOSSES[loss_name]
+    model = _pipeline()
+    loss = build_loss(model)
+    inputs = _inputs(model, columns)
+    forwards = _backbone_forwards(model)
+    with torch.no_grad():
+        loss(*_eval_trainer(model, loss).collect_features(dict(inputs)))
+    loss_forwards = len(forwards)
+
+    trainer = _eval_trainer(model, loss)
+    with torch.no_grad():
+        trainer.compute_loss(model, dict(inputs), return_outputs=True)
+
+    assert len(forwards) == 2 * loss_forwards, "the metrics must add no forward of their own"
+    expected = _reference_metrics(model, inputs, columns)
+    assert trainer._eval_embedding_accum.keys() == expected.keys()
+    for key, value in expected.items():
+        assert trainer._eval_embedding_accum[key] == [pytest.approx(value, rel=1e-4, abs=1e-5)], key
+
+
+def test_group_heads_take_each_groups_leading_rows_across_chunks():
+    """Groups of five, four and six rows over chunks that straddle the group boundaries, column-major."""
+    rows = torch.arange(15.0).unsqueeze(1)
+    heads = _group_heads(list(rows.split([4, 7, 2, 2])), [5, 4, 6])
+    assert [head.squeeze(1).tolist() for head in heads] == [[0, 1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12, 13, 14]]
+
+
+def test_group_heads_cap_every_group_and_refuse_rows_the_groups_do_not_account_for():
+    rows = torch.arange(2.0 * (_METRIC_MAX_SAMPLES + 3)).unsqueeze(1)
+    heads = _group_heads(list(rows.split(97)), [_METRIC_MAX_SAMPLES + 3] * 2)
+    assert [head.size(0) for head in heads] == [_METRIC_MAX_SAMPLES, _METRIC_MAX_SAMPLES]
+    assert heads[1][0].item() == _METRIC_MAX_SAMPLES + 3, "the second group starts past the first's uncapped rows"
+    # A loss that forwards its first column alone (the batch triplet losses) over a two-column batch.
+    assert _group_heads([torch.zeros(4, 1)], [4, 4]) is None
+    assert _group_heads([], [4]) is None
+
+
+def test_group_samples_count_padded_rows_and_packed_sequences():
+    inputs = {
+        "anchor_input_ids": torch.ones(3, 7, dtype=torch.long),
+        "anchor_attention_mask": torch.ones(3, 7, dtype=torch.long),
+        "positive_input_ids": torch.ones(1, 20, dtype=torch.long),
+        "positive_cu_seq_lens_q": torch.tensor([0, 5, 12, 20], dtype=torch.int32),
+        "label": torch.zeros(3),
     }
-
-
-def _padded_group(prefix: str, samples: int, length: int) -> dict:
-    return {
-        f"{prefix}input_ids": torch.ones(samples, length, dtype=torch.long),
-        f"{prefix}attention_mask": torch.ones(samples, length, dtype=torch.long),
-        f"{prefix}modality": "message",
-    }
-
-
-def test_packed_group_is_encoded_verbatim():
-    """A packed group has no sliceable sample axis: it must reach the model exactly as collated."""
-    inputs = _packed_group("query_", samples=8, tokens=123) | _packed_group("answer_", samples=8, tokens=456)
-    model = _RecordingModel()
-
-    metrics = _trainer()._encode_and_compute_metrics(model, inputs)
-
-    assert len(model.seen) == 2
-    for features, tokens in zip(model.seen, (123, 456), strict=True):
-        assert features["max_length_q"] == tokens
-        assert features["modality"] == "message"
-        assert features["cu_seq_lens_q"].numel() == 9
-        assert features["input_ids"].shape == (1, tokens)
-    assert "embed/cos_sim" in metrics
-
-
-def test_padded_group_over_the_cap_is_sliced_on_the_sample_axis():
-    inputs = _padded_group("anchor_", samples=_CAP + 16, length=7)
-    model = _RecordingModel()
-
-    _trainer()._encode_and_compute_metrics(model, inputs)
-
-    features = model.seen[0]
-    assert features["input_ids"].shape == (_CAP, 7)
-    assert features["attention_mask"].shape == (_CAP, 7)
-    assert features["modality"] == "message"  # a string must not be sliced into "mess…"
-
-
-def test_padded_group_under_the_cap_is_untouched():
-    inputs = _padded_group("anchor_", samples=4, length=7)
-    model = _RecordingModel()
-
-    _trainer()._encode_and_compute_metrics(model, inputs)
-
-    assert model.seen[0]["input_ids"].shape == (4, 7)
+    assert _group_samples(inputs) == [3, 3]
 
 
 if __name__ == "__main__":

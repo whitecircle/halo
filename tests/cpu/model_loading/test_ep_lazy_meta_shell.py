@@ -18,8 +18,13 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, GptOssConfig, GptOssForCausalLM, LlamaConfig, LlamaForCausalLM
 
+from halo.distributed.expert_parallel.lazy_plan import lazy_load_prologue
 from halo.model_loading.lazy_safetensors import meta_shell
-from halo.model_loading.lazy_safetensors.meta_shell import _instantiate_from_config_on_meta, instantiate_on_meta
+from halo.model_loading.lazy_safetensors.meta_shell import (
+    MetaShellBuildError,
+    _instantiate_from_config_on_meta,
+    instantiate_on_meta,
+)
 from tests.common.models import TINY_GPTOSS_CONFIG
 
 NO_SUCH_CHECKPOINT = "/nonexistent/checkpoint-the-fallback-must-never-read"
@@ -73,7 +78,7 @@ def test_both_meta_paths_failing_raises_instead_of_loading_into_host_ram(monkeyp
     monkeypatch.setattr(GptOssForCausalLM, "from_pretrained", reject)
     monkeypatch.setattr(GptOssForCausalLM, "_from_config", reject_from_config)
 
-    with pytest.raises(RuntimeError, match="ep_lazy_loading=False"):
+    with pytest.raises(MetaShellBuildError, match="simulated config-only build failure"):
         instantiate_on_meta(
             NO_SUCH_CHECKPOINT, GptOssForCausalLM, config, dtype=torch.float32, trust_remote_code=False
         )
@@ -229,7 +234,7 @@ class _MissingKernelLlama(LlamaForCausalLM):
 
 def test_a_missing_kernel_is_not_reported_as_an_architecture_refusal(tmp_path):
     """Only the class flags' ValueError is a verdict on the architecture; an ImportError under the same
-    check is the environment's, so it keeps the lazy-build error that names it."""
+    check is the environment's, so it keeps the shell-build error that names it."""
     config = LlamaConfig(
         hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, vocab_size=64
     )
@@ -243,6 +248,36 @@ def test_a_missing_kernel_is_not_reported_as_an_architecture_refusal(tmp_path):
             config_only=True,
             attn_implementation="flash_attention_2",
         )
+
+
+class _UnbuildableLlama(LlamaForCausalLM):
+    """Fails its own construction, as a class reading a parameter value in ``__init__`` does on meta."""
+
+    def __init__(self, config):
+        raise TypeError("simulated: __init__ reads a parameter value")
+
+
+def test_only_the_lazy_prologue_offers_the_lazy_load_setting(tmp_path):
+    """The shell's own build error names no caller: the CP/TP structure gate builds one too, whatever
+    ``ep_lazy_loading`` says. The lazy loaders' shared prologue, the one caller that setting gets past, adds it."""
+    config = LlamaConfig(
+        hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, vocab_size=64
+    )
+    LlamaForCausalLM(config).save_pretrained(tmp_path, safe_serialization=True)
+
+    def build(_incomplete):
+        return instantiate_on_meta(
+            str(tmp_path), _UnbuildableLlama, config, dtype=torch.bfloat16, trust_remote_code=False, config_only=True
+        )
+
+    with pytest.raises(MetaShellBuildError, match="TypeError: simulated") as bare:
+        build(False)
+    assert "lazy" not in str(bare.value).lower()
+    with pytest.raises(RuntimeError, match="ep_lazy_loading=False") as lazy:
+        lazy_load_prologue(
+            str(tmp_path), config, None, dtype=torch.bfloat16, meta_init_phase="test", build_meta_shell=build
+        )
+    assert isinstance(lazy.value.__cause__, MetaShellBuildError)
 
 
 def test_the_remote_modeling_class_comes_from_the_runs_revision(monkeypatch, config):

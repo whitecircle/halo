@@ -58,6 +58,13 @@ class MoEFamilySpec:
     supports_gradient_checkpointing: bool = True
     # Why no online weight sync into the family's served model is validated; ``None`` where it is.
     weight_sync_refusal: str | None = None
+    # Why the family runs eager attention only; ``None`` where its class's declared backends all run.
+    eager_only_attention: str | None = None
+    # The FA4 backward emits NaN gradients on its 256-wide, partially rotated query/key heads.
+    fa4_backward_nan_prone: bool = False
+    # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
+    # one causal sequence.
+    dense_packing_leaks: bool = False
 
     def to_hub_key(self, key: str) -> str:
         """``key`` with the first ``export_key_renames`` pair it contains applied once."""
@@ -93,6 +100,10 @@ DEEPSEEK_V4 = MoEFamilySpec(
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("deepseek_v4",),
+    eager_only_attention=(
+        "its head_dim=512 exceeds every flash kernel, SDPA and flex cannot carry its sink column, and its "
+        "compressor concatenates KV entries after the mask is built"
+    ),
 )
 GEMMA4 = MoEFamilySpec(
     model_types=("gemma4", "gemma4_text"),
@@ -109,6 +120,8 @@ GLM4 = MoEFamilySpec(
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     experts_container_attrs=("experts", "routed_experts"),
     shared_expert_attrs=("shared_experts", "shared_expert"),
+    # MLA: qk_nope_head_dim 192 + qk_rope_head_dim 64, rope on the 64-wide split.
+    fa4_backward_nan_prone=True,
 )
 GLM5_NEXT = MoEFamilySpec(
     model_types=("glm5_next", "glm5_next_text"),
@@ -123,6 +136,7 @@ GLM5_NEXT = MoEFamilySpec(
 )
 GPT_OSS = MoEFamilySpec(
     model_types=("gpt_oss",),
+    dense_packing_leaks=True,
     expert_layout=ExpertLayout(ExpertLayoutKind.INTERLEAVED_GLU),
     # The router's own logit-space bias, which vLLM and SGLang both load and route with.
     balancing_slot=NativeBalancingSlot(("router.bias",)),
@@ -184,6 +198,7 @@ QWEN3_5 = MoEFamilySpec(
     model_types=("qwen3_5_moe", "qwen3_5_moe_text"),
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
+    fa4_backward_nan_prone=True,
 )
 STEP3P7 = MoEFamilySpec(
     model_types=("step3p7", "step3p5"),
