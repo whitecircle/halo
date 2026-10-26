@@ -257,9 +257,9 @@ the lock, the resolved `libnccl.so.2`, and the `ncclUniqueId` ABI identity betwe
 The image bakes the RL serving contract: native weight transfer (`VLLM_SERVER_DEV_MODE=1`; the
 trainer's client drives the phased update protocol the server exposes), R3 routed-experts capture,
 Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`, the runner thinking budgets and R3 capture run on), and
-four `sitecustomize`-applied patches: layerwise reload, weight-transfer re-init and the two gpt-oss
-thinking-budget patches. The patch targets are asserted against the live vLLM at build, so an upstream
-refactor fails the image build.
+five `sitecustomize`-applied patches: layerwise reload, weight-transfer re-init, the two gpt-oss
+thinking-budget patches and the split top-p guard. The patch targets are asserted against the live
+vLLM at build, so an upstream refactor fails the image build.
 
 What the patches do, the `--moe-backend triton` rule, serving flags, networking, GPU assignment, and
 troubleshooting: [Rollout Servers](rollout-servers.md).

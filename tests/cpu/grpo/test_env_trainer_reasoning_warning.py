@@ -36,6 +36,7 @@ class _StubTokenizer:
 def _trainer(floor_weight: float, carry_reasoning: bool, price: dict[str, float] | None = None):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer.async_config = AsyncTrainingConfig(reasoning_floor=floor_weight, reasoning_price=price)
+    trainer.num_generations = 1
     trainer._tokenizer = _StubTokenizer()
     attach_world_metrics(trainer)
     trainer._metrics = {"train": defaultdict(list)}
@@ -51,9 +52,9 @@ def _rollouts(thinkings: list[str | None]) -> list[RolloutResult]:
 
 
 def _with_counts(rollouts: list[RolloutResult]) -> tuple:
-    """``_build_rollout_rewards``' arguments: the rollouts, their per-turn reasoning counts, the device."""
+    """``_build_rollout_rewards``' arguments: the rollouts, their per-turn reasoning counts, the device, the mode."""
     counts = [reasoning_token_counts(_StubTokenizer(), r.trajectory) for r in rollouts]
-    return rollouts, counts, torch.device("cpu")
+    return rollouts, counts, torch.device("cpu"), "train"
 
 
 def _warnings(caplog) -> list[str]:

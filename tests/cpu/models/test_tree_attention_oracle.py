@@ -135,6 +135,17 @@ def _plan(model, columns, form: str) -> dict:
     }
 
 
+def _install_reference_flash_kernel(monkeypatch, calls: list[dict]) -> None:
+    """transformers' FA4 path with the reference varlen kernel standing in for the CUDA one.
+
+    The path's kwargs processor is built on importing ``flash_attn.cute``, which an image may ship
+    unimportable (FA2's source tree does on Hopper)."""
+    pytest.importorskip("flash_attn.cute")
+    flash_utils.lazy_import_flash_attention("flash_attention_4")
+    monkeypatch.setattr(flash_utils, "_flash_varlen_fn", reference_varlen(calls))
+    monkeypatch.setattr(flash_utils, "_flash_fn", None)
+
+
 def _install(model, monkeypatch, form: str) -> TreeFamily:
     """Tree attention on ``model``'s family for one test; every module attribute it replaces is restored."""
     family = TREE_FAMILIES[model.config.model_type]
@@ -217,9 +228,7 @@ def test_the_kernel_plans_reproduce_every_example_alone_through_the_flash_path(m
     has_sinks = any(hasattr(layer, "sinks") for layer in model.modules())
 
     calls: list[dict] = []
-    flash_utils.lazy_import_flash_attention("flash_attention_4")
-    monkeypatch.setattr(flash_utils, "_flash_varlen_fn", reference_varlen(calls))
-    monkeypatch.setattr(flash_utils, "_flash_fn", None)
+    _install_reference_flash_kernel(monkeypatch, calls)
     _install(model, monkeypatch, form)
 
     table = build_node_table(columns[POSITION_COLUMN], columns[DEPTH_COLUMN])
@@ -252,9 +261,7 @@ def test_a_gather_over_the_call_budget_gives_the_one_call_logits_and_gradients(m
     none over the budget, with the logits of the single call and its gradients."""
     _, _, columns = tree
     calls: list[dict] = []
-    flash_utils.lazy_import_flash_attention("flash_attention_4")
-    monkeypatch.setattr(flash_utils, "_flash_varlen_fn", reference_varlen(calls))
-    monkeypatch.setattr(flash_utils, "_flash_fn", None)
+    _install_reference_flash_kernel(monkeypatch, calls)
     _install(model, monkeypatch, "gather")
 
     def run() -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
@@ -293,9 +300,7 @@ def test_a_lora_wrapped_model_reads_the_tree_under_the_adapter(tree, monkeypatch
             (rows, model(input_ids=columns["input_ids"][rows][None], use_cache=False).logits[0])
             for rows in example_rows(table)
         ]
-        flash_utils.lazy_import_flash_attention("flash_attention_4")
-        monkeypatch.setattr(flash_utils, "_flash_varlen_fn", reference_varlen([]))
-        monkeypatch.setattr(flash_utils, "_flash_fn", None)
+        _install_reference_flash_kernel(monkeypatch, [])
         _install(model, monkeypatch, "split")
         assert _worst_gap(_tree_forward(model, columns, **_plan(model, columns, "split")), alone) < 5e-5
         assert _worst_gap(_tree_forward(model, columns), alone) > 1e-2

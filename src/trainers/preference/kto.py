@@ -92,9 +92,9 @@ class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         """KTO's pipeline-loss contract: unpaired rows + dataset-precomputed reference log-probs.
 
         Rows are independent, so the microbatch split is safe at any size; ``ref_logps`` and the
-        per-row desirability ``label`` ship as extra targets to stay row-aligned. The collator's
-        sequence keys are padded to the fixed shape in the batch transform, so no ``pad_spec`` is
-        needed. ``pin_runner_columns=False`` because KTO's dataset columns feed
+        per-row desirability ``label`` ship as extra targets to stay row-aligned. ``completion_mask``
+        rides ``pad_spec`` so the batch transform sees it at the width the fixed-shape collator pads
+        ``input_ids`` to. ``pin_runner_columns=False`` because KTO's dataset columns feed
         TRL's unpaired-preference collator, which needs TRL's own signature set.
         """
         return PipelineLossAdapter(
@@ -102,6 +102,7 @@ class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
             batch_transform=self._pp_kto_batch_transform,
             normalizer=row_count_normalizer,
             extra_target_keys=("ref_logps", "label"),
+            pad_spec={"completion_mask": 0},
             eval_normalizer=row_count_normalizer,
             pin_runner_columns=False,
         )

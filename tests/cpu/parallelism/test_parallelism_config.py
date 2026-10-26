@@ -1230,8 +1230,7 @@ def test_expert_lora_reaches_validation_through_the_builder():
         assert cfg.expert_lora is spec, "the builder must forward expert_lora into the constructor"
 
         # Anti-vacuity: the field is not populated by some default, and expert LoRA under expert TP
-        # is refused at CONFIG time — before any checkpoint download. (EPConfig repeats the check as
-        # defense for hand-built configs that skip ParallelismConfig.)
+        # is refused at CONFIG time — before any checkpoint download.
         args_etp = _DistArgs()
         args_etp.expert_parallel_size = 1
         args_etp.expert_tensor_parallel_size = 2
@@ -1254,25 +1253,6 @@ def test_expert_lora_reaches_validation_through_the_builder():
         assert parallelism_config_from_args(args_pp, trainer_cls=DistributedSFTTrainer).pp_size == 2
         with pytest.raises(ValueError, match="Expert LoRA"):
             parallelism_config_from_args(args_pp, trainer_cls=DistributedSFTTrainer, expert_lora=spec)
-
-
-def test_epconfig_second_timing_rejects_expert_lora_with_etp():
-    """A HAND-BUILT ``EPConfig`` (bypassing ``ParallelismConfig``) must still refuse expert LoRA
-    under ETP — the shared raiser keeps the two timings' messages identical; this pins that the
-    second timing actually fires."""
-    try:
-        EPConfig(
-            ep_size=1,
-            stage_world_size=2,
-            nvlink_domain_size=2,
-            expert_tp_size=2,
-            use_grouped_gemm=False,
-            expert_lora=ExpertLoraSpec(r=8, alpha=16.0),
-            experts_fsdp_managed=False,
-        )
-        raise AssertionError("hand-built EPConfig accepted expert LoRA under expert_tp_size > 1")
-    except ValueError as e:
-        assert "Expert LoRA is not supported with expert_tensor_parallel_size" in str(e)
 
 
 if __name__ == "__main__":

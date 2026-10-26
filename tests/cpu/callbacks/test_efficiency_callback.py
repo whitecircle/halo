@@ -389,6 +389,16 @@ def test_step_time_covers_the_device_work_of_its_own_step_only(monkeypatch):
     assert cb.tps.step_tokens_per_second == pytest.approx(1000 / 2.25, abs=0.01)
 
 
+def test_the_measured_step_times_are_every_step_after_warmup_unrounded(monkeypatch):
+    """The benchmarks read the step-time median off them, finer than the logged two decimals."""
+    cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=1)
+    for step, step_time in enumerate((9.0, 0.123456, 0.5), start=1):
+        _measured_step(monkeypatch, cb, tokens=1000 * step, step_time=step_time, step=step)
+
+    assert cb.measured_step_times == (0.123456, 0.5)
+    assert cb.time.avg_step_time_seconds == 0.31
+
+
 # Core accounting: FLOPS/token, MFU, S-MFU, throughput.
 # These pin the *values* of the numbers the callback reports to wandb.
 

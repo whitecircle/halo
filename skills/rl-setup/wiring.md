@@ -44,7 +44,8 @@ communicator on each engine-core worker until `ncclCommInitRank` fails outright)
 weight-transfer wire (init and update request fields, the packed chunk boundary, the routes) must
 match the client's; `/pause` must still accept `mode=keep`, the form the client pauses with so
 in-flight requests survive a sync, and reset the prefix cache under it; the two thinking-budget
-patches must be applied; and `verify_gptoss_plugins.py` must exercise the gpt-oss tool + reasoning
+patches must be applied; the split top-p guard must keep a budget-cut row whole while masking an
+ordinary row as upstream does; and `verify_gptoss_plugins.py` must exercise the gpt-oss tool + reasoning
 parser plugins and the Model Runner V2 budget they drive, which no test suite can reach (they import
 vLLM). Two more assert a per-family config-schema parity fixture through vLLM's own `ModelConfig`,
 and that `EngineArgs` still carries `weight_transfer_config` / `enable_return_routed_experts` and
@@ -121,6 +122,7 @@ docker run --gpus all --network=host --ipc=host \
 | `max_train_row_tokens` | `None` | longest training row a rank takes; must exceed `rollout_max_tokens`. Over-cap per-turn rows are left out, whole-trajectory rows train at zero weight (`sampling/rows_over_cap_frac`) |
 | `eval_rollout_batch_size` | `None` | rows per rank in one eval rollout round (eval runs without prefetch); `None` = the eval batch |
 | `reasoning_price` / `reasoning_price_past_budget` / `reasoning_price_cap` / `reasoning_floor` | `None` / `False` / `0.1` / `0.0` | the price is off by default: per level, reward units per 1k reasoning tokens summed over the episode's turns (under `reasoning_price_past_budget`, only what each turn reasons past a soft budget; every drawable level must then be soft), capped per episode by the cap (refused at a non-default value while the price is off); the floor (off at `0`) prices an episode's shortfall against 0.75 × the per-turn thinking budget it ran under |
+| `reasoning_terms_in_failed_groups` | `False` | off, a training group no baseline episode of which earned the objective is charged neither term (eval always is), and a reward with no environment term of positive weight is refused while a term is on; refused as inert with both terms off |
 | `episode_timeout` | `1200.0` | per-episode deadline in engine-serving time (a weight-sync pause is credited back), checked against the NCCL watchdog — raise `DIST_NCCL_TIMEOUT_MINUTES` with it |
 | `train_on_sampled_tokens` | `True` | train on the server's actual sampled ids (needs `--return-tokens-as-token-ids`) rather than a re-tokenized re-render; off, a run with a bindable vLLM thinking budget and a resolvable `rollout_reasoning_end_token` is refused |
 | `enable_prefetch` | `True` | overlap rollout with training (auto-disabled in single-server mode) |

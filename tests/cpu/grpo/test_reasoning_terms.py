@@ -7,7 +7,9 @@ trace costs most where little reasoning was asked and the cap keeps a long trace
 task reward. The floor is the only term that pays for MORE reasoning: it prices an episode's shortfall
 against three quarters of the per-turn thinking budget it ran under. Both read the episode's reasoning
 summed over its turns — a short repair turn is not under-use. Past a budget (``reasoning_price_past_budget``)
-the price charges only what each turn reasoned past a soft per-turn budget, and nothing within it.
+the price charges only what each turn reasoned past a soft per-turn budget, and nothing within it. A training
+group no baseline episode of which earned the objective is charged neither term (``reasoning_terms_in_failed_groups``
+restores the charge): there the length terms would be most of what tells the attempts apart.
 
 Run: python tests/cpu/grpo/test_reasoning_terms.py  (or pytest)
 """
@@ -20,9 +22,13 @@ import torch
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.episode import RolloutResult
+from src.environments.episode_keys import EPISODE_INVALID_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
 from src.environments.messages import Message, Trajectory
+from src.environments.reasoning_effort import has_thinking_budget
+from src.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm
 from src.trainers.grpo.environmental.environmental_rules import reject_inert_reasoning_terms
 from src.trainers.grpo.environmental.reasoning import (
+    failed_group_mask,
     reasoning_floor_term,
     reasoning_price_term,
     reasoning_token_counts,
@@ -35,6 +41,8 @@ PRICE = {"low": 0.01, "medium": 0.005, "high": 0.001}
 # The example prices the async-GRPO templates show.
 TEMPLATE_PRICE = {"low": 0.0037, "medium": 0.0013, "high": 0.00018}
 CAP = 0.1
+# The default reward's environment term: a solve priced at 1.
+OBJECTIVE_TERM = EnvironmentTerm()
 
 
 def test_price_is_linear_in_reasoning_tokens_per_thousand_summed_over_turns():
@@ -95,29 +103,36 @@ class _CharTokenizer:
         return {"input_ids": [0] * len(text)}
 
 
-def _reward_host(**config) -> DistributedAsyncEnvironmentalGRPOTrainer:
+def _reward_host(num_generations=1, **config) -> DistributedAsyncEnvironmentalGRPOTrainer:
     trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
     trainer.async_config = AsyncTrainingConfig(**config)
+    trainer.num_generations = num_generations
     trainer._tokenizer = _CharTokenizer()
-    trainer._metrics = {"train": defaultdict(list)}
+    trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     trainer._carry_reasoning = False
     trainer._warned_once = set()
     return trainer
 
 
-def _rollout(level, tokens, budget=None, soft=False):
-    """An episode of zero environment reward whose turns carry ``tokens`` reasoning tokens each."""
+def _rollout(level, tokens, budget=None, soft=False, objective=1.0):
+    """An episode of zero environment reward whose turns carry ``tokens`` reasoning tokens each, its settled
+    objective component ``objective``."""
     trajectory = types.SimpleNamespace(
-        reasoning_effort=level, reasoning_budget=budget, reasoning_budget_soft=soft, tokens=tokens, messages=[]
+        reasoning_effort=level,
+        reasoning_budget=budget,
+        reasoning_budget_soft=soft,
+        tokens=tokens,
+        messages=[],
+        info={REWARD_COMPONENTS_KEY: {OBJECTIVE_REWARD_KEY: objective}},
     )
-    return types.SimpleNamespace(trajectory=trajectory, total_reward=0.0)
+    return types.SimpleNamespace(trajectory=trajectory, total_reward=0.0, counts_toward_baseline=True)
 
 
-def _apply(rollouts, **config):
-    trainer = _reward_host(**config)
+def _apply(rollouts, mode="train", num_generations=1, **config):
+    trainer = _reward_host(num_generations, **config)
     tokens = [r.trajectory.tokens if r.trajectory else [] for r in rollouts]
-    rewards = trainer._build_rollout_rewards(rollouts, tokens, torch.device("cpu"))
-    return rewards, flushed_metrics(trainer)
+    rewards = trainer._build_rollout_rewards(rollouts, tokens, torch.device("cpu"), mode)
+    return rewards, flushed_metrics(trainer, mode)
 
 
 def test_trainer_charges_each_episode_its_levels_price_and_the_floor_of_its_own_budget():
@@ -162,11 +177,61 @@ def test_each_term_is_off_on_its_own_and_records_only_its_own_metric():
     assert rewards[0].item() == pytest.approx(-0.05 / 3) and "reward/reasoning_price" not in metrics
 
 
-def _episode(thinkings, budget=1000, level="low"):
+def _episode(thinkings, budget=1000, level="low", objective=1.0):
     turns = (Message.assistant("step", thinking=thinking) for thinking in thinkings)
     trajectory = Trajectory(messages=[Message.user("task"), *turns])
     trajectory.reasoning_budget, trajectory.reasoning_effort = budget, level
+    trajectory.info[REWARD_COMPONENTS_KEY] = {OBJECTIVE_REWARD_KEY: objective}
     return RolloutResult(prompt="task", trajectory=trajectory)
+
+
+def _built_rewards(trainer, episodes) -> torch.Tensor:
+    """The trainer's own training-round reward build, each episode's reasoning counted by its tokenizer."""
+    counts = [reasoning_token_counts(trainer._tokenizer, e.trajectory) for e in episodes]
+    return trainer._build_rollout_rewards(episodes, counts, torch.device("cpu"), "train")
+
+
+def test_a_training_group_that_earned_no_objective_is_charged_neither_term():
+    """Where every attempt failed, the length terms are most of what tells the attempts apart, so the advantage
+    would teach reasoning less wherever the task is out of reach. A group with a success is charged in full, its
+    failure included."""
+    rollouts = [
+        _rollout("low", [4096], budget=8192),  # solved
+        _rollout("low", [4096], budget=8192, objective=0.0),  # failed beside a solve: charged
+        _rollout("low", [4096], budget=8192, objective=0.0),
+        _rollout("low", [4096], budget=8192, objective=0.0),  # a failed group: waived
+    ]
+    rewards, metrics = _apply(rollouts, num_generations=2, reasoning_price=PRICE, reasoning_floor=0.05)
+    charged = -0.04096 - 0.05 / 3
+    assert rewards.tolist() == pytest.approx([charged, charged, 0.0, 0.0])
+    assert metrics["outcome/reasoning_terms_waived_frac"] == [0.5]
+    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.04096 / 2)], "the logged price is what was charged"
+    assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.05 / 3 / 2)]
+
+
+def test_a_vetoed_solve_and_an_episode_outside_the_baseline_earn_their_group_nothing():
+    """The group is read off the settled objective component, which a veto zeroes even where the environment's
+    solve verdict stands, and off the episodes that train."""
+    vetoed = _episode(["x" * 500], objective=0.0)
+    vetoed.metrics[SOLVE_RATE_KEY] = 1.0
+    invalid = _episode(["x" * 500])
+    invalid.trajectory.info[EPISODE_INVALID_KEY] = True
+    episodes = [vetoed, _episode(["x" * 500], objective=0.0), invalid, _episode(["x" * 500], objective=0.0)]
+    assert failed_group_mask(episodes, 2) == [True] * 4
+    trainer = _reward_host(num_generations=2, reasoning_price=PRICE)
+    rewards = _built_rewards(trainer, episodes)
+    assert rewards.tolist() == [0.0] * 4
+    assert failed_group_mask([invalid, _episode(["x"])], 2) == [False, False], "a baseline solve keeps the terms"
+
+
+def test_eval_episodes_and_the_knob_charge_failed_groups():
+    """An eval reward trains nothing, so it reports what the reasoning costs; the knob restores the charge in
+    training."""
+    rollouts = [_rollout("low", [4096], objective=0.0) for _ in range(2)]
+    for mode, config in (("eval", {}), ("train", {"reasoning_terms_in_failed_groups": True})):
+        rewards, metrics = _apply(rollouts, mode=mode, num_generations=2, reasoning_price=PRICE, **config)
+        assert rewards.tolist() == pytest.approx([-0.04096] * 2)
+        assert "outcome/reasoning_terms_waived_frac" not in metrics
 
 
 def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
@@ -181,9 +246,7 @@ def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
         _episode(["x" * 750]),  # exactly 0.75 x its 1000 budget: no floor, 750 tokens priced
         _episode(["x" * 300, "x" * 75]),  # 375 summed over two turns: half the target short, 375 priced
     ]
-    rewards = trainer._build_rollout_rewards(
-        episodes, [reasoning_token_counts(trainer._tokenizer, e.trajectory) for e in episodes], torch.device("cpu")
-    )
+    rewards = _built_rewards(trainer, episodes)
     assert rewards.tolist() == pytest.approx([-0.05, 0.0, -0.0075, -0.025 - 0.00375])
     metrics = flushed_metrics(trainer)
     assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.075 / 4)]
@@ -193,18 +256,15 @@ def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
 def test_with_both_terms_off_nothing_is_charged_or_logged():
     trainer = _reward_host()
     episodes = [_episode(["x" * 10])]
-    rewards = trainer._build_rollout_rewards(
-        episodes, [reasoning_token_counts(trainer._tokenizer, e.trajectory) for e in episodes], torch.device("cpu")
-    )
+    rewards = _built_rewards(trainer, episodes)
     assert rewards.tolist() == [0.0]
     metrics = flushed_metrics(trainer)
     assert "reward/reasoning_floor" not in metrics and "reward/reasoning_price" not in metrics
 
 
 def test_a_missing_trajectory_is_free():
-    rewards, _ = _apply(
-        [types.SimpleNamespace(trajectory=None, total_reward=0.0)], reasoning_price=PRICE, reasoning_floor=0.05
-    )
+    missing = types.SimpleNamespace(trajectory=None, total_reward=0.0, counts_toward_baseline=True)
+    rewards, _ = _apply([missing], reasoning_price=PRICE, reasoning_floor=0.05)
     assert rewards[0].item() == 0.0
 
 
@@ -239,13 +299,20 @@ def test_a_price_cap_with_the_price_off_is_refused_as_inert():
     assert AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_cap=0.2).reasoning_price_cap == 0.2
 
 
-def _constructing(budgets, effort="random", soft=(), **config):
+def test_the_failed_group_knob_with_both_terms_off_is_refused_as_inert():
+    with pytest.raises(ValueError, match="reasoning_terms_in_failed_groups set with reasoning_price and"):
+        AsyncTrainingConfig(reasoning_terms_in_failed_groups=True)
+    assert AsyncTrainingConfig(reasoning_floor=0.05, reasoning_terms_in_failed_groups=True).reasoning_floor == 0.05
+
+
+def _constructing(budgets, effort="random", soft=(), objective_term=OBJECTIVE_TERM, **config):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer.async_config = AsyncTrainingConfig(**config)
     trainer._rollout_env = types.SimpleNamespace(
         reasoning_effort=effort,
         thinking_budget_for_effort=budgets.get,
         thinking_budget_enforced=lambda level: level not in soft,
+        objective_term=objective_term,
     )
     return trainer
 
@@ -255,7 +322,7 @@ def _check_terms(host) -> None:
     reject_inert_reasoning_terms(
         host.async_config,
         host._rollout_env,
-        budgeted=host._any_episode_budgeted,
+        budgeted=has_thinking_budget(host._efforts_by_level()),
         every_budget_soft=host._every_budget_soft,
     )
 
@@ -270,6 +337,19 @@ def test_construction_refuses_a_price_table_that_misses_or_invents_a_level():
     _check_terms(_constructing({}, reasoning_price=PRICE))
     _check_terms(_constructing({}, reasoning_price=TEMPLATE_PRICE))
     _check_terms(_constructing({}))  # the price off: no table to check
+
+
+def test_construction_refuses_waiving_the_terms_under_a_reward_that_prices_no_success_above_zero():
+    """No episode of a judge-only reward, nor of one whose environment term weighs nothing, earns the objective,
+    so every group would read as failed."""
+    for objective_term in (None, EnvironmentTerm(weight=0.0), EnvironmentTerm(weight=-1.0)):
+        with pytest.raises(ValueError, match="prices no success above zero"):
+            _check_terms(_constructing({}, objective_term=objective_term, reasoning_price=PRICE))
+        _check_terms(
+            _constructing(
+                {}, objective_term=objective_term, reasoning_price=PRICE, reasoning_terms_in_failed_groups=True
+            )
+        )
 
 
 def test_construction_refuses_a_price_with_no_level_to_price_at():

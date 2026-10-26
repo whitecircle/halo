@@ -480,6 +480,10 @@ that repeat and a band run that meets one fails: keep the node to the bench whil
 host I/O into the page cache: its time moves by up to 6% between runs and its peak resident memory in steps
 of about 1%, hence their own margins. Five repeats measure the spread well enough for a later run of the same
 commit to pass its band. MFU, S-MFU and TFLOPS stay under `metrics.diagnostics`, never gated.
+Each training line also carries its rank's mean and median step time in milliseconds (`mean_step_time_ms`,
+`median_step_time_ms`); the band reads rank 0's. A repeat whose mean is more than 2% off its median is flagged
+(`FLAG` lines, `flags` in the evidence), never failed: a few stalled steps move the mean the gate reads while
+the median holds, so re-run a flagged row before reading its throughput as a regression.
 A key compares only with a baseline measured by the same command on as many ranks of the same GPU model, so
 editing a row means re-recording it; a measured key with no baseline, and a baseline the run did not
 measure, fail too.

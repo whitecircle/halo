@@ -60,13 +60,15 @@ RUN mkdir -p /opt/nccl_compat/src/distributed/nccl \
 # Every patch is required: vLLM's layerwise reload puts each layer's tensors on the meta device, so
 # layers that write weights with a direct `param.copy_()` revert on every /update_weights; the re-init
 # patch destroys the NCCL communicator the engine would otherwise leak per trainer that reconnects
-# without a clean shutdown; and the two thinking-budget patches let the gpt-oss parser force its whole
-# move into the final channel when an analysis channel overruns its budget. `sitecustomize` applies
+# without a clean shutdown; the two thinking-budget patches let the gpt-oss parser force its whole
+# move into the final channel when an analysis channel overruns its budget; and the split top-p guard
+# keeps a budget-forced token from being masked with the rest of its row. `sitecustomize` applies
 # them in the API server and every engine-core worker.
 COPY docker/vllm/patches/vllm_layerwise_reload_patch.py \
      docker/vllm/patches/vllm_weight_transfer_reinit_patch.py \
      docker/vllm/patches/vllm_reasoning_forced_end_patch.py \
      docker/vllm/patches/vllm_thinking_budget_completion_patch.py \
+     docker/vllm/patches/vllm_topp_split_guard_patch.py \
      docker/vllm/patches/sitecustomize.py /opt/vllm_patches/
 # No `:${PYTHONPATH:-}` tail: it is unset in the base image, so the suffix would render an empty
 # sys.path entry (the server's CWD) that a stray module could import-shadow.
@@ -151,6 +153,21 @@ from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState as T; 
 assert f._APPLIED and getattr(ReasoningConfig.initialize_token_ids, f.PATCH_MARKER, False), 'forced-end patch not applied'; \
 assert c._APPLIED and all(getattr(getattr(T, n), c.PATCH_MARKER, False) for n in ('__init__', 'apply_staged_writes', 'apply')), 'completion patch not applied'; \
 print('thinking-budget patches: OK')"
+
+# Verify the split top-p guard on the Triton interpreter (no GPU here): unpatched, a p-only row of a
+# batch of at most 64 whose budget forced a token comes back all -inf, so the engine samples token 0
+# with a NaN log-prob. The check also fails once upstream stops wiping that row: drop the patch then.
+# The interpreter never reads kernel source, so the rebuilt kernel is also loaded as the compiled
+# JITFunction the engine builds; a failure there would only be logged at server start.
+RUN CUDA_VISIBLE_DEVICES= TRITON_INTERPRET=1 python3 -c "\
+import vllm_topp_split_guard_patch as g; \
+from triton.runtime.jit import JITFunction; \
+from vllm.v1.sample.ops import topk_topp_triton as t; \
+kernel = t._topp_split_mask.kernel; \
+assert g._APPLIED and getattr(kernel, g.PATCH_MARKER, False), 'top-p split guard not applied'; \
+assert g._GUARD in JITFunction(kernel.fn).src, 'guarded kernel does not load as a compiled Triton kernel'; \
+g.self_check(); \
+print('top-p split guard: OK (forced row kept, ordinary row masked as upstream, upstream still wipes the forced row)')"
 
 # Verify both parser plugins and the budget they drive during the build: they import vLLM, so no test
 # suite covers them. The budget rows run Model Runner V2's Triton kernels on the interpreter (no GPU here).

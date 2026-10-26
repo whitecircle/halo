@@ -1,5 +1,6 @@
-"""The bench band passes a run inside its baselines and fails each way a run can fall out of them; ``record``
-writes baselines only from repeats that hold together, and touches no other file in the store.
+"""The bench band passes a run inside its baselines and fails each way a run can fall out of them, and flags,
+without failing, a run whose mean step time strays from its median; ``record`` writes baselines only from
+repeats that hold together, and touches no other file in the store.
 
 Logs are written as ``make bench`` leaves them: every rank of a row prints one ``__HALO_BENCH__`` line per key,
 among the rows' other output. Two cases emit through the benchmarks' own emitters, so the band reads what they
@@ -126,13 +127,18 @@ def test_emitted_lines_read_back_as_one_measurement_per_key(tmp_path, monkeypatc
     argv = ["tests/gpu/profiling/benchmark_sft_ep.py", "--ep", "8", "--measure_save"]
     monkeypatch.setattr(sys, "argv", argv)
     monkeypatch.setenv("WORLD_SIZE", "3")
-    ranks = [(1000.0, 30.0, 41.234, 11.004), (1000.0, 32.5, 41.0, 9.0), (1030.0, 31.0, 41.5, 10.0)]
-    for rank, (tokens, peak, seconds, rss) in enumerate(ranks):
+    ranks = [
+        (1000.0, 30.0, 41.234, 11.004, (0.3, 0.301, 0.299, 0.76)),
+        (1000.0, 32.5, 41.0, 9.0, (0.3, 0.3, 0.3)),
+        (1030.0, 31.0, 41.5, 10.0, (0.25, 0.25, 0.25)),
+    ]
+    for rank, (tokens, peak, seconds, rss, step_times) in enumerate(ranks):
         monkeypatch.setenv("RANK", str(rank))
         callback = SimpleNamespace(
             tps=SimpleNamespace(avg_tokens_per_second=tokens, avg_cluster_tokens_per_second=3 * tokens),
             memory=SimpleNamespace(peak_allocated_gb=peak, training_peak_allocated_gb=peak),
             time=SimpleNamespace(avg_step_time_seconds=0.4),
+            measured_step_times=step_times,
             gpu_model="B300",
             precision="bf16",
             flops_model=SimpleNamespace(local_params=11e9, sparsity_factor=0.125),
@@ -152,6 +158,9 @@ def test_emitted_lines_read_back_as_one_measurement_per_key(tmp_path, monkeypatc
     assert train.metrics["tokens_per_second"] == 1010.0, "a throughput is the mean over ranks"
     assert train.metrics["peak_allocated_gb"] == 32.5, "a peak is the highest rank's"
     assert train.metrics["diagnostics"]["gpu_model"] == "B300"
+    assert (train.metrics["mean_step_time_ms"], train.metrics["median_step_time_ms"]) == (415.0, 300.5), (
+        "rank 0's step times, in milliseconds"
+    )
     assert save.metrics == {"save_seconds": 41.24, "save_peak_rss_gib": 11.0}, "a save line carries two decimals"
 
 
@@ -256,6 +265,24 @@ def test_an_unmeasured_baseline_and_an_unbaselined_key_fail(tmp_path, baselines)
         f"{SAVE}: has a baseline the run did not measure",
         "sft_new_s4096: measured, but has no baseline",
     ]
+
+
+@pytest.mark.parametrize(
+    ("mean", "median", "skew"),
+    [(305.0, 300.0, None), (307.0, 300.0, "+2.3%"), (293.0, 300.0, "-2.3%")],
+    ids=["within 2%", "a mean above its median", "a mean below its median"],
+)
+def test_a_mean_step_time_off_its_median_is_flagged_and_passes(tmp_path, baselines, mean, median, skew):
+    metrics = {**_train_metrics(1005.0, 50.0), "mean_step_time_ms": mean, "median_step_time_ms": median}
+    log = _write_log(
+        tmp_path / "run.log", {TRAIN: [metrics] * WORLD_SIZE, SAVE: [_save_metrics(41.0, 12.0)] * WORLD_SIZE}
+    )
+
+    verdict = check(read_logs([log]), baselines)
+
+    assert verdict["verdict"] == "pass", verdict["failures"]
+    flagged = f"{TRAIN}: repeat 1's mean step time {mean} ms is {skew} off its median {median} ms"
+    assert verdict["flags"] == ([] if skew is None else [flagged])
 
 
 @pytest.mark.parametrize(
@@ -451,11 +478,14 @@ def test_a_malformed_baseline_raises(tmp_path, edit, problem):
 def test_check_exits_non_zero_on_a_failure_and_writes_its_evidence(tmp_path, baselines, monkeypatch):
     monkeypatch.setattr(bench_band, "BASELINE_DIR", tmp_path / "baselines")
     monkeypatch.setattr(bench_band, "EVIDENCE_DIR", tmp_path / "evidence")
+    stalled = {"mean_step_time_ms": 330.0, "median_step_time_ms": 300.0}
     within = _write_log(
-        tmp_path / "within.log", {TRAIN: [_train_metrics(1000.0, 50.0)] * 2, SAVE: [_save_metrics(41.0, 12.0)] * 2}
+        tmp_path / "within.log",
+        {TRAIN: [{**_train_metrics(1000.0, 50.0), **stalled}] * 2, SAVE: [_save_metrics(41.0, 12.0)] * 2},
     )
     slower = _write_log(
-        tmp_path / "slower.log", {TRAIN: [_train_metrics(900.0, 50.0)] * 2, SAVE: [_save_metrics(41.0, 12.0)] * 2}
+        tmp_path / "slower.log",
+        {TRAIN: [{**_train_metrics(900.0, 50.0), **stalled}] * 2, SAVE: [_save_metrics(41.0, 12.0)] * 2},
     )
     arguments = ["--revision", "feedface-dirty", "--image", IMAGE]
 
@@ -465,6 +495,7 @@ def test_check_exits_non_zero_on_a_failure_and_writes_its_evidence(tmp_path, bas
     evidence = json.loads((tmp_path / "evidence" / "bench_band-feedface-dirty.json").read_text())
     assert (evidence["verdict"], evidence["base"], evidence["head"]) == ("fail", COMMIT, "feedface-dirty")
     assert evidence["failures"] == [f"{TRAIN}: tokens_per_second 900.0 is below its band 984.9 .. 1025.1"]
+    assert evidence["flags"] == [f"{TRAIN}: repeat 1's mean step time 330.0 ms is +10.0% off its median 300.0 ms"]
     assert evidence["logs"] == [str(slower)]
 
 

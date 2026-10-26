@@ -68,6 +68,7 @@ _STAGE_SHARED_KEYS = (
     "reasoning_floor",
     "reasoning_price",
     "reasoning_price_cap",
+    "reasoning_terms_in_failed_groups",
 )
 # The per-turn thinking budget of each level, one contract at every family.
 _PER_TURN_BUDGETS = {"low": 8192, "medium": 12288, "high": 16384}

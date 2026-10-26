@@ -283,11 +283,7 @@ def _reject_ep_group(pc: ParallelismConfig) -> None:
     if pc.ep_group_size > 1:
         if pc.ep_scope == "node":
             reject_node_local_ep_group(
-                pc.ep_group_size,
-                pc.nvlink_domain_size,
-                ep_size=pc.ep_size,
-                expert_tp_size=pc.expert_tp_size,
-                remedy="Use ep_scope='global' for EP spanning NVLink domains (RDMA).",
+                pc.ep_group_size, pc.nvlink_domain_size, ep_size=pc.ep_size, expert_tp_size=pc.expert_tp_size
             )
         else:  # global scope
             # Named after the unit, or an ep16+pp2 job reads "cannot exceed world size (8)" on 16 GPUs.
@@ -363,7 +359,6 @@ def _reject_tp(pc: ParallelismConfig) -> None:
 def _reject_expert_tp(pc: ParallelismConfig) -> None:
     """Expert-TP groups stay inside one NVLink domain, under cross-node EP too."""
     if pc.expert_tp_size > 1:
-        # EPConfig re-checks it, but only after the checkpoint has downloaded.
         if pc.expert_lora is not None:
             reject_expert_lora_with_expert_tp()
         if pc.nvlink_domain_size % pc.expert_tp_size != 0:
@@ -381,21 +376,12 @@ def _reject_expert_tp(pc: ParallelismConfig) -> None:
                 f"single EP group (expert_parallel_size * expert_tensor_parallel_size == world size) or set "
                 f"expert_tensor_parallel_size to 1."
             )
-        # One ETP group per NVLink domain; on one domain too, where EPConfig would raise after the load.
+        # One ETP group per NVLink domain, on a single domain too.
         if pc.ep_scope == "global":
             layout = CrossNodeLayout(
                 world_size=pc.stage_world_size, group_size=pc.ep_group_size, domain_size=pc.nvlink_domain_size
             )
-            reject_cross_node_etp_shape(
-                pc.expert_tp_size,
-                layout.members_per_domain,
-                pc.ep_size,
-                layout.num_domains,
-                remedy=(
-                    f"Set expert_tensor_parallel_size={layout.members_per_domain} with "
-                    f"expert_parallel_size={layout.num_domains}, or use NVLink-local EP (ep_scope='node')."
-                ),
-            )
+            reject_cross_node_etp_shape(pc.expert_tp_size, layout.members_per_domain, pc.ep_size, layout.num_domains)
 
 
 def _reject_ep_cp(pc: ParallelismConfig) -> None:

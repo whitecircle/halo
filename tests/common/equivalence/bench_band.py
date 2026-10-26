@@ -6,6 +6,10 @@ rank of a row prints one line per key (``tests/common/reporting.py``). Per key, 
 and a peak must not rise above it. A key compares only with a baseline measured by the same command on as many
 ranks of the same GPU model; a measured key with no baseline, and a baseline the run did not measure, fail too.
 
+A training line also carries its mean and median step time, read off rank 0. ``check`` flags a repeat whose mean
+is more than :data:`STEP_TIME_SKEW` off its median, the mark of a few stalled steps moving the gated mean, and
+never fails it: the gate stays on the mean.
+
 ``check`` writes ``evidence/bench_band-<revision>.json`` and exits non-zero on a failure. ``record`` makes the
 baselines the run's: one file per key from at least :data:`MIN_REPEATS` repeats of one clean commit, refusing a
 repeat that a baseline of the others would fail by more than ordinary spread. Standard library only.
@@ -46,6 +50,7 @@ MIN_REPEATS = 5
 # Recording refuses a repeat outside the others' band widened to OUTLIER_FACTOR times their spread: a disturbed
 # repeat (a row sharing the host with another job), not one at the edge of the spread four repeats measure.
 OUTLIER_FACTOR = 4
+STEP_TIME_SKEW = 0.02
 PROVENANCE_FIELDS = ("commit", "image", "measured", "world_size", "command")
 LINE_FIELDS = frozenset({"key", "rank", "world_size", "command", "metrics"})
 _COMMIT = re.compile(r"[0-9a-f]{40}")
@@ -214,6 +219,23 @@ def _incomparability(baseline: Baseline, measurements: Sequence[Measurement]) ->
     return None
 
 
+def _skewed_step_times(run: Mapping[str, Sequence[Measurement]]) -> list[str]:
+    """Each repeat of a key whose mean step time is more than :data:`STEP_TIME_SKEW` off its median."""
+    flags = []
+    for key, measurements in sorted(run.items()):
+        for index, measurement in enumerate(measurements):
+            metrics = measurement.metrics
+            if "median_step_time_ms" not in metrics:
+                continue
+            mean, median = metrics["mean_step_time_ms"], metrics["median_step_time_ms"]
+            if abs(mean - median) > STEP_TIME_SKEW * median:
+                flags.append(
+                    f"{key}: repeat {index + 1}'s mean step time {mean} ms is {mean / median - 1:+.1%} off its "
+                    f"median {median} ms"
+                )
+    return flags
+
+
 def _bound(judgment: Mapping) -> str:
     if "band" in judgment:
         low, high = judgment["band"]
@@ -222,7 +244,8 @@ def _bound(judgment: Mapping) -> str:
 
 
 def check(run: Mapping[str, Sequence[Measurement]], baselines: Mapping[str, Baseline]) -> dict:
-    """``run`` held to ``baselines``: the verdict, every failure, and each key's judged metrics."""
+    """``run`` held to ``baselines``: the verdict, every failure, the flagged step-time skews, and each key's
+    judged metrics."""
     failures = [f"{key}: has a baseline the run did not measure" for key in sorted(baselines.keys() - run.keys())]
     failures += [f"{key}: measured, but has no baseline" for key in sorted(run.keys() - baselines.keys())]
     judged = {}
@@ -244,7 +267,12 @@ def check(run: Mapping[str, Sequence[Measurement]], baselines: Mapping[str, Base
             judged[key]["metrics"][name] = judgment
             if judgment["verdict"] != "within":
                 failures.append(f"{key}: {name} {value} is {judgment['verdict']} its {_bound(judgment)}")
-    return {"verdict": "fail" if failures else "pass", "failures": failures, "keys": judged}
+    return {
+        "verdict": "fail" if failures else "pass",
+        "failures": failures,
+        "flags": _skewed_step_times(run),
+        "keys": judged,
+    }
 
 
 def record(
@@ -302,6 +330,8 @@ def _print_verdict(verdict: Mapping) -> None:
         print(f"{key} (baseline {judged['commit'][:12]})")
         for name, judgment in judged["metrics"].items():
             print(f"  {name:<20} {judgment['run']:>12}  {_bound(judgment):<28} {judgment['verdict']}")
+    for flag in verdict["flags"]:
+        print(f"FLAG {flag}")
     for failure in verdict["failures"]:
         print(f"FAIL {failure}")
     print(f"bench band: {verdict['verdict']}")
@@ -336,7 +366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         verdict=verdict["verdict"],
         findings={
             "logs": [str(log) for log in args.logs],
-            **{name: verdict[name] for name in ("failures", "keys")},
+            **{name: verdict[name] for name in ("failures", "flags", "keys")},
         },
         directory=EVIDENCE_DIR,
     )

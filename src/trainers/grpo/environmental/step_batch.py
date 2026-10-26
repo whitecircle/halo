@@ -151,8 +151,9 @@ class StepBatchMixin:
         The phases run in this order on every rank, and every collective inside them sits behind a config- or
         mode-derived gate, never a local-data one: a rank-dependent skip or early-out desyncs the world.
         """
-        rewards = F.pad(self._build_rollout_rewards(rollout_results, reasoning_tokens, device), (0, num_padding))
         rows, turns_per_traj = self._rows_for_step(rollout_results, num_padding, device)
+        # After tokenizing: an episode the template cannot re-render leaves the baseline the waiver reads.
+        rewards = F.pad(self._build_rollout_rewards(rollout_results, reasoning_tokens, device, mode), (0, num_padding))
         # Fences the row-shape failures tokenization recorded (a context overflow, a malformed routing payload).
         self._batch_errors.reject()
         # After the fence and ahead of every collective: the re-score never raises, but it must not sit between

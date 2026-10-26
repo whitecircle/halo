@@ -173,17 +173,35 @@ class ReasoningCostArguments(ValidatedConfig):
             "See agent-docs/training-methods/async-grpo/reasoning.md#floor."
         },
     )
+    reasoning_terms_in_failed_groups: bool = field(
+        default=False,
+        metadata={
+            "help": "Charge reasoning_price and reasoning_floor in a training group none of whose baseline episodes "
+            "earned the objective (its reward/objective component, zeroed by a veto). Off by default: there the "
+            "length terms are most of what tells the attempts apart, so the advantage would train reasoning length "
+            "rather than the task. A group with a success is charged either way, and eval episodes always are. Off, "
+            "it needs an environment term of positive weight (refused at trainer construction otherwise). Logged as "
+            "outcome/reasoning_terms_waived_frac. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#failed-groups."
+        },
+    )
 
     def _validate_fields(self) -> None:
         """A NaN passes every ordered comparison, a negative price would pay for the length it prices, and a
-        cap set while the price is off parses and changes nothing. The levels a price must map are checked at
-        trainer construction, beside the environment that draws them."""
+        cap set while the price is off, or the failed-group switch while both terms are off, parses and changes
+        nothing. The levels a price must map, and the objective a waiver reads, are checked at trainer
+        construction, beside the environment that draws and prices them."""
         super()._validate_fields()
         owner = type(self).__name__
         if self.reasoning_price is None and self.reasoning_price_cap != ReasoningCostArguments.reasoning_price_cap:
             raise ValueError(
                 "reasoning_price_cap set with reasoning_price unset: nothing reads it until the price is on. Remove "
                 "it, or set reasoning_price."
+            )
+        if self.reasoning_price is None and self.reasoning_floor == 0 and self.reasoning_terms_in_failed_groups:
+            raise ValueError(
+                "reasoning_terms_in_failed_groups set with reasoning_price and reasoning_floor both off: it chooses "
+                "where the reasoning terms charge. Set one of them, or remove it."
             )
         if self.reasoning_price is None and self.reasoning_price_past_budget:
             raise ValueError(

@@ -96,11 +96,9 @@ class _Host(AsyncRolloutMixin):
         self._engine_rescore_clients = None
         self._rollout_start_callback = None
         self._rollout_stop_token_ids = None
+        self._reasoning_end_ids = None
         self._loop = None
         self.callbacks: list = []
-
-    def _resolve_reasoning_end_token_id(self):
-        return None
 
     def _init_weight_sync_client(self):
         if self._fail_client and self.accelerator.is_main_process:

@@ -107,10 +107,11 @@ class _Tolerances:
     ep_grad_norm_ratio_band: tuple[float, float] = (0.67, 1.5)
 
     # ── Exact-objective pins ────────────────────────────────────────────────
-    # Independent reimplementation vs the logged loss. Residual is dtype, not objective: an
-    # fp32 reference of a preference objective over bf16 sequence log-prob sums lands 4e-3
-    # relative away (measured, KTO on Qwen3-0.6B). Degenerate objectives miss by >0.5 (25x).
-    # Relative, applied against max(1, |expected|).
+    # A test's independent reimplementation of its trainer's objective (offline GRPO, distillation,
+    # reward) vs the loss the trainer computes or logs. Only precision and reduction order separate
+    # them, so the bound stays far under a wrong objective's gap; the reward and distillation pins
+    # require each of their controls to miss by more than it. Relative: against max(1, |expected|)
+    # in the reward and distillation pins, against |expected| in offline GRPO's.
     exact_objective_rel: float = 2e-2
 
     # ── Generic finite-difference / numerical kernels ───────────────────────

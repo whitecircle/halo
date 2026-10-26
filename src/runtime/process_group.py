@@ -22,15 +22,6 @@ from src.runtime.ranks import (
 logger = logging.getLogger(__name__)
 
 
-def _world_group_timeout() -> datetime.timedelta | None:
-    """The initialized world group's NCCL watchdog timeout, or None where torch's internals hide it."""
-    try:
-        backend = dist.group.WORLD._get_backend(torch.device("cuda"))
-        return backend.options._timeout
-    except Exception:  # introspection only; the caller degrades to setting anyway
-        return None
-
-
 def _apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
     """Make ``timeout`` the NCCL watchdog of every later ``new_group`` and extend the world group's.
 
@@ -51,7 +42,10 @@ def _apply_default_pg_timeout(timeout: datetime.timedelta) -> None:
     # Extend-only: shortening the world group would resurface the straggler aborts.
     if not has_process_group():
         return
-    current = _world_group_timeout()
+    try:
+        current = dist.group.WORLD._get_backend(torch.device("cuda")).options._timeout
+    except Exception:  # introspection only: torch's internals may hide it
+        current = None
     if current is None:
         # Setting blindly could SHORTEN an external watchdog (accelerate ddp_timeout).
         if is_global_main_process():

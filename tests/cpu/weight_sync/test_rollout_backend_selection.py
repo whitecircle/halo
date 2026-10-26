@@ -15,7 +15,7 @@ import pytest
 
 import src.environments.engine_wire as engine_wire
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.engine_wire import capture_generation_tokens
+from src.environments.engine_wire import capture_generation_tokens, turn_from_chat_completion
 from src.environments.ray_actors import EnvironmentActor
 from src.environments.rollout_config import RolloutConfig
 from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
@@ -139,8 +139,8 @@ def test_sglang_supports_train_on_sampled_tokens():
 
 
 def test_sglang_supports_rollout_routing_replay():
-    """SGLang publishes routed experts response-level in a raw-int32 wire format the decoder
-    handles, so R3 is not capability-gated on this backend."""
+    """SGLang returns routed experts in a raw-int32 wire format the decoder handles, so R3 is not
+    capability-gated on this backend."""
     config = _sglang_config(routing_replay="rollout", train_on_sampled_tokens=True)
     assert config.get_rollout_config().capture_routed_experts is True
 
@@ -360,6 +360,22 @@ def test_each_backend_capture_rejects_the_other_shape():
     assert capture_generation_tokens(sglang_choice, {}, "vllm")[0] is None
     vllm_choice = {"logprobs": {"content": [{"token": "token_id:42", "logprob": -0.25}]}}
     assert capture_generation_tokens(vllm_choice, {}, "sglang")[0] is None
+
+
+def test_sglang_routing_mask_is_read_from_the_choice_meta_info():
+    """With ``return_meta_info`` (every request that captures sampled ids) SGLang leaves the routing
+    payload in the choice's ``meta_info`` and publishes no ``sglext`` entry; without it, response-level."""
+    config = RolloutConfig(backend="sglang", capture_routed_experts=True)
+
+    def routing_mask(choice_extras: dict, **response_extras) -> str | None:
+        choice = {"message": {"content": "ok"}, "finish_reason": "stop", **choice_extras}
+        return turn_from_chat_completion({"choices": [choice], **response_extras}, config).routing_mask
+
+    with_meta = {"meta_info": {"routed_experts": "AAAA", "output_token_logprobs": [[-0.1, 5, "a"]]}}
+    assert routing_mask(with_meta) == "AAAA"
+    assert routing_mask({}, sglext={"routed_experts": "BBBB"}) == "BBBB"
+    assert routing_mask({"routed_experts": "CCCC"}) == "CCCC"
+    assert routing_mask({"meta_info": {}}) is None
 
 
 def test_sglang_payload_requests_the_meta_info_capture():

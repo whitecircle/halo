@@ -11,15 +11,23 @@ import stat
 import pytest
 import torch
 from accelerate import PartialState
+from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import save_file
-from transformers import Qwen3Config, Qwen3ForCausalLM
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.models import Dense, Pooling, Router
+from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3Model
 
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from src.checkpoint.adapters import write_adapter_file
 from src.checkpoint.offline_export import save_full_checkpoint
 from src.checkpoint.writing import StreamingShardWriter, save_sharded_state_dict
+from src.configs.embedding import EmbeddingConfig
+from src.distributed.parallelism_config import ParallelismConfig
+from src.trainers.embedding.preloaded_transformer import PreloadedTransformer
+from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.tiny_models import word_level_tokenizer
 
 
 @pytest.fixture(params=[0o022, 0o002, 0o077], ids=lambda umask: f"umask-{umask:03o}")
@@ -89,6 +97,61 @@ def test_an_adapter_conversion_changes_the_mode_of_its_own_file_only(umask, tmp_
     convert_to_bf16(str(tmp_path / "adapter"), str(output), "causal_lm", is_peft=True)
 
     assert _modes(output) == {**_expect(umask, ["adapter_model.safetensors"]), "model.safetensors": "600"}
+
+
+# A head past the pooling, and the module folders its save writes weights into: a ``Router`` nests one per route.
+_EMBEDDING_HEADS = [
+    pytest.param(lambda dimension: Dense(dimension, dimension), ["2_Dense"], id="dense"),
+    pytest.param(
+        lambda dimension: Router.for_query_document([Dense(dimension, dimension)], [Dense(dimension, dimension)]),
+        ["2_Router/query_0_Dense", "2_Router/document_0_Dense"],
+        id="router",
+    ),
+]
+
+
+def _embedding_pipeline(head) -> SentenceTransformer:
+    """The toolkit's backbone wrapper, mean pooling and ``head``."""
+    torch.manual_seed(0)
+    backbone = PreloadedTransformer(Qwen3Model(Qwen3Config(**TINY_QWEN3_CONFIG)), word_level_tokenizer(["a", "b"]))
+    dimension = backbone.get_embedding_dimension()
+    return SentenceTransformer(modules=[backbone, Pooling(dimension), head(dimension)], device="cpu")
+
+
+@pytest.mark.parametrize(("head", "weight_folders"), _EMBEDDING_HEADS)
+def test_an_embedding_save_follows_the_umask_in_every_module_folder(umask, head, weight_folders, tmp_path):
+    """sentence-transformers writes each module's weights into its own folder (``2_Dense/``) at ``0600``,
+    under the trainer's save of the whole pipeline."""
+    args = EmbeddingConfig(
+        output_dir=str(tmp_path / "run"),
+        use_cpu=True,
+        report_to="none",
+        bf16=False,
+        use_liger_kernel=False,
+        max_length=16,
+        router_mapping={"anchor": "query", "positive": "document"},  # the Router head's routes
+    )
+    pairs = Dataset.from_dict({"anchor": ["a b"], "positive": ["b a"]})
+    trainer = EmbeddingTrainer(
+        model=_embedding_pipeline(head), args=args, train_dataset=pairs, parallelism_config=ParallelismConfig()
+    )
+
+    trainer.save_model(str(tmp_path / "out"))
+
+    assert _modes(tmp_path / "out") == _expect(umask, ["model.safetensors"])
+    for folder in weight_folders:
+        assert _modes(tmp_path / "out" / folder) == _expect(umask, ["model.safetensors"]), folder
+
+
+@pytest.mark.parametrize(("head", "weight_folders"), _EMBEDDING_HEADS)
+def test_a_distributed_embedding_save_follows_the_umask_in_every_module_folder(umask, head, weight_folders, tmp_path):
+    """The pipeline modules past the backbone, which a sharded run's save writes one by one."""
+    host = object.__new__(EmbeddingTrainer)
+
+    host._save_st_pipeline_config(_embedding_pipeline(head), str(tmp_path))
+
+    for folder in weight_folders:
+        assert _modes(tmp_path / folder) == _expect(umask, ["model.safetensors"]), folder
 
 
 if __name__ == "__main__":

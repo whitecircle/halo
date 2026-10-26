@@ -11,16 +11,9 @@ from typing import Literal
 
 import torch.distributed as dist
 
-from src.distributed.group_layout import (
-    CrossNodeLayout,
-    NodeLocalLayout,
-    ep_layout,
-    reject_cross_node_ep_group,
-    reject_cross_node_etp_shape,
-    reject_node_local_ep_group,
-)
+from src.distributed.group_layout import CrossNodeLayout, NodeLocalLayout, ep_layout
 from src.hardware import supports_grouped_mm
-from src.models.moe.expert_lora_spec import ExpertLoraSpec, reject_expert_lora_with_expert_tp
+from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.runtime.collectives import build_groups
 from src.runtime.ranks import get_global_rank, get_global_world_size, has_process_group, is_global_main_process
 
@@ -40,7 +33,9 @@ class EPConfig:
     """The Expert Parallelism topology (Megatron-LM style), its process groups and the expert assignment.
 
     EP is orthogonal to DP: experts receive tokens from any batch. ``node_local`` keeps each EP group
-    within one NVLink domain; otherwise groups span domains over RDMA.
+    within one NVLink domain; otherwise groups span domains over RDMA. Built by
+    :meth:`~src.distributed.parallelism_config.ParallelismConfig.ep_config`, whose rules have refused every
+    shape the groups cannot tile.
     """
 
     def __init__(
@@ -78,10 +73,6 @@ class EPConfig:
         self.fp32_experts = fp32_experts
         self.fp32_grad_reduce = fp32_grad_reduce
         self.use_grouped_gemm = use_grouped_gemm
-        # The LoRA gather/load paths assume adapters are never ETP-sharded; lifting it needs a
-        # per-projection A/B shard split there.
-        if expert_lora is not None and expert_tp_size > 1:
-            reject_expert_lora_with_expert_tp()
         self.expert_lora = expert_lora
         self.experts_fsdp_managed = experts_fsdp_managed
         self.ep_buffer_backend = ep_buffer_backend
@@ -117,25 +108,6 @@ class EPConfig:
         self.is_deferred_dp = False
         self.num_rank_blocks = 1
         self._my_ep_group_ranks = None
-
-        # Same predicates ParallelismConfig gates the run with, so a directly built EPConfig cannot
-        # accept a shape the run-level config rejects; only the remedy is worded for this API.
-        if node_local:
-            reject_node_local_ep_group(
-                self.ep_group_size,
-                self.nvlink_domain_size,
-                ep_size=ep_size,
-                expert_tp_size=expert_tp_size,
-                remedy="Use node_local=False for cross-node EP.",
-            )
-        else:
-            reject_cross_node_ep_group(
-                self.ep_group_size,
-                self.stage_world_size,
-                scope_desc="world size",
-                ep_size=ep_size,
-                expert_tp_size=expert_tp_size,
-            )
 
         self._build_process_groups()
 
@@ -358,27 +330,6 @@ class EPConfig:
         else:
             # Cross-node EP + node-local ETP: each domain's contiguous block is one ETP group, keeping
             # its all-reduce on NVLink; the dispatch group strides across domains over Gin.
-            for group_ranks in ep_groups:
-                domains = [r // self.nvlink_domain_size for r in group_ranks]
-                domains_spanned = len(set(domains))
-                members_per_domain = len(group_ranks) // domains_spanned
-                reject_cross_node_etp_shape(
-                    expert_tp_size,
-                    members_per_domain,
-                    ep_size,
-                    domains_spanned,
-                    remedy=(
-                        f"EP group {group_ranks}. Use ep_scope='node' for node-local EP+ETP, or set "
-                        f"expert_tensor_parallel_size={members_per_domain}."
-                    ),
-                )
-                for c in range(ep_size):
-                    etp_ranks = group_ranks[c * expert_tp_size : (c + 1) * expert_tp_size]
-                    if len({r // self.nvlink_domain_size for r in etp_ranks}) > 1:
-                        raise ValueError(
-                            f"Expert TP group {etp_ranks} spans multiple nodes (cross-node EP+ETP). "
-                            f"This should not happen for a one-ETP-group-per-domain shape — report a bug."
-                        )
             tp_lists = [g[c * expert_tp_size : (c + 1) * expert_tp_size] for g in ep_groups for c in range(ep_size)]
             dispatch_lists = [
                 [g[p + expert_tp_size * c] for c in range(ep_size)] for g in ep_groups for p in range(expert_tp_size)

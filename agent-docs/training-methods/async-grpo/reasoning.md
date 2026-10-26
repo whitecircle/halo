@@ -118,10 +118,24 @@ Two trainer-side terms add to the task reward before advantages.
 | `reasoning_price` | `null` (off) | per-level map: reward units per 1,000 reasoning tokens |
 | `reasoning_price_cap` | `0.1` | the most the price charges one episode; refused at another value while the price is off |
 | `reasoning_price_past_budget` | `false` | price only reasoning past each turn's soft budget; needs `reasoning_price` |
+| `reasoning_terms_in_failed_groups` | `false` | charge both terms in a [failed group](#failed-groups) too |
 
 - While `drop_degenerate_groups` is on (the default), both reach the gradient only through groups the environment's
   reward separates: it judges a group without them ([Advantages](objective.md#advantages)).
 - Watch `reward/reasoning_price` and `reward/reasoning_floor`.
+
+### Failed groups
+
+A training group in which no baseline episode earned the objective (a positive `reward/objective`; a veto zeroes it)
+is charged neither term.
+
+- Shaping and judge terms still separate such a group, so it trains, but the length terms would be most of what tells
+  its attempts apart: the advantage would train reasoning length, not the task, wherever the task is out of reach.
+- A group with a success is charged in full, its failures included. Eval episodes are always charged.
+- Under `reasoning_price_past_budget`, only the engine's ceiling holds a soft budget in such a group.
+- `outcome/reasoning_terms_waived_frac` logs the waived share of training episodes.
+- `reasoning_terms_in_failed_groups: true` charges them there too. A reward that prices no success above zero (no
+  environment term, or one of weight ≤ 0) needs that setting; trainer construction refuses it otherwise.
 
 ### Floor
 

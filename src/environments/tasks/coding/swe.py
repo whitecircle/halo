@@ -80,7 +80,7 @@ Tips:
             **kwargs,
         )
         self.test_function = test_function
-        if test_function is None and self._grades_objective:
+        if test_function is None and self.objective_term is not None:
             if kwargs.get("requires_answer") is False:
                 raise ValueError(
                     f"{type(self).__name__} has nothing to grade against: requires_answer is false and no "
@@ -88,11 +88,6 @@ Tips:
                     f"pass a test_function, or price the episode with an external reward term only."
                 )
             self.requires_answer = True
-
-    @property
-    def _grades_objective(self) -> bool:
-        """Whether the reward prices this environment's own grade (its ``environment`` term)."""
-        return self._rewards.environment_term is not None
 
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
@@ -132,7 +127,7 @@ Tips:
         ``answer``; a row with neither raises, since running a command proves nothing. A reward without an
         ``environment`` term takes no grade, which could only void the episode for a verdict no term reads.
         """
-        if not self._grades_objective or not trajectory.info.get("completed"):
+        if self.objective_term is None or not trajectory.info.get("completed"):
             return EpisodeGrade(0.0)
 
         if self.test_function:

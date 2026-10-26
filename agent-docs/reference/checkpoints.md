@@ -171,8 +171,9 @@ Staging and durable publication live in `src/checkpoint/atomic.py` (`staged_file
 file Halo's writers create gets `0o666` under the process umask; a file copied from a source keeps that
 file's mode. safetensors creates its files `0600`, so every safetensors writer goes through
 `save_safetensors_file`, and a `save_pretrained` writer is followed by `apply_umask_mode` on the weight
-file it wrote, or on its directory where the save owns the whole directory. `apply_umask_mode` reads the
-mode off a probe file, so a default ACL applies too.
+file it wrote, or on its directory where the save owns the whole directory: each module folder of a
+sentence-transformers save (`2_Dense/`) too, nested ones included (a `Router`'s `2_Router/query_0_Dense/`).
+`apply_umask_mode` reads the mode off a probe file, so a default ACL applies too.
 Export copies omit every unpublished file an interrupted save leaves: a staged write's stage (the reference and prefetch
 sidecars, `optimizer_meta.pt`, the model card), the withheld `.trainer_state.json.uncommitted`, and
 the `.<name>.<uuid hex>.tmp` staging spelling.
@@ -857,14 +858,15 @@ params registered; HF evaluates immediately before the end-of-training save unde
 no optimizer state.
 
 The fingerprint is broader than the sizes: **`world_size`, `pp_size`, `ep_size`, `cp_size`, `tp_size`,
-`expert_tp_size`, `ep_scope`, `nvlink_domain_size`, `use_hsdp`, `use_grouped_gemm`,
+`expert_tp_size`, `ep_scope`, `nvlink_domain_size`, `use_hsdp` (saved as `hsdp`), `use_grouped_gemm`,
 `fsdp_shard_ep1_experts`, `expert_replica_size`, and the optimizer class** — a run that changes any one of them (a flipped
 `use_grouped_gemm`, a different `ep_scope`) warm-restarts even at the same GPU count.
 
-A fingerprint mismatch falls back to warm restart with a warning naming the differing fields. The
-fields are named as `ParallelismConfig`'s and the saved key set must match exactly: a meta written
-under an older fingerprint schema (a field it lacks reads `saved='<absent>'`) mismatches like any
-topology change.
+A fingerprint mismatch falls back to warm restart with a warning naming the differing keys. The
+saved key set must match exactly: a key the meta lacks reads `saved='<absent>'` and mismatches like
+any topology change. The one exception is `expert_replica_size`, which a meta written before the
+expert-replica dedup lacks: those shards hold every rank's own copy of the expert moments, so they
+restore under any replica size.
 
 Shards absent on every rank warm-restart only when nothing proves state was written. If the
 directory still holds other ranks' `optimizer_shard_*.pt` or a fingerprint-matched

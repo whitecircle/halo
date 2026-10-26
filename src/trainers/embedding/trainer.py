@@ -30,7 +30,7 @@ from src.checkpoint.adapters import (
     resume_adapter_dir,
     unmarked_merged_checkpoint_reason,
 )
-from src.checkpoint.atomic import save_safetensors_file
+from src.checkpoint.atomic import apply_umask_mode, save_safetensors_file
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
 from src.checkpoint.parallel.completeness import mark_resume_adapter_complete
 from src.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
@@ -105,6 +105,20 @@ def build_embedding_loss(model: SentenceTransformer, config: EmbeddingConfig) ->
         loss = losses.MatryoshkaLoss(model=model, loss=loss, **matryoshka_kwargs)
 
     return loss
+
+
+def _apply_umask_mode_to_module(output_dir: str, module_path: str) -> None:
+    """Give the weights a sentence-transformers module saved at ``module_path`` (its ``modules.json`` path)
+    the umask mode (:func:`~src.checkpoint.atomic.apply_umask_mode`) in place of the ``0600`` it writes them at.
+
+    A module past the first owns its folder whole, nested module folders included (a ``Router``'s
+    ``2_Router/query_0_Dense/``); the first module's path ``""`` is ``output_dir`` itself, which also holds other
+    saves' folders, so there only the files directly under it.
+    """
+    module_dir = os.path.join(output_dir, module_path)
+    folders = [folder for folder, _, _ in os.walk(module_dir)] if module_path else [module_dir]
+    for folder in folders:
+        apply_umask_mode(folder)
 
 
 class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
@@ -443,6 +457,15 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         else:
             super()._write_model_payload(ctx, output_dir, _internal_call)
 
+    def _save(self, output_dir: str | None = None, state_dict=None) -> None:
+        """sentence-transformers' save, each module's weights (``2_Dense/``, say) given the umask mode
+        (:func:`_apply_umask_mode_to_module`)."""
+        super()._save(output_dir, state_dict=state_dict)
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        with open(os.path.join(output_dir, "modules.json")) as f:
+            for module in json.load(f):
+                _apply_umask_mode_to_module(output_dir, module["path"])
+
     def _saves_rank_locally(self) -> bool:
         """Whether the backbone saves through the distributed ladder, which writes the other pipeline modules
         rank-locally: FSDP2, TP or EP."""
@@ -494,8 +517,10 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                     f"{idx}_{type(module).__name__}",
                     f"{type(module).__module__}.{type(module).__name__}",
                 )
-                os.makedirs(os.path.join(output_dir, path), exist_ok=True)
-                module.save(os.path.join(output_dir, path))
+                module_dir = os.path.join(output_dir, path)
+                os.makedirs(module_dir, exist_ok=True)
+                module.save(module_dir)
+                _apply_umask_mode_to_module(output_dir, path)
             modules_config.append({"idx": idx, "name": name, "path": path, "type": module_type})
 
         with open(os.path.join(output_dir, "modules.json"), "w") as f:

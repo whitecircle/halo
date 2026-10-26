@@ -388,9 +388,9 @@ and rebuild TRL's `RepeatSampler` at the DP consumption rate
 ([batch geometry](../training-methods/grpo/online.md#data-flow-and-batch-construction));
 Offline GRPO uses `MultiGroupSampler`.
 
-`ParallelismConfig` computes both: `data_parallel_size` is
-`world_size / pp_size / max(cp_size, tp_size, expert_tp_size)` (`stage_world_size` over the divisor), and
-`ParallelismConfig.get_data_parallel_rank()` derives the shard index per mode
+`ParallelismConfig` computes both: `data_parallel_size`
+(see [Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)) and, through
+`get_data_parallel_rank()`, each rank's shard index per mode
 ([per-mode derivation](../parallelism/data-loading.md)).
 
 `_prepare_dataloader()` passes the computed size/rank to

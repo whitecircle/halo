@@ -23,6 +23,7 @@ from src.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_file
 from src.checkpoint.parallel.reading import consensus_read
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import RolloutManager, ray_init_kwargs
+from src.environments.rollout_config import resolve_reasoning_end_token_id
 from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure, rank_consensus
 from src.runtime.ranks import get_global_rank, get_global_world_size, get_num_nodes, is_global_main_process
@@ -140,7 +141,7 @@ class AsyncRolloutMixin:
             server_urls=self.async_config.get_server_urls(),
             rollout_config=self.async_config.get_rollout_config(
                 stop_token_ids=self._rollout_stop_token_ids,
-                reasoning_end_token_id=self._resolve_reasoning_end_token_id(),
+                reasoning_end_token_id=resolve_reasoning_end_token_id(self._reasoning_end_ids),
             ),
             max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
             pool_replicas=self.accelerator.num_processes if self.async_config.ray_address is not None else 1,

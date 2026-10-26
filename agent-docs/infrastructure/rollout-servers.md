@@ -239,6 +239,11 @@ cycles there.
 final channel; they patch Model Runner V2's budget
 ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)).
 
+**The split top-p guard** (`vllm_topp_split_guard_patch.py`) adds the monolithic kernel's
+logit-space no-mask check to the split top-p pipeline vLLM runs for the top-k-off rows of a batch of at
+most 64: without it, a budget cut (the forced token's logit is 1e9) at `rollout_top_p < 1` masks the
+whole row, the engine samples token 0 and reports a NaN log-prob.
+
 **Prompt log-probs under speculative decoding.** The V1 model runner runs the drafter before it reads
 the target's hidden states for prompt log-probs. When the prefill ran as a CUDA graph (by default up
 to 512 tokens on H100/H200, 1024 on B200/B300 and for gpt-oss), the drafter's graph overwrites those
@@ -610,8 +615,9 @@ Engine behavior under RL:
   (`triton_kernel`, `flashinfer_trtllm`, `flashinfer_mxfp4`; per-family auto-selection picks one for
   many MoE shapes) bypass the capture hook and return nothing.
 
-    The trainer opts in per request and decodes the wire format (response-level
-    `sglext.routed_experts`, base64 raw int32) by the model's own layer/top-k counts. Rows cover the
+    The trainer opts in per request and decodes the wire format (base64 raw int32) by the model's own
+    layer/top-k counts. The payload sits in the `meta_info` the engine echoes per choice when the request
+    also captures sampled ids, response-level under `sglext.routed_experts` otherwise. Rows cover the
     full sequence, so prompt spans replay too.
 
     The engine's capturer is per family: it serves GptOss, Qwen3 MoE, Qwen3.5/3.6 and GLM-4 MoE Lite,
@@ -849,7 +855,8 @@ prefill chunk. The file is read once per process, so a new one needs a server re
 **Generation volume is the step-time lever** once prefetch overlaps collection into training
 (`async/prefetch_hit_rate` > 0.8): step time tracks mean episode tokens. `rollout_max_tokens` caps a
 turn; on vLLM the turn's reasoning cap (`rollout_max_thinking_tokens`, a level's enforced budget, or a soft level's
-ceiling) caps CoT engine-side; below it a soft budget, and on SGLang every budget, is held only by the reasoning terms.
+ceiling) caps CoT engine-side; below it a soft budget, and on SGLang every budget, is held only by the reasoning terms,
+which a training group with no success is not charged.
 
 **Memory.** Raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 (0.80 with
 `isr_engine_reference`, below) when the server GPUs are dedicated; more KV cache means more

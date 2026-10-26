@@ -393,8 +393,8 @@ def _calls(stmt: ast.stmt, name: str) -> list[ast.Call]:
 
 # The phase helpers ``_build_training_tensors`` is partitioned into, in call order.
 _PHASE_HELPERS = (
-    "_build_rollout_rewards",
     "_rows_for_step",
+    "_build_rollout_rewards",
     "_pad_rows_across_ranks",
     "_stack_rows",
     "_assemble_rollout_routing",
@@ -418,6 +418,16 @@ def test_build_training_tensors_routes_through_every_phase_helper():
     nested = [_method_ast("_score_step"), _method_ast("_record_step_metrics")]
     missing = [name for name in _NESTED_HELPERS if not any(_calls(phase, name) for phase in nested)]
     assert not missing, f"nested helpers no longer called: {missing}"
+
+
+def test_rewards_are_built_once_tokenizing_has_settled_the_baseline():
+    """Tokenizing drops an episode the template cannot re-render from the baseline, and the failed-group waiver of
+    the reasoning terms reads the baseline: a reward built first would count a dropped solve for its group."""
+    fn = _build_training_tensors_ast()
+    tokenized_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "_rows_for_step")]
+    rewards_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "_build_rollout_rewards")]
+    assert tokenized_at and rewards_at and max(tokenized_at) < min(rewards_at)
+    assert _calls(_method_ast("_rows_for_step"), "_tokenize_step_rows"), "the rows phase no longer tokenizes"
 
 
 def test_world_metrics_flush_once_after_every_recording_site_with_no_return_between():

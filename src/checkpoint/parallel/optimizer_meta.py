@@ -74,13 +74,16 @@ class OptimizerStateFingerprint:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        """The saved form, ``use_hsdp`` under ``hsdp``: the key every 1.x ``optimizer_meta.pt`` carries."""
+        return {("hsdp" if name == "use_hsdp" else name): value for name, value in asdict(self).items()}
 
     def mismatches(self, saved: Mapping[str, Any]) -> list[str]:
-        """The fields where the ``saved`` fingerprint dict differs from this live one; empty means its
-        shards are layout-compatible. The key sets must match exactly: a field either side lacks is a
-        mismatch, so a meta written under another fingerprint schema never restores."""
+        """The keys where the ``saved`` fingerprint dict differs from this live one's :meth:`to_dict`; empty
+        means its shards are layout-compatible. The key sets must match exactly, a key either side lacks
+        being a mismatch, except ``expert_replica_size``: a meta written before the expert-replica dedup
+        lacks it, and its shards hold the expert moments on every rank, so they restore under any layout."""
         live = self.to_dict()
+        saved = {"expert_replica_size": live["expert_replica_size"], **saved}
         absent = "<absent>"
         return [
             f"{name}: saved={saved.get(name, absent)!r} current={live.get(name, absent)!r}"

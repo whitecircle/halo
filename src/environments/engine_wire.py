@@ -146,8 +146,14 @@ def turn_from_chat_completion(data: dict[str, Any], config: RolloutConfig) -> Tu
         )
     routing_mask = None
     if config.capture_routed_experts:
-        # The raw base64 MoE routing: vLLM attaches it per choice, SGLang response-level under ``sglext``.
-        routing_mask = choice.get("routed_experts") or (data.get("sglext") or {}).get("routed_experts")
+        # The raw base64 MoE routing. vLLM attaches it per choice. SGLang leaves it in the ``meta_info`` it echoes
+        # per choice when the request asks for that (every request capturing sampled ids does), and publishes it
+        # response-level under ``sglext`` otherwise.
+        routing_mask = (
+            choice.get("routed_experts")
+            or (choice.get("meta_info") or {}).get("routed_experts")
+            or (data.get("sglext") or {}).get("routed_experts")
+        )
     return TurnGeneration(
         text=text,
         tool_calls=msg.get("tool_calls") or [],

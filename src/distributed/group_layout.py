@@ -124,19 +124,13 @@ def ep_layout(
     return layout(world_size=world_size, group_size=group_size, domain_size=domain_size)
 
 
-def reject_node_local_ep_group(
-    ep_group_size: int, domain_size: int, *, ep_size: int, expert_tp_size: int, remedy: str
-) -> None:
-    """Reject a node-local EP group that does not fit in and tile its NVLink domain.
-
-    Checked by ``ParallelismConfig`` at config time and by ``EPConfig`` at group construction; each
-    caller appends its own ``remedy``.
-    """
+def reject_node_local_ep_group(ep_group_size: int, domain_size: int, *, ep_size: int, expert_tp_size: int) -> None:
+    """Reject a node-local EP group that does not fit in and tile its NVLink domain."""
     shape = f"ep_group_size = expert_parallel_size({ep_size}) * expert_tensor_parallel_size({expert_tp_size})."
     if ep_group_size > domain_size:
         raise ValueError(
             f"Node-local EP group size ({ep_group_size}) cannot exceed the NVLink domain "
-            f"({domain_size}). {shape} {remedy}"
+            f"({domain_size}). {shape} Use ep_scope='global' for EP spanning NVLink domains (RDMA)."
         )
     if domain_size % ep_group_size != 0:
         raise ValueError(f"EP group size ({ep_group_size}) must divide the NVLink domain ({domain_size}). {shape}")
@@ -154,18 +148,13 @@ def reject_cross_node_ep_group(
         raise ValueError(f"EP group size ({ep_group_size}) must divide {scope_desc} ({scope_size}). {shape}")
 
 
-def reject_cross_node_etp_shape(
-    expert_tp_size: int, members_per_domain: int, ep_size: int, num_domains: int, *, remedy: str
-) -> None:
-    """Reject a cross-node EP+ETP shape that is not exactly one ETP group per NVLink domain.
-
-    ``ParallelismConfig`` checks it before the model loads; ``EPConfig`` re-checks it at group
-    construction, where ``remedy`` can name the offending group.
-    """
+def reject_cross_node_etp_shape(expert_tp_size: int, members_per_domain: int, ep_size: int, num_domains: int) -> None:
+    """Reject a cross-node EP+ETP shape that is not exactly one ETP group per NVLink domain."""
     if expert_tp_size != members_per_domain or ep_size != num_domains:
         raise ValueError(
             f"Cross-node EP+ETP supports one ETP group per NVLink domain only: requires "
             f"expert_tensor_parallel_size ({expert_tp_size}) == EP members per domain "
             f"({members_per_domain}) and expert_parallel_size ({ep_size}) == domains "
-            f"spanned ({num_domains}). {remedy}"
+            f"spanned ({num_domains}). Set expert_tensor_parallel_size={members_per_domain} with "
+            f"expert_parallel_size={num_domains}, or use NVLink-local EP (ep_scope='node')."
         )

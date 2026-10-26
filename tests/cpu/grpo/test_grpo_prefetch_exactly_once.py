@@ -259,13 +259,11 @@ class _LifecycleHost:
         self._last_sync_attempt_step = -1
         self._resumed_prefetch_rounds = []
         self._rollout_stop_token_ids = None
+        self._reasoning_end_ids = None
         self.callbacks: list = []
         # What the engines were handed, in order — the fingerprint of WHICH weights they serve.
         self.pushed: list[float] = []
         self.prefetch_starts = 0
-
-    def _resolve_reasoning_end_token_id(self):
-        return None
 
     def _init_weight_sync_client(self):
         self._weight_sync_client = object()

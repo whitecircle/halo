@@ -101,7 +101,18 @@ def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
 def reject_inert_reasoning_terms(async_config, env, *, budgeted: bool, every_budget_soft: bool) -> None:
     """A price with no level to read would charge nothing (a level the table misses too, and one it invents is
     a typo), a floor in a run where no episode carries a thinking cap (``budgeted``) would never fire, and a
-    price past a budget prices nothing unless every drawable budget is soft (``every_budget_soft``)."""
+    price past a budget prices nothing unless every drawable budget is soft (``every_budget_soft``). Nor may a
+    term waived in groups that earned no objective run under a reward that prices no success above zero: it
+    would charge no training episode."""
+    terms_on = async_config.reasoning_price is not None or async_config.reasoning_floor > 0
+    objective = env.objective_term if terms_on else None
+    if terms_on and not async_config.reasoning_terms_in_failed_groups and (objective is None or objective.weight <= 0):
+        raise ValueError(
+            "reasoning_price and reasoning_floor are waived in a training group no episode of which earned the "
+            "objective, but the reward prices no success above zero (no environment term, or one of weight <= 0), "
+            "so every group would read as failed and the terms would charge no training episode: give the "
+            "environment term a positive weight, or set reasoning_terms_in_failed_groups: true."
+        )
     if async_config.reasoning_price is not None:
         if env.reasoning_effort is None:
             raise ValueError(

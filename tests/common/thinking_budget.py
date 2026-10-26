@@ -97,11 +97,16 @@ def record_budget_enforcement(server_url: str, model_name: str, budget: int, tok
 
 
 class ReasoningTurnRecorder(DistributedAsyncEnvironmentalGRPOTrainer):
-    """The environmental trainer, keeping each sampled assistant turn's CoT length.
+    """The environmental trainer, keeping each assistant turn's CoT length that the checkpoint's own policy sampled.
 
     ``_log_rollout_metrics`` is the one place the trainer sees a step's episodes on every rank before
     they are reduced to means, and it is handed the step's per-turn counts. A mean would not do: the budget
     bounds each TURN, and a mean of per-episode sums can sit under it while a turn ran over.
+
+    Only the turns sampled before the first optimizer step are kept. The e2e's step is large enough to
+    leave the policy writing malformed turns, and an engine counts the budget inside the reasoning
+    channel the template opens (gpt-oss: per analysis message), so a turn that never opens one is not
+    the budget's to cap while the reasoning parser still reports all of it as reasoning.
     """
 
     def __init__(self, *args, **kwargs):
@@ -109,13 +114,14 @@ class ReasoningTurnRecorder(DistributedAsyncEnvironmentalGRPOTrainer):
         self.sampled_reasoning_tokens: list[int] = []
 
     def _log_rollout_metrics(self, results, mode: str, reasoning_tokens):
-        for tokens in reasoning_tokens:
-            self.sampled_reasoning_tokens.extend(tokens)
+        if self.state.global_step == 0:
+            for tokens in reasoning_tokens:
+                self.sampled_reasoning_tokens.extend(tokens)
         return super()._log_rollout_metrics(results, mode, reasoning_tokens)
 
 
 def record_thinking_budget_checks(trainer: ReasoningTurnRecorder, checks: dict[str, bool], budget: int) -> None:
-    """Every sampled turn reasoned within ``budget``, and at least one of them reasoned at all.
+    """Every turn the checkpoint's policy sampled reasoned within ``budget``, and at least one reasoned at all.
 
     Rank-local: each rank grades the turns it collected, so a rank whose engine ignored the budget
     fails on its own rather than behind rank 0's verdict.

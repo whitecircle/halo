@@ -3,7 +3,7 @@
 import logging
 import time
 import weakref
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import NamedTuple
 
 import torch
@@ -41,7 +41,7 @@ class _RunState:
     step_start_time: float = 0.0
     step_start_tokens_seen: int = 0
     elapsed_time: float = 0.0
-    elapsed_step: int = 0
+    step_times: list[float] = field(default_factory=list)
     elapsed_tokens_seen: int = 0  # per GPU
     elapsed_cluster_tokens: int = 0  # cluster-wide unique
     total_flops: float = 0.0
@@ -292,6 +292,12 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self._attention_source = weakref.ref(source)
         return self.flops_model.attention_layout if self.flops_model is not None else None
 
+    @property
+    def measured_step_times(self) -> tuple[float, ...]:
+        """Every measured step's time in seconds, unrounded and in order: the distribution behind
+        ``avg_step_time_seconds``."""
+        return tuple(self._run.step_times)
+
     def _initialize_once_model_arrives(self, args, kwargs) -> None:
         """Re-run :meth:`_initialize_metrics` the first time HF hands the model over (``model`` in the
         callback kwargs is the only handle it passes), since ``on_init_end`` may have run without it."""
@@ -387,10 +393,10 @@ class EfficiencyCallback(transformers.TrainerCallback):
     def _record_step_time(self) -> float:
         step_time = _step_clock() - self._run.step_start_time
         self._run.elapsed_time += step_time
-        self._run.elapsed_step += 1
+        self._run.step_times.append(step_time)
         self.time = StepTimeMetrics(
             round(step_time, _DISPLAY_DECIMALS),
-            round(self._run.elapsed_time / self._run.elapsed_step, _DISPLAY_DECIMALS),
+            round(self._run.elapsed_time / len(self._run.step_times), _DISPLAY_DECIMALS),
         )
         return step_time
 

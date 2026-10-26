@@ -30,7 +30,7 @@ DDP splits the samples across ranks and gathers on rank 0; FSDP2 and EP/ETP gene
 
 ### EfficiencyCallback
 
-Tracks token throughput, step time and GPU memory; tokens/s/GPU is the headline. MFU, S-MFU and achieved TFLOPS are computed every step but reach the log only under `report_mfu_diagnostics: true`, staying readable off `efficiency_cb.mfu` / `.smfu` / `.tps` / `.memory`. The first two steps are warmup.
+Tracks token throughput, step time and GPU memory; tokens/s/GPU is the headline. MFU, S-MFU and achieved TFLOPS are computed every step but reach the log only under `report_mfu_diagnostics: true`, staying readable off `efficiency_cb.mfu` / `.smfu` / `.tps` / `.memory`, with `.measured_step_times` holding every measured step's unrounded time in seconds. The first two steps are warmup.
 
 | Key (each as `step_*` and `avg_*`) | Meaning |
 |---|---|

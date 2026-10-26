@@ -95,7 +95,7 @@ class EPExpertLoraMixin:
         """COLLECTIVE over the dispatch-EP group. This layer's adapters gathered to the full expert count, keyed
         ``experts.<attr>.lora_{A,B}`` in matmul convention; ``{}`` without adapters or ``retain``.
 
-        Never ETP-sharded: ``EPConfig`` rejects expert LoRA under expert TP.
+        Never ETP-sharded: ``ParallelismConfig`` rejects expert LoRA under expert TP.
         """
         state: dict[str, torch.Tensor] = {}
         for attr in sorted(self._expert_lora_attrs):

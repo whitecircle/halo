@@ -30,7 +30,13 @@ from tests.common.harness import gpu_test_main
 from tests.common.on_policy_e2e import probe_top_logprobs, record_served_baseline, served_policy_moved
 from tests.common.utils import log
 from tests.common.weight_sync import VLLM_DENSE_SERVER_URL, weight_transfer_port
-from tests.common.weight_sync_reinit import CONNECTION_TIMEOUT_S, PERTURBATION, PERTURBED_PARAM, VLLM_REINIT_MODEL
+from tests.common.weight_sync_reinit import (
+    CONNECTION_TIMEOUT_S,
+    PERTURBATION,
+    PERTURBED_PARAM,
+    VLLM_REINIT_MODEL,
+    serve_the_checkpoint,
+)
 
 
 def _push(pool: WeightSyncPool, weight: torch.Tensor) -> None:
@@ -52,8 +58,10 @@ def _restore(pool: WeightSyncPool, original: torch.Tensor) -> dict[str, float] |
 def run(ctx) -> dict:
     log(f"weight-sync pool reconnect against {VLLM_DENSE_SERVER_URL}")
     checks: dict[str, bool] = {}
-    baseline = record_served_baseline(VLLM_DENSE_SERVER_URL, VLLM_REINIT_MODEL, checks)
     model = AutoModelForCausalLM.from_pretrained(VLLM_REINIT_MODEL, dtype=torch.bfloat16).to(ctx.device)
+    base_group_port = weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT")
+    serve_the_checkpoint(VLLMWeightSyncClient, VLLM_DENSE_SERVER_URL, model, ctx.device, base_group_port)
+    baseline = record_served_baseline(VLLM_DENSE_SERVER_URL, VLLM_REINIT_MODEL, checks)
     param = dict(model.named_parameters())[PERTURBED_PARAM]
     original = param.detach().clone()
     with torch.no_grad():
@@ -63,7 +71,7 @@ def run(ctx) -> dict:
         [{"url": VLLM_DENSE_SERVER_URL}],
         connection_timeout=CONNECTION_TIMEOUT_S,
         client_cls=VLLMWeightSyncClient,
-        base_group_port=weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT"),
+        base_group_port=base_group_port,
     )
     begin = VLLMWeightSyncClient._start_engine_update
     opened_by: list[VLLMWeightSyncClient] = []

@@ -42,7 +42,6 @@ from src.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.distributed import snapshot_full_weights
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.tolerances import TOL
 from tests.common.utils import log, step_losses
 
 MODEL_NAME = QWEN3_0_6B
@@ -64,12 +63,11 @@ SEED = 42
 # ~0, the KL clamps to 0, and a sign-flipped or KL-free implementation lands on the same number.
 PINNED_STEP = NUM_TRAIN_STEPS
 
-# TRL's `selective_log_softmax` keeps bf16 logits in bf16 while this reference is fp32; that dtype
-# gap is the whole residual (measured 4.0e-3 on the loss, 7.4e-3 on KL, against controls off by >0.53).
-LOSS_REL_TOL = TOL.exact_objective_rel
-# Absolute, because each sequence log-prob sums ~40 bf16 per-token terms whose error does not cancel.
-# The two groups sit ~10 nats apart, so a swapped split still misses by two orders of magnitude.
-LOGPS_ABS_TOL = 0.2
+# The trainer scores KTO's log-probs in fp32 like this reference, so the pinned loss and KL agree to
+# fp32 rounding (measured below 1e-6); the controls miss by >0.5.
+LOSS_REL_TOL = 1e-3
+# The two groups sit ~13 nats apart, so a swapped split still misses by three orders of magnitude.
+LOGPS_ABS_TOL = 2e-2
 # Clear of TRL's clamp, or the `kl` pin compares 0.0 with 0.0 and holds for a trainer with no KL term.
 MIN_LIVE_KL = 0.1
 # A control must show the pin would FAIL, so its threshold IS the pin's tolerance.

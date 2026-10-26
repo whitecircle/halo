@@ -29,8 +29,9 @@ import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.moe_layer.grad_sync import build_router_grad_hook
+from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from tests.common.parallelism import stubbed_process_groups
+from tests.common.parallelism import built_ep_config, make_parallelism_config, stubbed_process_groups
 
 _GS_MOD = "src.distributed.expert_parallel.moe_layer.grad_sync"
 # The trainer-side sweep, whose globals the deferred-sync tests patch.
@@ -130,38 +131,46 @@ def test_defer_true_under_pp_for_pure_etp():
     assert cfg.defer_grad_sync
 
 
+def _parallelism_config(world, stage, ep_size, etp, ep_scope, fsdp_shard_ep1_experts) -> ParallelismConfig:
+    return make_parallelism_config(
+        world_size=world,
+        pp_size=world // stage,
+        ep_size=ep_size,
+        expert_tp_size=etp,
+        ep_scope=ep_scope,
+        fsdp_shard_ep1_experts=fsdp_shard_ep1_experts,
+    )
+
+
+def _admitted(*topology) -> bool:
+    """Whether ``ParallelismConfig``, the gate every run's ``EPConfig`` is built behind, admits the shape."""
+    try:
+        _parallelism_config(*topology)
+    except ValueError:
+        return False
+    return True
+
+
 _TOPOLOGIES = [
-    # (world, stage, ep_size, expert_tp_size, node_local, fsdp_shard_ep1_experts)
-    (world, stage, ep, etp, node_local, managed)
+    # (world, stage, ep_size, expert_tp_size, ep_scope, fsdp_shard_ep1_experts)
+    (world, stage, ep, etp, ep_scope, managed)
     for world, stage in ((8, 8), (16, 16), (16, 8), (32, 16))
     for ep, etp in ((1, 1), (1, 2), (2, 1), (4, 2), (8, 1))
-    for node_local in (True, False)
+    for ep_scope in ("node", "global")
     for managed in (True, False)
-    if stage % (ep * etp) == 0 and not (node_local and ep * etp > 8)
+    if _admitted(world, stage, ep, etp, ep_scope, managed)
 ]
 
 
-@pytest.mark.parametrize(("world", "stage", "ep_size", "etp", "node_local", "managed"), _TOPOLOGIES)
-def test_every_topology_with_expert_replicas_defers_their_sync(world, stage, ep_size, etp, node_local, managed):
+@pytest.mark.parametrize(("world", "stage", "ep_size", "etp", "ep_scope", "managed"), _TOPOLOGIES)
+def test_every_topology_with_expert_replicas_defers_their_sync(world, stage, ep_size, etp, ep_scope, managed):
     """The global norm sums expert shards within the dispatch group only, which is right only if the
     clip's sweep has already made every replica's expert grads identical: so every topology with
     expert replicas (more than one EP group) defers, unless FSDP2 owns the experts — and then they
     are DTensors outside the expert bucket, normed over their FSDP shard group instead."""
-    try:
-        cfg, _ = _make_ep(
-            0,
-            world_size=world,
-            stage_world_size=stage,
-            ep_size=ep_size,
-            expert_tp_size=etp,
-            nvlink_domain_size=8,
-            node_local=node_local,
-            fsdp_shard_ep1_experts=managed,
-        )
-    except ValueError as rejected:
-        pytest.skip(f"EPConfig rejects this layout: {rejected}")
+    cfg = built_ep_config(_parallelism_config(world, stage, ep_size, etp, ep_scope, managed))
     if cfg.num_ep_groups > 1:
-        assert cfg.defer_grad_sync or cfg.experts_fsdp_managed, (world, stage, ep_size, etp, node_local, managed)
+        assert cfg.defer_grad_sync or cfg.experts_fsdp_managed, (world, stage, ep_size, etp, ep_scope, managed)
     if cfg.experts_fsdp_managed:
         assert cfg.ep_group_size == 1
 

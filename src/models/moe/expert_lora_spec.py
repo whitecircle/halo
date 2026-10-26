@@ -71,8 +71,7 @@ def expert_target_projections(target: str) -> frozenset[str] | None:
 
 def reject_expert_lora_with_expert_tp() -> None:
     """Raise for native expert LoRA under expert TP: adapters are never ETP-sharded, so the replicated
-    half would take a partial gradient. ``ParallelismConfig`` checks it before the checkpoint downloads,
-    ``EPConfig`` again for a hand-built config."""
+    half would take a partial gradient. ``ParallelismConfig`` checks it before the checkpoint downloads."""
     raise ValueError(
         "Expert LoRA is not supported with expert_tensor_parallel_size > 1: the replicated "
         "adapter half receives partial gradients under expert TP and drifts across ranks. "

@@ -81,22 +81,18 @@ def is_output_shared_filesystem() -> bool:
     return _shared_filesystem_flag(_OUTPUT_SHARED_FILESYSTEM_VAR, is_shared_filesystem())
 
 
-def _env_shared_filesystem_flags() -> dict[str, bool]:
-    """This rank's three flags from its environment, bypassing the memo: they are the consensus input."""
-    umbrella = env_flag(_SHARED_FILESYSTEM_VAR, default=True)
-    return {
-        _SHARED_FILESYSTEM_VAR: umbrella,
-        _INPUT_SHARED_FILESYSTEM_VAR: env_flag(_INPUT_SHARED_FILESYSTEM_VAR, default=umbrella),
-        _OUTPUT_SHARED_FILESYSTEM_VAR: env_flag(_OUTPUT_SHARED_FILESYSTEM_VAR, default=umbrella),
-    }
-
-
 def resolve_shared_filesystem_consensus() -> None:
     """COLLECTIVE: agree the three flags across ranks, rank 0's values winning with a warning, and memoize
     them once, at the end, so no reader sees a half-resolved state. The flags pick the coordination
     scope, so ranks that disagree would wait in different scopes."""
     global _shared_filesystem_consensus
-    local = _env_shared_filesystem_flags()
+    # Read from the environment, bypassing the memo: this rank's flags are the consensus input.
+    umbrella = env_flag(_SHARED_FILESYSTEM_VAR, default=True)
+    local = {
+        _SHARED_FILESYSTEM_VAR: umbrella,
+        _INPUT_SHARED_FILESYSTEM_VAR: env_flag(_INPUT_SHARED_FILESYSTEM_VAR, default=umbrella),
+        _OUTPUT_SHARED_FILESYSTEM_VAR: env_flag(_OUTPUT_SHARED_FILESYSTEM_VAR, default=umbrella),
+    }
     agreed = broadcast_from_rank0(local)
     disagreed = [var for var, value in agreed.items() if local[var] != value]
     if disagreed:
@@ -116,13 +112,6 @@ def resolve_shared_filesystem_consensus() -> None:
             "Shared-filesystem scope: %s (set DIST_SHARED_FILESYSTEM=0 for per-node local storage).",
             {var: ("shared" if value else "per-node") for var, value in agreed.items()},
         )
-
-
-def ensure_shared_filesystem_consensus() -> None:
-    """COLLECTIVE on its first call only: agree the flags if no consensus has been taken yet, for a phase
-    that can precede ``init_distributed``."""
-    if _shared_filesystem_consensus is None:
-        resolve_shared_filesystem_consensus()
 
 
 def reset_shared_filesystem_consensus() -> None:
@@ -190,8 +179,10 @@ def fs_aware_main_first(tag: str, timeout: datetime.timedelta | None = None):
 def hub_metadata_main_first(tag: str, fetch: Callable[[], Any]) -> Any:
     """Run a small hub metadata read (``AutoConfig``, ``AutoTokenizer``, ...) main-rank-first and return
     its result, under a short bound so a tag entered from a rank-dependent branch fails by name. It can
-    be the run's first coordinated phase, before ``init_distributed``."""
-    ensure_shared_filesystem_consensus()
+    be the run's first coordinated phase, before ``init_distributed``, so it takes the shared-filesystem
+    consensus when none has been taken yet."""
+    if _shared_filesystem_consensus is None:
+        resolve_shared_filesystem_consensus()
     with fs_aware_main_first(f"hub_meta/{tag}", timeout=_HUB_METADATA_TIMEOUT):
         return fetch()
 

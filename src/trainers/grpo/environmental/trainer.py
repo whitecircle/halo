@@ -10,7 +10,7 @@ from trl.extras.profiling import profiling_context
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.environment_base import EnvironmentBase
 from src.environments.messages import task_prompt
-from src.environments.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
+from src.environments.reasoning_effort import has_thinking_budget, resolve_reasoning_effort, stable_reasoning_effort
 from src.environments.rollout_config import RANDOM_REASONING_EFFORT, resolve_rollout_stop_token_ids
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.distributed_trainer import DistributedTrainerMixin
@@ -129,7 +129,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         reject_inert_reasoning_terms(
             self.async_config,
             self._rollout_env,
-            budgeted=self._any_episode_budgeted,
+            budgeted=has_thinking_budget(self._efforts_by_level()),
             every_budget_soft=self._every_budget_soft,
         )
         self._configure_rollout_state()

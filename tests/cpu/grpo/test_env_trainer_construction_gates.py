@@ -40,8 +40,9 @@ from transformers import CONFIG_MAPPING
 from trl import GRPOConfig, GRPOTrainer
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.environments.reasoning_effort import has_thinking_budget
 from src.environments.registry import build_environment
-from src.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND
+from src.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND, resolve_reasoning_end_token_id
 from src.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
@@ -297,7 +298,7 @@ def _check_reasoning_terms(host) -> None:
     reject_inert_reasoning_terms(
         host.async_config,
         host._rollout_env,
-        budgeted=host._any_episode_budgeted,
+        budgeted=has_thinking_budget(host._efforts_by_level()),
         every_budget_soft=host._every_budget_soft,
     )
 
@@ -441,9 +442,20 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
     ), warnings
 
 
+def test_the_marker_warning_is_logged_once_by_the_main_process_under_the_trainers_name(caplog, monkeypatch):
+    """Every rank resolves the marker, so a warning each logged would repeat once per rank."""
+    for is_main, expected in ((True, 1), (False, 0)):
+        monkeypatch.setattr(PartialState, "is_main_process", property(lambda self, is_main=is_main: is_main))
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            assert _forced_close_ids(_close_host({"high": 16384}, knows_close=False)) is None
+        warnings = [r.name for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == ["src.trainers.grpo.environmental.reasoning"] * expected, (is_main, warnings)
+
+
 def _count_end_id(budgets: dict, knows_close: bool = True, **config) -> int | None:
     """The id the rollout counts a turn's reasoning up to, off the marker construction resolved."""
-    return _close_host(budgets, knows_close, **config)._resolve_reasoning_end_token_id()
+    return resolve_reasoning_end_token_id(_close_host(budgets, knows_close, **config)._reasoning_end_ids)
 
 
 def test_the_reasoning_count_reads_up_to_a_one_token_close_on_every_budgeted_vllm_run():

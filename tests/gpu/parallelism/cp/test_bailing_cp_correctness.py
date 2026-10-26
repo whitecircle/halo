@@ -160,7 +160,7 @@ def check_attention_equivalence(model: nn.Module, cp_group, rank: int, cp_size: 
         "scaling": wrapper.scaling == config.head_dim**-0.5,
         "use_qk_norm": wrapper.use_qk_norm == config.use_qk_norm,
         "output_projection": getattr(wrapper.original_attention, wrapper.OUTPUT_PROJECTION) is attn.dense,
-        "rotary_dim": cos.shape[-1] == int(config.head_dim * config.partial_rotary_factor),
+        "rotary_dim": cos.shape[-1] == int(config.head_dim * config.rope_parameters["partial_rotary_factor"]),
     }
     for name, passed in structural.items():
         if not passed:

@@ -24,6 +24,7 @@ Standard library only: the launcher process imports this module and stays free o
 import json
 import os
 import shlex
+import statistics
 import sys
 from collections.abc import Iterator
 
@@ -127,8 +128,16 @@ def _emit_bench_line(key: str, metrics: dict) -> None:
 
 def emit_benchmark(key: str, cb) -> None:
     """Print this rank's training-throughput line for ``key``, the golden ``tests/baselines/bench/<key>.json``
-    (e.g. ``"sft_ep_gpt-oss-20b_ep8_s4096"``): the :func:`snapshot_efficiency` of ``cb``."""
-    _emit_bench_line(key, snapshot_efficiency(cb))
+    (e.g. ``"sft_ep_gpt-oss-20b_ep8_s4096"``): the :func:`snapshot_efficiency` of ``cb``, plus the mean and the
+    median of its measured step times in milliseconds, fine enough for the band to tell a mean a few stalled
+    steps moved from a slower steady step."""
+    step_ms = [seconds * 1e3 for seconds in cb.measured_step_times]
+    metrics = {
+        **snapshot_efficiency(cb),
+        "mean_step_time_ms": round(statistics.fmean(step_ms), BENCH_DECIMALS),
+        "median_step_time_ms": round(statistics.median(step_ms), BENCH_DECIMALS),
+    }
+    _emit_bench_line(key, metrics)
 
 
 def emit_save_benchmark(key: str, seconds: float, peak_rss_gib: float) -> None:

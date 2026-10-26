@@ -39,6 +39,7 @@ Environments add task-specific `outcome/*` and `reward/*` keys through their `ro
 | Metric | Meaning |
 |---|---|
 | `outcome/all_pass_group_frac` / `all_fail_group_frac` | Groups every / no valid member solved, by the environment's solve verdict (absent without one). High values: the task is too easy / too hard |
+| `outcome/reasoning_terms_waived_frac` | Training episodes whose group earned no objective, so neither reasoning term was charged ([Failed groups](reasoning.md#failed-groups)). It counts episodes by the settled objective, which a veto zeroes, so it can exceed `all_fail_group_frac`. The train `reward/reasoning_*` means average in the waived zeros |
 | `sampling/degenerate_group_frac` | Groups whose valid members' settled environment rewards are all equal, or with fewer than two valid members; logged in train rounds under `drop_degenerate_groups` |
 | `logps/advantage_cov` | Covariance of each loss token's pre-update log-prob with its advantage. It pools contexts, so its sign need not match the `entropy` trend, which [`advantage/net_token_mass`](objective.md#token-mass-balance) predicts |
 

@@ -122,6 +122,11 @@ class EpisodeScoringMixin:
         """The episode reward's terms, as configured."""
         return self._rewards.terms
 
+    @property
+    def objective_term(self) -> EnvironmentTerm | None:
+        """The reward's term pricing this environment's own grade, or ``None`` when the reward prices none."""
+        return self._rewards.environment_term
+
     @classmethod
     def shaping_components(cls) -> frozenset[str]:
         """The shaping component names this class may add: every ``SHAPING_COMPONENTS`` along the MRO."""

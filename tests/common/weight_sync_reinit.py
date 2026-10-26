@@ -79,6 +79,18 @@ def _sync(
         client.close_communicator()
 
 
+def serve_the_checkpoint(
+    client_class: type[WeightSyncClientBase], server_url: str, model, device: torch.device, group_port: int
+) -> None:
+    """Push the loaded checkpoint whole, so a suite's baseline is the policy its restore returns to.
+
+    The server outlives the rows of a tier, and an on-policy row before this one leaves its trained
+    weights served; a restore that re-pushes only the perturbed tensor could not reach a baseline taken
+    over those.
+    """
+    _sync(client_class, server_url, ((name, t.detach()) for name, t in model.named_parameters()), device, group_port)
+
+
 def _probe_or_none(server_url: str, model_name: str) -> dict[str, float] | None:
     """The served policy's fingerprint, or ``None`` if the server can no longer produce one."""
     try:
@@ -103,8 +115,6 @@ def run_reinit_cycles(
     drawn once (``group_port_knob`` pins it) and rebound by every cycle."""
     log(f"{client_class.BACKEND_NAME} weight-transfer re-init: {cycles} cycles against {server_url}")
     checks: dict[str, bool] = {}
-    baseline = record_served_baseline(server_url, model_name, checks)
-
     model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16).to(ctx.device)
     param = dict(model.named_parameters())[PERTURBED_PARAM]
     original = param.detach().clone()
@@ -112,6 +122,8 @@ def run_reinit_cycles(
     # Itself part of the invariant: close_communicator must release the port on both ends or the next
     # cycle cannot form its group.
     group_port = weight_transfer_port(group_port_knob)
+    serve_the_checkpoint(client_class, server_url, model, ctx.device, group_port)
+    baseline = record_served_baseline(server_url, model_name, checks)
     probes = [baseline]
     errors: list[str] = []
     # Both baselines are taken after the first cycle: the first sync loads the NCCL library, sizes

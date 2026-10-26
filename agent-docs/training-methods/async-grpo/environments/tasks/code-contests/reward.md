@@ -1,7 +1,8 @@
 # Reward
 
-An episode's reward is the solve, small shaping rungs around it, the trainer's reasoning length terms, and an audit
-judge whose veto zeroes an episode's credit and whose weighted checks charge a fixed price. Recipe values: [Shipped recipes](README.md#shipped-recipes).
+An episode's reward is the solve, small shaping rungs around it, the trainer's reasoning length terms (not charged in
+a training group with no success), and an audit judge whose veto zeroes an episode's credit and whose weighted checks
+charge a fixed price. Recipe values: [Shipped recipes](README.md#shipped-recipes).
 
 ## Reward ladder
 

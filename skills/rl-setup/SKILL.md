@@ -29,8 +29,8 @@ cannot import vLLM (the server image ships its own torch and
 image's PyTorch 2.11+cu130 + `transformers 5.20`). Build gates keep the sync honest —
 layerwise-reload skip-list coverage, the weight-transfer re-init patch and wire contract,
 the `/pause mode=keep` cache reset the client pauses with, a per-family config-schema parity
-check through vLLM's own `ModelConfig`, the thinking-budget patches and the gpt-oss
-parser-plugin verifier — so a green build is what proves the server can be synced
+check through vLLM's own `ModelConfig`, the thinking-budget patches, the split top-p guard
+and the gpt-oss parser-plugin verifier — so a green build is what proves the server can be synced
 (`wiring.md` §1).
 Trainer and vLLM communicate over **HTTP** (generation) and **NCCL** (weight
 sync via the engine client in `src/weight_sync/`). For concrete commands, field-by-field references,
@@ -113,6 +113,7 @@ and full launch examples see [`wiring.md`](wiring.md).
    (`reasoning_price` per level per 1k tokens with `reasoning_price_cap`, `reasoning_floor`; the price and
    the floor off by default) price an episode's reasoning length and its shortfall against three quarters
    of its per-turn budget; `reasoning_price_past_budget` prices only what each turn reasons past a soft budget.
+   Neither is charged in a training group that earned no objective unless `reasoning_terms_in_failed_groups`.
 
 ## Parallelism note
 

@@ -95,6 +95,10 @@ if FAMILY not in _FAMILIES:
 TEXT_CONFIG = _FAMILIES[FAMILY]["text"]
 # Step-1 loss vs the unsplit fp32 composite: the trainer runs bf16, the reference fp32.
 LOSS_REL_TOL = 2e-2
+# Reloaded eval vs the logged one: the run evaluates its fp32 masters under bf16 autocast, the artifact
+# holds them rounded to bf16, and the precision a bf16 reload is evaluated in alone moves the eval of
+# this tiny model by 3e-4 relative. A missing or misplaced tensor moves it by orders of magnitude more.
+EVAL_REL_TOL = 1e-3
 
 
 def build_composite(dtype=torch.float32):
@@ -293,7 +297,7 @@ def run(ctx):
             ]
             reference_eval = sum(shard_means) / len(shard_means)
             log(f"[reload] reference eval={reference_eval:.6f} logged={eval_losses[-1]:.6f}")
-            if abs(reference_eval - eval_losses[-1]) / abs(reference_eval) > 1e-4:
+            if abs(reference_eval - eval_losses[-1]) / abs(reference_eval) > EVAL_REL_TOL:
                 reload_ok = False
         except Exception as exc:
             log(f"[reload] FAILED: {exc!r}")

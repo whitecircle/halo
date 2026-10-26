@@ -174,8 +174,9 @@ to make the budget soft:
   budget. Every level the run can draw must then be soft.
 
 `reasoning_floor` reads either kind: it charges an episode whose reasoning, summed over its turns, falls
-short of three quarters of the per-turn budget. All the code-contests recipes run soft budgets (8,192 /
-12,288 / 16,384 tokens for low / medium / high), priced past the budget
+short of three quarters of the per-turn budget. Neither term is charged in a training group where no episode
+earned the objective. All the code-contests recipes run soft budgets (8,192 / 12,288 / 16,384 tokens for
+low / medium / high), priced past the budget
 ([Enforced and soft budgets](../../agent-docs/training-methods/async-grpo/reasoning.md#enforced-and-soft-budgets) ↗).
 
 ### One server or several

@@ -313,12 +313,15 @@ def test_the_fingerprinted_replica_size_is_what_the_dedup_actually_writes(topolo
 
 
 @pytest.mark.parametrize("live_groups", [1, 2, 64])
-def test_a_meta_without_the_replica_size_mismatches_every_layout(live_groups):
-    """No compatibility shape: a meta written before the field existed restores under no replica layout,
-    and the mismatch names the field it lacks."""
+def test_a_pre_dedup_meta_is_compatible_with_every_replica_size(live_groups):
+    """A meta written before the field existed must resume under ANY replica layout, not just one.
+
+    Those shards hold the expert moments on every rank (nothing was stripped), so they restore whatever
+    the live replica size is. Reading the absent field as a value would discard the optimizer state
+    world-wide (a raise under PP) for a topology that never changed.
+    """
     saved = {k: v for k, v in _fingerprint(2).to_dict().items() if k != "expert_replica_size"}
-    live = _fingerprint(live_groups)
-    assert live.mismatches(saved) == [f"expert_replica_size: saved='<absent>' current={live.expert_replica_size}"]
+    assert not _fingerprint(live_groups).mismatches(saved)
 
 
 if __name__ == "__main__":

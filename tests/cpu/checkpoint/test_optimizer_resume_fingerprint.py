@@ -18,7 +18,6 @@ Consensus outcomes that cannot occur single-process are simulated by monkeypatch
 """
 
 import os
-from dataclasses import fields
 
 import pytest
 import torch
@@ -31,6 +30,26 @@ from src.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
 from src.checkpoint.parallel.sidecars import restore_lr_scheduler
 from src.runtime.consensus import RankConsensus
 from tests.common.checkpoint_io import load_context
+
+# What a 1.1.0 save wrote to optimizer_meta.pt, verbatim: one rank, AdamW, no parallelism.
+SAVED_BY_1_1_0 = {
+    "num_ranks": 1,
+    "fingerprint": {
+        "world_size": 1,
+        "ep_size": 1,
+        "expert_tp_size": 1,
+        "cp_size": 1,
+        "tp_size": 1,
+        "pp_size": 1,
+        "fsdp_shard_ep1_experts": True,
+        "optimizer_class": "AdamW",
+        "ep_scope": "node",
+        "use_grouped_gemm": True,
+        "hsdp": False,
+        "nvlink_domain_size": 1,
+        "expert_replica_size": 1,
+    },
+}
 
 
 def _stub_consensus(patcher, fake) -> None:
@@ -144,13 +163,20 @@ def test_dict_round_trip():
     assert fp.mismatches(fp.to_dict()) == []
 
 
-@pytest.mark.parametrize("field", [field.name for field in fields(OptimizerStateFingerprint)])
-def test_a_saved_fingerprint_missing_a_field_mismatches(field):
-    """No compatibility shapes: a meta written before a field existed, or under its old name, differs
-    from every live run and warm-restarts (raises under PP) as any topology change does."""
+def test_the_saved_fingerprint_keeps_the_keys_1_1_0_wrote():
+    """The on-disk keys, in order, are the ones every 1.x meta carries (``use_hsdp`` saved as ``hsdp``): a
+    renamed key would warm-restart every existing shard set."""
+    live = _live_fp(torch.optim.AdamW(_TinyModel().parameters()))
+    assert list(live.to_dict()) == list(SAVED_BY_1_1_0["fingerprint"])
+
+
+@pytest.mark.parametrize("key", [key for key in SAVED_BY_1_1_0["fingerprint"] if key != "expert_replica_size"])
+def test_a_saved_fingerprint_missing_a_key_mismatches(key):
+    """A meta lacking any key but the replica size differs from every live run and warm-restarts (raises
+    under PP) as any topology change does."""
     live = _live_fp(_sgd(_TinyModel()))
-    saved = {name: value for name, value in live.to_dict().items() if name != field}
-    assert any(mismatch.startswith(f"{field}: saved='<absent>'") for mismatch in live.mismatches(saved))
+    saved = {name: value for name, value in live.to_dict().items() if name != key}
+    assert live.mismatches(saved) == [f"{key}: saved='<absent>' current={live.to_dict()[key]!r}"]
 
 
 def test_a_saved_field_the_live_run_lacks_mismatches():
@@ -165,13 +191,14 @@ def test_shape_preserving_topology_knobs_are_fingerprinted():
     succeeds and reports success on permuted or silently reinitialized state."""
     sgd = _sgd(_TinyModel())
     live = _live_fp(sgd, _StubParallelismConfig(ep_size=8), world_size=16)
-    for field, other in (
-        ("ep_scope", "global"),
-        ("use_grouped_gemm", False),
-        ("use_hsdp", True),
-        ("nvlink_domain_size", 4),
+    for knob, other, key in (
+        ("ep_scope", "global", "ep_scope"),
+        ("use_grouped_gemm", False, "use_grouped_gemm"),
+        ("use_hsdp", True, "hsdp"),
+        ("nvlink_domain_size", 4, "nvlink_domain_size"),
     ):
-        assert any(m.startswith(f"{field}:") for m in live.mismatches({**live.to_dict(), field: other})), field
+        saved = _live_fp(sgd, _StubParallelismConfig(ep_size=8, **{knob: other}), world_size=16).to_dict()
+        assert [m.split(":")[0] for m in live.mismatches(saved)] == [key], knob
 
 
 def test_mismatches_names_fields_with_values():
@@ -191,6 +218,22 @@ def test_matching_fingerprint_restores(tmp_path, monkeypatch):
     monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", restore)
 
     OptimizerShardStore(_ctx(model, optimizer)).load(str(tmp_path))
+
+    assert len(restore.calls) == 1
+
+
+def test_a_meta_written_by_1_1_0_resumes_exactly(tmp_path, monkeypatch):
+    """A 1.1.0 shard set restores into the same topology: its meta passes every gate, so the moments
+    restore rather than warm-restarting."""
+    model = _TinyModel()
+    optimizer = torch.optim.AdamW(model.parameters())
+    _write_checkpoint(tmp_path, fingerprint=SAVED_BY_1_1_0["fingerprint"], num_ranks=SAVED_BY_1_1_0["num_ranks"])
+    restore = _Recorder()
+    monkeypatch.setattr(optimizer_mod, "set_optimizer_state_dict", restore)
+
+    OptimizerShardStore(_ctx(model, optimizer, parallelism_config=_StubParallelismConfig(nvlink_domain_size=1))).load(
+        str(tmp_path)
+    )
 
     assert len(restore.calls) == 1
 
