@@ -20,8 +20,8 @@ Usage:
         tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit.py
 """
 
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.env import env_int, env_str
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.harness import gpu_test_main
 from tests.common.weight_sync import VLLM_DENSE_SERVER_URL
 from tests.common.weight_sync_reinit import VLLM_REINIT_MODEL, run_reinit_cycles

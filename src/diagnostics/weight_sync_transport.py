@@ -3,10 +3,11 @@
 Every failure of that group is a hang, not an error: two containers on different NCCL nets, on
 different aws-ofi-nccl builds, or with cuMem enabled on one side only all form the group and then
 spin at the first collective. This forms the group against a live server with the toolkit's own
-client, pushes one real checkpoint parameter (its unchanged value, so the served model is unchanged),
-and reads the transport NCCL chose out of its own debug log — ``NET/Libfabric/.../GDRDMA`` is EFA
-with GPUDirect, ``NET/IB`` NCCL's own InfiniBand transport, ``NET/Socket`` TCP over the host network,
-``P2P/CUMEM`` same-host CUDA IPC and ``SHM`` same-host shared memory.
+client, pushes one real checkpoint parameter through the trainer's streamed path (its unchanged
+value, so the served model is unchanged), and reads the transport NCCL chose out of its own debug log
+— ``NET/Libfabric/.../GDRDMA`` is EFA with GPUDirect, ``NET/IB`` NCCL's own InfiniBand transport,
+``NET/Socket`` TCP over the host network, ``P2P/CUMEM`` same-host CUDA IPC and ``SHM`` same-host
+shared memory.
 
 The pushed value is the checkpoint's own, so the served model is unchanged as long as the
 checkpoint named (``--model-id``, else the id the server advertises) is the one the server loaded;
@@ -40,8 +41,9 @@ from huggingface_hub.errors import (
 from safetensors import safe_open
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE
-from src.distributed.nccl.clients.base import BaseWeightSyncClient, payload_bytes, resolve_sync_device
-from src.distributed.nccl.registry import resolve_weight_sync_client
+from src.weight_sync.chunking import resolve_sync_device
+from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -224,18 +226,21 @@ def load_checkpoint_tensor(
         return name, fh.get_tensor(name)
 
 
-def served_model_id(client: BaseWeightSyncClient) -> str:
+def served_model_id(client: WeightSyncClientBase) -> str:
     """The model id the server advertises on the OpenAI route both engines serve."""
-    cards = client.served_model_cards(timeout=_HTTP_TIMEOUT_S)
+    cards = client.request("GET", "/v1/models", retry=True, timeout=_HTTP_TIMEOUT_S).json().get("data", [])
     if not cards:
         raise RuntimeError(f"{client.base_url}/v1/models lists no model")
     return cards[0]["id"]
 
 
-def greedy_completion(client: BaseWeightSyncClient, model_id: str) -> str:
+def greedy_completion(client: WeightSyncClientBase, model_id: str) -> str:
     """A deterministic completion, compared before and after the push to prove the model unchanged."""
-    resp = client.session.post(
-        f"{client.base_url}/v1/completions",
+    resp = client.request(
+        "POST",
+        "/v1/completions",
+        retry=True,
+        timeout=_HTTP_TIMEOUT_S,
         json={
             "model": model_id,
             "prompt": _COMPLETION_PROMPT,
@@ -243,9 +248,7 @@ def greedy_completion(client: BaseWeightSyncClient, model_id: str) -> str:
             "temperature": 0,
             "seed": 0,
         },
-        timeout=_HTTP_TIMEOUT_S,
     )
-    resp.raise_for_status()
     return resp.json()["choices"][0]["text"]
 
 
@@ -286,7 +289,7 @@ def run_preflight(
     served = served_model_id(client)
     checkpoint = model_id or served
     param, tensor = load_checkpoint_tensor(checkpoint, param, revision=revision, device=str(torch_device))
-    nbytes = payload_bytes(tensor)
+    nbytes = tensor.nbytes
     before = greedy_completion(client, served)
 
     started = time.perf_counter()
@@ -298,7 +301,8 @@ def run_preflight(
             if torch_device.type == "cuda":
                 torch.cuda.synchronize(torch_device)
             started = time.perf_counter()
-            client.sync_model_weights([(param, tensor)])
+            client.update_named_param(param, tensor)
+            client.reset_prefix_cache()
             if torch_device.type == "cuda":
                 torch.cuda.synchronize(torch_device)
             rates_gbps.append(nbytes / (time.perf_counter() - started) / 1e9)

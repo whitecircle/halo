@@ -95,7 +95,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - **Rollout-engine support is not a family declaration.** Both pinned engines read the layout `gather_expert_state_dict` already emits, so nothing here is per engine.
 
-    Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `src/distributed/nccl/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `validate_weight_sync_support` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+    Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `validate_weight_sync_support` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 - `_EXPORT_KEY_RENAMES` — `(module spelling, hub spelling)` pairs for a family whose in-library module names differ from its checkpoint's inside an EP layer. The gathered save and the RL weight sync revert transformers' own `WeightRenaming` entries off the load's record, but the key-by-key paths with no model behind them — the lazy loader and `merge_ep_shards.py` — read only these pairs.
 

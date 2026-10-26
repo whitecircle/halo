@@ -144,6 +144,8 @@ The trainer's tokenizer renders each prompt and TRL sends vLLM the **token ids**
 - **In-process generation** (`use_vllm: false`, `vllm_mode: colocate`), at init: two NCCL worlds on the same GPUs deadlock ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)).
 - **TRL's tool-calling loop** (`tools`, `environment_factory`), which desynchronizes ranks. Tool use trains on [Async GRPO with Environments](../async-grpo/README.md).
 
+TRL generates through `TrlVLLMClient` (`src/trainers/grpo/rollout/trl_vllm_client.py`): one batched `/v1/completions` request per round, bounded by `HALO_VLLM_GENERATION_TIMEOUT_SECONDS`. The completion ids are the server's sampled ids (`return_token_ids`); a server that omits them is refused rather than re-tokenized. TRL's `vllm_structured_outputs_regex` goes out as vLLM's `structured_outputs.regex`. The route is text-only, so a prompt with an image raises.
+
 Before the trainer is built, every rank raises if `max_prompt_length + max_completion_length` exceeds the served `max_model_len`.
 
 > [!WARNING]

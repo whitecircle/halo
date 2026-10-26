@@ -17,12 +17,12 @@ import src.environments.engine_wire as engine_wire
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.rollout_config import RolloutConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.ray_actors import EnvironmentActor
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.weight_sync import StockModel, offline_client
 
 # --- Registry — derived from the client hierarchy, not a hand-maintained table ---
@@ -289,14 +289,6 @@ def _sampler_fields(body: dict) -> dict:
     return {key: body.get(key) for key in _FILTERS}
 
 
-class _JsonReply:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def json(self):
-        return self._payload
-
-
 def test_the_filter_defaults_are_the_engines_off_values():
     """Pinned literally. Both engines fill an omitted filter from the model's generation_config.json
     (vLLM `--generation-config auto`, SGLang `--sampling-defaults model`; Qwen3.6 ships top_k 20), so the
@@ -321,24 +313,6 @@ def test_rollout_and_eval_requests_carry_the_configured_filters(backend, filters
         == expected
     )
     assert _sampler_fields(engine_wire.generation_control_fields(config)) == expected
-
-
-def test_online_generation_states_trl_s_filters():
-    """TRL's generation layer hands the client top_k 0, min_p 0.0 and repetition_penalty 1.0 by default.
-    vLLM's completions route fills an omitted field from the model's generation_config.json, so each goes
-    out at its off value, top_k 0 being vLLM's own. Set values go out as set."""
-    client = offline_client(VLLMWeightSyncClient)
-    bodies = []
-
-    def post_once(_path, json, **_kwargs):
-        bodies.append(json)
-        return _JsonReply({"choices": [{"token_ids": [7], "logprobs": {"token_logprobs": [-0.1]}}]})
-
-    client._post_once = post_once
-    client.generate([[1, 2]], top_k=0, min_p=0.0, repetition_penalty=1.0)
-    client.generate([[1, 2]], top_k=20, min_p=0.05, repetition_penalty=1.1)
-    assert _sampler_fields(bodies[0]) == {"top_k": 0, "min_p": 0.0, "repetition_penalty": 1.0}
-    assert _sampler_fields(bodies[1]) == {"top_k": 20, "min_p": 0.05, "repetition_penalty": 1.1}
 
 
 # --- Sampled-token capture — the two engines report the same facts in different places ---

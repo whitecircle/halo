@@ -23,9 +23,9 @@ from unittest.mock import patch
 import torch
 from transformers import AutoModelForCausalLM
 
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.distributed.nccl.transport.pynccl import PyNcclCommunicator
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.transport.pynccl import PyNcclCommunicator
 from tests.common.harness import gpu_test_main
 from tests.common.on_policy_e2e import probe_top_logprobs, record_served_baseline, served_policy_moved
 from tests.common.utils import log

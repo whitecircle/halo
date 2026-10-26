@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""The endpoint leaf: which key an OpenAI-compatible caller sends, and that the leaf never imports
-the SDK — the argument dataclasses read their defaults from it, so an ``openai`` import there would
-pull the SDK into every config parse.
+"""The endpoint leaf: which key an OpenAI-compatible caller sends, which hosts name this machine only,
+and that the leaf never imports the SDK — the argument dataclasses read their defaults from it, so an
+``openai`` import there would pull the SDK into every config parse.
 
 Run: pytest tests/cpu/inference/test_endpoints.py
 """
@@ -12,7 +12,12 @@ import pathlib
 import pytest
 
 from src.inference import endpoints
-from src.inference.endpoints import LOCAL_SERVER_API_KEY, resolve_external_api_key, resolve_local_api_key
+from src.inference.endpoints import (
+    LOCAL_SERVER_API_KEY,
+    is_loopback,
+    resolve_external_api_key,
+    resolve_local_api_key,
+)
 
 _KEY_VARS = ("VLLM_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY")
 
@@ -47,6 +52,17 @@ def test_an_exported_empty_key_falls_through_both_chains(no_keys):
         no_keys.setenv(name, "")
     assert resolve_local_api_key() == LOCAL_SERVER_API_KEY
     assert resolve_external_api_key() is None
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.1.1", "localhost", "::1", "0.0.0.0"])
+def test_a_loopback_or_wildcard_host_names_this_machine_only(host):
+    """A rollout URL or group address on any of these is unreachable from another node."""
+    assert is_loopback(host)
+
+
+@pytest.mark.parametrize("host", ["10.0.0.7", "203.0.113.7", "rollout-server", "128.0.0.1"])
+def test_a_routable_host_is_not_loopback(host):
+    assert not is_loopback(host)
 
 
 def _imported_modules(path: pathlib.Path) -> list[str]:

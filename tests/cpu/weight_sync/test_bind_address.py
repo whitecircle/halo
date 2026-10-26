@@ -19,25 +19,24 @@ peer is needed) and read the bound address off the kernel's listener table, as `
 The engine's join request runs inline, at the moment the client issues it, so what it records is
 what a real engine would find when it dials in.
 
-    python tests/cpu/grpo/test_weight_sync_bind_address.py
+    python tests/cpu/weight_sync/test_bind_address.py
 """
 
 import logging
 import socket
-import sys
 from pathlib import Path
 from typing import NamedTuple
 
 import pytest
 from torch.distributed import distributed_c10d as c10d
 
-import src.distributed.nccl.clients.sglang as sglang_module
-import src.distributed.nccl.clients.vllm as vllm_module
-from src.distributed.nccl.addresses import is_loopback
-from src.distributed.nccl.clients.base import _get_ip
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.distributed.nccl.transport.stateless_group import RendezvousListener
+import src.weight_sync.clients.base as base_module
+import src.weight_sync.clients.sglang as sglang_module
+import src.weight_sync.clients.vllm as vllm_module
+from src.inference.endpoints import is_loopback
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.transport.rendezvous import RendezvousListener, _outbound_ip
 from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 
@@ -81,7 +80,7 @@ class _JoinRequest(NamedTuple):
 
 
 class _InlineCall:
-    """``_AsyncCall`` run on the issuing thread, so the call happens at the moment it is issued."""
+    """``AsyncCall`` run on the issuing thread, so the call happens at the moment it is issued."""
 
     def __init__(self, fn, name: str = "server call"):
         self.name, self.result, self.error = name, None, None
@@ -112,11 +111,11 @@ class _Response:
         return self._payload
 
 
-class _GroupHoldingCommunicator:
-    """Stand-in for ``PyNcclCommunicator``, which keeps the group (and so its listener) it formed from."""
+class _StoreHoldingCommunicator:
+    """Stand-in for ``PyNcclCommunicator``, holding the unique-id store it formed from."""
 
-    def __init__(self, group, device):
-        self.group = group
+    def __init__(self, store, device):
+        self.store = store
 
     def abort(self):
         pass
@@ -127,8 +126,13 @@ def _group_without_nccl(*args, **kwargs):
     return object(), None
 
 
-def _recording_join(engine_requests: list[_JoinRequest], server_calls: list[str]):
-    def post_once(path, **kwargs):
+def _recording_engine(engine_requests: list[_JoinRequest], server_calls: list[str]):
+    """The engine's routes: vLLM's world-size read reports no ranks, and every other request is a group-join
+    request, recorded with who listened on its port when it arrived."""
+
+    def request(method, path, **kwargs):
+        if path == "/get_world_size":
+            return _Response({"world_size": 0})
         server_calls.append(path)
         body = kwargs["json"]
         group = body.get("init_info", body)  # vLLM nests the group fields, SGLang does not
@@ -136,7 +140,7 @@ def _recording_join(engine_requests: list[_JoinRequest], server_calls: list[str]
         engine_requests.append(_JoinRequest(group["master_address"], port, _listening_addresses(port)))
         return _Response({})
 
-    return post_once
+    return request
 
 
 @pytest.fixture
@@ -176,10 +180,9 @@ def client(request, monkeypatch, engine_requests, server_calls, opened_listeners
     if request.param == "vllm":
         monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
         client = offline_client(VLLMWeightSyncClient, "http://127.0.0.1:8000")
-        monkeypatch.setattr(client, "probe_generation", lambda: None)
-        monkeypatch.setattr(vllm_module.requests, "get", lambda url, timeout=None: _Response({"world_size": 0}))
-        monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _GroupHoldingCommunicator)
-        monkeypatch.setattr(vllm_module, "_AsyncCall", _InlineCall)
+        monkeypatch.setattr(client, "_probe_generation", lambda: None)
+        monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _StoreHoldingCommunicator)
+        monkeypatch.setattr(vllm_module, "AsyncCall", _InlineCall)
     else:
         monkeypatch.delenv("SGLANG_GROUP_HOST", raising=False)
         client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:30000")
@@ -188,8 +191,9 @@ def client(request, monkeypatch, engine_requests, server_calls, opened_listeners
             client, "_destroy_remote_group", lambda: server_calls.append("/destroy_weights_update_group")
         )
         monkeypatch.setattr(c10d, "_new_process_group_helper", _group_without_nccl)
-        monkeypatch.setattr(sglang_module, "_AsyncCall", _InlineCall)
-    monkeypatch.setattr(client, "_post_once", _recording_join(engine_requests, server_calls))
+        monkeypatch.setattr(sglang_module, "AsyncCall", _InlineCall)
+    monkeypatch.setattr(base_module, "AsyncCall", _InlineCall)
+    monkeypatch.setattr(client, "request", _recording_engine(engine_requests, server_calls))
     yield client
     client.close_communicator()
 
@@ -200,7 +204,7 @@ def test_the_listener_binds_the_advertised_address(client, engine_requests, adve
     advertising the trainer's NIC (a server on another node) listens on that NIC alone."""
     expected = "127.0.0.1"
     if advertise_nic:
-        expected = _get_ip()
+        expected = _outbound_ip()
         if is_loopback(expected):
             pytest.skip("no default route: this host has no NIC address to advertise")
         client.group_host = expected
@@ -331,7 +335,7 @@ def test_a_failure_before_the_store_takes_the_listener_closes_it(
         held_at_failure.append(_listening_addresses(port))
         raise RuntimeError("can't start new thread")
 
-    monkeypatch.setattr(sys.modules[type(client).__module__], "_AsyncCall", no_thread)
+    monkeypatch.setattr(base_module, "AsyncCall", no_thread)  # the join's thread
 
     with pytest.raises(RuntimeError, match="can't start new thread"):
         client.init_communicator(device="cpu")

@@ -16,31 +16,39 @@ pinned here:
 * **peak** staged residency stays at one chunk (plus the tensor that crossed the budget), for the
   single-server client and for the multi-server fan-out — the property the streaming exists for,
   asserted by counting live snapshots at their peak;
-* the chunk is cut BEFORE the budget is exceeded, on one rule shared by the streamed path and the
-  whole-payload one, so nothing downstream has to re-split an already-budgeted chunk;
+* the chunk is cut BEFORE the budget is exceeded, so nothing downstream has to re-split an
+  already-budgeted chunk;
 * the engines are quiesced only once a chunk is ready to go out, not from the first gathered param;
 * every parameter reaches the engine exactly once, in order, across the chunk boundaries;
 * a server that failed AFTER its first chunk went out is NOT retried: the trainer kept no copy of
   what already landed, so a reconnect would leave that engine part old and part new while still
   answering /health.
 
-Run: ``python tests/cpu/grpo/test_weight_sync_param_buffer.py`` (or ``pytest -m cpu``).
+Run: ``python tests/cpu/weight_sync/test_param_buffer.py`` (or ``pytest -m cpu``).
 """
 
 from __future__ import annotations
 
 import weakref
+from collections.abc import Callable
 
 import pytest
 import torch
 
-import src.distributed.nccl.clients.base as base_module
-from src.distributed.nccl.clients.base import resolve_sync_device, resolve_weight_sync_chunk_bytes, snapshot_param
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
-from tests.common.weight_sync import Wire, offline_client
+from src.weight_sync.chunking import (
+    declared_co_load_groups,
+    resolve_sync_device,
+    snapshot_to_sync_device,
+)
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES
+from tests.common.repo import probe_findings
+from tests.common.weight_sync import Wire, offline_client, push
+
+# The chunk budget the cut-rule cases run against, small enough for a few CPU tensors to cross it.
+_BUDGET = 4096
 
 
 def _bare_client(wire: Wire | None = None) -> VLLMWeightSyncClient:
@@ -92,15 +100,55 @@ def test_update_named_param_buffers_a_snapshot():
     assert torch.equal(stored, original), "buffered weight mutated by a later in-place update"
 
 
+def _snapshot(
+    weights: torch.Tensor,
+    device: torch.device | None = None,
+    *,
+    buffered_bytes: int = 0,
+    flush: Callable[[], object] = lambda: None,
+) -> torch.Tensor:
+    """:func:`snapshot_to_sync_device` of ``weights`` against ``_BUDGET``, by default with nothing buffered."""
+    return snapshot_to_sync_device(
+        "w", weights, device=device, buffered_bytes=buffered_bytes, budget=_BUDGET, flush=flush
+    )
+
+
 def test_a_snapshot_is_contiguous_and_on_the_requested_device():
     """A strided view is snapshotted as a contiguous copy (both wire formats send flat bytes), on the
     device asked for — the sync GPU in production; here the CPU stands in for it."""
     strided = torch.arange(16, dtype=torch.float32).reshape(4, 4).t()
-    snapshot = snapshot_param(strided, torch.device("cpu"))
+    snapshot = _snapshot(strided, torch.device("cpu"))
     assert snapshot.is_contiguous() and snapshot.device.type == "cpu"
     assert snapshot.dtype == strided.dtype, "the wire declares the source dtype, so the snapshot must keep it"
     assert torch.equal(snapshot, strided)
-    assert snapshot_param(strided, None).device == strided.device, "no device pins the source's own"
+    assert _snapshot(strided).device == strided.device, "no device pins the source's own"
+
+
+@pytest.mark.parametrize(("buffered", "item", "cut"), [(0, 8192, False), (2048, 2048, False), (2048, 2052, True)])
+def test_a_chunk_goes_out_only_when_the_next_tensor_would_pass_the_budget(buffered, item, cut):
+    """The pending chunk goes out when this tensor would take it past the budget, not once it is past:
+    reaching the budget exactly sends nothing, and a tensor above the budget on an empty buffer becomes
+    its own chunk without sending an empty one."""
+    flushes = []
+    _snapshot(torch.zeros(item // 4), buffered_bytes=buffered, flush=lambda: flushes.append(1))
+    assert flushes == ([1] if cut else []), f"{buffered} B buffered + {item} B against a {_BUDGET} B budget"
+
+
+def test_an_unsyncable_param_is_refused_before_the_pending_chunk_goes_out():
+    """A full buffer and a 0-dim param: the refusal comes first, so no chunk is sent (and no engine
+    quiesced) for a sync that cannot complete."""
+    flushes = []
+    with pytest.raises(ValueError, match="0-dimensional"):
+        _snapshot(torch.tensor(1.0), buffered_bytes=_BUDGET, flush=lambda: flushes.append(1))
+    assert flushes == [], "the pending chunk was flushed for a param the sync then refused"
+
+
+def test_the_snapshot_is_taken_after_the_flush():
+    """The pending chunk goes out before the copy is allocated, so the two are never held at once. A
+    flush that rewrites the source shows which came first."""
+    weights = torch.zeros(1024)
+    snapshot = _snapshot(weights, buffered_bytes=_BUDGET, flush=lambda: weights.fill_(2.0))
+    assert torch.equal(snapshot, torch.full((1024,), 2.0)), "the snapshot was taken before the flush ran"
 
 
 def test_staged_residency_never_exceeds_one_chunk(monkeypatch):
@@ -111,7 +159,7 @@ def test_staged_residency_never_exceeds_one_chunk(monkeypatch):
     the client still holds anywhere is counted; the engine side copies what it receives and keeps no
     reference (``retain=False``), as a real one does.
     """
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     param_bytes, num_params, budget = 512, 10, 4096
     client = _bare_client(Wire(retain=False))
     refs: list[weakref.ref] = []
@@ -132,14 +180,12 @@ def test_staged_residency_never_exceeds_one_chunk(monkeypatch):
 
 def test_streaming_sends_every_param_once_in_order(monkeypatch):
     """Anti-vacuity for the bound above: chunking must not drop, duplicate or reorder a param."""
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     wire = Wire()
     client = _bare_client(wire)
     names = [f"w{index}" for index in range(10)]
 
-    for name in names:
-        client.update_named_param(name, torch.zeros(128, dtype=torch.float32))
-    client.reset_prefix_cache()
+    push(client, [(name, torch.zeros(128, dtype=torch.float32)) for name in names])
 
     assert [name for name, _ in wire.sent] == names, "params were dropped, duplicated or reordered"
     assert len(wire.chunks) > 1, "the payload never chunked — the budget did nothing"
@@ -218,11 +264,11 @@ def test_manager_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
 
     staged_on: list = []
 
-    def fake_snapshot(weights, device):
+    def fake_snapshot(name, weights, *, device, **cut):
         staged_on.append(device)
         return weights.detach().clone()
 
-    monkeypatch.setattr("src.trainers.grpo.rollout.weight_sync_clients.snapshot_param", fake_snapshot)
+    monkeypatch.setattr("src.trainers.grpo.rollout.weight_sync_clients.snapshot_to_sync_device", fake_snapshot)
     manager.update_named_param("w", torch.zeros(4))
     assert staged_on == [torch.device("cuda", 0)], "the shared snapshot was not staged on the sync device"
 
@@ -320,7 +366,9 @@ def test_manager_scopes_every_client_it_holds_and_builds():
     manager._client_factory = factory
     manager._device = torch.device("cpu")
     manager.scope_co_load_groups(["model.layers.0.self_attn.kv_a_proj_with_mqa"])
-    scoped = VLLMWeightSyncClient.scoped_co_load_groups(["model.layers.0.self_attn.kv_a_proj_with_mqa"])
+    scoped = declared_co_load_groups(
+        VLLMWeightSyncClient.CO_LOADED_PARAM_GROUPS, ["model.layers.0.self_attn.kv_a_proj_with_mqa"]
+    )
     assert all(client._co_load_groups == scoped for client in clients)
     old = clients[0]
     old.close_communicator = lambda: None  # a bare client has no group to tear down
@@ -355,15 +403,13 @@ def test_chunks_are_cut_before_the_budget_is_exceeded(monkeypatch):
     budget of staged device memory here, and the same overshoot in the receive buffers the engine
     allocates for every declared name before the first byte arrives.
     """
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     budget, oversize = 4096, 4096 + 512
     wire = Wire()
     client = _bare_client(wire)
     sizes = [1536, 1536, 1536, 512, oversize, 256]  # irregular, one tensor above the budget
 
-    for index, size in enumerate(sizes):
-        client.update_named_param(f"w{index}", torch.zeros(size // 4, dtype=torch.float32))
-    client.reset_prefix_cache()
+    push(client, [(f"w{index}", torch.zeros(size // 4, dtype=torch.float32)) for index, size in enumerate(sizes)])
 
     assert [name for name, _ in wire.sent] == [f"w{i}" for i in range(len(sizes))]
     for chunk in wire.chunks:
@@ -374,30 +420,6 @@ def test_chunks_are_cut_before_the_budget_is_exceeded(monkeypatch):
         )
 
 
-def test_the_whole_payload_path_cuts_on_the_same_boundaries(monkeypatch):
-    """One chunker: a payload handed over in one call is cut where streaming it would have cut it.
-
-    A second rule would make the SGLang client re-split every already-budgeted chunk at a stricter
-    boundary — one `/update_weights_from_distributed` declare, thread and round-trip per fragment.
-    """
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
-    params = [(f"w{index}", torch.zeros(384, dtype=torch.float32)) for index in range(10)]
-
-    streamed_wire = Wire()
-    streamed = _bare_client(streamed_wire)
-    for name, tensor in params:
-        streamed.update_named_param(name, tensor)
-    streamed.reset_prefix_cache()
-
-    whole_wire = Wire()
-    _bare_client(whole_wire).sync_model_weights(params)
-
-    boundaries = [[name for name, _ in chunk] for chunk in streamed_wire.chunks]
-    assert len(boundaries) > 1, "the payload never chunked — the budget did nothing"
-    assert [[name for name, _ in chunk] for chunk in whole_wire.chunks] == boundaries
-    assert (whole_wire.opened, whole_wire.closed) == (1, 1), "the whole-payload path re-quiesced per chunk"
-
-
 def test_sglang_declares_one_request_per_chunk(monkeypatch):
     """The chunk budget IS the server-side bound on SGLang: the engine allocates ``torch.empty`` for
     every declared name before receiving any of them.
@@ -405,16 +427,15 @@ def test_sglang_declares_one_request_per_chunk(monkeypatch):
     A second, stricter budget inside the client would re-split every already-budgeted chunk — each
     fragment its own ``/update_weights_from_distributed`` declare, thread and round-trip.
     """
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     client = offline_client(SGLangWeightSyncClient)
     declares: list[list[str]] = []
     client.begin_weight_update = lambda: None
     client._send_chunk = lambda chunk, flush_cache: declares.append([name for name, _ in chunk])
     client._lift_pause = lambda timeout, context: None
 
-    for index in range(10):  # 1536 B each: two per 4 KiB chunk
-        client.update_named_param(f"w{index}", torch.zeros(384, dtype=torch.float32))
-    client.reset_prefix_cache()
+    # 1536 B each: two per 4 KiB chunk.
+    push(client, [(f"w{index}", torch.zeros(384, dtype=torch.float32)) for index in range(10)])
 
     assert declares == [[f"w{index}", f"w{index + 1}"] for index in range(0, 10, 2)], (
         f"{len(declares)} declares for 5 budgeted chunks — a second budget re-split them: {declares}"
@@ -442,26 +463,39 @@ def test_no_server_is_quiesced_until_a_chunk_is_ready_to_send(monkeypatch):
     assert [wire.closed for wire in wires] == [1, 1], "the update stayed open after the final flush"
 
 
-def test_the_default_chunk_budget_is_one_packed_buffer(monkeypatch):
-    """The default budget is the transport's own staging size, not an arbitrary number — a chunk is
-    re-packed into exactly that on the way out."""
-    monkeypatch.delenv("HALO_WEIGHT_SYNC_CHUNK_MB", raising=False)
-    assert resolve_weight_sync_chunk_bytes() == DEFAULT_PACKED_BUFFER_SIZE_BYTES
+def test_the_pool_refuses_an_unsyncable_param_before_any_server_gets_the_pending_chunk(monkeypatch):
+    """The pool snapshots for its clients, so their own check never runs: with a full chunk pending, a
+    0-dim param must be refused before that chunk quiesces a server for a sync that cannot complete."""
+    monkeypatch.setattr("src.trainers.grpo.rollout.weight_sync_clients.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
+    wires = [Wire(), Wire()]
+    manager, clients = _bare_manager(2, wires=wires)
+    manager.update_named_param("w", torch.zeros(_BUDGET // 4, dtype=torch.float32))
+
+    with pytest.raises(ValueError, match="0-dimensional"):
+        manager.update_named_param("scale", torch.tensor(1.0))
+
+    assert [wire.opened for wire in wires] == [0, 0], "a server was quiesced for a param the pool then refused"
+    assert [wire.chunks for wire in wires] == [[], []], "the pending chunk went out for a refused param"
+    assert all(client._chunks_sent == 0 and not client._update_open for client in clients)
+    manager.update_named_param("bias", torch.zeros(1, dtype=torch.float32))
+    assert [wire.opened for wire in wires] == [1, 1], "the pending chunk was not full: nothing was at stake"
 
 
-def test_the_module_constant_is_the_resolved_budget():
-    """The clients read the budget through the module constant; one that ignored the resolver would
-    leave the knob documented but inert."""
-    assert resolve_weight_sync_chunk_bytes() == base_module.WEIGHT_SYNC_CHUNK_BYTES
-
-
-def test_the_chunk_budget_is_read_from_the_env_in_megabytes(monkeypatch):
+@pytest.mark.parametrize(
+    ("value", "expected"), [(None, PACKED_BUFFER_BYTES), ("2048", 2 * 2**30), ("0", PACKED_BUFFER_BYTES)]
+)
+def test_the_chunk_budget_is_read_once_from_the_env_in_megabytes(monkeypatch, value, expected):
     """``HALO_WEIGHT_SYNC_CHUNK_MB`` sizes the chunk staged on the sync GPU (and the SGLang client's
-    device arena); an ignored or misparsed value silently leaves the default in place."""
-    monkeypatch.setenv("HALO_WEIGHT_SYNC_CHUNK_MB", "2048")
-    assert resolve_weight_sync_chunk_bytes() == 2 * 2**30
-    monkeypatch.setenv("HALO_WEIGHT_SYNC_CHUNK_MB", "0")
-    assert resolve_weight_sync_chunk_bytes() == DEFAULT_PACKED_BUFFER_SIZE_BYTES, "a non-positive value must fall back"
+    device arena), and the default is the transport's own packed buffer, the size a chunk is re-packed
+    into on the way out; a non-positive value falls back. Read in a fresh interpreter, since the module
+    latches it."""
+    if value is None:
+        monkeypatch.delenv("HALO_WEIGHT_SYNC_CHUNK_MB", raising=False)
+    else:
+        monkeypatch.setenv("HALO_WEIGHT_SYNC_CHUNK_MB", value)
+    script = "import src.weight_sync.chunking as c; print('CHUNK_BYTES:' + str(c.WEIGHT_SYNC_CHUNK_BYTES))"
+    [budget] = probe_findings(script, "CHUNK_BYTES:")
+    assert int(budget) == expected
 
 
 if __name__ == "__main__":

@@ -40,8 +40,8 @@ from src.checkpoint.config_export import (
     restore_model_type,
 )
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.models.moe_balancing import exports_source_config_schema, legacy_per_layer_config_keys
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.models import (
     TINY_BAILING_MOE_CONFIG,
     TINY_GEMMA4_MOE_CONFIG,

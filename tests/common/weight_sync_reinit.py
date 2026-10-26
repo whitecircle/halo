@@ -13,12 +13,12 @@ from collections.abc import Iterable
 import torch
 from transformers import AutoModelForCausalLM
 
-from src.distributed.nccl.clients.base import BaseWeightSyncClient
 from src.env import env_str
+from src.weight_sync.clients.base import WeightSyncClientBase
 from tests.common.models import QWEN3_0_6B
 from tests.common.on_policy_e2e import probe_top_logprobs, record_served_baseline
 from tests.common.utils import log
-from tests.common.weight_sync import weight_transfer_port
+from tests.common.weight_sync import push, weight_transfer_port
 
 # The checkpoint the vLLM tier's dense endpoint serves, which the re-init and pool-reconnect suites push.
 VLLM_REINIT_MODEL = env_str("HALO_TEST_VLLM_REINIT_MODEL", QWEN3_0_6B)
@@ -64,7 +64,7 @@ def _trainer_gpu_used_mib(device: torch.device) -> int:
 
 
 def _sync(
-    client_class: type[BaseWeightSyncClient],
+    client_class: type[WeightSyncClientBase],
     server_url: str,
     named_params: Iterable[tuple[str, torch.Tensor]],
     device: torch.device,
@@ -74,9 +74,7 @@ def _sync(
     client = client_class(base_url=server_url, group_port=group_port, connection_timeout=CONNECTION_TIMEOUT_S)
     client.init_communicator(device=device)
     try:
-        for name, tensor in named_params:
-            client.update_named_param(name, tensor)
-        client.reset_prefix_cache()
+        push(client, named_params)
     finally:
         client.close_communicator()
 
@@ -92,7 +90,7 @@ def _probe_or_none(server_url: str, model_name: str) -> dict[str, float] | None:
 
 def run_reinit_cycles(
     ctx,
-    client_class: type[BaseWeightSyncClient],
+    client_class: type[WeightSyncClientBase],
     *,
     server_url: str,
     model_name: str,

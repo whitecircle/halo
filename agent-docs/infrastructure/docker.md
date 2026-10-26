@@ -247,7 +247,7 @@ rollout server on another node selects EFA through its compose overlay and the t
 
 vLLM runs as a separate container built from upstream `vllm/vllm-openai:v0.26.0` plus toolkit patches
 (`Dockerfile.vllm`; the unsuffixed upstream tag is the CUDA 13 build). It pins its own torch/transformers
-stack, so the training environment uses a vendored NCCL weight-sync client (`src/distributed/nccl/`) instead
+stack, so the training environment uses its own NCCL weight-sync client (`src/weight_sync/`) instead
 of importing vLLM.
 
 The image reads `nvidia-nccl-cu13` out of `uv.lock` and installs that **exact** version, so the weight-sync

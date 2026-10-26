@@ -64,7 +64,6 @@ import src.models.structure as structure
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes, has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import broadcast_from_rank0
 from src.models.structure import lora_fold_targets, unwrap_framework_wrappers
@@ -75,6 +74,7 @@ from src.trainers.grpo.rollout.weight_sync import (
 )
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.trainers.sft import DistributedSFTTrainer
+from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.checkpoint_io import fixed_text_batch
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir, world_all

@@ -1,5 +1,5 @@
-"""Endpoint URL defaults and API-key resolution for OpenAI-compatible callers; SDK-free, since the
-argument dataclasses read their defaults from it."""
+"""Endpoint URL defaults, API-key resolution and the loopback-host test for OpenAI-compatible callers;
+SDK-free, since the argument dataclasses read their defaults from it."""
 
 from src.env import env_str
 
@@ -10,6 +10,8 @@ DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 EXTERNAL_API_KEY_CHAIN = ("OPENROUTER_API_KEY", "OPENAI_API_KEY")
 # What a keyless local server (no --api-key) accepts: the SDK refuses to build a client without some key.
 LOCAL_SERVER_API_KEY = "EMPTY"
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "0.0.0.0", "::1", "localhost"})
 
 
 def resolve_local_api_key() -> str:
@@ -22,3 +24,8 @@ def resolve_external_api_key() -> str | None:
     """Key for a hosted (non-local) endpoint: the first set :data:`EXTERNAL_API_KEY_CHAIN` variable, or
     ``None`` for the caller to judge."""
     return next((key for name in EXTERNAL_API_KEY_CHAIN if (key := env_str(name))), None)
+
+
+def is_loopback(host: str) -> bool:
+    """Whether ``host`` names this machine only: a loopback address, ``localhost`` or the wildcard."""
+    return host in _LOOPBACK_HOSTS or host.startswith("127.")

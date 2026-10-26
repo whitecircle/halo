@@ -7,7 +7,7 @@ back over a per-server NCCL group. Every on-policy GRPO trainer needs one:
 [Async GRPO with Environments](../training-methods/async-grpo/README.md).
 
 The training environment never imports either engine (ABI-incompatible stacks); it speaks to them
-through the vendored client in `src/distributed/nccl/`. Select the engine with
+through the weight-sync clients in `src/weight_sync/`. Select the engine with
 `rollout_backend: vllm | sglang` (async GRPO only; Online GRPO is vLLM-only by construction). Every
 other server knob is the same for both engines:
 
@@ -714,9 +714,10 @@ Run it from the trainer container, launched as the trainer would be (same image,
 env), on a GPU the server does not own.
 
 It forms the group against the live server (either backend) and pushes one real parameter of the
-served checkpoint: the input embedding by default, value unchanged, so the served model is
-unchanged. The checkpoint read on the trainer side must be the one the server loaded (`--model-id`
-when the served id is a server-side path or an alias).
+served checkpoint (the input embedding by default, value unchanged, so the served model is unchanged)
+through the trainer's own sync path: staged on the sync GPU, then streamed. The checkpoint read on
+the trainer side must be the one the server loaded (`--model-id` when the served id is a server-side
+path or an alias).
 
 It reports the transport NCCL formed on (`NET/Libfabric/…/GDRDMA` is EFA with GPUDirect; `NET/IB`,
 `NET/Socket`, `P2P/CUMEM` for same-host CUDA IPC, or `SHM`), the `aws-ofi-nccl` build string, the

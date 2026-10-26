@@ -2,9 +2,9 @@
 
 SGLang builds its weight-update group with ``init_custom_process_group``: a plain c10d group over a
 TCPStore wrapped in ``PrefixStore(group_name, ...)``, then broadcasts typed tensors with
-``torch.distributed.broadcast(..., src=0)``. That bootstrap differs from the vLLM path in
-``stateless_group.py``, which exchanges a pickled ``ncclUniqueId`` through raw store keys and drives
-pynccl directly, and the two cannot interoperate because c10d derives its own store keys.
+``torch.distributed.broadcast(..., src=0)``. That bootstrap differs from the vLLM path
+(``pynccl.py``), which publishes a pickled ``ncclUniqueId`` under one raw store key and drives pynccl
+directly, and the two cannot interoperate because c10d derives its own store keys.
 
 This mirrors SGLang's side (``sglang.srt.utils.common.init_custom_process_group``) without importing
 sglang, which the training image never installs. ``Dockerfile.sglang`` asserts at build time that the
@@ -19,12 +19,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed import distributed_c10d as c10d
 
-from src.distributed.nccl.transport.stateless_group import RendezvousListener
+from src.weight_sync.transport.rendezvous import RendezvousListener
 
 logger = logging.getLogger(__name__)
-
-# SGLang's own default; it is the PrefixStore prefix, so both sides must agree on it.
-DEFAULT_WEIGHT_UPDATE_GROUP_NAME = "weight_update_group"
 
 
 @contextmanager
@@ -50,27 +47,27 @@ def _store_bootstrapped_communicator():
             default_pg.bound_device_id = bound
 
 
-def create_weight_update_group(
+def build_weight_update_group(
     master_address: str,
     listener: RendezvousListener,
     world_size: int,
     device: torch.device,
-    group_name: str = DEFAULT_WEIGHT_UPDATE_GROUP_NAME,
     *,
+    group_name: str,
     timeout_s: float,
 ) -> tuple[dist.ProcessGroup, dist.TCPStore]:
-    """Host the rendezvous store and join the weight-update group as rank 0.
+    """Host the rendezvous store and join the weight-update group ``group_name`` as rank 0.
 
-    ``world_size`` counts the trainer: ``1 + tp_size * dp_size``. Returns the group and the store,
-    which the caller must keep alive: dropping the store closes the listener and the engine can no
-    longer re-join. Pair with :func:`destroy_weight_update_group`.
+    ``world_size`` counts the trainer and every engine rank. Returns the group and the store, which the
+    caller must keep alive: dropping the store closes the listener and the engine can no longer re-join.
+    Pair with :func:`release_weight_update_group`.
 
     The store takes over ``listener`` (:class:`RendezvousListener`), which the client opened before
     it asked the engine to join: bound on ``master_address`` itself, or on every interface under the
     client's explicit opt-in.
 
     ``timeout_s`` has no default because this half of the handshake blocks against a concurrent HTTP
-    request to the engine, and the client sets that deadline (``_GROUP_FORMATION_TIMEOUT_S``); a
+    request to the engine, and the client sets that deadline (``GROUP_FORMATION_TIMEOUT_S``); a
     second spelling here could drift and let one half give up first.
 
     The store is constructed directly rather than through ``torch.distributed.rendezvous``, which
@@ -85,16 +82,7 @@ def create_weight_update_group(
     """
     if device.type == "cuda":
         torch.cuda.set_device(device)
-    with listener.handover() as listen_fd:
-        store = dist.TCPStore(
-            host_name=master_address,
-            port=listener.port,
-            world_size=world_size,
-            is_master=True,
-            timeout=timedelta(seconds=timeout_s),
-            wait_for_workers=False,
-            master_listen_fd=listen_fd,
-        )
+    store = listener.start_store(master_address, world_size, timeout_s=timeout_s, wait_for_workers=False)
     # SGLang wraps the rendezvous store in PrefixStore(group_name) before handing it to c10d, so an
     # unprefixed store here would leave the two sides reading different keys and hanging.
     prefixed = dist.PrefixStore(group_name, store)
@@ -124,28 +112,30 @@ def create_weight_update_group(
     return group, store
 
 
-def destroy_weight_update_group(group: dist.ProcessGroup | None) -> None:
-    """Tear down a group from :func:`create_weight_update_group`, tolerating an already-dead peer.
+def release_weight_update_group(group: dist.ProcessGroup | None, *, destroy: bool) -> None:
+    """Release a group from :func:`build_weight_update_group`; never raises, so it cannot mask the error
+    that triggered the teardown.
 
-    Runs on cleanup paths where the engine may already be gone, so a failure here must never mask
-    the error that triggered the teardown.
+    ``destroy`` runs the NCCL destroy, tolerating an already-dead peer. ``destroy=False`` drops only
+    torch's rank-map entry: the engine peers never enter destroy, so on an interrupted sync
+    ``dist.destroy_process_group`` would block, and process teardown reclaims the communicator.
     """
     if group is None:
         return
-    try:
-        dist.destroy_process_group(group)
-    except Exception as e:  # teardown is best-effort; never mask the original failure
-        logger.warning(f"Error destroying the weight-update group: {e}")
+    if destroy:
+        try:
+            dist.destroy_process_group(group)
+        except Exception as e:  # teardown is best-effort; never mask the original failure
+            logger.warning(f"Error destroying the weight-update group: {e}")
     c10d._world.pg_group_ranks.pop(group, None)
 
 
-def drop_weight_update_group_bookkeeping(group: dist.ProcessGroup | None) -> None:
-    """Forget a group without the NCCL destroy; used by the interpreter-exit teardown.
-
-    At exit the group's peers are engine processes that never enter destroy, so with an interrupted
-    sync in flight ``dist.destroy_process_group`` blocks rather than raising and wedges the exiting
-    process. Process teardown reclaims the communicator, so only the rank map entry is dropped (the
-    same no-collectives-at-teardown rule as the EP dispatcher's ``__del__``).
-    """
-    if group is not None:
-        c10d._world.pg_group_ranks.pop(group, None)
+def abort_weight_update_group(group: dist.ProcessGroup | None) -> None:
+    """Abort ``group``, ending the kernels spinning on a peer that never answered; torch drops its
+    bookkeeping, so no destroy may follow. Never raises: it runs on an already-failing path."""
+    if group is None:
+        return
+    try:
+        c10d._abort_process_group(group)
+    except Exception as e:
+        logger.warning(f"Aborting the SGLang weight-update group failed: {e}")

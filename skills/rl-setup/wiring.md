@@ -2,7 +2,7 @@
 
 Concrete commands, config fields, and launch examples for online / async-environment
 GRPO. Source of truth: `Dockerfile.vllm`, `docker-compose.vllm.yml`,
-`src/distributed/nccl/clients/vllm.py`, `src/trainers/grpo/environmental.py`,
+`src/weight_sync/clients/vllm.py`, `src/trainers/grpo/environmental.py`,
 `src/configs/async_training_config.py`, `src/configs/environment_config.py`,
 `src/rewards/terms.py` (the reward terms), `src/environments/registry.py`. Cross-link the docs:
 `agent-docs/infrastructure/rollout-servers.md` (server setup, weight sync, SGLang),
@@ -155,7 +155,7 @@ since a constant cancels in the group baseline. Per-term reference:
 
 ## 3. NCCL client connect flow
 
-`VLLMWeightSyncClient` (`src/distributed/nccl/clients/vllm.py`), driven by
+`VLLMWeightSyncClient` (`src/weight_sync/clients/vllm.py`), driven by
 the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
 
 1. `VLLMWeightSyncClient(base_url=..., group_port=..., connection_timeout=...)`
@@ -169,16 +169,16 @@ the trainer's `_init_weight_sync_client` → `_sync_weights_to_engine`:
    [group rendezvous](../../agent-docs/infrastructure/rollout-servers.md#group-rendezvous));
    only then POSTs `/init_weight_transfer_engine` (server rank_offset=1) with the
    listener's port, while the trainer (rank 0) hands the listener to the
-   `StatelessProcessGroup` store and builds the `PyNcclCommunicator` concurrently.
+   `UniqueIdStore` and builds the `PyNcclCommunicator` concurrently.
    Done once, while vLLM is idle.
 3. Each sync: the gather calls `update_named_param()` per param, which stages it on the sync
    GPU and flushes a chunk whenever the next param would overflow `HALO_WEIGHT_SYNC_CHUNK_MB`
    (default 1024). The first flush opens the update (`/pause?mode=keep` → `/start_weight_update`);
    each chunk is a `/update_weights` declaration alongside `packed_broadcast_producer`.
    `reset_prefix_cache()` sends the tail chunk, then `/finish_weight_update` → `/resume`. PEFT
-   adapters are folded into each base weight as it is sent, names stripped of `base_model.model.`. `sync_model_weights()` is the
-   single-call form of the same phases, for a caller holding the whole payload (the transport
-   preflight, `scripts/profiling/weight_sync_transport.py`).
+   adapters are folded into each base weight as it is sent, names stripped of `base_model.model.`.
+   The transport preflight (`scripts/profiling/weight_sync_transport.py`) pushes through the same
+   two calls.
 
 The parallelism-aware gather is the shared `gather_and_send_weights`
 (`src/trainers/grpo/rollout/weight_sync.py`) that both the online trainer and env

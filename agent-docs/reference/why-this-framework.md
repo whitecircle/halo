@@ -99,4 +99,4 @@ Pinned versions: [Docker](../infrastructure/docker.md) (images) and `pyproject.t
 > [!WARNING]
 > **Rollout servers run as separate Docker containers**
 >
-> vLLM and SGLang each pin their own torch/transformers stack — neither is in the training environment. Each runs as an isolated container (`Dockerfile.vllm` + `docker-compose.vllm.yml`, `Dockerfile.sglang` + `docker-compose.sglang.yml`). The training container talks to the server over HTTP (generation) and a vendored NCCL client (`src/distributed/nccl/`, weight sync).
+> vLLM and SGLang each pin their own torch/transformers stack — neither is in the training environment. Each runs as an isolated container (`Dockerfile.vllm` + `docker-compose.vllm.yml`, `Dockerfile.sglang` + `docker-compose.sglang.yml`). The training container talks to the server over HTTP (generation) and an NCCL weight-sync client (`src/weight_sync/`).

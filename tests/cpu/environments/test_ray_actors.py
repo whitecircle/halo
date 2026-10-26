@@ -380,7 +380,7 @@ def test_build_payload_sends_only_supported_params_and_env_tools():
     # Env tools are attached and in OpenAI function format.
     assert payload["tools"] and payload["tools"][0]["type"] == "function" and "function" in payload["tools"][0]
     # model is omitted when model_name is unset, and no unsupported sampling knob leaks through (the
-    # sampler filters each request carries are pinned in tests/cpu/grpo/test_rollout_backend_selection.py).
+    # sampler filters each request carries are pinned in tests/cpu/weight_sync/test_rollout_backend_selection.py).
     assert "model" not in payload
     for leaked in ("frequency_penalty", "presence_penalty"):
         assert leaked not in payload

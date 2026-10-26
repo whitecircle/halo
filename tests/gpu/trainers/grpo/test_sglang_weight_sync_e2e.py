@@ -29,13 +29,13 @@ import torch
 from transformers import AutoModelForCausalLM
 
 from src.configs.rollout_config import RolloutConfig
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.ray_actors import EnvironmentActor
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
-from tests.common.weight_sync import SGLANG_SERVER_URL, weight_transfer_port
+from tests.common.weight_sync import SGLANG_SERVER_URL, push, weight_transfer_port
 
 PROBE_PROMPT = "Count: 1 2 3"
 
@@ -109,9 +109,7 @@ def test_weight_sync_changes_the_served_policy():
         with torch.no_grad():
             for name in targets:
                 params[name].mul_(1.02)
-        for name in targets:
-            client.update_named_param(name, params[name].detach())
-        client.reset_prefix_cache()
+        push(client, [(name, params[name].detach()) for name in targets])
 
         after = _greedy_probe()
         assert after != baseline, "served policy unchanged after weight sync — the broadcast did not land"

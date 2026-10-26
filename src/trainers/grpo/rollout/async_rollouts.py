@@ -27,8 +27,6 @@ from trl.extras.profiling import profiling_context
 from src.checkpoint.atomic import atomic_torch_save
 from src.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_filename
 from src.distributed.checkpoint.coordination import consensus_read
-from src.distributed.nccl.clients.base import BaseWeightSyncClient, resolve_sync_device
-from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import (
     DeferredRankFailure,
     broadcast_from_rank0,
@@ -43,6 +41,9 @@ from src.environments.ray_actors import RolloutManager, ray_init_kwargs
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
 from src.trainers.grpo.world_metrics import world_sums
+from src.weight_sync.chunking import resolve_sync_device
+from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,7 @@ class AsyncRolloutMixin:
         self._rollout_manager = None
         self._weight_sync_client = None  # one engine client, or an InferenceClientManager over several
         # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference).
-        self._engine_rescore_clients: list[BaseWeightSyncClient] | None = None
+        self._engine_rescore_clients: list[WeightSyncClientBase] | None = None
         self._loop = None
         # Two separate questions: which client shape to build (a configs list of any length carries
         # its own per-server url/ports) and how many engines serve, which prefetch_active counts (a
@@ -324,7 +325,7 @@ class AsyncRolloutMixin:
                 f"device={device}, group_port={self.args.vllm_group_port}"
             )
 
-    def _build_engine_rescore_clients(self) -> list[BaseWeightSyncClient]:
+    def _build_engine_rescore_clients(self) -> list[WeightSyncClientBase]:
         """The score-only clients the engine re-score fans out over, one per rollout server.
 
         Every rank builds its own: the re-score is an HTTP prefill each rank issues for its own rows,
@@ -365,7 +366,7 @@ class AsyncRolloutMixin:
         # Score-only clients formed no communicator; their HTTP sessions are what they hold.
         if self._engine_rescore_clients is not None:
             for client in self._engine_rescore_clients:
-                client.session.close()
+                client.close_session()
             self._engine_rescore_clients = None
 
         self._loop = None

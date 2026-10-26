@@ -13,7 +13,7 @@ Both phases of a resume row run in one process against one server on the same we
 port: a second ``init_communicator`` after ``close_communicator`` succeeds and its sync lands (on vLLM
 0.26.0). The trainer-side close is what allows that: it aborts an interrupted update, lifts the pause
 so the server generates again, and frees the group port
-(``src/distributed/nccl/clients/vllm.py``), without reaching into the server's engine. The server's
+(``src/weight_sync/clients/vllm.py``), without reaching into the server's engine. The server's
 previous communicator is destroyed by the next ``/init_weight_transfer_engine``, before that call
 builds the new one (``docker/vllm/patches/vllm_weight_transfer_reinit_patch.py``). A leg that never
 closes holds its trainer-side port for the life of the process.

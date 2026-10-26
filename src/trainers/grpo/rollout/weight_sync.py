@@ -38,8 +38,6 @@ from src.distributed.expert_parallel.expert_weights import (
 )
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions, reversed_export_transforms
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.nccl.clients.base import WEIGHT_SYNC_CHUNK_BYTES, payload_bytes
-from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import DeferredRankFailure, barrier_on_exit, materialize_dtensor
 from src.distributed.tensor_parallel.state_dict import (
     iter_tp_sharded_non_dtensor_full,
@@ -62,6 +60,8 @@ from src.models.structure import (
     unwrap_framework_wrappers,
 )
 from src.trainers.mixins.ep_introspection import named_ep_layers
+from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES
+from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -317,7 +317,7 @@ class _HubForwarder:
             self._client.update_named_param(renamed, tensor)
             return
         self._held[name] = tensor
-        self._held_bytes += payload_bytes(tensor)
+        self._held_bytes += tensor.nbytes
         if self._held_bytes > _HELD_CONVERTER_BUDGET_BYTES:
             raise RuntimeError(
                 f"weight sync is holding {self._held_bytes / 2**30:.2f} GiB on the forwarding rank: "

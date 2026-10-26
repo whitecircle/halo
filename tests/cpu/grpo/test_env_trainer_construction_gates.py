@@ -40,8 +40,6 @@ from trl import GRPOConfig, GRPOTrainer
 
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.rollout_config import DEFAULT_REASONING_END_TOKEN, SGLANG_BACKEND, VLLM_BACKEND
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.environments.registry import resolve_environment
 from src.trainers.grpo.environmental import (
     DistributedAsyncEnvironmentalGRPOTrainer,
@@ -49,6 +47,8 @@ from src.trainers.grpo.environmental import (
     reject_vespo_loss,
 )
 from src.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 PartialState()  # the per-turn close-marker warning logs through accelerate, which refuses to log without it
 

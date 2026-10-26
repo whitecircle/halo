@@ -53,12 +53,12 @@ from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
 from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.hardware import supports_grouped_mm
 from src.trainers.grpo.rollout.weight_sync import sync_weights_to_client, validate_weight_sync_support
 from src.trainers.mixins.ep_introspection import named_ep_layers
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.utils import log, max_or_nan
 from tests.common.weight_sync import weight_transfer_port

@@ -43,9 +43,11 @@ changes.
 | `src/models/loading/lazy_safetensors/` (safetensors lazy-load core shared by the EP + PP loaders) | `agent-docs/parallelism/expert-parallelism.md` (lazy loading), `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `src/distributed/group_layout.py`, `mesh.py` (rank math, DeviceMesh + the typed group view) | `agent-docs/parallelism/multi-node.md`, `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/architecture.md` |
 | `src/subclass_registry.py` (class-claim maps over a subclass tree: HF class → EP/CP wrapper, PP split spec, head transform) | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
+| `src/distributed/nccl/_nccl_wrapper.py` (the `ncclUniqueId` binding the vLLM image unpickles from this path) | `agent-docs/infrastructure/docker.md` (the `ncclUniqueId` ABI assert), `agent-docs/infrastructure/rollout-servers.md` |
 | `src/distributed/grad_reduce.py` (bucketed gradient all-reduce — EP cross-replica, TP replicated, QLoRA sweeps) | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/configuration-reference.md` (`HALO_GRAD_BUCKET_MB`) |
-| `src/distributed/nccl/` (weight sync clients + transport) | `agent-docs/infrastructure/rollout-servers.md` (weight sync, NCCL transport), `agent-docs/training-methods/grpo/online.md` |
+| `src/weight_sync/` (the engine clients, the backend registry, the chunking, and their NCCL transport and group-address policy under `transport/`) | `agent-docs/infrastructure/rollout-servers.md` (weight sync, NCCL transport, group rendezvous), `agent-docs/training-methods/grpo/online.md`, `agent-docs/reference/configuration-reference.md` (`VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`, `HALO_WEIGHT_SYNC_BIND_ALL`, `HALO_NCCL_SYNC_TIMEOUT_SECONDS`) |
 | `src/trainers/grpo/rollout/weight_sync.py` (gather/gates/LoRA fold/memory bracket) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/online.md` (construction gates), `agent-docs/optimization/peft.md` (LoRA fold), `agent-docs/training-methods/async-grpo/setup.md`, `agent-docs/reference/debugging.md` (memory bracket) |
+| `src/trainers/grpo/rollout/trl_vllm_client.py` (`TrlVLLMClient`: TRL's `generate` contract over the vLLM weight-sync client, online GRPO) | `agent-docs/training-methods/grpo/online.md` (Server mode only), `agent-docs/reference/trainer-architecture.md`, `agent-docs/reference/configuration-reference.md` (`HALO_VLLM_GENERATION_TIMEOUT_SECONDS`) |
 | `src/trainers/grpo/rollout/weight_sync_clients.py` (per-server weight-sync client pool, `/v1/models` context preflight) | `agent-docs/training-methods/async-grpo/setup.md`, `agent-docs/training-methods/grpo/online.md` |
 | `src/trainers/grpo/rollout/async_rollouts.py` (Ray-actor collection, prefetch thread, engine weight-sync entry points) | `agent-docs/training-methods/async-grpo/setup.md` |
 | `src/trainers/grpo/rollout/routing_replay.py` (R2/R3 capture, wire decode, engine-layer slicing) | `agent-docs/training-methods/async-grpo/objective.md`, `agent-docs/infrastructure/rollout-servers.md` |
@@ -174,7 +176,7 @@ changes.
 | `src/training/parallelism_args.py` (`DistributedArguments` → `ParallelismConfig`, the per-script CP/PP/lowp gates) | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md` |
 | `src/training/run_logging.py` (per-rank transformers verbosity, the `run.log` console tee) | `agent-docs/reference/debugging.md` |
 | `src/training/early_stopping.py` (`StopsTrainingEarly`, the marker the script runner reads to exit a stopped run non-zero) | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/reference/scripts-reference.md` |
-| `src/inference/endpoints.py` (endpoint defaults, key resolution), `src/inference/openai_client.py` (async client, one request with the upstream retry, the single-request helper), `src/inference/batch_requests.py` (the parallel resumable batch and its JSONL resume store), `src/inference/response.py` (`OpenAIResponse`, the finish-reason contract) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/rewards/README.md` (Probe and retries) |
+| `src/inference/endpoints.py` (endpoint defaults, key resolution, the loopback test), `src/inference/openai_client.py` (async client, one request with the upstream retry, the single-request helper), `src/inference/batch_requests.py` (the parallel resumable batch and its JSONL resume store), `src/inference/response.py` (`OpenAIResponse`, the finish-reason contract) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/rewards/README.md` (Probe and retries) |
 
 ## Scripts & infrastructure
 
@@ -231,13 +233,13 @@ what a user sets, runs or can combine there, update the page with its owner. A n
 | `human-docs/configuration.md` | `src/training/parser.py`, `src/configs/`, `src/args/`; `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
 | `human-docs/environment-variables.md` | `src/env.py` and every toolkit knob; `agent-docs/reference/configuration-reference.md` (Environment variables) |
 | `human-docs/parallelism.md` | `src/distributed/parallelism_config.py`, `src/training/parallelism_args.py`; `agent-docs/parallelism/` |
-| `human-docs/supported-matrix.md` | every support verdict: version pins, attention backends, trainer × mode, the rollout-engine roster (`src/distributed/nccl/clients/`), families, parallelism modes, PEFT and quantization |
+| `human-docs/supported-matrix.md` | every support verdict: version pins, attention backends, trainer × mode, the rollout-engine roster (`src/weight_sync/clients/`), families, parallelism modes, PEFT and quantization |
 | `human-docs/clusters.md` | multi-node launch, `launcher-configs/**`; `agent-docs/parallelism/{multi-node,launch-recipes}.md`, `agent-docs/infrastructure/{skypilot,runpod,nomad}.md` |
 | `human-docs/checkpoints.md` | `src/distributed/checkpoint/`, `src/checkpoint/`, `scripts/after_training/**`; `agent-docs/reference/{checkpoints,model-merging}.md` |
 | `human-docs/data.md` | `src/data/`; `agent-docs/data/` |
 | `human-docs/monitoring.md` | `src/callbacks/`, `src/training/run_logging.py`, the tracking vars in `src/training/environment.py`; `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/debugging.md`, `agent-docs/training-methods/async-grpo/monitoring.md` |
 | `human-docs/performance.md` | `src/kernels/`, `src/optimizers/`; `agent-docs/optimization/` (the numbers from `throughput-benchmarks.md`) |
-| `human-docs/rollout-servers.md` | `src/distributed/nccl/`, `Dockerfile.vllm` / `Dockerfile.sglang` + their compose files; `agent-docs/infrastructure/rollout-servers.md` |
+| `human-docs/rollout-servers.md` | `src/weight_sync/`, `Dockerfile.vllm` / `Dockerfile.sglang` + their compose files; `agent-docs/infrastructure/rollout-servers.md` |
 | `human-docs/troubleshooting.md` | a new user-facing failure mode; `agent-docs/reference/{troubleshooting,debugging}.md` |
 | `human-docs/models.md`, `human-docs/model-integration-cost.md` | the family roster, `src/distributed/expert_parallel/layers/`; `agent-docs/models/` |
 | `human-docs/cookbooks/*.md` | the family's `examples/` recipes; its `agent-docs/models/` page |

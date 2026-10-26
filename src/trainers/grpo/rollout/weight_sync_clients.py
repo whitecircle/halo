@@ -15,23 +15,14 @@ from functools import partial
 from typing import Any
 
 import torch
-from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from src.configs.rollout_config import SAMPLER_FILTERS_OFF
-from src.distributed.nccl.clients.base import (
-    WEIGHT_SYNC_CHUNK_BYTES,
-    BaseWeightSyncClient,
-    SamplerLogprobSemantics,
-    payload_bytes,
-    resolve_sync_device,
-    snapshot_param,
-    starts_new_chunk,
-    validate_syncable_param,
-)
-from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import raise_rank0_failure
 from src.models.structure import resolve_tokenizer
+from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
+from src.weight_sync.clients.base import SamplerLogprobSemantics, WeightSyncClientBase
+from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +61,9 @@ _PER_TOKEN_RATIO_REMEDY = (
 
 
 def _probe_server(
-    client_cls: type[BaseWeightSyncClient],
+    client_cls: type[WeightSyncClientBase],
     url: str,
-    probe: Callable[[BaseWeightSyncClient], Any],
+    probe: Callable[[WeightSyncClientBase], Any],
     default: Any,
     failure: str,
 ) -> Any:
@@ -81,20 +72,18 @@ def _probe_server(
     completes the warning ``Could not <failure> <url>``."""
     client = None
     try:
-        client = client_cls(base_url=url)
-        for scheme in ("http://", "https://"):
-            client.session.mount(scheme, HTTPAdapter(max_retries=_PREFLIGHT_RETRY))
+        client = client_cls(base_url=url, retry_policy=_PREFLIGHT_RETRY)
         return probe(client)
     except Exception as e:
         logger.warning(f"Could not {failure} {url}: {e}")
         return default
     finally:
         if client is not None:
-            client.session.close()
+            client.close_session()
 
 
 def verify_context_window(
-    client_cls: type[BaseWeightSyncClient],
+    client_cls: type[WeightSyncClientBase],
     urls: list[str],
     single_turn_tokens: int,
     full_trajectory_tokens: int | None,
@@ -127,7 +116,7 @@ def verify_context_window(
 
 
 def verify_sampler_logprob_reference(
-    client_cls: type[BaseWeightSyncClient],
+    client_cls: type[WeightSyncClientBase],
     urls: list[str],
     temperature: float,
     top_p: float,
@@ -210,7 +199,7 @@ def verify_sampler_logprob_reference(
                 )
 
 
-def _probe_prompt_logprobs(client: BaseWeightSyncClient, token_ids: list[int]) -> tuple[float, float, int]:
+def _probe_prompt_logprobs(client: WeightSyncClientBase, token_ids: list[int]) -> tuple[float, float, int]:
     """``(mean NLL, gap, length)``: the whole sequence's mean negative log-prob, and the largest per-position
     gap between it and a prefix scored alone, with that prefix's length. A non-finite log-prob reads as an
     infinite gap."""
@@ -225,7 +214,7 @@ def _probe_prompt_logprobs(client: BaseWeightSyncClient, token_ids: list[int]) -
     return -sum(whole) / len(whole), gap, length
 
 
-def verify_engine_prompt_logprobs(client_cls: type[BaseWeightSyncClient], urls: list[str], tokenizer) -> None:
+def verify_engine_prompt_logprobs(client_cls: type[WeightSyncClientBase], urls: list[str], tokenizer) -> None:
     """Refuse a rollout server whose prompt log-probs do not follow from the tokens alone.
 
     ``isr_engine_reference`` reads every re-scored row off the engine's prompt log-probs. vLLM 0.26.0 under
@@ -330,7 +319,7 @@ class InferenceClientManager:
         server_configs: list[dict[str, Any]],
         *,
         connection_timeout: float,
-        client_cls: type[BaseWeightSyncClient],
+        client_cls: type[WeightSyncClientBase],
         base_group_port: int,
     ):
         """``server_configs`` is a list of ``{"url", "group_port", "group_host"}`` dicts, one client
@@ -379,7 +368,7 @@ class InferenceClientManager:
         """The trainer-side NCCL group port for one server: its configured value, else the base + index."""
         return self.server_configs[index].get("group_port", self.base_group_port + index)
 
-    def _connect_client(self, index: int, device: torch.device) -> BaseWeightSyncClient:
+    def _connect_client(self, index: int, device: torch.device) -> WeightSyncClientBase:
         """Build server ``index``'s client and form its NCCL group on ``device``: the one construction
         path, shared by the first connect and a reconnect so both bind the same port and NIC."""
         config = self.server_configs[index]
@@ -447,17 +436,17 @@ class InferenceClientManager:
             raise RuntimeError("InferenceClientManager not initialized. Call init_communicators() first.")
         if not self._clients:
             return
-        # On the source, before the snapshot and before any chunk quiesces a server (this path never
-        # reaches the client's own update_named_param, which is where the single-server check lives).
-        validate_syncable_param(name, weights)
-        # Flushed before the budget is exceeded, on the same rule the clients buffer by, and before
-        # the snapshot, so the staged chunk never holds more than the budget plus this param.
-        if starts_new_chunk(self._buffered_bytes, payload_bytes(weights), WEIGHT_SYNC_CHUNK_BYTES):
-            self._flush_chunk_to_every_server()
-        snapshot = snapshot_param(weights, self._device)
+        snapshot = snapshot_to_sync_device(
+            name,
+            weights,
+            device=self._device,
+            buffered_bytes=self._buffered_bytes,
+            budget=WEIGHT_SYNC_CHUNK_BYTES,
+            flush=self._flush_chunk_to_every_server,
+        )
         for client in self._clients:
             client.buffer_param(name, snapshot)
-        self._buffered_bytes += payload_bytes(snapshot)
+        self._buffered_bytes += snapshot.nbytes
 
     def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
         """Bind every client's co-load groups to the served model (see the client method)."""

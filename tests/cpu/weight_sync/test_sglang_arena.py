@@ -14,12 +14,14 @@ pinned:
     engine's reply is not handed out again before the queued copy reads it;
   * the arena is reused across chunks with no host wait — a chunk's sends are settled two chunks
     later — and every chunk's broadcasts go out in declared order;
+  * a deferred settle that passes the drain deadline, whether staging the next chunk or ending the
+    sync, aborts the group and retires the client;
   * a chunk that fails before its event is recorded drains the send stream as a whole under the
     cleanup deadline, and the deadline aborts the group and retires the client;
   * the end of a sync settles what is outstanding and drops the arena, so it does not pin the sync
     GPU at the largest chunk's size between syncs.
 
-    python tests/cpu/grpo/test_weight_sync_sglang_staging.py
+    python tests/cpu/weight_sync/test_sglang_arena.py
 """
 
 import contextlib
@@ -27,8 +29,9 @@ import contextlib
 import pytest
 import torch
 
-import src.distributed.nccl.clients.sglang as sglang_module
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
+import src.weight_sync.clients.sglang as sglang_module
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.transport import c10d_group
 from tests.common.weight_sync import offline_client
 
 _BUDGET = 4096
@@ -48,6 +51,13 @@ class _FakeEvent:
 
     def record(self, stream):
         self.stream = stream
+
+
+class _PendingEvent:
+    """The event of a chunk whose sends never retire: the engine stopped receiving."""
+
+    def query(self) -> bool:
+        return False
 
 
 class _StreamContexts:
@@ -97,8 +107,7 @@ def client(monkeypatch, streams, recorded_streams):
     monkeypatch.setattr(torch.cuda, "stream", streams.enter)
     monkeypatch.setattr(torch.cuda, "current_stream", streams.current)
     monkeypatch.setattr(torch.cuda, "Event", _FakeEvent)
-    monkeypatch.setattr(handle, "_post_once", lambda path, **kwargs: None)
-    monkeypatch.setattr(handle, "_post", lambda path, **kwargs: None)
+    monkeypatch.setattr(handle, "request", lambda method, path, **kwargs: None)
     monkeypatch.setattr(handle, "_lift_pause", lambda timeout, context: None)
     return handle
 
@@ -107,13 +116,26 @@ _DRAIN_DEADLINE = 1234.5
 
 
 def _settle_probe(monkeypatch) -> list:
-    """Records every settle as ``(event, timeout_s)``; the drain deadline resolves to a sentinel."""
+    """Records every settle as ``(event, timeout_s)``; the drain deadline is a sentinel."""
     settled: list = []
-    monkeypatch.setattr(sglang_module, "resolve_drain_timeout_s", lambda: _DRAIN_DEADLINE)
+    monkeypatch.setattr(sglang_module, "BROADCAST_DRAIN_TIMEOUT_S", _DRAIN_DEADLINE)
     monkeypatch.setattr(
-        sglang_module, "bounded_event_sync", lambda event, timeout_s, what: settled.append((event, timeout_s))
+        sglang_module,
+        "bounded_event_sync",
+        lambda event, timeout_s, what, abort: settled.append((event, timeout_s)),
     )
     return settled
+
+
+def _expired(waited: list):
+    """A ``bounded_stream_sync`` whose deadline passes: it records ``(stream, timeout_s)``, aborts and raises."""
+
+    def expired(stream, timeout_s, what, abort):
+        waited.append((stream, timeout_s))
+        abort()
+        raise RuntimeError(f"{what} did not complete")
+
+    return expired
 
 
 def test_chunks_are_staged_in_one_arena_sized_to_the_budget(client, monkeypatch):
@@ -246,14 +268,9 @@ def test_a_chunk_that_fails_mid_upload_drains_the_stream_and_aborts_on_deadline(
 
     monkeypatch.setattr(sglang_module.dist, "broadcast", failing_broadcast)
     aborted: list = []
-    monkeypatch.setattr(sglang_module.c10d, "_abort_process_group", aborted.append)
+    monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", aborted.append)
     waited: list = []
-
-    def expired(event, timeout_s, what):
-        waited.append((event, timeout_s))
-        raise RuntimeError(f"{what} did not complete")
-
-    monkeypatch.setattr(sglang_module, "bounded_event_sync", expired)
+    monkeypatch.setattr(sglang_module, "bounded_stream_sync", _expired(waited))
     # The arena of an earlier chunk.
     list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)], torch.cuda.current_stream()))
     previous = _FakeEvent()
@@ -264,11 +281,9 @@ def test_a_chunk_that_fails_mid_upload_drains_the_stream_and_aborts_on_deadline(
 
     assert aborted == [client._group], "the failure path did not abort the weight-update group"
     assert client._aborted and not client._inflight
-    assert len(waited) == 1 and waited[0][1] == sglang_module._CLEANUP_TIMEOUT_S, (
-        "the failure path must wait under the cleanup deadline, not the drain deadline"
-    )
-    assert waited[0][0] is not previous and waited[0][0].stream is client._send_stream, (
-        "the failure path must drain the whole send stream through a fresh event, not the previous chunk's"
+    assert waited == [(client._send_stream, sglang_module.CLEANUP_TIMEOUT_S)], (
+        "the failure path must drain the whole send stream, not the previous chunk's event, under the "
+        f"cleanup deadline rather than the drain deadline (waited on {waited})"
     )
     with pytest.raises(RuntimeError, match="aborted"):
         client.begin_weight_update()
@@ -278,26 +293,49 @@ def test_a_drain_deadline_on_the_failure_path_still_reports_the_engines_own_erro
     """The engine rejecting the chunk is what usually leaves a broadcast spinning: the drain then
     passes its deadline, and the error raised must still be the engine's, not the deadline's."""
 
-    def rejected(path, **kwargs):
+    def rejected(method, path, **kwargs):
         raise RuntimeError("HTTP 500: the engine refused the declared shapes")
 
-    monkeypatch.setattr(client, "_post_once", rejected)
+    monkeypatch.setattr(client, "request", rejected)
 
     def failing_broadcast(tensor, src, group):
         raise RuntimeError("NCCL error: peer answered with an error")
 
     monkeypatch.setattr(sglang_module.dist, "broadcast", failing_broadcast)
-    monkeypatch.setattr(sglang_module.c10d, "_abort_process_group", lambda group: None)
-
-    def expired(event, timeout_s, what):
-        raise RuntimeError(f"{what} did not complete")
-
-    monkeypatch.setattr(sglang_module, "bounded_event_sync", expired)
+    monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", lambda group: None)
+    monkeypatch.setattr(sglang_module, "bounded_stream_sync", _expired([]))
 
     with pytest.raises(RuntimeError, match="refused the declared shapes") as excinfo:
         client._send_chunk([("w", torch.ones(3, dtype=torch.bfloat16))], flush_cache=False)
-    assert sglang_module._EP_UPDATE_FROM_DIST in str(excinfo.value), "the failing engine route is not named"
+    assert "/update_weights_from_distributed" in str(excinfo.value), "the failing engine route is not named"
     assert client._aborted, "the deadline must still have aborted the group"
+
+
+def _stage_the_next_chunk(client) -> None:
+    list(client._stage_on_device([torch.ones(3, dtype=torch.bfloat16)], torch.cuda.current_stream()))
+
+
+def _end_the_sync(client) -> None:
+    client._release_arena()
+
+
+@pytest.mark.parametrize("settle", [_stage_the_next_chunk, _end_the_sync], ids=["next-chunk", "end-of-sync"])
+def test_a_deferred_settle_that_passes_the_drain_deadline_aborts_the_group(client, monkeypatch, settle):
+    """The settle is the only host wait on a chunk's sends once the engine has acknowledged it; a peer
+    that stopped receiving leaves those kernels spinning, and without the abort the client is not
+    retired and the reconnect's destroy blocks behind them."""
+    monkeypatch.setattr(sglang_module, "BROADCAST_DRAIN_TIMEOUT_S", 0.0)
+    aborted: list = []
+    monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", aborted.append)
+    client._inflight.extend(_PendingEvent() for _ in range(sglang_module._INFLIGHT_CHUNKS))
+
+    with pytest.raises(RuntimeError, match="weight broadcast did not complete"):
+        settle(client)
+
+    assert aborted == [client._group], "the settle deadline did not abort the weight-update group"
+    assert client._aborted, "an aborted group must keep close from destroying it"
+    with pytest.raises(RuntimeError, match="aborted"):
+        client.begin_weight_update()
 
 
 def test_the_end_of_a_sync_settles_the_outstanding_sends_and_drops_the_arena(client, monkeypatch):

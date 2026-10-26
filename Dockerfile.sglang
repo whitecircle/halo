@@ -59,7 +59,7 @@ missing = {'names','dtypes','shapes','group_name','flush_cache','abort_all_reque
 assert not missing, f'UpdateWeightsFromDistributedReqInput lost: {missing}'; \
 print('weight-sync request schemas: OK')"
 
-# The trainer vendors sglang's rendezvous convention (src/distributed/nccl/transport/torch_group.py):
+# The trainer vendors sglang's rendezvous convention (src/weight_sync/transport/c10d_group.py):
 # a group_name-prefixed store joined via _new_process_group_helper, trainer at rank 0. A change
 # upstream would hang the group with no error, so assert it here, against whichever module this
 # release keeps the weight update in.

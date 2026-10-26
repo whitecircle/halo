@@ -2,8 +2,8 @@
 """PEFT weight sync must push the *folded* adapter, and leave the trainer's own weights untouched.
 
 ``gather_and_send_weights`` folds the LoRA delta into each base weight out of place and forwards the
-result under the base-model name; the vendored client snapshots each ``update_named_param`` payload
-and flushes the snapshots later via ``reset_prefix_cache``. A recording client that stages exactly as
+result under the base-model name; the weight-sync client snapshots each ``update_named_param`` payload
+and flushes the snapshots later via ``reset_prefix_cache``. A recording client that snapshots exactly as
 the real one does pins that the flushed weight is ``W + B @ A``, not the base ``W``. CPU: neither
 property depends on the device or the real NCCL transport.
 
@@ -29,8 +29,8 @@ from peft import LoraConfig, get_peft_model
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, init_device_mesh
 
-from src.distributed.nccl.clients.base import snapshot_param
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, sync_weights_to_client
+from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, snapshot_to_sync_device
 from tests.common.gloo import run_gloo_ranks
 from tests.common.peft_helpers import randomize_adapters
 from tests.common.weight_sync import (
@@ -60,15 +60,19 @@ class _TinyModel(nn.Module):
 
 
 class _RecordingClient:
-    """Stand-in for the vendored NCCL client's snapshot-then-late-flush semantics."""
+    """Stand-in for the weight-sync client's snapshot-then-late-flush semantics."""
 
     def __init__(self):
         self._buffer: list[tuple[str, torch.Tensor]] = []
         self.flushed: dict[str, torch.Tensor] = {}
 
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
-        # The client's own staging: a snapshot taken when the tensor is forwarded, never a reference.
-        self._buffer.append((name, snapshot_param(weights, None)))
+        # The client's own snapshot, taken when the tensor is forwarded, never a reference. The
+        # whole push rides one chunk, sent by reset_prefix_cache, so nothing is buffered toward a cut.
+        snapshot = snapshot_to_sync_device(
+            name, weights, device=None, buffered_bytes=0, budget=WEIGHT_SYNC_CHUNK_BYTES, flush=lambda: None
+        )
+        self._buffer.append((name, snapshot))
 
     def reset_prefix_cache(self) -> None:
         # The broadcast happens here, after gather_and_send_weights has returned.

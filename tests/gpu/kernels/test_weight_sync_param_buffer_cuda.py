@@ -2,7 +2,7 @@
 """The weight sync must stage a weight on the sync device as a copy, never through host memory.
 
 The rest of the buffering contract is CPU-only and lives in
-``tests/cpu/grpo/test_weight_sync_param_buffer.py``; this case needs a real GPU. A snapshot that
+``tests/cpu/weight_sync/test_param_buffer.py``; this case needs a real GPU. A snapshot that
 transits pinned host memory is copied out and back over PCIe before the NCCL broadcast, and those two
 copies cap the push well below the fabric; one that aliases the source is rewritten by the next
 optimizer step before it goes out.
@@ -25,7 +25,7 @@ import torch
 
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log
-from tests.cpu.grpo.test_weight_sync_param_buffer import _bare_client
+from tests.cpu.weight_sync.test_param_buffer import _bare_client
 
 # 32 MiB fp32: a copy long enough that a reader with no ordering against it would see it in flight.
 _STAGED_ELEMENTS = 8 * 1024 * 1024

@@ -66,7 +66,9 @@ def _scorer_cls(fail: bool):
         def __init__(self, base_url, connection_timeout):
             if fail:
                 raise ConnectionError(f"rollout server {base_url} unreachable from this node")
-            self.session = types.SimpleNamespace(close=lambda: None)
+
+        def close_session(self) -> None:
+            pass
 
     return _Scorer
 

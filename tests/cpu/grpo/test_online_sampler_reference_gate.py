@@ -22,13 +22,13 @@ import torch
 from trl import GRPOTrainer
 
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout import weight_sync_clients
 from src.trainers.grpo.rollout.weight_sync_clients import (
     verify_sampler_logprob_reference,
     verify_sampler_logprob_reference_synced,
 )
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeVLLMServer
 from tests.common.repo import REPO_ROOT
 

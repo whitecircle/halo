@@ -5,14 +5,15 @@ The transport verdict is the whole point of the tool: a parser that misses the `
 channel lines, or reads GPUDirect off the wrong field, turns a socket fallback into a passing
 preflight. The excerpts below are verbatim NCCL 2.31 output for the transports the trainer meets:
 EFA with GPUDirect, NCCL's own InfiniBand transport, the socket fallback, same-host CUDA IPC and
-shared memory. The CLI's gate (``--expect``, the unchanged-server check) is pinned against a
-stubbed preflight result.
+shared memory. The push is pinned against a recording client, and the CLI's gate (``--expect``,
+the unchanged-server check) against a stubbed preflight result.
 
     python tests/cpu/diagnostics/test_weight_sync_transport.py
 """
 
 import json
 import os
+import tempfile
 from dataclasses import asdict
 
 import pytest
@@ -20,7 +21,10 @@ import torch
 from safetensors.torch import save_file
 
 from src.diagnostics import weight_sync_transport as wst
+from src.weight_sync.clients.base import WeightSyncClientBase
+from tests.common.fake_engines import FakeVLLMServer
 from tests.common.repo import load_script_module
+from tests.common.weight_sync import Wire
 
 preflight_cli = load_script_module("scripts/profiling/weight_sync_transport.py", register=True)
 
@@ -142,11 +146,17 @@ def test_a_log_without_channel_lines_is_unknown_not_a_guess():
     assert wst.parse_nccl_log("host:1:1 [0] NCCL INFO NCCL version 2.31.2+cuda13.3\n").verdict == wst.VERDICT_UNKNOWN
 
 
-def test_arming_sets_the_debug_variables_before_nccl_reads_them(tmp_path, monkeypatch):
+@pytest.fixture
+def nccl_debug_env(monkeypatch):
+    """The NCCL debug variables, restored once the test ends."""
     for key in ("NCCL_DEBUG", "NCCL_DEBUG_SUBSYS", "NCCL_DEBUG_FILE"):
-        # Recorded whether or not the key exists, so the arming cannot leak past this test into the
+        # Recorded whether or not the key exists, so the arming cannot leak past the test into the
         # torchrun subprocesses the GPU tier spawns with this process's environment.
         monkeypatch.setenv(key, os.environ.get(key, ""))
+
+
+@pytest.mark.usefixtures("nccl_debug_env")
+def test_arming_sets_the_debug_variables_before_nccl_reads_them(tmp_path):
     pattern = wst.arm_nccl_debug(str(tmp_path))
     assert os.environ["NCCL_DEBUG"] == "INFO"
     assert "NET" in os.environ["NCCL_DEBUG_SUBSYS"]
@@ -239,6 +249,73 @@ def test_a_hub_checkpoint_is_read_at_the_requested_revision(monkeypatch, tmp_pat
     monkeypatch.setattr(wst, "hf_hub_download", not_a_repo)
     with pytest.raises(ValueError, match="--model-id"):
         wst.load_checkpoint_tensor("/mnt/models/on-the-server", None)
+
+
+class _StreamedClient(WeightSyncClientBase):
+    """The engine-agnostic client over a fake server's HTTP routes: forming the group only records the
+    sync device, and a :class:`Wire` stands in for the engine's update phases."""
+
+    BACKEND_NAME = "fake engine"
+
+    def _reset_transport_state(self) -> None:
+        pass
+
+    def init_communicator(self, device=0):
+        self._resolve_sync_device(device)
+
+    def close_communicator(self):
+        self.abort_weight_update()
+        self._finalize_close()
+
+
+@pytest.mark.usefixtures("nccl_debug_env")
+def test_each_round_is_the_trainers_streamed_push(tmp_path, monkeypatch):
+    """A round stages the checkpoint tensor on the sync device as a copy and streams it inside one update
+    it closes, as every trainer sync does. An engine handed the loaded tensor itself means the round
+    skipped that copy, so the rate it reports is not the trainer's."""
+    # The preflight's NCCL log directory is a fresh mkdtemp; this keeps it under tmp_path.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    embed = torch.arange(8, dtype=torch.bfloat16).reshape(4, 2)
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    save_file({"model.embed_tokens.weight": embed}, str(checkpoint / wst.SAFETENSORS_WEIGHTS_FILE))
+    loaded: list[torch.Tensor] = []
+    load = wst.load_checkpoint_tensor
+
+    def recording_load(*args, **kwargs):
+        name, tensor = load(*args, **kwargs)
+        loaded.append(tensor)
+        return name, tensor
+
+    wire = Wire()
+    monkeypatch.setattr(wst, "load_checkpoint_tensor", recording_load)
+    monkeypatch.setattr(
+        wst, "resolve_weight_sync_client", lambda backend: lambda **kwargs: wire.attach(_StreamedClient(**kwargs))
+    )
+    server = FakeVLLMServer()
+    try:
+        result = wst.run_preflight(
+            server_url=server.url,
+            backend="vllm",
+            group_port=0,
+            group_host=None,
+            device="cpu",
+            param=None,
+            model_id=str(checkpoint),
+            revision=None,
+            rounds=2,
+            connection_timeout=5.0,
+        )
+    finally:
+        server.close()
+
+    assert len(result["rates_gbps"]) == 2
+    assert (wire.opened, wire.closed) == (2, 2), "each round must open one update and close it"
+    [source] = loaded
+    assert len(wire.chunks) == 2
+    for [(name, sent)] in wire.chunks:
+        assert name == "model.embed_tokens.weight" and torch.equal(sent, embed)
+        assert sent.data_ptr() != source.data_ptr(), "the round pushed the loaded tensor, not a staged copy"
 
 
 def _result(**overrides) -> dict:

@@ -19,7 +19,7 @@ Prerequisites:
 
 One leg per invocation, and ``--mode`` is required: each leg binds its own trainer-side
 weight-transfer port — the online legs hold it until the client's atexit ``close_communicator``
-(``src/distributed/nccl/clients/vllm.py``), the environmental legs close it when ``train()`` ends and
+(``src/weight_sync/clients/vllm.py``), the environmental legs close it when ``train()`` ends and
 additionally stand up Ray actors. The manifest's args_matrix gives each leg
 its own invocation; there is no mode that runs several. Every leg first checks server connectivity.
 

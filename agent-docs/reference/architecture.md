@@ -27,8 +27,9 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Models | The sharding-agnostic model side: module-tree introspection, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, the `Auto*`/tokenizer/dtype preparation, and the sequence-classification heads transformers does not ship (`src/models/seq_cls_heads.py`, registered by an import in `src/models/loading/model_preparation.py`) | `src/models/` | [Adding a Model](../models/adding-a-model.md) |
 | Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model, their catalog), the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards/README.md) |
 | Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/async-grpo/environments/README.md) |
+| Weight sync | Trainer-to-rollout-engine weight sync: one client per engine (`VLLMWeightSyncClient`, `SGLangWeightSyncClient`) and the backend registry, the chunking (the chunk budget, the co-load groups, the snapshots on the sync device), and the NCCL transport — the rendezvous listener and the group-address policy, the bounded broadcast waits, the vLLM pynccl communicator and packed broadcast, the SGLang c10d weight-update group, the send-stream buffers | `src/weight_sync/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
 | Entry-script plumbing | Environment setup (output dir, HF caches, seed, resume detection), the `scripts/training/**` backbone, the `run.log` tee, root/CLI logging, and the `halo launch` / `halo run` surface | `src/training/`, `src/cli.py`, `src/log.py` | [Scripts](scripts-reference.md) |
-| Served endpoints | The OpenAI-compatible client every rollout, judge and batch-generation script talks through: endpoint defaults and key resolution (`endpoints.py`), the async client, one request with the upstream retry and the single-request helper that normalizes a reply (`openai_client.py`), the parallel resumable batch with its JSONL resume store (`batch_requests.py`), and the response record with its finish-reason contract (`response.py`) | `src/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
+| Served endpoints | The OpenAI-compatible client every rollout, judge and batch-generation script talks through: endpoint defaults, key resolution and the loopback test (`endpoints.py`), the async client, one request with the upstream retry and the single-request helper that normalizes a reply (`openai_client.py`), the parallel resumable batch with its JSONL resume store (`batch_requests.py`), and the response record with its finish-reason contract (`response.py`) | `src/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
 
 Leaf modules keep those imports one-way, each holding a contract several layers share:
 
@@ -54,8 +55,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/config_validation.py` | the value guards, the range-validation base, the declared-default comparison and the argument refusals — standard library only | the argument and config dataclasses, the reward terms, the training scripts and the Muon builder |
 | `src/subclass_registry.py` | the subclass-tree walk, the class-claim maps (a key claimed twice raises), the swap of claimed modules and the package import that registers every family — torch only | the EP and CP patchers, the PP splitter, the head-path contract, the EP `model_type` roster and the weight-sync backend registry, so a family registers by subclassing, with no list to edit |
 | `src/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `src/config_validation.py` guards are its only first-party imports | the argument dataclasses and `EnvironmentConfig`, which parse `rewards:` at config time without pulling in the scorers' SDK client |
-| `src/inference/endpoints.py` | the OpenAI-compatible endpoint defaults and key resolution — `src/env.py` only | the reward terms, the CLI endpoint flag block (`scripts/_common.py`), the judge clients — none imports the SDK to learn a URL |
-| `src/distributed/nccl/addresses.py` | host-address classification (`is_loopback`) — standard library only | the weight-sync clients and the Ray rollout actors — without pulling the client's torch, DTensor and NCCL transport into the actors |
+| `src/inference/endpoints.py` | the OpenAI-compatible endpoint defaults, key resolution and the loopback test (`is_loopback`) — `src/env.py` only | the reward terms, the CLI endpoint flag block (`scripts/_common.py`), the judge clients, the Ray rollout actors and the weight-sync group-address policy — none of them imports the SDK |
 
 `src/distributed/runtime.py` therefore holds rank/world state, `init_distributed` and the
 process-group timeouts, barriers, the cross-rank rejection/consensus seams (including the
@@ -192,10 +192,12 @@ instead (`rollout_backend: sglang`, `Dockerfile.sglang` + `docker-compose.sglang
 engine's pinned loaders refuse a few families — see
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
-The training process talks to it over two channels: HTTP for generation, and a vendored NCCL client
-(`src/distributed/nccl/`, one client per engine: `VLLMWeightSyncClient` / `SGLangWeightSyncClient`)
-for weight sync, replacing TRL's `VLLMClient` which would pull in the vLLM package. A server on
-another node syncs over EFA ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)).
+The training process talks to it over two channels: HTTP for generation, and an NCCL weight-sync client
+(`src/weight_sync/clients/`, one per engine: `VLLMWeightSyncClient` / `SGLangWeightSyncClient`,
+over the NCCL transport in `src/weight_sync/transport/`) for weight sync. Online GRPO hands TRL
+`TrlVLLMClient` (`src/trainers/grpo/rollout/`), the vLLM client plus TRL's generation contract, in place
+of TRL's `VLLMClient`, which would pull in the vLLM package. A server on another node syncs over EFA
+([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)).
 
 Before each generation round that follows a weight update (async GRPO: every
 `sync_weights_every_n_steps`), the trainer gathers EP expert shards, unfolds FSDP2 DTensors via

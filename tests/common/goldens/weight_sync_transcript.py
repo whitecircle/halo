@@ -26,12 +26,13 @@ import requests
 import torch
 from urllib3.util.retry import Retry
 
-from src.distributed.nccl.clients import base as client_base
-from src.distributed.nccl.clients import sglang as sglang_client
-from src.distributed.nccl.clients import vllm as vllm_client
-from src.distributed.nccl.clients.base import BaseWeightSyncClient
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.clients import base as client_base
+from src.weight_sync.clients import sglang as sglang_client
+from src.weight_sync.clients import vllm as vllm_client
+from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.transport import rendezvous
 from tests.common.fake_engines import CALL_ID_HEADER, FakeEngineServer, fake_server_class
 from tests.common.goldens import regen_main
 
@@ -137,7 +138,7 @@ class _Transport:
     def send(self, tensor: torch.Tensor) -> None:
         self.events.append(f"send {str(tensor.dtype).removeprefix('torch.')}{list(tensor.shape)}")
 
-    def form_communicator(self, group, device) -> _Communicator:
+    def form_communicator(self, store, device) -> _Communicator:
         self._form("communicator")
         return _Communicator(self, device)
 
@@ -152,13 +153,9 @@ class _Transport:
     def broadcast(self, tensor: torch.Tensor, src: int, group) -> None:
         self.send(tensor)
 
-    def destroy_group(self, group) -> None:
+    def release_group(self, group, *, destroy: bool) -> None:
         if group is not None:
-            self.events.append("destroy group")
-
-    def forget_group(self, group) -> None:
-        if group is not None:
-            self.events.append("forget group")
+            self.events.append("destroy group" if destroy else "forget group")
 
     def release(self) -> None:
         self._released.set()
@@ -173,9 +170,8 @@ def _vllm_transport(transport: _Transport) -> list:
 
 def _sglang_transport(transport: _Transport) -> list:
     return [
-        patch.object(sglang_client, "create_weight_update_group", transport.form_group),
-        patch.object(sglang_client, "destroy_weight_update_group", transport.destroy_group),
-        patch.object(sglang_client, "drop_weight_update_group_bookkeeping", transport.forget_group),
+        patch.object(sglang_client, "build_weight_update_group", transport.form_group),
+        patch.object(sglang_client, "release_weight_update_group", transport.release_group),
         patch.object(torch.distributed, "broadcast", transport.broadcast),
         # The arena is a CPU tensor here, and the real call takes CUDA tensors only.
         patch.object(torch.Tensor, "record_stream", lambda tensor, stream: None),
@@ -191,7 +187,7 @@ class Engine:
     """One engine's client, the patches that put its transport on the CPU, and the routes a scenario
     scripts failures on."""
 
-    client_class: type[BaseWeightSyncClient]
+    client_class: type[WeightSyncClientBase]
     transport_patches: Callable[[_Transport], list]
     init_route: str
     declaration_route: str
@@ -355,7 +351,7 @@ def _retry_spelling(retry: Retry) -> str:
     return f"retry({','.join(fields)})"
 
 
-def _request_line(call_id: int, call: _Call, client: BaseWeightSyncClient | None, server: FakeEngineServer) -> str:
+def _request_line(call_id: int, call: _Call, client: WeightSyncClientBase | None, server: FakeEngineServer) -> str:
     url = urlsplit(call.url)
     query = "&".join(part for part in (url.query, urlencode(call.params or {})) if part)
     parts = [call.method, url.path + (f"?{query}" if query else "")]
@@ -364,7 +360,7 @@ def _request_line(call_id: int, call: _Call, client: BaseWeightSyncClient | None
     parts.append(
         f"timeout={call.timeout:g}" if isinstance(call.timeout, (int, float)) else f"timeout={call.timeout!r}"
     )
-    kind = "session" if client is not None and call.session is client.session else "single-shot"
+    kind = "session" if client is not None and call.session is client._session else "single-shot"
     parts.append(f"{kind} {_retry_spelling(call.retry)}")
     received = server.received(str(call_id))
     if received != 1:
@@ -402,7 +398,7 @@ class Driver:
         self.engine = engine
         self.server = server
         self.scenario = scenario
-        self.client: BaseWeightSyncClient | None = None
+        self.client: WeightSyncClientBase | None = None
         # (fn, args, kwargs) per at-exit hook a weight-sync client registered, in order.
         self.at_exit_hooks: list[tuple[Callable, tuple, dict]] = []
 
@@ -442,7 +438,7 @@ class Driver:
         register_at_exit, unregister_at_exit = atexit.register, atexit.unregister
 
         def registers_a_client(fn) -> bool:
-            return isinstance(getattr(fn, "__self__", None), BaseWeightSyncClient)
+            return isinstance(getattr(fn, "__self__", None), WeightSyncClientBase)
 
         def register(fn, *args, **kwargs):
             if not registers_a_client(fn):
@@ -467,7 +463,7 @@ class Driver:
         with ExitStack() as stack:
             for patcher in patches:
                 stack.enter_context(patcher)
-            for name in (self.engine.client_class.GROUP_HOST_ENV, client_base._WEIGHT_SYNC_BIND_ALL_ENV):
+            for name in (self.engine.client_class.GROUP_HOST_ENV, rendezvous._BIND_ALL_ENV):
                 os.environ.pop(name, None)
             yield
 

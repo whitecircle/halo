@@ -1,19 +1,11 @@
-"""Engine-agnostic half of the weight-sync clients: HTTP plumbing, group addressing, chunk staging.
+"""The engine-agnostic half of the weight-sync clients: the HTTP control plane and the streamed update.
 
-Both supported rollout engines take the same shape: the trainer joins the engine's process group as
-rank 0 and, while the engine is quiesced, streams the gathered parameters to it in byte-bounded
-chunks. Both wire protocols are chunk-oriented (one quiesce, N declared payloads), so the forwarding
-rank stages at most one chunk on its sync GPU instead of a full model. Staged on the device, not in
-pinned host memory: a chunk that transits the host is copied out and back over PCIe before it
-reaches the NIC, and those two copies, not the fabric, would set the sync rate. Only the HTTP verbs
-and the broadcast transport differ; those are in ``VLLMWeightSyncClient`` / ``SGLangWeightSyncClient``.
-
-The gather layer (``src/trainers/grpo/rollout/weight_sync.py``) drives whichever client it is given
-through ``update_named_param`` + ``reset_prefix_cache``.
+The trainer joins the engine's process group as rank 0 and, while the engine is quiesced, streams the
+gathered parameters to it in byte-bounded chunks (``chunking``). Only the HTTP verbs and the broadcast
+transport differ per engine; those are in ``VLLMWeightSyncClient`` / ``SGLangWeightSyncClient``.
 """
 
 import atexit
-import errno
 import logging
 import socket
 import threading
@@ -25,52 +17,57 @@ from urllib.parse import urlparse
 import requests
 import torch
 from requests.adapters import HTTPAdapter
-from torch.distributed.tensor import DTensor
 from urllib3.util.retry import Retry
 
-from src.distributed.nccl.addresses import is_loopback
-from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
-from src.distributed.nccl.transport.stateless_group import RendezvousListener
-from src.env import env_flag, env_positive_int, env_str
+from src.weight_sync.chunking import (
+    WEIGHT_SYNC_CHUNK_BYTES,
+    declared_co_load_groups,
+    resolve_sync_device,
+    snapshot_to_sync_device,
+    split_co_loaded,
+)
+from src.weight_sync.transport.rendezvous import RendezvousListener, open_group_rendezvous
 
 logger = logging.getLogger(__name__)
 
-
-_ALL_INTERFACES = "0.0.0.0"
-_WEIGHT_SYNC_BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
 # Bailing spellings whose checkpoints declare a model class neither pinned engine registers; each
 # client quotes them for its own release through :func:`unregistered_bailing_model_types`.
 _UNREGISTERED_BAILING_CLASSES = (
-    ("bailing_hybrid", "{engine} registers no model class for Ling 3.0's BailingMoeV3ForCausalLM"),
+    ("bailing_hybrid", "{release} registers no model class for Ling 3.0's BailingMoeV3ForCausalLM"),
     (
         "bailing_moe_linear",
-        "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where {engine} registers BailingMoeV2_5ForCausalLM",
+        "Ring's checkpoints declare BailingMoeLinearV2ForCausalLM where {release} registers BailingMoeV2_5ForCausalLM",
     ),
 )
-# UDP "connect" target used only to make the kernel pick this host's outbound interface, whose local
-# address is then its routable IP. No packet is sent, so the address only has to be off-link and
-# non-loopback; a missing route falls back to loopback in :func:`_get_ip`.
-_OUTBOUND_ROUTE_PROBE = ("8.8.8.8", 80)
 
-# Default per-attempt deadline for a control-plane POST: the quiesce/capability calls (`/pause`,
-# `/pause_generation`, `/start_weight_update`, `/tokenize`). Longer calls use the constants below.
-_POST_TIMEOUT_S = 60
-
-_HTTP_PROBE_TIMEOUT_S = 10
-_GROUP_FORMATION_TIMEOUT_S = 120
-_WEIGHT_UPDATE_TIMEOUT_S = 600
+# Per-attempt deadline of a short control-plane POST; the calls that block on the engine have their own.
+POST_TIMEOUT_S = 60
+HTTP_PROBE_TIMEOUT_S = 10
+GROUP_FORMATION_TIMEOUT_S = 120
+WEIGHT_UPDATE_TIMEOUT_S = 600
 # Cleanup POSTs run on an already-failing path, where a long block only delays the real raise.
-_CLEANUP_TIMEOUT_S = 30
-_ASYNC_POLL_INTERVAL_S = 0.1
+CLEANUP_TIMEOUT_S = 30
+# A re-score is one prefill of a training row: a 250k-token row on a server that is also generating.
+RESCORE_TIMEOUT_S = 600.0
+_LOGPROB_PROBE_TIMEOUT_S = 60.0
 # Grace for a still-in-flight server call to record its error once the local side has already failed.
 _SERVER_ERROR_GRACE_S = 5.0
+_ASYNC_POLL_INTERVAL_S = 0.1
 # Cadence of the startup /health poll, which runs against a server that may still be loading weights.
 _HEALTH_RETRY_INTERVAL_S = 2.0
+# What a client's session retries by default: a refused connection, a dropped read or a 5xx, with backoff.
+_DEFAULT_RETRY = Retry(
+    total=5,
+    connect=5,
+    read=5,
+    status=3,
+    status_forcelist=[500, 502, 503],
+    backoff_factor=2,
+    allowed_methods=["POST", "GET"],
+)
+
 # Sampler-logprob semantics probe: 1-token completions of one prompt under three sampler settings.
 _LOGPROB_PROBE_PROMPT = "The capital of France is"
-_LOGPROB_PROBE_TIMEOUT_S = 60.0
-# A re-score is one prefill of a training row: a 250k-token row on a server that is also generating.
-_RESCORE_TIMEOUT_S = 600.0
 _LOGPROB_PROBE_TEMPERATURE = 2.0
 _LOGPROB_PROBE_TOP_P = 0.5
 # Temperature-processed logprobs halve the top-1/top-2 gap at temperature 2; raw ones leave it whole.
@@ -79,159 +76,12 @@ _TEMPERATURE_APPLIED_GAP_RATIO_MAX = 0.75
 _NUCLEUS_RENORM_MIN_SHIFT_NATS = 1e-3
 
 
-def resolve_weight_sync_chunk_bytes() -> int:
-    """Budget for one streamed chunk on the sync GPU: ``HALO_WEIGHT_SYNC_CHUNK_MB``, default 1024.
-
-    The staged chunk drains into the engine as soon as the budget is reached, so the forwarding
-    rank's staged footprint is this plus the largest single tensor (one above the budget becomes its
-    own chunk, since both wire protocols describe whole tensors); the SGLang client's staging arena
-    is at least this size, while the vLLM producer's packed buffers stay at their own size. Each
-    chunk costs one engine round trip, so a larger budget trades staged memory for fewer round trips
-    (the vLLM path's remaining per-chunk cost).
-    """
-    return env_positive_int("HALO_WEIGHT_SYNC_CHUNK_MB", DEFAULT_PACKED_BUFFER_SIZE_BYTES >> 20) << 20
+def unregistered_bailing_model_types(release: str) -> dict[str, str]:
+    """``model_type`` → loader fact for the Bailing spellings the pinned engine ``release`` has no class for."""
+    return {model_type: fact.format(release=release) for model_type, fact in _UNREGISTERED_BAILING_CLASSES}
 
 
-WEIGHT_SYNC_CHUNK_BYTES = resolve_weight_sync_chunk_bytes()
-
-
-def unregistered_bailing_model_types(engine: str) -> dict[str, str]:
-    """``model_type`` → loader fact for the Bailing spellings ``engine`` (a pinned release) has no class for."""
-    return {model_type: fact.format(engine=engine) for model_type, fact in _UNREGISTERED_BAILING_CLASSES}
-
-
-def payload_bytes(tensor: torch.Tensor) -> int:
-    """Wire size of one tensor, the unit the chunk budgets below are counted in."""
-    return tensor.numel() * tensor.element_size()
-
-
-def describe_chunk(chunk: list[tuple[str, torch.Tensor]]) -> tuple[list[str], list[str], list[list[int]]]:
-    """``(names, dtype names, shapes)`` of one chunk in wire order: what both engines' update requests
-    declare ahead of the broadcasts, so the consumer allocates and unpacks against them."""
-    names = [name for name, _ in chunk]
-    dtypes = [str(param.dtype).split(".")[-1] for _, param in chunk]
-    shapes = [list(param.shape) for _, param in chunk]
-    return names, dtypes, shapes
-
-
-def starts_new_chunk(buffered_bytes: int, item_bytes: int, budget: int) -> bool:
-    """Whether the next tensor must open a new chunk; the budget is applied before it is exceeded.
-
-    Cutting after the budget is reached would put the tensor that crossed it into the chunk that goes
-    out, costing a budget's worth of extra staged memory on the trainer and the same overshoot in
-    the engine's receive buffers. A tensor larger than the budget gets a chunk of its own, since both
-    wire protocols describe whole tensors.
-    """
-    return buffered_bytes > 0 and buffered_bytes + item_bytes > budget
-
-
-def _co_load_key(name: str, groups: tuple[tuple[str, ...], ...]) -> tuple[int, str] | None:
-    """``(group index, module prefix)`` of a parameter one of ``groups`` claims, else ``None``."""
-    for index, suffixes in enumerate(groups):
-        for suffix in suffixes:
-            if name == suffix or name.endswith("." + suffix):
-                return index, name[: len(name) - len(suffix)]
-    return None
-
-
-def split_co_loaded(
-    chunk: list[tuple[str, torch.Tensor]], groups: tuple[tuple[str, ...], ...]
-) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
-    """``(sendable, held)``: the members of a co-load group not yet complete in ``chunk`` are held.
-
-    An engine whose loader fuses a module's tensors from a cache local to one request drops a member
-    that arrives without the rest, so the incomplete set waits for the chunk its partners land in.
-    Order is preserved on both sides.
-    """
-    keys = [_co_load_key(name, groups) for name, _ in chunk]
-    members: dict[tuple[int, str], set[str]] = {}
-    for (name, _), key in zip(chunk, keys, strict=True):
-        if key is not None:
-            members.setdefault(key, set()).add(name)
-    sendable, held = [], []
-    for item, key in zip(chunk, keys, strict=True):
-        complete = key is None or len(members[key]) == len(groups[key[0]])
-        (sendable if complete else held).append(item)
-    return sendable, held
-
-
-def chunk_by_bytes(
-    named_params: list[tuple[str, torch.Tensor]], budget: int, groups: tuple[tuple[str, ...], ...] = ()
-) -> list[list[tuple[str, torch.Tensor]]]:
-    """Split a whole payload into chunks, on the same boundary rule the streamed path buffers by.
-
-    One rule for both entry points, so a payload handed over in a single call is cut where streaming
-    it would have cut it rather than re-split by a second budget downstream. ``groups`` are the
-    engine's co-load groups (:func:`split_co_loaded`): a group a boundary would split moves whole
-    into the next chunk, and one the payload never completes raises, since the engine would drop it.
-    """
-    chunks: list[list[tuple[str, torch.Tensor]]] = []
-    current: list[tuple[str, torch.Tensor]] = []
-    current_bytes = 0
-    for name, param in named_params:
-        item_bytes = payload_bytes(param)
-        if starts_new_chunk(current_bytes, item_bytes, budget):
-            sendable, current = split_co_loaded(current, groups)
-            if sendable:
-                chunks.append(sendable)
-            current_bytes = sum(payload_bytes(param) for _, param in current)
-        current.append((name, param))
-        current_bytes += item_bytes
-    if current:
-        sendable, held = split_co_loaded(current, groups)
-        if held:
-            raise ValueError(f"co-loaded parameters never completed in this payload: {[name for name, _ in held]}")
-        chunks.append(sendable)
-    return chunks
-
-
-def _get_ip() -> str:
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        try:
-            s.connect(_OUTBOUND_ROUTE_PROBE)
-            return s.getsockname()[0]
-        except OSError:
-            return "127.0.0.1"
-
-
-def _is_local_address(host: str) -> bool:
-    """True when ``host`` is a bindable address of this machine (covers same-host-by-routable-IP)."""
-    if is_loopback(host):
-        return True
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, 0))
-        return True
-    except OSError:
-        return False
-
-
-def resolve_sync_device(device: torch.device | str | int) -> torch.device:
-    """The explicit ``cuda:N`` form of ``device``.
-
-    An index (0 included) and a bare ``"cuda"`` must name the same GPU the transport is formed on
-    and the snapshots are staged on, and ``torch.device("cuda")`` compares unequal to ``cuda:0``.
-    """
-    resolved = device if isinstance(device, torch.device) else torch.device(device)
-    if resolved.type == "cuda" and resolved.index is None:
-        resolved = torch.device("cuda", torch.cuda.current_device())
-    return resolved
-
-
-def snapshot_param(weights: torch.Tensor, device: torch.device | None) -> torch.Tensor:
-    """A contiguous copy of ``weights`` on ``device`` (the source's own when ``None``), never an alias.
-
-    A snapshot: an in-place mutation of the source after buffering (the next optimizer step)
-    cannot revert a staged weight before it is sent. One copy even from a strided
-    source, since ``copy_`` reads any layout. It is async on the caller's stream; the flush
-    completes it before a producer reads the tensor.
-    """
-    snapshot = torch.empty_like(weights, memory_format=torch.contiguous_format, device=device)
-    snapshot.copy_(weights.detach(), non_blocking=True)
-    return snapshot
-
-
-class _AsyncCall:
+class AsyncCall:
     """Run a function in a background thread, join later."""
 
     def __init__(self, fn, name: str = "server call"):
@@ -250,14 +100,14 @@ class _AsyncCall:
     def is_alive(self) -> bool:
         return self._thread.is_alive()
 
-    def wait(self, timeout: float = _WEIGHT_UPDATE_TIMEOUT_S):
+    def wait(self, timeout: float = WEIGHT_UPDATE_TIMEOUT_S):
         self._thread.join(timeout=timeout)
         if self._thread.is_alive():  # join() returns without signalling a timeout
             raise TimeoutError(f"{self.name} still blocked after {timeout:.0f}s — server wedged?")
         if self.error:
             raise self.error
 
-    def join(self, grace: float) -> "_AsyncCall":
+    def join(self, grace: float) -> "AsyncCall":
         """Wait up to ``grace`` seconds, then read ``.error`` / ``.result`` off the returned handle.
 
         Both readers run where the local side has already failed and ``_wait_for_calls`` raised as
@@ -268,7 +118,7 @@ class _AsyncCall:
         return self
 
 
-def _wait_for_calls(calls: list[_AsyncCall], timeout: float) -> None:
+def _wait_for_calls(calls: list[AsyncCall], timeout: float) -> None:
     """Block until every call returned, raising as soon as one of them fails.
 
     Polled rather than joined in sequence: the calls that set up the weight-transfer group complete
@@ -289,28 +139,6 @@ def _wait_for_calls(calls: list[_AsyncCall], timeout: float) -> None:
         time.sleep(_ASYNC_POLL_INTERVAL_S)
 
 
-def validate_syncable_param(name: str, param: torch.Tensor) -> None:
-    """Reject params neither broadcast protocol can carry, while the server is still serving.
-
-    A DTensor reports a global ``numel()``/``shape`` against a local ``data_ptr()``, so a sharded
-    param would be broadcast past the end of its shard. A 0-dim tensor has no last dimension to
-    re-view as bytes: it raises inside the vLLM producer with the server already paused mid-reload,
-    and gives the SGLang consumer a shape it cannot allocate against.
-    """
-    if isinstance(param, DTensor):
-        raise TypeError(
-            f"Parameter {name!r} is a DTensor: the weight-sync client broadcasts raw local storage but "
-            f"describes it with the global shape, so a sharded param would be read past its shard. "
-            f"Materialize it first (materialize_dtensor / full_tensor)."
-        )
-    if param.ndim == 0:
-        raise ValueError(
-            f"Parameter {name!r} is 0-dimensional: the broadcast protocols re-view every tensor as bytes, "
-            f"which needs a last dimension, and the consumer rebuilds it from the declared shape. "
-            f"Give the parameter an explicit shape (e.g. (1,)) in the model."
-        )
-
-
 class SamplerLogprobSemantics(NamedTuple):
     """What the engine's reported per-token logprobs already account for; ``None`` = the probe could not tell."""
 
@@ -318,38 +146,28 @@ class SamplerLogprobSemantics(NamedTuple):
     nucleus_renormalized: bool | None
 
 
-class BaseWeightSyncClient:
-    """HTTP session, group addressing and chunk staging shared by every engine.
+class WeightSyncClientBase:
+    """HTTP control plane and streamed-update state shared by every engine.
 
-    Subclasses implement the engine-specific half (``init_communicator``, ``begin_weight_update``,
-    ``_broadcast_chunk``, ``end_weight_update``, ``close_communicator``) and declare:
-
-    * ``BACKEND_KEY``: the ``rollout_backend`` config value; the package builds its client registry
-      from these.
-    * ``BACKEND_NAME``: used verbatim in operator-facing errors and logs.
-    * ``GROUP_HOST_ENV``: env var naming the trainer NIC the engine dials back to, per engine because
-      the two servers can sit on different hosts.
-    * ``RESUME_ENDPOINT`` / ``RESUME_PAYLOAD``: the route (and body, where the engine's handler takes
-      a request object) that lifts the sync quiesce, used by :meth:`_lift_pause`.
-    * ``UNSERVABLE_MODEL_TYPES`` / ``CO_LOADED_PARAM_GROUPS``: the engine's loader facts the trainer
-      side reads — which families it cannot serve, and which parameters its loader consumes only
-      together.
-    * ``SUPPORTS_ENGINE_RESCORE`` (default ``True``): whether :meth:`score_completion_logprobs` can
-      re-score a token sequence under the engine's current weights (the ``isr_engine_reference``
-      trust region), read by the trainer's construction gate. The base implementation is the OpenAI
-      completions ``prompt_logprobs`` echo (vLLM); an engine with a different prefill-log-prob route
-      overrides the method (SGLang: ``/generate`` with ``logprob_start_len``).
+    Subclasses implement the engine-specific half (``_reset_transport_state``, ``init_communicator``,
+    ``begin_weight_update``, ``_broadcast_chunk``, ``end_weight_update``, ``close_communicator``) and
+    declare the engine facts below; those declared by annotation alone have no default, so a client that
+    leaves one out fails by name where it is read. :meth:`score_completion_logprobs` is the OpenAI completions
+    ``prompt_logprobs`` echo (vLLM); an engine with another prefill-log-prob route overrides it (SGLang:
+    ``/generate`` with ``logprob_start_len``).
     """
 
-    BACKEND_KEY = ""
-    BACKEND_NAME = "inference server"
-    GROUP_HOST_ENV = ""
-    # Route that lifts the weight-sync quiesce. Annotated rather than defaulted, so a client that
-    # quiesces without declaring a route fails by name instead of POSTing to the server root.
-    # RESUME_PAYLOAD stays None for an engine whose handler takes no body; one parsing a request
-    # dataclass rejects an empty body, so it declares {}.
+    # The ``rollout_backend`` config value; the registry is built from these.
+    BACKEND_KEY: str
+    # The engine's name in operator-facing errors and logs.
+    BACKEND_NAME: str
+    # The pinned server release every roster fact below describes.
+    ENGINE_RELEASE: str
+    # Env var naming the trainer NIC the engine dials back to; per engine, as the servers can sit on different hosts.
+    GROUP_HOST_ENV: str
+    # Route that lifts the weight-sync quiesce, and the request keywords beside it.
     RESUME_ENDPOINT: str
-    RESUME_PAYLOAD: dict | None = None
+    RESUME_REQUEST: Mapping[str, object] = {}
     # ``model_type`` → why this engine cannot serve the family (no model class registered, or a loader
     # that cannot take an online update of the layout the trainer holds). Quoted by the construction
     # gate; per engine, since the two pinned servers register different rosters.
@@ -358,28 +176,12 @@ class BaseWeightSyncClient:
     # the suffixes, and parameters sharing the prefix before them must ride one chunk. Empty where the
     # engine loads every tensor on its own. Scoped per model by :meth:`scope_co_load_groups`.
     CO_LOADED_PARAM_GROUPS: tuple[tuple[str, ...], ...] = ()
-    # Whether the engine can return per-token log-probs of a given sequence under its current weights.
+    # Whether :meth:`score_completion_logprobs` can re-score a sequence under the engine's current weights
+    # (the ``isr_engine_reference`` trust region), read by the trainer's construction gate.
     SUPPORTS_ENGINE_RESCORE = True
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal that
     # follows one. Declared per client because it follows from the engine's own reload model.
     INTERRUPTED_UPDATE_STATE = "a model that is part old weights and part new"
-
-    # The GPU this client's transport was formed on, set by ``init_communicator``. Recorded rather
-    # than inferred: the flush runs on a worker thread when several servers sync at once, and torch's
-    # current device and current stream are both thread-local.
-    _sync_device: torch.device | None = None
-    # Cached by ``served_model_id``; None until the first completions-route call.
-    _served_model_id: str | None = None
-    # Set once an interrupted sync left the engine unservable; every later sync is refused with it.
-    _unusable_reason: str | None = None
-    # Update-phase state, defaulted here as well as set in ``__init__``: the methods reading it decide
-    # whether the engine is quiesced or partly rewritten, and must answer on any instance rather than
-    # raise AttributeError. The pending chunk is not defaulted here, since a mutable class attribute
-    # would be shared by every client; ``_reset_buffer_state`` initializes it.
-    _paused = False
-    _update_open = False
-    _chunks_sent = 0
-    _buffered_bytes = 0
 
     def __init__(
         self,
@@ -387,21 +189,14 @@ class BaseWeightSyncClient:
         group_port: int = 0,
         connection_timeout: float = 0.0,
         group_host: str | None = None,
+        *,
+        retry_policy: Retry = _DEFAULT_RETRY,
     ):
-        self.session = requests.Session()
-        adapter = HTTPAdapter(
-            max_retries=Retry(
-                total=5,
-                connect=5,
-                read=5,
-                status=3,
-                status_forcelist=[500, 502, 503],
-                backoff_factor=2,
-                allowed_methods=["POST", "GET"],
-            )
-        )
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
+        # Carries the requests sent with ``retry``; ``retry_policy`` is what it retries.
+        self._session = requests.Session()
+        adapter = HTTPAdapter(max_retries=retry_policy)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
 
         parsed = urlparse(base_url)
         if not parsed.hostname:
@@ -415,30 +210,42 @@ class BaseWeightSyncClient:
         self.group_port = group_port
         # NIC advertised for the NCCL group. Distinct from NCCL_SOCKET_IFNAME (data plane).
         self.group_host = group_host
-        self._reset_buffer_state()
+        # The GPU the transport was formed on, set by ``init_communicator``. Recorded rather than
+        # inferred: the flush runs on a worker thread when several servers sync at once, and torch's
+        # current device and current stream are both thread-local.
+        self._sync_device: torch.device | None = None
+        # Cached by ``served_model_id``; None until the first completions-route call.
+        self._served_model_id: str | None = None
+        # Set once an interrupted sync left the engine unservable; every later sync is refused with it.
+        self._unusable_reason: str | None = None
         # Server quiesced for a weight sync; close_communicator/atexit lift it if the trainer dies.
         self._paused = False
+        self._reset_buffer_state()
+        self._reset_transport_state()
         self.check_server(connection_timeout)
 
-    def _post(self, path: str, timeout: float = _POST_TIMEOUT_S, **kwargs):
-        resp = self.session.post(f"{self.base_url}{path}", timeout=timeout, **kwargs)
-        resp.raise_for_status()
+    def request(
+        self, method: str, path: str, *, retry: bool, timeout: float, check: bool = True, **kwargs
+    ) -> requests.Response:
+        """Send ``method`` to ``path`` on the server, raising on an error status unless ``check`` is off.
+
+        ``retry`` sends it over the session, which retries it under the client's policy; without it the
+        request goes out once. A blocking engine RPC must go out once: a retry queues a second collective
+        call and wedges the engine.
+        """
+        url = f"{self.base_url}{path}"
+        if retry:
+            resp = self._session.request(method, url, timeout=timeout, **kwargs)
+        else:
+            resp = requests.request(method, url, timeout=timeout, **kwargs)
+        if check:
+            resp.raise_for_status()
         return resp
 
-    def _post_once(self, path: str, timeout: float = _POST_TIMEOUT_S, **kwargs):
-        """Single-shot POST for non-idempotent blocking endpoints; a retry would queue a second
-        collective RPC and wedge the engine."""
-        resp = requests.post(f"{self.base_url}{path}", timeout=timeout, **kwargs)
-        resp.raise_for_status()
-        return resp
-
-    def _post_if_supported(self, path: str, timeout: float = _POST_TIMEOUT_S, **kwargs) -> bool:
-        """POST to an optional endpoint; treat 404 as "this server lacks it". Returns whether it exists."""
-        resp = requests.post(f"{self.base_url}{path}", timeout=timeout, **kwargs)
-        if resp.status_code == 404:
-            return False
-        resp.raise_for_status()
-        return True
+    def _start_collective_rpc(self, path: str, *, timeout: float, json: dict) -> AsyncCall:
+        """Start a single-shot POST of ``path`` on a background thread, for a route the engine answers only
+        once its side of a collective returned. The handle is labelled with the route."""
+        return AsyncCall(name=path, fn=lambda: self.request("POST", path, retry=False, timeout=timeout, json=json))
 
     def check_server(self, total_timeout: float = 0.0):
         start = time.time()
@@ -447,7 +254,9 @@ class BaseWeightSyncClient:
         while True:
             try:
                 # Bounded GET: a blackholed route would otherwise block past the outer deadline.
-                status = requests.get(f"{self.base_url}/health", timeout=_HTTP_PROBE_TIMEOUT_S).status_code
+                status = self.request(
+                    "GET", "/health", retry=False, timeout=HTTP_PROBE_TIMEOUT_S, check=False
+                ).status_code
                 if status == 200:
                     logger.info(f"{self.BACKEND_NAME} server is up")
                     return
@@ -463,20 +272,18 @@ class BaseWeightSyncClient:
                 ) from last_error
             time.sleep(_HEALTH_RETRY_INTERVAL_S)
 
-    def served_model_cards(self, timeout: float = _HTTP_PROBE_TIMEOUT_S) -> list[dict]:
+    def _served_model_cards(self) -> list[dict]:
         """The engine's ``/v1/models`` model cards. Raises when the server cannot be read."""
-        resp = self.session.get(f"{self.base_url}/v1/models", timeout=timeout)
-        resp.raise_for_status()
-        return list(resp.json().get("data", []))
+        return list(self.request("GET", "/v1/models", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json().get("data", []))
 
     def served_model_id(self) -> str:
         """The id the engine serves the policy under, read once and cached for the completions route."""
         if self._served_model_id is None:
-            self._served_model_id = str(self.served_model_cards()[0]["id"])
+            self._served_model_id = str(self._served_model_cards()[0]["id"])
         return self._served_model_id
 
     def score_completion_logprobs(
-        self, prompt_ids: list[int], completion_ids: list[int], timeout: float = _RESCORE_TIMEOUT_S
+        self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
     ) -> list[float]:
         """Per-token log-probs of ``completion_ids`` after ``prompt_ids`` under the engine's CURRENT
         weights: one prefill through the completions ``prompt_logprobs`` echo, the raw (pre-sampler)
@@ -490,8 +297,7 @@ class BaseWeightSyncClient:
             "prompt_logprobs": 0,
             "temperature": 0.0,
         }
-        resp = self.session.post(f"{self.base_url}/v1/completions", json=body, timeout=timeout)
-        resp.raise_for_status()
+        resp = self.request("POST", "/v1/completions", retry=True, timeout=timeout, json=body)
         entries = resp.json()["choices"][0]["prompt_logprobs"]
         expected = len(prompt_ids) + len(completion_ids)
         if entries is None or len(entries) != expected:
@@ -507,7 +313,7 @@ class BaseWeightSyncClient:
 
     def served_max_model_len(self) -> int | None:
         """Context window the served model declares, or ``None`` when no card carries one."""
-        for card in self.served_model_cards():
+        for card in self._served_model_cards():
             if card.get("max_model_len"):
                 return int(card["max_model_len"])
         return None
@@ -527,8 +333,7 @@ class BaseWeightSyncClient:
             "seed": 0,
         }
         try:
-            resp = self.session.post(f"{self.base_url}/v1/completions", json=body, timeout=_LOGPROB_PROBE_TIMEOUT_S)
-            resp.raise_for_status()
+            resp = self.request("POST", "/v1/completions", retry=True, timeout=_LOGPROB_PROBE_TIMEOUT_S, json=body)
             top = resp.json()["choices"][0]["logprobs"]["top_logprobs"][0]
             values = sorted((float(v) for v in top.values() if v is not None), reverse=True)
         except (requests.exceptions.RequestException, KeyError, IndexError, TypeError, ValueError) as e:
@@ -557,7 +362,7 @@ class BaseWeightSyncClient:
         generation_config default on vLLM's completions route.
         """
         try:
-            model_id = self.served_model_cards()[0]["id"]
+            model_id = self.served_model_id()
         except Exception as e:
             logger.warning(f"Sampler-logprob probe: could not resolve the model served at {self.base_url}: {e}")
             return SamplerLogprobSemantics(None, None)
@@ -575,102 +380,15 @@ class BaseWeightSyncClient:
         return SamplerLogprobSemantics(temperature_applied, nucleus_renormalized)
 
     def _open_group_rendezvous(self) -> tuple[str, RendezvousListener]:
-        """``(master address, listener)``: the group's rendezvous, listening before the engine hears of it.
-
-        The listener binds ``group_port``, or a port the kernel assigns when it is 0, and the engine is
-        told the port it holds (:class:`RendezvousListener`). A configured port another socket holds
-        therefore raises here, before the engine is asked anything, rather than leaving it waiting on
-        a group that cannot form. The caller hands the listener to the store, or closes it.
-        """
-        master_address, bind_address = self._resolve_group_address()
-        try:
-            listener = RendezvousListener(bind_address, max(self.group_port, 0))
-        except OSError as e:
-            if self.group_port > 0 and e.errno == errno.EADDRINUSE:
-                raise RuntimeError(
-                    f"Could not bind the weight-transfer group port {bind_address}:{self.group_port} ({e}); the "
-                    f"{self.BACKEND_NAME} server {self.base_url} was not asked to join. A connected client holds "
-                    f"its group port until close_communicator(), so every server — and every trainer process "
-                    f"sharing this host — needs its own group_port / vllm_group_port; a port inside "
-                    f"net.ipv4.ip_local_port_range can also be taken as an outbound connection's source port "
-                    f"unless reserved (net.ipv4.ip_local_reserved_ports)."
-                ) from e
-            raise
-        return master_address, listener
-
-    def _resolve_group_address(self) -> tuple[str, str]:
-        """``(master address, bind address)`` of the weight-transfer group's rendezvous.
-
-        The master address is what the engine's workers dial back to. Resolution order: explicit
-        ``group_host``, the backend's group-host env var, loopback when the server is on this machine,
-        then the default-route NIC. Raises when a remote server would be told to dial a loopback
-        address, which forms no group and times out. The bind address is where the listener takes
-        that connection (:meth:`_rendezvous_bind_address`). Outside ``HALO_WEIGHT_SYNC_BIND_ALL`` the
-        engine is sent the bind address rather than the name it was resolved from, since a name the
-        server resolves differently would be dialed where nothing listens.
-        """
-        master_address = self.group_host or (env_str(self.GROUP_HOST_ENV) if self.GROUP_HOST_ENV else None)
-        if not master_address:
-            # Same-host groups stay on loopback: firewalls drop hairpin traffic on the external NIC.
-            master_address = "127.0.0.1" if _is_local_address(self.host) else _get_ip()
-
-        if is_loopback(master_address) and not _is_local_address(self.host):
-            raise RuntimeError(
-                f"{self.BACKEND_NAME} server {self.base_url} is on a remote host ({self.host}) but the "
-                f"NCCL weight-sync group address resolved to loopback ({master_address}). The server's "
-                f"workers would dial back to themselves and the group would never form. Set "
-                f"{self.GROUP_HOST_ENV or 'the group host'} (or the per-server group_host) to the "
-                f"trainer's routable IP on the subnet the server can reach."
-            )
-        bind_address = self._rendezvous_bind_address(master_address)
-        if bind_address != _ALL_INTERFACES:
-            master_address = bind_address
-        return master_address, bind_address
-
-    def _rendezvous_bind_address(self, master_address: str) -> str:
-        """The local address the rendezvous listener binds: the advertised ``master_address``, resolved.
-
-        The store is unauthenticated and the engine reads the group's bootstrap from it, so it listens
-        only where the engine is told to dial. A name resolves once, here, to the one IPv4 address the
-        listener and the engine both use; the listener is IPv4-only, so an address with no IPv4 form
-        (an IPv6 literal, a name without an A record) raises whatever the bind mode.
-        ``HALO_WEIGHT_SYNC_BIND_ALL`` widens the listener to every interface for a trainer reached
-        through NAT or a port mapping, whose advertised address is not its own. Without it, an address
-        that is not local, the wildcard, or a name resolving to loopback while the server is remote
-        raises rather than widening.
-        """
-        host_knob = f"{self.GROUP_HOST_ENV or 'the group host'} (or the per-server group_host)"
-        try:
-            bind_address = socket.gethostbyname(master_address)
-        except OSError:
-            raise RuntimeError(
-                f"{self.BACKEND_NAME} weight-sync group address {master_address} has no IPv4 address on "
-                f"this host. The rendezvous store listens on IPv4 only; IPv6 is unsupported. Set "
-                f"{host_knob} to this host's IPv4 address on an interface the server reaches."
-            ) from None
-        if env_flag(_WEIGHT_SYNC_BIND_ALL_ENV):
-            logger.warning(
-                f"{_WEIGHT_SYNC_BIND_ALL_ENV} is set: the {self.BACKEND_NAME} weight-sync rendezvous store "
-                f"listens on every interface, not only on {master_address}. The store is unauthenticated and "
-                f"the engine reads the group's bootstrap from it while the group forms (vLLM unpickles it), "
-                f"so any host that reaches the group port then can run code in the rollout server. Keep the "
-                f"port reachable only by trusted hosts."
-            )
-            return _ALL_INTERFACES
-        if (
-            bind_address == _ALL_INTERFACES
-            or not _is_local_address(bind_address)
-            or (is_loopback(bind_address) and not _is_local_address(self.host))
-        ):
-            raise RuntimeError(
-                f"{self.BACKEND_NAME} weight-sync group address {master_address} (resolves to "
-                f"{bind_address}) is not a single address of this host that the server at {self.host} can "
-                f"reach. The group's rendezvous store is unauthenticated, so it listens only on the address "
-                f"it advertises. Set {host_knob} to this host's IP on an interface the server reaches. For "
-                f"a trainer reached through NAT or a port mapping, set {_WEIGHT_SYNC_BIND_ALL_ENV}=1 to "
-                f"listen on every interface, only on a network where no untrusted host can reach the group port."
-            )
-        return bind_address
+        """:func:`open_group_rendezvous` for this client's server, group host and group port."""
+        return open_group_rendezvous(
+            engine=self.BACKEND_NAME,
+            server_url=self.base_url,
+            server_host=self.host,
+            advertised_host=self.group_host,
+            host_env=self.GROUP_HOST_ENV,
+            port=self.group_port,
+        )
 
     def _lift_pause(self, timeout: float, context: str) -> None:
         """Resume a quiesced engine, clearing ``_paused`` only once the server confirmed.
@@ -680,8 +398,8 @@ class BaseWeightSyncClient:
         otherwise put the partly-written model back on the wire.
 
         Does not raise on a server-side failure: both callers run on a path that is already failing or
-        tearing down, where a dead server must not mask the real error. Uses ``_post_once`` rather than
-        ``_post``, whose session retries POSTs with backoff and would block ~80s at interpreter exit.
+        tearing down, where a dead server must not mask the real error. Sent once: the session retries
+        POSTs with backoff and would block ~80s at interpreter exit.
         """
         if self._unusable_reason is not None:
             logger.error(f"Leaving {self.base_url} paused {context}: {self._unusable_reason}")
@@ -690,18 +408,18 @@ class BaseWeightSyncClient:
         # quiesces without declaring its route, which must fail by name.
         endpoint = self.RESUME_ENDPOINT
         try:
-            self._post_once(
+            self.request(
+                "POST",
                 endpoint,
+                retry=False,
                 timeout=timeout,
-                **({} if self.RESUME_PAYLOAD is None else {"json": self.RESUME_PAYLOAD}),
+                **self.RESUME_REQUEST,
             )
             self._paused = False
         except Exception as e:  # advisory: a paused server wedges later rollouts, but so does raising
             logger.warning(f"Failed to resume paused {self.BACKEND_NAME} server {context}: {e}")
 
-    def _raise_if_server_failed(
-        self, error: Exception, server_call: "_AsyncCall | None", endpoint: str, hint: str = ""
-    ) -> None:
+    def _raise_if_server_failed(self, error: Exception, server_call: AsyncCall | None, hint: str = "") -> None:
         """Re-raise ``error`` naming the server's own failure, when it recorded one.
 
         The local half of a sync fails downstream of whatever the server rejected, and that rejection
@@ -712,7 +430,7 @@ class BaseWeightSyncClient:
         if server_error is not None and server_error is not error:
             raise RuntimeError(
                 f"{self.BACKEND_NAME} weight sync to {self.base_url} failed "
-                f"({type(error).__name__}: {error}); the server's {endpoint} call failed with: "
+                f"({type(error).__name__}: {error}); the server's {server_call.name} call failed with: "
                 f"{type(server_error).__name__}: {server_error}.{hint}"
             ) from server_error
 
@@ -748,6 +466,10 @@ class BaseWeightSyncClient:
         """Record :func:`resolve_sync_device` of ``device`` as this client's :attr:`sync_device`."""
         self._sync_device = resolve_sync_device(device)
         return self._sync_device
+
+    def _reset_transport_state(self) -> None:
+        """Initialize the engine transport's fields to those of a client that has formed nothing yet."""
+        raise NotImplementedError
 
     def init_communicator(self, device: torch.device | str | int = 0):
         raise NotImplementedError
@@ -796,50 +518,13 @@ class BaseWeightSyncClient:
     def close_communicator(self):
         raise NotImplementedError
 
-    def sync_model_weights(self, named_params: list[tuple[str, torch.Tensor]]):
-        """Push a whole payload inside one quiesce: open the phase, stream it in chunks, close.
-
-        The single-call form of the streamed path below, for callers holding the entire payload
-        (the transport preflight). Same phases and byte budget: declaring a whole
-        model in one request would have the engine allocate receive buffers for all of it up front.
-        """
-        named_params = list(named_params)
-        if not named_params:
-            return
-        # Before the quiesce: this caller holds the whole payload, so a param neither protocol can
-        # carry fails while the server is still serving.
-        for name, param in named_params:
-            validate_syncable_param(name, param)
-        chunks = chunk_by_bytes(named_params, WEIGHT_SYNC_CHUNK_BYTES, self._co_load_groups)
-        self._open_update()
-        try:
-            for chunk in chunks[:-1]:
-                self.send_weights(chunk)
-        except BaseException:
-            # Only the close ends the phase, and a chunk that failed mid-payload never reaches it.
-            self.abort_weight_update()
-            raise
-        self._close_update(chunks[-1])
-
-    @classmethod
-    def scoped_co_load_groups(cls, module_names: Iterable[str]) -> tuple[tuple[str, ...], ...]:
-        """``CO_LOADED_PARAM_GROUPS`` narrowed to the members whose module ``module_names`` carries.
-
-        An engine fuses a group only where the model declares every member (an MLA block without
-        ``q_lora_rank`` has no ``q_a_proj``), so a member no module spells is dropped, and a group
-        left with one member is complete on its own.
-        """
-        names = set(module_names)
-
-        def declared(suffix: str) -> bool:
-            module = suffix.rsplit(".", 1)[0]
-            return any(name == module or name.endswith("." + module) for name in names)
-
-        return tuple(tuple(suffix for suffix in group if declared(suffix)) for group in cls.CO_LOADED_PARAM_GROUPS)
+    def close_session(self) -> None:
+        """Release the HTTP session: all a client that never formed a communicator holds."""
+        self._session.close()
 
     def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
         """Bind the co-load groups to the model whose modules ``module_names`` are, for every sync."""
-        self._co_load_groups = self.scoped_co_load_groups(module_names)
+        self._co_load_groups = declared_co_load_groups(self.CO_LOADED_PARAM_GROUPS, module_names)
 
     @property
     def buffered_bytes(self) -> int:
@@ -847,14 +532,14 @@ class BaseWeightSyncClient:
         return self._buffered_bytes
 
     def buffer_param(self, name: str, snapshot: torch.Tensor):
-        """Buffer a pre-made snapshot (from ``snapshot_param``) by reference, for the next chunk.
+        """Buffer a pre-made snapshot (from :func:`snapshot_to_sync_device`) by reference, for the next chunk.
 
         The snapshot may be shared across clients (a multi-server fan-out stages one copy per param),
         so it must not be mutated. This only buffers; the multi-server caller decides when the chunk
         goes out, which is what keeps the shared snapshots alive long enough for all of them.
         """
         self._param_buffer.append((name, snapshot))
-        self._buffered_bytes += payload_bytes(snapshot)
+        self._buffered_bytes += snapshot.nbytes
         if snapshot.is_cuda:
             # Re-recorded per param on the copy's own stream (this thread's current one on that
             # device), so the newest record covers every staged copy issued before it.
@@ -865,19 +550,21 @@ class BaseWeightSyncClient:
     def update_named_param(self, name: str, weights: torch.Tensor):
         """Buffer one gathered param, streaming a chunk to the engine whenever the next would overflow.
 
-        Staged on the sync GPU (see the module docstring for why not pinned host memory). The chunk
-        goes out mid-gather, which bounds the staged footprint to one chunk plus the largest tensor;
-        the caller's rank-uniform failure guard covers a failure here.
+        The snapshot lands on the sync GPU (``chunking`` says why not pinned host memory) and the chunk
+        goes out mid-gather; the caller's rank-uniform failure guard covers a failure here.
         """
-        # On the source, before the snapshot. It cannot be checked before the quiesce: this path opens
-        # the update as soon as the first chunk fills, so a later rejection lands mid-stream and the
-        # abort path handles the engine's state.
-        validate_syncable_param(name, weights)
-        # Flushed before the snapshot, so the staged chunk never holds more than the budget plus this
-        # param. Before init_communicator there is no sync device and the copy stays on the source's.
-        if starts_new_chunk(self._buffered_bytes, payload_bytes(weights), WEIGHT_SYNC_CHUNK_BYTES):
-            self.flush_chunk()
-        self.buffer_param(name, snapshot_param(weights, self.sync_device))
+        # Checked per param, not once before the sync: the update opens with the first chunk, so a later
+        # refusal lands mid-stream and the abort path handles the engine's state. Before init_communicator
+        # there is no sync device and the copy stays on the source's.
+        snapshot = snapshot_to_sync_device(
+            name,
+            weights,
+            device=self.sync_device,
+            buffered_bytes=self._buffered_bytes,
+            budget=WEIGHT_SYNC_CHUNK_BYTES,
+            flush=self.flush_chunk,
+        )
+        self.buffer_param(name, snapshot)
 
     def flush_chunk(self):
         """Send what is buffered as one chunk, leaving the update open for the chunks that follow.
@@ -896,7 +583,7 @@ class BaseWeightSyncClient:
         # Dropped only once on the wire: a chunk that failed while the sync is still replayable is
         # re-sent by the reconnect path, and dropping it first would lose those params.
         self._param_buffer = held
-        self._buffered_bytes = sum(payload_bytes(snapshot) for _, snapshot in held)
+        self._buffered_bytes = sum(snapshot.nbytes for _, snapshot in held)
 
     def reset_prefix_cache(self):
         """Send the tail chunk, close the update and resume the engine; no-op if nothing was buffered.
@@ -1018,7 +705,7 @@ class BaseWeightSyncClient:
     def _lift_pause_at_close(self) -> None:
         """Resume a server this client left paused at teardown (a deliberate pause survives it)."""
         if self._paused:
-            self._lift_pause(_HTTP_PROBE_TIMEOUT_S, context="at close_communicator")
+            self._lift_pause(HTTP_PROBE_TIMEOUT_S, context="at close_communicator")
 
     @property
     def can_replay_sync(self) -> bool:

@@ -3,7 +3,7 @@
 SGLang's contract differs from vLLM's in three ways that shape this client:
 
 * Bootstrap: the engine joins a plain c10d group (``/init_weights_update_group``), so the trainer
-  speaks c10d too (``transport/torch_group.py``) rather than the vendored pynccl path.
+  speaks c10d too (``src/weight_sync/transport/c10d_group.py``) rather than the vendored pynccl path.
 * Wire format: the engine allocates one empty tensor per declared name and receives each with
   ``torch.distributed.broadcast(src=0)``, so weights travel as typed tensors in declaration order
   rather than the packed uint8 buffers the vLLM protocol uses.
@@ -29,50 +29,40 @@ from urllib.parse import urlparse
 
 import torch
 import torch.distributed as dist
-from torch.distributed import distributed_c10d as c10d
 
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
-from src.distributed.nccl.clients.base import (
-    _CLEANUP_TIMEOUT_S,
-    _GROUP_FORMATION_TIMEOUT_S,
-    _HTTP_PROBE_TIMEOUT_S,
-    _RESCORE_TIMEOUT_S,
+from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, describe_chunk
+from src.weight_sync.clients.base import (
     _SERVER_ERROR_GRACE_S,
-    _WEIGHT_UPDATE_TIMEOUT_S,
-    WEIGHT_SYNC_CHUNK_BYTES,
-    BaseWeightSyncClient,
-    _AsyncCall,
+    CLEANUP_TIMEOUT_S,
+    GROUP_FORMATION_TIMEOUT_S,
+    HTTP_PROBE_TIMEOUT_S,
+    POST_TIMEOUT_S,
+    RESCORE_TIMEOUT_S,
+    WEIGHT_UPDATE_TIMEOUT_S,
+    AsyncCall,
+    WeightSyncClientBase,
     _wait_for_calls,
-    describe_chunk,
-    payload_bytes,
     unregistered_bailing_model_types,
 )
-from src.distributed.nccl.transport.pynccl import bounded_event_sync, resolve_drain_timeout_s
-from src.distributed.nccl.transport.staging import allocate_send_buffer, hold_for_stream
-from src.distributed.nccl.transport.torch_group import (
-    DEFAULT_WEIGHT_UPDATE_GROUP_NAME,
-    create_weight_update_group,
-    destroy_weight_update_group,
-    drop_weight_update_group_bookkeeping,
+from src.weight_sync.transport.bounded_waits import BROADCAST_DRAIN_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
+from src.weight_sync.transport.c10d_group import (
+    abort_weight_update_group,
+    build_weight_update_group,
+    release_weight_update_group,
 )
+from src.weight_sync.transport.send_buffers import allocate_send_buffer, hold_for_stream
 
 logger = logging.getLogger(__name__)
 
-# Engine control-plane routes used from more than one call site (the call and its async-call label,
-# or both the sync and the teardown path), so a route rename cannot leave a stale label behind.
-_EP_INIT_GROUP = "/init_weights_update_group"
-_EP_UPDATE_FROM_DIST = "/update_weights_from_distributed"
+# SGLang's own default group name, the prefix of each client's per-server one.
+_GROUP_NAME_PREFIX = "weight_update_group"
 # Byte alignment of each tensor inside the staging arena: a multiple of every dtype's element size,
 # so a uint8 slice can be viewed as the tensor's dtype.
 _ARENA_ALIGNMENT = 256
 # Chunks whose sends the host has not settled yet: a chunk's sends are waited for this many chunks
 # later, so a chunk's declaration never waits on the previous chunk's tail (see ``_send_chunk``).
 _INFLIGHT_CHUNKS = 2
-# Every Step-3 spelling the trainer knows resolves to the same SGLang model file.
-_STEP3_FULL_COVERAGE = (
-    "SGLang 0.5.17's step3p5 loader asserts full parameter coverage in each load_weights call, so it "
-    "refuses the chunked online update"
-)
 
 
 def _aligned_bytes(nbytes: int) -> int:
@@ -80,27 +70,32 @@ def _aligned_bytes(nbytes: int) -> int:
     return (nbytes + _ARENA_ALIGNMENT - 1) // _ARENA_ALIGNMENT * _ARENA_ALIGNMENT
 
 
-class SGLangWeightSyncClient(BaseWeightSyncClient):
+class SGLangWeightSyncClient(WeightSyncClientBase):
     """NCCL weight sync client for SGLang servers."""
 
     BACKEND_KEY = "sglang"
     BACKEND_NAME = "SGLang"
+    ENGINE_RELEASE = "SGLang 0.5.17"
     GROUP_HOST_ENV = "SGLANG_GROUP_HOST"
-    # Loader facts of the pinned 0.5.17 server, per ``model_type``.
     UNSERVABLE_MODEL_TYPES = {
-        "mistral4": "SGLang 0.5.17 registers no Mistral4 model class (agent-docs/models/mistral4.md#serving)",
-        **unregistered_bailing_model_types("SGLang 0.5.17"),
+        "mistral4": f"{ENGINE_RELEASE} registers no Mistral4 model class (agent-docs/models/mistral4.md#serving)",
+        **unregistered_bailing_model_types(ENGINE_RELEASE),
         "zaya": (
-            "SGLang 0.5.17's zaya loader reads the pre-transformers-5.14 per-expert checkpoint "
+            f"{ENGINE_RELEASE}'s zaya loader reads the pre-transformers-5.14 per-expert checkpoint "
             "(zaya_block.experts.local_experts.N.linear_fc1), not the native fused layout the trainer holds"
         ),
         "laguna": (
-            "SGLang 0.5.17's laguna loader asserts every routed-expert tensor of every sparse layer in each "
+            f"{ENGINE_RELEASE}'s laguna loader asserts every routed-expert tensor of every sparse layer in each "
             "load_weights call, so it refuses the chunked online update"
         ),
-        **dict.fromkeys(EPStep3p7MoELayer.HF_MODEL_TYPES, _STEP3_FULL_COVERAGE),
+        # Every Step-3 spelling the trainer knows resolves to the same SGLang model file.
+        **dict.fromkeys(
+            EPStep3p7MoELayer.HF_MODEL_TYPES,
+            f"{ENGINE_RELEASE}'s step3p5 loader asserts full parameter coverage in each load_weights call, so it "
+            "refuses the chunked online update",
+        ),
         "deepseek_v4": (
-            "SGLang 0.5.17's deepseek_v4 loader maps per-expert w1/w3/w2 names where the gather emits the "
+            f"{ENGINE_RELEASE}'s deepseek_v4 loader maps per-expert w1/w3/w2 names where the gather emits the "
             "fused pair, and no end-to-end sync has been validated for the family"
         ),
     }
@@ -111,10 +106,34 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
     CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     RESUME_ENDPOINT = "/continue_generation"
     # An empty body is rejected: the endpoint takes a request dataclass, so it needs JSON.
-    RESUME_PAYLOAD: dict | None = {}
+    RESUME_REQUEST = {"json": {}}
+
+    def __init__(self, *args, group_name: str | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Unique per server by default: c10d registers group names process-globally on the trainer, so
+        # a second client re-using one fixed name fails with "group name has already been created".
+        # Keyed on the server endpoint rather than group_port, where 0 means "auto-pick at group
+        # formation" and would collide every auto-port client on one name.
+        self.group_name = group_name or f"{_GROUP_NAME_PREFIX}_{urlparse(self.base_url).netloc}"
+
+    def _reset_transport_state(self) -> None:
+        self._group: dist.ProcessGroup | None = None
+        self._store = None
+        # Set once a drain deadline aborted the group; a destroy on an aborted group raises, and a
+        # broadcast on one hangs.
+        self._aborted = False
+        # Device staging arena the chunks' uploads are carved from, and the events recorded after
+        # the latest chunks' broadcasts (see ``_stage_on_device`` and ``_send_chunk``).
+        self._arena: torch.Tensor | None = None
+        self._inflight: deque[torch.cuda.Event] = deque()
+        # Every upload and broadcast runs on this stream, never on the caller's: a synchronous
+        # ``dist.broadcast`` orders the issuing stream behind the collective, and on the default
+        # stream that would put the next chunk's staged copies (and the trainer's own work) behind
+        # this chunk's sends, serializing the tail of one chunk with the next.
+        self._send_stream: torch.cuda.Stream | None = None
 
     def score_completion_logprobs(
-        self, prompt_ids: list[int], completion_ids: list[int], timeout: float = _RESCORE_TIMEOUT_S
+        self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
     ) -> list[float]:
         """SGLang's prefill log-probs come from its native ``/generate`` route: ``return_logprob`` with
         ``logprob_start_len`` returns one ``[logprob, token_id, text]`` entry per input token from
@@ -131,8 +150,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             "return_logprob": True,
             "logprob_start_len": len(prompt_ids) - 1,
         }
-        resp = self.session.post(f"{self.base_url}/generate", json=body, timeout=timeout)
-        resp.raise_for_status()
+        resp = self.request("POST", "/generate", retry=True, timeout=timeout, json=body)
         entries = resp.json()["meta_info"]["input_token_logprobs"]
         if len(entries) != len(completion_ids) + 1:
             raise ValueError(
@@ -154,40 +172,6 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             values.append(float(entry[0]))
         return values
 
-    def __init__(
-        self,
-        base_url: str,
-        group_port: int = 0,
-        connection_timeout: float = 0.0,
-        group_host: str | None = None,
-        group_name: str | None = None,
-    ):
-        self._group: dist.ProcessGroup | None = None
-        self._store = None
-        # Set once a drain deadline aborted the group; a destroy on an aborted group raises, and a
-        # broadcast on one hangs.
-        self._aborted = False
-        # Device staging arena the chunks' uploads are carved from, and the events recorded after
-        # the latest chunks' broadcasts (see ``_stage_on_device`` and ``_send_chunk``).
-        self._arena: torch.Tensor | None = None
-        self._inflight: deque[torch.cuda.Event] = deque()
-        # Every upload and broadcast runs on this stream, never on the caller's: a synchronous
-        # ``dist.broadcast`` orders the issuing stream behind the collective, and on the default
-        # stream that would put the next chunk's staged copies (and the trainer's own work) behind
-        # this chunk's sends, serializing the tail of one chunk with the next.
-        self._send_stream: torch.cuda.Stream | None = None
-        super().__init__(
-            base_url=base_url,
-            group_port=group_port,
-            connection_timeout=connection_timeout,
-            group_host=group_host,
-        )
-        # Unique per server by default: c10d registers group names process-globally on the trainer, so
-        # a second client re-using one fixed name fails with "group name has already been created".
-        # Keyed on the server endpoint rather than group_port, where 0 means "auto-pick at group
-        # formation" and would collide every auto-port client on one name.
-        self.group_name = group_name or f"{DEFAULT_WEIGHT_UPDATE_GROUP_NAME}_{urlparse(self.base_url).netloc}"
-
     def fetch_engine_world_size(self) -> int:
         """Number of engine ranks that will join the group.
 
@@ -198,9 +182,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         update group and no sizing can address them, which is rejected below. The layout is read from
         the server rather than from config so the two cannot disagree after a serve-flag change.
         """
-        resp = self.session.get(f"{self.base_url}/server_info", timeout=_HTTP_PROBE_TIMEOUT_S)
-        resp.raise_for_status()
-        info = resp.json()
+        info = self.request("GET", "/server_info", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json()
         try:
             tp_size = int(info["tp_size"])
             dp_size = int(info.get("dp_size", 1) or 1)
@@ -239,38 +221,35 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             # registration first is a no-op on the first attempt.
             self._destroy_remote_group()
 
-            server_call = _AsyncCall(
-                name=_EP_INIT_GROUP,
-                fn=lambda: self._post_once(
-                    _EP_INIT_GROUP,
-                    timeout=_GROUP_FORMATION_TIMEOUT_S,
-                    json={
-                        "master_address": master_address,
-                        "master_port": master_port,
-                        "rank_offset": 1,
-                        "world_size": world_size,
-                        "group_name": self.group_name,
-                        "backend": "nccl",
-                    },
-                ),
+            server_call = self._start_collective_rpc(
+                "/init_weights_update_group",
+                timeout=GROUP_FORMATION_TIMEOUT_S,
+                json={
+                    "master_address": master_address,
+                    "master_port": master_port,
+                    "rank_offset": 1,
+                    "world_size": world_size,
+                    "group_name": self.group_name,
+                    "backend": "nccl",
+                },
             )
-            group_call: _AsyncCall | None = None
+            group_call: AsyncCall | None = None
             try:
                 # Both halves block until the other arrives (the engine's request returns once the
                 # group formed, group creation returns once the engine joined), so they run
                 # concurrently and whichever fails first wins.
-                group_call = _AsyncCall(
+                group_call = AsyncCall(
                     name="weight-update group formation",
-                    fn=lambda: create_weight_update_group(
+                    fn=lambda: build_weight_update_group(
                         master_address=master_address,
                         listener=listener,
                         world_size=world_size,
                         device=self.sync_device,
                         group_name=self.group_name,
-                        timeout_s=_GROUP_FORMATION_TIMEOUT_S,
+                        timeout_s=GROUP_FORMATION_TIMEOUT_S,
                     ),
                 )
-                _wait_for_calls([server_call, group_call], timeout=_GROUP_FORMATION_TIMEOUT_S)
+                _wait_for_calls([server_call, group_call], timeout=GROUP_FORMATION_TIMEOUT_S)
                 self._group, self._store = group_call.result
             except Exception as e:
                 # `_wait_for_calls` raises as soon as either half fails, so a group this rank already
@@ -291,10 +270,8 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                     f"Original error: {type(e).__name__}: {e}"
                 ) from e
 
-        # The atexit invocation skips the local NCCL destroy: the group's peers are engine
-        # processes that never enter destroy, so with an interrupted sync in flight
-        # ``dist.destroy_process_group`` blocks rather than raising and wedges interpreter exit.
-        # Explicit close_communicator() calls (the reconnect path) keep the full destroy.
+        # Interpreter exit skips the local NCCL destroy (release_weight_update_group says why); explicit
+        # close_communicator() calls, the reconnect path, keep it.
         atexit.register(self.close_communicator, _local_destroy=False)
         logger.info("SGLang NCCL weight transfer initialized")
 
@@ -320,9 +297,9 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         try:
             # The engine's post-update flush asserts a fully idle scheduler and SIGQUITs the server
             # when that fails, so draining first is required for correctness.
-            self._post("/pause_generation", json={"mode": "abort"})
+            self.request("POST", "/pause_generation", retry=True, timeout=POST_TIMEOUT_S, json={"mode": "abort"})
         except Exception:
-            self._lift_pause(_CLEANUP_TIMEOUT_S, context="after a failed pause")
+            self._lift_pause(CLEANUP_TIMEOUT_S, context="after a failed pause")
             raise
 
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool = False):
@@ -342,11 +319,11 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             else:
                 # The cache invalidation rides the last chunk, so with nothing left to send it is
                 # requested directly; otherwise the new weights serve against a stale prefix cache.
-                self._post("/flush_cache")
+                self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
             self._release_arena()
         finally:
             # Always lift the pause; a server left paused wedges every later rollout.
-            self._lift_pause(_CLEANUP_TIMEOUT_S, context="after sync")
+            self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
 
     def _send_chunk(self, chunk: list[tuple[str, torch.Tensor]], flush_cache: bool):
         """Declare one chunk over HTTP, then broadcast its tensors in the declared order.
@@ -366,21 +343,18 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                 f"receives each name once, so the broadcast order would desynchronize."
             )
 
-        server_call = _AsyncCall(
-            name=_EP_UPDATE_FROM_DIST,
-            fn=lambda: self._post_once(
-                _EP_UPDATE_FROM_DIST,
-                timeout=_WEIGHT_UPDATE_TIMEOUT_S,
-                json={
-                    "names": names,
-                    "dtypes": dtypes,
-                    "shapes": shapes,
-                    "group_name": self.group_name,
-                    # Only the final chunk invalidates the cache: an intermediate flush would run once
-                    # per chunk for no benefit, and each one asserts an idle scheduler.
-                    "flush_cache": flush_cache,
-                },
-            ),
+        server_call = self._start_collective_rpc(
+            "/update_weights_from_distributed",
+            timeout=WEIGHT_UPDATE_TIMEOUT_S,
+            json={
+                "names": names,
+                "dtypes": dtypes,
+                "shapes": shapes,
+                "group_name": self.group_name,
+                # Only the final chunk invalidates the cache: an intermediate flush would run once
+                # per chunk for no benefit, and each one asserts an idle scheduler.
+                "flush_cache": flush_cache,
+            },
         )
         # The engine replies once it has queued the receives and the load (its wait is a stream
         # wait), so this chunk's sends may still be pending. The host does not wait for them here,
@@ -390,8 +364,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         if self._send_stream is None:
             self._send_stream = torch.cuda.Stream(device=self.sync_device)
         caller_stream = torch.cuda.current_stream(self.sync_device)
-        # Needed on every path: the arena's block may last have been used on the caller's stream
-        # (``allocate_send_buffer``), and the whole-payload path stages live params written there.
+        # The arena's block may last have been used on the caller's stream (``allocate_send_buffer``).
         self._send_stream.wait_stream(caller_stream)
         try:
             with torch.cuda.stream(self._send_stream):
@@ -403,7 +376,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
                 event = torch.cuda.Event()
                 event.record(self._send_stream)
             self._inflight.append(event)
-            server_call.wait(timeout=_WEIGHT_UPDATE_TIMEOUT_S)
+            server_call.wait(timeout=WEIGHT_UPDATE_TIMEOUT_S)
         except Exception as e:
             # A kernel whose peer answered with an error, or never answered, spins on the stream and
             # hangs every later device synchronization; the abort ends it. The whole stream is
@@ -412,13 +385,12 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             # error is still read before the drain's is raised.
             drain_error: RuntimeError | None = None
             try:
-                self._drain_sends(timeout_s=_CLEANUP_TIMEOUT_S)
+                self._drain_sends(timeout_s=CLEANUP_TIMEOUT_S)
             except RuntimeError as deadline:
                 drain_error = deadline
             self._raise_if_server_failed(
                 e,
                 server_call,
-                _EP_UPDATE_FROM_DIST,
                 hint=(
                     " The engine reports a partially updated model after such a failure — restart "
                     "the server before serving again."
@@ -448,13 +420,12 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         A generator so each view is handed over right after its copy is issued, in the order the
         engine receives them.
         """
-        if len(self._inflight) == _INFLIGHT_CHUNKS:
-            self._settle(self._inflight.popleft(), timeout_s=resolve_drain_timeout_s())
+        self._settle_inflight(keep=_INFLIGHT_CHUNKS - 1)
         offsets: list[int] = []
         total = 0
         for param in params:
             offsets.append(total)
-            total += _aligned_bytes(payload_bytes(param))
+            total += _aligned_bytes(param.nbytes)
         if self._arena is None or self._arena.numel() < total:
             # Regrown only once the previous chunk's sends retired: the old arena is still their input,
             # and dropping it under a pending collective leaves the allocator to wait on that
@@ -468,7 +439,7 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
             )
         arena = self._arena
         for param, offset in zip(params, offsets, strict=True):
-            view = arena[offset : offset + payload_bytes(param)].view(param.dtype).view(param.shape)
+            view = arena[offset : offset + param.nbytes].view(param.dtype).view(param.shape)
             view.copy_(param, non_blocking=True)
             hold_for_stream(param, self._send_stream)
             yield view
@@ -481,9 +452,22 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         allocator's between syncs and the next sync's first chunk takes it back from the pool. One
         settle per sync rather than per chunk keeps the deferred settle's overlap.
         """
-        while self._inflight:
-            self._settle(self._inflight.popleft(), timeout_s=resolve_drain_timeout_s())
+        self._settle_inflight(keep=0)
         self._arena = None
+
+    def _settle_inflight(self, *, keep: int) -> None:
+        """Wait for the oldest chunks' sends until ``keep`` chunks remain in flight, under the drain deadline.
+
+        Polling each chunk's event keeps the host off the CUDA driver while a peer that never joins would
+        otherwise park the trainer indefinitely; the group carries no watchdog the trainer can rely on.
+        """
+        while len(self._inflight) > keep:
+            bounded_event_sync(
+                self._inflight.popleft(),
+                timeout_s=BROADCAST_DRAIN_TIMEOUT_S,
+                what=f"{self.BACKEND_NAME} weight broadcast",
+                abort=self._abort_group,
+            )
 
     def _drain_sends(self, *, timeout_s: float) -> None:
         """Settle everything issued on the send stream so far, on the failure path.
@@ -492,34 +476,17 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         spinning on the same peer, so the stream is drained as a whole rather than by chunk.
         """
         self._inflight.clear()
-        event = torch.cuda.Event()
-        event.record(self._send_stream)
-        self._settle(event, timeout_s=timeout_s)
-
-    def _settle(self, event: torch.cuda.Event, *, timeout_s: float) -> None:
-        """Wait, under a deadline, for the sends recorded behind ``event``; abort the group when it
-        passes.
-
-        Polling the event keeps the host off the CUDA driver while a peer that never joins would
-        otherwise park the trainer indefinitely (the group carries no watchdog the trainer can rely
-        on). The abort ends the spinning kernel, without which every later device synchronization
-        hangs too.
-        """
-        try:
-            bounded_event_sync(event, timeout_s=timeout_s, what=f"{self.BACKEND_NAME} weight broadcast")
-        except RuntimeError:
-            self._abort_group()
-            raise
+        bounded_stream_sync(
+            self._send_stream,
+            timeout_s=timeout_s,
+            what=f"{self.BACKEND_NAME} weight broadcast",
+            abort=self._abort_group,
+        )
 
     def _abort_group(self) -> None:
-        """Abort the weight-update group; torch drops its bookkeeping, so no destroy may follow."""
+        """Abort the group; ``_aborted`` keeps close from destroying a group torch already dropped."""
         self._aborted = True
-        if self._group is None:
-            return
-        try:
-            c10d._abort_process_group(self._group)
-        except Exception as e:  # best-effort cleanup on an already-failing path
-            logger.warning(f"Aborting the SGLang weight-update group failed: {e}")
+        abort_weight_update_group(self._group)
 
     def _destroy_remote_group(self):
         """Drop the engine's registration of this client's group name, so the name can be joined again.
@@ -528,11 +495,16 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         never have registered anything, and a failure here must not mask the original error.
         """
         try:
-            self._post_if_supported(
+            resp = self.request(
+                "POST",
                 "/destroy_weights_update_group",
-                timeout=_CLEANUP_TIMEOUT_S,
+                retry=False,
+                timeout=CLEANUP_TIMEOUT_S,
+                check=False,
                 json={"group_name": self.group_name},
             )
+            if resp.status_code != 404:  # a server without the route has no registration to drop
+                resp.raise_for_status()
         except Exception as e:  # advisory cleanup; never mask the caller's failure
             logger.debug(f"Could not clear weight-update group {self.group_name!r} on {self.base_url}: {e}")
 
@@ -542,12 +514,10 @@ class SGLangWeightSyncClient(BaseWeightSyncClient):
         # local destroy returned parks that destroy forever. The engine-side release also runs when
         # the local group is skipped or was aborted: a local teardown alone leaves the server
         # rejecting every future join under the name.
-        remote = _AsyncCall(name="/destroy_weights_update_group", fn=self._destroy_remote_group)
-        if local_destroy and not self._aborted:
-            destroy_weight_update_group(self._group)
-        else:
-            drop_weight_update_group_bookkeeping(self._group)
-        remote.join(_CLEANUP_TIMEOUT_S)
+        remote = AsyncCall(self._destroy_remote_group)
+        # An aborted group is already gone from torch, and a destroy on it raises.
+        release_weight_update_group(self._group, destroy=local_destroy and not self._aborted)
+        remote.join(CLEANUP_TIMEOUT_S)
         self._group = None
         # Dropping the last store reference stops its daemon and frees the rendezvous port.
         self._store = None

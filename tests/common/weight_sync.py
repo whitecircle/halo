@@ -1,9 +1,9 @@
 """Weight-sync stand-ins shared by the suites: the rollout endpoints and group ports the GPU tiers use,
-an offline client, a recording wire, a recording sender, a stock model, and the probes of what a LoRA
-push leaves behind."""
+an offline client, the trainer's push, a recording wire, a recording sender, a stock model, and the
+probes of what a LoRA push leaves behind."""
 
 import copy
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from typing import NamedTuple
 from unittest.mock import patch
@@ -16,11 +16,11 @@ from torch.distributed.tensor import DTensor
 from transformers import CONFIG_MAPPING, PretrainedConfig
 
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.nccl.clients.base import BaseWeightSyncClient
 from src.distributed.runtime import DeferredRankFailure, broadcast_from_rank0, materialize_dtensor, to_local
 from src.env import env_int, env_str
 from src.trainers.grpo.rollout.weight_sync import _HubForwarder
 from src.trainers.mixins.ep_introspection import named_ep_layers
+from src.weight_sync.clients.base import WeightSyncClientBase
 from tests.common.ports import free_port
 
 # The rollout endpoints the GPU server tiers drive. ``or`` rather than an env_str default: an
@@ -47,12 +47,25 @@ def weight_transfer_port(knob: str, offset: int = 0) -> int:
     return broadcast_from_rank0(free_port())
 
 
-def offline_client[Client: BaseWeightSyncClient](
+def offline_client[Client: WeightSyncClientBase](
     client_class: type[Client], base_url: str = "http://localhost", **kwargs
 ) -> Client:
     """A client built by its real ``__init__`` minus the live-server probe (``check_server``)."""
     with patch.object(client_class, "check_server"):
         return client_class(base_url=base_url, **kwargs)
+
+
+def push(client: WeightSyncClientBase, named_params: Iterable[tuple[str, torch.Tensor]]) -> None:
+    """One sync of ``named_params`` as the trainer drives it: each param buffered, a chunk streamed
+    whenever the budget fills, then the tail sent and the update closed. A failure anywhere aborts the
+    update before it propagates."""
+    try:
+        for name, tensor in named_params:
+            client.update_named_param(name, tensor)
+        client.reset_prefix_cache()
+    except BaseException:
+        client.abort_weight_update()
+        raise
 
 
 class StockModel(nn.Module):
@@ -83,9 +96,9 @@ class Wire:
         # A real engine copies what it receives into its own storage and keeps no reference to the
         # trainer's snapshot. The lifetime tests need that; the others want the values back.
         self.retain = retain
-        self.client: BaseWeightSyncClient | None = None
+        self.client: WeightSyncClientBase | None = None
 
-    def attach(self, client: BaseWeightSyncClient) -> BaseWeightSyncClient:
+    def attach(self, client: WeightSyncClientBase) -> WeightSyncClientBase:
         self.client = client
         client.begin_weight_update = self._begin
         client._broadcast_chunk = self._send

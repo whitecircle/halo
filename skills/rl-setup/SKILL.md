@@ -6,7 +6,7 @@ description: >-
   SGLang 0.5.17 for async GRPO with environments (rollout_backend: sglang, the families
   its loaders can take an update for)
   — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
-  NCCL weight sync through the vendored client in src/distributed/nccl/
+  NCCL weight sync through the engine client in src/weight_sync/
   (parallelism-aware gather — EP/TP/ETP and multi-rank FSDP2 all participate),
   select the RL environment by registry name, and set the key GRPO
   hyperparameters. USER-INVOKED ONLY — invoke when the user explicitly asks to set
@@ -36,7 +36,7 @@ and the gpt-oss parser-plugin verifier — and assert the spec-decode prompt-log
 engine re-score relies on, so a green build is what proves the server can be synced
 (`wiring.md` §1).
 Trainer and vLLM communicate over **HTTP** (generation) and **NCCL** (weight
-sync via the vendored client). For concrete commands, field-by-field references,
+sync via the engine client in `src/weight_sync/`). For concrete commands, field-by-field references,
 and full launch examples see [`wiring.md`](wiring.md).
 
 ## End-to-end wiring
@@ -69,8 +69,8 @@ and full launch examples see [`wiring.md`](wiring.md).
    GRPO (RLVR) uses TRL's native vLLM fields instead (`use_vllm: true`,
    `vllm_mode: server`, `vllm_server_host`, `vllm_server_port`).
 
-3. **NCCL weight sync** is the vendored `VLLMWeightSyncClient` (`SGLangWeightSyncClient` under
-   `rollout_backend: sglang`; `src/distributed/nccl/clients/`) — trainer is NCCL rank 0, server
+3. **NCCL weight sync** is `VLLMWeightSyncClient` (`SGLangWeightSyncClient` under
+   `rollout_backend: sglang`; `src/weight_sync/clients/`) — trainer is NCCL rank 0, server
    workers rank 1+. vLLM takes each `/update_weights` chunk as packed uint8 broadcasts (flow in
    step 1); SGLang takes one typed `dist.broadcast` per tensor in declaration order, bracketed by
    `/pause_generation` and `/continue_generation`. Online and env GRPO share **one** gather routine,
@@ -138,7 +138,7 @@ the sync.
 
 `wiring.md` + `agent-docs/training-methods/` document the setup (`grpo/rewards/README.md` owns the
 term list, `async-grpo/setup.md` the servers and launch). The code is the **ultimate** authority:
-`src/trainers/grpo/environmental.py`, `src/distributed/nccl/` (the vendored weight-sync client), and
+`src/trainers/grpo/environmental.py`, `src/weight_sync/` (the weight-sync clients), and
 `Dockerfile.vllm` decide the real handshake — when a doc, this skill, or memory disagrees, or you are
 unsure, read those files before wiring it up. (`CLAUDE.md`: docs-first, the code wins.) Related skills:
 `data` (the async-GRPO format: `prompt`, plus `answer` where the environment's `requires_answer` is

@@ -76,12 +76,12 @@ def test_cleanup_closes_the_score_only_clients_sessions():
     trainer._loop = None
     trainer._prefetch_thread = None
     trainer._multi_server_mode = False
-    sessions = [Mock(), Mock()]
-    trainer._engine_rescore_clients = [SimpleNamespace(session=s) for s in sessions]
+    clients = [Mock(), Mock()]
+    trainer._engine_rescore_clients = list(clients)
 
     trainer._cleanup_async_components()
 
-    assert all(s.close.call_count == 1 for s in sessions)
+    assert all(client.close_session.call_count == 1 for client in clients)
     assert trainer._engine_rescore_clients is None
 
 

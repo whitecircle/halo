@@ -13,9 +13,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import torch
 from torch.distributed import TCPStore
 
-from src.distributed.nccl.clients.base import BaseWeightSyncClient
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 # vLLM 0.26.0's default CUDA-graph capture range: prefills up to this many tokens replay a captured graph.
 GRAPH_CAPTURE_TOKENS = 512
@@ -47,7 +47,7 @@ class FakeEngineServer:
     """
 
     # The client this fake answers.
-    CLIENT_CLASS: type[BaseWeightSyncClient]
+    CLIENT_CLASS: type[WeightSyncClientBase]
     # What its ``/v1/completions`` logprobs account for: vLLM's raw default, its processed mode
     # (temperature and nucleus renormalization), or SGLang's default (temperature only).
     LOGPROBS_MODE: str
@@ -278,7 +278,7 @@ class FakeSGLangServer(FakeEngineServer):
         return super().answer(method, path, body)
 
 
-def fake_server_class(client_class: type[BaseWeightSyncClient]) -> type[FakeEngineServer]:
+def fake_server_class(client_class: type[WeightSyncClientBase]) -> type[FakeEngineServer]:
     """The fake answering ``client_class``."""
     for cls in FakeEngineServer.__subclasses__():
         if cls.CLIENT_CLASS is client_class:

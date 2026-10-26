@@ -11,11 +11,12 @@ import json
 from collections import deque
 
 import pytest
+from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from src.distributed.nccl.clients import base as client_base
-from src.distributed.nccl.clients.base import BaseWeightSyncClient
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients import base as client_base
+from src.weight_sync.clients.base import WeightSyncClientBase
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.goldens.weight_sync_transcript import ENGINES, GOLDEN_PATH, SCENARIOS, scenario_record
 
 GOLDEN = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -60,7 +61,12 @@ def test_a_collective_rpc_sent_through_the_retrying_session_breaks_the_transcrip
     """Anti-vacuity: a retry of a blocking engine call queues a second collective RPC and wedges the
     engine, so routing the single-shot posts through the session must read as a different transcript
     although every route is the same."""
-    monkeypatch.setattr(BaseWeightSyncClient, "_post_once", BaseWeightSyncClient._post)
+    request = WeightSyncClientBase.request
+
+    def over_the_session(self, method, path, *, retry, **kwargs):
+        return request(self, method, path, retry=True, **kwargs)
+
+    monkeypatch.setattr(WeightSyncClientBase, "request", over_the_session)
     record = scenario_record("vllm", SCENARIO["dense sync"])
     golden = GOLDEN["vllm"]["dense sync"]
     assert _routes(record) == _routes(golden), "premise: the mutant sends the same routes"
@@ -71,10 +77,11 @@ def test_a_session_that_no_longer_retries_a_server_error_breaks_the_transcript(m
     """Anti-vacuity: the session's retry policy is recorded field by field, so dropping 500 from the codes
     it retries must read as a different transcript although every request still goes out once."""
 
-    def without_500(*args, status_forcelist=(), **kwargs) -> Retry:
-        return Retry(*args, status_forcelist=[code for code in status_forcelist if code != 500], **kwargs)
+    def without_500(max_retries: Retry) -> HTTPAdapter:
+        codes = [code for code in max_retries.status_forcelist if code != 500]
+        return HTTPAdapter(max_retries=max_retries.new(status_forcelist=codes))
 
-    monkeypatch.setattr(client_base, "Retry", without_500)
+    monkeypatch.setattr(client_base, "HTTPAdapter", without_500)
     record = scenario_record("vllm", SCENARIO["dense sync"])
     golden = GOLDEN["vllm"]["dense sync"]
     assert _routes(record) == _routes(golden), "premise: the mutant sends the same routes"

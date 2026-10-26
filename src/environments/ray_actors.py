@@ -21,7 +21,6 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from src.configs.rollout_config import VLLM_BACKEND, RolloutConfig
-from src.distributed.nccl.addresses import is_loopback
 from src.environments.base import EPISODE_ERROR_KEY, Trajectory
 from src.environments.engine_wire import build_payload, capture_generation_tokens, capture_routing_mask
 from src.environments.episode import (
@@ -36,6 +35,7 @@ from src.environments.episode import (
     step_context_from_generation,
 )
 from src.environments.registry import create_environment
+from src.inference.endpoints import is_loopback
 from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason, get_reasoning_text
 from src.log import warn_once
 

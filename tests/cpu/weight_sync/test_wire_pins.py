@@ -1,24 +1,37 @@
 #!/usr/bin/env python
-"""The vLLM weight-transfer bootstrap's wire contract, pinned against the weight-sync wire golden: the
+"""The weight-sync bootstraps' wire contracts. vLLM's is pinned against the weight-sync wire golden: the
 rendezvous store rank 0 builds, the one write that publishes its NCCL unique id, the id the communicator
-then initializes with, and the class the vLLM image's shim must answer for.
+then initializes with, and the class the vLLM image's shim must answer for. SGLang's rendezvous store is
+pinned directly: the options its group forms on.
 
 Run: python tests/cpu/weight_sync/test_wire_pins.py
 """
 
 import json
+import os
 import pickle
 import re
+import socket
+from datetime import timedelta
 
 import pytest
+import torch
 
 from src.distributed.nccl._nccl_wrapper import ncclUniqueId
+from src.weight_sync.transport import rendezvous
+from src.weight_sync.transport.c10d_group import build_weight_update_group
+from src.weight_sync.transport.rendezvous import RendezvousListener
 from tests.common.goldens.weight_sync_wire import GOLDEN_PATH, PINNED_ID_BYTES, WORLD_SIZE, bootstrap_record
 from tests.common.repo import REPO_ROOT
 
 GOLDEN = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 VLLM_DOCKERFILE = REPO_ROOT / "Dockerfile.vllm"
 SHIM_ROOT = "/opt/nccl_compat"
+SGLANG_GROUP_TIMEOUT_S = 7.0
+
+
+class _StoreBuilt(Exception):
+    """Ends SGLang's group formation once its store is constructed, before c10d needs a peer."""
 
 
 @pytest.fixture(scope="module")
@@ -62,6 +75,43 @@ def test_the_vllm_image_shims_the_module_the_id_pickles_from():
         assert init in dockerfile, f"Dockerfile.vllm creates no {init}, so the shim cannot import"
     asserted = re.findall(r"from (\S+) import ncclUniqueId; from vllm\.\S+ import ncclUniqueId as v", dockerfile)
     assert asserted == [module], f"the image's build assert checks {asserted}, not {module}"
+
+
+def test_the_sglang_store_does_not_wait_for_the_engine(monkeypatch):
+    """SGLang's engine dials in only once it has the join request, which the client sends while the store
+    is being built; the master must return without waiting for its workers, serve on the listener the
+    engine was told to dial, and share the group's formation deadline."""
+    built: list[tuple[dict, int]] = []
+
+    def recording_store(**kwargs):
+        listen_fd = kwargs["master_listen_fd"]
+        with socket.socket(fileno=os.dup(listen_fd)) as listening:
+            built.append((kwargs, listening.getsockname()[1]))
+        os.close(listen_fd)  # the store owns the fd it is handed
+        raise _StoreBuilt
+
+    monkeypatch.setattr(rendezvous, "TCPStore", recording_store)
+    with RendezvousListener("127.0.0.1", 0) as listener, pytest.raises(_StoreBuilt):
+        build_weight_update_group(
+            "127.0.0.1",
+            listener,
+            WORLD_SIZE,
+            torch.device("cpu"),
+            group_name="weight_update_group_test",
+            timeout_s=SGLANG_GROUP_TIMEOUT_S,
+        )
+
+    [(kwargs, listen_port)] = built
+    assert listen_port == listener.port, "the store does not serve on the listener the engine was told to dial"
+    assert kwargs == {
+        "host_name": "127.0.0.1",
+        "port": listener.port,
+        "world_size": WORLD_SIZE,
+        "is_master": True,
+        "timeout": timedelta(seconds=SGLANG_GROUP_TIMEOUT_S),
+        "wait_for_workers": False,
+        "master_listen_fd": kwargs["master_listen_fd"],
+    }
 
 
 if __name__ == "__main__":

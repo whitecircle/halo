@@ -357,7 +357,7 @@ RUN echo "=== Verifying Installation (TARGET_GPU=${TARGET_GPU}) ===" \
          echo "  - FA3: skipped (Blackwell target)"; \
        fi \
     && python -c "import nvidia.nvshmem; print('NVSHMEM: installed')" \
-    && python -c "from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient; print('Vendored NCCL client: OK')" \
+    && python -c "from src.weight_sync.clients.vllm import VLLMWeightSyncClient; print('Weight-sync client: OK')" \
     && halo --help >/dev/null && echo "halo CLI: $(command -v halo)" \
     && command -v newuidmap newgidmap >/dev/null && grep -q '^root:' /etc/subuid /etc/subgid \
     && echo "bubblewrap jail ids: $(grep '^root:' /etc/subuid)" \

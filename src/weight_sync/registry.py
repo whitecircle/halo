@@ -1,28 +1,27 @@
-"""Rollout-backend key → weight-sync client, derived from the client subclasses shipped in this package."""
+"""Rollout-backend key → weight-sync client, derived from the client subclasses in ``clients``."""
 
-from src.distributed.nccl.clients.base import BaseWeightSyncClient
-from src.distributed.nccl.clients.sglang import (
-    SGLangWeightSyncClient,  # noqa: F401 — a shipped client registers by being imported
-)
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient  # noqa: F401
-from src.subclass_registry import iter_subclasses
+import src.weight_sync.clients as _clients
+from src.subclass_registry import import_package_modules, iter_subclasses
+from src.weight_sync.clients.base import WeightSyncClientBase
+
+import_package_modules(_clients)
 
 
-def _client_registry() -> dict[str, type[BaseWeightSyncClient]]:
+def _client_registry() -> dict[str, type[WeightSyncClientBase]]:
     """Backend key → client class, derived from the subclasses rather than a parallel table.
 
-    Restricted to the clients shipped in this package: ``__subclasses__()`` also returns classes
+    Restricted to the clients in ``clients``: ``__subclasses__()`` also returns classes
     defined outside it (a test double, or this module tree loaded a second time under another name),
     and such a class capturing a backend key would replace the production client with no error.
     """
-    registry: dict[str, type[BaseWeightSyncClient]] = {}
-    for cls in iter_subclasses(BaseWeightSyncClient):
-        if not cls.BACKEND_KEY or not cls.__module__.startswith(f"{__package__}."):
+    registry: dict[str, type[WeightSyncClientBase]] = {}
+    for cls in iter_subclasses(WeightSyncClientBase):
+        if not cls.__module__.startswith(f"{_clients.__name__}."):
             continue
         clash = registry.get(cls.BACKEND_KEY)
         if clash is not None and clash is not cls:
             raise RuntimeError(
-                f"Two clients in {__package__} declare BACKEND_KEY {cls.BACKEND_KEY!r}: "
+                f"Two clients in {_clients.__name__} declare BACKEND_KEY {cls.BACKEND_KEY!r}: "
                 f"{clash.__module__}.{clash.__qualname__} and {cls.__module__}.{cls.__qualname__}. "
                 f"A backend key must identify exactly one client."
             )
@@ -36,7 +35,7 @@ def rollout_backends() -> list[str]:
     return sorted(_client_registry())
 
 
-def resolve_weight_sync_client(backend: str) -> type[BaseWeightSyncClient]:
+def resolve_weight_sync_client(backend: str) -> type[WeightSyncClientBase]:
     """The weight-sync client class for ``backend``, raising on an unknown one."""
     registry = _client_registry()
     try:

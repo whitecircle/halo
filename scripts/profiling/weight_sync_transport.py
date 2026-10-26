@@ -27,8 +27,8 @@ import json
 import sys
 
 from src.diagnostics.weight_sync_transport import TRANSPORT_PREFIXES, format_report, run_preflight
-from src.distributed.nccl.registry import rollout_backends
 from src.log import configure_cli_logging
+from src.weight_sync.registry import rollout_backends
 
 DEFAULT_CONNECTION_TIMEOUT_S = 120.0
 

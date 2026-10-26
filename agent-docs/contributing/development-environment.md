@@ -25,7 +25,7 @@ It does **not** resolve `flash_attn` or `deep_ep`, which the `Dockerfile` instal
 `[project.dependencies]`: Blackwell takes FA2 from the NGC base and FA4 from a prebuilt wheel, Hopper
 source-builds FA2 and FA3, and DeepEP is source-built in both. Navigation elsewhere is unaffected
 because both are imported behind optional-dependency guards. `vllm` is never imported into the training env; it runs in a separate
-container reached over HTTP plus the vendored NCCL client (`src/distributed/nccl/`).
+container reached over HTTP plus the weight-sync clients (`src/weight_sync/`).
 
 The `.venv` torch is the cu130 wheel: it imports without a GPU, but CUDA operations fail. The
 `.venv` is git-ignored.

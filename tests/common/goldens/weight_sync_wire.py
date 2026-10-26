@@ -19,9 +19,9 @@ from unittest.mock import patch
 import torch
 
 from src.distributed.nccl._nccl_wrapper import ncclUniqueId
-from src.distributed.nccl.transport import pynccl, stateless_group
-from src.distributed.nccl.transport.pynccl import PyNcclCommunicator
-from src.distributed.nccl.transport.stateless_group import RendezvousListener, StatelessProcessGroup
+from src.weight_sync.transport import pynccl, rendezvous
+from src.weight_sync.transport.pynccl import PyNcclCommunicator, UniqueIdStore
+from src.weight_sync.transport.rendezvous import RendezvousListener
 from tests.common.goldens import regen_main
 
 GOLDEN_PATH = Path(__file__).with_suffix(".json")
@@ -52,10 +52,6 @@ class _RecordingStore:
 
     def set(self, key: str, value: bytes) -> None:
         self.writes.append(("set", key, value))
-
-    def delete_key(self, key: str) -> bool:
-        self.writes.append(("delete_key", key, b""))
-        return True
 
 
 class _PinnedIdLibrary:
@@ -99,21 +95,25 @@ def bootstrap_record() -> dict:
     class's module, qualname and fields."""
     library = _PinnedIdLibrary()
     listener = RendezvousListener(GROUP_HOST, 0)
+    stores: list[_RecordingStore] = []
+
+    def recording_store(*args, **kwargs) -> _RecordingStore:
+        stores.append(_RecordingStore(*args, **kwargs))
+        return stores[-1]
+
     with (
         listener,
         # The server's knob, which the communicator refuses in the trainer: a host export must not end
         # the record early.
         patch.object(pynccl, "vllm_pynccl_disabled", lambda: False),
-        patch.object(stateless_group, "TCPStore", _RecordingStore),
+        patch.object(rendezvous, "TCPStore", recording_store),
         patch.object(pynccl, "NCCLLibrary", lambda: library),
         patch.object(torch.cuda, "device", lambda device: nullcontext()),
     ):
-        group = StatelessProcessGroup.create(
-            host=GROUP_HOST, port=listener.port, rank=0, world_size=WORLD_SIZE, listener=listener
-        )
-        store = group.store
+        unique_id_store = UniqueIdStore.create(host=GROUP_HOST, listener=listener, world_size=WORLD_SIZE)
+        [store] = stores
         try:
-            PyNcclCommunicator(group, device=torch.device("cuda", 0))
+            PyNcclCommunicator(unique_id_store, device=torch.device("cuda", 0))
         except _EngineNeverJoins:
             pass
         else:

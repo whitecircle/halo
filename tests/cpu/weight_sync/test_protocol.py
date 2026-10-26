@@ -24,7 +24,7 @@ Every defect pinned here leaves a *running* RL job broken with no usable error:
 Tests drive the REAL client against a fake vLLM HTTP server that records its own state, so they fail
 on the ordering/bookkeeping bugs rather than on mocked call counts.
 
-Run: ``python tests/cpu/grpo/test_weight_sync_protocol.py`` (or ``pytest -m cpu``).
+Run: ``python tests/cpu/weight_sync/test_protocol.py`` (or ``pytest -m cpu``).
 """
 
 from __future__ import annotations
@@ -40,20 +40,22 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
-from src.distributed.nccl.clients import vllm as wsc
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES, DEFAULT_PACKED_NUM_BUFFERS
-from src.distributed.nccl.transport.pynccl import PyNcclCommunicator
-from src.distributed.nccl.transport.stateless_group import RendezvousListener, StatelessProcessGroup
+from src.distributed.nccl._nccl_wrapper import ncclUniqueId
 from src.trainers.grpo.rollout.weight_sync_clients import (
     InferenceClientManager,
     verify_context_window,
     verify_sampler_logprob_reference,
 )
+from src.weight_sync.clients import vllm as wsc
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from src.weight_sync.transport import pynccl
+from src.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES, PACKED_NUM_BUFFERS
+from src.weight_sync.transport.pynccl import PyNcclCommunicator, UniqueIdStore
+from src.weight_sync.transport.rendezvous import RendezvousListener
 from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer, fake_server_class
 from tests.common.ports import free_port
-from tests.common.weight_sync import offline_client
+from tests.common.weight_sync import offline_client, push
 
 # Well above the client deadlines each test monkeypatches down, so a block is observed, not waited out.
 JOIN_TIMEOUT_S = 30.0
@@ -69,17 +71,39 @@ class FakeCommunicator:
     def abort(self):
         self.aborted = True
 
-    def broadcast(self, tensor, src=0):
+    def broadcast(self, tensor):
         pass
 
 
-class _GroupHoldingCommunicator(FakeCommunicator):
-    """``PyNcclCommunicator`` keeps the process group it formed from (``self.group``) — the reason a
-    live communicator keeps its ``group_port`` bound."""
+class _StoreHoldingCommunicator(FakeCommunicator):
+    """A communicator that holds the unique-id store it formed from, as the frame of a thread parked in
+    ``ncclCommInitRank`` does."""
 
-    def __init__(self, group, device):
+    def __init__(self, store, device):
         super().__init__()
-        self.group = group
+        self.store = store
+
+
+class _BlockingInitLibrary:
+    """libnccl whose ``ncclCommInitRank`` blocks, as the real one does until the engine joins, and calls
+    ``on_parked`` once it does."""
+
+    def __init__(self, on_parked):
+        self.parked = threading.Event()
+        self.released = threading.Event()
+        self._on_parked = on_parked
+
+    def ncclGetUniqueId(self) -> ncclUniqueId:
+        return ncclUniqueId()
+
+    def ncclGetVersion(self) -> str:
+        return "2.0.0"
+
+    def ncclCommInitRank(self, world_size, unique_id, rank):
+        self.parked.set()
+        self._on_parked()
+        self.released.wait()
+        raise RuntimeError("NCCL error: the engine never joined")
 
 
 @pytest.fixture
@@ -92,9 +116,9 @@ def server():
 @pytest.fixture
 def client(server, monkeypatch):
     """A real client attached to the fake server, with the cleanup/HTTP deadlines shortened."""
-    monkeypatch.setattr(wsc, "_CLEANUP_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "_HTTP_PROBE_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "_WEIGHT_UPDATE_TIMEOUT_S", 10)
+    monkeypatch.setattr(wsc, "CLEANUP_TIMEOUT_S", 5)
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    monkeypatch.setattr(wsc, "WEIGHT_UPDATE_TIMEOUT_S", 10)
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
     handle.communicator = FakeCommunicator()
     return handle
@@ -148,7 +172,7 @@ def test_pause_keeps_in_flight_generations(server, client, monkeypatch):
     client must ask for ``keep``, so those requests freeze and resume under the new weights."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
 
-    client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+    push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
     assert server.count("POST /pause") == 1
     assert "mode=keep" in server.queries["/pause"], f"pause query was {server.queries['/pause']!r}"
@@ -160,7 +184,7 @@ def test_lost_pause_reply_still_resumes_the_server(server, client, monkeypatch):
     server.status["/pause"] = 500
 
     with pytest.raises(Exception, match="/pause"):
-        client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+        push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
     assert client._paused is True or server.count("POST /resume") > 0, (
         "the pause flag was only set AFTER the POST, so a lost reply leaves no record of the pause"
@@ -176,7 +200,7 @@ def test_pause_left_by_a_failed_sync_is_lifted_on_close(server, client, monkeypa
     server.refuse.add("/resume")  # the in-sync resume never lands either; only close() can recover
 
     with pytest.raises(Exception, match="/pause"):
-        client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+        push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
     assert server.paused is True  # precondition for what close_communicator must repair
 
     server.refuse.clear()
@@ -190,7 +214,7 @@ def test_failed_start_weight_update_is_closed(server, client, monkeypatch):
     server.status["/start_weight_update"] = 500
 
     with pytest.raises(Exception, match="start_weight_update"):
-        client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+        push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
     assert server.count("POST /finish_weight_update") > 0, (
         "a started-but-failed weight update was never closed — the server stays mid-layerwise-reload"
@@ -202,18 +226,18 @@ def test_failed_start_weight_update_is_closed(server, client, monkeypatch):
 def test_start_weight_update_read_timeout_is_closed(server, client, monkeypatch):
     """Same defect via the real-world trigger: the reply is lost, not refused."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    real_post = requests.post
+    real_request = requests.request
 
-    def timing_out_post(url, *args, **kwargs):
+    def timing_out_request(method, url, *args, **kwargs):
         if url.endswith("/start_weight_update"):
-            real_post(url, *args, **kwargs)  # the server DOES open the update
+            real_request(method, url, *args, **kwargs)  # the server DOES open the update
             raise requests.exceptions.ReadTimeout("simulated lost reply")
-        return real_post(url, *args, **kwargs)
+        return real_request(method, url, *args, **kwargs)
 
-    monkeypatch.setattr(requests, "post", timing_out_post)
+    monkeypatch.setattr(requests, "request", timing_out_request)
 
     with pytest.raises(requests.exceptions.ReadTimeout):
-        client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+        push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
     assert server.update_open is False, "a lost /start_weight_update reply left the update open"
     assert server.paused is False
@@ -229,7 +253,7 @@ def test_producer_failure_surfaces_the_server_rejection(server, client, monkeypa
     server.status["/update_weights"] = 500
 
     with pytest.raises(Exception) as excinfo:
-        client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+        push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
     reported = f"{excinfo.value}\n{excinfo.value.__cause__}"
     assert "/update_weights" in reported and "500" in reported, (
@@ -242,11 +266,11 @@ def test_update_weights_declares_the_packed_layout(server, client, monkeypatch):
     """The chunk-boundary parameters must be on the wire, not implied by matching defaults."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
 
-    client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+    push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
     update_info = server.bodies["/update_weights"]["update_info"]
-    assert update_info["packed_buffer_size_bytes"] == DEFAULT_PACKED_BUFFER_SIZE_BYTES
-    assert update_info["packed_num_buffers"] == DEFAULT_PACKED_NUM_BUFFERS
+    assert update_info["packed_buffer_size_bytes"] == PACKED_BUFFER_BYTES
+    assert update_info["packed_num_buffers"] == PACKED_NUM_BUFFERS
     assert update_info["names"] == ["w"] and update_info["shapes"] == [[4]]
 
 
@@ -259,7 +283,7 @@ def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(s
     serves exactly that, behind a 200 ``/health``.
     """
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
+    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):  # 1 KiB each: the second crosses the budget, so the first chunk goes out
         client.update_named_param(name, torch.zeros(512, dtype=torch.bfloat16))
@@ -276,7 +300,7 @@ def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(s
         "old, part new, and part uninitialized"
     )
     with pytest.raises(RuntimeError, match="RESTART"):
-        client.sync_model_weights([("d", torch.zeros(4, dtype=torch.bfloat16))])
+        push(client, [("d", torch.zeros(4, dtype=torch.bfloat16))])
     client.close_communicator()
     assert server.paused is True, "close_communicator resumed a server that has to be restarted"
 
@@ -289,7 +313,7 @@ def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client,
     the engine back on the wire.
     """
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
+    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):
         client.update_named_param(name, torch.zeros(512, dtype=torch.bfloat16))
@@ -303,7 +327,7 @@ def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client,
     assert server.paused is True
     assert server.update_open is False, "the reload phase was left open by the failed tail"
     with pytest.raises(RuntimeError, match="RESTART"):
-        client.sync_model_weights([("d", torch.zeros(4, dtype=torch.bfloat16))])
+        push(client, [("d", torch.zeros(4, dtype=torch.bfloat16))])
 
 
 def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, client, monkeypatch):
@@ -311,7 +335,7 @@ def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, c
     serving, so the phase must be closed and the pause lifted — left quiesced it refuses every later
     sync and queues every rollout."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
+    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
     server.status["/update_weights"] = 500
 
     client.update_named_param("a", torch.zeros(512, dtype=torch.bfloat16))
@@ -324,7 +348,7 @@ def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, c
     assert server.update_open is False, "the reload phase was left open behind a failed first chunk"
     assert server.paused is False, "the engine stayed paused although nothing had been streamed"
     server.status.clear()
-    client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])  # the client is still usable
+    push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])  # the client is still usable
 
 
 def test_a_failed_snapshot_completion_still_closes_the_update(server, client, monkeypatch):
@@ -352,7 +376,7 @@ def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, mo
     sent. The engine then holds the earlier chunks and its old weights for the rest — the same mixed
     model, so the close must still refuse to resume it."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
+    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):
         client.update_named_param(name, torch.zeros(512, dtype=torch.bfloat16))
@@ -400,7 +424,7 @@ def test_the_snapshot_completion_waits_on_the_staged_copies_not_the_device(clien
 
 def test_check_server_honours_the_deadline_on_a_non_200_health(server, monkeypatch):
     """A route answering 503 forever is as dead as an unreachable one."""
-    monkeypatch.setattr(wsc, "_HTTP_PROBE_TIMEOUT_S", 5)
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     server.status["/health"] = 503
 
     outcome = _run_bounded(lambda: VLLMWeightSyncClient(base_url=server.url, connection_timeout=1.0))
@@ -415,9 +439,9 @@ def test_probe_generation_reports_a_paused_server(server, client):
     requests.post(f"{server.url}/pause")
     assert server.paused is True
 
-    outcome = _run_bounded(client.probe_generation)
+    outcome = _run_bounded(client._probe_generation)
 
-    assert outcome, "probe_generation blocked instead of reading /is_paused"
+    assert outcome, "_probe_generation blocked instead of reading /is_paused"
     assert isinstance(outcome[0], RuntimeError), f"a paused server was not reported: {outcome[0]!r}"
     assert "PAUSED" in str(outcome[0])
     assert "wedged" not in str(outcome[0]), "a paused server must not be reported as a wedged scheduler"
@@ -425,19 +449,20 @@ def test_probe_generation_reports_a_paused_server(server, client):
 
 def test_probe_generation_passes_on_a_serving_server(server, client):
     """Anti-vacuity: the pause check must not reject a healthy server."""
-    assert _run_bounded(client.probe_generation) == [None]
+    assert _run_bounded(client._probe_generation) == [None]
 
 
 def _record_session_gets(client, monkeypatch) -> list[str]:
     """URLs the client's retrying session GETs, recorded without disabling the adapter."""
     seen: list[str] = []
-    real_get = client.session.get
+    real_request = client._session.request
 
-    def spy(url, *args, **kwargs):
-        seen.append(url)
-        return real_get(url, *args, **kwargs)
+    def spy(method, url, *args, **kwargs):
+        if method == "GET":
+            seen.append(url)
+        return real_request(method, url, *args, **kwargs)
 
-    monkeypatch.setattr(client.session, "get", spy)
+    monkeypatch.setattr(client._session, "request", spy)
     return seen
 
 
@@ -460,10 +485,10 @@ def test_a_card_without_a_context_window_reports_none(server, client):
 def test_probe_generation_resolves_the_served_model_over_the_session(server, client, monkeypatch):
     session_gets = _record_session_gets(client, monkeypatch)
 
-    client.probe_generation()
+    client._probe_generation()
 
     assert [url for url in session_gets if url.endswith("/v1/models")], (
-        "probe_generation resolved the served model outside the client's session"
+        "_probe_generation resolved the served model outside the client's session"
     )
 
 
@@ -601,29 +626,32 @@ def test_the_preflight_probe_reads_each_engines_server(client_cls, caplog):
 def test_group_port_is_released_when_group_formation_fails(server, monkeypatch):
     """A failed group formation must give its ``group_port`` back, or every retry EADDRINUSEs.
 
-    The NCCL side is unconditionally blocking, so when the server's half fails the comm thread stays
-    parked in ``ncclCommInitRank`` holding the process group — dropping references cannot free the
-    listener, only closing it out of the group can. Without that, one wedged connect attempt burns the
+    ``ncclCommInitRank`` is unconditionally blocking, so when the server's half fails the formation thread
+    stays parked in the real communicator's constructor, its frame holding the unique-id store. Dropping
+    references cannot free the listener; closing the store can, and only while the communicator keeps no
+    reference of its own to the store's ``TCPStore``. Without that, one wedged connect attempt burns the
     configured port for the whole process: the reconnect path and every later client on that port die
     with ``Address already in use`` instead of retrying.
     """
-    monkeypatch.setattr(wsc, "_HTTP_PROBE_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "_GROUP_FORMATION_TIMEOUT_S", 20)
-    server.world_size = 0
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    monkeypatch.setattr(wsc, "GROUP_FORMATION_TIMEOUT_S", 20)
+    # The server's 500 is held until the communicator parked, so the failure lands with the init in flight.
     server.status["/init_weight_transfer_engine"] = 500
+    server.hold.add("/init_weight_transfer_engine")
+    library = _BlockingInitLibrary(on_parked=server.release)
+    monkeypatch.setattr(pynccl, "NCCLLibrary", lambda: library)
+    monkeypatch.setattr(pynccl, "vllm_pynccl_disabled", lambda: False)
+    monkeypatch.setattr(torch.cuda, "device", lambda device: contextlib.nullcontext())
     port = free_port()
     handle = VLLMWeightSyncClient(base_url=server.url, group_port=port, connection_timeout=5.0)
-
-    released = threading.Event()
-    # Parked like the real blocking init, holding the group like PyNcclCommunicator.group does.
-    monkeypatch.setattr(wsc, "PyNcclCommunicator", lambda pg, device: (pg, released.wait()))
     try:
         outcome = _run_bounded(lambda: handle.init_communicator(device="cpu"))
+        assert library.parked.is_set(), "the communicator never reached ncclCommInitRank — nothing was parked"
         assert outcome, "init_communicator parked in the blocking group init"
         assert isinstance(outcome[0], Exception), f"a 500 from the server did not raise: {outcome[0]!r}"
         assert _bindable(port), f"group_port {port} still held after a failed formation: {_bind_error(port)}"
     finally:
-        released.set()
+        library.released.set()
 
 
 def test_group_port_is_released_on_close(server, monkeypatch):
@@ -633,9 +661,9 @@ def test_group_port_is_released_on_close(server, monkeypatch):
     after another, reuses the configured ``vllm_group_port``; a listener surviving the close makes
     every run after the first fail before it starts.
     """
-    monkeypatch.setattr(wsc, "_HTTP_PROBE_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "_GROUP_FORMATION_TIMEOUT_S", 20)
-    monkeypatch.setattr(wsc, "PyNcclCommunicator", _GroupHoldingCommunicator)
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    monkeypatch.setattr(wsc, "GROUP_FORMATION_TIMEOUT_S", 20)
+    monkeypatch.setattr(wsc, "PyNcclCommunicator", _StoreHoldingCommunicator)
     server.world_size = 0
     port = free_port()
 
@@ -648,44 +676,33 @@ def test_group_port_is_released_on_close(server, monkeypatch):
     handle.close_communicator()
 
     assert _bindable(port), f"group_port {port} still held after close_communicator: {_bind_error(port)}"
-    assert pinned.group.store is None, "the closed group still holds its TCPStore"
+    assert pinned.aborted, "close_communicator released the port without aborting the communicator"
 
 
-def test_a_closed_group_cannot_broadcast():
-    """Closing releases the store, so a later exchange must say so instead of raising AttributeError."""
+def test_a_closed_store_cannot_publish():
+    """Closing releases the store, so a later publish must say so instead of raising AttributeError."""
     listener = RendezvousListener("127.0.0.1", 0)
-    group = StatelessProcessGroup.create(host="127.0.0.1", port=listener.port, rank=0, world_size=1, listener=listener)
-    group.close()
-    group.close()  # idempotent: close runs from cleanup paths that may already have run
+    store = UniqueIdStore.create(host="127.0.0.1", listener=listener, world_size=1)
+    store.close()
+    store.close()  # idempotent: close runs from cleanup paths that may already have run
     with pytest.raises(RuntimeError, match="closed"):
-        group.broadcast_obj("x", src=0)
-
-
-def test_rank_0_refuses_a_port_its_listener_does_not_hold():
-    """The store would take the fd and then fail its start on the port check, leaking the fd; the
-    refusal comes first and leaves the listener the caller's to close."""
-    with RendezvousListener("127.0.0.1", 0) as listener:
-        with pytest.raises(ValueError, match=f"holds {listener.port}"):
-            StatelessProcessGroup.create(
-                host="127.0.0.1", port=listener.port + 1, rank=0, world_size=1, listener=listener
-            )
-        assert not listener.handed_over
+        store.publish(ncclUniqueId())
 
 
 def test_init_communicator_surfaces_a_server_side_init_failure(server, monkeypatch):
     """A 500 from ``/init_weight_transfer_engine`` must win over the blocking ``ncclCommInitRank``."""
-    monkeypatch.setattr(wsc, "_HTTP_PROBE_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "_GROUP_FORMATION_TIMEOUT_S", 20)
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    monkeypatch.setattr(wsc, "GROUP_FORMATION_TIMEOUT_S", 20)
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
     server.status["/init_weight_transfer_engine"] = 500
     server.world_size = 0  # the stub forms no store, so no engine worker may dial the listener
 
     released = threading.Event()
     closed: list[bool] = []
-    stub_group = type("StubGroup", (), {"close": lambda self: closed.append(True)})()
-    monkeypatch.setattr(wsc.StatelessProcessGroup, "create", staticmethod(lambda **kwargs: stub_group))
+    stub_store = type("StubStore", (), {"close": lambda self: closed.append(True)})()
+    monkeypatch.setattr(wsc.UniqueIdStore, "create", staticmethod(lambda **kwargs: stub_store))
     # ncclCommInitRank blocks until the peer joins; a server that failed never will.
-    monkeypatch.setattr(wsc, "PyNcclCommunicator", lambda pg, device: released.wait())
+    monkeypatch.setattr(wsc, "PyNcclCommunicator", lambda store, device: released.wait())
 
     outcome = _run_bounded(lambda: handle.init_communicator(device="cpu"))
     released.set()
@@ -694,7 +711,7 @@ def test_init_communicator_surfaces_a_server_side_init_failure(server, monkeypat
     error = str(outcome[0])
     assert "500" in error, f"the server's own failure was not surfaced: {error}"
     assert "VLLM_GROUP_HOST" not in error, f"a server-side 500 was misreported as a topology error: {error}"
-    assert closed, "the group formed for a failed init was left holding its listener"
+    assert closed, "the store formed for a failed init was left holding its listener"
 
 
 def test_zero_dim_param_is_rejected_before_the_server_is_paused(server, client, monkeypatch):
@@ -702,7 +719,7 @@ def test_zero_dim_param_is_rejected_before_the_server_is_paused(server, client, 
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
 
     with pytest.raises(ValueError, match="0-dimensional"):
-        client.sync_model_weights([("scale", torch.zeros((), dtype=torch.bfloat16))])
+        push(client, [("scale", torch.zeros((), dtype=torch.bfloat16))])
 
     assert server.count("POST /pause") == 0, "the server was paused for a payload that can never be sent"
     assert server.paused is False
@@ -716,7 +733,7 @@ def test_dtensor_param_is_rejected(server, client, tmp_path, monkeypatch):
         mesh = init_device_mesh("cpu", (1,))
         sharded = distribute_tensor(torch.zeros(8, 4, dtype=torch.bfloat16), mesh, [Shard(0)])
         with pytest.raises(TypeError, match="DTensor"):
-            client.sync_model_weights([("w", sharded)])
+            push(client, [("w", sharded)])
     finally:
         dist.destroy_process_group()
 
@@ -743,7 +760,7 @@ def test_aborted_communicator_is_refused_by_name(server, client):
     client.communicator = FakeCommunicator(aborted=True)
 
     with pytest.raises(RuntimeError, match="aborted"):
-        client.sync_model_weights([("w", torch.zeros(4, dtype=torch.bfloat16))])
+        push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
     assert server.count("POST /pause") == 0, "the server was paused for a sync that cannot broadcast"
 
@@ -756,17 +773,28 @@ def test_aborted_communicator_refuses_to_broadcast():
     comm.device = torch.device("cpu")
 
     with pytest.raises(RuntimeError, match="aborted"):
-        comm.broadcast(torch.zeros(1), src=0)
+        comm.broadcast(torch.zeros(1))
+
+
+def test_a_tensor_off_the_communicators_device_is_refused():
+    """NCCL reads the raw pointer on the communicator's device; a tensor elsewhere must fail by name."""
+    comm = PyNcclCommunicator.__new__(PyNcclCommunicator)
+    comm.disabled = False
+    comm.aborted = False
+    comm.device = torch.device("cuda", 0)
+
+    with pytest.raises(ValueError, match="formed on cuda:0"):
+        comm.broadcast(torch.zeros(1))
 
 
 def test_disabled_communicator_still_exposes_its_device():
-    """``sync_model_weights`` reads ``.device`` to stage weights, after the server is already paused."""
+    """The vLLM client reads ``.device`` to land each chunk, after the server is already paused."""
     listener = RendezvousListener("127.0.0.1", 0)
-    group = StatelessProcessGroup.create(host="127.0.0.1", port=listener.port, rank=0, world_size=1, listener=listener)
+    store = UniqueIdStore.create(host="127.0.0.1", listener=listener, world_size=1)
     try:
-        comm = PyNcclCommunicator(group, device="cpu")  # world_size 1 takes the disabled path
+        comm = PyNcclCommunicator(store, device=torch.device("cpu"))  # world_size 1 takes the disabled path
     finally:
-        group.close()
+        store.close()
 
     assert comm.disabled is True
     assert comm.device == torch.device("cpu"), "a disabled communicator must still carry its device"

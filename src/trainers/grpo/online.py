@@ -1,7 +1,7 @@
 """Online GRPO trainer under EP / TP / ETP and their supported combinations (no CP or PP).
 
-Server-mode vLLM weight sync uses a vendored NCCL client; vLLM is not installed in the
-training environment (ABI-incompatible extensions, older transformers than the image).
+Server-mode vLLM generation and weight sync run through ``TrlVLLMClient``; vLLM is not installed in
+the training environment (ABI-incompatible extensions, older transformers than the image).
 """
 
 import contextlib
@@ -16,7 +16,7 @@ from accelerate.logging import get_logger
 from trl import GRPOTrainer
 
 from src.args.mixins import EarlyStopConfig, RLRRConfig
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
+from src.configs.rollout_config import VLLM_BACKEND
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
@@ -38,6 +38,7 @@ from src.trainers.grpo.objective.application import (
 from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps, kl_clamp_counts
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
+from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights
 from src.trainers.grpo.world_metrics import gathered_fractions
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -53,7 +54,7 @@ _ROLLOUT_FUNC_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "rollout_func")
 
 
 def _vllm_available_stub() -> bool:
-    """Stand in for TRL's ``is_vllm_available`` while the vendored NCCL-only client is installed."""
+    """Stand in for TRL's ``is_vllm_available`` while ``TrlVLLMClient`` is installed."""
     return True
 
 
@@ -81,7 +82,7 @@ class DistributedGRPOTrainer(
     )
     # Online GRPO is vLLM-only by construction (TRL's server-mode generation), so the engine the
     # weight-sync gate reads is fixed here rather than configured.
-    _rollout_backend = VLLMWeightSyncClient.BACKEND_KEY
+    _rollout_backend = VLLM_BACKEND
     # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
     _loss_outside_model_forward = True
 
@@ -102,7 +103,7 @@ class DistributedGRPOTrainer(
 
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
 
-        with self._patch_trl_for_vendored_vllm_client(), self._supplying_kl_reference():
+        with self._installing_trl_vllm_client(), self._supplying_kl_reference():
             super().__init__(*args, **kwargs)
         if early_stop is not None:
             self.add_callback(early_stop)
@@ -232,12 +233,12 @@ class DistributedGRPOTrainer(
 
     @staticmethod
     @contextlib.contextmanager
-    def _patch_trl_for_vendored_vllm_client() -> Iterator[None]:
+    def _installing_trl_vllm_client() -> Iterator[None]:
         """Swap TRL's vLLM client + availability checks for the duration of init.
 
-        vLLM isn't installed, so force ``is_vllm_available`` True and substitute the vendored
-        NCCL-only ``VLLMWeightSyncClient``. Reverted after ``super().__init__``; the ctor has already
-        required server mode, the only shape TRL builds that client for.
+        vLLM isn't installed, so force ``is_vllm_available`` True and substitute ``TrlVLLMClient``.
+        Reverted after ``super().__init__``; the ctor has already required server mode, the only shape
+        TRL builds that client for.
         """
         originals = (
             _trl_vllm_generation.is_vllm_available,
@@ -246,7 +247,7 @@ class DistributedGRPOTrainer(
         )
         _trl_vllm_generation.is_vllm_available = _vllm_available_stub
         _trl_vllm_client.is_vllm_available = _vllm_available_stub
-        _trl_vllm_generation.VLLMClient = VLLMWeightSyncClient
+        _trl_vllm_generation.VLLMClient = TrlVLLMClient
         try:
             yield
         finally:

@@ -28,11 +28,11 @@ from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
-from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
 from src.distributed.pipeline_parallel.split import PP_SPEC_MAP
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
 from src.models.head_transform import HEAD_TRANSFORM_SPEC_MAP
 from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
+from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.goldens import regen_main
 
 GOLDEN_PATH = Path(__file__).with_suffix(".json")

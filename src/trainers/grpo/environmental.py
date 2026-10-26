@@ -24,7 +24,6 @@ from trl.trainer.utils import pad
 
 from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.rollout_config import IDENTITY_SAMPLER
-from src.distributed.nccl.registry import resolve_weight_sync_client
 from src.distributed.runtime import (
     DeferredRankFailure,
     get_global_rank,
@@ -111,6 +110,7 @@ from src.trainers.grpo.world_metrics import WorldMetrics, gathered_fractions
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.loss_masks import effective_loss_mask
 from src.trainers.mixins.validation import evaluation_runs, keep_all_dataset_columns
+from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = get_logger(__name__, log_level="INFO")
 

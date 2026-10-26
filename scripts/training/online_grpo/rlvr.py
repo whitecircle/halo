@@ -18,6 +18,7 @@ from src.args.distributed_args import DistributedArguments
 from src.args.mixins import RLRRArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.config_validation import reject_non_default_args, reject_unsupported_args
+from src.configs.rollout_config import VLLM_BACKEND
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
 from src.data.pipeline.rendered import render_generation_prompt
@@ -25,7 +26,6 @@ from src.data.pipeline.row_processors import blank_conversation
 from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.frozen_models import load_reference_model_for_on_policy_grpo
 from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.runtime import barrier
 from src.environments.base import resolve_reasoning_effort
 from src.models.loading.model_preparation import log_model_info
@@ -205,7 +205,7 @@ def main():
     verify_context_window_synced(
         [vllm_base_url],
         single_turn_tokens=(args.max_prompt_length or 0) + grpo_config.max_completion_length,
-        backend=VLLMWeightSyncClient.BACKEND_KEY,
+        backend=VLLM_BACKEND,
     )
     # TRL's IS correction divides by the engine's logprobs too: they must carry the sampling temperature,
     # and a sequence-level IS mode sums the per-token log-ratios, which a reference renormalized over the
@@ -218,7 +218,7 @@ def main():
         min_p=0.0 if grpo_config.min_p is None else grpo_config.min_p,
         repetition_penalty=grpo_config.repetition_penalty,
         sequence_ratio_active=DistributedGRPOTrainer.sums_sequence_logratio(grpo_config),
-        backend=VLLMWeightSyncClient.BACKEND_KEY,
+        backend=VLLM_BACKEND,
     )
     # The KL reference TRL would otherwise build itself; None where the run holds none. Loaded after the
     # server preflights, so a misconfigured server fails before a second model load.

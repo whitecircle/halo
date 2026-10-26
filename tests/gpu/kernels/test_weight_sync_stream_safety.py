@@ -15,10 +15,10 @@ from unittest import mock
 
 import torch
 
-import src.distributed.nccl.clients.sglang as sglang_module
-import src.distributed.nccl.transport.packed_tensor as packed_tensor
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_NUM_BUFFERS, packed_broadcast_producer
+import src.weight_sync.clients.sglang as sglang_module
+import src.weight_sync.transport.packed_broadcast as packed_broadcast
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.weight_sync import offline_client
 
@@ -43,7 +43,7 @@ class _WireGroup:
     def __init__(self):
         self.sent: list[torch.Tensor] = []
 
-    def broadcast(self, tensor, src=0):
+    def broadcast(self, tensor):
         self.sent.append(tensor.clone())
 
     def abort(self):
@@ -54,16 +54,16 @@ def test_the_vllm_producer_holds_its_inputs_for_the_pack_stream():
     device = torch.device("cuda", torch.cuda.current_device())
     sources = _sources(device)
     expected = torch.cat([source.view(torch.uint8) for source in sources])
-    streams = [torch.cuda.Stream() for _ in range(DEFAULT_PACKED_NUM_BUFFERS)]
+    streams = [torch.cuda.Stream() for _ in range(PACKED_NUM_BUFFERS)]
     group = _WireGroup()
-    drain = packed_tensor.bounded_stream_sync
+    drain = packed_broadcast.bounded_stream_sync
 
     def drained_then_held_back(stream, **kwargs):
         drain(stream, **kwargs)
         with torch.cuda.stream(stream):
             torch.cuda._sleep(_SLEEP_CYCLES)
 
-    with mock.patch.object(packed_tensor, "bounded_stream_sync", drained_then_held_back):
+    with mock.patch.object(packed_broadcast, "bounded_stream_sync", drained_then_held_back):
         packed_broadcast_producer(iter([(f"p{i}", s) for i, s in enumerate(sources)]), group=group, streams=streams)
     del sources
     _overwrites = _refill_freed_blocks(device)
@@ -88,7 +88,7 @@ def test_the_sglang_client_holds_its_sources_for_the_send_stream():
         torch.cuda._sleep(_SLEEP_CYCLES)
     with (
         mock.patch.object(sglang_module.dist, "broadcast", lambda tensor, src, group: sent.append(tensor.clone())),
-        mock.patch.object(client, "_post_once", return_value=None),
+        mock.patch.object(client, "request", return_value=None),
     ):
         client._send_chunk([(f"p{i}", s) for i, s in enumerate(sources)], flush_cache=False)
         del sources

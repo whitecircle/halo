@@ -363,7 +363,7 @@ def _lora_under_tp_refused(**build_kwargs) -> dict[str, bool]:
     ``_validate_lora_tp_compatibility`` runs inside ``_setup_distributed_modes``, after the trainer's
     own ``__init__`` has built the model wrappers and TRL's weight-transfer client, so a config-level
     assertion never reaches it. The client that construction left behind is closed by the ``atexit``
-    hook ``init_communicator`` registers (``src/distributed/nccl/clients/vllm.py``), since the raise
+    hook ``init_communicator`` registers (``src/weight_sync/clients/vllm.py``), since the raise
     leaves no handle to close it through.
     """
     try:

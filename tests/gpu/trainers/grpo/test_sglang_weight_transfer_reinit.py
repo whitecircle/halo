@@ -18,8 +18,8 @@ Usage:
         tests/gpu/trainers/grpo/test_sglang_weight_transfer_reinit.py
 """
 
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.env import env_int, env_str
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.weight_sync import SGLANG_SERVER_URL

@@ -10,12 +10,12 @@ through it makes the trainer refuse a launch the server happily ignores: pynccl 
 server while the trainer dies claiming it is disabled. ``src/env.py``'s rule is that third-party
 vars match their owner's parse, and this is the only place that rule is enforceable in a test.
 
-Run: pytest tests/cpu/grpo/test_vllm_pynccl_parse.py
+Run: pytest tests/cpu/weight_sync/test_vllm_pynccl_parse.py
 """
 
 import pytest
 
-from src.distributed.nccl.transport.pynccl import vllm_pynccl_disabled
+from src.weight_sync.transport.pynccl import vllm_pynccl_disabled
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", " true "])

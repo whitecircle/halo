@@ -15,6 +15,9 @@ src/distributed/**
 src/subclass_registry.py
 src/kernels/moe_permute.py
 
+# Rollout-engine weight sync
+src/weight_sync/**
+
 # Trainers
 src/trainers/**
 

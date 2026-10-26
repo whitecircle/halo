@@ -74,7 +74,7 @@ EP surface. The table is pinned against the classes by
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for
-(`UNSERVABLE_MODEL_TYPES` in `src/distributed/nccl/clients/`), and `validate_weight_sync_support`
+(`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), and `validate_weight_sync_support`
 refuses that model+backend pair at trainer construction, quoting the loader fact.
 
 SGLang 0.5.17's list is the longer of the two: Laguna and Step-3.7 sync on vLLM only. Full roster

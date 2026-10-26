@@ -16,8 +16,6 @@ import torch
 from accelerate import PartialState
 
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from src.trainers.grpo import environmental
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import select_mask_logratio
@@ -26,6 +24,8 @@ from src.trainers.grpo.rollout.weight_sync_clients import (
     _probe_prompt_logprobs,
     verify_engine_prompt_logprobs_synced,
 )
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from tests.common.fake_engines import GRAPH_CAPTURE_TOKENS, FakeEngineServer, fake_server_class
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 from tests.common.repo import REPO_ROOT
@@ -330,7 +330,7 @@ def test_a_preflight_request_never_retries_a_read_past_its_timeout(prefill_serve
     client's own session would retry the read five times."""
     url = prefill_server.url
     retry = weight_sync_clients._probe_server(
-        client_cls, url, lambda client: client.session.get_adapter(url).max_retries, None, "probe"
+        client_cls, url, lambda client: client._session.get_adapter(url).max_retries, None, "probe"
     )
     assert retry.read == 0 and retry.connect > 0
 

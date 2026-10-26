@@ -14,7 +14,7 @@ The first two tests drive the failure with the local half completing FIRST (an e
 which is exactly the window the release has to cover. The third covers the other end of that window:
 the local half never starting at all.
 
-    python tests/cpu/grpo/test_nccl_client_group_leak.py
+    python tests/cpu/weight_sync/test_group_leak.py
 """
 
 import socket
@@ -22,10 +22,10 @@ import threading
 
 import pytest
 
-import src.distributed.nccl.clients.sglang as sglang_module
-import src.distributed.nccl.clients.vllm as vllm_module
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
+import src.weight_sync.clients.sglang as sglang_module
+import src.weight_sync.clients.vllm as vllm_module
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 
@@ -43,14 +43,27 @@ class _FakeResponse:
         return self._payload
 
 
-def _failing_server_call(built: threading.Event):
-    """Stand-in for the engine's group-init POST: fails only once the local half has succeeded."""
+def _recording_destroy(destroyed: list):
+    """A ``release_weight_update_group`` that records each group it was asked to destroy."""
 
-    def _post_once(path, **kwargs):
+    def release(group, *, destroy):
+        if destroy:
+            destroyed.append(group)
+
+    return release
+
+
+def _failing_server_call(built: threading.Event):
+    """Stand-in for the engine's routes: ``/get_world_size`` reports one rank, and the group-init POST
+    fails only once the local half has succeeded."""
+
+    def request(method, path, **kwargs):
+        if path == "/get_world_size":
+            return _FakeResponse({"world_size": 1})
         assert built.wait(timeout=30), "the local half never completed — test would not exercise the leak window"
         raise RuntimeError(_SERVER_REFUSED)
 
-    return _post_once
+    return request
 
 
 def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatch):
@@ -66,9 +79,9 @@ def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatc
 
     monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
-    monkeypatch.setattr(client, "_post_once", _failing_server_call(built))
-    monkeypatch.setattr(sglang_module, "create_weight_update_group", fake_create)
-    monkeypatch.setattr(sglang_module, "destroy_weight_update_group", destroyed.append)
+    monkeypatch.setattr(client, "request", _failing_server_call(built))
+    monkeypatch.setattr(sglang_module, "build_weight_update_group", fake_create)
+    monkeypatch.setattr(sglang_module, "release_weight_update_group", _recording_destroy(destroyed))
 
     with pytest.raises(RuntimeError, match=_SERVER_REFUSED):
         client.init_communicator(device="cpu")
@@ -82,7 +95,7 @@ def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatc
 
 
 def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeypatch):
-    """``_AsyncCall.__init__`` starts a thread, and a thread-starved process (Ray actors + rollout
+    """``AsyncCall.__init__`` starts a thread, and a thread-starved process (Ray actors + rollout
     threads) raises there. The handler must still release and report THAT error — reading the
     unbound call handle instead would raise UnboundLocalError, replacing the diagnosis and skipping
     the release that keeps the group name reusable. The listener no store took is closed with it."""
@@ -90,18 +103,18 @@ def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeyp
     client = offline_client(SGLangWeightSyncClient, "http://localhost:30000", group_port=port)
 
     destroyed: list[object] = []
-    real_async_call = sglang_module._AsyncCall
+    real_async_call = sglang_module.AsyncCall
 
-    def no_threads(*, name, fn):
+    def no_threads(fn, name="server call"):
         if name == "weight-update group formation":
             raise RuntimeError("can't start new thread")
-        return real_async_call(name=name, fn=fn)
+        return real_async_call(fn, name=name)
 
     monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
-    monkeypatch.setattr(client, "_post_once", lambda path, **kwargs: _FakeResponse({}))
-    monkeypatch.setattr(sglang_module, "_AsyncCall", no_threads)
-    monkeypatch.setattr(sglang_module, "destroy_weight_update_group", destroyed.append)
+    monkeypatch.setattr(client, "request", lambda method, path, **kwargs: _FakeResponse({}))
+    monkeypatch.setattr(sglang_module, "AsyncCall", no_threads)
+    monkeypatch.setattr(sglang_module, "release_weight_update_group", _recording_destroy(destroyed))
 
     with pytest.raises(RuntimeError, match="can't start new thread"):
         client.init_communicator(device="cpu")
@@ -121,24 +134,23 @@ def test_vllm_aborts_a_communicator_it_built_when_the_server_half_fails(monkeypa
     closed: list[str] = []
 
     class _FakeCommunicator:
-        def __init__(self, group, device):
+        def __init__(self, store, device):
             built.set()
 
         def abort(self):
             aborted.append("abort")
 
-    class _FakeGroup:
+    class _FakeStore:
         @staticmethod
         def create(**kwargs):
-            return _FakeGroup()
+            return _FakeStore()
 
         def close(self):
             closed.append("close")
 
-    monkeypatch.setattr(client, "probe_generation", lambda *a, **kw: None)
-    monkeypatch.setattr(client, "_post_once", _failing_server_call(built))
-    monkeypatch.setattr(vllm_module.requests, "get", lambda url, timeout=None: _FakeResponse({"world_size": 1}))
-    monkeypatch.setattr(vllm_module, "StatelessProcessGroup", _FakeGroup)
+    monkeypatch.setattr(client, "_probe_generation", lambda *a, **kw: None)
+    monkeypatch.setattr(client, "request", _failing_server_call(built))
+    monkeypatch.setattr(vllm_module, "UniqueIdStore", _FakeStore)
     monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _FakeCommunicator)
 
     with pytest.raises(RuntimeError, match=_SERVER_REFUSED):
@@ -148,7 +160,7 @@ def test_vllm_aborts_a_communicator_it_built_when_the_server_half_fails(monkeypa
         "the built NCCL communicator was never aborted — its ncclComm and the device memory NCCL "
         "pinned for it leak for the life of the trainer process"
     )
-    assert closed == ["close"], "the rendezvous group must still be closed so its port can be rebound"
+    assert closed == ["close"], "the unique-id store must still be closed so its port can be rebound"
     assert client.communicator is None
 
 

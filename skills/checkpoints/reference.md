@@ -236,7 +236,7 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   export resolves only through vLLM's transformers backend, generation quality unverified here), and
   SGLang 0.5.17's loader reads the pre-transformers-5.14 per-expert layout, not the native fused one
   the trainer holds. RL weight sync is refused at construction for both, off the engine client's
-  `UNSERVABLE_MODEL_TYPES` (`src/distributed/nccl/clients/`) — **not** off the layer class, whose
+  `UNSERVABLE_MODEL_TYPES` (`src/weight_sync/clients/`) — **not** off the layer class, whose
   `_supports_weight_sync = False` covers glm5_next, inkling and cohere2_moe instead. Zaya's gathered
   save is the native fused layout (`experts.gate_up_proj` / `down_proj`), which `from_pretrained`
   reads back directly.

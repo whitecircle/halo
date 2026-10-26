@@ -93,8 +93,8 @@ class _OnPolicyHost(OnPolicyGRPOInitMixin, GRPOTrainer):
             super().__init__(**kwargs)
 
 
-class _StubWeightSyncClient:
-    """The vendored vLLM client TRL's server-mode generation builds, with no server behind it."""
+class _StubTrlVLLMClient:
+    """The ``TrlVLLMClient`` TRL's server-mode generation builds, with no server behind it."""
 
     def __init__(self, **_):
         pass
@@ -292,10 +292,10 @@ def test_both_scripts_load_the_reference_as_their_policy_and_pass_it(script):
     assert [ast.unparse(k.value) for k in passed] == ["ref_model"]
 
 
-def test_the_online_trainer_hands_trl_the_reference_under_its_vendored_client_patch(tmp_path, base_dir, monkeypatch):
-    """The real online constructor at ``beta != 0``: TRL builds its server-mode generation through the vendored
-    client and holds the supplied reference, and both patches are unwound once construction succeeds."""
-    monkeypatch.setattr(online, "VLLMWeightSyncClient", _StubWeightSyncClient)
+def test_the_online_trainer_hands_trl_the_reference_under_its_client_install(tmp_path, base_dir, monkeypatch):
+    """The real online constructor at ``beta != 0``: TRL builds its server-mode generation through
+    ``TrlVLLMClient`` and holds the supplied reference, and both patches are unwound once construction succeeds."""
+    monkeypatch.setattr(online, "TrlVLLMClient", _StubTrlVLLMClient)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     reference = _load_reference(base_dir)
     trainer = DistributedGRPOTrainer(
@@ -304,10 +304,10 @@ def test_the_online_trainer_hands_trl_the_reference_under_its_vendored_client_pa
         parallelism_config=ParallelismConfig(),
         **_trainer_kwargs(tmp_path, use_vllm=True, vllm_mode="server"),
     )
-    assert isinstance(trainer.vllm_generation.vllm_client, _StubWeightSyncClient)
+    assert isinstance(trainer.vllm_generation.vllm_client, _StubTrlVLLMClient)
     assert trainer.accelerator.unwrap_model(trainer.ref_model) is reference
     assert trl_grpo_trainer.create_model_from_path is _TRL_BUILD, "the hand-off left TRL's build call patched"
-    assert trl_vllm_generation.VLLMClient is _TRL_VLLM_CLIENT, "the vendored client patch was left installed"
+    assert trl_vllm_generation.VLLMClient is _TRL_VLLM_CLIENT, "the TrlVLLMClient install was left in place"
 
 
 def _trl_constructor_reached(*_, **__):

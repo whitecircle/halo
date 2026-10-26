@@ -449,8 +449,8 @@ reference forward runs (a held `ref_model`, else the PEFT policy with its adapte
 `mixins/offline_reference.py`), and `rollout/`. `environmental.py` keeps the objective itself: batch assembly, advantages, the IS
 trust region and the rank-uniform fences.
 
-`rollout/` holds `weight_sync.py`, `weight_sync_clients.py`, `trajectory_spans.py` and
-`routing_replay.py`, plus four mixins. The async GRPO trainer composes three of them:
+`rollout/` holds `weight_sync.py`, `weight_sync_clients.py`, `trl_vllm_client.py`,
+`trajectory_spans.py` and `routing_replay.py`, plus four mixins. The async GRPO trainer composes three of them:
 `AsyncRolloutMixin` (`async_rollouts.py` — Ray actors, the prefetch thread, engine weight sync),
 `TrajectoryTokenizeMixin` (`trajectory_tokenize.py` — trajectory → training rows) and
 `RolloutMetricsMixin` (`rollout_metrics.py` — completion logs and per-episode diagnostics). Both
@@ -465,8 +465,9 @@ the artifact writers it routes `log` through): it writes the completions record 
 built no `vllm_generation` (server-mode vLLM is required). Before it, the init spine both on-policy
 trainers close through (`OnPolicyGRPOInitMixin._finish_on_policy_init`) runs
 `validate_weight_sync_support` against the trainer's engine.
-It uses the vendored `VLLMWeightSyncClient` (`src/distributed/nccl/`) instead of TRL's
-`VLLMClient`, which would import the vLLM package.
+TRL builds `TrlVLLMClient` (`src/trainers/grpo/rollout/trl_vllm_client.py`), TRL's `generate`
+contract over the vLLM weight-sync client, in place of its own `VLLMClient`, which would import the
+vLLM package ([generation](../training-methods/grpo/online.md#server-mode-only)).
 
 TRL's default only unfolds DTensors when its `DistributedBackend.is_fsdp` flag is set (an accelerate
 `fsdp_plugin`). FSDP2 is applied manually via `fully_shard` with accelerate in MULTI_GPU mode, so

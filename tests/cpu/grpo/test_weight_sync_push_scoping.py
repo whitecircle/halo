@@ -25,13 +25,13 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.distributed.nccl.clients.base as base_module
 import src.trainers.grpo.rollout.weight_sync_clients as pool_module
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
+import src.weight_sync.clients.base as base_module
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, sync_weights_to_client
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.weight_sync import Wire, offline_client
 
 # Each projection is a 2x2 bf16 weight, 8 bytes: a 16-byte budget holds two, so the cut falls between

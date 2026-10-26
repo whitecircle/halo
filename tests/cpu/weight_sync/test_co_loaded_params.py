@@ -4,21 +4,21 @@
 SGLang's MLA loaders fuse ``q_a_proj`` and ``kv_a_proj_with_mqa`` from a cache local to one
 ``load_weights`` call, so a half arriving in a request without the other is dropped without error;
 every request is one chunk, and the chunk boundary falls wherever the byte budget fills. What is
-pinned: a group a boundary would split waits whole for the next chunk, on both the streamed and the
-whole-payload path; a buffer holding nothing but such members sends nothing; a group the sync never
-completes refuses the close rather than closing over a dropped half; and the groups are scoped to
-the modules the model declares, since the engine fuses nothing where a half does not exist.
+pinned: a group a boundary would split waits whole for the next chunk; a buffer holding nothing but
+such members sends nothing; a group the sync never completes refuses the close rather than closing
+over a dropped half; and the groups are scoped to the modules the model declares, since the engine
+fuses nothing where a half does not exist.
 
-    python tests/cpu/grpo/test_weight_sync_co_loaded_params.py
+    python tests/cpu/weight_sync/test_co_loaded_params.py
 """
 
 import pytest
 import torch
 
-import src.distributed.nccl.clients.base as base_module
-from src.distributed.nccl.clients.base import chunk_by_bytes, split_co_loaded
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from tests.common.weight_sync import Wire, offline_client
+import src.weight_sync.clients.base as base_module
+from src.weight_sync.chunking import declared_co_load_groups, split_co_loaded
+from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from tests.common.weight_sync import Wire, offline_client, push
 
 GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
 # Four bf16 elements: 8 bytes each, so a budget of 16 holds two.
@@ -69,20 +69,6 @@ def test_a_suffix_claims_a_name_only_at_a_module_boundary():
     assert _names(held) == [_layer(0, "q_a_proj")]
 
 
-def test_chunk_by_bytes_moves_a_split_pair_whole_into_the_next_chunk():
-    plain = [_names(chunk) for chunk in chunk_by_bytes(_mla_payload(), _BUDGET)]
-    assert plain == [
-        [_layer(0, "q_a_proj"), _layer(0, "q_b_proj")],
-        [_layer(0, "kv_a_proj_with_mqa"), _layer(0, "o_proj")],
-    ]
-    assert [_names(chunk) for chunk in chunk_by_bytes(_mla_payload(), _BUDGET, GROUPS)] == _GROUPED_CHUNKS
-
-
-def test_chunk_by_bytes_refuses_a_pair_the_payload_never_completes():
-    with pytest.raises(ValueError, match="never completed"):
-        chunk_by_bytes([(_layer(0, "q_a_proj"), _param())], _BUDGET, GROUPS)
-
-
 @pytest.fixture
 def streamed(monkeypatch) -> tuple[SGLangWeightSyncClient, Wire]:
     """An SGLang client on a recording wire, with the chunk budget shrunk to two params."""
@@ -91,18 +77,22 @@ def streamed(monkeypatch) -> tuple[SGLangWeightSyncClient, Wire]:
     return wire.attach(offline_client(SGLangWeightSyncClient)), wire
 
 
-def test_the_streamed_path_keeps_the_pair_in_one_request(streamed):
+def test_a_pair_the_budget_would_split_moves_whole_into_the_next_chunk(streamed):
     client, wire = streamed
-    for name, param in _mla_payload():
-        client.update_named_param(name, param)
-    client.reset_prefix_cache()
+    push(client, _mla_payload())
     assert wire.chunk_names == _GROUPED_CHUNKS
 
 
-def test_the_whole_payload_path_uses_the_clients_own_groups(streamed):
+def test_without_the_group_the_budget_cuts_between_the_halves(streamed):
+    """The budget alone cuts between the halves, so the regrouping in ``_GROUPED_CHUNKS`` is the co-load
+    group's doing."""
     client, wire = streamed
-    client.sync_model_weights(_mla_payload())
-    assert wire.chunk_names == _GROUPED_CHUNKS
+    client.scope_co_load_groups([])
+    push(client, _mla_payload())
+    assert wire.chunk_names == [
+        [_layer(0, "q_a_proj"), _layer(0, "q_b_proj")],
+        [_layer(0, "kv_a_proj_with_mqa"), _layer(0, "o_proj")],
+    ]
 
 
 def test_a_buffer_of_nothing_but_a_waiting_half_sends_nothing(streamed):
@@ -125,11 +115,13 @@ def test_groups_are_scoped_to_the_modules_the_model_declares():
     """An MLA block without ``q_lora_rank`` has no ``q_a_proj``: the engine fuses nothing there, so the
     surviving half must travel on its own rather than wait for a partner that never comes."""
     without_q_a = ["model.layers.0.self_attn.kv_a_proj_with_mqa", "model.layers.0.self_attn.q_b_proj"]
-    assert SGLangWeightSyncClient.scoped_co_load_groups(without_q_a) == (("self_attn.kv_a_proj_with_mqa.weight",),)
+    assert declared_co_load_groups(SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS, without_q_a) == (
+        ("self_attn.kv_a_proj_with_mqa.weight",),
+    )
     # A PEFT-wrapped tree keeps the module names, so the pair stays whole under an adapter.
     peft = [f"base_model.model.model.layers.0.self_attn.{leaf}" for leaf in ("q_a_proj", "kv_a_proj_with_mqa")]
-    assert SGLangWeightSyncClient.scoped_co_load_groups(peft) == GROUPS
-    assert SGLangWeightSyncClient.scoped_co_load_groups([]) == ((),)
+    assert declared_co_load_groups(SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS, peft) == GROUPS
+    assert declared_co_load_groups(SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS, []) == ((),)
 
 
 def test_a_scoped_client_sends_a_partnerless_half_and_closes(streamed):
