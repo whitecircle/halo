@@ -1,6 +1,6 @@
 # SkyPilot Deployment
 
-Automated cluster provisioning for MoE training on AWS (EFA) and Nebius (InfiniBand). Configs live at `launcher-configs/skypilot/{provider}/{model}/{mode}.yaml` — five tasks per provider, tabled below. Adapt to other MoE families by swapping `CONFIG_PATH`.
+Automated cluster provisioning for MoE training on AWS (EFA) and Nebius (InfiniBand). Four tasks live at `launcher-configs/skypilot/{aws,nebius}/{nodelocal,crossnode}-ep.yaml`, one per cloud fabric and EP topology, each defaulting to GPT-OSS 120B; the [presets](#presets) retarget them at launch, and other MoE families swap `CONFIG_PATH`.
 
 ## Install and authenticate
 
@@ -12,39 +12,31 @@ Nebius: install the CLI (`curl -sSL https://storage.ai.nebius.cloud/nebius/insta
 
 ## Launch
 
-Every shipped task needs two edits first, or the launch burns a provisioning cycle before failing:
-uncomment `resources.image_id` ([Docker image](#docker-image) — the `setup:` block exits non-zero
-when `flash_attn` / `deep_ep` are missing) and set the S3 mount bucket (`--env HALO_BUCKET=<your-bucket>`) to your
-bucket ([Storage](#storage)). Each task also pins its provider's region (`us-east-1` on AWS,
-`eu-north1` on Nebius) — change it, or delete the key for cross-region failover, to match your quota.
+Every task needs two edits first, or the launch burns a provisioning cycle before failing:
+set `resources.image_id` (uncomment it, or pass `--image-id`; [Docker image](#docker-image) — the `setup:`
+block exits non-zero when `flash_attn` / `deep_ep` are missing) and set the S3 mount bucket
+(`--env HALO_BUCKET=<your-bucket>`) to your bucket ([Storage](#storage)). Each task also pins its
+provider's region (`us-east-1` on AWS, `eu-north1` on Nebius) — change it, or delete the key for
+cross-region failover, to match your quota.
 
 ```bash
-sky launch -c oss-120b launcher-configs/skypilot/nebius/gpt-oss-120b/crossnode-ep.yaml \
+sky launch -c oss-120b launcher-configs/skypilot/nebius/crossnode-ep.yaml \
   --secret HF_TOKEN --secret WANDB_API_KEY   # --secret masks tokens in logs
-
-# retarget a task without editing it — every envs: key takes --env
-sky launch -c q35-122b launcher-configs/skypilot/nebius/qwen3.5-122b-a10b/crossnode-ep.yaml \
-  --secret HF_TOKEN --secret WANDB_API_KEY \
-  --env MODEL=/data/checkpoints/q35-122b-sft \
-  --env CONFIG_PATH=examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml \
-  --env OUTPUT_DIR=/data/checkpoints/q35-122b-sft-v2
 ```
 
-## Available configs
+As shipped, `nodelocal-ep` runs EP=8 at node scope on one B200:8 node (`halo:blackwell`) and `crossnode-ep` runs EP=16 at global scope on two H200:8 nodes (`halo:hopper`). Each task drives its run from `envs`: `CONFIG_PATH` (the training config) plus `MODEL`, `EXPERT_PARALLEL_SIZE`, `EXPERT_PARALLEL_SCOPE`, `OUTPUT_DIR` and `WANDB_PROJECT`, forwarded as `--model_name_or_path` / `--expert_parallel_size` / `--ep_scope` / `--output_dir` / `--project_name`. Every `envs:` key takes a launch-time `--env KEY=VALUE` and every `resources` field its `sky launch` flag (`--gpus`, `--num-nodes`, `--memory`, `--disk-size`, `--network-tier`, `--image-id`), so no retarget edits the YAML. Point `MODEL` at a stage-1 `output_dir` to chain stages, and retarget `OUTPUT_DIR` and `WANDB_PROJECT` alongside `MODEL`, or the run writes into the shipped checkpoint directory and project.
 
-| Model | Mode | Layout | GPUs | Image |
-|---|---|---|---|---|
-| gpt-oss-20b | `nodelocal-ep` | 2 nodes, EP=8 node + DP | H100:8 (aws) / H200:8 (nebius) | `halo:hopper` |
-| gpt-oss-120b | `crossnode-ep` | 2 nodes, EP=16 global | H200:8 | `halo:hopper` |
-| gpt-oss-120b | `nodelocal-ep` | 1 node, EP=8 node | B200:8 | `halo:blackwell` |
-| qwen3.5-122b-a10b | `crossnode-ep` | 2 nodes, EP=16 global | H200:8 | `halo:hopper` |
-| qwen3.5-122b-a10b | `nodelocal-ep` | 1 node, EP=8 node | B200:8 | `halo:blackwell` |
+The two `crossnode-ep` files are **not** interchangeable: beyond `cloud`/`region` they differ in the RDMA fabric setup below (fabric env, the `/dev/gdrdrv` device, the `setup:` probe), and no launch flag supplies the device or the probe. The two `nodelocal-ep` files differ only in the EFA env the AWS `run:` block exports on more than one node.
 
-Each shape exists under both `launcher-configs/skypilot/aws/` (EFA) and `launcher-configs/skypilot/nebius/` (InfiniBand), and drives its run from `envs`: `CONFIG_PATH` (the training config) plus `MODEL`, `EXPERT_PARALLEL_SIZE`, `EXPERT_PARALLEL_SCOPE` and `WANDB_PROJECT`, forwarded as `--model_name_or_path` / `--expert_parallel_size` / `--ep_scope` / `--project_name`. Every `envs:` key takes a launch-time `--env KEY=VALUE`, so `MODEL` (point it at a stage-1 `output_dir` to chain stages), `CONFIG_PATH`, the EP knobs, `OUTPUT_DIR` and `WANDB_PROJECT` retarget without editing the YAML — retarget `WANDB_PROJECT` alongside `MODEL`, or the run logs into the shipped project.
+## Presets
 
-The `aws/` and `nebius/` copy of a shape are **not** interchangeable: beyond `cloud`/`region`/`accelerators` they differ in the RDMA fabric setup below (fabric env, the `/dev/gdrdrv` device, the AWS-only `fi_info` probe), which `--env` cannot supply.
+| Model | Task | `--env` | Resources |
+|---|---|---|---|
+| GPT-OSS 120B | both | none (the default) | as shipped |
+| Qwen3.5-122B-A10B | both | `CONFIG_PATH=examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml`, `MODEL=Qwen/Qwen3.5-122B-A10B`, `OUTPUT_DIR=/data/checkpoints/qwen35-122b`, `WANDB_PROJECT=halo-qwen35-122b` | as shipped |
+| GPT-OSS 20B | `nodelocal-ep` | `CONFIG_PATH=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`, `MODEL=unsloth/gpt-oss-20b-BF16`, `OUTPUT_DIR=/data/checkpoints/oss-20b`, `WANDB_PROJECT=halo-20b-nodelocal` | `--num-nodes 2 --network-tier best`, `--gpus H100:8` (AWS) or `H200:8` (Nebius), `--image-id docker:public.ecr.aws/whitecircle/halo:hopper`; `--memory 256+ --disk-size 1500` suffice |
 
-120B/122B `nodelocal-ep` require Blackwell HBM. The gpt-oss tasks default `MODEL` to a BF16-dequantized mirror — EP cannot load the MXFP4 `openai/gpt-oss-*` ([GPT-OSS → Precision and kernels](../models/gpt-oss.md#precision-and-kernels)).
+The 120B and 122B models run `nodelocal-ep` on Blackwell only (B200's 180 GB/GPU is the minimum, B300 has headroom; lower `max_length` on OOM) and need the shipped `memory: 512+` and `disk_size: 3000`. The gpt-oss defaults point `MODEL` at a BF16-dequantized mirror — EP cannot load the MXFP4 `openai/gpt-oss-*` ([GPT-OSS → Precision and kernels](../models/gpt-oss.md#precision-and-kernels)). The 20B preset keeps EP inside each node and adds cross-node data parallelism over the fabric, hence `--network-tier best` ([RDMA fabric](#rdma-fabric-aws-efa-vs-nebius-infiniband)).
 
 ## Cross-node expert parallelism
 
@@ -62,39 +54,38 @@ envs:
   DIST_SHARED_FILESYSTEM: "1"    # default; "0" for local-only FS
 ```
 
-The multi-node `run:` blocks are a plain `torchrun --nnodes=$SKYPILOT_NUM_NODES ... scripts/training/sft.py $CONFIG_PATH`
-(single-node tasks hardcode `--nnodes=1`) that forwards `--expert_parallel_size` / `--ep_scope` / `--max_length` from these envs — it does not use the
+Both `run:` blocks are a plain `torchrun --nnodes=$SKYPILOT_NUM_NODES ... scripts/training/sft.py $CONFIG_PATH`
+that forwards `--expert_parallel_size` / `--ep_scope` (and, in `crossnode-ep`, `--max_length`) from these envs — it does not use the
 `halo` CLI. `MAX_LENGTH` is a `crossnode-ep` knob: the training configs are tuned for a single NVLink
 domain, while cross-node dispatch is capped at 8192 tokens/rank
 ([DeepEP → AWS EFA](deepep.md#expert-parallelism-over-aws-efa)) and is rejected above it.
 
 ### RDMA fabric: AWS EFA vs Nebius InfiniBand
 
-The fabric env differs by cloud. The Nebius (IB) tasks keep the image's InfiniBand defaults. The two
-single-node AWS tasks (`gpt-oss-120b/nodelocal-ep`, `qwen3.5-122b-a10b/nodelocal-ep`) set no fabric
-env at all — intra-node NVLink only.
+The fabric env differs by cloud. The Nebius (IB) tasks keep the image's InfiniBand defaults.
 
-The three multi-node AWS (EFA) tasks set `NCCL_NET_PLUGIN: ofi` explicitly, because the NGC base's
-`shinit_v2` sets it only for a shell that sources it. They also set `NCCL_NET: Libfabric` so a missing
-plugin fails the launch instead of falling back to sockets. That fallback is silent for
-`gpt-oss-20b/nodelocal-ep`'s cross-node DP gradient sync, and surfaces as "NCCL GIN is unavailable" for
-the cross-node EP tasks once the cluster is already up.
+A multi-node AWS (EFA) run sets `NCCL_NET_PLUGIN=ofi` explicitly (`crossnode-ep` in its `envs`; AWS
+`nodelocal-ep` exports it in its `run:` block when `SKYPILOT_NUM_NODES > 1`, so one node stays
+NVLink-only), because the NGC base's `shinit_v2` sets it only for a shell that sources it. It also
+sets `NCCL_NET=Libfabric` so a missing plugin fails the launch instead of falling back to sockets.
+That fallback is silent for a multi-node `nodelocal-ep`'s cross-node DP gradient sync, and surfaces
+as "NCCL GIN is unavailable" for `crossnode-ep` once the cluster is already up.
 
 `NCCL_PROTO` is left to the plugin's own probe
 ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)).
 
 ```yaml
-envs:                       # AWS EFA, every multi-node AWS task
+envs:                       # AWS crossnode-ep; nodelocal-ep exports the first two on >1 node
   NCCL_NET_PLUGIN: ofi
   NCCL_NET: Libfabric
   NCCL_GIN_TYPE: "2"        # cross-node EP only (proxy GIN)
 ```
 
 Every task sets `config.docker.run_options: ["--ipc=host", "--ulimit", "memlock=-1", "--ulimit",
-"stack=67108864", "--shm-size=128g"]`; only the two `crossnode-ep` AWS tasks prepend
+"stack=67108864", "--shm-size=128g"]`; only AWS `crossnode-ep` prepends
 `"--device", "/dev/gdrdrv"` — node-local EP needs neither proxy GIN nor GDRCopy.
 
-The multi-node tasks set `resources.network_tier: best` so SkyPilot provisions the EFA/InfiniBand interfaces; the single-node ones omit it. The host supplies the EFA driver and devices; the image bundles the GIN-capable `aws-ofi-nccl` + GDRCopy that standard NCCL collectives and DeepEP cross-node EP both run on.
+`crossnode-ep` sets `resources.network_tier: best` so SkyPilot provisions the EFA/InfiniBand interfaces; `nodelocal-ep` omits it, so a multi-node `nodelocal-ep` launch passes `--network-tier best`. The host supplies the EFA driver and devices; the image bundles the GIN-capable `aws-ofi-nccl` + GDRCopy that standard NCCL collectives and DeepEP cross-node EP both run on.
 
 GIN-plugin prerequisites and the measured B300 EFA numbers: [DeepEP → Expert parallelism over AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa). Per-fabric env and verification (`fi_info -p efa` vs `ibstat`): [Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics).
 
@@ -143,13 +134,13 @@ reload after preemption. Pull results with `aws s3 sync`,
 
 ## Docker image
 
-`resources.image_id` is **not set in the shipped YAMLs — you must uncomment it.** Each carries it as a
-commented line under `resources` naming the prebuilt image for that shape, which pulls anonymously (no
-AWS account, no registry login).
+`resources.image_id` is **not set in the shipped YAMLs — uncomment it or pass `--image-id`.** Each carries
+it as a commented line under `resources` naming the prebuilt image for its shipped GPUs, which pulls
+anonymously (no AWS account, no registry login).
 
 Each task's `setup:` block fails fast when `flash_attn` / `deep_ep` are not importable, so a from-source
 build on a bare node is not a fallback; the prebuilt image is required. The `hopper` image serves
-the H100/H200 tasks (Nebius and AWS) and `blackwell` the B200 single-node tasks. To run your own build
+H100/H200 (`crossnode-ep`, the GPT-OSS 20B preset) and `blackwell` B200/B300 (`nodelocal-ep` as shipped). To run your own build
 instead, push it to a registry the nodes can reach and point `image_id` there ([Docker](docker.md)).
 
 ```yaml
@@ -172,8 +163,9 @@ Spot instances (AWS): spot with auto-recovery needs managed jobs — `sky jobs l
 ## Troubleshooting
 
 - **Cross-node EP hangs**: verify RDMA — `ibstat` (Nebius) or `fi_info -p efa` (AWS); on AWS also confirm `/dev/gdrdrv` reached the container.
-- **OOM**: reduce `max_length` or enable gradient checkpointing.
-- **NCCL errors**: check the NCCL env vars in the YAML; inspect setup with `sky logs <cluster> --status`.
+- **NCCL errors**: check the NCCL env vars in the YAML and the launch's `--env`; inspect setup with `sky logs <cluster> --status`.
+
+OOM, NCCL timeouts and config rejections: [Troubleshooting](../reference/troubleshooting.md).
 
 ## Resources
 

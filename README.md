@@ -332,7 +332,7 @@ Halo builds on a lot of great open-source work, in particular:
 - **[SDPG](https://arxiv.org/abs/2606.04036)**, led by researchers at UCLA — self-distilled policy
   gradient for online reinforcement learning.
 
-DeepEP is vendored as a git submodule under [`vendors/`](vendors/) and retains its upstream license;
+DeepEP is built from upstream at a pinned commit in the training image and keeps its upstream license;
 the build pins, Flash Attention's included, live in the [`Dockerfile`](Dockerfile).
 See [`pyproject.toml`](pyproject.toml) for the full dependency set.
 

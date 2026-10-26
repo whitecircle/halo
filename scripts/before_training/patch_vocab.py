@@ -27,7 +27,6 @@ import json
 import logging
 
 import torch
-from accelerate import PartialState
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from scripts.cli_arguments import (
@@ -212,9 +211,6 @@ def main():
     # Without --device_map the whole model lands in host RAM, and the patched output is about the
     # source's size on disk (not reported for a Hub id, where there is nothing local to measure).
     preflight_model_load_resources(args.model_id, args.output_dir, tool="patch_vocab", device_map=args.device_map)
-
-    # The shared model_preparation utilities use accelerate's rank-aware logger.
-    PartialState()
 
     logger.info("PATCH VOCABULARY SCRIPT")
     logger.info(f"Model: {args.model_id}")

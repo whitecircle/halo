@@ -1,7 +1,7 @@
 """``gpu_test_main`` — the shared lifecycle for torchrun-native GPU tests.
 
-Covers the lifecycle every torchrun test needs: deterministic kernel env → ``init_distributed`` →
-``PartialState`` → validate world size → ``setup_cache_dirs`` → ``try`` body →
+Covers the lifecycle every torchrun test needs: the training run's INFO root → deterministic kernel env →
+``init_distributed`` → ``PartialState`` → validate world size → ``setup_cache_dirs`` → ``try`` body →
 ``finally`` (the ``ctx.on_teardown`` finalizers, ``cleanup_ep`` among them → ``cleanup_memory`` →
 ``cleanup_dirs`` → ``barrier`` → ``teardown_distributed``, the last two skipped on an ``error``
 status, since a rank whose body raised abandoned a collective its peers are still inside) →
@@ -50,6 +50,7 @@ from accelerate import PartialState
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.hardware import is_blackwell_gpu
+from src.log import configure_training_logging
 from tests.common.distributed import (
     cleanup_dirs,
     init_distributed,
@@ -216,6 +217,7 @@ def gpu_test_main(
     def decorator(run: Callable[["Ctx"], dict]) -> Callable[[], int]:
         @functools.wraps(run)
         def wrapper() -> int:
+            configure_training_logging()
             for name, value in _DETERMINISTIC_KERNEL_ENV.items():
                 os.environ.setdefault(name, value)
             rank, world_size, local_rank = init_distributed()

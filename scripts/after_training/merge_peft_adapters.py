@@ -23,7 +23,6 @@ import argparse
 import logging
 
 import torch
-from accelerate import PartialState
 from transformers import AutoModelForSequenceClassification
 
 from scripts.cli_arguments import add_device_map_arg, add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
@@ -219,10 +218,6 @@ Examples:
         help="Suppress verbose output",
     )
     args = parser.parse_args()
-
-    # The model-loading helpers log through the accelerate logger, which raises unless the state is
-    # initialized; this script is a single-process tool, so initialize it explicitly.
-    PartialState()
 
     merge_peft_adapter(
         adapter_dir=args.adapter_dir,

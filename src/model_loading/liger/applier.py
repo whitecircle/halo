@@ -9,19 +9,20 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 import sys
 from collections.abc import Callable
 from types import ModuleType
 
-from accelerate.logging import get_logger
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 
 from src.model_loading.liger.cross_entropy import patch_loss_utils_cross_entropy
 from src.model_loading.liger.family_specs import LigerFamilySpec
 from src.model_loading.liger.fused_modules import GLU_FLAGS, apply_fused_modules, apply_fused_modules_to_model
 from src.model_loading.remote_code import register_remote_class_hook
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # (required class names, patch) armed for the modules transformers has not loaded yet.
 _armed: list[tuple[tuple[str, ...], Callable[[ModuleType], object]]] = []
@@ -141,7 +142,8 @@ class LigerApplier:
         if model is not None:
             apply_fused_modules_to_model(model, spec, flags)
 
-        logger.info(f"Liger Kernel applied to {spec.model_types[0]}: {', '.join(patched) or 'nothing'}")
+        if is_global_main_process():
+            logger.info(f"Liger Kernel applied to {spec.model_types[0]}: {', '.join(patched) or 'nothing'}")
         return patched
 
 
@@ -171,8 +173,9 @@ def _fire(module: ModuleType) -> None:
         present = _declared_classes(module, class_names)
         if present == set(class_names):
             patch(module)
-            logger.info(f"Liger Kernel applied to remote modeling module {module.__name__}")
-        elif present:
+            if is_global_main_process():
+                logger.info(f"Liger Kernel applied to remote modeling module {module.__name__}")
+        elif present and is_global_main_process():
             logger.warning(
                 f"Liger Kernel NOT applied to {module.__name__}: it defines {sorted(present)} but "
                 f"not {sorted(set(class_names) - present)}. This revision has renamed a class the "

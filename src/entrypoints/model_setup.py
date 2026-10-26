@@ -1,10 +1,10 @@
 """The run's policy model and processing class, for text and multimodal checkpoints, and the window,
 padding and attention defaults every training script applies around that load."""
 
+import logging
 import os
 from typing import Any, NamedTuple
 
-from accelerate.logging import get_logger
 from huggingface_hub import hf_hub_download, is_offline_mode
 from huggingface_hub.errors import LocalEntryNotFoundError, RemoteEntryNotFoundError
 from transformers import (
@@ -32,7 +32,7 @@ from src.runtime.consensus import rank_consensus
 from src.runtime.filesystem import hub_metadata_main_first
 from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # The files ``AutoProcessor`` reads a checkpoint's image processor from; a checkpoint shipping neither
 # has no native processor to build.
@@ -328,5 +328,6 @@ def apply_text_path_padding_side(tokenizer: PreTrainedTokenizer, vlm_run: bool) 
 
 def log_model_info(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> None:
     """Log the tokenizer and the model config on the main process."""
-    logger.info(f"Tokenizer: {tokenizer}")
-    logger.info(f"Model config: {model.config}")
+    if is_global_main_process():
+        logger.info(f"Tokenizer: {tokenizer}")
+        logger.info(f"Model config: {model.config}")

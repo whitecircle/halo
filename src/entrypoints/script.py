@@ -4,13 +4,13 @@ and tear the process group down."""
 import asyncio
 import functools
 import inspect
+import logging
 from collections.abc import Callable, Sequence
 from typing import Any, NamedTuple
 
 import torch
 import torch.distributed as dist
 from accelerate import PartialState
-from accelerate.logging import get_logger
 
 from src.callbacks.balancing import configure_moe_balancing
 from src.callbacks.early_stop import StopsTrainingEarly
@@ -21,6 +21,7 @@ from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispat
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.entrypoints.run_setup import configure_training_run, install_log_tee, prepare_distributed_resume
+from src.log import configure_training_logging
 from src.model_loading.parallel.peft_setup import split_expert_lora_targets
 from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import raise_rank0_failure
@@ -28,7 +29,7 @@ from src.runtime.filesystem import verify_output_filesystem_sharing
 from src.runtime.process_group import init_distributed
 from src.runtime.ranks import get_local_rank, has_process_group, is_global_main_process
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 class EarlyStopExit(SystemExit):
@@ -57,14 +58,15 @@ class ScriptContext(NamedTuple):
 
 
 def parse_script_args(*dataclass_types: type) -> Any:
-    """COLLECTIVE: parse the command line into ``dataclass_types``, returned in order (the instance
-    alone for one type), and tee the console into the run's ``output_dir``.
+    """COLLECTIVE: raise the root logger to INFO, parse the command line into ``dataclass_types``, returned in
+    order (the instance alone for one type), and tee the console into the run's ``output_dir``.
 
     The process group comes up before any dataclass is built: constructing a TrainingArguments touches
     ``self.device``, which makes accelerate initialize the default process group without ``device_id``,
     costing a ``new_group`` per mesh dim instead of one ``ncclCommSplit`` and leaving every barrier to
     infer its device.
     """
+    configure_training_logging()
     init_distributed()
     parser = HaloArgumentParser(dataclass_types)
     values = parser.load_values()
@@ -88,10 +90,11 @@ def _pin_single_process_to_bound_gpu(training_config) -> None:
     visible = training_config.n_gpu
     if visible <= 1:
         return
-    logger.warning(
-        f"{visible} GPUs are visible to this process; it trains on the one it bound. A multi-GPU run "
-        f"takes one process per GPU: `halo launch <method> <config> -n <gpus>` (torchrun)."
-    )
+    if is_global_main_process():
+        logger.warning(
+            f"{visible} GPUs are visible to this process; it trains on the one it bound. A multi-GPU run "
+            f"takes one process per GPU: `halo launch <method> <config> -n <gpus>` (torchrun)."
+        )
     training_config._n_gpu = 1
 
 

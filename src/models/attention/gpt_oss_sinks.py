@@ -10,9 +10,9 @@ from __future__ import annotations
 import contextlib
 import enum
 import functools
+import logging
 
 import torch
-from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
@@ -20,8 +20,9 @@ from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 from src.models.config_access import model_type_matches, text_config
 from src.models.model_classes import mapped_model_class
 from src.models.module_tree import backbone_with_layers
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Where :func:`apply_sinks_policy` stamps the run's :class:`SinksPolicy`: a module attribute, so it never
 # serializes into a ``config.json`` and attribute lookup falls through PEFT/FSDP2 wrappers.
@@ -100,7 +101,7 @@ def install_sdpa_for_reset_sinks(model_config) -> bool:
         if cls.__dict__.get("_supports_sdpa") is False:
             cls._supports_sdpa = True
             flipped = True
-    if flipped:
+    if flipped and is_global_main_process():
         logger.info(f"Enabled SDPA for {model_cls.__name__} (sinks reset for fine-tuning → sink column is a no-op)")
     return flipped
 
@@ -116,10 +117,11 @@ def install_local_flash_for_sinks(model_config: AutoConfig) -> None:
         return
     if GptOssPreTrainedModel._compatible_flash_implementations is not None:
         GptOssPreTrainedModel._compatible_flash_implementations = None
-        logger.info(
-            "Disabled GptOss flash-attn auto-fallback "
-            "(use locally-installed flash_attention_2 directly, no kernel-hub swap)"
-        )
+        if is_global_main_process():
+            logger.info(
+                "Disabled GptOss flash-attn auto-fallback "
+                "(use locally-installed flash_attention_2 directly, no kernel-hub swap)"
+            )
 
 
 def _gpt_oss_sink_attentions(model, model_config=None):
@@ -133,7 +135,8 @@ def _gpt_oss_sink_attentions(model, model_config=None):
         return
     backbone = backbone_with_layers(model)
     if backbone is None:
-        logger.warning("Could not find model.layers for GptOss attention sinks — skipping")
+        if is_global_main_process():
+            logger.warning("Could not find model.layers for GptOss attention sinks — skipping")
         return
     for index, layer in enumerate(backbone.layers):
         attn = getattr(layer, "self_attn", None)
@@ -170,7 +173,8 @@ def _reset_gpt_oss_sinks(
 
     if reset_count > 0:
         mode = "set to None (FA2)" if use_none else "filled with dtype min, frozen"
-        logger.info(f"Disabled attention sinks in {reset_count} GptOss layers ({mode})")
+        if is_global_main_process():
+            logger.info(f"Disabled attention sinks in {reset_count} GptOss layers ({mode})")
     return reset_count
 
 
@@ -184,7 +188,8 @@ def _set_gpt_oss_sinks_trainable(model: PreTrainedModel, model_config: AutoConfi
             touched += 1
     if touched:
         state = "TRAINABLE" if trainable else "frozen"
-        logger.info(f"Kept pretrained attention sinks live and {state} in {touched} GptOss layers")
+        if is_global_main_process():
+            logger.info(f"Kept pretrained attention sinks live and {state} in {touched} GptOss layers")
     return touched
 
 
@@ -239,7 +244,8 @@ def install_fa4_trainable_sink_rescale() -> bool:
         flash_utils._flash_varlen_fn = varlen_with_sink_grad
     if flash_utils._flash_fn is orig_dense:
         flash_utils._flash_fn = dense_with_sink_grad
-    logger.info("Installed the FA4 trainable-sink rescale (sink-less kernel + sigmoid(lse - sink) gate)")
+    if is_global_main_process():
+        logger.info("Installed the FA4 trainable-sink rescale (sink-less kernel + sigmoid(lse - sink) gate)")
     return True
 
 

@@ -9,9 +9,9 @@ Cross-entropy is always the toolkit's scoped patch: an upstream applier's CE bra
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable
 
-from accelerate.logging import get_logger
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers import AutoConfig
 
@@ -21,8 +21,9 @@ from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from src.models.config_access import set_config_field_run_scoped, text_config
 from src.models.moe.config_fields import has_routed_experts
 from src.models.moe.family_specs import wraps_experts
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # The effective Liger config the classes were patched with, stamped run-scoped on ``model.config`` for the
 # post-load TRL flag reconciliation to read back.
@@ -186,7 +187,7 @@ def _force_off(user_config: dict, forced_off: dict[str, str], *, yields_to_reque
     for key, reason in forced_off.items():
         if key in yields_to_request and key in user_config:
             continue
-        if result.get(key):
+        if result.get(key) and is_global_main_process():
             logger.warning(f"Liger {key} was explicitly enabled but {reason}; forcing it off.")
         result[key] = False
     return result
@@ -215,12 +216,13 @@ def sanitize_liger_config(
         pp_size=pp_size,
     )
     config = _force_off(user_config, forced_off, yields_to_request=("swiglu", "geglu"))
-    if forced_off:
+    if forced_off and is_global_main_process():
         logger.info(f"Liger disabled by parallelism: {', '.join(sorted(forced_off))}")
     routed_expert_overrides = liger_routed_expert_overrides(needs_ep_wrappers, model_config)
     config = _force_off(config, routed_expert_overrides, yields_to_request=())
-    for key, reason in routed_expert_overrides.items():
-        logger.info(f"Liger {key} off: {reason}")
+    if is_global_main_process():
+        for key, reason in routed_expert_overrides.items():
+            logger.info(f"Liger {key} off: {reason}")
     return config
 
 
@@ -250,7 +252,7 @@ def warn_if_flce_unreachable(model_config: AutoConfig, trainer_name: str) -> Non
     forward, so this warns instead.
     """
     applied = getattr(model_config, LIGER_APPLIED_CONFIG_ATTR, None) or {}
-    if applied.get("fused_linear_cross_entropy"):
+    if applied.get("fused_linear_cross_entropy") and is_global_main_process():
         logger.warning(
             f"Liger fused_linear_cross_entropy is applied but unreachable on {trainer_name}: its "
             f"loss runs outside the model's forward and never passes labels, so the fused path "
@@ -278,10 +280,11 @@ def _apply_liger_for_standard_models(
     wrapper_head = apply_fn is not None and resolved_type != model_type
     if wrapper_head:
         suffix = " (toolkit applier)" if resolved_type in _TOOLKIT_LIGER_APPLIERS else ""
-        logger.info(
-            f"Liger Kernel not available for model_type={model_type}; "
-            f"falling back to text sub-config model_type={resolved_type}{suffix}"
-        )
+        if is_global_main_process():
+            logger.info(
+                f"Liger Kernel not available for model_type={model_type}; "
+                f"falling back to text sub-config model_type={resolved_type}{suffix}"
+            )
         model_type = resolved_type
     if apply_fn is None:
         if requested_kernels:
@@ -291,12 +294,13 @@ def _apply_liger_for_standard_models(
                 f"own registry. Remove the keys and set use_liger_kernel: false, or add a LigerFamilySpec "
                 f"for the family (agent-docs/models/adding-a-model.md)."
             )
-        logger.warning(
-            f"No Liger applier for model_type={model_type}: this run trains UNFUSED — RMSNorm, the "
-            f"GLU MLPs, cross-entropy and RoPE all run eager, costing throughput and the logits-plane "
-            f"memory a fused loss would save. Add a LigerFamilySpec to LIGER_FAMILY_SPECS, or set "
-            f"use_liger_kernel: false to state the choice."
-        )
+        if is_global_main_process():
+            logger.warning(
+                f"No Liger applier for model_type={model_type}: this run trains UNFUSED — RMSNorm, the "
+                f"GLU MLPs, cross-entropy and RoPE all run eager, costing throughput and the logits-plane "
+                f"memory a fused loss would save. Add a LigerFamilySpec to LIGER_FAMILY_SPECS, or set "
+                f"use_liger_kernel: false to state the choice."
+            )
         return None
 
     signature_params = inspect.signature(apply_fn).parameters
@@ -310,7 +314,7 @@ def _apply_liger_for_standard_models(
 
     flce_requested = bool(user_overrides.get("fused_linear_cross_entropy"))
     if wrapper_head and "fused_linear_cross_entropy" in valid_params:
-        if flce_requested:
+        if flce_requested and is_global_main_process():
             logger.warning(
                 f"Liger fused_linear_cross_entropy requested for model_type={model_type}, but the "
                 f"checkpoint loads as its multimodal wrapper, whose own head runs: the fused loss patches "
@@ -330,10 +334,11 @@ def _apply_liger_for_standard_models(
                 f"set cross_entropy: false."
             )
         if "cross_entropy" not in user_overrides:
-            logger.info(
-                f"Liger cross_entropy defaulted off for {model_type}: fused_linear_cross_entropy was "
-                f"requested and the two are mutually exclusive."
-            )
+            if is_global_main_process():
+                logger.info(
+                    f"Liger cross_entropy defaulted off for {model_type}: fused_linear_cross_entropy was "
+                    f"requested and the two are mutually exclusive."
+                )
             config["cross_entropy"] = False
 
     # An applier declaring one of these ``False`` states Liger's kernel cannot serve the family; read
@@ -345,7 +350,7 @@ def _apply_liger_for_standard_models(
 
     # A key this applier does not accept is dropped by the filter below, so a requested one is named.
     unsatisfiable = sorted(requested_kernels - valid_params)
-    if unsatisfiable:
+    if unsatisfiable and is_global_main_process():
         logger.warning(
             f"Liger {unsatisfiable} requested for model_type={model_type} but its applier does not "
             f"offer {'them' if len(unsatisfiable) > 1 else 'it'} — the request is dropped and those "
@@ -360,9 +365,11 @@ def _apply_liger_for_standard_models(
         call_config["cross_entropy"] = False
         patch_loss_utils_cross_entropy()
 
-    logger.info(f"Applying Liger Kernel for {model_type}: {filtered_config}")
+    if is_global_main_process():
+        logger.info(f"Applying Liger Kernel for {model_type}: {filtered_config}")
     apply_fn(**call_config)
-    logger.info(f"✓ Liger Kernel applied for {model_type}")
+    if is_global_main_process():
+        logger.info(f"✓ Liger Kernel applied for {model_type}")
     return filtered_config
 
 

@@ -5,12 +5,12 @@ and its delta-rule scan. Only backends whose kernels are pinned against every ex
 
 import copy
 import functools
+import logging
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import torch
-from accelerate.logging import get_logger
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.integrations.flash_attention import get_target_dtype
 from transformers.models.gpt_oss import modeling_gpt_oss
@@ -35,8 +35,9 @@ from src.models.config_access import text_config
 from src.models.module_tree import backbone_with_layers, decoder_layers
 from src.models.segment_markers import require_segment_aware_kernels
 from src.models.unwrapping import base_transformers_model
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -405,7 +406,8 @@ def install_tree_attention(model, full_form: FullAttentionForm) -> None:
     if family.stateful is not None:
         for name, wrap in ((family.stateful.conv, _tree_conv), (family.stateful.recurrence, _tree_recurrence)):
             setattr(module, name, wrap(getattr(module, name)))
-    logger.info(f"Installed tree attention on {module.__name__} (full layers: {full_form})")
+    if is_global_main_process():
+        logger.info(f"Installed tree attention on {module.__name__} (full layers: {full_form})")
 
 
 def _on_device(plan, device: torch.device):
@@ -477,9 +479,8 @@ def warm_tree_kernels(model, *, dtype: torch.dtype, full_form: FullAttentionForm
         if full_form == "split":
             warm_split_form_kernels(model.config, dtype=dtype)
         warm_recurrent_mixer_kernels(model, dtype=dtype)
-        logger.info(f"Tree attention kernel warmup done (full layers: {full_form}, dtype={dtype})")
+        if is_global_main_process():
+            logger.info(f"Tree attention kernel warmup done (full layers: {full_form}, dtype={dtype})")
     except Exception as e:
-        # main_process_only=False: the skip is rank-local, and a rank without the warm-up stalls later.
-        logger.warning(
-            f"Tree attention kernel warmup skipped (non-fatal): {type(e).__name__}: {e}", main_process_only=False
-        )
+        # Every rank: the skip is rank-local, and a rank without the warm-up stalls later.
+        logger.warning(f"Tree attention kernel warmup skipped (non-fatal): {type(e).__name__}: {e}")

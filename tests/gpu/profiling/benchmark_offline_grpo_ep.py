@@ -39,6 +39,7 @@ from transformers import AutoTokenizer
 from src.callbacks.efficiency import EfficiencyCallback
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
+from src.log import configure_training_logging
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
@@ -193,6 +194,7 @@ def create_offline_grpo_dataset(
 
 
 def main() -> int:
+    configure_training_logging()
     failed = False
     trainer = None
     model = None

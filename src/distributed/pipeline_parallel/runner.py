@@ -8,12 +8,12 @@ the caller never calls ``.backward()`` and runs ``gradient_accumulation_steps=1`
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Generator, Mapping
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate.logging import get_logger
 from torch.distributed.fsdp import FSDPModule, fully_shard
 from torch.distributed.pipelining import PipelineStage, Schedule1F1B, ScheduleGPipe
 from torch.distributed.pipelining.schedules import PipelineScheduleSingle
@@ -23,8 +23,9 @@ from src.distributed.parallelism_rules import PPSchedule
 from src.distributed.pipeline_parallel.stage import PipelineStageModule
 from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss, fused_causal_lm_token_loss
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 _SCHEDULES: dict[PPSchedule, type[PipelineScheduleSingle]] = {"1f1b": Schedule1F1B, "gpipe": ScheduleGPipe}
 
@@ -88,15 +89,16 @@ def resolve_microbatch_count(
         )
     n_microbatches = config.pp_microbatches or gradient_accumulation_steps
     if config.pp_schedule == "1f1b" and n_microbatches < config.pp_size:
-        logger.warning(
-            "pipeline_microbatches=%d is below pipeline_parallel_size=%d (Schedule1F1B needs a full "
-            "pipeline); raising to %d.",
-            n_microbatches,
-            config.pp_size,
-            config.pp_size,
-        )
+        if is_global_main_process():
+            logger.warning(
+                "pipeline_microbatches=%d is below pipeline_parallel_size=%d (Schedule1F1B needs a full "
+                "pipeline); raising to %d.",
+                n_microbatches,
+                config.pp_size,
+                config.pp_size,
+            )
         n_microbatches = config.pp_size
-    if n_microbatches < _BUBBLE_WARN_FACTOR * config.pp_size:
+    if n_microbatches < _BUBBLE_WARN_FACTOR * config.pp_size and is_global_main_process():
         logger.warning(
             "pipeline_microbatches=%d gives a large pipeline bubble at pipeline_parallel_size=%d (idle "
             "fraction (pp-1)/(m+pp-1): 1/5 of the step at m=2*pp on 2 stages). For a 10%% "

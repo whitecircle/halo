@@ -38,6 +38,7 @@ from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.parallelism_config import ParallelismConfig
+from src.log import configure_training_logging
 from src.model_loading.liger.dispatch import apply_liger_kernel, finalize_liger_after_direct_load
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
@@ -247,6 +248,7 @@ def print_summary(all_results: list[dict], args, model_cfg: dict, avg_tokens: in
 
 
 def main():
+    configure_training_logging()
     parser = create_benchmark_parser(
         description="Collator comparison: Standard vs Packing vs Padding-Free",
         require_ep=False,

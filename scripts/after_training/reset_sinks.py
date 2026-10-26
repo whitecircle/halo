@@ -21,7 +21,6 @@ import shutil
 from pathlib import Path
 
 import torch
-from accelerate import PartialState
 from safetensors.torch import load_file
 
 from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
@@ -364,10 +363,6 @@ def reset_sinks(
 
 if __name__ == "__main__":
     args = parse_args()
-    # sanitize_generation_config logs through accelerate's rank-aware logger, which raises without
-    # this state, and every gpt-oss checkpoint ships do_sample=False, so it fires on this script's
-    # main path.
-    PartialState()
     reset_sinks(
         args.model_id,
         output_dir=args.output_dir,

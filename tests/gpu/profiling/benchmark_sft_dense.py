@@ -59,6 +59,7 @@ from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.parallelism_config import ParallelismConfig
+from src.log import configure_training_logging
 from src.model_loading.liger.dispatch import apply_liger_kernel, finalize_liger_after_direct_load
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
@@ -85,6 +86,7 @@ from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 
 def main() -> int:
+    configure_training_logging()
     failed = False
     parser = create_benchmark_parser(
         description="Dense model SFT MFU/TFLOPS benchmark",

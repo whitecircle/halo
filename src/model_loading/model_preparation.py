@@ -2,7 +2,8 @@
 the verified load through it, the per-family patches and the implementation a model is built with, and
 the run policies every loaded model takes."""
 
-from accelerate.logging import get_logger
+import logging
+
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -25,8 +26,9 @@ from src.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_imp
 from src.models.attention.selection import has_head_dim_beyond_flash, is_flash_attn_implementation
 from src.models.config_access import model_type_matches
 from src.models.zaya import apply_zaya_patches
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def _auto_map_class_name(auto_map: dict, key: str) -> str | None:
@@ -152,7 +154,10 @@ def sanitize_generation_config(model: PreTrainedModel) -> None:
     )
     if sampling_params_set and not getattr(generation_config, "do_sample", False):
         generation_config.do_sample = True
-        logger.info("Sanitized generation_config: set do_sample=True (model ships sampling params without do_sample)")
+        if is_global_main_process():
+            logger.info(
+                "Sanitized generation_config: set do_sample=True (model ships sampling params without do_sample)"
+            )
 
 
 def apply_run_model_policies(

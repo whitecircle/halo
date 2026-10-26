@@ -18,7 +18,6 @@ import os
 from collections import Counter
 
 import torch
-from accelerate import PartialState
 from peft import PeftConfig, PeftModel
 from safetensors import safe_open
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
@@ -409,9 +408,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    # The shared model_preparation helpers log through accelerate's rank-aware logger, which needs
-    # this state.
-    PartialState()
     convert_to_bf16(
         args.input_dir,
         args.output_dir,

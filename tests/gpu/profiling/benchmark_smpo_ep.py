@@ -35,6 +35,7 @@ from transformers import AutoTokenizer
 from src.callbacks.efficiency import EfficiencyCallback
 from src.configs.preference import SmoothMarginPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
+from src.log import configure_training_logging
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
@@ -167,6 +168,7 @@ def create_smpo_dataset(
 
 
 def main() -> int:
+    configure_training_logging()
     failed = False
     trainer = None
     model = None

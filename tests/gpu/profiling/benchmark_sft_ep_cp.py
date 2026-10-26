@@ -50,6 +50,7 @@ from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.parallelism_config import ParallelismConfig
+from src.log import configure_training_logging
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
@@ -70,6 +71,7 @@ from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 
 def main() -> int:
+    configure_training_logging()
     failed = False
     parser = create_benchmark_parser(
         description="MoE SFT benchmark with EP + Context Parallelism",

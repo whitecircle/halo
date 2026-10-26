@@ -4,11 +4,11 @@ FP32-master restore, the trainer-constructor load, and the attention warm-up eve
 from __future__ import annotations
 
 import gc
+import logging
 from collections.abc import Callable
 from functools import partial
 
 import torch
-from accelerate.logging import get_logger
 from transformers import PreTrainedModel
 
 from src.distributed.expert_parallel.config import EPConfig
@@ -30,7 +30,7 @@ from src.runtime.consensus import DeferredRankFailure
 from src.runtime.load_coordination import joined_node_load
 from src.runtime.ranks import get_global_world_size
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool, ep_wrapped: bool) -> None:
@@ -165,7 +165,6 @@ def _warm_then_barrier(*warmups: Callable[[], None]) -> None:
             logger.warning(
                 f"Attention warmup teardown barrier failed ({type(e).__name__}: {e}) — ranks may be skewed "
                 f"entering the next collective",
-                main_process_only=False,
             )
 
 

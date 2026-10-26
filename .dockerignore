@@ -76,9 +76,6 @@ checkpoints/
 outputs/
 wandb/
 
-# Vendored submodules (the image clones and builds DeepEP itself)
-vendors/
-
 # Local caches / rendered docs / secrets — never build-context material
 .hfcache/
 site/

@@ -3,8 +3,9 @@ the run's attention through the per-mode loader to the post-load policies."""
 
 from __future__ import annotations
 
+import logging
+
 import torch
-from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
@@ -45,9 +46,9 @@ from src.models.config_access import apply_config_overrides
 from src.models.moe.config_fields import has_routed_experts
 from src.runtime.consensus import reject_across_ranks
 from src.runtime.load_coordination import joined_node_load
-from src.runtime.ranks import get_local_rank
+from src.runtime.ranks import get_local_rank, is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def _backend_sinks_policy(sinks_policy: SinksPolicy, init_from_scratch: bool) -> SinksPolicy:
@@ -91,10 +92,11 @@ def _resolve_run_attention(
                 "Train in bf16/fp16, or drop Context Parallelism for fp32 runs."
             )
         cp_fa = preferred_flash_impl(allow_fa4=not is_fa4_backward_nan_prone(model_config))
-        logger.warning(
-            f"flex_attention is not supported with Context Parallelism (Ulysses always uses "
-            f"flash_attn). Switching to {cp_fa}."
-        )
+        if is_global_main_process():
+            logger.warning(
+                f"flex_attention is not supported with Context Parallelism (Ulysses always uses "
+                f"flash_attn). Switching to {cp_fa}."
+            )
         # Re-validated, not assigned: the substitute must clear the same sink-capability matrix, or a
         # run keeping live sinks (reset_sinks=false) silently moves to a sink-dropping kernel.
         attn_implementation = validate_attn_implementation(
@@ -178,7 +180,8 @@ def _load_undistributed_model(
     if wraps_experts:
         model = apply_ep_layers(model, ep_config)
     mode = "Grouped GEMM wrappers (no EP distribution)" if wraps_experts else "standard DDP"
-    logger.info(f"Model loaded with {mode}")
+    if is_global_main_process():
+        logger.info(f"Model loaded with {mode}")
     return model
 
 
@@ -199,9 +202,10 @@ def _dispatch_model_loading(
         model = load_pp_stage_model(
             *rung, preserve_checkpoint_precision=preserve_checkpoint_precision, wraps_experts=wraps_experts
         )
-        logger.info(
-            f"Model loaded for PP stage {pc.pp_rank}/{pc.pp_size} (ep={pc.ep_size}, dp={pc.data_parallel_size})"
-        )
+        if is_global_main_process():
+            logger.info(
+                f"Model loaded for PP stage {pc.pp_rank}/{pc.pp_size} (ep={pc.ep_size}, dp={pc.data_parallel_size})"
+            )
         return model
     if pc.has_ep_group and pc.is_tp_mode:
         return load_ep_tp_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
@@ -213,19 +217,22 @@ def _dispatch_model_loading(
         return load_tp_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
     if pc.has_ep_group and pc.is_cp_mode:
         model = load_ep_cp_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
-        logger.info(f"Model loaded with EP+CP (ep={pc.ep_size}, cp={pc.cp_size})")
+        if is_global_main_process():
+            logger.info(f"Model loaded with EP+CP (ep={pc.ep_size}, cp={pc.cp_size})")
         return model
     if pc.has_ep_group:
         model = load_ep_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
-        logger.info(
-            f"Model loaded with EP (ep_size={pc.ep_size}, {'node-local' if pc.ep_scope == 'node' else 'cross-node'})"
-        )
+        if is_global_main_process():
+            logger.info(
+                f"Model loaded with EP (ep_size={pc.ep_size}, {'node-local' if pc.ep_scope == 'node' else 'cross-node'})"
+            )
         return model
     if pc.is_cp_mode:
         model = load_cp_model(
             *rung, preserve_checkpoint_precision=preserve_checkpoint_precision, wraps_experts=wraps_experts
         )
-        logger.info(f"Model loaded with CP (cp_size={pc.cp_size}, grouped_gemm_experts={wraps_experts})")
+        if is_global_main_process():
+            logger.info(f"Model loaded with CP (cp_size={pc.cp_size}, grouped_gemm_experts={wraps_experts})")
         return model
     return _load_undistributed_model(
         *rung,
@@ -297,7 +304,7 @@ def load_distributed_model(
     # text_only_model opts into that drop deliberately (and restores config-honored aux loss).
     if model_class is None:
         model_class = resolve_auto_model_class(model_config, text_only=text_only_model)
-    elif text_only_model:
+    elif text_only_model and is_global_main_process():
         logger.warning(
             f"text_only_model=True is ignored: the caller pinned model_class={model_class} "
             f"(task-head scripts resolve their own class). The flag only affects auto-resolution."
@@ -342,8 +349,9 @@ def load_distributed_model(
         from_pretrained_kwargs["revision"] = source.revision
     if quantization_config is not None:
         from_pretrained_kwargs["quantization_config"] = quantization_config
-        logger.info(f"Using quantization config: {quantization_config}")
-    if init_from_scratch:
+        if is_global_main_process():
+            logger.info(f"Using quantization config: {quantization_config}")
+    if init_from_scratch and is_global_main_process():
         logger.info("init_from_scratch=True — building model with RANDOM weights from config (no checkpoint load).")
 
     model = _dispatch_model_loading(

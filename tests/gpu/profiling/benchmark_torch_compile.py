@@ -38,6 +38,7 @@ from trl import SFTConfig
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.parallelism_config import ParallelismConfig
+from src.log import configure_training_logging
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
@@ -263,6 +264,7 @@ def run_benchmark(
 
 
 def main() -> int:
+    configure_training_logging()
     parser = argparse.ArgumentParser(
         description="One cell of the Liger x torch.compile 2x2 benchmark for MoE models.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

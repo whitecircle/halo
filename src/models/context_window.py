@@ -2,12 +2,14 @@
 left unset resolves to.
 """
 
-from accelerate.logging import get_logger
+import logging
+
 from transformers import PretrainedConfig, PreTrainedModel, PreTrainedTokenizer
 
 from src.models.config_access import text_config
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Bound below which a ``model_max_length`` is a real context window. HF's "this tokenizer declares no
 # length" sentinel (``VERY_LARGE_INTEGER``, 1e30) sits above it and is a positive int, so
@@ -61,7 +63,8 @@ def resolve_length_to_context(value: int | None, model: PreTrainedModel, tokeniz
     if is_bounded_length(value):
         return value
     context = get_model_context_window(model, tokenizer)
-    logger.info("max_length unset → resolved to the model context window (%d)", context)
+    if is_global_main_process():
+        logger.info("max_length unset → resolved to the model context window (%d)", context)
     return context
 
 

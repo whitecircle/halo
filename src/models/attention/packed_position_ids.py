@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import functools
 import inspect
+import logging
 from abc import ABC, abstractmethod
 
-from accelerate.logging import get_logger
 from transformers.models.mistral4 import modeling_mistral4 as m4
 
-logger = get_logger(__name__)
+from src.runtime.ranks import is_global_main_process
+
+logger = logging.getLogger(__name__)
 
 
 class FlashInterfaceViewBase(ABC):
@@ -100,5 +102,6 @@ def patch_mistral4_flash_packed_position_ids() -> None:
     """Make Mistral4's flash path see ``position_ids``, so packed documents stay isolated. Its attention
     forward takes ``position_ids`` for the attention scale and passes only ``**kwargs`` on, so the
     stash rides that forward."""
-    if install_packed_position_ids_injection(m4, m4.Mistral4Attention, lambda attention: (attention,)):
+    installed = install_packed_position_ids_injection(m4, m4.Mistral4Attention, lambda attention: (attention,))
+    if installed and is_global_main_process():
         logger.info("Patched Mistral4 flash attention to receive position_ids (packed-document isolation)")

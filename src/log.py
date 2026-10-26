@@ -1,6 +1,6 @@
-"""Process logging: the root handler and third-party suppression installed at package import, CLI
-verbosity for standalone tools, the warn-once helper, the key-preview count and the run-log names under
-``output_dir``."""
+"""Process logging: the root handler and third-party suppression installed at package import, the training
+run's root level, CLI verbosity for standalone tools, the warn-once helper, the key-preview count and the
+run-log names under ``output_dir``."""
 
 import logging
 import sys
@@ -46,9 +46,15 @@ def configure_root_logging() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
+def configure_training_logging() -> None:
+    """Raise the root logger to INFO for a training run. Every rank logs at the root level; a line for global
+    rank 0 only is guarded at its call with ``runtime.ranks.is_global_main_process()``."""
+    logging.getLogger().setLevel(logging.INFO)
+
+
 def info_logger(name: str) -> logging.Logger:
-    """The logger ``name`` set to INFO, since the root is pinned to WARNING; plain logging, so entry
-    points without accelerate state can use it."""
+    """The logger ``name`` set to INFO, for lines a tool must print under the WARNING root it leaves
+    unconfigured."""
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     return logger

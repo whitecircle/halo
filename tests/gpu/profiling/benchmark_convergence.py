@@ -30,6 +30,7 @@ from trl import SFTConfig, SFTTrainer
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.parallelism_config import ParallelismConfig
+from src.log import configure_training_logging
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
@@ -50,6 +51,7 @@ _LAYER_CLS = {"gpt-oss-20b": "GptOssDecoderLayer", "qwen3-30b-a3b": "Qwen3MoeDec
 
 
 def main() -> int:
+    configure_training_logging()
     failed = False
     parser = create_benchmark_parser(description="Convergence comparison (TRL vs Halo)", require_ep=False)
     parser.add_argument("--ep", type=int, default=0, help="0=stock TRL, 1=Halo dense, N>1=Halo EP size N")

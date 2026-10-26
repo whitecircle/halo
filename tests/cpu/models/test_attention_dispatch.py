@@ -44,15 +44,10 @@ FA4_NAN_PRONE_MODEL_TYPES = (
 
 
 def _blackwell():
-    """Patches making ``_detect_attention_impl`` see a Blackwell (SM100) GPU.
-
-    ``logger.info`` is silenced too: it is accelerate's MultiProcessAdapter, which raises unless a
-    ``PartialState`` exists — absent in a bare unit-test process.
-    """
+    """Patches making ``_detect_attention_impl`` see a Blackwell (SM100) GPU."""
     return (
         patch.object(attention_mod.torch.cuda, "is_available", lambda: True),
         patch.object(attention_mod.torch.cuda, "get_device_capability", lambda *a, **k: (10, 0)),
-        patch.object(attention_mod.logger, "info"),
     )
 
 
@@ -63,11 +58,10 @@ def test_detect_attn_impl_warns_when_present_fa4_is_broken():
     Blackwell box whose flash_attn.cute install is broken silently trains every job on FA2 —
     2-3x slower attention — with nothing in the log to say so.
     """
-    is_avail, capability, quiet_info = _blackwell()
+    is_avail, capability = _blackwell()
     with (
         is_avail,
         capability,
-        quiet_info,
         patch.object(attention_mod, "ensure_fa4_kernel_cache_env", side_effect=RuntimeError("cutlass dsl broken")),
         patch.object(attention_mod.logger, "warning") as warn,
     ):
@@ -80,11 +74,10 @@ def test_detect_attn_impl_warns_when_present_fa4_is_broken():
 
 def test_detect_attn_impl_stays_quiet_when_fa4_is_merely_absent():
     """Anti-noise counterpart: an ABSENT FA4 is an expected build, not a fault — info, never warn."""
-    is_avail, capability, quiet_info = _blackwell()
+    is_avail, capability = _blackwell()
     with (
         is_avail,
         capability,
-        quiet_info,
         patch.object(attention_mod, "ensure_fa4_kernel_cache_env", lambda: None),
         patch.dict(sys.modules, {"flash_attn": None, "flash_attn.cute": None}),
         patch.object(attention_mod.logger, "warning") as warn,

@@ -3,9 +3,9 @@ MoE, and EP+TP with the experts distributed by DeepEP."""
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 
-from accelerate.logging import get_logger
 from transformers import DistributedConfig, PreTrainedModel
 
 from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
@@ -23,9 +23,9 @@ from src.model_loading.parallel.model_source import ModelSource, resolve_lazy_ch
 from src.model_loading.parallel.whole_model import load_whole_model
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.load_coordination import joined_node_load, timed_global_load
-from src.runtime.ranks import get_global_rank
+from src.runtime.ranks import get_global_rank, is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class _ToolkitMeshViews:
@@ -77,7 +77,8 @@ def load_tp_model(
     tp_size, dp_size = pc.tp_size, pc.data_parallel_size
     device_mesh = build_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
     tp_mesh = tp_submesh(device_mesh)
-    logger.info(f"Created device mesh ({'DP x TP' if dp_size > 1 else 'TP only'}): {device_mesh}")
+    if is_global_main_process():
+        logger.info(f"Created device mesh ({'DP x TP' if dp_size > 1 else 'TP only'}): {device_mesh}")
 
     # Not node-throttled: the load ends in ``tie_weights``, whose equality check on a tied pair of
     # DTensors is an all-reduce on the default group, which a rank-serialized region deadlocks. Each
@@ -111,9 +112,10 @@ def load_tp_model(
     # After finish_hf_tp_load's tie check: the seam re-ties, which would mask a load that left the pair untied.
     finalize_loaded_model(model)
 
-    logger.info(f"Model loaded with TP (tp_size={tp_size})")
-    if dp_size > 1:
-        logger.info(f"  FSDP2 will be used for DP (dp_size={dp_size})")
+    if is_global_main_process():
+        logger.info(f"Model loaded with TP (tp_size={tp_size})")
+        if dp_size > 1:
+            logger.info(f"  FSDP2 will be used for DP (dp_size={dp_size})")
     return model
 
 
@@ -121,7 +123,8 @@ def _apply_attention_only_tp(model: PreTrainedModel, rank: int, tp_size: int, dp
     """Shard attention via DTensor TP, leaving the MoE experts alone, and stamp the mesh onto the model."""
     device_mesh = build_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
     num_tp_modules = apply_tp_to_attention_only(model, device_mesh)
-    logger.info(f"[Rank {rank}] TP applied to {num_tp_modules} attention modules")
+    if is_global_main_process():
+        logger.info(f"[Rank {rank}] TP applied to {num_tp_modules} attention modules")
     model._device_mesh = device_mesh
 
 
@@ -138,8 +141,9 @@ def load_tp_moe_model(
     mis-shards MoE expert biases); ``wraps_experts`` adds the grouped-GEMM expert wrappers."""
     rank = get_global_rank()
     tp_size, dp_size = pc.tp_size, pc.data_parallel_size
-    logger.info(f"[Rank {rank}] Loading MoE model for TP-only mode (attention-only TP)...")
-    logger.info(f"  TP size: {tp_size}, DP size: {dp_size}")
+    if is_global_main_process():
+        logger.info(f"[Rank {rank}] Loading MoE model for TP-only mode (attention-only TP)...")
+        logger.info(f"  TP size: {tp_size}, DP size: {dp_size}")
 
     ep_config = pc.ep_config() if wraps_experts else None
     model = load_whole_model(
@@ -157,9 +161,11 @@ def load_tp_moe_model(
 
     if wraps_experts:
         model = apply_ep_layers(model, ep_config)
-        logger.info("Applied grouped GEMM wrappers to MoE layers")
+        if is_global_main_process():
+            logger.info("Applied grouped GEMM wrappers to MoE layers")
 
-    logger.info(f"Model loaded with TP on MoE (tp={tp_size}, dp={dp_size})")
+    if is_global_main_process():
+        logger.info(f"Model loaded with TP on MoE (tp={tp_size}, dp={dp_size})")
     return model
 
 
@@ -177,17 +183,19 @@ def load_ep_tp_model(
     otherwise every rank loads the whole model through ``from_pretrained``.
     """
     rank = get_global_rank()
-    logger.info(f"[Rank {rank}] Loading model for EP+TP mode...")
-    logger.info(f"  EP size: {pc.ep_size}, TP size: {pc.tp_size}, DP size: {pc.data_parallel_size}")
+    if is_global_main_process():
+        logger.info(f"[Rank {rank}] Loading model for EP+TP mode...")
+        logger.info(f"  EP size: {pc.ep_size}, TP size: {pc.tp_size}, DP size: {pc.data_parallel_size}")
 
     # Before the lazy gate: ep_config() issues new_group on every rank, so a per-rank
     # filesystem probe ahead of it would order the groups per rank (deadlock).
     ep_config = pc.ep_config()
     use_lazy = resolve_lazy_checkpoint(source, lazy_requested=pc.ep_lazy_loading, layout_supported=is_lazy_loadable)
-    if use_lazy:
-        logger.info(f"[Rank {rank}] Using lazy safetensors loader for EP+TP")
-    elif pc.ep_lazy_loading:
-        logger.info(f"[Rank {rank}] Lazy path unavailable, falling back to sequential loading")
+    if is_global_main_process():
+        if use_lazy:
+            logger.info(f"[Rank {rank}] Using lazy safetensors loader for EP+TP")
+        elif pc.ep_lazy_loading:
+            logger.info(f"[Rank {rank}] Lazy path unavailable, falling back to sequential loading")
 
     def load() -> PreTrainedModel:
         if use_lazy:
@@ -215,5 +223,6 @@ def load_ep_tp_model(
         return model if use_lazy else apply_ep_layers(model, ep_config)
 
     model = timed_global_load("EP+TP", "ep_tp_lazy" if use_lazy else "ep_tp_huggingface", load)
-    logger.info(f"Model loaded with EP+TP (tp={pc.tp_size}, ep={pc.ep_size}, dp={pc.data_parallel_size})")
+    if is_global_main_process():
+        logger.info(f"Model loaded with EP+TP (tp={pc.tp_size}, ep={pc.ep_size}, dp={pc.data_parallel_size})")
     return model

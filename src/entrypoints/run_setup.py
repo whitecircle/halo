@@ -15,7 +15,6 @@ from pathlib import Path
 
 import datasets
 import transformers
-from accelerate.logging import get_logger
 from transformers import set_seed
 
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
@@ -30,9 +29,7 @@ from src.runtime.consensus import reject_across_ranks
 from src.runtime.filesystem import OUTPUT_FS_PROBE_PREFIX, is_fs_load_rank, is_fs_save_rank
 from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
-# The tee installs before accelerate's state exists, which its logging adapter requires.
-_tee_logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
 # Seconds allowed for tee to flush its block-buffered tail once the fds are restored at exit. It is
 # draining an already-closed pipe, so a longer wait would only mask a stuck process.
@@ -111,7 +108,8 @@ def _setup_tracking_env_vars(args, training_config, script_name: str) -> None:
 
 def configure_training_run(args, training_config, script_name: str, *, overwrite_output_dir: bool) -> None:
     """COLLECTIVE: set the run up before any model loads: kernel caches, fp32 matmul precision, the
-    ``output_dir`` guard, the datasets cache, log verbosity, tracking env vars and the seed."""
+    ``output_dir`` guard, the datasets cache, log verbosity (the root level is set earlier, by
+    ``parse_script_args``), tracking env vars and the seed."""
     # Both kernel caches, anchored on HF_HOME, before any model/attention import: they read their env
     # lazily at first compile, and a cold cache re-benchmarks per packed-row width (fla keys on
     # ceil(tokens/1024)) while every peer waits in the next collective.
@@ -195,7 +193,7 @@ def install_log_tee(output_dir: str | None) -> None:
     log_path = os.path.abspath(os.path.join(log_dir, RUN_LOG_FILE))
     if _tee_log_path is not None:
         if log_path != _tee_log_path:
-            _tee_logger.warning(
+            logger.warning(
                 "Console output is already tee'd to %s; this process's fds cannot be redirected a "
                 "second time, so %s will NOT receive it. Run one output_dir per process.",
                 _tee_log_path,
@@ -207,7 +205,7 @@ def install_log_tee(output_dir: str | None) -> None:
         os.makedirs(log_dir, exist_ok=True)
         tee = subprocess.Popen(["tee", "-a", log_path], stdin=subprocess.PIPE, close_fds=False)
     except OSError as exc:
-        _tee_logger.warning("Console output is not persisted to %s (%s); the run continues without it.", log_path, exc)
+        logger.warning("Console output is not persisted to %s (%s); the run continues without it.", log_path, exc)
         return
     if tee.stdin is None:
         tee.kill()

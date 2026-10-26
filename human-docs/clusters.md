@@ -143,19 +143,20 @@ rank and an engine cannot share one. Layouts, ports and the fabric setup:
 
 ## SkyPilot
 
-`launcher-configs/skypilot/` holds task YAMLs for AWS and Nebius: GPT-OSS 20B
-(node-local EP), plus GPT-OSS 120B and Qwen3.5-122B in node-local and cross-node
-EP variants. They handle rendezvous, fabric setup and storage mounts:
+`launcher-configs/skypilot/{aws,nebius}/{nodelocal,crossnode}-ep.yaml` launch
+GPT-OSS 120B, one task per cloud fabric and EP topology, with rendezvous, fabric
+setup and storage mounts; the [preset table](../agent-docs/infrastructure/skypilot.md#presets)
+retargets them to the other shipped models at launch:
 
 ```bash
 pip install "skypilot-nightly[aws]"   # or [nebius]
-sky launch -c oss-120b launcher-configs/skypilot/aws/gpt-oss-120b/crossnode-ep.yaml \
+sky launch -c oss-120b launcher-configs/skypilot/aws/crossnode-ep.yaml \
     --secret HF_TOKEN --secret WANDB_API_KEY
 sky logs oss-120b --follow
 ```
 
 Each YAML ships `resources.image_id` commented out, naming the prebuilt image
-for its GPUs. Uncomment it before launching; change it only for your own build.
+for its GPUs. Uncomment it (or pass `--image-id`) before launching.
 [SkyPilot](../agent-docs/infrastructure/skypilot.md) ↗.
 
 ## RunPod

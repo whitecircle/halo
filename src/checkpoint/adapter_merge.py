@@ -4,11 +4,11 @@ every tool writing from a saved adapter shares."""
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 from collections.abc import Callable
 from typing import NamedTuple
 
-from accelerate.logging import get_logger
 from peft import PeftConfig, PeftModel
 from transformers import PreTrainedModel
 
@@ -23,7 +23,7 @@ from src.checkpoint.reading import reject_partial_checkpoint
 from src.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
 from src.model_loading.tokenizer_setup import resolve_peft_processing_class
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class AdapterBaseModel(NamedTuple):

@@ -1,18 +1,17 @@
-# GPT-OSS 20B — node-local EP=8 on Nebius (2 x 8 H200, InfiniBand). Experts stay on NVLink per node;
-# only the cross-node data-parallel gradient sync rides IB.
-# Launch: sky launch -c oss-20b launcher-configs/skypilot/nebius/gpt-oss-20b/nodelocal-ep.yaml --secret HF_TOKEN --secret WANDB_API_KEY
+# GPT-OSS 120B, cross-node EP=16 on 2 x 8 H200 (Nebius, InfiniBand); experts shard across all 16 GPUs.
+# Retarget it at launch (sky launch --env / --gpus / --num-nodes): presets in agent-docs/infrastructure/skypilot.md.
 
-name: oss-20b-nodelocal-ep-nebius
+name: oss-120b-crossnode-ep-nebius
 
 resources:
   cloud: nebius
   region: eu-north1
-  accelerators: H200:8
-  memory: 256+
-  disk_size: 1500
+  accelerators: H200:8            # 141 GB HBM3e per GPU
+  memory: 512+
+  disk_size: 3000
   disk_tier: best
-  network_tier: best             # InfiniBand RDMA for the cross-node DP grad sync
-  # image_id: docker:public.ecr.aws/whitecircle/halo:hopper
+  network_tier: best             # Quantum-2 InfiniBand RDMA — required for cross-node EP
+  # image_id: docker:public.ecr.aws/whitecircle/halo:hopper   # H200 = Hopper; the prebuilt image is required
 
 num_nodes: 2
 
@@ -28,23 +27,28 @@ secrets:
 
 envs:
   HALO_BUCKET: <your-bucket>     # sky launch --env HALO_BUCKET=... retargets the S3 mount
-  CONFIG_PATH: examples/sft/gptoss/gptoss-20b-multinode-ep.yaml
-  MODEL: unsloth/gpt-oss-20b-BF16      # override to train from a local mirror or a previous run's output_dir
-  EXPERT_PARALLEL_SIZE: "8"
-  EXPERT_PARALLEL_SCOPE: "node"
+  CONFIG_PATH: examples/sft/gptoss/gptoss-120b-multinode-ep.yaml
+  MODEL: unsloth/gpt-oss-120b-BF16      # override to train from a local mirror or a previous run's output_dir
+  EXPERT_PARALLEL_SIZE: "16"
+  EXPERT_PARALLEL_SCOPE: "global"
+  # Cross-node dispatch is capped at 8192 tokens/rank (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK); a larger
+  # per_device_train_batch_size × max_length is rejected at config time, before the model loads. Pinned
+  # here so a CONFIG_PATH tuned for one NVLink domain stays within it. See agent-docs/infrastructure/deepep.md.
+  MAX_LENGTH: "8192"
   HF_HOME: /data/hf_cache
   # Toolkit scratch (S3 dataset cache, profiler traces) beside the HF cache; the default
   # ~/.cache/halo would fill each node's root disk instead.
   HALO_DATA_ROOT: /data/halo_scratch
-  OUTPUT_DIR: /data/checkpoints/oss-20b
-  DIST_SHARED_FILESYSTEM: "1"
-  WANDB_PROJECT: halo-20b-nodelocal-nebius
-  # No NCCL env needed: the image bakes the IB defaults, and on IB its OFI plugin yields to NCCL's
-  # built-in IB transport.
+  OUTPUT_DIR: /data/checkpoints/oss-120b
+  DIST_SHARED_FILESYSTEM: "1"    # /data is a shared S3 mount (below)
+  DIST_NCCL_TIMEOUT_MINUTES: "60"
+  WANDB_PROJECT: halo-120b-crossnode-nebius
+  # No NCCL env needed: the image bakes the IB defaults (NCCL_IB_HCA=mlx5, NCCL_NET_GDR_LEVEL=2,
+  # NCCL_P2P_LEVEL=NVL), and on IB its OFI plugin yields to NCCL's built-in IB transport (native GIN/IBGDA).
 
 file_mounts:
   /workspace: {source: ., mode: COPY}
-  /data: {source: "s3://${HALO_BUCKET}/halo", mode: MOUNT}
+  /data: {source: "s3://${HALO_BUCKET}/halo", mode: MOUNT}   # shared across nodes; point at your bucket
 
 setup: |
   set -e
@@ -53,6 +57,7 @@ setup: |
     echo "ERROR: flash_attn / deep_ep missing — set resources.image_id: docker:public.ecr.aws/whitecircle/halo:hopper" >&2
     echo "(see agent-docs/infrastructure/skypilot.md); from-source build on a bare node is unsupported." >&2
     exit 1; }
+  command -v ibstat >/dev/null && ibstat | head -20 || echo "ibstat unavailable (NCCL will verify IB at init)"
   nvidia-smi --query-gpu=name,memory.total --format=csv
   if [ -n "$HF_TOKEN" ]; then hf auth login --token "$HF_TOKEN" || true; fi
   if [ -n "$WANDB_API_KEY" ]; then wandb login "$WANDB_API_KEY" || true; fi
@@ -68,5 +73,6 @@ run: |
     --master_addr=$MASTER_ADDR --master_port=29500 \
     scripts/training/sft.py $CONFIG_PATH \
     --model_name_or_path=$MODEL \
-    --expert_parallel_size=$EXPERT_PARALLEL_SIZE --ep_scope=$EXPERT_PARALLEL_SCOPE --output_dir=$OUTPUT_DIR \
+    --expert_parallel_size=$EXPERT_PARALLEL_SIZE --ep_scope=$EXPERT_PARALLEL_SCOPE --max_length=$MAX_LENGTH \
+    --output_dir=$OUTPUT_DIR \
     --project_name=$WANDB_PROJECT

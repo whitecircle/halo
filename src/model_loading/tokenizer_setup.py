@@ -7,21 +7,22 @@ the model, and the ``model_max_length`` pin the exporter serves the tokenizer's 
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from accelerate.logging import get_logger
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerBase
 
 from src.model_loading.tokenizer_backend import resolve_tokenizer_backend
 from src.models.config_access import set_config_field
+from src.runtime.ranks import is_global_main_process
 
 if TYPE_CHECKING:
     # Annotation only: the entry scripts' argument layer sits above this package.
     from src.configs.script_arguments import CommonScriptArguments
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Where :func:`configure_run_tokenizer` parks the tokenizer's own ``model_max_length`` before
 # pinning the run's, for :func:`pristine_model_max_length` to serve back at save time. A plain int on
@@ -46,14 +47,16 @@ def load_processing_class(path: str, *, trust_remote_code: bool = False):
     except (OSError, ValueError) as e:
         # The two ways "this repo has no processor" is reported (absent processor config,
         # unrecognized processing class) — the ordinary text-only path, hence info, not a warning.
-        logger.info(f"No processor at {path} ({type(e).__name__}: {e}); falling back to the tokenizer.")
+        if is_global_main_process():
+            logger.info(f"No processor at {path} ({type(e).__name__}: {e}); falling back to the tokenizer.")
         try:
             return AutoTokenizer.from_pretrained(path, trust_remote_code=trust_remote_code)
         except (OSError, ValueError) as e:
-            logger.warning(
-                f"No processing class could be loaded from {path} ({type(e).__name__}: {e}). Any "
-                f"checkpoint written from it carries no tokenizer of its own."
-            )
+            if is_global_main_process():
+                logger.warning(
+                    f"No processing class could be loaded from {path} ({type(e).__name__}: {e}). Any "
+                    f"checkpoint written from it carries no tokenizer of its own."
+                )
             return None
 
 
@@ -96,7 +99,8 @@ def load_chat_template(chat_template: str | None) -> str | None:
                 f"Chat template file not found: {chat_template}. "
                 f"Make sure the file exists or provide the template string directly."
             )
-        logger.info(f"Loading chat template from file: {chat_template}")
+        if is_global_main_process():
+            logger.info(f"Loading chat template from file: {chat_template}")
         with open(chat_template, encoding="utf-8") as f:
             return f.read()
     if os.path.isfile(chat_template):
@@ -119,7 +123,8 @@ def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -
     """
     if model is None:
         return
-    if not set_config_field(model.config, field, token_id, only_declared=True):
+    recorded = set_config_field(model.config, field, token_id, only_declared=True)
+    if not recorded and is_global_main_process():
         logger.warning(
             f"{type(model.config).__name__} declares no '{field}' at either the top level or on its "
             f"text sub-config, so the tokenizer's id could not be recorded on the model config. Any "
@@ -191,7 +196,7 @@ def configure_run_tokenizer(
     # batch > 1, a stale one pools on padding in silence.
     if tokenizer.pad_token_id is not None:
         sync_special_token_id(model, "pad_token_id", tokenizer.pad_token_id)
-        if tokenizer.pad_token_id == tokenizer.eos_token_id and model is not None:
+        if tokenizer.pad_token_id == tokenizer.eos_token_id and model is not None and is_global_main_process():
             logger.info(
                 "Tokenizer pad token IS eos (id %s), so the recorded pad id binds "
                 "nn.Embedding(padding_idx=%s) on the next load and that row's input-embedding gradient "
@@ -201,7 +206,7 @@ def configure_run_tokenizer(
                 tokenizer.pad_token_id,
                 tokenizer.pad_token_id,
             )
-    elif model is not None:
+    elif model is not None and is_global_main_process():
         logger.warning(
             f"The tokenizer settled on pad_token={tokenizer.pad_token!r} with no id, so the model "
             f"config keeps whatever the checkpoint shipped. An out-of-vocab pad_token is the usual "

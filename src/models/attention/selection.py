@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 
 import torch
-from accelerate.logging import get_logger
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.utils import is_flash_attn_2_available
 
@@ -26,8 +26,9 @@ from src.models.attention.gpt_oss_sinks import (
 from src.models.attention.layout import GDN_MODEL_TYPE_PREFIXES, declares_attention_heads, resolve_head_dim
 from src.models.config_access import model_type_matches, set_config_field_run_scoped, text_config
 from src.models.model_classes import mapped_model_class
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # The modules each flash backend's kernels import from, in transformers' dispatch order: FA3 runs
 # through flash_attn_interface first, so a coexisting flash_attn_3 build never answers for it.
@@ -92,17 +93,21 @@ def _detect_attention_impl() -> str:
         build = _FLASH_KERNEL_MODULES[preferred][-1]
         try:
             flash_kernel(preferred)
-            logger.info(f"Using {preferred} ({build} installed)")
+            if is_global_main_process():
+                logger.info(f"Using {preferred} ({build} installed)")
             return preferred
         except ImportError:
-            logger.info(f"{build} not installed, using FlashAttention-2")
+            if is_global_main_process():
+                logger.info(f"{build} not installed, using FlashAttention-2")
         except Exception as e:
-            logger.warning(
-                f"{build} IS present but unusable ({type(e).__name__}: {e}); falling back to "
-                f"FlashAttention-2, which is correct but slower on attention. Repair the {build} install "
-                f"to regain {preferred}."
-            )
-    logger.info("Using FlashAttention-2")
+            if is_global_main_process():
+                logger.warning(
+                    f"{build} IS present but unusable ({type(e).__name__}: {e}); falling back to "
+                    f"FlashAttention-2, which is correct but slower on attention. Repair the {build} install "
+                    f"to regain {preferred}."
+                )
+    if is_global_main_process():
+        logger.info("Using FlashAttention-2")
     return "flash_attention_2"
 
 
@@ -210,7 +215,7 @@ def validate_attn_implementation(model_config, attn_impl: str, sinks_policy: Sin
             model_config._attn_implementation = candidate
         except ValueError:
             continue  # a config that validates the assignment refused this candidate
-        if candidate != attn_impl:
+        if candidate != attn_impl and is_global_main_process():
             logger.warning(
                 f"Model {type(model_config).__name__} does not support "
                 f"attn_implementation='{attn_impl}', using '{candidate}'"
@@ -247,34 +252,38 @@ def resolve_attn_implementation(
 
     if dtype == torch.float32 and is_flash_attn_implementation(attn_implementation):
         fp32_fallback = "flex_attention" if uses_gpt_oss_sinks(model_config) else "sdpa"
-        logger.warning(
-            f"dtype=float32 (fp32 training) is incompatible with {attn_implementation}; "
-            f"falling back to attn_implementation='{fp32_fallback}' (FlashAttention is half-precision only)."
-        )
+        if is_global_main_process():
+            logger.warning(
+                f"dtype=float32 (fp32 training) is incompatible with {attn_implementation}; "
+                f"falling back to attn_implementation='{fp32_fallback}' (FlashAttention is half-precision only)."
+            )
         attn_implementation = fp32_fallback
 
     if attn_implementation == "flash_attention_4" and is_fa4_backward_nan_prone(model_config):
-        logger.warning(
-            "FlashAttention-4 produces NaN gradients for this model's head_dim-256 partial-rotary "
-            "attention; falling back to attn_implementation='sdpa'."
-        )
+        if is_global_main_process():
+            logger.warning(
+                "FlashAttention-4 produces NaN gradients for this model's head_dim-256 partial-rotary "
+                "attention; falling back to attn_implementation='sdpa'."
+            )
         attn_implementation = "sdpa"
 
     # Force eager before from_pretrained rejects the auto-detected FA default.
     if attn_implementation != "eager" and _model_is_deepseek_v4(model_config):
-        logger.warning(
-            f"DeepSeek-V4 supports only eager attention (head_dim=512 exceeds FA's {FLASH_MAX_HEAD_DIM} cap; SDPA/flex "
-            f"cannot carry the sink column + compressor KV concat); overriding "
-            f"attn_implementation='{attn_implementation}' to 'eager'."
-        )
+        if is_global_main_process():
+            logger.warning(
+                f"DeepSeek-V4 supports only eager attention (head_dim=512 exceeds FA's {FLASH_MAX_HEAD_DIM} cap; SDPA/flex "
+                f"cannot carry the sink column + compressor KV concat); overriding "
+                f"attn_implementation='{attn_implementation}' to 'eager'."
+            )
         attn_implementation = "eager"
 
     if is_flash_attn_implementation(attn_implementation) and has_head_dim_beyond_flash(model_config):
-        logger.warning(
-            f"head_dim={resolve_head_dim(model_config)} attention is unsupported by {attn_implementation} "
-            f"(FA2 caps at {FLASH_MAX_HEAD_DIM}; FA4 overflows tensor memory); falling back to "
-            f"attn_implementation='sdpa'."
-        )
+        if is_global_main_process():
+            logger.warning(
+                f"head_dim={resolve_head_dim(model_config)} attention is unsupported by {attn_implementation} "
+                f"(FA2 caps at {FLASH_MAX_HEAD_DIM}; FA4 overflows tensor memory); falling back to "
+                f"attn_implementation='sdpa'."
+            )
         attn_implementation = "sdpa"
 
     return validate_attn_implementation(model_config, attn_implementation, sinks_policy)

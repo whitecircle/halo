@@ -6,17 +6,18 @@ All are idempotent. A renamed upstream internal fails loud rather than skipping 
 from __future__ import annotations
 
 import functools
+import logging
 
 import torch
 import transformers.models.zaya.modeling_zaya as zaya_modeling
-from accelerate.logging import get_logger
 
 from src.kernels.histogram import accumulate_bincount
 from src.models.attention.packed_position_ids import install_packed_position_ids_injection
 from src.models.attention.selection import is_flash_attn_implementation
 from src.models.gradient_checkpointing import counts_toward_expert_load
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def apply_zaya_patches(attn_implementation: str | None = None) -> None:
@@ -60,7 +61,8 @@ def patch_zaya_router_load_recording() -> None:
 
     forward._halo_load_recording = True
     router_cls.forward = forward
-    logger.info("Patched ZayaRouter with expert-load recording (bias-update balancing)")
+    if is_global_main_process():
+        logger.info("Patched ZayaRouter with expert-load recording (bias-update balancing)")
 
 
 def patch_zaya_gradient_checkpointing_refusal() -> None:
@@ -71,7 +73,8 @@ def patch_zaya_gradient_checkpointing_refusal() -> None:
     if pretrained_cls.supports_gradient_checkpointing is False:
         return
     pretrained_cls.supports_gradient_checkpointing = False
-    logger.info("Patched ZayaPreTrainedModel to refuse gradient checkpointing (cuDNN CCA Conv1d fault)")
+    if is_global_main_process():
+        logger.info("Patched ZayaPreTrainedModel to refuse gradient checkpointing (cuDNN CCA Conv1d fault)")
 
 
 def patch_zaya_fp32_interlayer_residual() -> None:
@@ -89,5 +92,5 @@ def patch_zaya_flash_packed_position_ids() -> None:
         zaya_modeling.ZayaModel,
         lambda model: [layer.self_attn for layer in model.layers if hasattr(layer, "self_attn")],
     )
-    if installed:
+    if installed and is_global_main_process():
         logger.info("Patched Zaya flash attention to receive position_ids (packed-document isolation)")

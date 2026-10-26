@@ -62,6 +62,10 @@ _TOOL_SAFE = frozenset(
 _TOOL_UNSAFE = frozenset({"runtime", "distributed", "weight_sync", "model_loading.parallel", "checkpoint.parallel"})
 # The one torch.distributed import a tool-safe module makes: the DTensor type a low-precision Linear checks for.
 _TOOL_SAFE_TORCH_DISTRIBUTED = {"kernels.lowp.linear": "torch.distributed.tensor"}
+# The runtime module a tool-safe unit may import: rank queries, which start no process group, collective or sync
+# (the guard on a rank-0-only log line). Its own first-party imports are pinned to _RANK_QUERIES_IMPORTS.
+_TOOL_SAFE_RANK_QUERIES = frozenset({"runtime.ranks"})
+_RANK_QUERIES_IMPORTS = frozenset({"log"})
 # Importing any module of the package runs its bootstrap, which imports torch; these units import nothing from it.
 _PACKAGE_FREE_UNITS = frozenset({"cli"})
 # Per package, the order its members import in, bottom to top: a member imports only members of lower rows.
@@ -325,7 +329,7 @@ def _edge_breaks(location: str, source: str, target: str) -> list[_Break]:
     if source_unit != target_unit and _LEVEL[target_unit] >= _LEVEL[source_unit]:
         detail = f"{source} ({source_unit}, L{_LEVEL[source_unit]}) imports {target} ({target_unit}, L{_LEVEL[target_unit]})"
         breaks.append(_Break("layer order", source, target, location, detail))
-    if source_unit in _TOOL_SAFE and target_unit in _TOOL_UNSAFE:
+    if source_unit in _TOOL_SAFE and target_unit in _TOOL_UNSAFE and target not in _TOOL_SAFE_RANK_QUERIES:
         detail = f"{source} ({source_unit}) imports {target} ({target_unit})"
         breaks.append(_Break("tool-safe", source, target, location, detail))
     for package, rows in _MEMBER_ROW.items():
@@ -570,6 +574,7 @@ def test_each_break_of_the_layer_table_is_reported(tmp_path):
                 import torch.distributed
 
                 import $pkg.old_ranks
+                from $pkg.runtime.ranks import is_global_main_process
             """,
             "$pkg/models/typing_only.py": """
                 from typing import TYPE_CHECKING
@@ -652,6 +657,14 @@ def test_the_layer_table_sweep_sees_every_unit():
     assert not set(_LEVEL) - placed, f"no module lands in {sorted(set(_LEVEL) - placed)}"
     first_party = [found for found in _IMPORTS if found.importer and _in_package(found.module)]
     assert len(first_party) > 2000, f"only {len(first_party)} first-party imports"
+
+
+def test_the_rank_queries_tool_safe_units_import_reach_only_log():
+    """The exemption cannot widen: a first-party import added to a rank-query module needs this pin changed."""
+    for module in _TOOL_SAFE_RANK_QUERIES:
+        assert _INDEX.module_source(f"{PACKAGE}.{module}") is not None, f"no {module} module"
+        imported = {_in_package(found.module) for found in _IMPORTS if found.importer == module} - {None}
+        assert imported <= _RANK_QUERIES_IMPORTS, f"{module} imports {sorted(imported)} from the package"
 
 
 def test_imports_follow_the_final_layer_table():

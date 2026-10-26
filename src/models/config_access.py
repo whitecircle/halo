@@ -4,13 +4,15 @@
 ``get_text_config()`` while others live only on the wrapper, and a one-level read returns the default instead."""
 
 import contextlib
+import logging
 import weakref
 from typing import Any
 
-from accelerate.logging import get_logger
 from transformers.integrations.heterogeneity import AmbiguousGlobalPerLayerAttributeError
 
-logger = get_logger(__name__)
+from src.runtime.ranks import is_global_main_process
+
+logger = logging.getLogger(__name__)
 
 # The config field every family spells its input/output embedding tie with.
 TIE_WORD_EMBEDDINGS_FLAG = "tie_word_embeddings"
@@ -225,7 +227,8 @@ def apply_config_overrides(model_config, overrides: dict | None) -> None:
             f"`fp16: true` in the training config (bf16 is the toolkit default), and fp32 master "
             f"weights with fp32_non_ep_params / fp32_experts."
         )
-    logger.info(f"Applying model config overrides: {overrides}")
+    if is_global_main_process():
+        logger.info(f"Applying model config overrides: {overrides}")
     for key, value in overrides.items():
         targets = configs_declaring(model_config, key)
         if not targets:
@@ -236,4 +239,5 @@ def apply_config_overrides(model_config, overrides: dict | None) -> None:
             )
         for target in targets:
             setattr(target, key, value)
-        logger.info(f"  Set {key} = {value} on {', '.join(type(t).__name__ for t in targets)}")
+        if is_global_main_process():
+            logger.info(f"  Set {key} = {value} on {', '.join(type(t).__name__ for t in targets)}")

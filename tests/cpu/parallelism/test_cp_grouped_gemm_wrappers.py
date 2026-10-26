@@ -20,17 +20,12 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3MoeConfig
 
 import src.model_loading.parallel.cp as cp_loading
 import src.model_loading.parallel.loader as loading
 from src.model_loading.parallel.model_source import ModelSource
 from tests.common.parallelism import make_parallelism_config
-
-# The loader logs through accelerate's MultiProcessAdapter, which refuses to emit before the
-# global state exists.
-PartialState()
 
 _SENTINEL_EP_CONFIG = object()
 

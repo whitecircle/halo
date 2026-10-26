@@ -4,6 +4,7 @@ local path, so training skips tokenization at startup. The flags are :class:`Pre
 :class:`PrepareDatasetArguments`'s, and a YAML file of them works as the first argument."""
 
 import contextlib
+import logging
 import os
 import shutil
 import sys
@@ -11,7 +12,6 @@ import tempfile
 from dataclasses import dataclass, field
 
 from accelerate import PartialState
-from accelerate.logging import get_logger
 from datasets import Dataset, DatasetDict
 from huggingface_hub import HfApi, upload_folder
 from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
@@ -36,9 +36,7 @@ from src.model_loading.tokenizer_setup import (
 )
 from src.models.segment_markers import reject_compressed_kv_rows
 
-# The rank-aware accelerate logger, at INFO: the shared data helpers this tool drives log through it,
-# and ``configure_cli_logging`` in main() attaches the handler those records reach.
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # Fixed so --test_size cuts the same split on every re-run: the assignment is baked into the
 # published artifact, and a re-preparation that reshuffled it would no longer match.
@@ -260,8 +258,6 @@ def main():
     args, config = parse_args()
     configure_cli_logging(verbose=args.verbose)
 
-    # The shared data-loading helpers log through the accelerate logger, which raises unless the
-    # accelerate state is initialized; this is a single-process tool, so initialize a minimal state.
     state = PartialState()
     if state.num_processes > 1:
         # The tokenization passes coordinate across ranks, but the publish does not: every rank would

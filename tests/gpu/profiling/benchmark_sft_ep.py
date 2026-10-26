@@ -62,6 +62,7 @@ from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, name
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_float, torch_trace_dir
 from src.kernels.lowp.spec import LowpPrecision, LowpSpec
+from src.log import configure_training_logging
 from src.model_loading.parallel.loader import load_distributed_model
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.runtime.collectives import barrier, broadcast_from_rank0
@@ -105,6 +106,7 @@ def _liger_config_pairs(spec: str) -> dict[str, bool]:
 
 
 def main() -> int:
+    configure_training_logging()
     failed = False
     parser = create_benchmark_parser(
         description="MoE SFT benchmark with Expert Parallelism",

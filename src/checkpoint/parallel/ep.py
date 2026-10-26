@@ -3,12 +3,12 @@ that ``merge_ep_shards.py`` merges into one."""
 
 import gc
 import itertools
+import logging
 import os
 from collections.abc import Callable, Iterable, Iterator
 from functools import partial
 
 import torch
-from accelerate.logging import get_logger
 from accelerate.utils import is_peft_model
 from transformers.core_model_loading import rename_source_key
 
@@ -41,9 +41,9 @@ from src.runtime.collectives import barrier_on_exit, combine_across_ranks
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.dtensor import resolve_retained
 from src.runtime.filesystem import fs_aware_makedirs, is_output_shared_filesystem
-from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size
+from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def _save_key_remap(*, cp_key_remap: bool, peft_prefix: str | None) -> Callable[[str], str | None]:
@@ -156,7 +156,7 @@ def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None
         model = base_transformers_model(model)
     fs_aware_makedirs(output_dir)
     ep_layers = named_ep_layers(model)
-    if ctx.is_save_rank:
+    if ctx.is_save_rank and is_global_main_process():
         logger.info(f"Saving EP model to {output_dir} (gathered mode)")
         logger.info(f"Found {len(ep_layers)} EP layers" if ep_layers else "No EP layers found, saving resolved params")
 
@@ -173,7 +173,7 @@ def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None
         max_shard_size=ctx.max_shard_size,
         normalize=_ep_chunk_normalizer(model, remap, cast),
     )
-    if ctx.is_save_rank:
+    if ctx.is_save_rank and is_global_main_process():
         logger.info(f"✓ Model saved to {output_dir} ({written} parameters, {total_bytes / 1e9:.2f}GB streamed)")
     gc.collect()
     if torch.cuda.is_available():
@@ -338,8 +338,8 @@ def save_ep_sharded_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     if ep_layers:
         reject_unmergeable_ep_sharded_save(model, world_size, ctx.parallelism_config.merge_expert_lora_on_save)
 
-    logger.info(f"[Rank {rank}] Saving EP model sharded to {output_dir}")
     if rank == 0:
+        logger.info(f"[Rank {rank}] Saving EP model sharded to {output_dir}")
         logger.warning(
             "Sharded EP save is NOT directly loadable — run "
             "scripts/after_training/merge_ep_shards.py to produce a HuggingFace "
@@ -360,7 +360,7 @@ def save_ep_sharded_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     guard = DeferredRankFailure(f"EP sharded checkpoint write to {output_dir}")
     if shard:
         guard.run(partial(save_safetensors_file, shard, os.path.join(output_dir, shard_filename)))
-        if guard.reason is None:
+        if guard.reason is None and is_global_main_process():
             logger.info(
                 f"[Rank {rank}] Saved shard: {shard_filename} ({len(shard)} tensors, {total_size / 1e9:.2f}GB)"
             )

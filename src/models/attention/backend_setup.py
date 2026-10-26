@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import functools
+import logging
 
 import torch
-from accelerate.logging import get_logger
 from transformers import PreTrainedModel
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.integrations import sdpa_attention as _sdpa_mod
@@ -15,8 +15,9 @@ from src.models.attention.gpt_oss_sinks import uses_gpt_oss_sinks
 from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
 from src.models.attention.selection import FLASH_MAX_HEAD_DIM, effective_attn_implementation, flash_kernel
 from src.models.config_access import text_config
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Warm-up row length: the floor keeps a kernel on a realistic tile count, the margin pushes the row past a
 # sliding window so the windowed variant is the one that compiles.
@@ -60,11 +61,12 @@ def patch_sdpa_for_wide_heads() -> None:
     forced to the manual KV repeat: native ``enable_gqa`` under mem-efficient-only is unverified on the
     narrower sliding heads, the repeat is the measured path. Idempotent.
     """
-    logger.warning(
-        "Wide-head SDPA patch: forcing mem-efficient SDPA and use_gqa_in_sdpa=False PROCESS-GLOBALLY — "
-        "every other sdpa model in this process (e.g. a frozen teacher beside a narrower-headed policy) "
-        "takes the manual-KV-repeat path too (numerics identical; perf/memory only)."
-    )
+    if is_global_main_process():
+        logger.warning(
+            "Wide-head SDPA patch: forcing mem-efficient SDPA and use_gqa_in_sdpa=False PROCESS-GLOBALLY — "
+            "every other sdpa model in this process (e.g. a frozen teacher beside a narrower-headed policy) "
+            "takes the manual-KV-repeat path too (numerics identical; perf/memory only)."
+        )
     torch.backends.cuda.enable_flash_sdp(False)
     torch.backends.cuda.enable_cudnn_sdp(False)
     torch.backends.cuda.enable_math_sdp(False)
@@ -77,10 +79,11 @@ def patch_sdpa_for_wide_heads() -> None:
 
         _no_gqa_in_sdpa._wide_head_patched = True
         _sdpa_mod.use_gqa_in_sdpa = _no_gqa_in_sdpa
-    logger.info(
-        f"Forced mem-efficient SDPA + manual KV repeat for heads wider than {FLASH_MAX_HEAD_DIM} "
-        "(unlocks seq>20k by avoiding the math kernel's score matrix)"
-    )
+    if is_global_main_process():
+        logger.info(
+            f"Forced mem-efficient SDPA + manual KV repeat for heads wider than {FLASH_MAX_HEAD_DIM} "
+            "(unlocks seq>20k by avoiding the math kernel's score matrix)"
+        )
 
 
 def patch_flex_attention_compile(reason: str):
@@ -98,7 +101,8 @@ def patch_flex_attention_compile(reason: str):
             self._is_flex_compiled = True
 
     WrappedFlexAttention.__init__ = _safe_init
-    logger.info(f"Patched FlexAttention: disabled torch.compile wrapper ({reason})")
+    if is_global_main_process():
+        logger.info(f"Patched FlexAttention: disabled torch.compile wrapper ({reason})")
 
 
 def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torch.device | None = None) -> None:
@@ -162,10 +166,11 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
             for window_kwargs in window_variants:
                 _warm(flash_fn, q_shape, kv_shape, **shape_kwargs, **window_kwargs, **sink_kwargs)
         torch.cuda.synchronize()
-        logger.info(
-            f"FA4 kernel warmup done (head_dim={head_dim}, dtype={dtype}, sliding_window={sliding_window}, "
-            f"sinks={sink is not None}, variants={len(entry_points) * len(window_variants)})"
-        )
+        if is_global_main_process():
+            logger.info(
+                f"FA4 kernel warmup done (head_dim={head_dim}, dtype={dtype}, sliding_window={sliding_window}, "
+                f"sinks={sink is not None}, variants={len(entry_points) * len(window_variants)})"
+            )
     except Exception as e:
-        # main_process_only=False: the skip is rank-local, and a rank without the warm-up desyncs later.
-        logger.warning(f"FA4 kernel warmup skipped (non-fatal): {type(e).__name__}: {e}", main_process_only=False)
+        # Every rank: the skip is rank-local, and a rank without the warm-up desyncs later.
+        logger.warning(f"FA4 kernel warmup skipped (non-fatal): {type(e).__name__}: {e}")
