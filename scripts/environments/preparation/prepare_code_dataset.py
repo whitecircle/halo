@@ -49,7 +49,7 @@ from pathlib import Path
 
 from datasets import Dataset, DatasetDict, disable_caching, load_dataset
 
-from scripts.environments.preparation._common import parquet_parts
+from scripts.environments.preparation.parquet_parts import parquet_parts
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from src.data.pipeline.processing import report_rejected_rows, resolve_map_num_proc
 from src.environments.sandbox.factory import build_sandbox

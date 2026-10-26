@@ -168,11 +168,9 @@ class AdvantageShapingArguments(ValidatedConfig):
         """Refuse a negative or NaN std floor, which fails silently: ``max(std, floor)`` becomes a
         no-op or a NaN that propagates to every advantage in the batch."""
         super()._validate_fields()
-        require_finite(type(self).__name__, scale_rewards_std_floor=self.scale_rewards_std_floor)
-        if self.scale_rewards_std_floor < 0:
-            raise ValueError(
-                f"scale_rewards_std_floor must be a finite value >= 0 (0 = off), got {self.scale_rewards_std_floor}"
-            )
+        require_finite(
+            type(self).__name__, ge=0, why=" (0 = off)", scale_rewards_std_floor=self.scale_rewards_std_floor
+        )
 
 
 @dataclass(frozen=True)

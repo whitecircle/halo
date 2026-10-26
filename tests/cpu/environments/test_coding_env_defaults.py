@@ -24,9 +24,9 @@ import pytest
 from datasets import Dataset
 
 from scripts.environments.inference import run_env
-from src.environments.base import REWARD_COMPONENTS_KEY
-from src.environments.eval_runner import require_answers
-from src.environments.registry import resolve_environment
+from src.environments.episode_keys import REWARD_COMPONENTS_KEY
+from src.environments.eval_runner import reject_answerless_examples
+from src.environments.registry import build_environment
 from src.environments.sandbox import factory as factory_module
 from src.environments.sandbox.base import SandboxExecutor
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
@@ -135,10 +135,10 @@ def test_the_eval_driver_refuses_an_answerless_dataset_before_generating(monkeyp
 @pytest.mark.parametrize(
     "build",
     [
-        lambda: resolve_environment("native_math", {}),
-        lambda: resolve_environment("native_coding", {}),
-        lambda: resolve_environment("native_combined", {}),
-        lambda: resolve_environment("mcp", {}),
+        lambda: build_environment("native_math", {}),
+        lambda: build_environment("native_coding", {}),
+        lambda: build_environment("native_combined", {}),
+        lambda: build_environment("mcp", {}),
         lambda: _swe(reward_terms=[_JUDGE]),
     ],
     ids=["native_math", "native_coding", "native_combined", "mcp", "judge-priced-swe"],
@@ -146,7 +146,7 @@ def test_the_eval_driver_refuses_an_answerless_dataset_before_generating(monkeyp
 def test_the_eval_gate_passes_an_environment_that_grades_without_an_answer(build):
     env = build()
     try:
-        require_answers(env, [{"context": {}}], "the rows")
+        reject_answerless_examples(env, [{"context": {}}], "the rows")
     finally:
         env.close()
 

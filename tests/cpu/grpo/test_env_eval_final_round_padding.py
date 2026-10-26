@@ -26,8 +26,9 @@ from accelerate.data_loader import prepare_data_loader
 from accelerate.state import GradientState
 from torch.utils.data import DataLoader
 
-from src.environments.base import SOLVE_RATE_KEY, Message, Trajectory
 from src.environments.episode import RolloutResult
+from src.environments.episode_keys import SOLVE_RATE_KEY
+from src.environments.messages import Message, Trajectory
 from src.trainers.grpo.environmental import BatchBuildFence, BatchRows, DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.env_grpo_batch import batch_host, row
 

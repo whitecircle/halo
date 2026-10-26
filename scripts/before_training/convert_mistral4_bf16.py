@@ -21,7 +21,7 @@ import math
 
 import torch
 
-from scripts._common import add_hub_source_args, add_max_shard_size_arg
+from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg
 from src.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
 from src.checkpoint.reading import SAFETENSORS_FLOAT_DTYPES, header_nbytes, header_numel
 from src.checkpoint.writing import cast_to_save_dtype

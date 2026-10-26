@@ -95,7 +95,7 @@ One sample serves every external term, each through its own view. It carries:
 - the calls a cut turn never ran (`Message.cut_tool_calls`), which only the judge's `full` and `digest` views show;
 - the final answer and the reference.
 
-Three `BaseEnvironment` hooks fill the episode-specific parts:
+Three `EnvironmentBase` hooks fill the episode-specific parts:
 
 - `_final_answer(trajectory)`: what the episode delivered (the native protocol's `final_response`, ReAct's `Final Answer`, code contests' submitted program as a fenced code block), or `None` (the base) when it delivered none.
 - `_scoring_reference(trajectory)`: the reference, `context["answer"]` by default. `exam_qa` hands the choice letter; code contests hands `None`, so the hidden tests never reach a judge.

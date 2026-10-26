@@ -1,115 +1,34 @@
 """Native tool-use environments over OpenAI-format tool calling, which both rollout engines parse (sync + async)."""
 
 import asyncio
-import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from src.environments.base import (
-    ANSWER_KEY,
-    EPISODE_ERROR_KEY,
-    EPISODE_TOOL_BUDGETS_KEY,
-    LAST_TURN_KEY,
-    TOOL_CALL_COUNTS_KEY,
-    AsyncBaseEnvironment,
-    BaseEnvironment,
-    EpisodeGrade,
-    Trajectory,
-    require_count,
-    require_magnitudes,
+from src.config_validation import require_finite
+from src.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
+from src.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, EPISODE_ERROR_KEY, LAST_TURN_KEY
+from src.environments.episode_scoring import EpisodeGrade
+from src.environments.messages import Trajectory
+from src.environments.tool_accounting import (
+    MAGNITUDE_WHY,
+    TOTAL_TOOL_CALLS_KEY,
+    initial_tool_counters,
+    tool_call_outcome,
+    validate_tool_budgets,
 )
-from src.environments.sandbox.results import SandboxFault
-from src.environments.tools.definitions import (
-    TOOL_CALL_REFUSALS,
-    NativeTool,
-    NativeToolCall,
-    NativeToolRegistry,
-    NativeToolResult,
-    ToolBudgetExhausted,
-    ToolDisabled,
-    is_refused_unrun,
-)
+from src.environments.tools.definitions import NativeToolCall, NativeToolRegistry, NativeToolResult, is_refused_unrun
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.graders.matching import is_correct_answer
 from src.rewards.samples import CUT_TOOL_CALLS_KEY
 
-logger = logging.getLogger(__name__)
-
-# The episode whose tool batch is executing, per asyncio Task / thread: one env instance serves
-# concurrent rollouts, so a handler reaching for per-episode state (the tests it grades against, a
-# workspace) reads it from here, never from an instance attribute.
+# The episode whose tool batch is executing, per asyncio Task / thread: one env instance serves concurrent
+# rollouts, so a handler reads per-episode state from here, never from an instance attribute.
 _ACTIVE_TRAJECTORY: ContextVar[Trajectory | None] = ContextVar("native_tool_use_active_trajectory", default=None)
 
 
-def validate_tool_budgets(budgets: dict[str, int] | None, registry: NativeToolRegistry) -> dict[str, int]:
-    """Per-tool episode caps checked against the registry: every capped tool must exist and a cap is a
-    non-negative int (``0`` disables the tool for the episode)."""
-    validated: dict[str, int] = {}
-    for name, cap in (budgets or {}).items():
-        if registry.get(name) is None:
-            raise ValueError(
-                f"tool_budgets names {name!r}, which is not a registered tool: {sorted(registry.names())}"
-            )
-        require_count(f"tool_budgets[{name!r}]", cap, 0)
-        validated[name] = cap
-    return validated
-
-
-def tool_accounting_info(budgets: dict[str, int]) -> dict[str, Any]:
-    """The per-episode tool counters a protocol seeds at reset, which the base's accounting books every
-    call into, and the episode's copy of the per-tool ``budgets``."""
-    return {
-        "total_tool_calls": 0,
-        "successful_tool_calls": 0,
-        TOOL_CALL_COUNTS_KEY: {},
-        EPISODE_TOOL_BUDGETS_KEY: dict(budgets),
-    }
-
-
-def admit_tool_call(
-    env: BaseEnvironment,
-    tool: NativeTool,
-    arguments: dict[str, Any],
-    trajectory: Trajectory,
-    *,
-    for_async: bool = False,
-) -> dict[str, Any]:
-    """Admit one call before it runs, under either protocol: bind its arguments (against the handler
-    that will run), then spend one of the episode's calls on the tool. Refuses
-    (:class:`ToolArgumentError`, :class:`ToolBudgetExhausted`, :class:`ToolDisabled` under a cap of 0)
-    without counting, so a call the handler could never run does not consume the budget; runs synchronously
-    before any await so concurrent calls in one turn cannot both pass a one-call cap."""
-    bound = tool.bind(arguments, for_async=for_async)
-    cap = env._tool_budget_exhausted(trajectory, tool.name)
-    if cap is not None:
-        raise (ToolDisabled if cap == 0 else ToolBudgetExhausted)(tool.budget_exhausted_message())
-    env._count_tool_call(trajectory, tool.name)
-    return bound
-
-
-def tool_call_outcome(name: str, outcome: str | Exception) -> tuple[str, bool, SandboxFault | None]:
-    """A call's observation as plain text, whether it succeeded, and the sandbox fault it ended on, from
-    what tool ``name`` returned or raised (admission included), under either protocol.
-
-    A refusal (:data:`TOOL_CALL_REFUSALS`) is expected control flow, logged without a traceback: an env
-    with a 2-submission cap in a 15-turn episode refuses by design.
-    A sandbox fault is booked and logged by type in the accounting. Any other exception is a broken
-    tool, logged with its traceback: the graded tools run here too, and a submit handler that dies on
-    a malformed payload would otherwise grade 0 with nothing anywhere saying why.
-    """
-    if not isinstance(outcome, Exception):
-        return str(outcome), True, None
-    fault = outcome if isinstance(outcome, SandboxFault) else None
-    if isinstance(outcome, TOOL_CALL_REFUSALS):
-        logger.debug("Tool %r refused the call: %s", name, outcome)
-    elif fault is None:
-        logger.warning("Tool %r raised during execution", name, exc_info=outcome)
-    return f"Error: {outcome}", False, fault
-
-
-class NativeToolUseEnvironment(BaseEnvironment):
+class NativeToolUseEnvironment(EnvironmentBase):
     """Environment using native OpenAI-format tool calling."""
 
     SHAPING_COMPONENTS = ("tool_shaping",)
@@ -156,14 +75,15 @@ class NativeToolUseEnvironment(BaseEnvironment):
         tool_budgets: dict[str, int] | None = None,
         **kwargs,
     ):
-        """``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``; an unlisted tool is
-        uncapped): a call past its cap is refused as a tool error with the tool's ``budget_message``
-        and never runs. Stamped into every episode at reset; a subclass may tighten the stamp per
-        episode (:meth:`~src.environments.base.BaseEnvironment._apply_effort_profile`). The per-call
-        knobs (``tool_success_reward``, ``tool_error_penalty``, ``tool_reward_cap``) are the base's."""
+        """``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``; an unlisted tool is uncapped): a
+        call past its cap is refused unrun, and a subclass may tighten the stamp per episode
+        (``_apply_effort_profile``)."""
         super().__init__(**kwargs)
 
-        require_magnitudes(
+        require_finite(
+            type(self).__name__,
+            ge=0,
+            why=MAGNITUDE_WHY,
             no_tool_use_penalty=no_tool_use_penalty,
             turn_overflow_penalty=turn_overflow_penalty,
             length_cutoff_penalty=length_cutoff_penalty,
@@ -175,9 +95,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
         self.max_tool_calls_per_turn = max_tool_calls_per_turn
         self.no_tool_use_penalty = no_tool_use_penalty
         self.turn_overflow_penalty = turn_overflow_penalty
-        # Per recovered unproductive turn (engine-cut, or ended on nothing). With carried reasoning a cut
-        # costs the policy only the turn, and the retry thinks on from where it stopped, so the per-turn
-        # budget binds nothing until it is priced.
+        # Per recovered unproductive turn: with carried reasoning a cut costs the policy only the turn, so the
+        # per-turn budget binds nothing until it is priced.
         self.length_cutoff_penalty = length_cutoff_penalty
 
     def get_tools_schema(self) -> list[dict[str, Any]]:
@@ -193,7 +112,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:
         """The text answer that completed the episode, where one did."""
-        return trajectory.info.get("final_response") if trajectory.info.get("completed") else None
+        return trajectory.info.get("final_response") if trajectory.info.get(COMPLETED_KEY) else None
 
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
         """Initialize episode with task prompt."""
@@ -201,7 +120,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
             prompt,
             context,
             system_prompt=self.system_prompt,
-            extra_info=tool_accounting_info(self.tool_budgets),
+            extra_info=initial_tool_counters(self.tool_budgets),
         )
 
     @staticmethod
@@ -216,11 +135,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         return [NativeToolCall.from_openai_format(tc) for tc in tool_calls_data]
 
     def _unknown_tool_result(self, tc: NativeToolCall) -> NativeToolResult:
-        """Build the error result for a tool call naming a tool not in the registry.
-
-        The ``unknown_tool`` marker is what tokenization reads; the observation text is the
-        registry's one wording (:meth:`NativeToolRegistry.unknown_tool_message`).
-        """
+        """The error result of a call naming no registered tool, marked ``unknown_tool`` for tokenization."""
         return NativeToolResult(
             tool_call_id=tc.id,
             name=tc.name,
@@ -230,10 +145,8 @@ class NativeToolUseEnvironment(BaseEnvironment):
         )
 
     def _result_from_call(self, tc: NativeToolCall, outcome: str | Exception) -> NativeToolResult:
-        """Build a NativeToolResult from a success payload or caught exception (:func:`tool_call_outcome`,
-        observation truncated). A refusal, at admission or by the handler, is marked ``refused`` (a disabled
-        tool's error is not one, :func:`is_refused_unrun`); a sandbox fault rides on the result, so the accounting
-        books it by type."""
+        """A call's result from its payload or caught exception, observation truncated, a refusal marked
+        ``refused`` (:func:`is_refused_unrun`) and a sandbox fault carried for the accounting to book by type."""
         content, success, fault = tool_call_outcome(tc.name, outcome)
         return NativeToolResult(
             tool_call_id=tc.id,
@@ -251,22 +164,16 @@ class NativeToolUseEnvironment(BaseEnvironment):
     def _finalize_text_response(
         self, trajectory: Trajectory, action: str
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
-        """Terminal step for a plain-text (no tool call) model response, shared sync/async.
-
-        The step itself pays nothing: a zero-tool-call finish is priced by the episode-level
-        ``no_tool_use_penalty``, charged once by :meth:`_tool_use_shaping` (the single owner), and a
-        per-call charge here as well would double-bill the same condition.
-        """
-        trajectory.info["completed"] = True
+        """The terminal step of a plain-text answer, which pays nothing: a finish without tool calls is priced once,
+        by :meth:`_tool_use_shaping`."""
+        trajectory.info[COMPLETED_KEY] = True
         trajectory.info["final_response"] = action
         return trajectory, 0.0, True, False, {}
 
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
-        """Bind the executing episode for the ``with`` block, so a tool handler reaching for per-episode
-        state gets THIS episode's (:meth:`active_trajectory`). Entered around every tool batch, sync
-        and async, and reset on the way out — one env instance serves concurrent rollouts. A subclass
-        binding more (a workspace session) nests its own ContextVar inside ``super()``'s block."""
+        """Bind the executing episode around a tool batch (:meth:`active_trajectory`); a subclass binding more (a
+        workspace session) nests its own ContextVar inside ``super()``'s block."""
         token = _ACTIVE_TRAJECTORY.set(trajectory)
         try:
             yield
@@ -289,7 +196,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
                     result = self._unknown_tool_result(tc)
                 else:
                     try:
-                        bound = admit_tool_call(self, tool, tc.arguments, trajectory)
+                        bound = self._admit_tool_call(tool, tc.arguments, trajectory)
                         outcome = tool.execute(**bound)
                     except Exception as e:  # a tool fault is an observation, not an episode kill
                         outcome = e
@@ -305,14 +212,13 @@ class NativeToolUseEnvironment(BaseEnvironment):
         for result in results:
             trajectory.add_message(result.to_message())
 
-        # Nothing this turn could execute (an invented tool, a call refused unrun): mark the assistant message so
-        # the trainer never rewards it. Read off the flags, never the reply text — a tool whose backend answers
-        # "Tool not found: x" failed for real, and dropping that turn would hide a broken tool as a model mistake.
+        # Nothing this turn could execute: the turn is never rewarded. Read off the flags, never the reply text, which
+        # a broken tool backend may word the same way.
         if results and all(r.unknown_tool or r.refused for r in results):
-            self._flag_calls_rejected(trajectory)
+            trajectory.last_assistant_message().calls_rejected = True
         refused = tuple(r.tool_call_id for r in results if (r.unknown_tool or r.refused) and r.tool_call_id)
         if refused:
-            self._last_assistant_message(trajectory).refused_call_ids = refused
+            trajectory.last_assistant_message().refused_call_ids = refused
 
         # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.
         return {"step_tool_calls": len(results)}
@@ -334,8 +240,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
     def _step_without_tool_calls(
         self, trajectory: Trajectory, action: str, ctx: dict[str, Any]
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
-        """Handle a turn that called no tool, shared by the sync and async steps: an engine-cut turn
-        and a turn that ended on nothing recover, anything else is the model's final text answer."""
+        """A turn that called no tool: an engine-cut or empty turn recovers, anything else is the final answer."""
         last_turn = bool(ctx.get(LAST_TURN_KEY))
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             in_call = bool(ctx.get(CUT_TOOL_CALLS_KEY))
@@ -345,15 +250,10 @@ class NativeToolUseEnvironment(BaseEnvironment):
         return self._finalize_text_response(trajectory, action)
 
     def _tool_use_shaping(self, trajectory: Trajectory) -> float:
-        """Per-episode agentic-loop shaping: penalize 0 tool calls and a ``max_turns`` overflow
-        (``trajectory.truncated``, set by ``_finalize_step`` before the reward runs) — an episode that
-        burns the turn budget without terminating pays ``turn_overflow_penalty`` regardless of what it
-        did earn. An episode its driver lost (:data:`EPISODE_ERROR_KEY`) is truncated too but pays no
-        overflow: the fault is not the policy's. Each unproductive turn the episode recovered from —
-        cut by the engine, or ended by the model on nothing — pays ``length_cutoff_penalty``; the one
-        that exhausted the recovery cap pays the overflow price instead, never both. All magnitudes
-        default to 0 (no-op). Distinct from the per-call knobs."""
-        shaping = -self.no_tool_use_penalty if trajectory.info.get("total_tool_calls", 0) == 0 else 0.0
+        """The episode's tool-use shaping: ``no_tool_use_penalty`` for no tool call, ``turn_overflow_penalty`` for a
+        ``max_turns`` overflow (never for an episode its driver lost), and ``length_cutoff_penalty`` per recovered
+        unproductive turn (the one that exhausted the recovery cap pays the overflow instead)."""
+        shaping = -self.no_tool_use_penalty if trajectory.info.get(TOTAL_TOOL_CALLS_KEY, 0) == 0 else 0.0
         if trajectory.truncated and EPISODE_ERROR_KEY not in trajectory.info:
             shaping -= self.turn_overflow_penalty
         unproductive = self._unproductive_turns(trajectory)
@@ -366,16 +266,12 @@ class NativeToolUseEnvironment(BaseEnvironment):
         return {"tool_shaping": self._tool_use_shaping(trajectory)}
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
-        """Grade the final answer: 1 for a completed episode whose answer validates, else 0.
-
-        A completed episode with nothing to grade against (no validator, no ``answer`` key) grades 1 —
-        completing IS the objective there. A row that carries an ``answer`` key holding ``None`` is a
-        data fault, not such an episode, and takes the invalid path instead.
-        """
-        if not trajectory.info.get("completed"):
+        """1 for a completed episode whose answer validates, or that has nothing to grade against (completing is
+        the objective there), else 0; a null ``answer`` cell grades invalid."""
+        if not trajectory.info.get(COMPLETED_KEY):
             return EpisodeGrade(0.0)
 
-        ctx = context or trajectory.info.get("context") or {}
+        ctx = context or trajectory.info.get(CONTEXT_KEY) or {}
 
         validator = ctx.get("validator")
         if callable(validator):
@@ -391,7 +287,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
         return EpisodeGrade(1.0)
 
 
-class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironment):
+class AsyncNativeToolUseEnvironment(AsyncEnvironmentBase, NativeToolUseEnvironment):
     """Async NativeToolUseEnvironment with concurrent tool execution."""
 
     async def _execute_tool_calls_async(
@@ -406,7 +302,7 @@ class AsyncNativeToolUseEnvironment(AsyncBaseEnvironment, NativeToolUseEnvironme
             if not tool:
                 return self._unknown_tool_result(tc)
             try:
-                bound = admit_tool_call(self, tool, tc.arguments, trajectory, for_async=True)
+                bound = self._admit_tool_call(tool, tc.arguments, trajectory, for_async=True)
                 outcome = await tool.execute_async(**bound)
             except Exception as e:  # same contract as the sync path above
                 outcome = e

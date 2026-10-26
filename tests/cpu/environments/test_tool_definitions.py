@@ -16,11 +16,7 @@ import time
 
 import pytest
 
-from src.environments.registry import (
-    get_registered_environments,
-    register_environment,
-    resolve_environment,
-)
+from src.environments.registry import build_environment, get_registered_environments, register_environment
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tools.definitions import (
@@ -437,17 +433,17 @@ def test_env_registry_duplicate_without_override_raises():
 
 def test_env_registry_resolve_unknown_raises():
     with pytest.raises(ValueError, match="Unknown environment type"):
-        resolve_environment("totally_nonexistent_env_12345", {})
+        build_environment("totally_nonexistent_env_12345", {})
 
 
 def test_env_registry_register_resolve_and_override_round_trip(isolated_registry):
     name = "unit_test_custom_env"
     sentinel_a, sentinel_b = object(), object()
     register_environment(name, lambda c: sentinel_a, override=True)
-    assert resolve_environment(name, {}) is sentinel_a
-    assert resolve_environment(name.upper(), {}) is sentinel_a  # names are lower-cased on both sides
+    assert build_environment(name, {}) is sentinel_a
+    assert build_environment(name.upper(), {}) is sentinel_a  # names are lower-cased on both sides
     register_environment(name, lambda c: sentinel_b, override=True)
-    assert resolve_environment(name, {}) is sentinel_b
+    assert build_environment(name, {}) is sentinel_b
 
 
 # Declared parameter names vs the handlers they bind to

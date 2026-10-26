@@ -32,7 +32,8 @@ import torch
 
 import src.trainers.grpo.rollout.completions_logging as cl
 import src.trainers.grpo.rollout.rollout_metrics as rm
-from src.environments.base import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY, Message, Trajectory
+from src.environments.episode_keys import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY
+from src.environments.messages import Message, Trajectory
 from src.rewards.samples import CUT_CALL_NOTE
 from src.runtime import filesystem, ranks
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer

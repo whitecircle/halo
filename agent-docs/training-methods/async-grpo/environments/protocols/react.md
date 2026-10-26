@@ -1,6 +1,6 @@
 # ReAct Environments
 
-The model writes a `Thought:`, then an `Action:` or a `Final Answer:`, and the environment parses the action out of the plain text ([ReAct](https://arxiv.org/abs/2210.03629), `src/environments/envs/protocols/react.py`).
+The model writes a `Thought:`, then an `Action:` or a `Final Answer:`, and the environment parses the action out of the plain text ([ReAct](https://arxiv.org/abs/2210.03629), `src/environments/protocols/react.py`).
 
 Serve the model **without** a tool-call parser: one would lift the call out of the text, leaving no `Action:` line to parse.
 
@@ -78,9 +78,9 @@ Flags and the `--training_config` contract: [Evaluation](../../evaluation.md).
 `answer_validator` is a callable, so only the Python path sets it:
 
 ```python
-from src.environments.envs.protocols.react import create_react_math_environment
+from src.environments.protocols.react import build_react_math_environment
 
-env = create_react_math_environment(max_turns=10, answer_validator=my_validator)
+env = build_react_math_environment(max_turns=10, answer_validator=my_validator)
 ```
 
 ## Related pages

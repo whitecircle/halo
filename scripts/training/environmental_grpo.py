@@ -67,9 +67,9 @@ from src.entrypoints.script import (
     verify_backend_on_rank0,
     with_distributed_teardown,
 )
-from src.environments.base import ANSWER_KEY
-from src.environments.episode import bind_episode_effort
-from src.environments.registry import create_environment
+from src.environments.episode_keys import ANSWER_KEY
+from src.environments.reasoning_effort import bind_episode_effort
+from src.environments.registry import build_environment
 from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.models.context_window import get_model_context_window
@@ -274,7 +274,7 @@ def main():
     # before any load so an unknown environment_type, or an environment_kwargs the environment
     # refuses, fails here.
     env_settings = env_config.to_env_config()
-    probe_env = create_environment(env_config.environment_type, env_settings)
+    probe_env = build_environment(env_config.environment_type, env_settings)
 
     context = init_training_script(
         args,

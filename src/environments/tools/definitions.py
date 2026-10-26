@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.environments.base import Message
+from src.environments.messages import Message
 from src.environments.sandbox.results import SandboxFault
 
 # What reading model-authored arguments as JSON or a Python literal raises on malformed text, past a

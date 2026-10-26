@@ -21,9 +21,9 @@ from datetime import timedelta
 
 import pytest
 
-import src.environments.envs.protocols.mcp as mcp_module
-from src.environments.envs.protocols.mcp import NativeMCPClientEnvironment, create_native_mcp_environment
-from src.environments.registry import resolve_environment
+import src.environments.protocols.mcp as mcp_module
+from src.environments.protocols.mcp import NativeMCPClientEnvironment, build_mcp_environment
+from src.environments.registry import build_environment
 from src.environments.rollout_config import RolloutConfig
 
 
@@ -73,7 +73,9 @@ class _StubSession:
 
 
 class _StubMCPEnv(NativeMCPClientEnvironment):
-    """MCP env with the SDK-touching seams stubbed out."""
+    """MCP env with the SDK transport stubbed out; :func:`_stub_client_session` stands in for the session."""
+
+    connecting: "_StubMCPEnv | None" = None
 
     def __init__(self, fail_initialize: bool = False, **kwargs):
         super().__init__(server_command="unused", **kwargs)
@@ -81,28 +83,36 @@ class _StubMCPEnv(NativeMCPClientEnvironment):
         self.stub_session = _StubSession(fail_initialize=fail_initialize)
 
     def _transport_context(self):
+        _StubMCPEnv.connecting = self
         return self.stub_transport
 
-    def _create_session(self, read, write):
+
+@pytest.fixture(autouse=True)
+def _stub_client_session(monkeypatch):
+    """``mcp.ClientSession`` as the stub session of the environment whose transport just opened."""
+
+    def _session(read, write, **kwargs):
         assert (read, write) == ("read", "write")
-        return self.stub_session
+        return _StubMCPEnv.connecting.stub_session
+
+    monkeypatch.setattr(mcp_module, "ClientSession", _session)
 
 
-def test_the_session_bounds_every_request_it_makes(monkeypatch):
+async def test_the_session_bounds_every_request_it_makes(monkeypatch):
     """A ClientSession built without ``read_timeout_seconds`` runs ``anyio.fail_after(None)``, so a
     server that ACKs and never answers parks the episode for the whole ``episode_timeout`` and takes
     its rollout worker with it — over stdio there is no socket timeout underneath either. The
     deadline must also sit BELOW the episode deadline, or it can never fire first."""
     seen: dict = {}
+    env = _StubMCPEnv()
 
     def _record(read, write, **kwargs):
         seen.update(read=read, write=write, **kwargs)
-        return "session"
+        return env.stub_session
 
     monkeypatch.setattr(mcp_module, "ClientSession", _record)
-    env = NativeMCPClientEnvironment(server_command="unused")
-
-    assert env._create_session("r", "w") == "session"
+    await env.connect()
+    await env.disconnect()
     assert seen["read_timeout_seconds"] == timedelta(seconds=mcp_module.MCP_REQUEST_TIMEOUT_S)
     assert 0 < mcp_module.MCP_REQUEST_TIMEOUT_S < RolloutConfig.episode_timeout
 
@@ -254,7 +264,7 @@ def test_factory_forwards_declared_server_env(monkeypatch):
     process environment: dropping the declared ``env`` list launches the server without
     credentials."""
     monkeypatch.setenv("BRAVE_API_KEY", "sekrit")
-    env = create_native_mcp_environment("brave_search")
+    env = build_mcp_environment("brave_search")
     assert env.server_env == {"BRAVE_API_KEY": "sekrit"}
 
 
@@ -263,19 +273,19 @@ def test_factory_missing_required_env_fails_at_construction(monkeypatch):
     opaque tool failure on the first call."""
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
     with pytest.raises(ValueError, match="BRAVE_API_KEY"):
-        create_native_mcp_environment("brave_search")
+        build_mcp_environment("brave_search")
 
 
 def test_factory_explicit_env_vars_satisfy_and_override(monkeypatch):
     """Explicit env_vars satisfy a declared requirement (no process-env lookup) and win over it."""
     monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN", raising=False)
-    env = create_native_mcp_environment("github", env_vars={"GITHUB_PERSONAL_ACCESS_TOKEN": "tok"})
+    env = build_mcp_environment("github", env_vars={"GITHUB_PERSONAL_ACCESS_TOKEN": "tok"})
     assert env.server_env == {"GITHUB_PERSONAL_ACCESS_TOKEN": "tok"}
 
 
 def test_factory_no_declared_env_passes_none():
     """Servers with no declared credentials keep server_env=None (SDK default environment)."""
-    env = create_native_mcp_environment("filesystem")
+    env = build_mcp_environment("filesystem")
     assert env.server_env is None
 
 
@@ -286,10 +296,10 @@ def test_sse_transport_is_registry_selectable_and_needs_a_url(monkeypatch):
     would build an env whose preset (and its credential resolution) is silently dead, so the two are
     mutually exclusive and the registry picks the transport from the config.
     """
-    mcp_module = importlib.import_module("src.environments.envs.protocols.mcp")
+    mcp_module = importlib.import_module("src.environments.protocols.mcp")
     monkeypatch.setattr(mcp_module, "sse_client", lambda url: ("sse-ctx", url))
 
-    env = resolve_environment("mcp", {"transport": "sse", "server_url": "http://mcp.example:9000/sse"})
+    env = build_environment("mcp", {"transport": "sse", "server_url": "http://mcp.example:9000/sse"})
     assert env.transport == "sse"
     assert env._transport_context() == ("sse-ctx", "http://mcp.example:9000/sse")
 
@@ -301,12 +311,12 @@ def test_sse_config_refuses_a_stdio_preset(monkeypatch):
     """Anti-vacuity for the branch above: an sse config that also names a preset must fail loudly
     rather than build an env that ignores half its own configuration."""
     with pytest.raises(ValueError, match="spawns nothing"):
-        resolve_environment("mcp", {"mcp_server": "filesystem", "transport": "sse", "server_url": "http://x/sse"})
+        build_environment("mcp", {"mcp_server": "filesystem", "transport": "sse", "server_url": "http://x/sse"})
 
 
 def test_stdio_is_still_the_default_transport_and_preset():
     """The default path stays the keyless filesystem preset over stdio."""
-    env = resolve_environment("mcp", {})
+    env = build_environment("mcp", {})
     assert (env.transport, env.server_command) == ("stdio", "npx")
     assert env.server_url is None
 
@@ -322,7 +332,7 @@ def test_stdio_transport_merges_credentials_over_sdk_default_env(monkeypatch):
             self.command, self.args, self.env = command, args, env
 
     # The SDK names the module binds at import; patch them where they are USED.
-    mcp_module = importlib.import_module("src.environments.envs.protocols.mcp")
+    mcp_module = importlib.import_module("src.environments.protocols.mcp")
     monkeypatch.setattr(mcp_module, "StdioServerParameters", _Params)
     monkeypatch.setattr(mcp_module, "get_default_environment", lambda: {"PATH": "/usr/bin", "HOME": "/root"})
     monkeypatch.setattr(mcp_module, "stdio_client", lambda params: captured.append(params) or "transport-ctx")

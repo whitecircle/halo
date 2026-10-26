@@ -25,18 +25,17 @@ import ray
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments import ray_actors
-from src.environments.base import Trajectory
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
+from src.environments.messages import Trajectory
+from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.ray_actors import (
     EnvironmentActor,
     RolloutHTTPError,
     RolloutManager,
-    _is_client_error,
     _should_giveup,
     ray_init_kwargs,
 )
-from src.environments.registry import create_environment
+from src.environments.registry import build_environment
 from src.environments.rollout_config import RolloutConfig
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
@@ -54,7 +53,7 @@ def test_env_reset_yields_one_episode_per_prompt():
     A reset that collapses or reorders prompts silently misattributes every reward the manager maps
     back positionally.
     """
-    env = create_environment("react_math", {"max_turns": 5})
+    env = build_environment("react_math", {"max_turns": 5})
     episode_ids, steps = env.reset(["2+2?", "3+3?"], [{"answer": "4"}, {"answer": "6"}])
 
     assert len(episode_ids) == len(steps) == 2
@@ -65,7 +64,7 @@ def test_env_reset_yields_one_episode_per_prompt():
 async def test_env_batch_calls_refuse_contexts_that_do_not_pair():
     """A context list shorter than the batch must raise, sync and async: truncating to the shorter
     list drops the unpaired episodes, which the caller only finds as missing results."""
-    env = create_environment("react_math", {"max_turns": 5})
+    env = build_environment("react_math", {"max_turns": 5})
     with pytest.raises(ValueError, match="shorter"):
         env.reset(["2+2?", "3+3?"], [{"answer": "4"}])
     episode_ids, _ = env.reset(["2+2?"], [{"answer": "4"}])
@@ -317,7 +316,7 @@ def test_a_loopback_server_url_warns_on_a_multinode_job(url, caplog):
 def test_tools_schema_detection():
     """Native tool-use environments must emit OpenAI-format tool schemas — the server rejects any
     other shape, so the key VALUES matter, not just their presence."""
-    native_env = create_environment("native_math", {"max_turns": 3})
+    native_env = build_environment("native_math", {"max_turns": 3})
     schema = native_env.get_tools_schema()
 
     assert isinstance(schema, list) and schema
@@ -330,7 +329,7 @@ def test_tools_schema_detection():
 def test_tool_calls_in_step_context():
     """Test that tool_calls in context are attached to assistant messages."""
     # Create a native tool use environment
-    env = create_environment("native_math", {"max_turns": 5})
+    env = build_environment("native_math", {"max_turns": 5})
 
     # Reset with a prompt
     episode_ids, steps = env.reset(["What is 2+2?"], [{"answer": "4"}])
@@ -669,10 +668,7 @@ async def test_the_actor_keeps_a_cut_call_on_its_turn_without_running_or_resendi
     what the engine is sent next."""
     actor = _make_actor("native_math", {"max_turns": 5})
 
-    async def _fake_client():
-        return None
-
-    actor._get_http_client = _fake_client
+    actor._http_client = None
     sent: list[list[dict]] = []
 
     async def _fake_generate(
@@ -705,7 +701,7 @@ async def test_actor_releases_session_when_episode_errors():
     session + temp dir — run_episode cleans up in a finally, so a long-lived actor doesn't leak a
     working directory per failed rollout."""
     actor = _make_actor("swe", {"max_turns": 5})
-    env = actor._get_env()  # force construction so we can inspect its sessions
+    env = actor._env  # force construction so we can inspect its sessions
 
     created = []
     orig_open = env.sandbox.open_session
@@ -714,7 +710,7 @@ async def test_actor_releases_session_when_episode_errors():
     async def _fake_client():  # unused (we mock _generate), just must not hit the network
         return None
 
-    actor._get_http_client = _fake_client
+    actor._http_client = None
 
     calls = {"n": 0}
 
@@ -741,7 +737,7 @@ async def test_actor_releases_session_when_episode_errors():
 async def test_actor_drives_async_env_via_step_async():
     """An async environment (async-only tool handlers, like MCP) must be driven through
     reset_async/step_async by the rollout — a sync step would hit NativeTool.execute's 'no sync
-    handler' and the tool would never run. Verifies the actor detects AsyncBaseEnvironment and the
+    handler' and the tool would never run. Verifies the actor detects AsyncEnvironmentBase and the
     async tool actually executes."""
     ran = {"called": False}
 
@@ -767,7 +763,7 @@ async def test_actor_drives_async_env_via_step_async():
     async def _fake_client():
         return None
 
-    actor._get_http_client = _fake_client
+    actor._http_client = None
 
     calls = {"n": 0}
 
@@ -803,7 +799,7 @@ async def test_run_episode_generation_tokens_sum_across_turns():
     async def _fake_client():
         return None
 
-    actor._get_http_client = _fake_client
+    actor._http_client = None
 
     per_turn: list[int] = []
     calls = {"n": 0}
@@ -842,7 +838,7 @@ async def test_each_assistant_turn_records_the_levels_cap_and_the_reasoning_it_s
     async def _fake_client():
         return None
 
-    actor._get_http_client = _fake_client
+    actor._http_client = None
     caps_sent: list[tuple[int, int | None]] = []
     reasoning = [[1] * 30 + [end, 2], [1] * 60 + [end], [1] * 5 + [end]]
     sampled = [350, 350, 6]
@@ -900,12 +896,12 @@ async def test_actor_grades_concurrent_codecontests_episodes_in_isolation():
         env_type=(CodeContestsEnvironment, {"language": "python", "max_submissions": 1, "max_test_calls": 0}),
         env_config={"max_turns": 1},
     )
-    assert actor._get_env() is actor._get_env(), "both episodes must share one cached env instance"
+    assert actor._env is actor._env, "both episodes must share one cached env instance"
 
     async def _fake_client():
         return None
 
-    actor._get_http_client = _fake_client
+    actor._http_client = None
 
     async def _fake_generate(
         client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
@@ -966,7 +962,7 @@ async def test_slow_sync_step_does_not_block_concurrent_episodes():
     async def _fake_client():
         return None
 
-    actor._get_http_client = _fake_client
+    actor._http_client = None
 
     async def _fake_generate(
         client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
@@ -1017,7 +1013,7 @@ async def test_sync_step_offload_preserves_cross_turn_contextvars():
     async def _fake_client():
         return None
 
-    actor._get_http_client = _fake_client
+    actor._http_client = None
 
     calls = {"A": 0, "B": 0}
 
@@ -1046,32 +1042,29 @@ async def test_sync_step_offload_preserves_cross_turn_contextvars():
     )
 
 
-# Test: _is_client_error
-
-
-def test_is_client_error():
+def test_only_a_genuine_client_error_gives_up():
     """Only a genuine, non-transient 4xx from the rollout server abandons the batch."""
 
     def _http(status, body="boom"):
         return RolloutHTTPError(status, "vllm", body)
 
     # 4xx errors should NOT be retried
-    assert _is_client_error(_http(400, "Bad request"))
-    assert _is_client_error(_http(422, "Unprocessable"))
-    assert _is_client_error(_http(404, "Not found"))
+    assert _should_giveup(_http(400, "Bad request"))
+    assert _should_giveup(_http(422, "Unprocessable"))
+    assert _should_giveup(_http(404, "Not found"))
 
     # 5xx errors SHOULD be retried (giveup returns False)
-    assert not _is_client_error(_http(500, "Internal error"))
-    assert not _is_client_error(_http(503, "Unavailable"))
+    assert not _should_giveup(_http(500, "Internal error"))
+    assert not _should_giveup(_http(503, "Unavailable"))
 
     # Timeouts SHOULD be retried
-    assert not _is_client_error(TimeoutError("Connection timed out"))
-    assert not _is_client_error(ConnectionError("Connection refused"))
+    assert not _should_giveup(TimeoutError("Connection timed out"))
+    assert not _should_giveup(ConnectionError("Connection refused"))
 
     # 429 (rate limit) and 408 (request timeout) are 4xx but transient — they MUST be
     # retried, not given up on.
-    assert not _is_client_error(_http(429, "Too Many Requests"))
-    assert not _is_client_error(_http(408, "Request Timeout"))
+    assert not _should_giveup(_http(429, "Too Many Requests"))
+    assert not _should_giveup(_http(408, "Request Timeout"))
 
 
 def test_an_engine_serialization_fault_under_a_400_is_retried():
@@ -1082,7 +1075,7 @@ def test_an_engine_serialization_fault_under_a_400_is_retried():
         '"type":"BadRequestError","param":null,"code":400}}'
     )
     fault = RolloutHTTPError(400, "vllm", body)
-    assert not _is_client_error(fault) and not _should_giveup(fault)
+    assert not _should_giveup(fault) and not _should_giveup(fault)
     # A genuine bad request under the same status is still terminal.
     assert _should_giveup(RolloutHTTPError(400, "vllm", '{"error":{"message":"max_tokens must be positive"}}'))
 
@@ -1096,9 +1089,9 @@ def test_a_server_error_quoting_a_4xx_in_its_body_is_still_retried():
     exc = RolloutHTTPError(503, "vllm", "upstream returned status 400: bad request")
 
     assert "status 400" in str(exc)
-    assert not _is_client_error(exc)
+    assert not _should_giveup(exc)
     # And a plain RuntimeError carrying the same text is a transport fault, not a client error.
-    assert not _is_client_error(RuntimeError("vllm error (status 400): Bad request"))
+    assert not _should_giveup(RuntimeError("vllm error (status 400): Bad request"))
 
 
 # Test: RolloutManager max_concurrent clamping

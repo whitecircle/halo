@@ -1,10 +1,6 @@
-"""Shared helpers for the reward-model inference scripts (``rm_scoring`` / ``rm_rejection_sampling``).
-
-Holds the run's boot (API client + reward model), the shared CLI parser, the generation helpers, the
-batched scorer and its event-loop offload, and the local-JSONL resume both scripts share. Generic
-prompt assembly (``resolve_system_prompt`` / ``build_base_prompt``) lives in
-``src.data.pipeline.conversation`` — rows there may be a pandas Series or a plain dict.
-"""
+"""Shared helpers for the reward-model inference scripts (``rm_scoring`` / ``rm_rejection_sampling``): the run's
+boot (API client + reward model), the CLI parser, the generation helpers, the batched scorer and its event-loop
+offload, and the local-JSONL resume both scripts share."""
 
 import argparse
 import asyncio
@@ -19,8 +15,13 @@ import pandas as pd
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from scripts._common import add_dtype_arg, add_openai_endpoint_args, add_trust_remote_code_arg
-from scripts.inference._common import add_generation_args, add_prompt_field_args, assistant_turn, follow_up_messages
+from scripts.cli_arguments import add_dtype_arg, add_openai_endpoint_args, add_trust_remote_code_arg
+from scripts.inference.inference_arguments import (
+    add_generation_args,
+    add_prompt_field_args,
+    assistant_turn,
+    follow_up_messages,
+)
 from src.checkpoint.reading import reject_partial_checkpoint
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from src.data.pipeline.rendered import tokenize_rendered
@@ -173,13 +174,6 @@ def build_generation_parser(description: str, *, temperature_default: float) -> 
     return parser
 
 
-def _resolve_response_format(row) -> dict:
-    """Per-row ``response_format`` override, defaulting to plain text."""
-    if "response_format" in row and pd.notna(row["response_format"]):
-        return row["response_format"]
-    return {"type": "text"}
-
-
 def resolve_correct_answer(row, args):
     """The row's ground-truth answer (``args.correct_answer_field``), or None."""
     if args.correct_answer_field in row and pd.notna(row[args.correct_answer_field]):
@@ -219,7 +213,8 @@ async def prepare_generation_prompt(client, row: pd.Series, args) -> tuple[list[
     """
     system_prompt = resolve_system_prompt(row, args.local_system_prompt_field, args.global_system_prompt)
     base_prompt = build_base_prompt(row, args.prompt_field, system_prompt)
-    response_format = _resolve_response_format(row)
+    has_format = "response_format" in row and pd.notna(row["response_format"])
+    response_format = row["response_format"] if has_format else {"type": "text"}
 
     follow_up = follow_up_messages(row, args.follow_up_prompt_field)
     if follow_up is not None:
@@ -249,19 +244,6 @@ def prepend_answer_context(conversation: list[dict], correct_answer: str | None)
     if correct_answer is None:
         return conversation
     return [{"role": "system", "content": f"The correct final answer must be: {correct_answer}"}] + conversation
-
-
-def require_single_output(logits) -> None:
-    """Reject a head that is not a single-output Bradley-Terry reward model.
-
-    Pointed at a multi-class classifier, the score readers (``[0]`` / ``view(-1)``) would return an
-    arbitrary, possibly misaligned, class logit as the reward.
-    """
-    if logits.shape[-1] != 1:
-        raise ValueError(
-            f"Expected a single-output reward model, got logits shape {tuple(logits.shape)} "
-            f"— this looks like a multi-class classifier, not an RM."
-        )
 
 
 def encode_for_scoring(tokenizer, conversations: list[list[dict]], correct_answer: str | None) -> dict:
@@ -304,7 +286,12 @@ def score_conversations(
         batch = {key: value.to(rm_device) for key, value in batch.items()}
         with torch.inference_mode():
             logits = rm_model(**batch).logits
-        require_single_output(logits)
+        # A multi-class classifier would hand back an arbitrary, possibly misaligned, class logit as the reward.
+        if logits.shape[-1] != 1:
+            raise ValueError(
+                f"Expected a single-output reward model, got logits shape {tuple(logits.shape)} "
+                f"— this looks like a multi-class classifier, not an RM."
+            )
         # .float() first: numpy has no bf16 dtype, and bf16 is the scoring default.
         scores.extend(logits.detach().cpu().float().view(-1).tolist())
     return np.array(scores, dtype=float)
@@ -363,7 +350,7 @@ def load_prompts_dataframe(args) -> pd.DataFrame:
 def load_local_jsonl_resume(output_path: Path, id_field: str) -> tuple[set, pd.DataFrame]:
     """``(ids already written, the rows carrying them)`` for a run resuming its own JSONL output.
 
-    The local-file twin of :func:`scripts.inference._common.load_prompts_with_resume` (S3 datasets):
+    The local-file twin of :func:`scripts.inference.inference_arguments.load_prompts_with_resume` (S3 datasets):
     both scripts append one finished row per line, so the ids in the output file are the work a re-run
     skips. An output that does not exist yet resumes nothing. The rows themselves come back because a
     caller reporting summary statistics over the whole job needs them, not just their ids.

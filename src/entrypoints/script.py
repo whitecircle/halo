@@ -26,7 +26,7 @@ from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import raise_rank0_failure
 from src.runtime.filesystem import verify_output_filesystem_sharing
 from src.runtime.process_group import init_distributed
-from src.runtime.ranks import get_local_rank, is_global_main_process
+from src.runtime.ranks import get_local_rank, has_process_group, is_global_main_process
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -106,15 +106,14 @@ def init_training_script(
     split_expert_lora: bool = True,
     supports_init_from_scratch: bool = False,
 ) -> ScriptContext:
-    """The pre-model phase of a training script, in the order every script depends on: the process
-    group and device bind, the ``ParallelismConfig``, the run setup (named ``{script_prefix}-{mode}``)
-    and the resume resolution.
+    """The pre-model phase of a training script, after :func:`parse_script_args` brought the process group
+    up, in the order every script depends on: the device bind, the ``ParallelismConfig``, the run setup
+    (named ``{script_prefix}-{mode}``) and the resume resolution.
 
     ``trainer_cls`` supplies the CP/PP/low-precision gates, so a mode the trainer refuses fails before any
     model, reference or rollout probe loads. ``split_expert_lora`` peels MoE expert targets out of
     ``lora_target_modules`` into native EP grouped LoRA; only SFT passes ``supports_init_from_scratch``.
     """
-    init_distributed()
     PartialState()
     local_rank = get_local_rank()
     if torch.cuda.is_available():  # CUDA-less interpreters (config-parse checks, CPU boxes) stay usable
@@ -250,7 +249,7 @@ def run_trainer(
 def _tear_down_distributed() -> None:
     """COLLECTIVE: destroy the EP dispatchers, then the process group."""
     destroy_all_dispatchers()
-    if dist.is_available() and dist.is_initialized():
+    if has_process_group():
         dist.destroy_process_group()
 
 

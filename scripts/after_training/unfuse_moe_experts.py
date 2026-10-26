@@ -32,7 +32,7 @@ from functools import lru_cache
 import torch
 from transformers.utils import CONFIG_NAME
 
-from scripts._common import add_max_shard_size_arg
+from scripts.cli_arguments import add_max_shard_size_arg
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.checkpoint.offline_export import (
     copy_checkpoint_aux_files,

@@ -23,8 +23,8 @@ import torch
 from accelerate import PartialState
 from trl.trainer.utils import pad
 
-from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
+from src.environments.messages import Message, Trajectory
 from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector

@@ -104,7 +104,7 @@ def test_text_only_skips_the_vlm_branch_in_load_policy_model(monkeypatch):
     )
     monkeypatch.setattr(
         model_setup,
-        "_load_policy",
+        "load_model_and_tokenizer",
         lambda *a, **k: calls.setdefault("args", a[3]) and ("model", "tokenizer"),
     )
     model_config = SimpleNamespace(model_name_or_path="fake/vlm", model_revision=None, trust_remote_code=False)

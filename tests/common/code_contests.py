@@ -5,7 +5,7 @@ protocol's own dispatch without a subprocess or a network."""
 import re
 from typing import Any, NamedTuple
 
-from src.environments.base import Trajectory
+from src.environments.messages import Trajectory
 from src.environments.sandbox.base import SandboxExecutor
 from src.environments.sandbox.results import SandboxResult
 from src.environments.tools.definitions import NativeToolCall

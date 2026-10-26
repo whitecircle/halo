@@ -80,7 +80,7 @@ TERMINAL_LOADERS = (
 # ``--check_inference`` generation. An uninitialized buffer here becomes numbers the operator acts
 # on, with no other symptom, so each must call the seam directly.
 INFERENCE_TOOL_LOADERS = (
-    ("scripts/inference/reward_model/_common.py", "load_reward_model"),
+    ("scripts/inference/reward_model/reward_model_arguments.py", "load_reward_model"),
     ("scripts/inference/generation/dataset_deduplication.py", "compute_embeddings"),
     ("scripts/after_training/convert_to_bf16.py", "_load_verified"),
 )

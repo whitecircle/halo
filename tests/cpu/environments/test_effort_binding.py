@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests: both rollout drivers bind an episode's reasoning effort through ONE seam.
 
-``bind_episode_effort`` (``src/environments/episode.py``) resolves the episode's level once and turns the
+``bind_episode_effort`` (``src/environments/reasoning_effort.py``) resolves the episode's level once and turns the
 env's per-level CoT budget into the per-turn reasoning cap every turn runs under. The Ray actor and the
 offline eval runner must both go through it: a driver that resolves the level itself, or skips the
 budget, generates under a different contract than the one the policy was trained on. The episode
@@ -24,16 +24,14 @@ import pytest
 
 import src.environments.eval_runner as eval_runner
 import src.environments.ray_actors as ray_actors
-from src.environments import episode
-from src.environments.base import (
-    OUTPUT_BUDGET_EXHAUSTED_KEY,
-    REWARD_COMPONENTS_KEY,
-    VALID_REASONING_EFFORTS,
-    Trajectory,
-)
+from src.environments import reasoning_effort
 from src.environments.engine_wire import generation_control_fields
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
+from src.environments.messages import Trajectory
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from src.environments.rollout_config import VALID_REASONING_EFFORTS
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry
+from tests.common.fake_chat_client import chat_reply
 
 _MAX_TOKENS = 20000
 # The reasoning-end marker's id the per-turn reasoning count reads up to: one no other id in a fake turn carries.
@@ -48,7 +46,7 @@ def _echo_registry() -> NativeToolRegistry:
 
 
 class _PlainEnv(NativeToolUseEnvironment):
-    """Env with one no-op tool binding no per-level budget (the ``BaseEnvironment`` default)."""
+    """Env with one no-op tool binding no per-level budget (the ``EnvironmentBase`` default)."""
 
     def __init__(self, **kwargs):
         super().__init__(tool_registry=_echo_registry(), max_turns=4, **kwargs)
@@ -63,29 +61,15 @@ class _BudgetEnv(_PlainEnv):
         return self.BUDGETS.get(effort)
 
 
-def _text_turn(text="the answer", token_ids=None, tokens=3):
-    return SimpleNamespace(
-        answer=text,
-        finish_reason="stop",
-        completion_tokens=tokens,
-        tool_calls=None,
-        reasoning=None,
-        token_ids=token_ids,
-    )
+def _text_turn(text="the answer", tokens=3, finish_reason="stop"):
+    return chat_reply(text, finish_reason=finish_reason, completion_tokens=tokens)
 
 
-def _tool_turn(token_ids=None, tokens=3, name="echo"):
+def _tool_turn(tokens=3, name="echo"):
     """A turn that calls ``name``: the no-op tool spends the step and keeps the episode open, and a name the
     registry lacks is a turn whose every call is refused."""
     call = SimpleNamespace(id="c0", function=SimpleNamespace(name=name, arguments="{}"))
-    return SimpleNamespace(
-        answer="",
-        finish_reason="tool_calls",
-        completion_tokens=tokens,
-        tool_calls=[call],
-        reasoning=None,
-        token_ids=token_ids,
-    )
+    return chat_reply("", finish_reason="tool_calls", completion_tokens=tokens, tool_calls=[call])
 
 
 def _actor_text_turn(token_ids=None, tokens=3, text="the answer"):
@@ -108,14 +92,14 @@ def _ids_closing_reasoning_after(reasoning_tokens: int) -> list[int]:
 
 
 async def _drive_eval(monkeypatch, env, context, *, responses, config=None):
-    """Run the eval driver over ``responses``; return its captured request kwargs and trajectory."""
+    """Run the eval driver over ``responses``; return its captured requests and trajectory."""
     calls = []
 
-    async def fake_generate(model, messages, **kwargs):
-        calls.append({"model": model, "messages": messages, **kwargs})
+    async def fake_chat(client, **request):
+        calls.append(request)
         return responses[len(calls) - 1]
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", fake_chat)
     traj = await eval_runner.run_episode(
         env,
         "solve it",
@@ -141,9 +125,6 @@ async def _drive_actor(env_cls, context, config, generations=None, env_kwargs=No
     actor.__init__(actor_id=0, env_type=(env_cls, env_kwargs or {}), env_config={})
     seen = []
 
-    async def fake_client():
-        return None
-
     async def fake_generate(
         client, url, messages, cfg, reasoning_effort=None, reasoning_budget=None, budget_soft=False
     ):
@@ -151,7 +132,7 @@ async def _drive_actor(env_cls, context, config, generations=None, env_kwargs=No
         seen.append((cfg, reasoning_effort, reasoning_budget, payload))
         return generations[len(seen) - 1] if generations else _actor_text_turn()
 
-    actor._get_http_client = fake_client
+    actor._http_client = None
     actor._generate = fake_generate
     result = await actor.run_episode("solve it", dict(context or {}), "http://x", config)
     return seen, result
@@ -215,7 +196,7 @@ async def test_every_turn_of_an_episode_runs_under_the_levels_whole_cap(monkeypa
     assert (result.trajectory.reasoning_effort, result.trajectory.reasoning_budget) == ("high", 4000)
     assert OUTPUT_BUDGET_EXHAUSTED_KEY not in result.trajectory.info, "no output budget, no verdict"
 
-    responses = [_tool_turn(ids), _tool_turn(ids), _text_turn(token_ids=ids)]
+    responses = [_tool_turn(), _tool_turn(), _text_turn()]
     calls, eval_traj = await _drive_eval(monkeypatch, _BudgetEnv(), context, responses=responses, config=config)
     assert _eval_caps(calls) == expected
     assert [call["extra_body"] for call in calls] == [
@@ -299,21 +280,25 @@ def test_a_level_budget_is_clamped_by_the_runs_cap_which_alone_caps_an_unbudgete
     since such a turn has no answer room and is cut mid-reasoning every time. The turn total is the
     run's ``max_tokens`` whatever the level, and the output budget rides on every binding."""
     context = {"reasoning_effort": "high"}
-    clamped = episode.bind_episode_effort(context, _BudgetEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=3000)
+    clamped = reasoning_effort.bind_episode_effort(
+        context, _BudgetEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=3000
+    )
     assert (clamped.thinking_budget, clamped.max_tokens) == (3000, _MAX_TOKENS)
-    level = episode.bind_episode_effort(context, _BudgetEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=8192)
+    level = reasoning_effort.bind_episode_effort(
+        context, _BudgetEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=8192
+    )
     assert (level.thinking_budget, level.max_tokens) == (4000, _MAX_TOKENS)
-    run = episode.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=8192)
+    run = reasoning_effort.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=8192)
     assert (run.thinking_budget, run.max_tokens) == (8192, _MAX_TOKENS)
-    assert episode.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS).thinking_budget is None
+    assert reasoning_effort.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS).thinking_budget is None
     with pytest.raises(ValueError, match=r"'high' level's thinking_tokens \(4000\) must sit below rollout_max_tokens"):
-        episode.bind_episode_effort(context, _BudgetEnv(), max_tokens=4000)
+        reasoning_effort.bind_episode_effort(context, _BudgetEnv(), max_tokens=4000)
     with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
-        episode.bind_episode_effort(context, _PlainEnv(), max_tokens=4000, max_thinking_tokens=4000)
+        reasoning_effort.bind_episode_effort(context, _PlainEnv(), max_tokens=4000, max_thinking_tokens=4000)
     for env in (_BudgetEnv(), _PlainEnv()):
-        bound = episode.bind_episode_effort(context, env, max_tokens=_MAX_TOKENS, max_episode_tokens=50000)
+        bound = reasoning_effort.bind_episode_effort(context, env, max_tokens=_MAX_TOKENS, max_episode_tokens=50000)
         assert bound.episode_tokens == 50000
-        assert episode.bind_episode_effort(context, env, max_tokens=_MAX_TOKENS).episode_tokens is None
+        assert reasoning_effort.bind_episode_effort(context, env, max_tokens=_MAX_TOKENS).episode_tokens is None
 
 
 async def test_the_eval_refuses_a_level_cap_that_fills_the_turn_before_generating(monkeypatch):
@@ -322,11 +307,11 @@ async def test_the_eval_refuses_a_level_cap_that_fills_the_turn_before_generatin
     construction, and a run whose levels fit passes the same gate."""
     calls = []
 
-    async def fake_generate(model, messages, **kwargs):
-        calls.append(kwargs)
+    async def fake_chat(client, **request):
+        calls.append(request)
         return _text_turn()
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", fake_chat)
     env = _BudgetEnv(reasoning_effort="random")
     examples = [{"prompt": "solve it", "context": {}}]
     too_small = ray_actors.RolloutConfig(model_name="m", max_tokens=4000)
@@ -335,7 +320,9 @@ async def test_the_eval_refuses_a_level_cap_that_fills_the_turn_before_generatin
     assert calls == [], "the gate must refuse before the first request"
 
     def caps(env, **kwargs):
-        return {level: effort.thinking_budget for level, effort in episode.efforts_by_level(env, **kwargs).items()}
+        return {
+            level: effort.thinking_budget for level, effort in reasoning_effort.efforts_by_level(env, **kwargs).items()
+        }
 
     assert caps(env, max_tokens=_MAX_TOKENS, max_thinking_tokens=None) == _BudgetEnv.BUDGETS
     assert caps(_BudgetEnv(reasoning_effort="low"), max_tokens=_MAX_TOKENS, max_thinking_tokens=None) == {"low": 1000}
@@ -348,17 +335,17 @@ async def test_the_eval_refuses_a_level_cap_that_fills_the_turn_before_generatin
 
 def test_drivers_share_one_seam():
     # A local copy of the seam in either driver lets the two drift apart.
-    assert eval_runner.bind_episode_effort is episode.bind_episode_effort
-    assert ray_actors.bind_episode_effort is episode.bind_episode_effort
+    assert eval_runner.bind_episode_effort is reasoning_effort.bind_episode_effort
+    assert ray_actors.bind_episode_effort is reasoning_effort.bind_episode_effort
 
 
 def test_context_level_wins_over_the_env_setting():
     # GRPO's group baseline assumes one conditioning per group: the trainer stamps it into the context.
     env = _BudgetEnv(reasoning_effort="low")
-    bound = episode.bind_episode_effort({"reasoning_effort": "high"}, env, max_tokens=_MAX_TOKENS)
+    bound = reasoning_effort.bind_episode_effort({"reasoning_effort": "high"}, env, max_tokens=_MAX_TOKENS)
     assert (bound.level, bound.thinking_budget) == ("high", 4000)
-    assert episode.bind_episode_effort(None, env, max_tokens=_MAX_TOKENS).level == "low"
-    unset = episode.bind_episode_effort(None, _BudgetEnv(), max_tokens=_MAX_TOKENS)
+    assert reasoning_effort.bind_episode_effort(None, env, max_tokens=_MAX_TOKENS).level == "low"
+    unset = reasoning_effort.bind_episode_effort(None, _BudgetEnv(), max_tokens=_MAX_TOKENS)
     assert (unset.level, unset.thinking_budget, unset.max_tokens) == (None, None, _MAX_TOKENS)
 
 
@@ -369,13 +356,13 @@ def test_context_level_wins_over_the_env_setting():
 _OVERFLOW_PRICE = 0.3
 
 
-def _effort(**overrides) -> episode.EpisodeEffort:
+def _effort(**overrides) -> reasoning_effort.EpisodeEffort:
     """A 20000-token turn with a 4000-token reasoning cap (16000 of answer room) under a 50000-token
     episode budget."""
     bound = {"level": None, "thinking_budget": 4000, "max_tokens": _MAX_TOKENS, "episode_tokens": 50000}
     merged = {**bound, **overrides}
     merged.setdefault("thinking_cap", merged["thinking_budget"])
-    return episode.EpisodeEffort(**merged)
+    return reasoning_effort.EpisodeEffort(**merged)
 
 
 def _caps(effort, generated):
@@ -466,9 +453,7 @@ async def test_a_cut_on_the_last_turn_the_budget_affords_closes_the_episode_as_o
     assert traj.info["length_cutoff_turns"] == 1 and traj.messages[-1].role == "assistant"
     assert traj.info[REWARD_COMPONENTS_KEY]["reward/tool_shaping"] == pytest.approx(-0.3)
 
-    eval_cut = SimpleNamespace(
-        **{**vars(_text_turn(tokens=11000)), "answer": "half an ans", "finish_reason": "length"}
-    )
+    eval_cut = _text_turn("half an ans", tokens=11000, finish_reason="length")
     responses = [_tool_turn(tokens=19000), _tool_turn(tokens=11000), eval_cut]
     _, eval_traj = await _drive_eval(monkeypatch, _PlainEnv(**prices), None, responses=responses, config=config)
     assert eval_traj.done and eval_traj.truncated and eval_traj.messages[-1].role == "assistant"
@@ -501,7 +486,7 @@ async def test_both_drivers_run_the_turn_after_an_unproductive_one_under_the_lev
     assert [m.thinking_cap for m in turns] == [4000] * 4
     assert result.metrics["episode/thinking_cap_turns"] == 1.0
 
-    eval_cut = SimpleNamespace(**{**vars(_text_turn(tokens=5000)), "answer": "half an ans", "finish_reason": "length"})
+    eval_cut = _text_turn("half an ans", tokens=5000, finish_reason="length")
     responses = [eval_cut, _text_turn(""), _tool_turn(name="absent"), _text_turn()]
     calls, eval_traj = await _drive_eval(monkeypatch, _BudgetEnv(), context, responses=responses, config=config)
     eval_turns = [m for m in eval_traj.messages if m.role == "assistant"]
@@ -515,11 +500,11 @@ async def test_the_eval_refuses_an_output_budget_under_one_turn_before_generatin
     the shared binding seam refuses it before the first request, as the trainer's config does at parse."""
     calls = []
 
-    async def fake_generate(model, messages, **kwargs):
-        calls.append(kwargs)
+    async def fake_chat(client, **request):
+        calls.append(request)
         return _text_turn()
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", fake_chat)
     too_big = ray_actors.RolloutConfig(model_name="m", max_tokens=60000, max_episode_tokens=50000)
     with pytest.raises(
         ValueError, match=r"rollout_max_episode_tokens \(50000\) must be at least rollout_max_tokens \(60000\)"
@@ -613,8 +598,8 @@ class _ContestEnv(_PlainEnv):
         return self.BUDGETS.get(effort)
 
 
-def _contest(level, *, answer=_ROOM, episode_tokens=None) -> episode.EpisodeEffort:
-    return episode.bind_episode_effort(
+def _contest(level, *, answer=_ROOM, episode_tokens=None) -> reasoning_effort.EpisodeEffort:
+    return reasoning_effort.bind_episode_effort(
         {"reasoning_effort": level},
         _ContestEnv(),
         max_tokens=_CONTEST_TURN,
@@ -665,7 +650,7 @@ def test_an_answer_bound_narrows_with_the_output_budget_and_starts_a_turn_only_w
         assert _caps(effort, _CONTEST_EPISODE - _ROOM) == (_ROOM, 1)
         last = _CONTEST_EPISODE - _ROOM + 1
         assert _caps(effort, last) is None
-        traj = episode.Trajectory(messages=[])
+        traj = Trajectory(messages=[])
         effort.stamp(traj, last)
         assert traj.info[OUTPUT_BUDGET_EXHAUSTED_KEY] is True
         effort.stamp(traj, last - 1)
@@ -696,7 +681,7 @@ async def test_both_drivers_bound_a_turn_and_the_one_after_a_cut_by_the_answer_r
     assert traj.info[OUTPUT_BUDGET_EXHAUSTED_KEY] is True
     assert result.generation_tokens == sum(sampled)
 
-    eval_cut = SimpleNamespace(**{**vars(_text_turn(tokens=sampled[0])), "answer": "half", "finish_reason": "length"})
+    eval_cut = _text_turn("half", tokens=sampled[0], finish_reason="length")
     responses = [eval_cut, _tool_turn(tokens=sampled[1]), _tool_turn(tokens=sampled[2])]
     calls, eval_traj = await _drive_eval(monkeypatch, _ContestEnv(), context, responses=responses, config=config)
     assert _eval_caps(calls) == expected
@@ -709,25 +694,25 @@ async def test_an_answer_bound_is_refused_where_a_drawable_level_has_no_reasonin
     cap gives every level one, and without it the binding and the eval's pre-generation gate refuse."""
     context = {"reasoning_effort": "high"}
     with pytest.raises(ValueError, match=r"rollout_max_answer_tokens \(8192\) bounds .* reasoning_effort='high'"):
-        episode.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_answer_tokens=8192)
-    capped = episode.bind_episode_effort(
+        reasoning_effort.bind_episode_effort(context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_answer_tokens=8192)
+    capped = reasoning_effort.bind_episode_effort(
         context, _PlainEnv(), max_tokens=_MAX_TOKENS, max_thinking_tokens=4000, max_answer_tokens=8192
     )
     assert (capped.answer_tokens, capped.answer_room) == (8192, 8192)
 
     calls = []
 
-    async def fake_generate(model, messages, **kwargs):
-        calls.append(kwargs)
+    async def fake_chat(client, **request):
+        calls.append(request)
         return _text_turn()
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", fake_chat)
     uncapped = ray_actors.RolloutConfig(model_name="m", max_tokens=_MAX_TOKENS, max_answer_tokens=8192)
     examples = [{"prompt": "solve it", "context": {}}]
     with pytest.raises(ValueError, match="rollout_max_answer_tokens"):
         await eval_runner.collect_results(_PlainEnv(reasoning_effort="random"), examples, None, rollout=uncapped)
     assert calls == [], "the gate must refuse before the first request"
-    efforts = episode.efforts_by_level(
+    efforts = reasoning_effort.efforts_by_level(
         _ContestEnv(reasoning_effort="random"),
         max_tokens=_CONTEST_TURN,
         max_thinking_tokens=None,
@@ -751,7 +736,7 @@ def _soft_env(**kwargs):
 
 
 def _soft(level, *, ceiling=None, answer=_ROOM):
-    return episode.bind_episode_effort(
+    return reasoning_effort.bind_episode_effort(
         {"reasoning_effort": level},
         _soft_env(),
         max_tokens=_CONTEST_TURN,
@@ -791,7 +776,7 @@ def test_an_uncapped_soft_turn_needs_its_whole_total_left_of_the_output_budget()
     """With no ceiling nothing closes the reasoning below the turn total, so no part of the turn is answer room
     a narrowed turn could keep: a turn starts only while the output budget still holds the whole total, and
     never narrower. An enforced level under the same budget narrows instead, down to its answer room."""
-    bare = episode.bind_episode_effort(
+    bare = reasoning_effort.bind_episode_effort(
         {"reasoning_effort": "high"}, _soft_env(), max_tokens=_CONTEST_TURN, max_episode_tokens=_CONTEST_EPISODE
     )
     assert bare.answer_room == _CONTEST_TURN
@@ -815,7 +800,7 @@ def test_a_soft_budget_at_or_past_its_ceiling_is_refused():
         _soft("high", ceiling=16384)
     assert _soft("high", ceiling=16385).thinking_cap == 16385
     with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
-        episode.bind_episode_effort(
+        reasoning_effort.bind_episode_effort(
             {"reasoning_effort": "high"},
             _PlainEnv(reasoning_effort_profiles={"high": {"thinking_tokens": 40000, "enforce_thinking_cap": False}}),
             max_tokens=_CONTEST_TURN,
@@ -880,7 +865,7 @@ async def test_both_drivers_send_the_ceiling_again_on_the_turn_after_a_cut_under
     assert _actor_caps(seen) == expected
     assert [m.thinking_cap for m in turns] == [_SOFT_CEILING] * 2
 
-    eval_cut = SimpleNamespace(**{**vars(_text_turn(tokens=30000)), "answer": "half", "finish_reason": "length"})
+    eval_cut = _text_turn("half", tokens=30000, finish_reason="length")
     calls, eval_traj = await _drive_eval(
         monkeypatch,
         _PlainEnv(reasoning_effort_profiles=profiles),

@@ -217,7 +217,8 @@ def test_each_script_feeds_the_preflight_its_own_sampler_filters(script, expecte
     [
         ({"isr_geo_band_max": 1.01}, "set together"),
         ({"isr_geo_band_min": 0.99}, "set together"),
-        ({"isr_geo_band_min": 1.01, "isr_geo_band_max": 1.02}, "0 < min < 1 < max"),
+        ({"isr_geo_band_min": 1.01, "isr_geo_band_max": 1.02}, r"isr_geo_band_min must be in \(0, 1\)"),
+        ({"isr_geo_band_min": 0.99, "isr_geo_band_max": 0.999}, "isr_geo_band_max must be > 1"),
         ({"isr_veto_min": 1.5}, "isr_veto_min"),
         ({"isr_opsm_delta": 0.0}, "isr_opsm_delta"),
         ({"isr_opsm_delta": float("nan")}, "isr_opsm_delta"),

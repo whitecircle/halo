@@ -27,7 +27,7 @@ import torch
 from datasets import Dataset, load_dataset
 from transformers import AutoModel, AutoTokenizer
 
-from scripts._common import add_trust_remote_code_arg
+from scripts.cli_arguments import add_trust_remote_code_arg
 from src.data.deduplication import faiss_deduplicate_mr, faiss_deduplicate_mr_multistep, process_texts
 from src.data.sources.paths import DATA_FILE_BUILDERS, data_file_builder, parse_dataset_source
 from src.log import configure_cli_logging

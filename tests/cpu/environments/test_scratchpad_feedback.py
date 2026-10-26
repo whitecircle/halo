@@ -18,7 +18,7 @@ import shutil
 
 import pytest
 
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from src.environments.sandbox.base import SandboxExecutor
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE, run_code_via_sandbox

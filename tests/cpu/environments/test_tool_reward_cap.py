@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the per-call tool reward and its episode cap, owned by ``BaseEnvironment``.
+"""CPU tests for the per-call tool reward and its episode cap, owned by ``EnvironmentBase``.
 
 ``tool_success_reward`` / ``tool_error_penalty`` price every executed call through one accounting
 (``_credit_tool_call``) under both protocols, and ``tool_reward_cap`` bounds what an episode earns
@@ -11,12 +11,12 @@ Run: python tests/cpu/environments/test_tool_reward_cap.py
 
 import pytest
 
-from src.environments.base import TOOL_REWARD_PAID_KEY
-from src.environments.envs.protocols.mcp import NativeMCPClientEnvironment
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.registry import resolve_environment
+from src.environments.protocols.mcp import NativeMCPClientEnvironment
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from src.environments.protocols.react import ReActEnvironment
+from src.environments.registry import build_environment
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tool_accounting import TOOL_REWARD_PAID_KEY
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 
@@ -122,7 +122,7 @@ def test_code_contests_turns_per_call_pay_off():
 
 @pytest.mark.parametrize("env_type", ["react_math", "native_math"])
 def test_yaml_spellings_reach_the_base_through_the_registry(env_type):
-    env = resolve_environment(
+    env = build_environment(
         env_type, {"tool_success_reward": 0.2, "tool_error_penalty": 0.3, "tool_reward_cap": 0.5, "max_turns": 3}
     )
     assert (env.tool_success_reward, env.tool_error_penalty, env.tool_reward_cap) == (0.2, 0.3, 0.5)

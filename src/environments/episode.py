@@ -1,255 +1,36 @@
-"""The rollout-driver half of the environment contract: what a driver binds, generates and hands back.
-
-The Ray actor and the eval runner both drive an episode through here, so an episode is generated and
-graded the same way whichever one collects it.
-"""
+"""The rollout-driver contract: the one episode loop (:func:`play_episode`) the Ray actor and the eval runner
+both play, the turn generation and retry policy it runs, and the row an episode hands the trainer."""
 
 import asyncio
 import contextvars
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any
 
 import backoff
 
-from src.environments.base import (
-    LAST_TURN_KEY,
-    OUTPUT_BUDGET_EXHAUSTED_KEY,
-    RANDOM_REASONING_EFFORT,
-    VALID_REASONING_EFFORTS,
-    AsyncBaseEnvironment,
-    BaseEnvironment,
-    EnvStep,
-    Trajectory,
-    resolve_reasoning_effort,
-)
-from src.environments.rollout_config import REASONING_END_TOKEN_EXAMPLES, RolloutConfig
+from src.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
+from src.environments.episode_keys import EPISODE_ERROR_KEY, LAST_TURN_KEY
+from src.environments.messages import EnvStep, Trajectory
+from src.environments.reasoning_effort import EpisodeEffort
+from src.environments.rollout_config import RolloutConfig
 from src.inference.openai_client import TRANSIENT_CLIENT_ERROR_CODES
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 from src.rewards.samples import CUT_TOOL_CALLS_KEY
 
 logger = logging.getLogger(__name__)
 
-# vLLM answers 400 when a NaN log-prob keeps it from serialising its OWN response: the request was
-# valid and a fresh one succeeds, so both drivers retry it rather than lose the turn.
-ENGINE_SERIALIZATION_FAULT = "not JSON compliant"
-# What an engine's client error says when the conversation outgrew the served context, lowercased:
-# vLLM's and SGLang's "maximum context length" / "model's context length", vLLM's "maximum model
-# length", and the OpenAI API's error code.
+# What an engine's client error says, lowercased, when the conversation outgrew the served context (vLLM, SGLang,
+# and the OpenAI API's error code).
 CONTEXT_OVERFLOW_MARKERS = ("context length", "maximum model length", "context_length_exceeded")
-
-
-@dataclass(frozen=True)
-class EpisodeEffort:
-    """The generation contract one episode runs under: its resolved reasoning-effort level, the per-turn
-    reasoning budget bound to that level (what the template states and the reasoning terms read; ``None``
-    = none), the reasoning cap the engine enforces per turn (``thinking_cap``: the budget itself, or — for a
-    level whose budget is soft — the run's ceiling, :func:`bind_episode_effort`; ``None`` = uncapped), the
-    turn's total token cap, the episode's output budget (``rollout_max_episode_tokens``:
-    the most its turns may sample together, reasoning and visible output alike; ``None`` leaves only the
-    per-turn caps), and the answer-room bound (``rollout_max_answer_tokens``: the most a turn may generate
-    past its reasoning cap; ``None`` leaves the turn total at ``max_tokens``)."""
-
-    level: str | None
-    thinking_budget: int | None
-    thinking_cap: int | None
-    max_tokens: int
-    episode_tokens: int | None = None
-    answer_tokens: int | None = None
-
-    @property
-    def budget_soft(self) -> bool:
-        """Whether the budget is stated without the engine enforcing it: the cap is not the budget."""
-        return self.thinking_budget is not None and self.thinking_cap != self.thinking_budget
-
-    @property
-    def turn_total(self) -> int:
-        """The total of a turn: ``max_tokens``, or the reasoning cap plus ``answer_tokens`` where that is
-        smaller."""
-        if self.thinking_cap is None or self.answer_tokens is None:
-            return self.max_tokens
-        return min(self.max_tokens, self.thinking_cap + self.answer_tokens)
-
-    @property
-    def answer_room(self) -> int:
-        """What a turn may generate past the reasoning cap the engine enforces; the whole turn without one."""
-        return self.turn_total - (self.thinking_cap or 0)
-
-    def turn_caps(self, generated: int) -> dict[str, int | None] | None:
-        """The engine caps of the turn about to start, as the request fields they set: the level's total
-        (:attr:`turn_total`) narrowed to what the output budget has left after ``generated`` tokens, and the
-        reasoning cap with it, so the turn keeps its :attr:`answer_room`. ``None`` once the budget no longer
-        holds that room: no further turn starts, and the driver closes the episode truncated."""
-        level_total = self.turn_total
-        total = level_total if self.episode_tokens is None else min(level_total, self.episode_tokens - generated)
-        if total < self.answer_room:
-            return None
-        thinking = self.thinking_cap
-        if thinking is not None:
-            # The cap gives up what the total gave up, never down to 0: a cap of 0 closes the reasoning
-            # before it opened.
-            thinking = max(thinking - (level_total - total), 1)
-        return {"max_tokens": total, "max_thinking_tokens": thinking}
-
-    def stamp(self, trajectory: Trajectory | None, generated: int) -> None:
-        """Record this contract on the episode's trajectory (no-op when the episode produced none):
-        re-tokenization has to render the level and budget the model generated under, the reasoning
-        terms price the episode by its level, and an output budget records whether it ran out."""
-        if trajectory is None:
-            return
-        trajectory.reasoning_effort = self.level
-        trajectory.reasoning_budget = self.thinking_budget
-        trajectory.reasoning_budget_soft = self.budget_soft
-        if self.episode_tokens is not None:
-            trajectory.info[OUTPUT_BUDGET_EXHAUSTED_KEY] = self.turn_caps(generated) is None
-
-
-def bind_episode_effort(
-    context: dict[str, Any] | None,
-    env: BaseEnvironment,
-    *,
-    max_tokens: int,
-    max_thinking_tokens: int | None = None,
-    max_episode_tokens: int | None = None,
-    max_answer_tokens: int | None = None,
-) -> EpisodeEffort:
-    """Resolve one episode's effort level and bind the env's per-level CoT budget into its token caps.
-
-    Every rollout driver (the Ray actor, the eval runner) binds through here, so an episode runs under
-    the same contract whichever one collects it. Call once per episode: the level may be a ``'random'``
-    draw and every turn must share it. A context-supplied level wins over the env setting: the trainer
-    stamps one group-level draw into every group member's context, and GRPO's group baseline assumes
-    the members of a group share their conditioning.
-
-    The level's ``thinking_tokens`` is every turn's reasoning budget, clamped by the run's
-    ``max_thinking_tokens``, which alone budgets an episode whose level sets none. The engine closes the
-    reasoning at that budget unless the level's ``enforce_thinking_cap`` is false: then the budget is soft
-    (stated, and read by the reasoning terms) and the engine closes the reasoning only at the run's ceiling —
-    ``max_thinking_tokens``, or else where only ``max_answer_tokens`` is left of the turn — which the budget must
-    sit below. ``max_tokens`` bounds the whole turn, ``max_answer_tokens`` what it generates past the enforced
-    cap, and ``max_episode_tokens`` the episode (:meth:`EpisodeEffort.turn_caps`).
-    """
-    level = resolve_reasoning_effort((context or {}).get("reasoning_effort") or env.reasoning_effort)
-    level_budget = env.thinking_budget_for_effort(level) if level is not None else None
-    soft = level is not None and level_budget is not None and not env.thinking_budget_enforced(level)
-    ceiling = max_thinking_tokens
-    if soft and ceiling is None and max_answer_tokens is not None:
-        ceiling = max_tokens - max_answer_tokens
-    if soft and ceiling is not None and level_budget >= ceiling:
-        raise ValueError(
-            f"the {level!r} level's soft thinking_tokens ({level_budget}) must sit below its ceiling ({ceiling}: "
-            "rollout_max_thinking_tokens, else rollout_max_tokens less rollout_max_answer_tokens): at or past it the "
-            "engine enforces the budget, so it is not soft. Lower the budget or enforce it."
-        )
-    caps = [cap for cap in (level_budget, None if soft else ceiling) if cap is not None]
-    budget = min(caps) if caps else None
-    thinking_cap = ceiling if soft else budget
-    # The budget, and under a soft one the ceiling the engine closes at: each has to leave the turn room.
-    for bound in (budget, thinking_cap):
-        if bound is not None and bound >= max_tokens:
-            source = (
-                f"the {level!r} level's thinking_tokens" if bound == level_budget else "rollout_max_thinking_tokens"
-            )
-            raise ValueError(
-                f"{source} ({bound}) must sit below rollout_max_tokens ({max_tokens}), which bounds the whole turn: "
-                "at or above it the turn has no answer room and is cut mid-reasoning."
-            )
-    if max_episode_tokens is not None and max_episode_tokens < max_tokens:
-        raise ValueError(
-            f"rollout_max_episode_tokens ({max_episode_tokens}) must be at least rollout_max_tokens ({max_tokens}), "
-            "so one whole turn fits the episode: below it no turn could start."
-        )
-    # Bounding past a cap the turn lacks would bound nothing: rollout_max_tokens already is its whole room.
-    if max_answer_tokens is not None and thinking_cap is None:
-        raise ValueError(
-            f"rollout_max_answer_tokens ({max_answer_tokens}) bounds what a turn generates past its reasoning cap, "
-            f"and an episode at reasoning_effort={level!r} has none: the level sets no thinking_tokens and "
-            "rollout_max_thinking_tokens is unset. Give every drawable level a cap, or unset "
-            "rollout_max_answer_tokens."
-        )
-    return EpisodeEffort(
-        level=level,
-        thinking_budget=budget,
-        thinking_cap=thinking_cap,
-        max_tokens=max_tokens,
-        episode_tokens=max_episode_tokens,
-        answer_tokens=max_answer_tokens,
-    )
-
-
-def efforts_by_level(
-    env: BaseEnvironment,
-    *,
-    max_tokens: int,
-    max_thinking_tokens: int | None,
-    max_episode_tokens: int | None = None,
-    max_answer_tokens: int | None = None,
-) -> dict[str | None, EpisodeEffort]:
-    """The contract an episode of ``env`` binds at each level it can draw — every level under ``random``,
-    the one it sets, or ``None`` with the run's own cap under no setting — bound as an episode binds it.
-    Both drivers bind it before their first request, so a level whose budget fills the turn, a level
-    without an enforced cap under an answer-room bound, or an output budget under one turn refuses the run
-    with one loud error rather than failing every episode at its first turn."""
-    levels = VALID_REASONING_EFFORTS if env.reasoning_effort == RANDOM_REASONING_EFFORT else (env.reasoning_effort,)
-    return {
-        level: bind_episode_effort(
-            {"reasoning_effort": level},
-            env,
-            max_tokens=max_tokens,
-            max_thinking_tokens=max_thinking_tokens,
-            max_episode_tokens=max_episode_tokens,
-            max_answer_tokens=max_answer_tokens,
-        )
-        for level in levels
-    }
-
-
-def resolve_rollout_stop_token_ids(tokenizer, names: list[str]) -> list[int] | None:
-    """The ids ``rollout_stop_tokens`` names under ``tokenizer``, sent as the engine's ``stop_token_ids``;
-    ``None`` when none is configured.
-
-    Every name must resolve. A dropped terminator runs the turn past the call it ends (a gpt-oss episode
-    whose ``<|call|>`` never stops the turn plays out in one generation), and the trainer and the eval
-    runner both resolve through here, so a recipe that trains is the recipe its eval samples under."""
-    if not names:
-        return None
-    unk = getattr(tokenizer, "unk_token_id", None)
-    ids = {name: tokenizer.convert_tokens_to_ids(name) for name in names}
-    unresolved = [name for name, tid in ids.items() if tid is None or tid == unk]
-    if unresolved:
-        raise ValueError(
-            f"rollout_stop_tokens {unresolved} are not tokens of "
-            f"{getattr(tokenizer, 'name_or_path', 'the tokenizer')!r}, so no turn would stop where the config "
-            "says. Check the spellings against its special tokens, or drop them."
-        )
-    return list(ids.values())
-
-
-def resolve_reasoning_end_ids(tokenizer, marker: str) -> tuple[int, ...]:
-    """``marker``'s ids as the engine forces them: encoded without special tokens, the way vLLM encodes its
-    reasoning parser's end string (one id for ``</think>`` or Gemma 4's ``<channel|>``, five for gpt-oss's
-    final-channel opener). A reasoning close sits on the tokenizer's added tokens, so an encoding holding none
-    of them is a marker this model does not write (``</think>`` where the vocabulary lacks it splits into
-    plain text) and raises."""
-    ids = tuple(tokenizer.encode(marker, add_special_tokens=False))
-    if not set(ids) & set(tokenizer.added_tokens_decoder):
-        raise ValueError(
-            f"rollout_reasoning_end_token {marker!r} is not a reasoning marker of this tokenizer: it encodes to "
-            f"{list(ids)}, none of them one of its added tokens. Name the end string the server's reasoning "
-            f"parser forces ({REASONING_END_TOKEN_EXAMPLES})."
-        )
-    return ids
 
 
 @dataclass
 class RolloutResult:
-    """One collected episode, as the rollout drivers hand it to the trainer.
-
-    Every field is pickled through the Ray object store and again through the TP broadcast, once per
-    episode, so each one needs a consumer (checked by ``tests/cpu/environments/test_ray_actors.py``).
-    """
+    """One collected episode as the rollout drivers hand it to the trainer; every field is pickled through Ray and
+    the TP broadcast per episode, so each needs a consumer (checked by ``test_ray_actors.py``)."""
 
     prompt: str
     trajectory: Trajectory | None = None
@@ -265,33 +46,30 @@ class RolloutResult:
 
     @property
     def counts_toward_baseline(self) -> bool:
-        """Whether the episode counts toward the GRPO group baseline.
-
-        Not when the rollout infrastructure errored (``error``) or the environment marked the reward as
-        carrying no learning signal (``Trajectory.episode_invalid`` — e.g. a grading-infrastructure
-        outage forced the failure reward). Either way the reward says nothing about the policy, so
-        averaging it into the baseline would bias every sibling's advantage.
-        """
+        """Whether the episode counts toward the GRPO group baseline: not when the rollout errored or the
+        environment marked its reward as carrying no signal, which would bias every sibling's advantage."""
         return not self.error and not (self.trajectory is not None and self.trajectory.episode_invalid)
+
+    @classmethod
+    def errored(cls, prompt: str, reason: str, **fields: Any) -> "RolloutResult":
+        """The row of an episode its driver lost: no reward, outside the group baseline (``error``), its
+        trajectory carrying only the cause."""
+        return cls(
+            prompt=prompt, trajectory=Trajectory(done=True, info={EPISODE_ERROR_KEY: reason}), error=reason, **fields
+        )
 
 
 @dataclass(frozen=True)
 class TurnGeneration:
-    """One assistant turn's generation from the rollout engine — everything a trainer may capture.
-
-    The optional fields are engine-side captures (exact sampled ids, behavior-policy logprobs, MoE
-    routing, the engine-rendered prompt ids); each is ``None`` unless its ``RolloutConfig`` capture
-    flag requested it and the server returned it.
-    """
+    """One assistant turn's generation from the rollout engine; the capture fields (sampled ids, their logprobs,
+    MoE routing, the engine's prompt ids) are ``None`` unless the ``RolloutConfig`` requested and the server sent them."""
 
     text: str
     tool_calls: list
     reasoning: str
     tokens: int
     finish_reason: str | None = None
-    """Why generation stopped. ``"length"`` (token cap) and ``"abort"`` (the engine dropped the
-    request, e.g. a pause in abort mode) both mean the text is a fragment rather than a completed
-    answer."""
+    """Why generation stopped; ``"length"`` and ``"abort"`` both mean the text is a fragment."""
     token_ids: list[int] | None = None
     token_logprobs: list[float] | None = None
     routing_mask: str | None = None
@@ -300,18 +78,15 @@ class TurnGeneration:
 
 
 def describe_exception(exc: BaseException) -> str:
-    """``Type: message``, keeping the type when the message is empty.
-
-    ``asyncio.TimeoutError``, the usual signature of a stalled engine, stringifies to ``""``, so
-    interpolating the exception alone carries no information.
-    """
+    """``Type: message``, keeping the type when the message is empty (a stalled engine's ``TimeoutError``)."""
     text = str(exc)
     return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def is_engine_fault(status: int, body: str) -> bool:
-    """A client-error status the engine returned for its own fault, which a fresh request clears."""
-    return 400 <= status < 500 and ENGINE_SERIALIZATION_FAULT in body
+    """A client-error status the engine returned for its own fault, which a fresh request clears: vLLM answers
+    400 when a NaN log-prob keeps it from serialising its own response to a valid request."""
+    return 400 <= status < 500 and "not JSON compliant" in body
 
 
 def is_terminal_client_status(status: int, body: str) -> bool:
@@ -336,15 +111,9 @@ async def generate_turn(
     log_prefix: str,
     on_failure: Callable[[BaseException], None] | None = None,
 ) -> TurnGeneration:
-    """One turn under the rollout retry policy every driver shares.
-
-    A failed ``request`` of a ``retry_on`` type is retried with exponential backoff from
-    ``config.retry_base_wait``, up to ``config.max_retries`` times, unless ``giveup`` names it terminal.
-    A generation the engine aborted is re-issued for the same observation, up to ``config.max_retries``
-    times: the fragment is the engine's doing (SGLang's sync pause drops every in-flight request), so
-    stepping it would spend the episode's length-cutoff recovery cap on a cut the policy did not make.
-    Past either bound the turn raises. ``on_failure`` sees every failed ``retry_on`` request, retried or not.
-    """
+    """One turn under the retry policy every driver shares: a failed ``retry_on`` request is retried with backoff
+    up to ``config.max_retries`` times unless ``giveup`` names it terminal, an engine abort re-issued as often;
+    ``on_failure`` sees every failed request."""
 
     def _failed(details: dict) -> None:
         if on_failure is not None:
@@ -389,14 +158,9 @@ async def generate_turn(
 
 
 def sampled_reasoning_tokens(token_ids: list[int] | None, reasoning_end_token_id: int | None) -> int | None:
-    """The reasoning tokens in a turn's sampled ids: up to and including the reasoning-end token, or every
-    id when the turn was cut before its reasoning closed. ``None`` without the ids or the end token's id.
-
-    On a turn vLLM force-closed this is exactly the budget it enforced. Its counter starts after the last
-    ``<think>`` the request holds, so it counts the generation prompt's tokens after that (the ``\n`` the
-    Qwen3.6 template ends on) and the reasoning sampled, but not the close it forces: the prompt's one token
-    and the close cancel. A prompt ending on a bare ``<think>`` reads one past the budget, and a ``<think>``
-    the model emits itself two past."""
+    """The reasoning tokens in a turn's sampled ids: up to and including the reasoning-end token, or every id when
+    the turn was cut before its reasoning closed; ``None`` without the ids or the end token's id. On a turn vLLM
+    force-closed this is the budget it enforced, one past where the prompt ends on a bare ``<think>``."""
     if token_ids is None or reasoning_end_token_id is None:
         return None
     try:
@@ -413,27 +177,15 @@ def step_context_from_generation(
     reasoning_end_token_id: int | None = None,
     last_turn: bool = False,
 ) -> dict[str, Any]:
-    """The per-turn context an ``env.step`` receives, stamped from one turn's generation.
-
-    Shared by every rollout driver (the Ray actor's raw aiohttp transport, the eval runner's OpenAI
-    client): a driver that omits ``finish_reason`` grades an engine-cut fragment as a deliberate final
-    answer. The capture keys are forwarded only where they are id-aligned, since an unaligned logprob
-    or routing vector would produce incorrect training data rather than a missing field. ``thinking_cap``
-    is the reasoning cap the turn ran under — its level's enforced budget or a soft level's ceiling (the
-    request's own cap may sit below it under an output budget, and SGLang ignores the field); with it goes the
-    reasoning the turn sampled (:func:`sampled_reasoning_tokens`), the pair ``episode/thinking_cap_turns`` reads.
-    ``last_turn`` says the output budget affords no turn after this one, so an unproductive turn is
-    closed as an overflow rather than nudged into a retry that cannot run.
-    """
+    """The per-turn context an ``env.step`` receives, stamped from one turn's generation: ``finish_reason``, the
+    calls, the reasoning, the captures where id-aligned, the reasoning cap with the reasoning sampled under it,
+    and ``last_turn`` when the output budget affords no further turn."""
     step_ctx = dict(context) if context else {}
     step_ctx["finish_reason"] = gen.finish_reason
     if last_turn:
         step_ctx[LAST_TURN_KEY] = True
-    # A cut turn is a fragment whatever the parser salvaged from it: the call it holds was never
-    # finished, and executing it books a malformed call and trains the fragment as a normal row. A turn
-    # that hit its token cap inside a call carries the salvaged calls apart, never run: the recovery tells
-    # it so, the one case the generic cut nudge misreads, and a judge reads what it wrote. An abort names
-    # no cause the recovery could pass on.
+    # A cut turn's calls never run: a token-cap cut carries them apart, for the recovery's in-call nudge and the
+    # judge; an abort names no cause to pass on.
     if gen.tool_calls:
         if gen.finish_reason not in ENGINE_CUT_FINISH_REASONS:
             step_ctx["tool_calls"] = gen.tool_calls
@@ -464,21 +216,12 @@ def step_context_from_generation(
 
 
 class EpisodeDispatcher:
-    """Routes one episode's ``reset``/``step``/``finalize_truncated`` onto the env's own execution path.
+    """Routes one episode's env calls inline on the loop for an :class:`AsyncEnvironmentBase`, else to a worker
+    thread in one context copied per episode, so a tool's ContextVar writes survive to the next turn."""
 
-    Every rollout driver (the Ray actor, the eval runner) goes through this, so an episode is driven
-    the same way whichever one collects it. An :class:`AsyncBaseEnvironment` runs inline on the event
-    loop; a sync env is offloaded to a worker thread, since its tool and grading handlers block on
-    sandboxed execution for minutes and would stall every episode sharing the loop.
-
-    The offload reuses a single context copied per episode rather than the fresh per-call copy
-    ``asyncio.to_thread`` makes, so a tool's ContextVar writes (the simulated file store) stay visible
-    on the next turn.
-    """
-
-    def __init__(self, env: BaseEnvironment):
+    def __init__(self, env: EnvironmentBase):
         self.env = env
-        self._is_async = isinstance(env, AsyncBaseEnvironment)
+        self._is_async = isinstance(env, AsyncEnvironmentBase)
         self._context = None if self._is_async else contextvars.copy_context()
 
     async def _offload(self, fn, *args):
@@ -510,10 +253,81 @@ class EpisodeDispatcher:
         return await self._settled(episode_ids, steps)
 
     async def _settled(self, episode_ids: list[int], steps: list[EnvStep]) -> list[EnvStep]:
-        """Score the externally rewarded terms of every episode these steps closed. Pure I/O over the
-        finished trajectory, so it runs on the loop for sync and async envs alike; an episode whose
-        reward has no external term is already settled and costs nothing here."""
+        """Score the external terms of every episode these steps closed, on the loop for any env."""
         done = [eid for eid, step in zip(episode_ids, steps, strict=True) if step.done]
         if done:
             await self.env.settle_async(done)
         return steps
+
+
+@dataclass(frozen=True)
+class PlayedEpisode:
+    """One episode as :func:`play_episode` played it: its closed trajectory, every turn generation it stepped,
+    the tokens they sampled, and the generation failure that ended it early, where one did."""
+
+    trajectory: Trajectory | None
+    turns: list[TurnGeneration]
+    generated: int
+    lost_turn: Exception | None = None
+
+
+async def play_episode(
+    env: EnvironmentBase,
+    prompt: str | list[dict[str, Any]],
+    context: dict[str, Any] | None,
+    effort: EpisodeEffort,
+    request_turn: Callable[[list[dict[str, Any]], RolloutConfig, EpisodeEffort], Awaitable[TurnGeneration]],
+    rollout: RolloutConfig,
+    *,
+    log_prefix: str,
+    keep_lost_episode: bool = False,
+) -> PlayedEpisode:
+    """Play one episode, the loop every driver shares: reset, request (``request_turn``, the driver's transport and
+    retries) and step each turn under ``effort``'s caps, close it truncated where still open, stamp the effort,
+    and release it on every path. A lost turn raises, unless ``keep_lost_episode``: then the episode closes on
+    what it earned, stamped :data:`EPISODE_ERROR_KEY`, the failure returned."""
+    episode = EpisodeDispatcher(env)
+    episode_ids, steps = await episode.reset([prompt], [context])
+    eid, step = episode_ids[0], steps[0]
+    turns: list[TurnGeneration] = []
+    generated = 0
+    lost: Exception | None = None
+    try:
+        for _ in range(env.max_turns):
+            # The engine caps this turn: the level's reasoning cap and the turn total, both narrowed to what the
+            # output budget has left; none once it holds no turn.
+            caps = effort.turn_caps(generated)
+            if step.done or caps is None:
+                break
+            try:
+                gen = await request_turn(step.observation, replace(rollout, **caps), effort)
+            except Exception as exc:
+                if not keep_lost_episode:
+                    raise
+                lost = exc
+                break
+            turns.append(gen)
+            generated += gen.tokens
+            step_ctx = step_context_from_generation(
+                context,
+                gen,
+                thinking_cap=effort.thinking_cap,
+                reasoning_end_token_id=rollout.reasoning_end_token_id,
+                last_turn=effort.turn_caps(generated) is None,
+            )
+            step = (await episode.step([eid], [gen.text], [step_ctx]))[0]
+        trajectory = env.get_trajectories([eid])[0]
+        if trajectory is not None and not trajectory.done:
+            # Closed by explicit truncation, never a synthetic empty turn, which would mark it ``completed`` and pay
+            # completion-graded envs; what it earned still counts, priced like a max_turns overflow unless lost.
+            if lost is not None:
+                trajectory.info[EPISODE_ERROR_KEY] = describe_exception(lost)
+            trajectory = (await episode.finalize_truncated([eid]))[0].trajectory
+        effort.stamp(trajectory, generated)
+        return PlayedEpisode(trajectory, turns, generated, lost)
+    finally:
+        # On every path: a stateful env (SweEnvironment) leaks a sandbox working dir per episode.
+        try:
+            env.cleanup([eid])
+        except Exception:  # cleanup must never mask the episode result
+            logger.debug("%s: cleanup failed for episode %s", log_prefix, eid, exc_info=True)

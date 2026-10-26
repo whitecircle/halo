@@ -26,7 +26,7 @@ For exact means, make `len(split) × num_generations_eval` a multiple of `eval_r
 
 ## Running an evaluation
 
-Two CLIs drive training's own `reset`/`step` loop (`src/environments/eval_runner.py`) against an OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter): `run_env.py` for generic environments, `run_code_contests.py` for code contests.
+Two CLIs drive training's own episode loop (`play_episode`, through `src/environments/eval_runner.py`) against an OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter): `run_env.py` for generic environments, `run_code_contests.py` for code contests. Replies are read by the training rollout's own parser (`turn_from_chat_completion`).
 
 ```bash
 python scripts/environments/inference/run_env.py --env_type qa_search \
@@ -98,9 +98,9 @@ Line 1 is a `meta` record of the run's contract: model, env type, dataset/config
 Each later line is an `episode` addressed by `index` and `id`: `reward`, `success`, `generation_error`, `stats`, the messages, `reasoning_effort` / `reasoning_budget` / `reasoning_budget_soft` and `info`.
 
 - `context`, the `_`-prefixed `info` fields (code contests' hidden tests and checker) and assistant chain-of-thought are stripped; other `info` keys stay (`exam_qa` keeps `expected_answer`).
-- Messages keep their `tool_calls`, which the re-grader replays; a call the engine cut stays as unrun `cut_tool_calls`, which it skips.
+- Messages keep their `tool_calls`, which the re-grader replays; a call the engine cut stays as unrun `cut_tool_calls`, which it skips, its arguments decoded as training decodes them ([Cut tool calls](monitoring.md#cut-tool-calls)).
 - Each assistant turn under a reasoning cap keeps its `thinking_cap`, the cap it ran under ([Thinking-cap metric](reasoning.md#thinking-cap-metric)).
-- No turn records `reasoning_tokens`: the eval transport captures no sampled ids.
+- A turn counted under a resolved single-token reasoning close (a vLLM `--training_config` run with a thinking budget, against a server started with `--return-tokens-as-token-ids`) also records `reasoning_tokens`, the reasoning it sampled.
 
 ## Re-grading recorded trajectories
 

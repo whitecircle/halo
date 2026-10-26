@@ -24,7 +24,7 @@ from peft import PeftConfig, PeftModel
 from safetensors import safe_open
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
-from scripts._common import add_device_map_arg, add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts.cli_arguments import add_device_map_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.adapter_merge import adapter_input_gates, load_base_for_adapter, merge_adapter_into_base
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
 from src.checkpoint.model_card import tag_model_card

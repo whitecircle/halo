@@ -20,7 +20,7 @@ import pytest
 
 from scripts.environments.inference import regrade_trajectories
 from scripts.environments.inference.run_code_contests import build_examples, contest_meta, resolve_selection
-from src.environments.registry import resolve_environment
+from src.environments.registry import build_environment
 from src.environments.tasks.coding import contest_datasets as coding_datasets
 from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 
@@ -245,7 +245,7 @@ def test_the_regrader_rebuilds_the_windowed_examples_from_the_meta_line_the_eval
     """Round trip through the writer (``contest_meta``) and the reader: the same problems in the same
     order, so every episode's index still names its own problem."""
     selection = ContestSelection.parse("2025-01-04", "2025-04-06", ["atcoder"])
-    env = resolve_environment("codeforces", {})
+    env = build_environment("codeforces", {})
     generic = {"env_type": "codeforces", "model": "m", "dataset": _DATASET, "config": "release_v2", "split": "test"}
     meta = json.loads(json.dumps({**generic, **contest_meta("livecodebench", selection, env, "medium", {})}))
     regrade_trajectories.validate_meta("f.jsonl", meta)

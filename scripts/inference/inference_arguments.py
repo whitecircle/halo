@@ -1,16 +1,7 @@
-"""Shared plumbing for the generation CLIs under ``scripts/inference``.
-
-``generation/openai_batched_generation.py`` reads a prompt dataset from S3, resumes against a
-partially written output dataset, merges the two and pushes the result back;
-``reward_model/rm_scoring.py`` and ``reward_model/rm_rejection_sampling.py`` generate against the
-same endpoint from local JSONL and score with a reward model. The parts they share live here so the
-sampling, resume, merge and abort contracts stay identical: a mismatched resume re-generates or drops
-rows, a mismatched merge discards a batch's own columns, and a mismatched abort reports a total
-failure as a completed run.
-
-The Gradio apps under ``playground/`` share the address block they bind and launch on, since each
-drives a server-side client holding a live key.
-"""
+"""Shared plumbing for the generation CLIs under ``scripts/inference``: the sampling, resume, merge and abort
+contracts ``openai_batched_generation.py`` and the two reward-model scorers must keep identical (a mismatched
+resume re-generates or drops rows, a mismatched merge discards a batch's own columns, a mismatched abort reports a
+total failure as a completed run), and the address block the ``playground/`` Gradio apps bind and launch on."""
 
 import argparse
 import asyncio

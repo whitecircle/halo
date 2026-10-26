@@ -45,22 +45,22 @@ import json
 import logging
 from typing import Any
 
-from scripts.environments._common import (
+from scripts.environments.eval_arguments import (
     DEFAULT_SPLIT,
     add_endpoint_args,
-    load_training_contract,
     resolve_setting,
     resolve_trajectory_path,
     rollout_config_from_args,
     write_eval_outputs,
 )
-from src.environments.base import ANSWER_KEY
+from scripts.environments.training_contract import load_training_contract
+from src.environments.episode_keys import ANSWER_KEY
 from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
     report,
 )
-from src.environments.registry import resolve_environment
+from src.environments.registry import build_environment
 from src.environments.rollout_config import RolloutConfig
 from src.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
@@ -411,23 +411,23 @@ def main() -> None:
         )
     env_config = resolve_env_config(args, trained_env, env_kwargs)
     reasoning_effort = env_config["reasoning_effort"]
-    env = resolve_environment(env_type, env_config)
+    env = build_environment(env_type, env_config)
     try:
-        # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
-        env.verify_backend()
-        examples = build_examples(args, adapter, selection)
-        client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
-
         # Without a training config the flag's effort level sets the generation budget unless --max_tokens
         # overrides it: too small a budget truncates the chain of thought before any solution and scores
         # the problem 0.
         rollout = rollout_config_from_args(
             args,
             contract,
+            env,
             default_temperature=DEFAULT_TEMPERATURE,
             default_max_tokens=default_max_tokens(env, args.reasoning_effort),
         )
         logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
+        # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
+        env.verify_backend()
+        examples = build_examples(args, adapter, selection)
+        client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
 
         traj_path = run_trajectory_path(args, env, selection)
 

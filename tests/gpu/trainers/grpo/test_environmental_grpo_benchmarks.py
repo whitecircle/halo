@@ -53,7 +53,7 @@ from trl import GRPOConfig
 from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
-from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.protocols.react import ReActEnvironment
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tasks.qa import ExamQAEnvironment
 from src.environments.tools.toolsets import build_math_tools, build_python_tools
@@ -303,7 +303,7 @@ def run_env_grpo_training(
             f"× {num_generations} gen = {batch_size * grad_accum * num_generations} sequences/step"
         )
 
-        # environment_cls takes real BaseEnvironment subclasses only; factory-built envs (qa_search)
+        # environment_cls takes real EnvironmentBase subclasses only; factory-built envs (qa_search)
         # arrive as registry names and must go through EnvironmentConfig instead, whose turn cap is its
         # own field.
         log("  Creating DistributedAsyncEnvironmentalGRPOTrainer...")

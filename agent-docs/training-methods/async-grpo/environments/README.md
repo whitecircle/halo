@@ -1,6 +1,6 @@
 # Environments
 
-An environment is the multi-turn task an [Async GRPO with Environments](../README.md) run trains against. The protocol (`src/environments/base.py`):
+An environment is the multi-turn task an [Async GRPO with Environments](../README.md) run trains against. The protocol (`EnvironmentBase`, `src/environments/environment_base.py`):
 
 - `reset(prompts, contexts)` opens one episode per prompt.
 - `step(episode_ids, actions, contexts)` executes a model turn and returns the next observation.
@@ -10,7 +10,7 @@ An episode ends when the environment reports it done, or at `max_turns`.
 
 ## Registry
 
-`environment_type` resolves through `src/environments/registry.py`. `get_registered_environments()` lists the live set; `register_environment` extends it ([Custom Environments](custom.md)).
+`environment_type` resolves through `build_environment` (`src/environments/registry.py`). `get_registered_environments()` lists the live set; `register_environment` extends it ([Custom Environments](custom.md)).
 
 | `environment_type` | Class | Tools | Default `max_turns` |
 |---|---|---|---|

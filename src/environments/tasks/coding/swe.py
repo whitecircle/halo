@@ -9,8 +9,10 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from src.environments.base import ANSWER_KEY, EpisodeGrade, Trajectory
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.episode_keys import ANSWER_KEY
+from src.environments.episode_scoring import EpisodeGrade
+from src.environments.messages import Trajectory
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
 from src.environments.sandbox.factory import build_sandbox, warn_if_unisolated
 from src.environments.tools.definitions import NativeToolRegistry

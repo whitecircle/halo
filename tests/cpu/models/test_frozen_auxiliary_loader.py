@@ -403,7 +403,7 @@ def test_the_frozen_load_keeps_the_task_head(is_vlm):
     a run that TRAINS that head supplies it. This model never trains anything — every tensor it
     carries is consumed to score the policy — so an absent head is not an excusable absence but a
     randomly initialized one producing plausible numbers on one side of the objective. The reward
-    scorers already load this way (``scripts/inference/reward_model/_common.py``).
+    scorers already load this way (``scripts/inference/reward_model/reward_model_arguments.py``).
     """
     with stub_frozen_loader() as caps:
         load_frozen_auxiliary_model(

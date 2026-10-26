@@ -14,14 +14,9 @@ import torch
 import torch.distributed as dist
 from accelerate.utils import gather_object
 
-from src.environments.base import (
-    EPISODE_SLICES_KEY,
-    REWARD_COMPONENTS_KEY,
-    REWARD_DETAILS_KEY,
-    SOLVE_RATE_KEY,
-    Trajectory,
-)
 from src.environments.episode import RolloutResult
+from src.environments.episode_keys import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY, SOLVE_RATE_KEY
+from src.environments.messages import Trajectory
 from src.rewards.samples import CUT_CALL_NOTE
 from src.rewards.terms import REWARD_COMPONENT_PREFIX
 from src.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem

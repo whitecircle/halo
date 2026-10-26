@@ -1,17 +1,8 @@
-"""Argparse flags shared across the ``scripts/`` subtrees.
+"""Argparse flags shared across the ``scripts/`` subtrees: the shard cap, the Hub-capable source block, the dtype
+and device-map pair, the remote-code switch and the OpenAI-compatible endpoint block.
 
-The shard cap, the Hub-capable source block, the dtype and device-map pair and the remote-code
-switch are defined once so the checkpoint tools chained over a single artifact accept the same
-spelling and defaults; each ``before_training/`` and ``after_training/`` tool takes the ones it
-needs (``quantize_to_lowp.py`` none, ``prepare_dataset.py`` only the remote-code switch). The
-reward-model scorers (``rm_scoring.py``, ``rm_rejection_sampling.py``) take the remote-code switch
-and the dtype flag, the latter as ``--rm_dtype`` (their device is their own ``--rm_device``), and
-``dataset_deduplication.py`` the remote-code switch. The OpenAI-compatible endpoint block
-(``--base_url``, ``--api_key``) is defined once for the same reason across every CLI that drives a
-served model: ``openai_batched_generation.py``, the two reward-model scorers, ``run_env.py``,
-``run_code_contests.py`` and the two Gradio playgrounds. It adds a required ``--model`` for all but
-the playgrounds. Flags only; the drivers they feed live in ``src/``.
-"""
+Defined once so the checkpoint tools chained over one artifact, and every CLI driving a served model, accept one
+spelling and one set of defaults. Flags only; the drivers they feed live in ``src/``."""
 
 import argparse
 
@@ -66,17 +57,11 @@ def add_hub_source_args(
 
 
 def add_trust_remote_code_arg(parser: argparse.ArgumentParser, *, default: bool = True) -> argparse.ArgumentParser:
-    """Add the ``--trust_remote_code`` flag for a tool that loads model code.
+    """Add the ``--trust_remote_code`` flag, one spelling across the tools that load model code.
 
-    The default follows the input source, not the tool:
-
-    * a local checkpoint or adapter (``--input_dir`` / ``--adapter_dir``, or the tokenizer of the run
-      being prepared) defaults on, since the remote-code families in the roster (Bailing/Ling,
-      Laguna, sink-carrying gpt-oss derivatives) ship their modeling files inside it;
-    * a source that may be a Hub repo (``--model_id``) defaults off, so a freshly downloaded
-      third-party repo does not execute its own code.
-
-    ``--trust_remote_code`` / ``--no-trust_remote_code`` overrides either way.
+    The default follows the source: a local checkpoint or adapter defaults on, since the remote-code families
+    (Bailing/Ling, Laguna) ship their modeling files inside it; a source that may be a Hub repo (``--model_id``)
+    defaults off, so a freshly downloaded third-party repo does not run its own code.
     """
     parser.add_argument(
         "--trust_remote_code",

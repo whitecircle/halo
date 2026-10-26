@@ -17,13 +17,14 @@ import json
 
 import pytest
 
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, REWARD_COMPONENTS_KEY
+from src.environments.episode_keys import REWARD_COMPONENTS_KEY
 from src.environments.sandbox.base import SandboxExecutor
 from src.environments.sandbox.repl import format_sandbox_repl_output
 from src.environments.sandbox.results import SandboxResult
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tasks.coding.code_contests_prompts import NO_STDIN_NOTE
 from src.environments.tasks.coding.submission_record import FAILED_WITH_NO_RUNS_LEFT, SUBMISSION_PASS_FRACS_KEY
+from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
 from src.environments.tools.definitions import NativeToolCall
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox, retired_budget_phrases

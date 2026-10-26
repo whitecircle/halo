@@ -20,8 +20,7 @@ import pandas as pd
 import pytest
 from openai.types.chat import ChatCompletionMessage
 
-from scripts.inference.reward_model import _common as rm_common
-from scripts.inference.reward_model import rm_scoring
+from scripts.inference.reward_model import reward_model_arguments, rm_scoring
 
 # --- rm_scoring: reward-model scoring ------------------------------------------------------------
 
@@ -45,12 +44,12 @@ def _prepare_rm_scoring(monkeypatch, tmp_path, *, prompt_ids, resumed_rows, clie
     monkeypatch.setattr(rm_scoring, "load_prompts_dataframe", lambda args: df)
     # Both endpoints are opened, and the batch is scored, through the shared module — that is where
     # the stubs go, or the script would boot a real client and load a real reward model.
-    monkeypatch.setattr(rm_common, "build_openai_client", lambda *a, **k: client)
-    monkeypatch.setattr(rm_common, "load_reward_model", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(reward_model_arguments, "build_openai_client", lambda *a, **k: client)
+    monkeypatch.setattr(reward_model_arguments, "load_reward_model", lambda *a, **k: (None, None, None))
     # The reward head is never reached on the failure paths; on the success path it stands in for it.
-    monkeypatch.setattr(rm_common, "score_conversations", lambda *a, **k: [1.0])
+    monkeypatch.setattr(reward_model_arguments, "score_conversations", lambda *a, **k: [1.0])
 
-    output_path = rm_common.build_output_path(str(tmp_path), str(prompts), "gen-model", "rm_scoring")
+    output_path = reward_model_arguments.build_output_path(str(tmp_path), str(prompts), "gen-model", "rm_scoring")
     if resumed_rows:
         output_path.write_text(
             "\n".join(json.dumps(row) for row in resumed_rows) + "\n",

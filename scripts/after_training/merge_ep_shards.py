@@ -31,7 +31,7 @@ from contextlib import ExitStack
 import torch
 from safetensors import safe_open
 
-from scripts._common import add_max_shard_size_arg
+from scripts.cli_arguments import add_max_shard_size_arg
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, EP_SHARD_KEY_RE, ep_shard_filename, is_ep_shard
 from src.checkpoint.offline_export import (
     copy_checkpoint_aux_files,

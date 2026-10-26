@@ -32,8 +32,8 @@ import pytest
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
+from src.environments.messages import Message, Trajectory
 from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs

@@ -21,9 +21,9 @@ import re
 
 import pytest
 
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from src.environments.protocols.react import ReActEnvironment
+from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 # The generic refusal, as the protocol prefixes it: the tool's name and the fact, no cap and no count.
@@ -331,7 +331,8 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
         def _apply_effort_profile(self, trajectory, level, profile):
             trajectory.info["seen"] = (level, dict(profile))
 
-    assert _Task.effort_profile_key_minima() == {"thinking_tokens": 1, "max_probes": 0}
+    with pytest.raises(ValueError, match=r"allowed: \['enforce_thinking_cap', 'max_probes', 'thinking_tokens'\]"):
+        _Task(tool_registry=_registry(), reasoning_effort_profiles={"low": {"max_submissions": 1}})
     env = _Task(
         tool_registry=_registry(), reasoning_effort="medium", reasoning_effort_profiles={"medium": {"max_probes": 2}}
     )

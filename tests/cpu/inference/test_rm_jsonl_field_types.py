@@ -15,7 +15,7 @@ import types
 
 import pytest
 
-from scripts.inference.reward_model import _common as rm_common
+from scripts.inference.reward_model import reward_model_arguments
 
 _PROMPT = [{"role": "user", "content": "q"}]
 _ROWS = [
@@ -33,13 +33,13 @@ def _args(tmp_path, rows=_ROWS):
 
 def _answer_context(row) -> str | None:
     """The answer line the reward model is shown for ``row``, or None when it is shown none."""
-    answer = rm_common.resolve_correct_answer(row, _ANSWER_ARGS)
-    context = rm_common.prepend_answer_context(list(_PROMPT), answer)
+    answer = reward_model_arguments.resolve_correct_answer(row, _ANSWER_ARGS)
+    context = reward_model_arguments.prepend_answer_context(list(_PROMPT), answer)
     return context[0]["content"] if len(context) > len(_PROMPT) else None
 
 
 def test_string_fields_reach_the_reward_model_unchanged(tmp_path):
-    row = rm_common.load_prompts_dataframe(_args(tmp_path)).iloc[0]
+    row = reward_model_arguments.load_prompts_dataframe(_args(tmp_path)).iloc[0]
 
     assert row["id"] == "007"
     assert row["created_at"] == "2024-01-01"
@@ -64,18 +64,18 @@ def test_numeric_answers_reach_the_reward_model_as_written(answers, shown, tmp_p
         {"id": str(i), "prompt": _PROMPT, **({} if answer == "absent" else {"correct_answer": answer})}
         for i, answer in enumerate(answers)
     ]
-    frame = rm_common.load_prompts_dataframe(_args(tmp_path, rows))
+    frame = reward_model_arguments.load_prompts_dataframe(_args(tmp_path, rows))
 
     expected = [None if value is None else f"The correct final answer must be: {value}" for value in shown]
     assert [_answer_context(row) for _, row in frame.iterrows()] == expected
 
 
 def test_a_resumed_id_matches_the_prompt_it_was_written_for(tmp_path):
-    prompts = rm_common.load_prompts_dataframe(_args(tmp_path))
+    prompts = reward_model_arguments.load_prompts_dataframe(_args(tmp_path))
     output = tmp_path / "out.jsonl"
-    rm_common.append_jsonl_record(output, {"id": "007", "reward": 1.0})
+    reward_model_arguments.append_jsonl_record(output, {"id": "007", "reward": 1.0})
 
-    processed, _existing = rm_common.load_local_jsonl_resume(output, "id")
+    processed, _existing = reward_model_arguments.load_local_jsonl_resume(output, "id")
 
     assert processed == {"007"}
     assert prompts[~prompts["id"].isin(processed)]["id"].tolist() == ["008"]

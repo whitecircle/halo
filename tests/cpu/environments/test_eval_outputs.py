@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from scripts.environments._common import write_eval_outputs
+from scripts.environments.eval_arguments import write_eval_outputs
 from src.environments.rollout_config import RolloutConfig
 
 

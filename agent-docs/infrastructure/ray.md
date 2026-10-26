@@ -66,11 +66,12 @@ exit hangs.
 - **Lazy environment build**: the env is constructed inside the actor on its first episode. A broken
   environment constructor surfaces as per-episode errors, not a startup crash.
 
-The actor's episode loop shares three things with the offline eval driver (`run_episode` in
-`src/environments/eval_runner.py`), all in `src/environments/episode.py`: the per-turn step-context
-stamp (`step_context_from_generation`), the effort binding, and the turn retry policy
-(`generate_turn`: backoff, engine-abort re-issue). It keeps its own aiohttp session, retryable-4xx
-classification, and engine token/routing capture.
+The actor and the offline eval driver (`run_episode` in `src/environments/eval_runner.py`) play one
+episode loop, `play_episode` in `src/environments/episode.py`: reset, the per-turn caps, the step
+context, the truncated close, the effort stamp and the cleanup. Both read replies with
+`turn_from_chat_completion` (`src/environments/engine_wire.py`) and retry turns under `generate_turn`
+(backoff, engine-abort re-issue). The actor keeps its own aiohttp transport and retryable-4xx rule, and
+turns a fault anywhere in the episode into a masked row.
 
 A turn the engine **aborts** (SGLang's sync pause drops every in-flight request) is re-issued for the
 same observation, up to `max_retries` times (default `3`), rather than stepped as a length cut; past

@@ -58,7 +58,6 @@ def _tool_roots(repo_root: Path) -> tuple[Path, ...]:
     Discovered from the tree, so a new subtree (e.g. ``profiling``) indexes without a code change;
     directories holding no runnable scripts drop out in :func:`_index`.
     """
-
     scripts_root = repo_root / SCRIPTS_ROOT
     if not scripts_root.exists():
         return ()
@@ -91,26 +90,21 @@ def _stem_alias_key(stem: str) -> str:
     return stem.removesuffix("s")
 
 
-def _is_runnable(path: Path) -> bool:
-    """A script is launchable if it has a ``__main__`` guard."""
-    return "__main__" in path.read_text(encoding="utf-8")
-
-
 def _index(roots: Iterable[Path], repo_root: Path, name_base: Path) -> dict[str, Path]:
     """Map slugged names to runnable scripts found under ``roots``.
 
-    Each script is indexed by its path relative to ``name_base`` (e.g. ``preference/smpo`` or
-    ``after-training/merge-ep-shards``), plus a short alias of its file stem when that stem, folded
-    with its singular/plural variant (:func:`_stem_alias_key`), is unambiguous across the index.
+    A script is runnable when it has a ``__main__`` guard. Each is indexed by its path relative to
+    ``name_base`` (e.g. ``preference/smpo`` or ``after-training/merge-ep-shards``), plus a short alias of
+    its file stem when that stem, folded with its singular/plural variant (:func:`_stem_alias_key`), is
+    unambiguous across the index.
     """
-
     discovered: list[tuple[str, str, Path]] = []
     for root in roots:
         script_root = repo_root / root
         if not script_root.exists():
             continue
         for script in sorted(script_root.rglob("*.py")):
-            if not _is_runnable(script):
+            if "__main__" not in script.read_text(encoding="utf-8"):
                 continue
             parts = [_slug(part) for part in script.relative_to(repo_root / name_base).with_suffix("").parts]
             discovered.append(("/".join(parts), _slug(script.stem), script))
@@ -134,12 +128,11 @@ def training_methods(root: Path | None = None) -> dict[str, Path]:
 def tool_commands(root: Path | None = None) -> dict[str, Path]:
     """Index the non-training tools (after-training, inference, before-training, environments,
     profiling, ...) from every ``scripts/`` subtree :data:`_NON_TOOL_DIRS` does not exclude."""
-
     repo_root = root or REPO_ROOT
     return _index(_tool_roots(repo_root), repo_root, SCRIPTS_ROOT)
 
 
-def command(
+def build_launch_command(
     script: Path,
     config: Path | None,
     *,
@@ -156,7 +149,6 @@ def command(
     ``--nproc_per_node`` under torchrun; ``port`` to ``--main_process_port`` / ``--master_port``
     (concurrent multi-process launches collide on the default rendezvous port without it).
     """
-
     if accelerate_config is not None:
         launcher = ["accelerate", "launch", "--config_file", str(accelerate_config)]
         if nproc > 1:
@@ -197,17 +189,6 @@ def _reject_option_as_positional(value: str | Path | None, name: str, usage: str
         raise click.UsageError(f"{name} must come before any flag, but got '{value}'. Usage: {usage}")
 
 
-def reject_multinode_flags(args: list[str]) -> None:
-    """Reject torchrun's multi-node flags among the pass-through args (``_TORCHRUN_MULTINODE_FLAGS``)."""
-    stray = [arg for arg in args if arg.split("=", 1)[0] in _TORCHRUN_MULTINODE_FLAGS]
-    if stray:
-        raise typer.BadParameter(
-            f"{stray} are torchrun flags, and halo launch is single-node (they would reach the training "
-            f"script as unknown config fields). Launch one torchrun per node directly — "
-            f"agent-docs/parallelism/launch-recipes.md."
-        )
-
-
 def _show(index: dict[str, Path], root: Path) -> None:
     if not index:
         typer.echo(f"(none found under {root})")
@@ -219,7 +200,6 @@ def _show(index: dict[str, Path], root: Path) -> None:
 
 def _lookup(index: dict[str, Path], name: str, kind: str, root: Path) -> Path:
     """Resolve a typed name against the hyphenated index (see :func:`_lookup_key`)."""
-
     # An empty index means a wrong --root (or an install without the scripts tree), not a bad name.
     if not index:
         raise typer.BadParameter(f"no {kind}s found under {root} — is --root a Halo checkout?")
@@ -286,17 +266,14 @@ def launch(
 ) -> None:
     """Launch a training method without spelling out Python, torchrun/accelerate, or script paths.
 
-    Defaults to Python (single process) or torchrun (``--nproc > 1``, required for EP/CP/TP).
-    Pass ``--accelerate <config>`` for standard FSDP data-parallel via ``accelerate launch``.
+    Defaults to Python (single process) or torchrun (``--nproc > 1``, required for EP/CP/TP); pass
+    ``--accelerate <config>`` for standard FSDP data-parallel via ``accelerate launch``.
 
     Config-field overrides follow the config and reach the training script as typed
-    (``halo launch sft config.yaml -n 8 --learning_rate=1e-5``). A standalone ``--`` is needed only
-    before a flag that collides with the launcher's own.
-
-    The run executes from ``--root``, so relative paths in the config (and in CLI overrides) resolve
-    against the repository root, not the caller's cwd.
+    (``halo launch sft config.yaml -n 8 --learning_rate=1e-5``); a standalone ``--`` is needed only
+    before a flag that collides with the launcher's own. The run executes from ``--root``, so relative
+    paths in the config and its overrides resolve against the repository root, not the caller's cwd.
     """
-
     root = root.resolve()
     index = training_methods(root)
     if list_methods:
@@ -308,13 +285,18 @@ def launch(
         raise click.UsageError("halo launch requires METHOD and CONFIG")
     script = _lookup(index, method, "method", root)
     accelerate_config = resolve_config(accelerate, root) if accelerate is not None else None
-    extra = ctx.args
-    reject_multinode_flags(extra)
-    argv = command(
+    stray = [arg for arg in ctx.args if arg.split("=", 1)[0] in _TORCHRUN_MULTINODE_FLAGS]
+    if stray:
+        raise typer.BadParameter(
+            f"{stray} are torchrun flags, and halo launch is single-node (they would reach the training "
+            f"script as unknown config fields). Launch one torchrun per node directly — "
+            f"agent-docs/parallelism/launch-recipes.md."
+        )
+    argv = build_launch_command(
         script,
         resolve_config(config, root),
         nproc=nproc,
-        args=extra,
+        args=ctx.args,
         accelerate_config=accelerate_config,
         port=port,
     )
@@ -346,7 +328,6 @@ def run(
     The tool runs in the caller's cwd (unlike ``halo launch``), so a relative path flag means what it
     would mean had the script been invoked directly.
     """
-
     root = root.resolve()
     index = tool_commands(root)
     if list_tools:
@@ -356,7 +337,7 @@ def run(
     if tool is None:
         raise click.UsageError("halo run requires a TOOL name (use --list to see options)")
     script = _lookup(index, tool, "tool", root)
-    argv = command(script, None, nproc=nproc, args=ctx.args, port=port)
+    argv = build_launch_command(script, None, nproc=nproc, args=ctx.args, port=port)
     _execute(argv, None, dry_run=dry_run)
 
 

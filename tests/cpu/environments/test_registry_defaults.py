@@ -12,9 +12,10 @@ Run: python tests/cpu/environments/test_registry_defaults.py  (or pytest)
 import pytest
 
 from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, BaseEnvironment
-from src.environments.envs.protocols.react import create_react_math_environment
-from src.environments.registry import get_registered_environments, resolve_environment
+from src.environments.environment_base import EnvironmentBase
+from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
+from src.environments.protocols.react import build_react_math_environment
+from src.environments.registry import build_environment, get_registered_environments
 from src.rewards.terms import EnvironmentTerm
 from tests.common.repo import REPO_ROOT
 
@@ -54,13 +55,13 @@ _SEARCH_ENV_KWARGS = {"exam_qa": {"open_book": True}, "native_combined": {}, "qa
 
 
 def _base_default_max_turns() -> int:
-    """``BaseEnvironment``'s own default — the value every env inherits unless it declares one."""
-    return BaseEnvironment.DEFAULT_MAX_TURNS
+    """``EnvironmentBase``'s own default — the value every env inherits unless it declares one."""
+    return EnvironmentBase.DEFAULT_MAX_TURNS
 
 
 def _declared_max_turns(env_type: str) -> int:
     """The ``DEFAULT_MAX_TURNS`` the class registered under ``env_type`` declares."""
-    return type(resolve_environment(env_type, _ENV_KWARGS[env_type])).DEFAULT_MAX_TURNS
+    return type(build_environment(env_type, _ENV_KWARGS[env_type])).DEFAULT_MAX_TURNS
 
 
 def _table_cells(line: str) -> list[str]:
@@ -85,7 +86,7 @@ def _documented_max_turns() -> dict[str, int]:
 @pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
 def test_class_default_max_turns_wins_when_unconfigured(env_type):
     expected = _CLASS_DEFAULT_MAX_TURNS.get(env_type, _base_default_max_turns())
-    env = resolve_environment(env_type, _ENV_KWARGS[env_type])
+    env = build_environment(env_type, _ENV_KWARGS[env_type])
     assert env.max_turns == expected
 
 
@@ -126,7 +127,7 @@ def test_each_environment_declares_whether_its_reward_needs_an_answer(env_type):
     """``requires_answer`` is what the trainer refuses an answer-less dataset by, so a class that
     grades on ``context["answer"]`` and forgets to declare it trains on a constant reward, while one
     that declares it spuriously refuses a dataset it could have trained on."""
-    env = resolve_environment(env_type, _ENV_KWARGS[env_type])
+    env = build_environment(env_type, _ENV_KWARGS[env_type])
     assert env.requires_answer is (env_type in _REQUIRES_ANSWER)
 
 
@@ -139,7 +140,7 @@ def test_a_react_answer_validator_grades_in_place_of_the_answer_column():
     """The validator IS the grader once passed — consulted before the expected answer is read — so it
     clears the requirement; without one an answer-less episode collects the full objective for
     reaching any Final Answer at all."""
-    assert create_react_math_environment().requires_answer
+    assert build_react_math_environment().requires_answer
 
     seen = []
 
@@ -147,7 +148,7 @@ def test_a_react_answer_validator_grades_in_place_of_the_answer_column():
         seen.append((answer, expected))
         return answer == "7"
 
-    env = create_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
+    env = build_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
     assert not env.requires_answer
 
     ids, _ = env.reset(["2 + 5?"])
@@ -164,7 +165,7 @@ def test_a_raising_react_validator_voids_the_episode_instead_of_paying_it():
     def validator(answer, expected):
         raise RuntimeError("grader down")
 
-    env = create_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
+    env = build_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
     ids, _ = env.reset(["2 + 5?"])
     trajectory = env.step(ids, ["Thought: add\nFinal Answer: 7"], [{}])[0].trajectory
     assert trajectory.total_reward == 0.0
@@ -175,12 +176,12 @@ def test_a_raising_react_validator_voids_the_episode_instead_of_paying_it():
 def test_an_explicit_requires_answer_overrides_the_class_declaration():
     """The escape hatch for a run that grades some other way: an environment_kwargs entry, like every
     other constructor knob."""
-    assert not resolve_environment("exam_qa", {"requires_answer": False}).requires_answer
-    assert resolve_environment("native_math", {"requires_answer": True}).requires_answer
+    assert not build_environment("exam_qa", {"requires_answer": False}).requires_answer
+    assert build_environment("native_math", {"requires_answer": True}).requires_answer
 
 
 def test_explicit_max_turns_still_overrides():
-    env = resolve_environment("swe", {"sandbox_backend": "local", "max_turns": 7})
+    env = build_environment("swe", {"sandbox_backend": "local", "max_turns": 7})
     assert env.max_turns == 7
 
 
@@ -188,17 +189,17 @@ def test_explicit_max_turns_still_overrides():
 def test_unknown_environment_kwarg_is_rejected(env_type):
     """An ``environment_kwargs`` key no constructor binds must raise, not be silently absorbed.
 
-    Parking leftover ``**kwargs`` in ``BaseEnvironment.__init__``'s ``self.config``, which nothing
+    Parking leftover ``**kwargs`` in ``EnvironmentBase.__init__``'s ``self.config``, which nothing
     ever reads, lets a misspelled key (``timout_per_test``) or one meant for a different ``env_type``
     (``sandbox_backend`` on a non-sandboxed env) parse cleanly and change nothing about the run.
     """
     with pytest.raises(TypeError, match="timout_per_test"):
-        resolve_environment(env_type, {"timout_per_test": 10})
+        build_environment(env_type, {"timout_per_test": 10})
 
 
 def test_valid_environment_kwarg_still_reaches_the_environment():
     """Guards the rejection above from being satisfied by rejecting everything."""
-    env = resolve_environment("code_contests", {"timeout_per_test": 3, "sandbox_backend": "local"})
+    env = build_environment("code_contests", {"timeout_per_test": 3, "sandbox_backend": "local"})
     assert env.grading_spec.default_timeout == 3
 
 
@@ -209,10 +210,10 @@ def test_every_search_environment_takes_its_backend_from_the_config(env_type, mo
     a preset can only auto-select, so a run searches on whichever API key its actor nodes hold."""
     monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
     config = {**_ENV_KWARGS[env_type], **_SEARCH_ENV_KWARGS[env_type]}
-    env = resolve_environment(env_type, {**config, "search_backend": "mock"})
+    env = build_environment(env_type, {**config, "search_backend": "mock"})
     assert "Wikipedia: pytest" in env.registry.get("web_search").execute(query="pytest")
     with pytest.raises(ValueError, match="Unknown search backend: nonexistent"):
-        resolve_environment(env_type, {**config, "search_backend": "nonexistent"})
+        build_environment(env_type, {**config, "search_backend": "nonexistent"})
 
 
 def test_the_search_table_names_every_environment_that_registers_web_search():
@@ -220,7 +221,7 @@ def test_the_search_table_names_every_environment_that_registers_web_search():
     knob is held to it too."""
     registering = set()
     for env_type, kwargs in _ENV_KWARGS.items():
-        env = resolve_environment(env_type, {**kwargs, **_SEARCH_ENV_KWARGS.get(env_type, {})})
+        env = build_environment(env_type, {**kwargs, **_SEARCH_ENV_KWARGS.get(env_type, {})})
         if "web_search" in env.registry.names():
             registering.add(env_type)
     assert registering == set(_SEARCH_ENV_KWARGS)
@@ -231,17 +232,17 @@ def test_non_positive_max_turns_is_rejected(max_turns):
     """``max_turns: 0`` makes the rollout loop a no-op, so every episode returns reward 0 with no
     error — a silently all-zero batch that reads as a legitimately failing policy."""
     with pytest.raises(ValueError, match="max_turns"):
-        resolve_environment("react_math", {"max_turns": max_turns})
+        build_environment("react_math", {"max_turns": max_turns})
 
 
 def test_the_reward_defaults_to_the_environment_term_alone():
     """An env config naming no ``reward_terms`` prices the environment's own all-or-nothing grade at
     weight 1, exponent 1 — and a per-env reward knob is refused as an unknown option, not absorbed."""
-    env = resolve_environment("exam_qa", {})
+    env = build_environment("exam_qa", {})
     assert env.reward_terms == (EnvironmentTerm(),)
     for knob in ("success_reward", "failure_reward", "partial_reward"):
         with pytest.raises(TypeError, match=knob):
-            resolve_environment("exam_qa", {knob: 0.5})
+            build_environment("exam_qa", {knob: 0.5})
 
 
 def test_environment_config_yaml_path_defers_to_class_default():
@@ -249,7 +250,7 @@ def test_environment_config_yaml_path_defers_to_class_default():
     default — an unset max_turns lets the class default (code_contests 15) win."""
     cfg = EnvironmentConfig(environment_type="code_contests", environment_kwargs={"sandbox_backend": "local"})
     assert "max_turns" not in cfg.to_env_config()
-    env = resolve_environment(cfg.environment_type, cfg.to_env_config())
+    env = build_environment(cfg.environment_type, cfg.to_env_config())
     assert env.max_turns == 15
 
 
@@ -257,7 +258,7 @@ def test_environment_config_explicit_max_turns_overrides():
     cfg = EnvironmentConfig(
         environment_type="code_contests", max_turns=12, environment_kwargs={"sandbox_backend": "local"}
     )
-    env = resolve_environment(cfg.environment_type, cfg.to_env_config())
+    env = build_environment(cfg.environment_type, cfg.to_env_config())
     assert env.max_turns == 12
 
 

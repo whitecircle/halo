@@ -1,9 +1,7 @@
 """Composite-config level access: read and write a field on every level that declares it.
 
-``PreTrainedConfig`` has no ``__getattr__``, so on a composite (VLM) config a decoder field lives only
-on ``get_text_config()`` while others live only on the wrapper, and a one-level read returns the
-default instead. The run-scoped writes, the embedding-tie readers and the field snapshots
-build on the same level enumeration."""
+``PreTrainedConfig`` has no ``__getattr__``, so on a composite (VLM) config a decoder field lives only on
+``get_text_config()`` while others live only on the wrapper, and a one-level read returns the default instead."""
 
 import contextlib
 import weakref
@@ -23,10 +21,8 @@ SPECIAL_TOKEN_ID_FIELDS = ("eos_token_id", "bos_token_id", "pad_token_id")
 # run and what an export carries.
 ROUTER_AUX_FIELDS = ("output_router_logits", "router_aux_loss_coef")
 
-# A field the level did not hold when its value was captured, so the restore removes it rather than
-# writing a value back: a special-token id a composite wrapper lacked until align_special_tokens
-# planted one, or a run-scoped field absent from the instance ``__dict__`` (serialization fell through
-# to the class default).
+# A field the level did not hold when captured, which the restore removes rather than writes back (a special-token
+# id align_special_tokens planted, a run-scoped field the instance ``__dict__`` lacked).
 _ABSENT = object()
 
 # Pre-mutation values of run-scoped config writes, kept outside the config object so nothing carries
@@ -52,9 +48,16 @@ def config_sources(cfg) -> tuple:
     return (cfg,) if text_cfg is cfg else (cfg, text_cfg)
 
 
+def config_model_types(cfg) -> tuple[str, ...]:
+    """Every ``model_type`` spelling across :func:`config_sources`, wrapper first, deduplicated; ``()`` for no config."""
+    if cfg is None:
+        return ()
+    return tuple(dict.fromkeys(mt for level in config_sources(cfg) if (mt := getattr(level, "model_type", None))))
+
+
 def model_type_matches(cfg, *prefixes: str) -> bool:
     """Whether the ``model_type`` of any :func:`config_sources` level starts with one of ``prefixes``."""
-    return any((getattr(level, "model_type", "") or "").startswith(prefixes) for level in config_sources(cfg))
+    return any(model_type.startswith(prefixes) for model_type in config_model_types(cfg))
 
 
 def tie_flag_configs(config, prefix: str = "") -> dict[str, object]:
@@ -234,10 +237,3 @@ def apply_config_overrides(model_config, overrides: dict | None) -> None:
         for target in targets:
             setattr(target, key, value)
         logger.info(f"  Set {key} = {value} on {', '.join(type(t).__name__ for t in targets)}")
-
-
-def config_model_types(cfg) -> tuple[str, ...]:
-    """Every ``model_type`` spelling across :func:`config_sources`, wrapper first, deduplicated; ``()`` for no config."""
-    if cfg is None:
-        return ()
-    return tuple(dict.fromkeys(mt for level in config_sources(cfg) if (mt := getattr(level, "model_type", None))))

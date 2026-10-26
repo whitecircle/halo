@@ -1,3 +1,2 @@
-"""RL environments for Environmental GRPO: the env protocol and registry, the episode driver contract,
-the env implementations under ``envs/``, their tools and code sandboxes, the Ray actors and the eval runner.
-Import from the defining module."""
+"""RL environments for environmental GRPO: the environment lifecycle and its concerns, the protocols and
+tasks, the registry, the episode loop, the Ray actors and the eval runner. Import from the defining module."""

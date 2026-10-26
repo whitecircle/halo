@@ -14,10 +14,11 @@ Those helpers are the shared flag surfaces:
 
 | Helper | Flags |
 |---|---|
-| `scripts/_common.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, each taken by the `before_training/` and `after_training/` tools that need it (`quantize_to_lowp.py` and `s3_datasets.py` take none, `prepare_dataset.py` only `--trust_remote_code`); `--trust_remote_code` and the dtype flag, spelled `--rm_dtype`, by the reward-model scorers `rm_scoring.py` and `rm_rejection_sampling.py` (their device flag is their own `--rm_device`); `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`), taken by every CLI that drives a served model — `openai_batched_generation.py`, the two reward-model scorers, `run_env.py`, `run_code_contests.py` and the two Gradio playgrounds — with a required `--model` on all but the playgrounds (the chatbot declares its own optional `--model`; the environment playground takes the name in its UI) |
-| `scripts/inference/_common.py` | The generation block (`--n_parallel`, `--temperature`, `--max_gen_tokens`) and the prompt-row fields (`--id_field`, `--prompt_field`, `--local_system_prompt_field`, `--global_system_prompt`), shared by the S3 generation CLI and the reward-model scorers; the S3 dataset block (`--input_path`, `--output_path`, `--subfolder`) and `--checkpoint_interval` of the S3 generation CLI; the Gradio server block (`--host`, `--port`, `--share`) of the two playgrounds |
-| `scripts/inference/reward_model/_common.py` | The reward-model scoring block, on top of the previous two |
-| `scripts/environments/_common.py` | The env-eval dataset/endpoint/trajectory flags, `--training_config`, and the output writer |
+| `scripts/cli_arguments.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, each taken by the `before_training/` and `after_training/` tools that need it (`quantize_to_lowp.py` and `s3_datasets.py` take none, `prepare_dataset.py` only `--trust_remote_code`); `--trust_remote_code` and the dtype flag, spelled `--rm_dtype`, by the reward-model scorers `rm_scoring.py` and `rm_rejection_sampling.py` (their device flag is their own `--rm_device`); `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`), taken by every CLI that drives a served model — `openai_batched_generation.py`, the two reward-model scorers, `run_env.py`, `run_code_contests.py` and the two Gradio playgrounds — with a required `--model` on all but the playgrounds (the chatbot declares its own optional `--model`; the environment playground takes the name in its UI) |
+| `scripts/inference/inference_arguments.py` | The generation block (`--n_parallel`, `--temperature`, `--max_gen_tokens`) and the prompt-row fields (`--id_field`, `--prompt_field`, `--local_system_prompt_field`, `--global_system_prompt`), shared by the S3 generation CLI and the reward-model scorers; the S3 dataset block (`--input_path`, `--output_path`, `--subfolder`) and `--checkpoint_interval` of the S3 generation CLI; the Gradio server block (`--host`, `--port`, `--share`) of the two playgrounds |
+| `scripts/inference/reward_model/reward_model_arguments.py` | The reward-model scoring block, on top of the previous two |
+| `scripts/environments/eval_arguments.py` | The env-eval dataset/endpoint/trajectory flags, their `Namespace` readers, and the output writer |
+| `scripts/environments/training_contract.py` | `TrainingContract`: the `--training_config` YAML read with the training script's config classes |
 
 Flag spelling is per script and stable: `scripts/profiling/**`, `before_training/prepare_dataset.py` and `before_training/s3_datasets.py` spell their own multi-word flags with dashes (`--server-url`); every other script uses underscores (`--base_url`), matching the YAML field names a training flag overrides. The shared `--trust_remote_code` keeps its one spelling everywhere, `prepare_dataset.py` included.
 
@@ -126,15 +127,17 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 \
 | `scripts/environments/inference/regrade_trajectories.py` | Offline re-grader: replays saved JSONL (`<jsonl...> --workers --output`) through grading only, decoupled from generation. Needs the code-contest meta `run_code_contests.py` stamps (`adapter`/`language` on top of the generic eval meta); a `run_env.py` trajectory is rejected up front. Re-applies the recorded contest selection and protocol, reads each recorded call's arguments as the environment read them, and leaves an episode recorded with a `generation_error` out of `n`, counted in `generation_errors` |
 
 Both `run_*.py` runners in `scripts/environments/inference/` share one dataset/endpoint/trajectory flag block
-(`scripts/environments/_common.py`). `--training_config <yaml>` points them at an async-GRPO training
-YAML and evaluates under that run's contract: its `EnvironmentConfig`, and its rollout settings
+(`scripts/environments/eval_arguments.py`). `--training_config <yaml>` points them at an async-GRPO training
+YAML (`scripts/environments/training_contract.py`) and evaluates under that run's contract: its `EnvironmentConfig`, and its rollout settings
 (backend, chat-template variables, stop tokens, thinking budget, temperature, top-p, top-k, min-p,
 repetition penalty, max tokens per turn and per episode, request timeout).
 
 Precedence is explicit flag → `--training_config` → the script's own default, so an eval matches the
 run it is judging unless a flag says otherwise. A `rollout_stop_tokens` entry that the config's
 tokenizer does not know raises here, as it does at trainer construction: both resolve the list through
-`resolve_rollout_stop_token_ids`.
+`resolve_rollout_stop_token_ids`. A vLLM contract whose run-wide cap, or an effort level the eval's environment
+can draw, sets a thinking budget the served model type cannot enforce (Mistral 4) is refused before any episode,
+as the trainer refuses it (`reject_unenforceable_thinking_budget`).
 
 In `openai_batched_generation.py`, `--input_path` / `--output_path` are S3 **keys**, not URIs:
 `build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (required; unset raises) and `--subfolder`
@@ -229,10 +232,10 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 
 - **Remote code.** Every checkpoint tool that loads a checkpoint's own modeling/config/tokenizer code
   takes one `--trust_remote_code`, spelled once (`add_trust_remote_code_arg` in
-  `scripts/_common.py`): `merge_peft_adapters.py`, `merge_models.py`,
+  `scripts/cli_arguments.py`): `merge_peft_adapters.py`, `merge_models.py`,
   `convert_to_bf16.py`, `reset_sinks.py`, `reattach_vision_tower.py`, `patch_vocab.py`,
   `prepare_dataset.py`, `convert_deepseek_v4_bf16.py`, the reward-model scoring CLIs
-  (`rm_scoring.py`, `rm_rejection_sampling.py`) through `scripts/inference/reward_model/_common.py`,
+  (`rm_scoring.py`, `rm_rejection_sampling.py`) through `scripts/inference/reward_model/reward_model_arguments.py`,
   and `dataset_deduplication.py`.
 
     **The default follows the input source.** A local checkpoint or adapter (`--input_dir`,

@@ -5,7 +5,7 @@ Each path below reports partial or failed work as clean work unless the accounti
 
 * ``reward_model/rm_scoring.py`` must count each per-row failure, or neither its own summary nor the
   guard's tally can say how many rows the endpoint lost.
-* ``_common.run_async_cli``'s signal handler must not exit 0: a SIGTERM'd (or Ctrl-C'd) job then
+* ``inference_arguments.run_async_cli``'s signal handler must not exit 0: a SIGTERM'd (or Ctrl-C'd) job then
   reports success to whatever ran it and the next pipeline stage consumes a partial output dataset.
 * ``rm_rejection_sampling.join_worker_queue`` must not race a queue drain against its worker —
   reading the drain first drops the worker's exception whenever the two complete together.
@@ -25,9 +25,8 @@ import pandas as pd
 import pytest
 from openai.types.chat import ChatCompletionMessage
 
-from scripts.inference import _common
-from scripts.inference.reward_model import _common as rm_common
-from scripts.inference.reward_model import rm_rejection_sampling, rm_scoring
+from scripts.inference import inference_arguments
+from scripts.inference.reward_model import reward_model_arguments, rm_rejection_sampling, rm_scoring
 from src.inference.openai_client import EmptyChoicesError
 
 
@@ -55,8 +54,8 @@ def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path)
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})
     monkeypatch.setattr(rm_scoring, "load_prompts_dataframe", lambda args: df)
-    monkeypatch.setattr(rm_common, "build_openai_client", lambda *a, **k: _DeadClient())
-    monkeypatch.setattr(rm_common, "load_reward_model", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(reward_model_arguments, "build_openai_client", lambda *a, **k: _DeadClient())
+    monkeypatch.setattr(reward_model_arguments, "load_reward_model", lambda *a, **k: (None, None, None))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -113,7 +112,7 @@ def test_generate_chat_message_reports_the_finish_reason():
     """The reason is part of the contract: without it the scoring scripts cannot tell a finished
     answer from a fragment cut at --max_gen_tokens."""
     message, finish_reason = asyncio.run(
-        rm_common.generate_chat_message(
+        reward_model_arguments.generate_chat_message(
             _TruncatingClient(), [{"role": "user", "content": "q"}], _rm_args(), {"type": "text"}
         )
     )
@@ -134,7 +133,7 @@ def test_generate_chat_message_names_a_reply_without_choices():
 
     with pytest.raises(EmptyChoicesError, match="'gen-model'.*bad request"):
         asyncio.run(
-            rm_common.generate_chat_message(
+            reward_model_arguments.generate_chat_message(
                 _EmptyClient(), [{"role": "user", "content": "q"}], _rm_args(), {"type": "text"}
             )
         )
@@ -147,9 +146,9 @@ def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_pat
     prompts.touch()
     df = pd.DataFrame({"id": [1, 2, 3], "prompt": [[{"role": "user", "content": "q"}] for _ in range(3)]})
     monkeypatch.setattr(rm_scoring, "load_prompts_dataframe", lambda args: df)
-    monkeypatch.setattr(rm_common, "build_openai_client", lambda *a, **k: _TruncatingClient())
-    monkeypatch.setattr(rm_common, "load_reward_model", lambda *a, **k: (None, None, None))
-    monkeypatch.setattr(rm_common, "score_conversations", lambda *a, **k: [1.0])
+    monkeypatch.setattr(reward_model_arguments, "build_openai_client", lambda *a, **k: _TruncatingClient())
+    monkeypatch.setattr(reward_model_arguments, "load_reward_model", lambda *a, **k: (None, None, None))
+    monkeypatch.setattr(reward_model_arguments, "score_conversations", lambda *a, **k: [1.0])
     monkeypatch.setattr(
         sys,
         "argv",
@@ -193,7 +192,7 @@ def test_rm_rejection_sampling_drops_a_row_whose_hypotheses_were_truncated():
 
 def test_rm_scoring_output_path_helper_is_the_one_under_test(tmp_path):
     """Pins the driver above to the real output-path contract rather than a path it invented."""
-    assert rm_common.build_output_path(str(tmp_path), "p.jsonl", "m", "rm_scoring").parent == tmp_path
+    assert reward_model_arguments.build_output_path(str(tmp_path), "p.jsonl", "m", "rm_scoring").parent == tmp_path
 
 
 # --- run_async_cli: an interrupted run is not a successful one ------------------------------------
@@ -204,15 +203,15 @@ def test_an_interrupt_exits_with_the_shell_convention_for_a_signalled_process(si
     """128 + signo, not 0: a wrapper script, a CI step or a ``&&`` chain reads 0 as "the dataset is
     complete" and proceeds to consume a partially written output."""
     with pytest.raises(SystemExit) as excinfo:
-        _common._signal_handler(signum, None)
+        inference_arguments._signal_handler(signum, None)
 
     assert excinfo.value.code == 128 + signum
 
 
 def test_the_saved_progress_hint_survives(caplog):
     """The non-zero exit is only actionable with the resume instruction beside it."""
-    with caplog.at_level(logging.INFO, logger=_common.__name__), pytest.raises(SystemExit):
-        _common._signal_handler(signal.SIGINT, None)
+    with caplog.at_level(logging.INFO, logger=inference_arguments.__name__), pytest.raises(SystemExit):
+        inference_arguments._signal_handler(signal.SIGINT, None)
 
     assert any("resume by re-running" in message for message in caplog.messages), caplog.messages
 
@@ -279,7 +278,7 @@ def test_the_fixture_rows_carry_the_fields_the_cli_actually_reads():
     nothing. Taken from the shared parser's own defaults, not from a literal repeated here.
     """
     parser = argparse.ArgumentParser()
-    _common.add_s3_dataset_args(parser)
+    inference_arguments.add_s3_dataset_args(parser)
     defaults = parser.parse_args(["--input_path", "in", "--output_path", "out"])
 
     row = _prompt_rows(1)[0]

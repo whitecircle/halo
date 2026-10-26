@@ -76,7 +76,7 @@ def test_any_stage_active_counts_opsm_beside_the_mask_stages():
 def test_ismask_validation():
     with pytest.raises(ValueError, match="together"):
         ISMaskConfig(geo_band_min=0.99)
-    with pytest.raises(ValueError, match="bounds"):
+    with pytest.raises(ValueError, match=r"isr_geo_band_min must be in \(0, 1\)"):
         ISMaskConfig(geo_band_min=1.2, geo_band_max=2.0)
     with pytest.raises(ValueError, match="veto"):
         ISMaskConfig(veto_min=2.0)

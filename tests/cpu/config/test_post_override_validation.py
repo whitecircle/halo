@@ -250,7 +250,7 @@ def test_unknown_pipeline_schedule_is_rejected_at_parse_time(tmp_path):
 
 
 def test_unknown_reasoning_effort_is_rejected_at_parse_time(tmp_path):
-    """The env-GRPO path validates this steer in BaseEnvironment.__init__; the RLVR path has only the
+    """The env-GRPO path validates this steer in EnvironmentBase.__init__; the RLVR path has only the
     parser, and an unknown level is silently ignored by most chat templates (no steer at all)."""
     with pytest.raises(ValueError, match="reasoning_effort"):
         _parse(RLVROnlineGRPOScriptArguments, tmp_path, ["--reasoning_effort=hgih"])

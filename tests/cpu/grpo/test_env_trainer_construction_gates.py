@@ -40,7 +40,7 @@ from transformers import CONFIG_MAPPING
 from trl import GRPOConfig, GRPOTrainer
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.registry import resolve_environment
+from src.environments.registry import build_environment
 from src.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND
 from src.trainers.grpo.environmental import (
     DistributedAsyncEnvironmentalGRPOTrainer,
@@ -250,7 +250,7 @@ def _dataset(**columns) -> Dataset:
 
 def _answer_host(env_type: str, env_kwargs: dict, train, eval_dataset=None):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host._rollout_env = resolve_environment(env_type, env_kwargs)
+    host._rollout_env = build_environment(env_type, env_kwargs)
     host.train_dataset = train
     host.eval_dataset = eval_dataset
     return host

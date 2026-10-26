@@ -1,11 +1,12 @@
 # Custom Environments
 
-Subclass `BaseEnvironment` (`src/environments/base.py`) and implement three methods, then register a factory for YAML or pass the class from Python.
+Subclass `EnvironmentBase` (`src/environments/environment_base.py`) and implement three methods, then register a factory for YAML or pass the class from Python. The base composes the tool accounting (`tool_accounting.py`), turn recovery (`turn_recovery.py`), effort profiles (`reasoning_effort.py`) and scoring (`episode_scoring.py`, `EpisodeGrade`) your class inherits.
 
 ```python
-from src.environments.base import BaseEnvironment, EpisodeGrade
+from src.environments.environment_base import EnvironmentBase
+from src.environments.episode_scoring import EpisodeGrade
 
-class GuessEnvironment(BaseEnvironment):
+class GuessEnvironment(EnvironmentBase):
     DEFAULT_MAX_TURNS = 6
     requires_answer = True          # the grade reads context["answer"]
 
@@ -40,7 +41,7 @@ Rules that bite:
     - Declare `LENGTH_CUTOFF_NUDGE` and `EMPTY_TURN_NUDGE`, or the base raises `NotImplementedError` on the first such turn.
     - A token-cap cut's unfinished tool calls arrive under `context[CUT_TOOL_CALLS_KEY]`, not `context["tool_calls"]`; never execute them. Pass `in_tool_call=bool(context.get(CUT_TOOL_CALLS_KEY))` to `_handle_length_cutoff` so the turn counts under `episode/length_cutoff_in_call_turns` and gets `LENGTH_CUTOFF_IN_CALL_NUDGE` (the plain nudge if unset).
     - A native-protocol environment with no tools sends the `TOOLLESS_*` nudges, which ask for the final answer. A subclass with its own wording declares those too.
-- **For I/O-bound steps** subclass `AsyncBaseEnvironment` and override `_reset_single_async` / `_step_single_async`; free per-episode resources in `_release_episode`, which `cleanup` calls after every episode, error and timeout paths included.
+- **For I/O-bound steps** subclass `AsyncEnvironmentBase` and override `_reset_single_async` / `_step_single_async`; free per-episode resources in `_release_episode`, which `cleanup` calls after every episode, error and timeout paths included.
 - **Probe your own backend.** Extend `verify_backend` and call `super()`, so a bad URL fails the launch instead of every episode.
 
 ## Register it
@@ -104,11 +105,11 @@ A CPU test, in the shape of `tests/cpu/environments/test_environments.py`:
 import pytest
 
 from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.registry import register_environment, resolve_environment
+from src.environments.registry import register_environment, build_environment
 
 def test_guess_env_grades_a_correct_answer(isolated_registry):
     register_environment("guess", lambda c: GuessEnvironment(**c))
-    env = resolve_environment("guess", EnvironmentConfig(environment_type="guess").to_env_config())
+    env = build_environment("guess", EnvironmentConfig(environment_type="guess").to_env_config())
 
     ids, _ = env.reset(["What is 2 + 2?"], [{"answer": "4"}])
     step = env.step(ids, ["Final Answer: 4"], [{}])[0]

@@ -40,7 +40,7 @@ from src.entrypoints.script import (
     verify_backend_on_rank0,
     with_distributed_teardown,
 )
-from src.environments.base import resolve_reasoning_effort
+from src.environments.reasoning_effort import resolve_reasoning_effort
 from src.environments.rollout_config import VLLM_BACKEND
 from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from src.model_loading.parallel.peft_setup import configure_adapter_training
@@ -70,7 +70,7 @@ def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
 
         template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=args.tools_field)
         # Reasoning-effort steer ("random" → a level sampled per prompt). Single-turn, so per-prompt is
-        # the per-episode analogue of the env-GRPO rollout (src/environments/base.py).
+        # the per-episode analogue of the env-GRPO rollout (src/environments/reasoning_effort.py).
         effort = resolve_reasoning_effort(args.reasoning_effort)
         if effort is not None:
             template_kwargs["reasoning_effort"] = effort

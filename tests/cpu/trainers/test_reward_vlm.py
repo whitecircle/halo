@@ -29,6 +29,7 @@ import pytest
 import torch.nn as nn
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
+from transformers import AutoConfig
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 from trl import RewardConfig, RewardTrainer
@@ -126,7 +127,7 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
         return SimpleNamespace()
 
     patches = [
-        mock.patch.object(module, "require_multimodal_sequence_classification_head"),
+        mock.patch.object(module, "reject_multimodal_model_without_seq_cls_head"),
         mock.patch.object(module, "init_training_script", return_value=runtime),
         mock.patch.object(module, "load_model_and_tokenizer", return_value=(model, tokenizer)),
         mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
@@ -391,17 +392,17 @@ def _model_config(name: str):
 
 @pytest.mark.parametrize("model_type", ["qwen3_vl", "llava"])
 def test_multimodal_family_without_a_score_head_is_refused(model_type):
-    with mock.patch.object(model_setup.AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
+    with mock.patch.object(AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
         with pytest.raises(ValueError, match="no sequence-classification head") as excinfo:
-            model_setup.require_multimodal_sequence_classification_head(_model_config(f"stub/{model_type}"))
+            model_setup.reject_multimodal_model_without_seq_cls_head(_model_config(f"stub/{model_type}"))
     # Actionable: the message names the families that DO work, off the live registry.
     assert "gemma4" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("model_type", ["gemma3", "qwen3_5", "qwen3"])
 def test_supported_and_text_only_families_pass_the_gate(model_type):
-    with mock.patch.object(model_setup.AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
-        model_setup.require_multimodal_sequence_classification_head(_model_config(f"stub/{model_type}"))
+    with mock.patch.object(AutoConfig, "from_pretrained", return_value=CONFIG_MAPPING[model_type]()):
+        model_setup.reject_multimodal_model_without_seq_cls_head(_model_config(f"stub/{model_type}"))
 
 
 def test_both_spellings_of_a_declared_vision_tower_classify_the_same():

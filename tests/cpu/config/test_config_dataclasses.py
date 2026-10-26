@@ -608,7 +608,9 @@ def test_async_config_rejects_an_episode_budget_below_one_turn_or_not_a_count(ba
     """The episode budget narrows every turn's cap to what is left: below ``rollout_max_tokens`` the
     first turn could never use the per-turn cap the run states, a bool is an int that spells a mistake,
     and a float or a string would reach the engine's ``max_tokens`` as no count."""
-    with pytest.raises(ValueError, match="rollout_max_episode_tokens must be an int >= rollout_max_tokens"):
+    with pytest.raises(
+        ValueError, match=r"rollout_max_episode_tokens must be an integer >= 4096 \(at least rollout_max_tokens\)"
+    ):
         AsyncTrainingConfig(rollout_max_tokens=4096, rollout_max_episode_tokens=bad)
 
 
@@ -628,7 +630,9 @@ def test_async_config_rejects_a_thinking_budget_that_is_not_a_positive_int(bad):
     would reach the engine as a nonsense ``thinking_token_budget``, and 0 would be sent as 1 while counting
     as no cap at all (the forced-close gates then never arm); the one range check refuses them all.
     ``null`` is the spelling for no run-wide cap."""
-    with pytest.raises(ValueError, match="rollout_max_thinking_tokens must be an int in"):
+    with pytest.raises(
+        ValueError, match=r"rollout_max_thinking_tokens must be an integer in \[1, \d+\) \(below rollout_max_tokens\)"
+    ):
         AsyncTrainingConfig(rollout_max_thinking_tokens=bad)
 
 

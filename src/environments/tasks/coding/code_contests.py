@@ -9,21 +9,18 @@ from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
-from src.environments.base import (
+from src.config_validation import require_finite, require_int
+from src.environments.episode_keys import (
     ANSWER_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     EPISODE_SLICES_KEY,
-    EPISODE_TOOL_BUDGETS_KEY,
     SANDBOX_FAULT_KEY,
     SOLVE_RATE_KEY,
-    TRUNCATION_MARKER,
-    EpisodeGrade,
-    Trajectory,
-    require_count,
-    require_magnitudes,
 )
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.episode_scoring import EpisodeGrade
+from src.environments.messages import TRUNCATION_MARKER, Trajectory
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from src.environments.sandbox.factory import build_sandbox, warn_if_unisolated
 from src.environments.sandbox.languages import LanguageSpec, require_language
@@ -61,6 +58,7 @@ from src.environments.tasks.coding.submission_record import (
     is_grading_infra_outage,
 )
 from src.environments.tasks.coding.verdicts import VERDICT_DETAIL_OUTCOME, find_stated_float_tolerance
+from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, MAGNITUDE_WHY
 from src.environments.tools.definitions import (
     NativeToolCall,
     NativeToolRegistry,
@@ -186,9 +184,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_submissions, max_test_calls = knobs["max_submissions"], knobs["max_test_calls"]
         self.eval_protocol = eval_protocol
         specs = self._resolve_languages(language)
-        require_count("max_submissions", max_submissions, 1)
-        require_count("max_test_calls", max_test_calls, 0)
-        require_magnitudes(
+        for knob, minimum in self.EFFORT_PROFILE_KEY_MINIMA.items():
+            require_int(type(self).__name__, ge=minimum, **{knob: knobs[knob]})
+        require_finite(
+            type(self).__name__,
+            ge=0,
+            why=MAGNITUDE_WHY,
             submission_reward=submission_reward,
             resubmission_penalty=resubmission_penalty,
             unrun_submission_penalty=unrun_submission_penalty,

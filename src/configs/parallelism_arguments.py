@@ -8,7 +8,7 @@ from src.distributed.expert_parallel.config import EPBufferBackend
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.parallelism_rules import AXES, EPScope, PPSchedule, reject_cross_domain_determinism
 from src.kernels.lowp.spec import LowpPrecision, LowpSpec
-from src.models.context_window import is_bounded_length
+from src.models.context_window import bounded_row_length
 
 if TYPE_CHECKING:
     from src.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -311,14 +311,19 @@ class ParallelismArguments(ValidatedConfig):
         )
 
 
-def same_name_arg_forwards(dist_args) -> tuple[str, ...]:
-    """``ParallelismConfig`` fields ``dist_args`` declares under the same name, in field order.
-
-    The by-name half of :func:`parallelism_config_from_args`' wiring: derived from the two
-    declarations rather than listed, so a knob added to both is forwarded automatically. Fields the
-    builder renames (``expert_parallel_size`` → ``ep_size``) or derives do not appear here.
-    """
-    return tuple(f.name for f in fields(ParallelismConfig) if f.init and hasattr(dist_args, f.name))
+def _reject_lowp_outside_sft(lowp: LowpSpec) -> None:
+    """Refuse a low-precision setting a trainer without ``SUPPORTS_LOWP_PRECISION`` would parse and ignore."""
+    if lowp.precision != "bf16":
+        raise ValueError(
+            f"lowp_precision={lowp.precision!r} is only validated for SFT training; this "
+            "trainer runs in bf16. Remove lowp_precision from the config (or use the SFT script)."
+        )
+    ignored = lowp.non_default_shape_fields()
+    if ignored:
+        raise ValueError(
+            f"{', '.join(ignored)} apply only to SFT training and would be silently dropped here. "
+            "Remove them from the config, or run the SFT script."
+        )
 
 
 def parallelism_config_from_args(
@@ -335,24 +340,12 @@ def parallelism_config_from_args(
     ``SUPPORTS_CP`` / ``PP_REFUSAL`` gate rejects, ``lowp_*`` knobs without ``SUPPORTS_LOWP_PRECISION`` (SFT only),
     ``init_from_scratch`` without ``supports_init_from_scratch``, and ``training_config.full_determinism`` on an
     EP group spanning NVLink domains. ``training_config`` also declares the per-rank token budget the DeepEP
-    dispatch-ceiling gate judges (no ``max_length`` field leaves it off). ``expert_lora`` must be passed here, not
-    assigned onto the result: only construction runs its PP and expert-TP refusals, and ``ep_config()``
-    caches the ``EPConfig`` it builds.
+    dispatch-ceiling gate judges. ``expert_lora`` is passed here, not assigned onto the result: only construction
+    runs its PP and expert-TP refusals, and ``ep_config()`` caches the ``EPConfig`` it builds.
     """
     lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
     if not trainer_cls.SUPPORTS_LOWP_PRECISION:
-        if lowp.precision != "bf16":
-            raise ValueError(
-                f"lowp_precision={lowp.precision!r} is only validated for SFT training; this "
-                "trainer runs in bf16. Remove lowp_precision from the config (or use the SFT script)."
-            )
-        # A config setting the other lowp_* keys outside SFT would parse cleanly and have no effect.
-        ignored = lowp.non_default_shape_fields()
-        if ignored:
-            raise ValueError(
-                f"{', '.join(ignored)} apply only to SFT training and would be silently dropped here. "
-                "Remove them from the config, or run the SFT script."
-            )
+        _reject_lowp_outside_sft(lowp)
 
     # Only SFT threads init_from_scratch into the loader; elsewhere the run would fine-tune pretrained weights.
     if not supports_init_from_scratch and dist_args.init_from_scratch:
@@ -373,9 +366,11 @@ def parallelism_config_from_args(
             "(EP) and/or Tensor Parallelism (TP) instead, or remove --pipeline_parallel_size."
         )
 
-    # Fields the two dataclasses spell identically forward themselves; only the renames and the
-    # derivations stay explicit.
-    kwargs = {name: getattr(dist_args, name) for name in same_name_arg_forwards(dist_args)}
+    # Fields the two dataclasses spell identically forward themselves, so a knob added to both needs no
+    # wiring; only the renames and the derivations stay explicit.
+    kwargs = {
+        f.name: getattr(dist_args, f.name) for f in fields(ParallelismConfig) if f.init and hasattr(dist_args, f.name)
+    }
     kwargs.update({axis.size_field: getattr(dist_args, axis.flag) for axis in AXES})
     kwargs.update(
         pp_schedule=dist_args.pipeline_schedule,
@@ -385,34 +380,15 @@ def parallelism_config_from_args(
         ep_fp32_experts=dist_args.fp32_experts,
         expert_lora=expert_lora,
         lowp=lowp,
-        # The two factors stay separate because only one of them is knowable here: a config with no
-        # max_length field at all (generation-shaped budgets) declares neither rows nor budget, while
-        # ``max_length: null`` declares its rows and leaves the length to the gate's context-window
-        # resolution unless a bounded prompt + completion budget caps each row.
+        # A config with no max_length field (generation-shaped budgets) declares no rows; ``max_length: null``
+        # declares its rows and leaves their length to the gate's context-window resolution.
         ep_rows_per_device=(
             trainer_cls.FORWARD_ROWS_PER_EXAMPLE * int(getattr(training_config, "per_device_train_batch_size", 0) or 0)
             if hasattr(training_config, "max_length")
             else 0
         ),
-        ep_declared_max_length=declared_row_length(training_config),
+        ep_declared_max_length=bounded_row_length(training_config) or 0,
     )
     config = ParallelismConfig(**kwargs)
     reject_cross_domain_determinism(config, bool(getattr(training_config, "full_determinism", False)))
     return config
-
-
-def declared_row_length(training_config) -> int:
-    """The token cap a config puts on one training row, or 0 when it declares none.
-
-    ``max_length`` where set; otherwise a bounded prompt + completion budget, which the trainers that
-    carry both (offline GRPO) truncate each row to. 0 leaves the EP capacity gate to the model's
-    context window.
-    """
-    max_length = getattr(training_config, "max_length", None)
-    if is_bounded_length(max_length):
-        return int(max_length)
-    prompt = getattr(training_config, "max_prompt_length", None)
-    completion = getattr(training_config, "max_completion_length", None)
-    if is_bounded_length(prompt) and is_bounded_length(completion):
-        return int(prompt) + int(completion)
-    return 0

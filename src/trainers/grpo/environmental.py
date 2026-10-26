@@ -23,26 +23,25 @@ from trl.extras.profiling import profiling_context
 from trl.trainer.utils import pad
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.base import (
-    ANSWER_KEY,
-    EPISODE_INVALID_REASON_KEY,
-    RANDOM_REASONING_EFFORT,
-    VALID_REASONING_EFFORTS,
-    BaseEnvironment,
-    resolve_reasoning_effort,
-    solve_verdict,
-    stable_reasoning_effort,
-    task_prompt,
-)
-from src.environments.engine_wire import refuse_unmatched_reasoning_markers
-from src.environments.episode import (
+from src.environments.engine_wire import reject_unenforceable_thinking_budget
+from src.environments.environment_base import EnvironmentBase
+from src.environments.episode import RolloutResult
+from src.environments.episode_keys import ANSWER_KEY, EPISODE_INVALID_REASON_KEY, solve_verdict
+from src.environments.messages import task_prompt
+from src.environments.reasoning_effort import (
     EpisodeEffort,
-    RolloutResult,
     efforts_by_level,
+    resolve_reasoning_effort,
+    stable_reasoning_effort,
+)
+from src.environments.rollout_config import (
+    IDENTITY_SAMPLER,
+    RANDOM_REASONING_EFFORT,
+    SGLANG_BACKEND,
+    VALID_REASONING_EFFORTS,
     resolve_reasoning_end_ids,
     resolve_rollout_stop_token_ids,
 )
-from src.environments.rollout_config import IDENTITY_SAMPLER, SGLANG_BACKEND
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.config_access import config_model_types
 from src.models.unwrapping import unwrap_framework_wrappers
@@ -272,7 +271,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     """Async environmental GRPO with Expert/Tensor Parallelism.
 
     Environment specified via kwargs: ``environment_config`` (from the registry) or
-    ``environment_cls`` + ``environment_kwargs`` (a custom ``BaseEnvironment`` subclass). Distributed
+    ``environment_cls`` + ``environment_kwargs`` (a custom ``EnvironmentBase`` subclass). Distributed
     setup via ``parallelism_config`` consumed by ``DistributedTrainerMixin``; rest flow to ``GRPOTrainer``.
     """
 
@@ -305,17 +304,17 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             self._environment_spec = environment_config.environment_type
             self._env_config_dict = environment_config.to_env_config()
         elif environment_cls is not None:
-            if not (isinstance(environment_cls, type) and issubclass(environment_cls, BaseEnvironment)):
+            if not (isinstance(environment_cls, type) and issubclass(environment_cls, EnvironmentBase)):
                 raise TypeError(
-                    f"environment_cls must be a subclass of BaseEnvironment, got {environment_cls}. "
-                    "Ensure your environment class inherits from src.environments.base.BaseEnvironment."
+                    f"environment_cls must be a subclass of EnvironmentBase, got {environment_cls}. "
+                    "Ensure your environment class inherits from src.environments.environment_base.EnvironmentBase."
                 )
             self._environment_spec = (environment_cls, environment_kwargs or {})
             self._env_config_dict = {}
         else:
             raise ValueError(
                 "Either environment_config (EnvironmentConfig from YAML) or "
-                "environment_cls (custom BaseEnvironment subclass) is required."
+                "environment_cls (custom EnvironmentBase subclass) is required."
             )
 
         # Read off the env instance the tokenize path also renders through, never re-derived from the
@@ -675,7 +674,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         if cfg.rollout_backend == SGLANG_BACKEND or not self._any_episode_budgeted:
             return None
         model_config = getattr(unwrap_framework_wrappers(self.model), "config", None)
-        refuse_unmatched_reasoning_markers(config_model_types(model_config), cfg.rollout_backend)
+        reject_unenforceable_thinking_budget(config_model_types(model_config), cfg.rollout_backend)
         try:
             return resolve_reasoning_end_ids(self._tokenizer, cfg.rollout_reasoning_end_token)
         except ValueError as e:

@@ -14,8 +14,9 @@ from collections import defaultdict
 
 import pytest
 
-from src.environments.base import EPISODE_SLICES_KEY, Trajectory
 from src.environments.episode import RolloutResult
+from src.environments.episode_keys import EPISODE_SLICES_KEY
+from src.environments.messages import Trajectory
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout import rollout_metrics
 

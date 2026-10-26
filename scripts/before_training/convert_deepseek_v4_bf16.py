@@ -32,7 +32,7 @@ import os
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, FineGrainedFP8Config
 
-from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.offline_export import (
     preflight_resource_warning,
     reject_in_place_conversion,

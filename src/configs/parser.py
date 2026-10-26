@@ -34,6 +34,11 @@ _UNSET = object()
 # percent that still needs escaping.
 _PERCENT_TOKENS = re.compile(r"%%|%\(|(%)")
 
+# A strftime directive to expand in output_dir: `%<letter>` or the `%%` escape. Anything else
+# (`100%-data`, `50%_subset`) is prose and must survive byte-identical; a whole-string strftime
+# would consume it, since glibc reads `%-d` as a no-padding day-of-month.
+_STRFTIME_DIRECTIVE = re.compile(r"%(?:%|[a-zA-Z])")
+
 
 def is_true_string(value: str) -> bool:
     """Whether a CLI/YAML string spells boolean true, for a ``str | bool`` field whose CLI override arrives
@@ -45,12 +50,6 @@ def is_null_string(value: str) -> bool:
     """Whether a CLI/YAML string spells null (case-insensitively), for a non-Optional ``str`` field the parser
     leaves such a spelling on as literal text."""
     return value.strip().lower() in {spelling.lower() for spelling in _NONE_STRINGS}
-
-
-# A strftime directive to expand in output_dir: `%<letter>` or the `%%` escape. Anything else
-# (`100%-data`, `50%_subset`) is prose and must survive byte-identical; a whole-string strftime
-# would consume it, since glibc reads `%-d` as a no-padding day-of-month.
-_STRFTIME_DIRECTIVE = re.compile(r"%(?:%|[a-zA-Z])")
 
 
 def expand_strftime_directives(template: str) -> str:
@@ -125,6 +124,37 @@ def _init_field_names(dataclass_type) -> set[str]:
     return {f.name for f in dataclasses.fields(dataclass_type) if f.init}
 
 
+def _cast_to_field_type(name: str, raw: str, annotation, field_type) -> Any:
+    """``raw`` cast to ``field_type``, the ``Field.type`` ``HfArgumentParser.__init__`` rewrote to the one member
+    argparse would cast to (``float | str`` -> float); ``annotation`` is the class's own."""
+    origin = get_origin(field_type)
+    if origin in (Union, types.UnionType):
+        members = [a for a in get_args(field_type) if a is not type(None)]
+        if len(members) == 1:
+            field_type = members[0]
+            origin = get_origin(field_type)
+    if field_type in (int, float):
+        try:
+            return field_type(raw)
+        except ValueError:
+            # ``float | str`` admits a sentinel its consumer resolves ("auto").
+            if get_origin(annotation) not in (Union, types.UnionType) or str not in get_args(annotation):
+                raise
+            return raw
+    if origin is list:
+        elem_args = get_args(field_type)
+        elem_cast = elem_args[0] if elem_args and elem_args[0] in (int, float, str) else str
+        return [elem_cast(v) for v in raw.split(",")]
+    if field_type is bool:
+        lowered = raw.strip().lower()
+        if is_true_string(lowered):
+            return True
+        if lowered in ("false", "0", "no"):
+            return False
+        raise ValueError(f"Cannot parse boolean CLI override --{name}={raw!r}")
+    return raw
+
+
 class HaloArgumentParser(HfArgumentParser):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("conflict_handler", "resolve")
@@ -154,9 +184,29 @@ class HaloArgumentParser(HfArgumentParser):
         return self.parse_dict(_load_yaml(yaml_file), allow_extra_keys=allow_extra_keys)
 
     def parse_dict(self, values: dict[str, Any], allow_extra_keys: bool = False):
-        """Validate the raw values first: ``HfArgumentParser.parse_dict`` builds the dataclasses directly, running
-        neither argparse ``choices`` nor a type cast."""
-        self._validate_field_values(values)
+        """Refuse a raw value that cannot mean what its field's annotation declares, for every dataclass declaring
+        the field, then build: ``HfArgumentParser.parse_dict`` builds the dataclasses directly, running neither
+        argparse ``choices`` nor a type cast. Annotations come from the class: ``HfArgumentParser.__init__``
+        rewrites ``Field.type`` in place, where ``Optional[Literal[...]]`` loses its ``None``."""
+        for dataclass_type in self.dataclass_types:
+            annotations = get_type_hints(dataclass_type)
+            for field in dataclasses.fields(dataclass_type):
+                if not field.init or field.name not in values:
+                    continue
+                value = values[field.name]
+                annotation = annotations[field.name]
+                choices = _literal_choices(annotation)
+                if choices is not None and value not in choices:
+                    raise ValueError(
+                        f"Invalid value {value!r} for field '{field.name}' of "
+                        f"{dataclass_type.__name__}: allowed values are {list(choices)}"
+                    )
+                if isinstance(value, str) and _is_bool_only(annotation):
+                    raise ValueError(
+                        f"Field '{field.name}' of {dataclass_type.__name__} is boolean but got the "
+                        f"string {value!r}. YAML 1.2 booleans are unquoted true/false — the 1.1 "
+                        f"spellings yes/no/on/off parse as (truthy) strings."
+                    )
         return super().parse_dict(values, allow_extra_keys=allow_extra_keys)
 
     def _merge_cli_overrides(self, values: dict[str, Any], other_args: list[str]) -> dict[str, Any]:
@@ -195,15 +245,6 @@ class HaloArgumentParser(HfArgumentParser):
                 f"so one string cannot be cast for all of them. Set '{name}' in the YAML config instead."
             )
         declared = declarers[0].__dataclass_fields__[name]
-        # The rewritten Field.type is the one member argparse would cast to (``float | str`` -> float).
-        base_type = declared.type
-        origin = get_origin(base_type)
-        if origin in (Union, types.UnionType):
-            members = [a for a in get_args(base_type) if a is not type(None)]
-            if len(members) == 1:
-                base_type = members[0]
-                origin = get_origin(base_type)
-
         literal_choices = _literal_choices(annotation)
         if literal_choices is not None:
             # Match by string form so str and int literals cast alike. A literal choice spelled "none"
@@ -234,26 +275,7 @@ class HaloArgumentParser(HfArgumentParser):
                 f"CLI override --{name} is not supported: field type {annotation} cannot be cast from a "
                 f"string. Set '{name}' in the YAML config instead."
             )
-        if base_type in (int, float):
-            try:
-                return base_type(raw)
-            except ValueError:
-                # ``float | str`` admits a sentinel its consumer resolves ("auto").
-                if get_origin(annotation) not in (Union, types.UnionType) or str not in get_args(annotation):
-                    raise
-                return raw
-        if origin is list:
-            elem_args = get_args(base_type)
-            elem_cast = elem_args[0] if elem_args and elem_args[0] in (int, float, str) else str
-            return [elem_cast(v) for v in raw.split(",")]
-        if base_type is bool:
-            lowered = raw.strip().lower()
-            if is_true_string(lowered):
-                return True
-            if lowered in ("false", "0", "no"):
-                return False
-            raise ValueError(f"Cannot parse boolean CLI override --{name}={raw!r}")
-        return raw
+        return _cast_to_field_type(name, raw, annotation, declared.type)
 
     def _flag_values(self, args: list[str]) -> dict[str, Any]:
         """The flags a flags-only command line sets, each given to every dataclass declaring it, where
@@ -264,27 +286,3 @@ class HaloArgumentParser(HfArgumentParser):
         )
         namespace = self.parse_args(args, namespace=seeded)
         return {key: value for key, value in vars(namespace).items() if value is not _UNSET}
-
-    def _validate_field_values(self, data: dict[str, Any]) -> None:
-        """Raise when a raw value cannot mean what its field's annotation declares, for every dataclass declaring the
-        field. Annotations come from the class: ``HfArgumentParser.__init__`` rewrites ``Field.type`` in place, where
-        ``Optional[Literal[...]]`` loses its ``None``."""
-        for dataclass_type in self.dataclass_types:
-            annotations = get_type_hints(dataclass_type)
-            for field in dataclasses.fields(dataclass_type):
-                if not field.init or field.name not in data:
-                    continue
-                value = data[field.name]
-                annotation = annotations[field.name]
-                choices = _literal_choices(annotation)
-                if choices is not None and value not in choices:
-                    raise ValueError(
-                        f"Invalid value {value!r} for field '{field.name}' of "
-                        f"{dataclass_type.__name__}: allowed values are {list(choices)}"
-                    )
-                if isinstance(value, str) and _is_bool_only(annotation):
-                    raise ValueError(
-                        f"Field '{field.name}' of {dataclass_type.__name__} is boolean but got the "
-                        f"string {value!r}. YAML 1.2 booleans are unquoted true/false — the 1.1 "
-                        f"spellings yes/no/on/off parse as (truthy) strings."
-                    )

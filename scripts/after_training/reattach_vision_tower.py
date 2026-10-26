@@ -28,7 +28,7 @@ import shutil
 
 from transformers import AutoConfig
 
-from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, PROCESSOR_FILES
 from src.checkpoint.offline_export import (

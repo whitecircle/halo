@@ -27,7 +27,7 @@ import yaml
 
 from src.configs.parallelism_arguments import parallelism_config_from_args
 from src.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
-from src.environments.episode import resolve_reasoning_end_ids
+from src.environments.rollout_config import resolve_reasoning_end_ids
 from src.model_loading.parallel.load_rules import reject_unsupported_model
 from src.model_loading.parallel.peft_setup import split_expert_lora_targets
 from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks

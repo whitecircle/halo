@@ -3,7 +3,7 @@
 
 ``react_math`` / ``react_search`` hardcode the system prompt that states the Thought/Action/Final Answer
 format their parser reads, so a configured one cannot apply. Driven through the trainer's own path
-(YAML fields → ``EnvironmentConfig`` → ``to_env_config`` → ``resolve_environment``); an explicit
+(YAML fields → ``EnvironmentConfig`` → ``to_env_config`` → ``build_environment``); an explicit
 ``null`` is not a request and still builds the preset with its own prompt.
 
 Usage:
@@ -13,14 +13,14 @@ Usage:
 import pytest
 
 from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.registry import resolve_environment
+from src.environments.registry import build_environment
 
 _REACT_TYPES = ["react_math", "react_search"]
 
 
 def _resolve(environment_type: str, environment_kwargs: dict):
     config = EnvironmentConfig(environment_type=environment_type, environment_kwargs=environment_kwargs)
-    return resolve_environment(config.environment_type, config.to_env_config())
+    return build_environment(config.environment_type, config.to_env_config())
 
 
 @pytest.mark.parametrize("environment_type", _REACT_TYPES)

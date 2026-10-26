@@ -7,7 +7,7 @@ the engine enforces or treats as a soft target. Two trainer-side terms price the
 
 | Knob (`environment_kwargs`) | Default | Effect |
 |---|---|---|
-| `reasoning_effort` | `null` on `BaseEnvironment`, `medium` on `code_contests` | `low` / `medium` / `high` / `random` / `null` |
+| `reasoning_effort` | `null` on `EnvironmentBase`, `medium` on `code_contests` | `low` / `medium` / `high` / `random` / `null` |
 | `reasoning_effort_profiles` | the class's per-level table | per-level overrides, merged over that table |
 
 - `random` draws one level per generation group, so a group shares its conditioning. An eval round draws it from the

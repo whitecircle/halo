@@ -88,7 +88,7 @@ def registry_order() -> dict[str, object]:
             if head.__module__ == seq_cls_heads.__name__
         },
         "optimizer builders": {name: builder.__qualname__ for name, (builder, _) in NAMED_OPTIMIZER_BUILDERS.items()},
-        "environments": list(environment_registry._ENVIRONMENT_REGISTRY),
+        "environments": list(environment_registry._environment_registry),
     }
 
 

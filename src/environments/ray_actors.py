@@ -1,9 +1,6 @@
-"""Ray actors for async Environmental GRPO rollout collection.
-
-Each actor (own process) drives env interactions and generates via the rollout server's
-/v1/chat/completions (vLLM or SGLang).
-RolloutManager fans prompts across actors and server URLs round-robin under a bounded Semaphore.
-Weight sync is separate, over NCCL (:mod:`src.weight_sync`)."""
+"""Ray actors for async environmental-GRPO rollout collection: each :class:`EnvironmentActor` plays episodes
+against a rollout server's ``/v1/chat/completions`` (vLLM or SGLang), and :class:`RolloutManager` fans prompts
+across actors and server URLs under a bounded semaphore. Weight sync is separate (:mod:`src.weight_sync`)."""
 
 import asyncio
 import inspect
@@ -11,7 +8,7 @@ import logging
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import cached_property, partial
 from typing import Any
 from urllib.parse import urlparse
@@ -20,54 +17,38 @@ import aiohttp
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from src.environments.base import EPISODE_ERROR_KEY, Trajectory
-from src.environments.engine_wire import build_payload, capture_generation_tokens, capture_routing_mask
+from src.environments.engine_wire import build_payload, turn_from_chat_completion, with_cut_call_as_written
+from src.environments.environment_base import EnvironmentBase
 from src.environments.episode import (
-    EpisodeDispatcher,
     RolloutResult,
     TurnGeneration,
-    bind_episode_effort,
     describe_exception,
     generate_turn,
     is_terminal_client_status,
-    step_context_from_generation,
+    play_episode,
 )
-from src.environments.registry import create_environment
-from src.environments.rollout_config import VLLM_BACKEND, RolloutConfig
+from src.environments.reasoning_effort import EpisodeEffort, bind_episode_effort
+from src.environments.registry import build_environment
+from src.environments.rollout_config import RolloutConfig
 from src.inference.endpoints import is_loopback
-from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason, get_reasoning_text
-from src.log import warn_once
 
 logger = logging.getLogger(__name__)
 
-# Backends already warned that their completions carry no ``usage.completion_tokens`` (once per process).
-_COMPLETION_TOKENS_MISSING_WARNED: set[str] = set()
-# Backends already warned that a cut call's text could not be decoded (once per process).
-_CUT_CALL_DECODE_FAILED_WARNED: set[str] = set()
-
-# The engine-paused seconds a deadline credits: the count now, or an awaitable of the count as of the
-# call (a read of the Ray copy an actor process holds).
+# The engine-paused seconds a deadline credits: the count, or an awaitable of it (a read of the actor's Ray copy).
 PausedClock = Callable[[], float | Awaitable[float]]
 
-# Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR
-# overflows it and crashes ``ray.init``.
+# Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR crashes ray.init.
 MAX_RAY_TEMP_DIR_LEN = 40
 RAY_FALLBACK_TEMP_DIR = "/tmp/ray"
 
-# In-flight rollouts per actor when ``max_concurrent_rollouts`` is unset. Actors multiplex episodes on
-# one event loop, so the pool size is not the concurrency limit; this oversubscribes it enough to keep
-# the servers fed while a turn is being graded. Documented as the derived default in
-# ``agent-docs/reference/configuration-reference.md``.
+# In-flight rollouts per actor when ``max_concurrent_rollouts`` is unset: actors multiplex episodes on one loop,
+# so oversubscribing keeps the servers fed while a turn is graded.
 DEFAULT_ROLLOUTS_PER_WORKER = 4
 
 
 class RolloutHTTPError(RuntimeError):
-    """A non-200 from the rollout server, carrying its status as data.
-
-    The status decides retry versus abandon (:func:`_is_client_error`). The response body is
-    server-controlled text, so recovering the status by re-parsing the message would let a 503 whose
-    body quotes a "status 400" upstream error abandon the whole batch.
-    """
+    """A non-200 from the rollout server, its status carried as data: the status decides retry versus abandon
+    (:func:`_should_giveup`), where re-parsing the server-controlled message could misread a quoted status."""
 
     def __init__(self, status: int, backend: str, body: str):
         super().__init__(f"{backend} error (status {status}): {body}")
@@ -83,30 +64,24 @@ class DeadlineExpired(TimeoutError):
         self.paused_seconds = paused_seconds
 
 
-def _is_client_error(exc: BaseException) -> bool:
-    """Return True for non-retryable client errors (give up).
-
-    Reads the status off :class:`RolloutHTTPError`, never out of a message: only genuine 4xx (minus
-    retryable 429/408) are terminal, and anything that is not a rollout HTTP error is retryable. The
-    one body it does read names an engine fault reported under a client status; misreading it costs
-    bounded retries of a request that then fails anyway, never an abandoned batch.
-    """
-    return isinstance(exc, RolloutHTTPError) and is_terminal_client_status(exc.status, exc.body)
-
-
 def _is_shutdown_error(exc: BaseException) -> bool:
-    """True for benign teardown-induced errors (session/loop closed at shutdown while a prefetched
-    rollout is in flight). Retrying is pointless; log quietly, not as ERROR.
-
-    Matched on message text, unlike :func:`_is_client_error`: these strings come from aiohttp and Ray,
-    which expose no typed marker for them."""
+    """A benign teardown error (the session or loop closed at shutdown under an in-flight rollout), matched on
+    the text aiohttp and Ray give it, since neither types it: retrying is pointless, and it logs quietly."""
     s = str(exc)
     return "Session is closed" in s or "Event loop is closed" in s or "INTENDED_USER_EXIT" in s
 
 
 def _should_giveup(exc: BaseException) -> bool:
-    """Backoff give-up predicate: non-retryable client 4xx, or a benign shutdown error."""
-    return _is_client_error(exc) or _is_shutdown_error(exc)
+    """Backoff give-up predicate: a benign shutdown error, or a genuine client 4xx read off
+    :class:`RolloutHTTPError`'s status, never its server-controlled message (429/408 and an engine fault retry)."""
+    return (
+        isinstance(exc, RolloutHTTPError) and is_terminal_client_status(exc.status, exc.body)
+    ) or _is_shutdown_error(exc)
+
+
+def _http_url(url: str) -> str:
+    """A server URL as the client dials it: ``http://`` where it names no scheme."""
+    return url if "://" in url else f"http://{url}"
 
 
 async def _awaited(awaitable):
@@ -121,15 +96,8 @@ async def _clock_reading(reading: float | Awaitable[float]) -> float:
 async def _await_with_deadline(
     awaitable, timeout: float, paused_clock: PausedClock | None = None, *, what: str = "episode"
 ):
-    """Await ``awaitable`` under ``timeout`` seconds of engine-serving time, raising :class:`DeadlineExpired`.
-
-    ``paused_clock`` reads the seconds the engines have spent paused for weight syncs: a paused engine
-    freezes every in-flight generation, so that window is credited back instead of charged. The clock
-    is read at the start and again only when the deadline runs out, so the happy path waits on no
-    read; the serving time used is taken when a read is issued, so a slow read (a Ray round trip)
-    never eats into the budget. The awaitable runs in one task, shielded across the re-arms a credit
-    forces; on expiry the task is cancelled.
-    """
+    """Await ``awaitable`` under ``timeout`` seconds of engine-serving time, raising :class:`DeadlineExpired`: the
+    weight-sync pauses ``paused_clock`` reads are credited back, read only at the start and at expiry."""
     loop = asyncio.get_running_loop()
     started = loop.time()
     at_start = paused_clock() if paused_clock is not None else 0.0
@@ -164,13 +132,9 @@ async def _await_with_deadline(
 
 
 class EnginePauseClock:
-    """Seconds the rollout engines have spent paused for weight syncs, an open window included.
-
-    The trainer thread opens and closes each window while the episode loops read it, so the total and
-    the open window's start live in one tuple, replaced whole: a read never pairs one state's total with
-    another's window. A deadline credits the seconds paused while its work was in flight
-    (:func:`_await_with_deadline`).
-    """
+    """Seconds the rollout engines have spent paused for weight syncs, an open window included. The trainer
+    thread opens and closes windows while the episode loops read them, so the total and the open window's start
+    live in one tuple, replaced whole: a read never pairs one state's total with another's window."""
 
     def __init__(self):
         self._state: tuple[float, float | None] = (0.0, None)
@@ -217,9 +181,8 @@ def ray_init_kwargs(**overrides) -> dict:
 # the round-robin, where every episode routed to a dead actor returns a masked row.
 @ray.remote(max_restarts=-1)
 class EnvironmentActor:
-    """Isolated Ray actor for environment episode execution. Generates via the rollout server's
-    /v1/chat/completions (chat template applied server-side). Env, HTTP client, and tool schema are
-    lazily initialized."""
+    """A Ray actor playing environment episodes against the rollout server's ``/v1/chat/completions`` (chat
+    template applied server-side); its env, HTTP session and tool schema are built on first use."""
 
     def __init__(
         self,
@@ -237,28 +200,23 @@ class EnvironmentActor:
             None if pause_clock is None else lambda: pause_clock.paused_seconds.remote()
         )
 
-        self._env = None
-        self._http_client = None
-
-    def _get_env(self):
-        if self._env is None:
-            self._env = create_environment(self.env_type, self.env_config)
-        return self._env
+    @cached_property
+    def _env(self) -> EnvironmentBase:
+        return build_environment(self.env_type, self.env_config)
 
     @cached_property
     def _tools_schema(self) -> list[dict] | None:
         """OpenAI-format tools list, or None if the env has no tools. Static per run."""
-        return self._get_env().get_tools_schema()
+        return self._env.get_tools_schema()
 
-    async def _get_http_client(self) -> aiohttp.ClientSession:
-        if self._http_client is None:
-            # force_close: the server drops idle keepalives between batches, so a pooled socket
-            # yields ServerDisconnectedError whose retries stall this rank at the next collective.
-            connector = aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True)
-            # No session timeout: aiohttp's would charge a weight-sync pause to the request, so each
-            # request runs under the pause-aware deadline in _generate instead.
-            self._http_client = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), connector=connector)
-        return self._http_client
+    @cached_property
+    def _http_client(self) -> aiohttp.ClientSession:
+        # force_close: the server drops idle keepalives between batches, so a pooled socket
+        # yields ServerDisconnectedError whose retries stall this rank at the next collective.
+        connector = aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True)
+        # No session timeout: aiohttp's would charge a weight-sync pause to the request, so each
+        # request runs under the pause-aware deadline in _generate instead.
+        return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), connector=connector)
 
     async def run_episode(
         self,
@@ -267,134 +225,86 @@ class EnvironmentActor:
         server_url: str,
         config: RolloutConfig,
     ) -> RolloutResult:
-        """Run a complete multi-turn episode."""
+        """Run a complete multi-turn episode; a fault anywhere in it comes back as an errored row."""
         start = time.time()
-        generated = 0
-        logp_sum, logp_count = 0.0, 0
-        eid = None
         sync_expiries = _SyncExpiries()
-
         try:
-            env = self._get_env()
-            client = await self._get_http_client()
-            episode = EpisodeDispatcher(env)
-            episode_ids, steps = await episode.reset([prompt], [context])
-            eid, step = episode_ids[0], steps[0]
-            length = 0
-
-            # Bound once per episode: every turn shares the level and its caps.
-            effort = bind_episode_effort(
-                context,
-                env,
-                max_tokens=config.max_tokens,
-                max_thinking_tokens=config.max_thinking_tokens,
-                max_episode_tokens=config.max_episode_tokens,
-                max_answer_tokens=config.max_answer_tokens,
-            )
-
-            for _ in range(env.max_turns):
-                # The engine caps this turn: the level's reasoning cap and the turn total, both narrowed to
-                # what the output budget has left; none once it holds no turn.
-                caps = effort.turn_caps(generated)
-                if step.done or caps is None:
-                    break
-                turn_config = replace(config, **caps)
-                gen = await self._generate_turn(
-                    client,
-                    server_url,
-                    step.observation,
-                    turn_config,
-                    effort.level,
-                    effort.thinking_budget,
-                    effort.budget_soft,
-                    sync_expiries,
-                )
-                generated += gen.tokens
-                if gen.token_logprobs:
-                    logp_sum += sum(gen.token_logprobs)
-                    logp_count += len(gen.token_logprobs)
-
-                step_ctx = step_context_from_generation(
-                    context,
-                    gen,
-                    thinking_cap=effort.thinking_cap,
-                    reasoning_end_token_id=config.reasoning_end_token_id,
-                    last_turn=effort.turn_caps(generated) is None,
-                )
-                steps = await episode.step([eid], [gen.text], [step_ctx])
-                step = steps[0]
-                length += 1
-
-            if not step.done:
-                # The output budget ran out with the episode open: closed as truncated, priced like a
-                # max_turns overflow — the budget is the episode's, not the driver's fault.
-                step = (await episode.finalize_truncated([eid]))[0]
-            traj = env.get_trajectories([eid])[0]
-            effort.stamp(traj, generated)
-
-            episode_metrics = env.rollout_metrics(traj) if traj else {}
-            if logp_count:
-                episode_metrics["logps/sampling_mean"] = logp_sum / logp_count
-
-            return RolloutResult(
-                prompt=prompt,
-                trajectory=traj,
-                episode_length=length,
-                total_reward=traj.total_reward if traj else 0.0,
-                metrics=episode_metrics,
-                # Natural terminal state, not a max_turns truncation; both set done=True.
-                success=bool(traj and traj.done and not traj.truncated),
-                latency=time.time() - start,
-                generation_tokens=generated,
-                requests_expired_in_sync=sync_expiries.count,
-            )
-
+            return await self._play_episode(prompt, context, server_url, config, start, sync_expiries)
         except Exception as e:
-            # exc_info: this catch-all turns any episode fault into a masked zero-reward row, so the
-            # traceback is what localizes it.
+            # exc_info: the traceback is all that localizes a fault this catch-all turns into a masked row.
             logger.error(f"Actor {self.actor_id} error: {e}", exc_info=True)
-            # Reward stays 0 and the partial trajectory is dropped, unlike the eval driver, which
-            # finalizes the episode as truncated and keeps what it earned: ``error`` puts this row
-            # outside ``rollout_valid_mask``, so the trainer excludes it from the group baseline and
-            # drops its tokens from the step. Accrued reward could therefore only reach the logged
-            # reward mean, where a half-episode's partial credit is noise. Typed, never ``str(e)``: a
-            # bare ``TimeoutError`` stringifies to "", which the mask reads as no error.
-            reason = describe_exception(e)
-            return RolloutResult(
-                prompt=prompt,
-                trajectory=Trajectory(done=True, info={EPISODE_ERROR_KEY: reason}),
-                total_reward=0.0,
-                success=False,
+            # The partial trajectory is dropped: ``error`` keeps the row out of the baseline and the step. Typed,
+            # never ``str(e)``: a bare ``TimeoutError`` stringifies to "", which the mask reads as no error.
+            return RolloutResult.errored(
+                prompt,
+                describe_exception(e),
                 latency=time.time() - start,
-                error=reason,
                 requests_expired_in_sync=sync_expiries.count,
             )
 
-        finally:
-            # On every path: a stateful env (SweEnvironment) leaks a sandbox working dir per rollout.
-            if eid is not None and self._env is not None:
-                try:
-                    self._env.cleanup([eid])
-                except Exception:  # cleanup must never mask the episode result
-                    logger.debug("Actor %s: cleanup failed for episode %s", self.actor_id, eid, exc_info=True)
+    async def _play_episode(
+        self,
+        prompt: str,
+        context: dict[str, Any] | None,
+        server_url: str,
+        config: RolloutConfig,
+        start: float,
+        sync_expiries: _SyncExpiries,
+    ) -> RolloutResult:
+        """The episode played (:func:`play_episode`) under its bound effort, as the row the trainer reads."""
+        env = self._env
+        # Bound once per episode: every turn shares the level and its caps.
+        effort = bind_episode_effort(
+            context,
+            env,
+            max_tokens=config.max_tokens,
+            max_thinking_tokens=config.max_thinking_tokens,
+            max_episode_tokens=config.max_episode_tokens,
+            max_answer_tokens=config.max_answer_tokens,
+        )
+        request = partial(self._generate_turn, self._http_client, server_url, sync_expiries)
+        played = await play_episode(env, prompt, context, effort, request, config, log_prefix=f"Actor {self.actor_id}")
+        traj = played.trajectory
+        episode_metrics = env.rollout_metrics(traj) if traj else {}
+        sampled = [turn.token_logprobs for turn in played.turns if turn.token_logprobs]
+        if sampled:
+            episode_metrics["logps/sampling_mean"] = sum(sum(lps) for lps in sampled) / sum(
+                len(lps) for lps in sampled
+            )
+        return RolloutResult(
+            prompt=prompt,
+            trajectory=traj,
+            episode_length=len(played.turns),
+            total_reward=traj.total_reward if traj else 0.0,
+            metrics=episode_metrics,
+            # Natural terminal state, not a max_turns truncation; both set done=True.
+            success=bool(traj and traj.done and not traj.truncated),
+            latency=time.time() - start,
+            generation_tokens=played.generated,
+            requests_expired_in_sync=sync_expiries.count,
+        )
 
     async def _generate_turn(
         self,
         client: aiohttp.ClientSession,
         server_url: str,
+        sync_expiries: _SyncExpiries,
         messages: list[dict[str, str]],
         config: RolloutConfig,
-        reasoning_effort: str | None,
-        reasoning_budget: int | None,
-        budget_soft: bool,
-        sync_expiries: _SyncExpiries,
+        effort: EpisodeEffort,
     ) -> TurnGeneration:
-        """One turn under the shared rollout retry policy (:func:`generate_turn`): transport and engine
-        faults are retried, a genuine client 4xx or a shutdown error is terminal, and an engine abort is
-        re-issued for the same observation. Past the retries the episode errors into a masked row."""
+        """One turn under the shared retry policy (:func:`generate_turn`): a genuine client 4xx or a shutdown error
+        is terminal, any other transport or engine fault retried."""
         return await generate_turn(
             partial(
-                self._generate, client, server_url, messages, config, reasoning_effort, reasoning_budget, budget_soft
+                self._generate,
+                client,
+                server_url,
+                messages,
+                config,
+                effort.level,
+                effort.thinking_budget,
+                effort.budget_soft,
             ),
             config,
             retry_on=(TimeoutError, aiohttp.ClientError, RuntimeError),
@@ -413,19 +323,9 @@ class EnvironmentActor:
         reasoning_budget: int | None = None,
         budget_soft: bool = False,
     ) -> TurnGeneration:
-        """One /v1/chat/completions request (and a ``/detokenize`` for a call cut at the cap,
-        :meth:`_cut_calls_as_written`); returns the turn's :class:`TurnGeneration` (capture fields populated per
-        the ``RolloutConfig`` flags).
-
-        The request gets ``config.request_timeout`` of engine-serving time: a weight sync that freezes it
-        (vLLM ``mode=keep``) is credited back, since expiring it would re-issue a turn the engine
-        resumes and completes anyway. Uses raw aiohttp rather than the shared OpenAI client: the
-        training rollout load-balances each request across a pool of server URLs chosen per call.
-        """
-        url = server_url.rstrip("/")
-        if not url.startswith("http"):
-            url = f"http://{url}"
-
+        """One ``/v1/chat/completions`` request, and a ``/detokenize`` for a call cut at the cap, each under
+        ``config.request_timeout`` of engine-serving time; raw aiohttp, since the server URL is chosen per call."""
+        url = _http_url(server_url.rstrip("/"))
         payload = self._build_payload(messages, config, reasoning_effort, reasoning_budget, budget_soft)
 
         async def _exchange() -> dict:
@@ -434,93 +334,21 @@ class EnvironmentActor:
                     raise RolloutHTTPError(resp.status, config.backend, await resp.text())
                 return await resp.json()
 
-        data = await _await_with_deadline(_exchange(), config.request_timeout, self._paused_clock, what="request")
-        choice = data["choices"][0]
-        usage = data.get("usage", {})
-        msg = choice["message"]
-        text = msg.get("content") or ""
-        reasoning = get_reasoning_text(msg) or ""
-        tool_calls = msg.get("tool_calls") or []
-        if config.capture_token_ids:
-            token_ids, token_logprobs, prompt_token_ids = capture_generation_tokens(choice, data, config.backend)
-        else:
-            token_ids = token_logprobs = prompt_token_ids = None
-        tokens = usage.get("completion_tokens") or 0
-        if not tokens and text:
-            # The captured ids are the only honest length; a word count of the text is not one.
-            tokens = len(token_ids) if token_ids else 0
-            warn_once(
-                logger,
-                _COMPLETION_TOKENS_MISSING_WARNED,
-                config.backend,
-                "%s returned a completion without usage.completion_tokens; generation-token metrics "
-                "count the captured token ids instead (0 when none are captured).",
-                config.backend,
-            )
-        routing_mask = capture_routing_mask(choice, data) if config.capture_routed_experts else None
-        # The engine's prompt length anchors the mask; the trainer's re-render can differ by a token.
-        routing_prompt_tokens = usage.get("prompt_tokens") if routing_mask else None
-        finish_reason = get_finish_reason(
-            choice, completion_tokens=usage.get("completion_tokens"), max_tokens=config.max_tokens
-        )
-        if finish_reason == FINISH_REASON_LENGTH and tool_calls and token_ids:
-            tool_calls = await self._cut_calls_as_written(
-                client, url, payload.get("model"), token_ids, tool_calls, config
-            )
-        return TurnGeneration(
-            text=text,
-            tool_calls=tool_calls,
-            reasoning=reasoning,
-            tokens=tokens,
-            token_ids=token_ids,
-            token_logprobs=token_logprobs,
-            routing_mask=routing_mask,
-            routing_prompt_tokens=routing_prompt_tokens,
-            prompt_token_ids=prompt_token_ids,
-            finish_reason=finish_reason,
-        )
-
-    async def _cut_calls_as_written(
-        self,
-        client: aiohttp.ClientSession,
-        url: str,
-        model: str | None,
-        token_ids: list[int],
-        salvaged: list[dict[str, Any]],
-        config: RolloutConfig,
-    ) -> list[dict[str, Any]]:
-        """The call a turn was writing when its cap cut it, as the policy wrote it, for the judge and the completions
-        record: vLLM's parser salvages only the call's name and whatever arguments it closed, so the turn's ids past
-        its reasoning close are decoded (vLLM's ``/detokenize``, which answers ``prompt``; SGLang's answers ``text``)
-        and carried whole as the call's arguments. The salvage stands wherever no single-token reasoning close is
-        resolved to split the ids at (SGLang, which enforces no thinking budget; gpt-oss, whose close spans several
-        tokens; a run with no budget) and when the decode fails — the cut is booked either way; only what a judge
-        reads of it changes."""
-        end = config.reasoning_end_token_id
-        if config.backend != VLLM_BACKEND or end is None or end not in token_ids:
-            return salvaged
-        visible = token_ids[len(token_ids) - token_ids[::-1].index(end) :]
-
-        async def _decode() -> str:
-            async with client.post(f"{url}/detokenize", json={"model": model, "tokens": visible}) as resp:
+        async def _detokenize(ids: list[int]) -> str:
+            async with client.post(f"{url}/detokenize", json={"model": payload.get("model"), "tokens": ids}) as resp:
                 if resp.status != 200:
                     raise RolloutHTTPError(resp.status, config.backend, await resp.text())
                 return (await resp.json())["prompt"]
 
-        try:
-            written = await _await_with_deadline(_decode(), config.request_timeout, self._paused_clock, what="decode")
-        except Exception as e:  # what a judge reads of a cut call never fails the episode
-            warn_once(
-                logger,
-                _CUT_CALL_DECODE_FAILED_WARNED,
-                config.backend,
-                "Actor %s: decoding a cut call's text failed (%s); the judge reads the call as the parser salvaged it",
-                self.actor_id,
-                describe_exception(e),
-            )
-            return salvaged
-        first = salvaged[0]
-        return [{**first, "function": {**first.get("function", {}), "arguments": written}}]
+        data = await _await_with_deadline(_exchange(), config.request_timeout, self._paused_clock, what="request")
+        return await with_cut_call_as_written(
+            turn_from_chat_completion(data, config),
+            config,
+            lambda ids: _await_with_deadline(
+                _detokenize(ids), config.request_timeout, self._paused_clock, what="decode"
+            ),
+            f"Actor {self.actor_id}",
+        )
 
     def _build_payload(
         self,
@@ -535,15 +363,15 @@ class EnvironmentActor:
 
     async def shutdown(self):
         """Close the HTTP session and the environment (idempotent; called by RolloutManager.shutdown)."""
-        if self._http_client:
-            await self._http_client.close()
-            self._http_client = None
-        if self._env:
+        client = self.__dict__.pop("_http_client", None)
+        if client is not None:
+            await client.close()
+        env = self.__dict__.pop("_env", None)
+        if env is not None:
             try:
-                self._env.close()
+                env.close()
             except Exception:  # a failed teardown must not block the rest of shutdown
                 logger.warning("Actor %s: environment close failed", self.actor_id, exc_info=True)
-            self._env = None
 
 
 class RolloutManager:
@@ -560,9 +388,8 @@ class RolloutManager:
         max_concurrent_rollouts: int | None = None,
         pool_replicas: int = 1,
     ):
-        """``num_workers`` is the actor budget for the whole Ray cluster; ``pool_replicas`` is how many
-        peers build their own pool against it (the DP size on a shared cluster, 1 when each rank runs
-        its own), so the budget is divided rather than oversubscribed once per rank."""
+        """``num_workers`` is the actor budget for the whole Ray cluster, divided among the ``pool_replicas`` peers
+        that build a pool against it (the DP size on a shared cluster, else 1)."""
         self.num_workers = max(1, num_workers // max(1, pool_replicas))
         self.env_type = env_type
         self.env_config = env_config
@@ -599,11 +426,8 @@ class RolloutManager:
             self._actor_pause_clock.begin.remote()
 
     def end_engine_pause(self, seconds: float) -> None:
-        """Close the pause window, crediting the ``seconds`` the forwarding rank measured for its push.
-
-        The measured figure replaces this rank's own estimate — the pause is the servers', timed
-        where the push ran.
-        """
+        """Close the pause window, crediting the ``seconds`` the forwarding rank measured for its push in place of
+        this rank's own estimate: the pause is the servers', timed where the push ran."""
         self._pause_clock.end(seconds)
         if self._actor_pause_clock is not None:
             self._actor_pause_clock.end.remote(seconds)
@@ -614,16 +438,10 @@ class RolloutManager:
         return self._pause_clock.paused_seconds()
 
     def warn_if_servers_unreachable_from_actors(self, multinode: bool) -> None:
-        """Warn when a rollout-server URL is loopback on a multi-node job. Call on a single rank.
-
-        Placement only prefers this node (see :meth:`start`), so an actor can land anywhere. A loopback
-        URL then reaches a node with no engine listening and every episode routed there returns a
-        rollout error, which :func:`~src.trainers.grpo.environmental.rollout_valid_mask` excludes from
-        the GRPO baseline: the effective batch shrinks until the all-masked guard halts the run. A
-        loopback URL is valid only if an engine runs on every node.
-        """
+        """Warn when a rollout-server URL is loopback on a multi-node job: placement only prefers this node, so an
+        actor elsewhere reaches no engine unless one runs on every node."""
         urls = self.server_urls
-        hosts = [urlparse(u if "://" in u else f"http://{u}").hostname or "" for u in urls]
+        hosts = [urlparse(_http_url(u)).hostname or "" for u in urls]
         if not multinode or not any(is_loopback(host) for host in hosts):
             return
         backend = self.rollout_config.backend
@@ -645,11 +463,8 @@ class RolloutManager:
             # Local-mode fallback for direct library use: on every entry-script path the trainer's
             # _init_async_components has already initialized Ray with the configured ray_address.
             ray.init(**ray_init_kwargs())
-        # Prefer this node; without it a shared cluster scatters this rank's actors cluster-wide.
-        # `soft` alone spills only when the node is dead or infeasible: a live but saturated node pins
-        # the actor there and waits indefinitely, which on the CPU-actor-tier topology
-        # (agent-docs/infrastructure/ray.md) keeps every actor on the training node instead of
-        # spilling. `_spill_on_unavailable` makes the affinity an actual preference.
+        # Prefer this node, or a shared cluster scatters this rank's actors. `soft` alone pins an actor to a live
+        # but saturated node indefinitely; `_spill_on_unavailable` makes the affinity a preference.
         strategy = NodeAffinitySchedulingStrategy(
             node_id=ray.get_runtime_context().get_node_id(), soft=True, _spill_on_unavailable=True
         )
@@ -720,13 +535,7 @@ class RolloutManager:
                     if isinstance(e, TimeoutError):
                         # Ray forbids force=True on an async-actor task, so it would never cancel.
                         ray.cancel(ref, force=False)
-                        logger.error(f"Rollout {idx} exceeded the {self.rollout_config.episode_timeout}s deadline")
-                    elif _is_shutdown_error(e):
-                        logger.debug(f"Rollout {idx} abandoned at shutdown: {e}")
-                    else:
-                        # Same reasoning as the actor-side catch-all: an unclassified failure costs
-                        # the whole rollout, and the traceback is what localizes it.
-                        logger.error(f"Rollout {idx} failed: {e}", exc_info=True)
+                    self._log_failure(idx, e)
                     errors[idx] = e
 
         # Paired before the first task starts, so a length mismatch submits no episode.
@@ -734,19 +543,22 @@ class RolloutManager:
         tasks = [asyncio.create_task(_run(i, p, c)) for i, (p, c) in enumerate(episodes)]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        final = []
-        for i in range(len(prompts)):
-            r = results[i]
-            if r is None:
-                # Typed, never ``str(e)``: the deadline's bare ``TimeoutError`` stringifies to "", and an
-                # empty ``error`` is a VALID zero-reward group member to ``rollout_valid_mask``.
-                msg = describe_exception(errors[i]) if errors[i] is not None else "Unknown error"
-                r = RolloutResult(
-                    prompt=prompts[i],
-                    trajectory=Trajectory(done=True, info={EPISODE_ERROR_KEY: msg}),
-                    success=False,
-                    error=msg,
-                )
-            final.append(r)
+        # Typed, never ``str(e)``: the deadline's bare ``TimeoutError`` stringifies to "", and an empty
+        # ``error`` is a VALID zero-reward group member to ``rollout_valid_mask``.
+        return [
+            result
+            if result is not None
+            else RolloutResult.errored(prompt, describe_exception(error) if error is not None else "Unknown error")
+            for prompt, result, error in zip(prompts, results, errors, strict=True)
+        ]
 
-        return final
+    def _log_failure(self, idx: int, error: Exception) -> None:
+        """Log a rollout lost on the manager's side (its deadline, a shutdown, anything else) by its cause."""
+        if isinstance(error, TimeoutError):
+            logger.error(f"Rollout {idx} exceeded the {self.rollout_config.episode_timeout}s deadline")
+        elif _is_shutdown_error(error):
+            logger.debug(f"Rollout {idx} abandoned at shutdown: {error}")
+        else:
+            # Same reasoning as the actor-side catch-all: an unclassified failure costs
+            # the whole rollout, and the traceback is what localizes it.
+            logger.error(f"Rollout {idx} failed: {error}", exc_info=True)

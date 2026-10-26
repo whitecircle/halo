@@ -28,8 +28,8 @@ Output dataset format:
 import argparse
 import logging
 
-from scripts._common import add_openai_endpoint_args
-from scripts.inference._common import (
+from scripts.cli_arguments import add_openai_endpoint_args
+from scripts.inference.inference_arguments import (
     add_checkpoint_interval_arg,
     add_generation_args,
     add_s3_dataset_args,

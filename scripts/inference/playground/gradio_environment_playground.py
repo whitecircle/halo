@@ -23,11 +23,12 @@ from typing import Any
 
 import gradio as gr
 
-from scripts._common import add_openai_endpoint_args
-from scripts.inference._common import add_gradio_server_args, launch_gradio
-from src.environments.base import ANSWER_KEY, Trajectory
-from src.environments.eval_runner import EVAL_STATS_KEY, require_answers, run_episode
-from src.environments.registry import get_registered_environments, resolve_environment
+from scripts.cli_arguments import add_openai_endpoint_args
+from scripts.inference.inference_arguments import add_gradio_server_args, launch_gradio
+from src.environments.episode_keys import ANSWER_KEY
+from src.environments.eval_runner import EVAL_STATS_KEY, reject_answerless_examples, run_episode
+from src.environments.messages import Trajectory
+from src.environments.registry import build_environment, get_registered_environments
 from src.environments.rollout_config import RolloutConfig
 from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from src.inference.openai_client import build_openai_client
@@ -124,10 +125,10 @@ def run_playground_episode(
     length-cut or empty turn is recovered here as in training rather than graded as a final answer),
     binds the episode's reasoning-effort level and token budget, and finalizes a truncated episode.
     """
-    env = resolve_environment(env_type, {"max_turns": int(max_turns)})
+    env = build_environment(env_type, {"max_turns": int(max_turns)})
     try:
         context = build_context(expected_answer)
-        require_answers(env, [{"context": context}], "the Expected Answer box")
+        reject_answerless_examples(env, [{"context": context}], "the Expected Answer box")
         # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a
         # full one, so the scheme is restored rather than refused.
         url = server_url if server_url.startswith("http") else f"http://{server_url}"

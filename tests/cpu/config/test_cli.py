@@ -7,7 +7,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from src.cli import app, command, resolve_config, tool_commands, training_methods
+from src.cli import app, build_launch_command, resolve_config, tool_commands, training_methods
 
 runner = CliRunner()
 
@@ -230,25 +230,27 @@ def test_tools_index_scripts_without_def_main(tmp_path):
 
 
 def test_command_uses_python_for_single_process():
-    run = command(Path("scripts/training/sft.py"), Path("config.yaml"), nproc=1, args=["--lr=1e-5"])
+    run = build_launch_command(Path("scripts/training/sft.py"), Path("config.yaml"), nproc=1, args=["--lr=1e-5"])
 
     assert run == [sys.executable, "scripts/training/sft.py", "config.yaml", "--lr=1e-5"]
 
 
 def test_command_uses_torchrun_when_nproc_is_greater_than_one():
-    run = command(Path("scripts/training/sft.py"), Path("config.yaml"), nproc=8, args=[])
+    run = build_launch_command(Path("scripts/training/sft.py"), Path("config.yaml"), nproc=8, args=[])
 
     assert run == ["torchrun", "--nproc_per_node=8", "scripts/training/sft.py", "config.yaml"]
 
 
 def test_command_omits_config_for_tools():
-    run = command(Path("scripts/after_training/merge_ep_shards.py"), None, nproc=1, args=["--input_dir=x"])
+    run = build_launch_command(
+        Path("scripts/after_training/merge_ep_shards.py"), None, nproc=1, args=["--input_dir=x"]
+    )
 
     assert run == [sys.executable, "scripts/after_training/merge_ep_shards.py", "--input_dir=x"]
 
 
 def test_command_uses_accelerate_launch_with_config():
-    run = command(
+    run = build_launch_command(
         Path("scripts/training/sft.py"),
         Path("config.yaml"),
         nproc=1,
@@ -268,7 +270,7 @@ def test_command_uses_accelerate_launch_with_config():
 
 
 def test_command_accelerate_passes_num_processes_when_nproc_set():
-    run = command(
+    run = build_launch_command(
         Path("scripts/training/sft.py"),
         Path("config.yaml"),
         nproc=4,
@@ -409,13 +411,13 @@ def test_run_rejects_unknown_tool(tmp_path):
 
 
 def test_command_torchrun_gets_master_port():
-    run = command(Path("scripts/training/sft.py"), Path("config.yaml"), nproc=2, args=[], port=29750)
+    run = build_launch_command(Path("scripts/training/sft.py"), Path("config.yaml"), nproc=2, args=[], port=29750)
 
     assert run[:3] == ["torchrun", "--nproc_per_node=2", "--master_port=29750"]
 
 
 def test_command_accelerate_gets_main_process_port():
-    run = command(
+    run = build_launch_command(
         Path("scripts/training/sft.py"),
         Path("config.yaml"),
         nproc=2,
@@ -438,7 +440,7 @@ def test_command_accelerate_gets_main_process_port():
 
 def test_command_rejects_port_for_single_process():
     with pytest.raises(typer.BadParameter, match="--port only applies"):
-        command(Path("scripts/training/sft.py"), Path("config.yaml"), nproc=1, args=[], port=29750)
+        build_launch_command(Path("scripts/training/sft.py"), Path("config.yaml"), nproc=1, args=[], port=29750)
 
 
 @pytest.mark.parametrize("flag", ["--nnodes=2", "--node_rank", "--master-addr=10.0.0.1", "--rdzv_endpoint=h:1"])

@@ -173,13 +173,14 @@ changes.
 
 | `src/` area | Owning doc page(s) |
 |---|---|
-| `src/environments/base.py`, `episode.py`, `registry.py` | `agent-docs/training-methods/async-grpo/environments/{README,custom}.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` (episode budgets, effort binding, unproductive turns); `agent-docs/training-methods/grpo/rewards/README.md` (What a scorer reads, Settlement) for the scoring hooks and the external-term settlement |
-| `src/environments/envs/protocols/` (native, react, mcp) | `agent-docs/training-methods/async-grpo/environments/protocols/{native-tool-use,react,mcp}.md` |
+| `src/environments/{environment_base,messages,episode_keys,tool_accounting,turn_recovery,reasoning_effort}.py`, `episode.py` (`play_episode`, the one episode loop), `registry.py` (`build_environment`) | `agent-docs/training-methods/async-grpo/environments/{README,custom}.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` (episode budgets, effort binding, unproductive turns) |
+| `src/environments/episode_scoring.py` (`EpisodeGrade`, the scoring hooks, the external-term settlement) | `agent-docs/training-methods/grpo/rewards/README.md` (What a scorer reads, Settlement), `agent-docs/training-methods/async-grpo/environments/custom.md` |
+| `src/environments/protocols/` (native_tool_use, react, mcp) | `agent-docs/training-methods/async-grpo/environments/protocols/{native-tool-use,react,mcp}.md` |
 | `src/environments/tasks/coding/` (swe, code_contests with its prompts and submission record, program_source, verdicts, grading, contest_datasets), `tasks/qa.py` | `agent-docs/training-methods/async-grpo/environments/tasks/{swe,qa-benchmarks}.md`, `agent-docs/training-methods/async-grpo/environments/tasks/code-contests/*.md` |
 | `src/environments/sandbox/` (`base.py` the abstract executor and session, `results.py`, `languages.py`, `factory.py`, the local, bubblewrap, remote and in-process backends, `repl.py`) | `agent-docs/training-methods/async-grpo/environments/sandbox.md` |
 | `src/environments/tools/` (`definitions.py`, `toolsets.py` the tool-set builders) | `agent-docs/training-methods/async-grpo/environments/protocols/native-tool-use.md`, `agent-docs/training-methods/async-grpo/environments/tasks/swe.md` |
-| `src/environments/engine_wire.py` (the rollout request wire format: stop tokens, `thinking_token_budget`, reasoning effort) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` |
-| `src/environments/rollout_config.py` (`RolloutConfig`: the rollout defaults `AsyncTrainingConfig` reads, sampler presets, reasoning template variables and `ReasoningEffortChoice`) | `agent-docs/reference/architecture.md` (leaf modules), `agent-docs/reference/configuration-reference.md` (the `AsyncTrainingConfig` fields it mirrors), `agent-docs/training-methods/async-grpo/evaluation.md` |
+| `src/environments/engine_wire.py` (the rollout request wire format: stop tokens, `thinking_token_budget`, reasoning effort; `turn_from_chat_completion`, the reply parser both drivers read with; `reject_unenforceable_thinking_budget`) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` |
+| `src/environments/rollout_config.py` (`RolloutConfig`: the rollout defaults `AsyncTrainingConfig` reads, sampler presets, reasoning template variables, `ReasoningEffortChoice` and its levels, the stop-token and reasoning-end id resolvers) | `agent-docs/reference/architecture.md` (leaf modules), `agent-docs/reference/configuration-reference.md` (the `AsyncTrainingConfig` fields it mirrors), `agent-docs/training-methods/async-grpo/evaluation.md` |
 | `src/environments/eval_runner.py` (offline episode driver + eval report/trajectory outputs) | `agent-docs/training-methods/async-grpo/evaluation.md`, `agent-docs/reference/scripts-reference.md` |
 | `src/environments/tools/web_search.py` (pluggable search backends) | `agent-docs/training-methods/async-grpo/environments/tasks/qa-benchmarks.md`, `agent-docs/reference/configuration-reference.md` |
 
@@ -192,6 +193,7 @@ changes.
 | `src/env.py` (the `env_*` readers, `HALO_DATA_ROOT` / `data_path`), `src/__init__.py` (the import-time process defaults: `HALO_TORCH_NUM_THREADS`, `TOKENIZERS_PARALLELISM`) and any `HALO_`/`DIST_`/`VLLM_`/`SGLANG_`/`NVLINK_`/`EP_` knob wherever it is read | `agent-docs/reference/configuration-reference.md` (Environment variables), `agent-docs/infrastructure/docker.md` |
 | `src/config_validation.py` (the bounds guards `require_finite` / `require_int`, `ValidatedConfig`, `differs_from_default`, the argument refusals `reject_unsupported_args` / `reject_non_default_args`) | `agent-docs/reference/configuration-reference.md` |
 | `src/configs/parallelism_arguments.py` (`ParallelismArguments` → `ParallelismConfig`, the per-script CP/PP/lowp gates) | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md` |
+| `src/configs/rollout_arguments.py` (`RolloutSamplingArguments`, `RolloutBudgetArguments`: the rollout sampling and token-budget bundles `AsyncTrainingConfig` mixes in) | `agent-docs/reference/configuration-reference.md`, `agent-docs/training-methods/async-grpo/setup.md` |
 | `src/log.py` (root logging setup, CLI verbosity, `warn_once`, `KEY_PREVIEW_COUNT`, the run-log names) | `agent-docs/reference/debugging.md` |
 | `src/cli.py` (`halo launch` / `halo run` surface, tool aliases) | `README.md` quick start, `agent-docs/reference/scripts-reference.md` |
 
@@ -211,8 +213,9 @@ changes.
 |---|---|
 | `scripts/training/**`, `scripts/inference/**`, `scripts/before_training/**`, `scripts/after_training/**` | `agent-docs/reference/scripts-reference.md` + the relevant method/data page |
 | `scripts/profiling/**` | `agent-docs/reference/debugging.md`, `agent-docs/reference/scripts-reference.md` |
-| `scripts/environments/**` (env eval runners, their shared `_common.py` flags/output writer, trajectory re-grading, coding-dataset prep) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
-| `scripts/_common.py` (flags shared across subtrees: the checkpoint tools' shard cap, Hub source block, `--dtype`/`--device_map`, `--trust_remote_code`; the OpenAI endpoint block) | `agent-docs/reference/scripts-reference.md` |
+| `scripts/environments/**` (env eval runners, their shared `eval_arguments.py` flags/output writer and `training_contract.py` (`--training_config`), trajectory re-grading, coding-dataset prep with `preparation/parquet_parts.py`) | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
+| `scripts/cli_arguments.py` (flags shared across subtrees: the checkpoint tools' shard cap, Hub source block, `--dtype`/`--device_map`, `--trust_remote_code`; the OpenAI endpoint block) | `agent-docs/reference/scripts-reference.md` |
+| `scripts/inference/inference_arguments.py` (the generation CLIs' shared generation and prompt-row flags, S3 resume, merge and abort; the Gradio server block), `scripts/inference/reward_model/reward_model_arguments.py` (the reward-model scorers' boot, parser, generation, scoring and local-JSONL resume) | `agent-docs/reference/scripts-reference.md` |
 | `scripts/after_training/merge_ep_shards.py` | `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/merge_pp_stages.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `scripts/after_training/quantize_to_lowp.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |

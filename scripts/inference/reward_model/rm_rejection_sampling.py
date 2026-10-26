@@ -35,8 +35,8 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
-from scripts.inference._common import reject_empty_results, run_async_cli
-from scripts.inference.reward_model._common import (
+from scripts.inference.inference_arguments import reject_empty_results, run_async_cli
+from scripts.inference.reward_model.reward_model_arguments import (
     OverlongConversationError,
     TruncatedGenerationError,
     append_jsonl_record,

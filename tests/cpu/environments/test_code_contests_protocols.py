@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 import src.environments.eval_runner as eval_runner
-from scripts.environments._common import rollout_config_from_args
+from scripts.environments.eval_arguments import rollout_config_from_args
 from scripts.environments.inference.run_code_contests import (
     FLAG_OWNED_ENV_KWARGS,
     SOLUTION_HEADROOM_TOKENS,
@@ -31,8 +31,7 @@ from scripts.environments.inference.run_code_contests import (
     resolve_eval_protocol,
     run_trajectory_path,
 )
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
-from src.environments.registry import resolve_environment
+from src.environments.registry import build_environment
 from src.environments.rollout_config import RolloutConfig
 from src.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
@@ -46,6 +45,7 @@ from src.environments.tasks.coding.code_contests_prompts import (
 )
 from src.environments.tasks.coding.contest_datasets import ContestSelection
 from src.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
+from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
     StubSandbox,
@@ -54,6 +54,7 @@ from tests.common.code_contests import (
     reset_episode,
     retired_budget_phrases,
 )
+from tests.common.fake_chat_client import chat_reply
 
 # The shipped recipes' interaction ladder under enforced budgets: effort buys submissions and scratchpad runs
 # as well as thinking.
@@ -185,7 +186,7 @@ def test_a_leaderboard_scratchpad_call_flags_no_turn_while_a_spent_budget_still_
 
 
 def test_the_registry_presets_take_the_protocol():
-    env = resolve_environment("codeforces", {"eval_protocol": "leaderboard", "sandbox": StubSandbox()})
+    env = build_environment("codeforces", {"eval_protocol": "leaderboard", "sandbox": StubSandbox()})
     assert env.grading_spec.comparison == "tokens"
     assert (env.eval_protocol, *_budgets(env)) == ("leaderboard", 1, 0)
 
@@ -322,17 +323,15 @@ async def test_a_no_level_episode_sends_no_level_and_records_none(monkeypatch):
     env_config = resolve_env_config(args, {}, {})
     env = CodeContestsEnvironment(sandbox=StubSandbox(), **env_config)
     rollout = rollout_config_from_args(
-        args, None, default_temperature=0.2, default_max_tokens=default_max_tokens(env, args.reasoning_effort)
+        args, None, env, default_temperature=0.2, default_max_tokens=default_max_tokens(env, args.reasoning_effort)
     )
     calls = []
 
-    async def fake_generate(model, messages, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=3, tool_calls=None, reasoning=None, token_ids=None
-        )
+    async def fake_chat(client, **request):
+        calls.append(request)
+        return chat_reply("done", completion_tokens=3)
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", fake_chat)
     traj = await eval_runner.run_episode(env, "solve it", dict(SINGLE_TEST_ANSWER), None, rollout=rollout)
 
     assert env.reasoning_effort is None

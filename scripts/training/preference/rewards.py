@@ -42,7 +42,7 @@ from src.entrypoints.model_setup import (
     load_model_and_tokenizer,
     load_vlm_processor,
     log_model_info,
-    require_multimodal_sequence_classification_head,
+    reject_multimodal_model_without_seq_cls_head,
 )
 from src.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -85,7 +85,7 @@ def main():
     # Before the model load: a multimodal family with no score head otherwise fails inside Auto*
     # resolution on every rank, naming no alternative. After the distributed init, so the hub read it
     # makes is ordered main-rank-first.
-    require_multimodal_sequence_classification_head(model_config)
+    reject_multimodal_model_without_seq_cls_head(model_config)
 
     model, tokenizer = load_model_and_tokenizer(
         context,

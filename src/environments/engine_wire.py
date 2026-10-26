@@ -1,14 +1,13 @@
-"""OpenAI chat-completions wire format for the rollout engines (vLLM and SGLang).
-
-Builds a turn's request payload and reads back the three facts a trainer may capture (sampled ids,
-their logprobs, the engine's prompt ids). The two engines spell the capture flags differently and
-return those facts in different places. Transport and the episode loop belong to the rollout drivers.
-"""
+"""OpenAI chat-completions wire format for the rollout engines (vLLM and SGLang): a turn's request fields and the
+turn a reply reports, the captures included, which the two engines request and return in different places.
+Transport belongs to the rollout drivers."""
 
 import logging
-from collections.abc import Iterable
-from typing import Any, get_args, get_type_hints
+from collections.abc import Awaitable, Callable, Iterable
+from dataclasses import replace
+from typing import Any
 
+from src.environments.episode import TurnGeneration, describe_exception
 from src.environments.rollout_config import (
     REASONING_BUDGET_SOFT_TEMPLATE_VAR,
     REASONING_BUDGET_TEMPLATE_VAR,
@@ -16,24 +15,25 @@ from src.environments.rollout_config import (
     VLLM_BACKEND,
     RolloutConfig,
 )
+from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason, get_reasoning_text
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
 
-# Backends already warned that a per-effort thinking budget reaches no engine field (once per process).
-_THINKING_BUDGET_UNENFORCED_WARNED: set[str] = set()
-
 # Model types vLLM serves with its mistral_common tokenizer, whose encode() turns the budget's "[THINK]"
 # and "[/THINK]" markers into plain-text pieces while the model writes them as control tokens.
-VLLM_UNMATCHED_REASONING_MARKER_MODEL_TYPES = frozenset({"mistral4"})
+_VLLM_UNMATCHED_REASONING_MARKER_MODEL_TYPES = frozenset({"mistral4"})
+
+# Backends already warned (once per process) that a per-effort thinking budget reaches no engine field, that
+# their completions carry no ``usage.completion_tokens``, and that a cut call's text could not be decoded.
+_thinking_budget_unenforced_warned: set[str] = set()
+_completion_tokens_missing_warned: set[str] = set()
+_cut_call_decode_failed_warned: set[str] = set()
 
 
 def _logprob_entries(choice: dict[str, Any]) -> list[dict[str, Any]] | None:
-    """A choice's per-token ``logprobs.content`` entries, or None when the server returned none.
-
-    An empty list is a zero-token completion whose capture succeeded, not a missing capture; the
-    consumers keep the two apart (``[]`` trains nothing, ``None`` falls back to a re-render).
-    """
+    """A choice's per-token ``logprobs.content`` entries, or None when the server returned none; ``[]`` is a
+    zero-token completion whose capture succeeded."""
     content = (choice.get("logprobs") or {}).get("content")
     return content if isinstance(content, list) else None
 
@@ -73,14 +73,8 @@ def _extract_token_logprobs(choice: dict[str, Any]) -> list[float] | None:
 
 
 def _sglang_meta_triples(choice: dict[str, Any]) -> list[list[Any]] | None:
-    """A choice's ``meta_info.output_token_logprobs`` — ``[logprob, token_id, token_text]`` per sampled
-    token, present when the request set both ``logprobs`` and ``return_meta_info``.
-
-    SGLang's OpenAI-compat ``logprobs`` field drops the token id while converting (it reports the
-    token as text), but ``return_meta_info`` echoes the pre-conversion dict on the choice, which still
-    carries it. Returns None when absent or malformed, so the caller falls back to re-tokenization;
-    an empty list is a zero-token completion and comes back as such.
-    """
+    """A choice's ``meta_info.output_token_logprobs`` (``[logprob, token_id, token_text]`` per sampled token), or
+    None when absent or malformed: SGLang's OpenAI ``logprobs`` drops the id, the ``return_meta_info`` echo keeps it."""
     triples = (choice.get("meta_info") or {}).get("output_token_logprobs")
     if not isinstance(triples, list):
         return None
@@ -118,17 +112,6 @@ def _capture_sglang(
 # Per-backend response readers: the engines return the same three facts in different places.
 _TOKEN_CAPTURE = {VLLM_BACKEND: _capture_vllm, SGLANG_BACKEND: _capture_sglang}
 
-# Every selectable backend needs a reader, checked at import rather than on the first captured turn.
-_SELECTABLE_BACKENDS = frozenset(get_args(get_type_hints(RolloutConfig)["backend"]))
-if not _SELECTABLE_BACKENDS:
-    raise RuntimeError("RolloutConfig.backend no longer declares a Literal roster; the reader table cannot be checked")
-_UNREADABLE_BACKENDS = sorted(_SELECTABLE_BACKENDS - set(_TOKEN_CAPTURE))
-if _UNREADABLE_BACKENDS:
-    raise RuntimeError(
-        f"rollout backend(s) {_UNREADABLE_BACKENDS} are selectable on RolloutConfig but have no "
-        f"response reader in {__name__}: ship the reader with the backend's payload branch."
-    )
-
 
 def capture_generation_tokens(
     choice: dict[str, Any], data: dict[str, Any], backend: str
@@ -137,38 +120,81 @@ def capture_generation_tokens(
     return _TOKEN_CAPTURE[backend](choice, data)
 
 
-def capture_routing_mask(choice: dict[str, Any], data: dict[str, Any]) -> str | None:
-    """The turn's raw base64 MoE routing payload, wherever this response put it.
+def turn_from_chat_completion(data: dict[str, Any], config: RolloutConfig) -> TurnGeneration:
+    """One turn as a chat-completions response (a raw JSON body, or an SDK reply's ``model_dump()``) reports it:
+    text, tool calls, reasoning, the sampled-token count and why it stopped, plus the captures ``config``
+    requested (sampled ids, their logprobs, the engine's prompt ids, the MoE routing)."""
+    choice = data["choices"][0]
+    usage = data.get("usage") or {}
+    msg = choice["message"]
+    text = msg.get("content") or ""
+    if config.capture_token_ids:
+        token_ids, token_logprobs, prompt_token_ids = capture_generation_tokens(choice, data, config.backend)
+    else:
+        token_ids = token_logprobs = prompt_token_ids = None
+    tokens = usage.get("completion_tokens") or 0
+    if not tokens and text:
+        # The captured ids are the only honest length; a word count of the text is not one.
+        tokens = len(token_ids) if token_ids else 0
+        warn_once(
+            logger,
+            _completion_tokens_missing_warned,
+            config.backend,
+            "%s returned a completion without usage.completion_tokens; generation-token metrics "
+            "count the captured token ids instead (0 when none are captured).",
+            config.backend,
+        )
+    routing_mask = None
+    if config.capture_routed_experts:
+        # The raw base64 MoE routing: vLLM attaches it per choice, SGLang response-level under ``sglext``.
+        routing_mask = choice.get("routed_experts") or (data.get("sglext") or {}).get("routed_experts")
+    return TurnGeneration(
+        text=text,
+        tool_calls=msg.get("tool_calls") or [],
+        reasoning=get_reasoning_text(msg) or "",
+        tokens=tokens,
+        token_ids=token_ids,
+        token_logprobs=token_logprobs,
+        routing_mask=routing_mask,
+        # The engine's prompt length anchors the mask; the trainer's re-render can differ by a token.
+        routing_prompt_tokens=usage.get("prompt_tokens") if routing_mask else None,
+        prompt_token_ids=prompt_token_ids,
+        finish_reason=get_finish_reason(
+            choice, completion_tokens=usage.get("completion_tokens"), max_tokens=config.max_tokens
+        ),
+    )
 
-    vLLM attaches it per-choice; SGLang publishes it response-level under ``sglext``.
-    """
-    return choice.get("routed_experts") or (data.get("sglext") or {}).get("routed_experts")
 
-
-def generation_control_fields(
+async def with_cut_call_as_written(
+    gen: TurnGeneration,
     config: RolloutConfig,
-    reasoning_effort: str | None = None,
-    reasoning_budget: int | None = None,
-    budget_soft: bool = False,
-) -> dict[str, Any]:
-    """The request fields carrying a turn's generation contract: the sampler filters (``config.top_k``,
-    ``min_p``, ``repetition_penalty``), the reasoning level, the CoT cap the engine enforces this turn
-    (``config.max_thinking_tokens``), the budget the template states (``reasoning_budget``, the level's
-    per-turn budget both drivers pass, with ``budget_soft`` when the engine does not enforce it), and the
-    turn terminator.
-    One owner for both drivers — the training payload below and the eval runner's SDK call — so a knob
-    cannot reach one and quietly miss the other.
+    detokenize: Callable[[list[int]], Awaitable[str]],
+    log_prefix: str,
+) -> TurnGeneration:
+    """``gen`` with the call its token cap cut as the policy wrote it: the ids past the reasoning close, decoded by
+    the driver's ``detokenize``, replace the arguments vLLM's parser salvaged. The salvage stands where no
+    single-token close splits the ids or the decode fails."""
+    ids, end = gen.token_ids, config.reasoning_end_token_id
+    cut_in_call = gen.finish_reason == FINISH_REASON_LENGTH and gen.tool_calls and ids
+    if not cut_in_call or config.backend != VLLM_BACKEND or end is None or end not in ids:
+        return gen
+    try:
+        written = await detokenize(ids[len(ids) - ids[::-1].index(end) :])
+    except Exception as e:  # what a judge reads of a cut call never fails the episode
+        warn_once(
+            logger,
+            _cut_call_decode_failed_warned,
+            config.backend,
+            "%s: decoding a cut call's text failed (%s); the judge reads the call as the parser salvaged it",
+            log_prefix,
+            describe_exception(e),
+        )
+        return gen
+    first = gen.tool_calls[0]
+    return replace(gen, tool_calls=[{**first, "function": {**first.get("function", {}), "arguments": written}}])
 
-    ``reasoning_effort`` goes out TOP-LEVEL: that spelling is the one both engines derive their
-    thinking toggles from (vLLM ``enable_thinking``, SGLang ``thinking`` + ``enable_thinking``: on for
-    any level but ``none``, unless ``chat_template_kwargs`` sets the toggle) and both hand the template. Each engine also reads a nested copy and lets one spelling override the
-    other — vLLM the top-level field, SGLang the nested one, which it pops into the top-level field
-    before rendering — so on SGLang the same value rides nested too, an exact copy that leaves one
-    value whichever spelling the engine reads.
-    The run's other template variables (``config.chat_template_kwargs``) ride in the nested form,
-    joined by the level's thinking budget under :data:`REASONING_BUDGET_TEMPLATE_VAR`; the config
-    refuses the per-episode keys there.
-    """
+
+def _sampler_fields(config: RolloutConfig) -> dict[str, Any]:
     # Sent at every value, off included: both engines fill an omitted filter from the model's
     # generation_config.json, and the eval's OpenAI SDK call has no keyword for any of them.
     fields: dict[str, Any] = {
@@ -179,32 +205,43 @@ def generation_control_fields(
     if config.stop_token_ids:
         # Stop at the tool-call terminator, else the model hallucinates the tool result itself.
         fields["stop_token_ids"] = config.stop_token_ids
-    if config.max_thinking_tokens is not None:
-        if config.backend == VLLM_BACKEND:
-            # vLLM forces the reasoning-end marker; needs a server-side reasoning parser.
-            fields["thinking_token_budget"] = config.max_thinking_tokens
-        else:
-            # A cap reaching here came from the env's profile — a level's budget or a soft level's ceiling (a
-            # global one is rejected at config time); the budget still reaches the reward side.
-            warn_once(
-                logger,
-                _THINKING_BUDGET_UNENFORCED_WARNED,
-                config.backend,
-                "Per-turn thinking cap of %d tokens is NOT enforced on rollout_backend=%r "
-                "(thinking_token_budget is a vLLM-only request field): nothing caps reasoning "
-                "below max_tokens=%d. The level still reaches the chat template and the reasoning "
-                "terms (reasoning_price, reasoning_floor), which price reasoning per level "
-                "without the engine's help.",
-                config.max_thinking_tokens,
-                config.backend,
-                config.max_tokens,
-            )
+    return fields
+
+
+def _thinking_cap_fields(config: RolloutConfig) -> dict[str, Any]:
+    if config.max_thinking_tokens is None:
+        return {}
+    if config.backend == VLLM_BACKEND:
+        # vLLM forces the reasoning-end marker; needs a server-side reasoning parser.
+        return {"thinking_token_budget": config.max_thinking_tokens}
+    # A cap reaching here came from the env's profile — a level's budget or a soft level's ceiling (a
+    # global one is rejected at config time); the budget still reaches the reward side.
+    warn_once(
+        logger,
+        _thinking_budget_unenforced_warned,
+        config.backend,
+        "Per-turn thinking cap of %d tokens is NOT enforced on rollout_backend=%r "
+        "(thinking_token_budget is a vLLM-only request field): nothing caps reasoning "
+        "below max_tokens=%d. The level still reaches the chat template and the reasoning "
+        "terms (reasoning_price, reasoning_floor), which price reasoning per level "
+        "without the engine's help.",
+        config.max_thinking_tokens,
+        config.backend,
+        config.max_tokens,
+    )
+    return {}
+
+
+def _template_fields(
+    config: RolloutConfig, reasoning_effort: str | None, reasoning_budget: int | None, budget_soft: bool
+) -> dict[str, Any]:
+    """The level top-level, where both engines derive their thinking toggles from it, and the run's template
+    variables nested, joined by the level's budget under :data:`REASONING_BUDGET_TEMPLATE_VAR`."""
+    fields: dict[str, Any] = {}
     template_kwargs = dict(config.chat_template_kwargs or {})
     if reasoning_budget is not None:
-        # The level's budget as a template variable, so a template can state it — as a cut where the engine
-        # enforces it, a target where it is soft; a template that does not read it ignores it. Episode-constant: the trainer renders
-        # every turn of a trajectory with the one value the trajectory carries, never the narrower cap
-        # an output budget leaves a late turn.
+        # Episode-constant: the trainer renders every turn with the one value the trajectory carries, never the
+        # narrower cap an output budget leaves a late turn.
         template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = reasoning_budget
         if budget_soft:
             template_kwargs[REASONING_BUDGET_SOFT_TEMPLATE_VAR] = True
@@ -219,17 +256,44 @@ def generation_control_fields(
     return fields
 
 
-def refuse_unmatched_reasoning_markers(model_types: Iterable[str], backend: str) -> None:
-    """Refuse a thinking budget vLLM accepts but can never enforce for these ``model_types``."""
-    unmatched = sorted(VLLM_UNMATCHED_REASONING_MARKER_MODEL_TYPES.intersection(model_types))
-    if backend == VLLM_BACKEND and unmatched:
-        raise ValueError(
-            f"vLLM cannot enforce a thinking budget for model_type {unmatched}: it serves this model with its "
-            "mistral_common tokenizer, which encodes the [THINK] and [/THINK] markers as plain text while the "
-            "model writes them as control tokens, so the budget never starts counting and reasoning runs "
-            "uncapped. Unset rollout_max_thinking_tokens and the thinking_tokens of every effort level the "
-            "environment draws, and steer with reasoning_effort instead."
-        )
+def generation_control_fields(
+    config: RolloutConfig,
+    reasoning_effort: str | None = None,
+    reasoning_budget: int | None = None,
+    budget_soft: bool = False,
+) -> dict[str, Any]:
+    """The request fields carrying a turn's generation contract: the sampler filters, the reasoning cap the engine
+    enforces this turn, the level, and the template variables with the budget the template states; one owner
+    for the training payload and the eval's SDK call alike."""
+    return {
+        **_sampler_fields(config),
+        **_thinking_cap_fields(config),
+        **_template_fields(config, reasoning_effort, reasoning_budget, budget_soft),
+    }
+
+
+def capture_request_fields(config: RolloutConfig) -> dict[str, Any]:
+    """The request fields asking the engine for the captures ``config`` requests, in its own spelling: SGLang
+    ignores unknown keys rather than rejecting them, so vLLM's would be a no-op there."""
+    fields: dict[str, Any] = {}
+    is_vllm = config.backend == VLLM_BACKEND
+    if config.capture_token_ids:
+        # Sampled ids are recovered from the logprobs; top_logprobs=0 keeps one entry per token.
+        fields["logprobs"] = True
+        fields["top_logprobs"] = 0
+        if is_vllm:
+            # The server's own render is authoritative; a client-side re-render can differ.
+            fields["return_token_ids"] = True
+        else:
+            # SGLang's OpenAI `logprobs` drops the token id; the meta_info it echoes still
+            # carries it, and the prompt ids come back on the choice (non-streaming only).
+            fields["return_meta_info"] = True
+            fields["return_prompt_token_ids"] = True
+    if config.capture_routed_experts and not is_vllm:
+        # SGLang additionally needs a per-request opt-in. start_len stays 0 so rows cover the full
+        # sequence, which is the convention assemble_rollout_masks replays prompt spans from.
+        fields["return_routed_experts"] = True
+    return fields
 
 
 def build_payload(
@@ -248,29 +312,24 @@ def build_payload(
         "temperature": config.temperature,
         "top_p": config.top_p,
         "max_tokens": config.max_tokens,
+        **capture_request_fields(config),
     }
-    # SGLang ignores unknown request keys rather than rejecting them, so vLLM's spelling of the
-    # capture flags would be a no-op there; gate them on the engine.
-    is_vllm = config.backend == VLLM_BACKEND
-    if config.capture_token_ids:
-        # Sampled ids are recovered from the logprobs; top_logprobs=0 keeps one entry per token.
-        payload["logprobs"] = True
-        payload["top_logprobs"] = 0
-        if is_vllm:
-            # The server's own render is authoritative; a client-side re-render can differ.
-            payload["return_token_ids"] = True
-        else:
-            # SGLang's OpenAI `logprobs` drops the token id; the meta_info it echoes still
-            # carries it, and the prompt ids come back on the choice (non-streaming only).
-            payload["return_meta_info"] = True
-            payload["return_prompt_token_ids"] = True
-    if config.capture_routed_experts and not is_vllm:
-        # SGLang additionally needs a per-request opt-in. start_len stays 0 so rows cover the full
-        # sequence, which is the convention assemble_rollout_masks replays prompt spans from.
-        payload["return_routed_experts"] = True
     if config.model_name:
         payload["model"] = config.model_name
     if tools:
         payload["tools"] = tools
     payload.update(generation_control_fields(config, reasoning_effort, reasoning_budget, budget_soft))
     return payload
+
+
+def reject_unenforceable_thinking_budget(model_types: Iterable[str], backend: str) -> None:
+    """Refuse a thinking budget vLLM accepts but can never enforce for these ``model_types``."""
+    unmatched = sorted(_VLLM_UNMATCHED_REASONING_MARKER_MODEL_TYPES.intersection(model_types))
+    if backend == VLLM_BACKEND and unmatched:
+        raise ValueError(
+            f"vLLM cannot enforce a thinking budget for model_type {unmatched}: it serves this model with its "
+            "mistral_common tokenizer, which encodes the [THINK] and [/THINK] markers as plain text while the "
+            "model writes them as control tokens, so the budget never starts counting and reasoning runs "
+            "uncapped. Unset rollout_max_thinking_tokens and the thinking_tokens of every effort level the "
+            "environment draws, and steer with reasoning_effort instead."
+        )

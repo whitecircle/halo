@@ -22,7 +22,7 @@ import unittest
 
 import pytest
 
-from src.environments.base import EPISODE_INVALID_REASON_KEY
+from src.environments.episode_keys import EPISODE_INVALID_REASON_KEY
 from src.environments.sandbox.results import SandboxResult
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tasks.coding.swe import SweEnvironment

@@ -13,41 +13,32 @@ where a protocol configures it; the turn that exhausts the recovery cap pays the
 Run: python tests/cpu/environments/test_length_cutoff_recovery.py  (or pytest)
 """
 
-import importlib
 import json
-import pkgutil
 from dataclasses import replace
 
 import pytest
 
-import src.environments.envs
-from src.environments.base import (
-    REWARD_COMPONENTS_KEY,
-    TOOL_CALL_COUNTS_KEY,
-    BaseEnvironment,
-    Message,
-    Trajectory,
-    engine_view,
-)
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.environment_base import EnvironmentBase
 from src.environments.episode import TurnGeneration, step_context_from_generation
+from src.environments.episode_keys import REWARD_COMPONENTS_KEY
+from src.environments.messages import Message, Trajectory, engine_view
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from src.environments.protocols.react import ReActEnvironment
 from src.environments.tasks.qa import ExamQAEnvironment
+from src.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
 from src.rewards.samples import CUT_TOOL_CALLS_KEY
 from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
 
 
-def _environment_classes(cls: type = BaseEnvironment) -> list[type]:
+def _environment_classes(cls: type = EnvironmentBase) -> list[type]:
     found = []
     for sub in cls.__subclasses__():
         found += [sub, *_environment_classes(sub)]
     return found
 
 
-for _module in pkgutil.walk_packages(src.environments.envs.__path__, f"{src.environments.envs.__name__}."):
-    importlib.import_module(_module.name)
 _NUDGES = {
     f"{cls.__name__}.{name}": getattr(cls, name)
     for cls in _environment_classes()

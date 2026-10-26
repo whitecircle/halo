@@ -18,8 +18,8 @@ import pytest
 import torch
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
+from src.environments.messages import Message, Trajectory
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.reasoning_terms import reasoning_token_counts
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics

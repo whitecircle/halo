@@ -24,7 +24,7 @@ import torch
 from accelerate import PartialState
 from safetensors.torch import load_file, save_file
 
-from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.atomic import (
     PUBLISH_STAGING_SUFFIX,
     clear_staging_path,

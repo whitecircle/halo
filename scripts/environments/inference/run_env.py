@@ -44,24 +44,19 @@ import json
 import logging
 from typing import Any
 
-from scripts.environments._common import (
+from scripts.environments.eval_arguments import (
     DEFAULT_SPLIT,
     add_endpoint_args,
-    load_training_contract,
     resolve_setting,
     resolve_trajectory_path,
     rollout_config_from_args,
     write_eval_outputs,
 )
+from scripts.environments.training_contract import load_training_contract
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
-from src.environments.base import ANSWER_KEY
-from src.environments.eval_runner import (
-    collect_results,
-    load_hf_split,
-    report,
-    require_answers,
-)
-from src.environments.registry import resolve_environment
+from src.environments.episode_keys import ANSWER_KEY
+from src.environments.eval_runner import collect_results, load_hf_split, reject_answerless_examples, report
+from src.environments.registry import build_environment
 from src.environments.rollout_config import RolloutConfig
 from src.inference.openai_client import build_openai_client
 from src.log import configure_cli_logging
@@ -188,19 +183,22 @@ def main() -> None:
     env_kwargs = json.loads(args.env_kwargs)
     turns_override = {"max_turns": args.max_turns} if args.max_turns is not None else {}
     # The training run's env config first, the flags over it: an eval under a contract grades as the run did.
-    env = resolve_environment(env_type, {**trained_env, **turns_override, **env_kwargs})
+    env = build_environment(env_type, {**trained_env, **turns_override, **env_kwargs})
     try:
-        # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
-        env.verify_backend()
-        examples = build_examples(args)
-        require_answers(env, examples, f"the {args.answer_field!r} field of {args.dataset} (--answer_field)")
-        client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
         rollout = rollout_config_from_args(
             args,
             contract,
+            env,
             default_temperature=RolloutConfig.temperature,
             default_max_tokens=RolloutConfig.max_tokens,
         )
+        # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
+        env.verify_backend()
+        examples = build_examples(args)
+        reject_answerless_examples(
+            env, examples, f"the {args.answer_field!r} field of {args.dataset} (--answer_field)"
+        )
+        client = build_openai_client(base_url=args.base_url, api_key_override=args.api_key)
 
         traj_path = resolve_trajectory_path(args, env_type, args.split)
 

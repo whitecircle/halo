@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.environments.base import BaseEnvironment, Message, Trajectory
+from src.environments.environment_base import EnvironmentBase
+from src.environments.messages import Message, Trajectory
 from src.inference.response import FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 
 
@@ -18,7 +19,7 @@ def _record_turn(finish_reason: str | None) -> Message:
     env = SimpleNamespace(max_tool_calls_per_turn=None)
     trajectory = Trajectory()
     trajectory.add_message(Message.user("q"))
-    BaseEnvironment._add_action_message(env, trajectory, "partial reasoning", {"finish_reason": finish_reason})
+    EnvironmentBase._add_action_message(env, trajectory, "partial reasoning", {"finish_reason": finish_reason})
     return trajectory.messages[-1]
 
 

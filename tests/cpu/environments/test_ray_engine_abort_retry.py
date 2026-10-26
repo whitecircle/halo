@@ -31,9 +31,6 @@ def _scripted(actor, finish_reasons: list[str | None]):
     """Make the actor's engine call answer ``finish_reasons`` in order; ``None`` is a completed turn."""
     served: list[list[dict]] = []
 
-    async def _client():
-        return None
-
     async def _generate(
         client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
     ):
@@ -43,7 +40,7 @@ def _scripted(actor, finish_reasons: list[str | None]):
             return TurnGeneration("partial reas", [], "", 3, finish_reason=reason)
         return TurnGeneration("final answer: 4", [], "", 5, finish_reason=reason)
 
-    actor._get_http_client = _client
+    actor._http_client = None
     actor._generate = _generate
     return served
 

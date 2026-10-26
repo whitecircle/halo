@@ -37,8 +37,8 @@ import torch
 from accelerate import PartialState
 
 from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
-from src.environments.base import VALID_REASONING_EFFORTS, stable_reasoning_effort
-from src.environments.episode import bind_episode_effort
+from src.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
+from src.environments.rollout_config import VALID_REASONING_EFFORTS
 from src.trainers.grpo import environmental
 from src.trainers.grpo.environmental import (
     EMPTY_ROLLOUT_STEP_LIMIT,

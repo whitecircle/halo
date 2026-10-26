@@ -4,8 +4,10 @@ import numbers
 import re
 from typing import Any
 
-from src.environments.base import ANSWER_KEY, EpisodeGrade, Trajectory
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.episode_keys import ANSWER_KEY
+from src.environments.episode_scoring import EpisodeGrade
+from src.environments.messages import Trajectory
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from src.environments.tools.definitions import NativeToolRegistry
 from src.environments.tools.toolsets import build_python_tools, build_search_tools
 from src.rewards.graders.matching import is_correct_answer

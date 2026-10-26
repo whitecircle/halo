@@ -17,8 +17,8 @@ from types import SimpleNamespace
 import pytest
 
 from src.environments import ray_actors
-from src.environments.base import Trajectory
 from src.environments.episode import RolloutResult
+from src.environments.messages import Trajectory
 from src.environments.ray_actors import EnginePauseClock, EnvironmentActor, RolloutManager, _await_with_deadline
 from src.environments.rollout_config import RolloutConfig
 
@@ -204,10 +204,7 @@ async def _episode_across_a_pause(
 
     session = _FrozenSession(request_delay, lambda: syncs.append(asyncio.create_task(_sync())))
 
-    async def _client():
-        return session
-
-    actor._get_http_client = _client
+    actor._http_client = session
     config = RolloutConfig(request_timeout=request_timeout, max_retries=max_retries, retry_base_wait=0.0)
     result = await actor.run_episode("2+2?", {"answer": "4"}, "http://x", config)
     for sync in syncs:

@@ -7,6 +7,8 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
     --learning_rate=0.00001 --num_train_epochs=2 --per_device_train_batch_size=2
 ```
 
+A guard's refusal names the config class and the field in one form, `<Config>: <field> must be [an integer ]<bounds>[ (<why>)], got <value>` (`src/config_validation.py`).
+
 Working configs per method and model family live under `examples/`.
 
 ---
@@ -497,7 +499,7 @@ environment_kwargs:
 
 ## AsyncTrainingConfig
 
-`DistributedAsyncEnvironmentalGRPOTrainer`: Ray workers, rollout-server connections, weight sync, rollout generation, async prefetch. **Source:** `src/configs/grpo_environmental.py`, where the sampling, budget, IS-correction and reasoning-cost fields come from the `RolloutSamplingArguments`, `RolloutBudgetArguments`, `ISCorrectionArguments` and `ReasoningCostArguments` bundles it mixes in. A field it copies into the actors' `RolloutConfig` (`src/environments/rollout_config.py`) defaults to `RolloutConfig`'s own value. Every numeric field also refuses a bool (`true` would read as 1) and a non-finite value, beside its own range.
+`DistributedAsyncEnvironmentalGRPOTrainer`: Ray workers, rollout-server connections, weight sync, rollout generation, async prefetch. **Source:** `src/configs/grpo_environmental.py`, where the IS-correction and reasoning-cost fields come from the `ISCorrectionArguments` and `ReasoningCostArguments` bundles it mixes in, and the sampling and budget fields from `RolloutSamplingArguments` and `RolloutBudgetArguments` in `src/configs/rollout_arguments.py`. A field it copies into the actors' `RolloutConfig` (`src/environments/rollout_config.py`) defaults to `RolloutConfig`'s own value. Every numeric field also refuses a bool (`true` would read as 1) and a non-finite value, beside its own range.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

@@ -30,7 +30,7 @@ import torch
 from accelerate import PartialState
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-from scripts._common import (
+from scripts.cli_arguments import (
     add_device_map_arg,
     add_dtype_arg,
     add_hub_source_args,

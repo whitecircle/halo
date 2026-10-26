@@ -53,7 +53,7 @@ def _hub_offline(monkeypatch):
 def _no_weight_load(monkeypatch):
     """The processing-class rule runs ahead of the weight load, which is stubbed out here."""
     PartialState()  # the loader logs through accelerate
-    monkeypatch.setattr(model_setup, "_load_policy", lambda *args, **kwargs: ("model", None))
+    monkeypatch.setattr(model_setup, "load_model_and_tokenizer", lambda *args, **kwargs: ("model", None))
 
 
 def _step3p7_checkpoint(path, *, with_processor: bool) -> str:

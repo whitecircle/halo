@@ -18,7 +18,7 @@
   theme on ``Blocks``); the apps still import and their parsers still build, so only
   constructing the demo and launching it catches the break.
 * Endpoint flags: every generation, eval and playground CLI takes ``--base_url``/``--api_key`` from
-  the one helper in ``scripts/_common.py``, so a command line carries from one to the next.
+  the one helper in ``scripts/cli_arguments.py``, so a command line carries from one to the next.
 * Shared flag blocks: every dtype flag under ``scripts/`` comes from ``add_dtype_arg`` and every
   prompt-row field flag of the generation CLIs from ``add_prompt_field_args``, so a re-typed copy
   cannot drift onto its own default or choices.
@@ -46,12 +46,12 @@ import pytest
 import torch
 from openai import AsyncOpenAI
 
-from scripts._common import add_dtype_arg, add_openai_endpoint_args
-from scripts.inference import _common as inference_common
-from scripts.inference._common import add_prompt_field_args
+from scripts.cli_arguments import add_dtype_arg, add_openai_endpoint_args
+from scripts.inference import inference_arguments
+from scripts.inference.inference_arguments import add_prompt_field_args
 from scripts.inference.playground import gradio_environment_playground
-from scripts.inference.reward_model import _common as reward_model_common
-from scripts.inference.reward_model._common import build_generation_parser
+from scripts.inference.reward_model import reward_model_arguments
+from scripts.inference.reward_model.reward_model_arguments import build_generation_parser
 from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT, load_script_module
@@ -123,16 +123,16 @@ def test_reward_model_loader_applies_the_requested_dtype(monkeypatch, requested,
         def eval(self):
             return self
 
-    monkeypatch.setattr(reward_model_common, "reject_partial_checkpoint", lambda path: None)
+    monkeypatch.setattr(reward_model_arguments, "reject_partial_checkpoint", lambda path: None)
     monkeypatch.setattr(
-        reward_model_common,
+        reward_model_arguments,
         "AutoTokenizer",
         types.SimpleNamespace(from_pretrained=lambda *a, **k: types.SimpleNamespace()),
     )
-    monkeypatch.setattr(reward_model_common, "from_pretrained_verified", lambda *a, **k: _Model())
+    monkeypatch.setattr(reward_model_arguments, "from_pretrained_verified", lambda *a, **k: _Model())
 
     args = _rm_args(*(["--rm_dtype", requested] if requested else []))
-    reward_model_common.load_reward_model(
+    reward_model_arguments.load_reward_model(
         args.rm_model_path,
         args.rm_model_atten_impl,
         args.rm_max_seq_len,
@@ -165,7 +165,7 @@ def test_a_gradio_app_publishes_nothing_by_default(app):
     own tunnel. Publishing stays possible, on the explicit flag.
 
     Read off the app's real parser, since the block is declared once in
-    ``scripts/inference/_common.py``: a source-level literal is not the contract.
+    ``scripts/inference/inference_arguments.py``: a source-level literal is not the contract.
     """
     parser = _gradio_app(app).build_parser()
 
@@ -323,7 +323,7 @@ def test_the_environment_playground_closes_the_environment_of_every_click(monkey
     connections and scorer clients for the life of the app, and a refused click must close it too."""
     seen, closed = [], []
     mod = _mock_playground_client(monkeypatch, seen, content="Final Answer: 4")
-    resolve = mod.resolve_environment
+    resolve = mod.build_environment
 
     def _resolve(env_type, config):
         env = resolve(env_type, config)
@@ -331,7 +331,7 @@ def test_the_environment_playground_closes_the_environment_of_every_click(monkey
         env.close = lambda: (closed.append(env_type), close())
         return env
 
-    monkeypatch.setattr(mod, "resolve_environment", _resolve)
+    monkeypatch.setattr(mod, "build_environment", _resolve)
     mod.run_playground_episode("react_math", "2+2?", "4", "http://localhost:8000/v1", "EMPTY", "m", 0.7, 16, 0.95, 1)
     with pytest.raises(ValueError, match="Expected Answer"):
         mod.run_playground_episode("swe", "fix it", "", "http://localhost:8000/v1", "EMPTY", "m", 0.7, 16, 0.95, 2)
@@ -393,11 +393,13 @@ def test_the_generation_clis_share_one_concurrency_and_checkpoint_default():
                 declared[flag].append((script.name, default))
 
     for flag, constant in expected.items():
-        assert getattr(inference_common, constant), f"{constant} is not defined in scripts/inference/_common.py"
+        assert getattr(inference_arguments, constant), (
+            f"{constant} is not defined in scripts/inference/inference_arguments.py"
+        )
         assert declared[flag], f"no inference CLI declares {flag} — this check covers nothing"
         literal = sorted(entry for entry in declared[flag] if entry[1] != constant)
         assert not literal, (
-            f"{flag} must default to the shared {constant} from scripts/inference/_common.py, not to a "
+            f"{flag} must default to the shared {constant} from scripts/inference/inference_arguments.py, not to a "
             f"per-script literal; found {literal}"
         )
 
@@ -444,12 +446,12 @@ def test_every_endpoint_flag_comes_from_the_shared_helper():
     redeclared = [
         f"{script.relative_to(REPO_ROOT)}: {flag}"
         for script in sorted(scripts_root.rglob("*.py"))
-        if script != scripts_root / "_common.py" and script.relative_to(scripts_root).parts[0] != "profiling"
+        if script != scripts_root / "cli_arguments.py" and script.relative_to(scripts_root).parts[0] != "profiling"
         for flag in _declared_flags(script.read_text(encoding="utf-8"))
         if _ENDPOINT_FLAG.match(flag)
     ]
     assert not redeclared, (
-        f"endpoint flags declared outside scripts/_common.py's add_openai_endpoint_args: {redeclared}"
+        f"endpoint flags declared outside scripts/cli_arguments.py's add_openai_endpoint_args: {redeclared}"
     )
 
 
@@ -465,11 +467,11 @@ def test_every_dtype_flag_comes_from_the_shared_helper():
     redeclared = [
         f"{script.relative_to(REPO_ROOT)}: {flag}"
         for script in sorted(scripts_root.rglob("*.py"))
-        if script != scripts_root / "_common.py"
+        if script != scripts_root / "cli_arguments.py"
         for flag in _declared_flags(script.read_text(encoding="utf-8"))
         if "dtype" in flag
     ]
-    assert not redeclared, f"dtype flags declared outside scripts/_common.py's add_dtype_arg: {redeclared}"
+    assert not redeclared, f"dtype flags declared outside scripts/cli_arguments.py's add_dtype_arg: {redeclared}"
 
     scorer = _declared_action(build_generation_parser("test", temperature_default=0.0), "--rm_dtype")
     shared = _declared_action(add_dtype_arg(argparse.ArgumentParser()), "--dtype")
@@ -494,7 +496,7 @@ def test_the_prompt_row_fields_come_from_the_shared_helper():
     redeclared = [
         f"{script.relative_to(REPO_ROOT)}: {flag}"
         for script in sorted(_INFERENCE_ROOT.rglob("*.py"))
-        if script != _INFERENCE_ROOT / "_common.py"
+        if script != _INFERENCE_ROOT / "inference_arguments.py"
         for flag in _declared_flags(script.read_text(encoding="utf-8"))
         if flag in shared
     ]

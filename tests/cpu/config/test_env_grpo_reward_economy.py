@@ -31,7 +31,7 @@ import pytest
 from ruamel.yaml import YAML
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.base import VALID_REASONING_EFFORTS
+from src.environments.rollout_config import VALID_REASONING_EFFORTS
 from src.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
 from src.rewards.terms import (
     ENVIRONMENT_REWARD_SOURCES,

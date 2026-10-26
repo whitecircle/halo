@@ -12,18 +12,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from src.environments.base import (
-    ANSWER_KEY,
-    LAST_TURN_KEY,
-    BaseEnvironment,
-    EpisodeGrade,
-    Message,
-    Trajectory,
-    require_magnitudes,
-)
-from src.environments.envs.protocols.native import (
-    admit_tool_call,
-    tool_accounting_info,
+from src.config_validation import require_finite
+from src.environments.environment_base import EnvironmentBase
+from src.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, LAST_TURN_KEY
+from src.environments.episode_scoring import EpisodeGrade
+from src.environments.messages import Message, Trajectory
+from src.environments.tool_accounting import (
+    MAGNITUDE_WHY,
+    initial_tool_counters,
     tool_call_outcome,
     validate_tool_budgets,
 )
@@ -75,25 +71,32 @@ class ReActStep:
         return self.final_answer is not None
 
 
-def parse_react_output(text: str) -> ReActStep:
-    """Parse ReAct output: a Thought followed by an Action (function-call/JSON/simple) or a Final Answer."""
-    step = ReActStep()
+def _parse_function_args(args_str: str) -> dict[str, Any]:
+    """Parse function-style arguments (``arg1="val1", arg2=123``), as a Python call of literals first, so a
+    triple-quoted or escaped code argument arrives whole, else by pattern."""
+    args = {}
+    if not args_str:
+        return args
+    with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
+        call = parse_python_expression(f"_({args_str})")
+        if isinstance(call, ast.Call) and not call.args and all(kw.arg for kw in call.keywords):
+            return {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
 
-    thought_match = _THOUGHT_RE.search(text)
-    if thought_match:
-        step.thought = thought_match.group(1).strip()
+    for match in _ARGUMENT_RE.finditer(args_str):
+        key = match.group(1)
+        # First MATCHED alternative by ``is not None``: truthiness would turn ``expression=""`` into None.
+        value = next((g for g in match.groups()[1:] if g is not None), None)
 
-    final_match = _FINAL_ANSWER_RE.search(text)
-    if final_match:
-        step.final_answer = final_match.group(1).strip()
-        return step
+        if value and (value.startswith("{") or value.startswith("[")):
+            with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
+                value = json.loads(value)
+        elif value:
+            with contextlib.suppress(ValueError, TypeError):
+                value = float(value) if "." in value else int(value)
 
-    action_match = _ACTION_RE.search(text)
-    if action_match:
-        action_text = action_match.group(1).strip()
-        step.action, step.action_args = _parse_action(action_text)
+        args[key] = value
 
-    return step
+    return args
 
 
 def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
@@ -127,45 +130,31 @@ def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
     return None, None
 
 
-def _parse_function_args(args_str: str) -> dict[str, Any]:
-    """Parse function-style arguments: arg1="val1", arg2=123.
+def parse_react_output(text: str) -> ReActStep:
+    """Parse ReAct output: a Thought followed by an Action (function-call/JSON/simple) or a Final Answer."""
+    step = ReActStep()
 
-    Read as a Python call first, so a triple-quoted or escaped code argument arrives whole: the pattern
-    fallback stops a value at its first matching quote and reads a ``name = value`` line of the code as
-    an argument of its own. Text that is not a call of literals (unquoted expressions, JSON's
-    ``true``/``null``, a literal Python cannot build such as an unhashable dict key) takes the pattern."""
-    args = {}
-    if not args_str:
-        return args
-    with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
-        call = parse_python_expression(f"_({args_str})")
-        if isinstance(call, ast.Call) and not call.args and all(kw.arg for kw in call.keywords):
-            return {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
+    thought_match = _THOUGHT_RE.search(text)
+    if thought_match:
+        step.thought = thought_match.group(1).strip()
 
-    for match in _ARGUMENT_RE.finditer(args_str):
-        key = match.group(1)
-        # First MATCHED alternative by ``is not None``: truthiness would turn ``expression=""`` into None.
-        value = next((g for g in match.groups()[1:] if g is not None), None)
+    final_match = _FINAL_ANSWER_RE.search(text)
+    if final_match:
+        step.final_answer = final_match.group(1).strip()
+        return step
 
-        if value and (value.startswith("{") or value.startswith("[")):
-            with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
-                value = json.loads(value)
-        elif value:
-            with contextlib.suppress(ValueError, TypeError):
-                value = float(value) if "." in value else int(value)
+    action_match = _ACTION_RE.search(text)
+    if action_match:
+        action_text = action_match.group(1).strip()
+        step.action, step.action_args = _parse_action(action_text)
 
-        args[key] = value
-
-    return args
+    return step
 
 
-class ReActEnvironment(BaseEnvironment):
-    """ReAct environment: Thought / Action / Observation turns, action parsed from text.
-
-    ``require_thought`` penalizes acting without a Thought. The action is read out of the assistant
-    text, so no tool schema is advertised to the server and no server-side tool-call parser is
-    involved — the tools are named in the system prompt.
-    """
+class ReActEnvironment(EnvironmentBase):
+    """ReAct environment: Thought / Action / Observation turns, the action parsed out of the text, so no tool
+    schema reaches the server; the tools are named in the system prompt. ``require_thought`` penalizes acting
+    without a Thought."""
 
     # The default check grades the Final Answer against ``context["answer"]``; an ``answer_validator``
     # grades in its place and clears this per instance.
@@ -213,14 +202,8 @@ Always think before acting, and provide a Final Answer when you're done."""
         tool_budgets: dict[str, int] | None = None,
         **kwargs,
     ):
-        """Reward = per-step thought/tool deltas + the graded final answer (the objective term).
-
-        Penalty knobs must be magnitudes (>= 0); minus is applied at the use site so a positive config
-        value cannot farm the penalty as a bonus. The per-call knobs (``tool_success_reward``,
-        ``tool_error_penalty``, ``tool_reward_cap``) are the base's. ``answer_validator`` overrides the
-        default check. ``tool_budgets`` caps calls per tool per episode (``{tool_name: cap}``); a call
-        past its cap is refused as a tool error and never runs.
-        """
+        """Reward = per-step thought and tool deltas + the graded final answer. ``answer_validator`` replaces the
+        default check; ``tool_budgets`` caps calls per tool per episode (a call past its cap is refused unrun)."""
         # An answer_validator grades the final answer itself, so only the default check makes the
         # dataset's answer column load-bearing. An explicit requires_answer wins; ``None`` is unset,
         # so a YAML ``requires_answer: null`` still lands on the class declaration.
@@ -228,7 +211,13 @@ Always think before acting, and provide a Final Answer when you're done."""
             kwargs["requires_answer"] = not callable(answer_validator)
         super().__init__(**kwargs)
 
-        require_magnitudes(thought_reward=thought_reward, no_thought_penalty=no_thought_penalty)
+        require_finite(
+            type(self).__name__,
+            ge=0,
+            why=MAGNITUDE_WHY,
+            thought_reward=thought_reward,
+            no_thought_penalty=no_thought_penalty,
+        )
 
         self.registry = tool_registry
         self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)
@@ -259,16 +248,13 @@ Always think before acting, and provide a Final Answer when you're done."""
             prompt,
             context,
             system_prompt=self.system_prompt,
-            extra_info={"final_answer": None, **tool_accounting_info(self.tool_budgets)},
+            extra_info={"final_answer": None, **initial_tool_counters(self.tool_budgets)},
         )
 
     def _step_single(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
     ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
         """Process model output in ReAct format (Thought: <reasoning>; Action: <tool_call> OR Final Answer: <answer>)."""
-        reward = 0.0
-        info = {}
-
         # A turn the engine cut short is a fragment whatever the parser would salvage from it — the
         # base flags the message untrainable, so an Action executed or a Final Answer graded here would
         # earn a reward on a turn the trainer never rewards. Same rule as the native protocol.
@@ -281,42 +267,19 @@ Always think before acting, and provide a Final Answer when you're done."""
             return self._handle_empty_turn(trajectory, last_turn=last_turn)
 
         step = parse_react_output(action)
-
+        reward = 0.0
         if step.thought:
             reward += self.thought_reward
         elif self.require_thought and (step.has_action or step.has_final_answer):
             reward -= self.no_thought_penalty
 
         if step.has_final_answer:
-            trajectory.info["completed"] = True
+            trajectory.info[COMPLETED_KEY] = True
             trajectory.info["final_answer"] = step.final_answer
-            return trajectory, reward, True, False, info
-
+            return trajectory, reward, True, False, {}
         if step.has_action:
-            tool = self.registry.get(step.action)
-            success = False
-            fault = None
-
-            if not tool:
-                observation = self.registry.unknown_tool_message(step.action)
-                info["tool_error"] = f"Unknown tool: {step.action}"
-                # The turn accomplished nothing: trained only on a negative advantage, never rewarded, as
-                # under the native protocol.
-                self._flag_calls_rejected(trajectory)
-            else:
-                try:
-                    args = admit_tool_call(self, tool, step.action_args or {}, trajectory)
-                    outcome = tool.execute(**args)
-                except Exception as e:  # a tool fault is an observation, not an episode kill
-                    outcome = e
-                observation, success, fault = tool_call_outcome(step.action, outcome)
-                if not success:
-                    info["tool_error"] = str(outcome)
-
-            reward += self._book_tool_call(trajectory, step.action, success, fault)
-            observation = self._truncate_observation(observation)
-            trajectory.add_message(Message.user(f"Observation: {observation}"))
-            return trajectory, reward, False, False, info
+            delta, info = self._act(trajectory, step)
+            return trajectory, reward + delta, False, False, info
 
         hint = (
             "Please provide either:\n"
@@ -325,21 +288,45 @@ Always think before acting, and provide a Final Answer when you're done."""
             "Remember to include a Thought before your action."
         )
         trajectory.add_message(Message.user(hint))
+        return trajectory, reward, False, False, {"no_action": True}
 
-        info["no_action"] = True
-        return trajectory, reward, False, False, info
+    def _act(self, trajectory: Trajectory, step: ReActStep) -> tuple[float, dict[str, Any]]:
+        """Run the step's Action and record its observation: the call's reward delta and the step info."""
+        info = {}
+        tool = self.registry.get(step.action)
+        success = False
+        fault = None
+        if not tool:
+            observation = self.registry.unknown_tool_message(step.action)
+            info["tool_error"] = f"Unknown tool: {step.action}"
+            # The turn accomplished nothing: trained only on a negative advantage, never rewarded, as
+            # under the native protocol.
+            trajectory.last_assistant_message().calls_rejected = True
+        else:
+            try:
+                args = self._admit_tool_call(tool, step.action_args or {}, trajectory)
+                outcome = tool.execute(**args)
+            except Exception as e:  # a tool fault is an observation, not an episode kill
+                outcome = e
+            observation, success, fault = tool_call_outcome(step.action, outcome)
+            if not success:
+                info["tool_error"] = str(outcome)
+
+        reward = self._book_tool_call(trajectory, step.action, success, fault)
+        trajectory.add_message(Message.user(f"Observation: {self._truncate_observation(observation)}"))
+        return reward, info
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:
         """The ``Final Answer:`` that completed the episode, where one did."""
-        return trajectory.info.get("final_answer") if trajectory.info.get("completed") else None
+        return trajectory.info.get("final_answer") if trajectory.info.get(COMPLETED_KEY) else None
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
         """Grade the final answer: 1 when it validates against the expected one, else 0."""
-        if not trajectory.info.get("completed"):
+        if not trajectory.info.get(COMPLETED_KEY):
             return EpisodeGrade(0.0)
 
         final_answer = trajectory.info.get("final_answer")
-        ctx = context or trajectory.info.get("context") or {}
+        ctx = context or trajectory.info.get(CONTEXT_KEY) or {}
         expected = ctx.get(ANSWER_KEY)
 
         if final_answer is None:
@@ -368,8 +355,20 @@ Always think before acting, and provide a Final Answer when you're done."""
         return EpisodeGrade(1.0 if is_correct_answer(final_answer, expected) else 0.0)
 
 
-def create_react_math_environment(**kwargs) -> ReActEnvironment:
-    """Create a ReAct environment for math problems (calculator + Python REPL tools)."""
+def _reject_preset_system_prompt(env_type: str, system_prompt: str | None) -> None:
+    """Refuse a configured ``system_prompt`` for a ReAct preset: the preset hardcodes the prompt that states the
+    Thought/Action/Final Answer format its parser reads, so the value would be dropped."""
+    if system_prompt is not None:
+        raise ValueError(
+            f"environment_type {env_type!r} hardcodes its ReAct system prompt, so environment_kwargs.system_prompt "
+            f"would be ignored. Remove it, or pick an environment_type whose class takes a system_prompt "
+            f"(e.g. native_math)."
+        )
+
+
+def build_react_math_environment(system_prompt: str | None = None, **kwargs) -> ReActEnvironment:
+    """Build a ReAct environment for math problems (calculator + Python REPL tools)."""
+    _reject_preset_system_prompt("react_math", system_prompt)
     registry = NativeToolRegistry.combine(
         build_math_tools(),
         build_python_tools(),
@@ -395,9 +394,12 @@ Always show your reasoning in the Thought section."""
     )
 
 
-def create_react_search_environment(search_backend: str | None = None, **kwargs) -> ReActEnvironment:
-    """Create a ReAct environment for search/QA tasks (web search + basic tools). ``search_backend``
+def build_react_search_environment(
+    search_backend: str | None = None, system_prompt: str | None = None, **kwargs
+) -> ReActEnvironment:
+    """Build a ReAct environment for search/QA tasks (web search + basic tools). ``search_backend``
     names the search backend (:func:`build_search_tools`; ``None`` auto-selects)."""
+    _reject_preset_system_prompt("react_search", system_prompt)
     registry = build_search_tools(backend=search_backend)
 
     system_prompt = """You are a research assistant that finds information to answer questions.

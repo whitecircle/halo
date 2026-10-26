@@ -167,10 +167,8 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
             "file. Can be a list of any of these."
         },
     )
-    # Annotated `float`, not `float | list[float]`, though a per-dataset list is supported:
-    # HfArgumentParser allows only `Optional[X]` in a union and refuses to build otherwise. YAML goes
-    # through `parse_dict`, which assigns without argparse coercion, so a list reaches
-    # `load_datasets` intact; it just cannot be spelled on the command line.
+    # Annotated `float` though a per-dataset YAML list is supported: HfArgumentParser builds only `Optional[X]`
+    # unions, and `parse_dict` assigns a YAML list uncoerced (it just cannot be spelled on the command line).
     dataset_ratio: float | None = field(
         default=None,
         metadata={
@@ -312,10 +310,8 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
-        # ``project_name`` becomes WANDB_PROJECT / CLEARML_PROJECT verbatim: ``--project_name=`` or
-        # ``--project_name=None`` would name the tracking project "" or "None", and a YAML null reaches
-        # os.environ as None, where the assignment raises TypeError later in the run. Annotated ``str``,
-        # so the parser leaves a null spelling as literal text on the CLI.
+        # A YAML null would reach os.environ as None and raise later in the run; annotated ``str``, so the
+        # parser leaves a CLI null spelling as literal text.
         project = self.project_name
         if not isinstance(project, str) or not project.strip() or is_null_string(project):
             raise ValueError(
@@ -330,10 +326,7 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
             for ratio in self.dataset_ratio if isinstance(self.dataset_ratio, list) else [self.dataset_ratio]:
                 require_finite(owner, gt=0, le=1, dataset_ratio=ratio)
         # The proportion train_test_split re-splits at; an int there would be a row count.
-        if self.test_size is not None:
-            require_finite(owner, test_size=self.test_size)
-            if not 0 < self.test_size < 1:
-                raise ValueError(f"{owner}: test_size must be a proportion in (0, 1), got {self.test_size!r}")
+        require_finite(owner, gt=0, lt=1, why=" (a proportion)", **present(test_size=self.test_size))
         require_finite(owner, gt=0, **present(num_full_model_params=self.num_full_model_params))
         require_finite(owner, gt=0, router_balancing_rate=self.router_balancing_rate)
 

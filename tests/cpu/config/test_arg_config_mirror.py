@@ -128,7 +128,7 @@ def test_every_declared_argument_reaches_the_builder():
     """A knob whose two declarations disagree on the NAME needs an explicit line in
     ``parallelism_config_from_args``; without one it parses, shows in ``--help``, and silently keeps
     the runtime default.
-    (Same-named fields are forwarded by construction — see ``same_name_arg_forwards``.)"""
+    (Same-named fields are forwarded by construction — see ``parallelism_config_from_args``.)"""
     declared = {f.name for f in fields(ParallelismArguments)}
     unforwarded = declared - _dist_args_names_read_by_builder()
     assert unforwarded == set(), (

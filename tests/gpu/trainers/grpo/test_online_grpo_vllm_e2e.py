@@ -54,7 +54,7 @@ from trl import GRPOConfig
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
-from src.environments.envs.protocols.react import ReActEnvironment
+from src.environments.protocols.react import ReActEnvironment
 from src.environments.tools.toolsets import build_math_tools, build_python_tools
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.rewards.graders.matching import extract_last_boxed

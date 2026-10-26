@@ -19,8 +19,8 @@ import pytest
 import torch
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
+from src.environments.messages import Message, Trajectory
 from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.reasoning_terms import reasoning_floor_term, reasoning_price_term
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
@@ -210,13 +210,13 @@ def test_config_refuses_values_that_would_invert_or_poison_the_terms():
         with pytest.raises(ValueError, match="reasoning_price must map each effort level to a price"):
             AsyncTrainingConfig(reasoning_price=empty)
     for bad in (-0.01, float("nan"), float("inf"), True, "0.01", None):
-        with pytest.raises(ValueError, match=r"reasoning_price\['low'\] must be a finite number >= 0"):
+        with pytest.raises(ValueError, match=r"reasoning_price\['low'\] must be (a finite number|>= 0)"):
             AsyncTrainingConfig(reasoning_price={**PRICE, "low": bad})
     for bad in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError, match=r"reasoning_price_cap must be (a finite number|> 0)"):
             AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_cap=bad)
     for bad in (-0.01, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match="reasoning_floor must be a finite number"):
+        with pytest.raises(ValueError, match=r"reasoning_floor must be (a finite number|>= 0 \(0 = off\))"):
             AsyncTrainingConfig(reasoning_floor=bad)
     # A price of zero on one level is a priced level that pays nothing, not a mistake.
     assert AsyncTrainingConfig(reasoning_price={**PRICE, "high": 0}).reasoning_price["high"] == 0

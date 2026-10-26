@@ -58,12 +58,11 @@ def _named_calls(tree: ast.AST, func_name: str) -> list[ast.Call]:
 # Loader-kwarg threading (revision + quantization_config)
 
 
-# Every training script loads through ``model_setup.load_model_and_tokenizer`` or
-# ``model_setup.load_policy_model``, both of which route the one ``load_distributed_model`` call
-# through ``model_setup._load_policy``; a script may still call the loader directly,
-# so all are held to the same contract. The shared helper is listed explicitly because a vacuous
-# parametrization (all scripts skipping) would silently stop testing anything —
-# ``test_loader_contract_is_not_vacuous`` pins that.
+# Every training script loads through ``model_setup.load_model_and_tokenizer``, directly or through
+# ``model_setup.load_policy_model``, and so makes the one ``load_distributed_model`` call there; a script may still call
+# the loader directly, so all are held to the same contract. The shared helper is listed explicitly because a vacuous
+# parametrization (all scripts skipping) would silently stop testing anything — ``test_loader_contract_is_not_vacuous``
+# pins that.
 _LOADER_CALL_SITES = [*_TRAINING_SCRIPTS, REPO_ROOT / "src" / "entrypoints" / "model_setup.py"]
 
 

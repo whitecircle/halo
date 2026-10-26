@@ -654,8 +654,9 @@ the read for a model constructed from the checkpoint.
 
 `model_config` is not mutated, so a frozen reference/teacher model and the preprocessed-dataset
 compatibility check keep using the base path. A policy built from the checkpoint keeps the base as
-its config's `_name_or_path` too (`load_model_and_tokenizer`), so the model card a resumed run writes names
-the same `base_model` as an uninterrupted run's. `trainer.train()` then reads `global_step` / `epoch`
+its config's `_name_or_path` too, on every policy load (`load_policy_model`, text or multimodal, and
+`load_model_and_tokenizer`), so the `config.json` and model card a resumed run writes name the same
+`base_model` as an uninterrupted run's. `trainer.train()` then reads `global_step` / `epoch`
 from `trainer_state.json`, computes batches to skip, and restores optimizer and LR scheduler.
 
 WandB does **not** auto-continue the same run — export `WANDB_RUN_ID` (see [Multi-node](#multi-node)).

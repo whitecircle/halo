@@ -2,7 +2,7 @@
 reasoning tokens (all of them, or what its turns reasoned past a soft budget) and an under-use floor against
 the per-turn thinking budget it ran under, both read off what the rollout recorded on the trajectory."""
 
-from src.environments.base import Trajectory
+from src.environments.messages import Trajectory
 
 # The share of the per-turn thinking budget the floor asks an episode for, summed over its turns. Under 1, so
 # one turn can clear the floor without running into an enforced budget.

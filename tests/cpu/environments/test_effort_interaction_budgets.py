@@ -20,18 +20,13 @@ import re
 
 import pytest
 
-from src.environments.base import (
-    EPISODE_TOOL_BUDGETS_KEY,
-    OUTPUT_BUDGET_EXHAUSTED_KEY,
-    REWARD_COMPONENTS_KEY,
-    TOOL_CALL_COUNTS_KEY,
-)
-from src.environments.episode import (
-    TurnGeneration,
-    bind_episode_effort,
+from src.environments.episode import TurnGeneration, sampled_reasoning_tokens, step_context_from_generation
+from src.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
+from src.environments.reasoning_effort import bind_episode_effort
+from src.environments.rollout_config import (
+    find_reasoning_end_ids,
     resolve_reasoning_end_ids,
-    sampled_reasoning_tokens,
-    step_context_from_generation,
+    resolve_reasoning_end_token_id,
 )
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tasks.coding.code_contests_prompts import (
@@ -41,6 +36,7 @@ from src.environments.tasks.coding.code_contests_prompts import (
 )
 from src.environments.tasks.coding.grading import _MAX_FAILURE_DETAILS, run_solution_against_tests
 from src.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
+from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.tools.definitions import NativeToolCall
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
@@ -209,7 +205,7 @@ def test_a_refused_over_cap_call_logs_no_traceback(caplog):
     def call(i: int) -> NativeToolCall:
         return NativeToolCall(id=f"c{i}", name="python_repl", arguments={"code": "print(1)"})
 
-    with caplog.at_level(logging.DEBUG, logger="src.environments.envs.protocols.native"):
+    with caplog.at_level(logging.DEBUG, logger="src.environments.tool_accounting"):
         env._execute_tool_calls([call(0), call(1), call(2)], traj)
 
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
@@ -417,6 +413,17 @@ def test_resolve_reasoning_end_ids_encodes_the_marker_as_the_engine_forces_it():
         resolve_reasoning_end_ids(_VOCAB, "<|end_reasoning|>")
     with pytest.raises(ValueError, match="not a reasoning marker of this tokenizer"):
         resolve_reasoning_end_ids(_VOCAB, "")
+
+
+def test_a_reasoning_count_ends_only_at_a_one_token_close_this_tokenizer_writes(caplog):
+    """A turn's reasoning is counted up to a one-token close; a marker of several tokens marks no one id, and one
+    the tokenizer does not write resolves nothing, said with what the run loses."""
+    assert resolve_reasoning_end_token_id(find_reasoning_end_ids(_VOCAB, "</think>")) == _END
+    final_channel = find_reasoning_end_ids(_VOCAB, "<|start|>assistant<|channel|>final<|message|>")
+    assert final_channel is not None and resolve_reasoning_end_token_id(final_channel) is None
+    with caplog.at_level(logging.WARNING, logger="src.environments.rollout_config"):
+        assert find_reasoning_end_ids(_VOCAB, "<|end_reasoning|>", also_lost=", and more") is None
+    assert "A turn's reasoning goes uncounted, and more." in caplog.text
 
 
 def test_stamp_records_output_budget_exhaustion_only_under_an_output_budget():

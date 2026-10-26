@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.inference.reward_model._common import _MAX_OUTPUT_BASENAME, build_output_path
+from scripts.inference.reward_model.reward_model_arguments import _MAX_OUTPUT_BASENAME, build_output_path
 
 
 def _path(model_name, suffix="rs", prompts_source="/data/prompts.jsonl"):

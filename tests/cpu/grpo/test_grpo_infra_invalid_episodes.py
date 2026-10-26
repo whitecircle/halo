@@ -20,13 +20,9 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.environments.base import (
-    EPISODE_INVALID_KEY,
-    EPISODE_INVALID_REASON_KEY,
-    REWARD_COMPONENTS_KEY,
-    Trajectory,
-)
 from src.environments.episode import RolloutResult
+from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from src.environments.messages import Trajectory
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from src.trainers.grpo.environmental import (

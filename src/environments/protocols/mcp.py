@@ -11,7 +11,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import get_default_environment, stdio_client
 
 from src.env import env_str
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment
+from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 logger = logging.getLogger(__name__)
@@ -20,11 +20,8 @@ logger = logging.getLogger(__name__)
 # because ``close()`` runs on the rollout shutdown path, where a wedged server must not hold the rank.
 MCP_DISCONNECT_TIMEOUT_S = 30.0
 
-# Deadline on a single MCP request (initialize, tool discovery, a tool call). The SDK defaults to
-# ``anyio.fail_after(None)``, so a server that acknowledges and never answers would block the episode
-# for the whole ``episode_timeout`` (20 min) along with its rollout worker; stdio has no socket
-# timeout underneath. Sized above a slow fetch/search round trip and below the episode deadline, so a
-# hung call returns as one tool error and the episode continues.
+# Deadline on a single MCP request: the SDK waits forever by default, so a hung server would hold the episode
+# to its deadline; sized above a slow fetch/search round trip, a hung call returns as one tool error.
 MCP_REQUEST_TIMEOUT_S = 120.0
 
 MCP_SERVERS = {
@@ -126,26 +123,18 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             return sse_client(self.server_url)
         raise ValueError(f"Unknown transport: {self.transport}")
 
-    def _create_session(self, read, write):
-        """Build the MCP ClientSession async context manager for a connected transport.
-
-        ``read_timeout_seconds`` bounds every request the session makes (:data:`MCP_REQUEST_TIMEOUT_S`).
-        """
-        return ClientSession(read, write, read_timeout_seconds=timedelta(seconds=MCP_REQUEST_TIMEOUT_S))
-
     async def _connection_main(self, ready: asyncio.Future, stop: asyncio.Event) -> None:
-        """Hold the transport and session contexts in a single task, from enter to exit.
-
-        The MCP SDK's contexts hold anyio cancel scopes, which must be entered and exited by the same
-        task; driving ``__aenter__``/``__aexit__`` from different tasks corrupts the scope stack. A
-        failure before ``ready`` resolves (spawn, initialize, discovery) unwinds the already-entered
-        contexts through the ``async with`` stack, so a partial connect leaves no half-initialized
-        session or server subprocess behind.
-        """
+        """Hold the transport and session contexts in one task from enter to exit, as their anyio cancel scopes
+        require; a failure before ``ready`` resolves unwinds them, leaving no half-started server behind."""
         try:
-            async with self._transport_context() as (read, write), self._create_session(read, write) as session:
+            async with (
+                self._transport_context() as (read, write),
+                ClientSession(read, write, read_timeout_seconds=timedelta(seconds=MCP_REQUEST_TIMEOUT_S)) as session,
+            ):
                 await session.initialize()
-                self._discover_tools(await session.list_tools())
+                for mcp_tool in (await session.list_tools()).tools:
+                    self.registry.register(self._build_mcp_tool(mcp_tool))
+                logger.info(f"MCP connected: {len(self.registry)} tools discovered")
                 self._session = session
                 ready.set_result(None)
                 await stop.wait()
@@ -156,12 +145,6 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
                 logger.exception("MCP connection task failed")
         finally:
             self._session = None
-
-    def _discover_tools(self, list_tools_response) -> None:
-        """Register the server's tools in native OpenAI format."""
-        for mcp_tool in list_tools_response.tools:
-            self.registry.register(self._create_mcp_tool(mcp_tool))
-        logger.info(f"MCP connected: {len(self.registry)} tools discovered")
 
     async def connect(self) -> None:
         """Start the connection-owner task; returns once tools are discovered (raises on failure)."""
@@ -177,8 +160,8 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             raise
         self._conn_task = task
 
-    def _create_mcp_tool(self, mcp_tool: Any) -> NativeTool:
-        """Create a NativeTool from an MCP tool definition."""
+    def _build_mcp_tool(self, mcp_tool: Any) -> NativeTool:
+        """A NativeTool from an MCP tool definition."""
         name = mcp_tool.name
         parameters = []
         schema = mcp_tool.inputSchema
@@ -207,11 +190,8 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         )
 
     async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        """Call an MCP tool and return its text content.
-
-        Raises on failure so the wrapper marks ``success=False`` (the protocol logs it); returning an
-        error string would count as a successful call and earn the per-call reward.
-        """
+        """Call an MCP tool and return its text content; a failure raises, since an error string would be booked
+        as a successful call."""
         if not self._session:
             raise RuntimeError("MCP session not connected")
 
@@ -245,13 +225,8 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         self.registry = NativeToolRegistry()
 
     def close(self) -> None:
-        """Drive :meth:`disconnect` from the sync lifecycle hook (``EnvironmentActor.shutdown``).
-
-        Without this override the base no-op ``close`` leaves the ClientSession and the stdio server
-        subprocess running after every rollout shutdown. Teardown must run on the loop that owns the
-        connection task; when called from that loop (the actor's async shutdown) it cannot block, so
-        the disconnect is scheduled as a task and a reference is kept until it completes.
-        """
+        """Drive :meth:`disconnect` from the sync lifecycle hook on the loop owning the connection: scheduled as a
+        task when called from that loop, which it cannot block, else awaited across threads."""
         task = self._conn_task
         if task is not None and task.done():
             # Already unwound: ``asyncio.run`` cancels the tasks its loop leaves behind (a CLI eval).
@@ -281,11 +256,8 @@ def get_mcp_server_config(name: str) -> dict[str, Any]:
 
 
 def _resolve_required_env(server_name: str, var_names: list[str]) -> dict[str, str]:
-    """Resolve a server's declared credential env vars from the process environment.
-
-    Raises at construction; a missing key otherwise surfaces only as an opaque tool failure
-    mid-episode.
-    """
+    """A server's declared credential env vars from the process environment; a missing one raises here rather
+    than as an opaque tool failure mid-episode."""
     missing = sorted(name for name in var_names if not env_str(name))
     if missing:
         raise ValueError(
@@ -295,33 +267,25 @@ def _resolve_required_env(server_name: str, var_names: list[str]) -> dict[str, s
     return {name: env_str(name, "") for name in var_names}
 
 
-def create_native_mcp_environment(
-    server_name: str | None = None, env_vars: dict[str, str] | None = None, **kwargs
+def build_mcp_environment(
+    mcp_server: str | None = None, env_vars: dict[str, str] | None = None, **kwargs
 ) -> NativeMCPClientEnvironment:
-    """Create a NativeMCPClientEnvironment for a known MCP server.
-
-    ``server_name`` selects a stdio preset from :data:`MCP_SERVERS` (default
-    :data:`DEFAULT_MCP_SERVER`). A remote server is reached with ``transport="sse"`` and
-    ``server_url=...`` instead, which spawns no subprocess and so has no preset.
-
-    The preset's declared credential requirements (``MCP_SERVERS[name]["env"]``) are resolved from
-    the process environment and forwarded to the server subprocess; explicit ``env_vars`` entries
-    both satisfy and override a declared name. A missing credential raises here rather than at the
-    first tool call.
-    """
+    """A NativeMCPClientEnvironment for the stdio preset ``mcp_server`` names in :data:`MCP_SERVERS`, its declared
+    credentials read from the process environment unless ``env_vars`` sets them, or, under ``transport="sse"``,
+    for the running server at ``server_url``."""
     if kwargs.get("transport") == "sse":
-        if server_name is not None or env_vars:
+        if mcp_server is not None or env_vars:
             raise ValueError(
                 f"transport='sse' connects to a running server at server_url, so it spawns nothing: "
-                f"the stdio preset (mcp_server={server_name!r}) and its credential env_vars would be "
+                f"the stdio preset (mcp_server={mcp_server!r}) and its credential env_vars would be "
                 f"silently ignored. Drop them, or drop transport='sse' to spawn the preset."
             )
         return NativeMCPClientEnvironment(**kwargs)
-    server_name = server_name or DEFAULT_MCP_SERVER
-    config = get_mcp_server_config(server_name)
+    mcp_server = mcp_server or DEFAULT_MCP_SERVER
+    config = get_mcp_server_config(mcp_server)
     explicit = dict(env_vars or {})
     declared = [name for name in config["env"] if name not in explicit]
-    server_env = {**_resolve_required_env(server_name, declared), **explicit}
+    server_env = {**_resolve_required_env(mcp_server, declared), **explicit}
     return NativeMCPClientEnvironment(
         server_command=config["command"],
         server_args=config["args"],

@@ -28,9 +28,9 @@ import pytest
 import torch
 from trl.trainer.utils import pad
 
-from src.environments.base import Message, Trajectory
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
+from src.environments.messages import Message, Trajectory
 from src.trainers.grpo.environmental import (
     BatchBuildFence,
     BatchRows,

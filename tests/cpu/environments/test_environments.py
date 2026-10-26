@@ -6,7 +6,7 @@ Run with:
     python tests/cpu/environments/test_environments.py
 
 Tests cover:
-- Base environment classes (Message, Trajectory, BaseEnvironment)
+- Base environment classes (Message, Trajectory, EnvironmentBase)
 - Native tool use (NativeTool, NativeToolRegistry, NativeToolUseEnvironment)
 - ReAct environment (parsing and execution)
 """
@@ -21,36 +21,25 @@ import numpy as np
 import pytest
 
 from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.base import (
-    EPISODE_INVALID_KEY,
-    EPISODE_INVALID_REASON_KEY,
-    REWARD_COMPONENTS_KEY,
-    AsyncBaseEnvironment,
-    BaseEnvironment,
-    EpisodeGrade,
-    Message,
-    Trajectory,
-)
-from src.environments.envs.protocols.mcp import (
+from src.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
+from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from src.environments.episode_scoring import EpisodeGrade
+from src.environments.messages import Message, Trajectory
+from src.environments.protocols.mcp import (
     MCP_SERVERS,
     NativeMCPClientEnvironment,
-    create_native_mcp_environment,
+    build_mcp_environment,
     get_mcp_server_config,
 )
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.envs.protocols.react import (
+from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from src.environments.protocols.react import (
     ReActEnvironment,
-    create_react_math_environment,
-    create_react_search_environment,
+    build_react_math_environment,
+    build_react_search_environment,
     parse_react_output,
 )
 from src.environments.ray_actors import RolloutManager
-from src.environments.registry import (
-    create_environment,
-    get_registered_environments,
-    register_environment,
-    resolve_environment,
-)
+from src.environments.registry import build_environment, get_registered_environments, register_environment
 from src.environments.rollout_config import RolloutConfig
 from src.environments.sandbox.results import SandboxResult
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
@@ -136,16 +125,7 @@ def test_trajectory():
     assert len(traj.messages) == 2
     assert traj.num_turns == 1
 
-    traj.add_reward(0.5)
-    assert traj.total_reward == 0.5
-
-    traj.add_reward(0.3)
-    assert traj.total_reward == 0.8
-
-    conv = traj.get_conversation()
-    assert len(conv) == 2
-    assert conv[0]["role"] == "user"
-    assert conv[1]["role"] == "assistant"
+    assert [m.role for m in traj.messages] == ["user", "assistant"]
 
 
 def test_trajectory_tool_messages_are_not_turns():
@@ -159,7 +139,7 @@ def test_trajectory_tool_messages_are_not_turns():
     traj.add_message(Message.assistant("Final Answer: 12"))
 
     assert traj.num_turns == 2
-    assert [m["role"] for m in traj.get_conversation()] == ["user", "assistant", "tool", "assistant"]
+    assert [m.role for m in traj.messages] == ["user", "assistant", "tool", "assistant"]
 
 
 def test_append_to_last_user_refuses_a_trajectory_without_a_user_message():
@@ -177,7 +157,7 @@ class SimpleTestEnvironment:
     """Simple test environment implementation."""
 
     def __init__(self, max_turns: int = 5):
-        class TestEnv(BaseEnvironment):
+        class TestEnv(EnvironmentBase):
             def _reset_single(self, prompt, context=None):
                 traj = Trajectory()
                 traj.add_message(Message.user(str(prompt)))
@@ -201,7 +181,7 @@ class SimpleTestEnvironment:
 
 
 def test_base_environment_reset():
-    """Test BaseEnvironment reset."""
+    """Test EnvironmentBase reset."""
     test_env = SimpleTestEnvironment()
     env = test_env.get_env()
 
@@ -223,7 +203,7 @@ def test_base_environment_reset():
 
 
 def test_base_environment_step():
-    """Test BaseEnvironment step."""
+    """Test EnvironmentBase step."""
 
     test_env = SimpleTestEnvironment()
     env = test_env.get_env()
@@ -715,7 +695,7 @@ def test_react_tool_that_raises_is_logged_and_charged(caplog):
     env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
     episode_ids, _ = env.reset(["Test"])
 
-    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.react"):
+    with caplog.at_level(logging.WARNING, logger="src.environments.tool_accounting"):
         steps = env.step(episode_ids, ['Thought: compute\nAction: calculate(expression="1+1")'])
 
     assert any("raised during execution" in record.getMessage() for record in caplog.records), (
@@ -733,7 +713,7 @@ def test_native_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog
     trajectory = Trajectory()
     trajectory.info.update(total_tool_calls=0, successful_tool_calls=0)
     call = NativeToolCall(id="1", name="submit_solution", arguments={})
-    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.native"):
+    with caplog.at_level(logging.WARNING, logger="src.environments.tool_accounting"):
         results, reward = env._execute_tool_calls([call], trajectory)
 
     assert results[0].success is False
@@ -756,7 +736,7 @@ def test_react_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog)
     )
     env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
     episode_ids, _ = env.reset(["Test"])
-    with caplog.at_level(logging.WARNING, logger="src.environments.envs.protocols.react"):
+    with caplog.at_level(logging.WARNING, logger="src.environments.tool_accounting"):
         steps = env.step(episode_ids, ["Thought: compute\nAction: calculate()"])
 
     assert steps[0].reward == pytest.approx(-0.1)
@@ -768,7 +748,7 @@ def test_react_math_factory():
     """ReAct advertises its tools in the system prompt, never as a native ``tools=`` schema: the
     action is parsed out of plain text, so a server-side parser would strip it into a burnt turn."""
 
-    env = create_react_math_environment(max_turns=10, reward_terms=[{"source": "environment", "weight": 2.0}])
+    env = build_react_math_environment(max_turns=10, reward_terms=[{"source": "environment", "weight": 2.0}])
 
     assert env.get_tools_schema() is None
     assert {"calculate", "python"}.issubset(env.registry.names())
@@ -795,11 +775,11 @@ def test_rollout_manager_round_robin():
     assert actors == ["actor0", "actor1", "actor0", "actor1"]
 
 
-def test_create_environment_class_tuple():
-    """Test create_environment with (class, kwargs) tuple."""
+def test_build_environment_class_tuple():
+    """Test build_environment with (class, kwargs) tuple."""
 
     registry = build_math_tools()
-    env = create_environment(
+    env = build_environment(
         (ReActEnvironment, {"tool_registry": registry, "max_turns": 5}),
         {},
     )
@@ -808,10 +788,10 @@ def test_create_environment_class_tuple():
 
 
 def test_registry_resolve_unknown():
-    """Test resolve_environment raises for unknown type."""
+    """Test build_environment raises for unknown type."""
 
     try:
-        resolve_environment("nonexistent_env", {})
+        build_environment("nonexistent_env", {})
         raise AssertionError("Should raise ValueError")
     except ValueError as e:
         assert "Unknown environment type" in str(e)
@@ -822,7 +802,7 @@ def test_registry_forwards_environment_kwargs():
     """environment_kwargs must reach the env — a dropped sandbox_backend is a silent isolation
     downgrade, a dropped max_submissions silently keeps the default contest budget."""
 
-    env = resolve_environment(
+    env = build_environment(
         "code_contests",
         {"sandbox_backend": "local", "max_submissions": 3, "max_test_calls": 7, "max_turns": 9},
     )
@@ -831,7 +811,7 @@ def test_registry_forwards_environment_kwargs():
     assert env.max_turns == 9
 
     # The codeforces preset keeps its token-compare default while forwarding the extras.
-    cf = resolve_environment("codeforces", {"max_submissions": 5})
+    cf = build_environment("codeforces", {"max_submissions": 5})
     assert cf.grading_spec.comparison == "tokens"
     assert cf.max_submissions == 5
 
@@ -839,7 +819,7 @@ def test_registry_forwards_environment_kwargs():
 def test_registry_register_custom(isolated_registry):
     """Test registering a custom environment type."""
 
-    class TestCustomEnv(BaseEnvironment):
+    class TestCustomEnv(EnvironmentBase):
         def _reset_single(self, prompt, context=None):
             traj = Trajectory()
             traj.add_message(Message.user(str(prompt)))
@@ -858,7 +838,7 @@ def test_registry_register_custom(isolated_registry):
     # The entry script refuses any environment_type absent from this listing.
     assert "test_custom_env" in get_registered_environments()
 
-    env = resolve_environment("test_custom_env", {"max_turns": 3})
+    env = build_environment("test_custom_env", {"max_turns": 3})
     assert env is not None
     assert isinstance(env, TestCustomEnv)
 
@@ -873,7 +853,7 @@ def test_registry_override(isolated_registry):
         return "factory2"
 
     register_environment("test_override_env", factory1)
-    assert resolve_environment("test_override_env", {}) == "factory1"
+    assert build_environment("test_override_env", {}) == "factory1"
 
     # Must raise without override=True, and leave the original factory in place.
     try:
@@ -881,17 +861,17 @@ def test_registry_override(isolated_registry):
         raise AssertionError("Should raise ValueError")
     except ValueError:
         pass
-    assert resolve_environment("test_override_env", {}) == "factory1", "a rejected register still replaced"
+    assert build_environment("test_override_env", {}) == "factory1", "a rejected register still replaced"
 
     # override=True must actually REPLACE the factory, not silently keep the first one.
     register_environment("test_override_env", factory2, override=True)
-    assert resolve_environment("test_override_env", {}) == "factory2"
+    assert build_environment("test_override_env", {}) == "factory2"
 
 
 def test_registry_resolve_swe():
-    """Test resolve_environment for 'swe' type (SweEnvironment)."""
+    """Test build_environment for 'swe' type (SweEnvironment)."""
 
-    env = resolve_environment("swe", {"max_turns": 5})
+    env = build_environment("swe", {"max_turns": 5})
     assert env is not None
     assert isinstance(env, SweEnvironment)
 
@@ -931,9 +911,9 @@ def test_code_environment_reset_step():
 
 
 async def test_async_base_environment():
-    """Test AsyncBaseEnvironment."""
+    """Test AsyncEnvironmentBase."""
 
-    class TestAsyncEnv(AsyncBaseEnvironment):
+    class TestAsyncEnv(AsyncEnvironmentBase):
         def _reset_single(self, prompt, context=None):
             traj = Trajectory()
             traj.add_message(Message.user(str(prompt)))
@@ -1039,10 +1019,10 @@ def test_get_mcp_server_config():
         assert "nonexistent_server" in str(e)
 
 
-def test_create_native_mcp_environment():
-    """Test create_native_mcp_environment factory."""
+def test_build_mcp_environment():
+    """Test build_mcp_environment factory."""
 
-    env = create_native_mcp_environment(
+    env = build_mcp_environment(
         "filesystem",
         max_turns=10,
         reward_terms=[{"source": "environment", "weight": 1.5}],
@@ -1052,7 +1032,7 @@ def test_create_native_mcp_environment():
     assert env.max_turns == 10
     assert [term.weight for term in env.reward_terms] == [1.5]
 
-    env2 = create_native_mcp_environment(
+    env2 = build_mcp_environment(
         "brave_search",
         env_vars={"BRAVE_API_KEY": "test-key"},
         max_turns=5,
@@ -1215,9 +1195,9 @@ def test_unknown_tool_handling():
 
 
 def test_react_search_environment():
-    """Test create_react_search_environment factory."""
+    """Test build_react_search_environment factory."""
 
-    env = create_react_search_environment(max_turns=8, reward_terms=[{"source": "environment", "weight": 1.5}])
+    env = build_react_search_environment(max_turns=8, reward_terms=[{"source": "environment", "weight": 1.5}])
 
     assert env.get_tools_schema() is None
     assert "web_search" in env.registry.names()
@@ -1246,7 +1226,7 @@ Final Answer: Paris"""
 def test_react_environment_with_python_tool():
     """Test ReAct environment using Python tool for complex calculations."""
 
-    env = create_react_math_environment(max_turns=10)
+    env = build_react_math_environment(max_turns=10)
 
     episode_ids, _ = env.reset(["Calculate the factorial of 10"], [{"answer": "3628800"}])
 
@@ -1266,10 +1246,10 @@ Action: python(code="factorial(10)")"""
     assert "3628800" in observations[-1]
 
 
-def test_create_environment_native_coding():
-    """Test create_environment for native_coding type."""
+def test_build_environment_native_coding():
+    """Test build_environment for native_coding type."""
 
-    env = create_environment("native_coding", {"max_turns": 5})
+    env = build_environment("native_coding", {"max_turns": 5})
     assert env is not None
 
     tools_schema = env.get_tools_schema()
@@ -1277,28 +1257,28 @@ def test_create_environment_native_coding():
     assert "python_repl" in tool_names
 
 
-def test_create_environment_native_math():
+def test_build_environment_native_math():
     """native_math advertises its calculator through the native tools= schema."""
 
-    env = create_environment("native_math", {"max_turns": 5})
+    env = build_environment("native_math", {"max_turns": 5})
 
     tool_names = [t["function"]["name"] for t in env.get_tools_schema()]
     assert "calculate" in tool_names
 
 
-def test_create_environment_react_math():
+def test_build_environment_react_math():
     """react_math names its tools in the system prompt; it advertises no native tools= schema."""
 
-    env = create_environment("react_math", {"max_turns": 5})
+    env = build_environment("react_math", {"max_turns": 5})
 
     assert env.get_tools_schema() is None
     assert "calculate" in env.registry.names()
 
 
-def test_create_environment_native_combined():
-    """Test create_environment for native_combined type."""
+def test_build_environment_native_combined():
+    """Test build_environment for native_combined type."""
 
-    env = create_environment("native_combined", {"max_turns": 10})
+    env = build_environment("native_combined", {"max_turns": 10})
     assert env is not None
 
     tools_schema = env.get_tools_schema()
@@ -1309,10 +1289,10 @@ def test_create_environment_native_combined():
     assert "web_search" in tool_names
 
 
-def test_create_environment_react_search():
-    """Test create_environment for react_search type."""
+def test_build_environment_react_search():
+    """Test build_environment for react_search type."""
 
-    env = create_environment("react_search", {"max_turns": 5})
+    env = build_environment("react_search", {"max_turns": 5})
     assert env is not None
 
     # ReAct names its tools in the system prompt; it advertises no native tools= schema.
@@ -1732,7 +1712,7 @@ def test_react_null_answer_is_invalid_not_a_free_success():
     and every sibling in its GRPO group reaches one just as easily. Same contract as the native
     protocol's null cell — dropped from the baseline, never taught as a success."""
 
-    env = create_react_math_environment(thought_reward=0.0)
+    env = build_react_math_environment(thought_reward=0.0)
 
     episode_ids, _ = env.reset(["What is 2 + 2?"], [{"answer": None}])
     env.step(episode_ids, ["Thought: add\nFinal Answer: 4"], [{}])
@@ -1749,7 +1729,7 @@ def test_react_missing_answer_key_still_pays_for_finishing():
     """Guards the invalid path above from swallowing the ungraded mode: with NO ``answer`` key at all
     there is nothing to verify, and reaching a Final Answer is the objective."""
 
-    env = create_react_math_environment(thought_reward=0.0)
+    env = build_react_math_environment(thought_reward=0.0)
 
     episode_ids, _ = env.reset(["What is 2 + 2?"], [{}])
     env.step(episode_ids, ["Thought: add\nFinal Answer: 4"], [{}])
@@ -1765,7 +1745,7 @@ def test_react_grades_off_the_context_and_keeps_no_copy_of_the_answer(step_conte
     """A settled episode sheds its grading payload before it rides Ray and the TP broadcast. ReAct
     grades the answer off the row's context, as the native protocol does, so no copy of it outlives
     the grade in ``info``; the drivers' step context carries the row as well, and grades the same."""
-    env = create_react_math_environment(thought_reward=0.0)
+    env = build_react_math_environment(thought_reward=0.0)
     answer = "4.000-graded"
     row = {"answer": answer}
     episode_ids, _ = env.reset(["What is 2 + 2?", "What is 2 + 2?"], [row, row])
@@ -1850,7 +1830,7 @@ def test_qa_search_environment_wrong_answer(allow_mock_search):
 def test_qa_search_registry(allow_mock_search):
     """Test qa_search resolves from registry."""
 
-    env = resolve_environment("qa_search", {"search_backend": "mock"})
+    env = build_environment("qa_search", {"search_backend": "mock"})
     assert env is not None
     tools = env.get_tools_schema()
     assert any(t["function"]["name"] == "web_search" for t in tools)
@@ -1888,7 +1868,7 @@ def test_code_contests_run_tests():
 def test_code_contests_registry():
     """Test code_contests resolves from registry."""
 
-    env = resolve_environment("code_contests", {})
+    env = build_environment("code_contests", {})
     assert env is not None
     tools = env.get_tools_schema()
     assert any(t["function"]["name"] == "submit_solution" for t in tools)
@@ -2109,7 +2089,7 @@ def test_environment_config_env_specific_kwargs():
 
 
 def test_all_registered_envs_resolvable():
-    """Every registered env type resolves to a real BaseEnvironment honouring the config's max_turns.
+    """Every registered env type resolves to a real EnvironmentBase honouring the config's max_turns.
 
     A factory that ignored ``env_config`` — or returned a stray non-environment object — would keep
     a plain ``is not None`` check green while every rollout ran the class default number of turns.
@@ -2119,8 +2099,8 @@ def test_all_registered_envs_resolvable():
     assert len(registered) >= 5, f"the registry went (nearly) empty — the loop below tests nothing: {registered}"
     for env_name in registered:
         config = EnvironmentConfig(environment_type=env_name, max_turns=3)
-        env = resolve_environment(config.environment_type, config.to_env_config())
-        assert isinstance(env, BaseEnvironment), f"{env_name} resolved to {type(env).__name__}"
+        env = build_environment(config.environment_type, config.to_env_config())
+        assert isinstance(env, EnvironmentBase), f"{env_name} resolved to {type(env).__name__}"
         assert env.max_turns == 3, f"{env_name} ignored max_turns from env_config (got {env.max_turns})"
 
 
@@ -2128,7 +2108,7 @@ def test_all_registered_envs_resolvable():
 
 
 def test_react_step_does_not_double_add_assistant_message():
-    """BaseEnvironment.step already appends the assistant action message, so ReAct's _step_single
+    """EnvironmentBase.step already appends the assistant action message, so ReAct's _step_single
     must NOT append it again: a double-add corrupts the history and halves max_turns."""
 
     env = ReActEnvironment(tool_registry=NativeToolRegistry(), require_thought=False)

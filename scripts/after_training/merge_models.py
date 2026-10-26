@@ -49,7 +49,7 @@ from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from transformers import AutoConfig
 
-from scripts._common import add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
+from scripts.cli_arguments import add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, WEIGHT_FILE_IGNORE_PATTERNS
 from src.checkpoint.offline_export import (

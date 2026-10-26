@@ -18,9 +18,9 @@ import types
 import pytest
 import torch
 
-from src.environments.base import Message, Trajectory
 from src.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
 from src.environments.episode import RolloutResult
+from src.environments.messages import Message, Trajectory
 from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.models import GPT_OSS_20B

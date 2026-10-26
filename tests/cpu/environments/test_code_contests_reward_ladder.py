@@ -18,13 +18,8 @@ test failed — pays no rung and leaves the group baseline.
 
 import pytest
 
-from src.environments.base import (
-    EPISODE_ERROR_KEY,
-    EPISODE_INVALID_REASON_KEY,
-    REWARD_COMPONENTS_KEY,
-    Message,
-    Trajectory,
-)
+from src.environments.episode_keys import EPISODE_ERROR_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from src.environments.messages import Message, Trajectory
 from src.environments.sandbox.results import SandboxInfraError
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tasks.coding.swe import SweEnvironment

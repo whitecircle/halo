@@ -92,7 +92,7 @@ and full launch examples see [`wiring.md`](wiring.md).
    `weight × score ^ exponent`, defaulting to `[{source: environment}]`
    (`agent-docs/training-methods/grpo/rewards/README.md`); `max_turns` defaults to `None` = the
    environment class's own. Custom envs: pass `environment_cls`
-   (a `BaseEnvironment` subclass) instead. See the table in `wiring.md`.
+   (a `EnvironmentBase` subclass) instead. See the table in `wiring.md`.
 
 5. **Key GRPO hyperparameters** (both flavors): `num_generations` (group size),
    `beta` (KL to ref; `0.0` disables the ref model), `epsilon` (clip),

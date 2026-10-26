@@ -1,5 +1,6 @@
 """MFU / throughput accounting: step time, token throughput, MFU / S-MFU and GPU memory per step."""
 
+import logging
 import time
 import weakref
 from dataclasses import asdict, dataclass
@@ -7,7 +8,6 @@ from typing import NamedTuple
 
 import torch
 import transformers
-from transformers.utils import logging as hf_logging
 
 from src.callbacks.model_flops import RankFlopsModel, estimate_rank_flops
 from src.diagnostics.profiling import read_cuda_memory
@@ -16,9 +16,10 @@ from src.hardware import PEAK_KEY_BY_DTYPE, detect_gpu_model, get_gpu_peak_flops
 from src.kernels.lowp.spec import LOWP_RECIPES
 from src.model_loading.dtype import resolve_training_dtype
 from src.models.attention.layout import AttentionLayout
+from src.models.context_window import bounded_row_length
 from src.runtime.ranks import get_global_world_size, is_global_main_process
 
-logger = hf_logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 _ESTIMATE_FILL_FRACTION = 0.8
 # Fallback when nothing declares a bound. Not a real upper bound, so callers must not clamp to it.
@@ -31,25 +32,6 @@ _TOKEN_DELTA_UPPER_BOUND = 2 * 1.25
 _TERA = 10**12
 # Decimals every reported metric is rounded to before it reaches the logs dict.
 _DISPLAY_DECIMALS = 2
-
-
-def resolve_max_seq_len(*sources) -> int | None:
-    """Upper bound on tokens per sequence declared across ``sources``, or None when none declares one.
-
-    Several sources are checked because on the RL surface the bound is split across objects:
-    ``trl.GRPOConfig`` declares neither ``max_length`` nor ``max_prompt_length``, and the scripts
-    carry the latter on their own args.
-    """
-
-    def first_positive(field: str) -> int | None:
-        return next((int(value) for source in sources if (value := getattr(source, field, None))), None)
-
-    max_length = first_positive("max_length")
-    if max_length:
-        return max_length
-    prompt = first_positive("max_prompt_length")
-    completion = first_positive("max_completion_length")
-    return (prompt or 0) + (completion or 0) if (prompt or completion) else None
 
 
 @dataclass
@@ -205,9 +187,9 @@ class EfficiencyCallback(transformers.TrainerCallback):
         parallelism_config: the run's validated axis sizes; every divisor here is read off it.
         num_full_model_params: total full-model params; enables ``distributed_efficiency = params_ratio x local_mfu``.
         report_mfu_diagnostics: also log MFU / S-MFU / TFLOP/s, which are setup-dependent.
-        max_seq_len: explicit per-sequence token bound, for runs whose real bound is not the sum of the
-            declared length fields (a multi-turn RL trajectory). Unset, :func:`resolve_max_seq_len`
-            reads it off the training arguments and ``script_args``.
+        max_seq_len: explicit per-sequence token bound, for runs whose real bound is not the declared length
+            fields (a multi-turn RL trajectory); unset, :func:`~src.models.context_window.bounded_row_length`
+            reads it off the training arguments and ``script_args``, a lone bounded half included.
         script_args: the entry script's own arguments, the second place a length bound is declared.
     """
 
@@ -319,7 +301,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
 
     def _initialize_metrics(self, args) -> None:
         self.training_args = args
-        resolved = self._max_seq_len_override or resolve_max_seq_len(args, self._script_args)
+        resolved = self._max_seq_len_override or bounded_row_length(args, self._script_args, one_sided=True)
         self._max_seq_len, self._has_length_bound = (
             (int(resolved), True) if resolved else (_ASSUMED_MAX_SEQ_LEN, False)
         )

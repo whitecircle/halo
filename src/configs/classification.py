@@ -113,20 +113,13 @@ class ClassificationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArg
     def _validate_fields(self) -> None:
         super()._validate_fields()
         owner = type(self).__name__
-        require_finite(owner, focal_gamma=self.focal_gamma, label_smoothing=self.label_smoothing)
-        if self.focal_gamma < 0:
-            raise ValueError(f"focal_gamma must be >= 0, got {self.focal_gamma}")
+        require_finite(owner, ge=0, focal_gamma=self.focal_gamma)
         # alpha_t = alpha*y + (1-alpha)*(1-y): outside [0, 1] one class's loss is negated.
-        if self.focal_alpha is not None:
-            require_finite(owner, focal_alpha=self.focal_alpha)
-            if not 0.0 <= self.focal_alpha <= 1.0:
-                raise ValueError(f"focal_alpha must be in [0, 1], got {self.focal_alpha}")
+        require_finite(owner, ge=0, le=1, **present(focal_alpha=self.focal_alpha))
         # A non-positive length is legal: it resolves to the model's context window at launch.
         require_int(owner, **present(max_length=self.max_length))
-        if not (0.0 <= self.label_smoothing < 1.0):
-            raise ValueError(f"label_smoothing must be in [0, 1), got {self.label_smoothing}")
-        if not (0.0 < self.multi_label_threshold < 1.0):
-            raise ValueError(f"multi_label_threshold must be in (0, 1), got {self.multi_label_threshold}")
+        require_finite(owner, ge=0, lt=1, label_smoothing=self.label_smoothing)
+        require_finite(owner, gt=0, lt=1, multi_label_threshold=self.multi_label_threshold)
         if self.class_weights is not None and self.derive_class_weights:
             raise ValueError(
                 "class_weights and derive_class_weights are mutually exclusive: class_weights sets the "

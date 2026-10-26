@@ -46,7 +46,7 @@ from unittest.mock import patch
 import pytest
 from datasets import DatasetDict
 
-from scripts._common import (
+from scripts.cli_arguments import (
     HUB_SOURCE_HELP,
     add_device_map_arg,
     add_dtype_arg,
@@ -207,7 +207,7 @@ def test_the_derived_rosters_cover_the_tool_tree():
 
 
 def test_the_shared_flag_module_is_reachable_to_a_bare_interpreter(tmp_path: Path):
-    """``scripts._common`` must import for a plain ``python scripts/<subtree>/<tool>.py``.
+    """``scripts.cli_arguments`` must import for a plain ``python scripts/<subtree>/<tool>.py``.
 
     Every tool below takes its flag spellings from a ``scripts.*`` module, so the repo root has to
     be on a bare interpreter's ``sys.path`` — the editable install puts it there, and the images
@@ -218,7 +218,7 @@ def test_the_shared_flag_module_is_reachable_to_a_bare_interpreter(tmp_path: Pat
     """
     env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
     result = subprocess.run(
-        [sys.executable, "-c", "import scripts._common"],
+        [sys.executable, "-c", "import scripts.cli_arguments"],
         cwd=tmp_path,
         env=env,
         capture_output=True,
@@ -227,7 +227,7 @@ def test_the_shared_flag_module_is_reachable_to_a_bare_interpreter(tmp_path: Pat
     )
 
     assert result.returncode == 0, (
-        f"`import scripts._common` fails for a bare interpreter outside the repo: "
+        f"`import scripts.cli_arguments` fails for a bare interpreter outside the repo: "
         f"{result.stderr.strip().splitlines()[-1:] or ['(no output)']}. The checkpoint tools take "
         f"their flags from that module, so every one of them would die on startup."
     )

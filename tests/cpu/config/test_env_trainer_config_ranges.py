@@ -159,7 +159,9 @@ def test_skip_update_masked_frac_in_range_passes(ok):
 
 @pytest.mark.parametrize("cap", [1, 999, 1000])
 def test_a_row_cap_at_or_below_the_per_turn_budget_is_refused(cap):
-    with pytest.raises(ValueError, match="must be an int above rollout_max_tokens"):
+    with pytest.raises(
+        ValueError, match=r"max_train_row_tokens must be an integer > 1000 \(above rollout_max_tokens\)"
+    ):
         AsyncTrainingConfig(rollout_max_tokens=1000, max_train_row_tokens=cap)
 
 
@@ -169,7 +171,9 @@ def test_a_row_cap_above_the_per_turn_budget_passes():
 
 
 def test_an_episode_budget_holds_one_whole_turn_and_is_unbounded_when_null():
-    with pytest.raises(ValueError, match="rollout_max_episode_tokens must be an int >= rollout_max_tokens"):
+    with pytest.raises(
+        ValueError, match=r"rollout_max_episode_tokens must be an integer >= 1000 \(at least rollout_max_tokens\)"
+    ):
         AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_episode_tokens=999)
     assert (
         AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_episode_tokens=1000).rollout_max_episode_tokens
@@ -181,7 +185,7 @@ def test_an_episode_budget_holds_one_whole_turn_and_is_unbounded_when_null():
 @pytest.mark.parametrize("bad", [0, -1, 1000, 1001, True, 512.0, "512"])
 def test_an_answer_bound_outside_one_to_the_turn_cap_or_not_a_count_is_refused(bad):
     with pytest.raises(
-        ValueError, match=r"rollout_max_answer_tokens must be an int in \[1, rollout_max_tokens=1000\)"
+        ValueError, match=r"rollout_max_answer_tokens must be an integer in \[1, 1000\) \(below rollout_max_tokens\)"
     ):
         AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_answer_tokens=bad)
 

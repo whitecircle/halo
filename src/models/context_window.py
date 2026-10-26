@@ -65,10 +65,11 @@ def resolve_length_to_context(value: int | None, model: PreTrainedModel, tokeniz
     return context
 
 
-def bounded_row_length(*sources) -> int | None:
+def bounded_row_length(*sources, one_sided: bool = False) -> int | None:
     """The token cap ``sources`` put on one row: the first bounded ``max_length`` across them, else the
     first bounded ``max_prompt_length`` plus the first bounded ``max_completion_length`` when both
-    exist, else None (a one-sided budget leaves the other half unbounded).
+    exist, else None (a one-sided budget leaves the other half unbounded). ``one_sided`` takes a lone
+    bounded half instead, for a figure that needs a typical length rather than a cap (the MFU sequence).
 
     Several sources because on the RL surface the bound is split across objects: ``trl.GRPOConfig``
     declares neither ``max_length`` nor ``max_prompt_length``, and the scripts carry the latter.
@@ -83,4 +84,6 @@ def bounded_row_length(*sources) -> int | None:
     if max_length is not None:
         return max_length
     prompt, completion = first_bounded("max_prompt_length"), first_bounded("max_completion_length")
-    return prompt + completion if prompt is not None and completion is not None else None
+    if prompt is None or completion is None:
+        return (prompt or completion) if one_sided else None
+    return prompt + completion

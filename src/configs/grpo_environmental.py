@@ -1,26 +1,24 @@
-"""Async environmental GRPO: the script arguments, ``EnvironmentConfig`` and ``AsyncTrainingConfig`` with its rollout
-bundles."""
+"""Async environmental GRPO: the script arguments, ``EnvironmentConfig`` and ``AsyncTrainingConfig``."""
 
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from datetime import timedelta
-from math import isfinite
 from typing import Any, ClassVar, Literal
 
-from src.config_validation import ValidatedConfig, require_finite, require_int
+from src.config_validation import ValidatedConfig, present, require_finite, require_int
 from src.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     GRPOEarlyStopArguments,
     PromptDatasetArguments,
 )
+from src.configs.rollout_arguments import RolloutBudgetArguments, RolloutSamplingArguments
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, nccl_timeout
 from src.environments.rollout_config import (
     REASONING_BUDGET_SOFT_TEMPLATE_VAR,
     REASONING_BUDGET_TEMPLATE_VAR,
-    REASONING_END_TOKEN_EXAMPLES,
     SGLANG_BACKEND,
     RolloutBackend,
     RolloutConfig,
@@ -47,14 +45,10 @@ class ISMaskConfig:
         lo, hi = self.geo_band_min, self.geo_band_max
         if (lo is None) != (hi is None):
             raise ValueError("isr_geo_band_min and isr_geo_band_max must be set together")
-        if lo is not None:
-            require_finite(type(self).__name__, isr_geo_band_min=lo, isr_geo_band_max=hi)
-            if not 0 < lo < 1 < hi:
-                raise ValueError(f"isr_geo_band bounds must satisfy 0 < min < 1 < max, got [{lo}, {hi}]")
-        if self.veto_min is not None and not 0 < self.veto_min < 1:
-            raise ValueError(f"isr_veto_min must be in (0, 1), got {self.veto_min}")
-        if self.opsm_delta is not None:
-            require_finite(type(self).__name__, gt=0, isr_opsm_delta=self.opsm_delta)
+        owner = type(self).__name__
+        require_finite(owner, gt=0, lt=1, **present(isr_geo_band_min=lo, isr_veto_min=self.veto_min))
+        require_finite(owner, gt=1, **present(isr_geo_band_max=hi))
+        require_finite(owner, gt=0, **present(isr_opsm_delta=self.opsm_delta))
 
     @property
     def any_mask_active(self) -> bool:
@@ -72,177 +66,6 @@ class ISMaskConfig:
         and OPSM's per-trajectory mean); the veto reads single tokens. The sampler-logprob preflight
         holds such a run to engine log-probs not renormalized over the sampler's cut."""
         return self.geo_band_min is not None or self.opsm_delta is not None
-
-
-@dataclass
-class RolloutSamplingArguments(ValidatedConfig):
-    """The sampling settings every rollout request carries."""
-
-    rollout_temperature: float = field(
-        default=RolloutConfig.temperature, metadata={"help": "Temperature for rollout generation."}
-    )
-    rollout_top_p: float = field(
-        default=RolloutConfig.top_p, metadata={"help": "Top-p (nucleus) sampling for rollout generation."}
-    )
-    rollout_top_k: int = field(
-        default=RolloutConfig.top_k,
-        metadata={
-            "help": "Top-k sampling for rollouts: -1 (off) or an int >= 1, since SGLang rejects 0. Sent on every "
-            "request, like rollout_min_p and rollout_repetition_penalty: both engines fill an omitted one from "
-            "generation_config.json."
-        },
-    )
-    rollout_min_p: float = field(
-        default=RolloutConfig.min_p,
-        metadata={
-            "help": "Min-p sampling for rollout generation, in [0, 1]; 0 = off. vLLM rejects every request "
-            "with min_p > 0 on a server running speculative decoding (MTP)."
-        },
-    )
-    rollout_repetition_penalty: float = field(
-        default=RolloutConfig.repetition_penalty,
-        metadata={
-            "help": "Repetition penalty for rollouts, in (0, 2]; 1 = off. Refused other than 1 under a "
-            "sequence-level ratio (isr_geo_band_*, isr_opsm_delta), since the trainer's recomputed log-probs do not "
-            "carry it."
-        },
-    )
-
-    def _validate_fields(self) -> None:
-        super()._validate_fields()
-        owner = type(self).__name__
-        # The trainer scores at the sampling temperature, so a 0 is a ZeroDivisionError mid-step.
-        require_finite(owner, gt=0, rollout_temperature=self.rollout_temperature)
-        # Sent verbatim on the wire; outside these ranges the server rejects every rollout request
-        # (SGLang's, the narrower of the two engines': it refuses top_k 0 and a penalty above 2).
-        require_finite(
-            owner,
-            rollout_top_p=self.rollout_top_p,
-            rollout_min_p=self.rollout_min_p,
-            rollout_repetition_penalty=self.rollout_repetition_penalty,
-        )
-        if not 0 < self.rollout_top_p <= 1:
-            raise ValueError(f"rollout_top_p must be in (0, 1], got {self.rollout_top_p}")
-        # True would pass as 1 and sample every rollout greedily; a fractional top-k fails every request.
-        top_k = self.rollout_top_k
-        if isinstance(top_k, bool) or not isinstance(top_k, int) or (top_k != -1 and top_k < 1):
-            raise ValueError(f"rollout_top_k must be an int, -1 (off) or >= 1, got {top_k!r}")
-        if not 0 <= self.rollout_min_p <= 1:
-            raise ValueError(f"rollout_min_p must be in [0, 1], got {self.rollout_min_p}")
-        if not 0 < self.rollout_repetition_penalty <= 2:
-            raise ValueError(f"rollout_repetition_penalty must be in (0, 2], got {self.rollout_repetition_penalty}")
-
-
-@dataclass
-class RolloutBudgetArguments(ValidatedConfig):
-    """The token budgets of one turn, one episode and one training row, and the reasoning close a turn cap cuts at."""
-
-    rollout_max_tokens: int = field(
-        default=RolloutConfig.max_tokens,
-        metadata={
-            "help": "Most tokens one turn generates (one /chat/completions call), checked against the server at "
-            "startup. The trajectory accumulates across turns, bounded by rollout_max_episode_tokens where set and "
-            "by the model's context window, which it fails past. "
-            "See agent-docs/training-methods/async-grpo/episodes.md#trajectory-length."
-        },
-    )
-    rollout_max_episode_tokens: int | None = field(
-        default=RolloutConfig.max_episode_tokens,
-        metadata={
-            "help": "Most tokens one episode may sample over all its turns, reasoning included; unset = max_turns × "
-            "rollout_max_tokens. Enforced by the engine per turn, never stated to the model, and at least "
-            "rollout_max_tokens. See agent-docs/training-methods/async-grpo/episodes.md#episode-output-budget."
-        },
-    )
-    rollout_max_thinking_tokens: int | None = field(
-        default=RolloutConfig.max_thinking_tokens,
-        metadata={
-            "help": "Per-turn reasoning-token cap (vLLM thinking_token_budget) that then forces the answer out of "
-            "the rest of the turn; a level's smaller enforced thinking_tokens wins, and under a soft level it is "
-            "the ceiling. Needs a reasoning parser on the vLLM server; unset leaves reasoning to the levels' "
-            "budgets. See agent-docs/training-methods/async-grpo/reasoning.md#reasoning-budget."
-        },
-    )
-    rollout_max_answer_tokens: int | None = field(
-        default=RolloutConfig.max_answer_tokens,
-        metadata={
-            "help": "Most a turn may generate past its reasoning cap, never stated to the model: an int in "
-            "[1, rollout_max_tokens), unset = rollout_max_tokens alone bounds the turn. "
-            "See agent-docs/training-methods/async-grpo/reasoning.md#answer-room."
-        },
-    )
-    rollout_reasoning_end_token: str = field(
-        default="</think>",
-        metadata={
-            "help": "The string the server's reasoning parser ends reasoning with, encoded as vLLM encodes it "
-            f"({REASONING_END_TOKEN_EXAMPLES}). Wherever a vLLM thinking budget can bind, the trainer gives a "
-            "forced run of its ids ratio 0 in the loss. "
-            "See agent-docs/training-methods/async-grpo/objective.md#forced-reasoning-closes."
-        },
-    )
-    max_train_row_tokens: int | None = field(
-        default=None,
-        metadata={
-            "help": "Longest training row (prompt + completion tokens) a training rank takes, above "
-            "rollout_max_tokens; unset = no cap beyond the context check. A per-turn row over it leaves the batch, "
-            "a whole-trajectory row trains at zero weight. "
-            "See agent-docs/training-methods/async-grpo/episodes.md#training-row-cap."
-        },
-    )
-
-    def _validate_fields(self) -> None:
-        super()._validate_fields()
-        owner = type(self).__name__
-        # Doubles as the dr_grpo loss normalizer, and is the request's max_tokens, which no engine reads as a fraction.
-        require_finite(owner, gt=0, rollout_max_tokens=self.rollout_max_tokens)
-        require_int(owner, rollout_max_tokens=self.rollout_max_tokens)
-        # A turn's answer room is `rollout_max_tokens - rollout_max_thinking_tokens` (or rollout_max_answer_tokens
-        # where smaller), none where the caps meet: the turn would then spend its whole cap on reasoning and stop
-        # before the answer or tool call it exists to produce. A cap of 0 would still be sent (as 1) while counting
-        # as no cap.
-        cap = self.rollout_max_thinking_tokens
-        if cap is not None and (
-            isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap < self.rollout_max_tokens
-        ):
-            raise ValueError(
-                f"rollout_max_thinking_tokens must be an int in [1, rollout_max_tokens={self.rollout_max_tokens}) when "
-                f"set (null = no run-wide cap): rollout_max_tokens bounds the whole turn, and at or above it the turn "
-                f"has no answer room and is cut mid-reasoning, got {cap!r}"
-            )
-        # The turn total is min(rollout_max_tokens, reasoning cap + this): at or above rollout_max_tokens it
-        # shrinks no turn, and below 1 a turn the engine force-closed has no room left to answer.
-        answer = self.rollout_max_answer_tokens
-        if answer is not None and (
-            isinstance(answer, bool) or not isinstance(answer, int) or not 1 <= answer < self.rollout_max_tokens
-        ):
-            raise ValueError(
-                f"rollout_max_answer_tokens must be an int in [1, rollout_max_tokens={self.rollout_max_tokens}) when "
-                f"set (null = rollout_max_tokens alone bounds the turn): at or above it the bound shrinks no turn, "
-                f"got {answer!r}"
-            )
-        # Below one turn's cap the first turn could never use the per-turn budget the run states. A turn's
-        # total is at most rollout_max_tokens, so this also holds one reasoning cap plus its answer room.
-        if self.rollout_max_episode_tokens is not None and (
-            isinstance(self.rollout_max_episode_tokens, bool)
-            or not isinstance(self.rollout_max_episode_tokens, int)
-            or self.rollout_max_episode_tokens < self.rollout_max_tokens
-        ):
-            raise ValueError(
-                f"rollout_max_episode_tokens must be an int >= rollout_max_tokens ({self.rollout_max_tokens}), so "
-                f"one whole turn fits the episode, or null, got {self.rollout_max_episode_tokens!r}"
-            )
-        # A row is a turn's prompt plus its completion, and the completion alone may run to
-        # rollout_max_tokens: a cap at or below it leaves out every turn that used its budget — a
-        # length bias against long turns, not the memory bound the knob is.
-        row_cap = self.max_train_row_tokens
-        if row_cap is not None and (
-            isinstance(row_cap, bool) or not isinstance(row_cap, int) or row_cap <= self.rollout_max_tokens
-        ):
-            raise ValueError(
-                f"max_train_row_tokens ({row_cap!r}) must be an int above rollout_max_tokens "
-                f"({self.rollout_max_tokens}): a row is prompt + completion, so a cap at or below the per-turn "
-                f"generation budget drops every turn that runs to it."
-            )
 
 
 @dataclass
@@ -296,13 +119,11 @@ class ISCorrectionArguments(ValidatedConfig):
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
-        owner = type(self).__name__
         self.build_is_mask_config()
         # A fraction of the step's corrected trajectories/tokens; 0 would trip on every step, >1 never.
-        if self.skip_update_masked_frac is not None:
-            require_finite(owner, skip_update_masked_frac=self.skip_update_masked_frac)
-            if not 0.0 < self.skip_update_masked_frac <= 1.0:
-                raise ValueError(f"skip_update_masked_frac must be in (0, 1], got {self.skip_update_masked_frac}")
+        require_finite(
+            type(self).__name__, gt=0, le=1, **present(skip_update_masked_frac=self.skip_update_masked_frac)
+        )
 
     def build_is_mask_config(self) -> ISMaskConfig:
         """The IS mask stages the ``isr_*`` knobs set, validated by :class:`ISMaskConfig` itself."""
@@ -374,14 +195,12 @@ class ReasoningCostArguments(ValidatedConfig):
                 raise ValueError(
                     f"reasoning_price must map each effort level to a price, got {self.reasoning_price!r}"
                 )
-            for level, price in self.reasoning_price.items():
-                if isinstance(price, bool) or not isinstance(price, int | float) or not isfinite(price) or price < 0:
-                    raise ValueError(f"reasoning_price[{level!r}] must be a finite number >= 0, got {price!r}")
+            require_finite(
+                owner, ge=0, **{f"reasoning_price[{level!r}]": price for level, price in self.reasoning_price.items()}
+            )
         require_finite(owner, gt=0, reasoning_price_cap=self.reasoning_price_cap)
         # A NaN or negative weight would parse and leave the floor off without a word.
-        require_finite(owner, reasoning_floor=self.reasoning_floor)
-        if self.reasoning_floor < 0:
-            raise ValueError(f"reasoning_floor must be a finite number >= 0 (0 = off), got {self.reasoning_floor}")
+        require_finite(owner, ge=0, why=" (0 = off)", reasoning_floor=self.reasoning_floor)
 
 
 @dataclass
@@ -564,33 +383,21 @@ class AsyncTrainingConfig(
     def _validate_fields(self) -> None:
         super()._validate_fields()
         owner = type(self).__name__
-        # 0 raises ZeroDivisionError at `global_step % sync_weights_every_n_steps`.
-        require_int(owner, ge=1, sync_weights_every_n_steps=self.sync_weights_every_n_steps)
+        # A 0 divides by zero (the sync period at `global_step % sync_weights_every_n_steps`, the empty actor
+        # list), reads as unset (`max_concurrent_rollouts or default`) or fails inside the DataLoader.
+        require_int(
+            owner,
+            ge=1,
+            sync_weights_every_n_steps=self.sync_weights_every_n_steps,
+            num_rollout_workers=self.num_rollout_workers,
+            **present(
+                max_concurrent_rollouts=self.max_concurrent_rollouts,
+                eval_rollout_batch_size=self.eval_rollout_batch_size,
+            ),
+        )
         # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
         # server is then retried until the NCCL watchdog kills the job.
-        retries = self.max_retries
-        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
-            raise ValueError(f"max_retries must be an int >= 0 (0 = one attempt, no retry), got {retries!r}")
-        # 0 workers builds an empty actor list and then divides by it.
-        require_int(owner, ge=1, num_rollout_workers=self.num_rollout_workers)
-        # `max_concurrent_rollouts or default` reads 0 as "unset", so the cap would vanish.
-        concurrency = self.max_concurrent_rollouts
-        if concurrency is not None and (
-            isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1
-        ):
-            raise ValueError(
-                f"max_concurrent_rollouts must be an int >= 1 when set (null = derive from num_rollout_workers), "
-                f"got {concurrency!r}"
-            )
-        # A non-positive batch raises inside the DataLoader, far from the knob; null is "unset".
-        eval_batch = self.eval_rollout_batch_size
-        if eval_batch is not None and (
-            isinstance(eval_batch, bool) or not isinstance(eval_batch, int) or eval_batch < 1
-        ):
-            raise ValueError(
-                f"eval_rollout_batch_size must be an int >= 1 when set (null = one round per eval batch), "
-                f"got {eval_batch!r}"
-            )
+        require_int(owner, ge=0, why=" (0 = one attempt, no retry)", max_retries=self.max_retries)
         # Compared against wall-clock, where a non-positive deadline cancels every episode on entry and halts the
         # run as an empty batch.
         require_finite(
@@ -601,16 +408,9 @@ class AsyncTrainingConfig(
             rollout_connection_timeout=self.rollout_connection_timeout,
         )
         # A negative base shrinks the retry backoff instead of growing it.
-        require_finite(owner, retry_base_wait=self.retry_base_wait)
-        if self.retry_base_wait < 0:
-            raise ValueError(
-                f"retry_base_wait must be a finite number >= 0 (0 = retry immediately), got {self.retry_base_wait}"
-            )
+        require_finite(owner, ge=0, retry_base_wait=self.retry_base_wait)
         # A rate is never above 1, so a threshold at 1 would never fire.
-        if self.truncation_alarm_rate is not None:
-            require_finite(owner, truncation_alarm_rate=self.truncation_alarm_rate)
-            if not 0.0 <= self.truncation_alarm_rate < 1.0:
-                raise ValueError(f"truncation_alarm_rate must be in [0, 1) or null, got {self.truncation_alarm_rate}")
+        require_finite(owner, ge=0, lt=1, **present(truncation_alarm_rate=self.truncation_alarm_rate))
         # The breaker is the only writer of the skip flag: without it the condition could never fire.
         if self.early_stop_on_skipped_updates and self.skip_update_masked_frac is None:
             raise ValueError(
@@ -633,17 +433,9 @@ class AsyncTrainingConfig(
                 "budget are per episode; the level travels as the request's top-level field and the budget is "
                 "added to the nested form per request."
             )
-        self._validate_backend_capabilities()
-
-    def _validate_backend_capabilities(self) -> None:
-        """Refuse a request knob the selected engine does not implement, which SGLang would drop without a word.
-
-        A level's own thinking budget reaches the same request field yet keeps steering through the chat template
-        (the rollout actor warns its cap is unenforced); ``rollout_max_thinking_tokens`` is a cap and nothing else.
-        """
-        if self.rollout_backend != SGLANG_BACKEND:
-            return
-        if self.rollout_max_thinking_tokens is not None:
+        # SGLang drops the request field without a word. A level's own thinking budget reaches the same field yet
+        # keeps steering through the chat template; rollout_max_thinking_tokens is a cap and nothing else.
+        if self.rollout_backend == SGLANG_BACKEND and self.rollout_max_thinking_tokens is not None:
             raise ValueError(
                 "rollout_max_thinking_tokens is not supported with rollout_backend='sglang': the "
                 "thinking_token_budget request field is vLLM-only and SGLang would silently ignore it, "
@@ -707,9 +499,6 @@ class AsyncTrainingConfig(
         """
         nccl_minutes = nccl_timeout() // timedelta(minutes=1)
         watchdog = nccl_minutes * 60
-
-        # Above the watchdog, a straggler cannot be cancelled before the peers' collective aborts;
-        # values merely close to it only warn, below.
         if self.episode_timeout > watchdog:
             raise ValueError(
                 f"episode_timeout ({self.episode_timeout:.0f}s) must be below the NCCL collective "
@@ -789,13 +578,9 @@ class EnvironmentConfig(ValidatedConfig):
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
-        # ``BaseEnvironment`` re-checks both, but that construction happens inside a Ray actor, after
+        # ``EnvironmentBase`` re-checks both, but that construction happens inside a Ray actor, after
         # the cluster and the vLLM servers are up. Check at parse time instead.
-        turns = self.max_turns
-        if turns is not None and (isinstance(turns, bool) or not isinstance(turns, int) or turns < 1):
-            raise ValueError(
-                f"max_turns must be an int >= 1 (null keeps the environment class default), got {turns!r}"
-            )
+        require_int(type(self).__name__, ge=1, **present(max_turns=self.max_turns))
         self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails here
         # Merged last in to_env_config, a key it writes from a top-level field would override that field
         # past the validation above.
@@ -817,7 +602,7 @@ class EnvironmentConfig(ValidatedConfig):
 
     def to_env_config(self) -> dict[str, Any]:
         """Merge the reward terms and turn budget with ``environment_kwargs`` into the dict passed to
-        ``resolve_environment(environment_type, config)``."""
+        ``build_environment(environment_type, config)``."""
         # Only an explicitly configured turn cap is forwarded; injecting the dataclass default would
         # override the per-class defaults.
         config = {key: value for key, value in self._core_env_config().items() if value is not None}

@@ -1,6 +1,6 @@
 # Native Tool-Use Environments
 
-`NativeToolUseEnvironment` (`src/environments/envs/protocols/native.py`) runs the OpenAI/vLLM function-calling protocol: the environment advertises tool schemas, the server's `--tool-call-parser` extracts the calls, and each result returns as a `tool` message.
+`NativeToolUseEnvironment` (`src/environments/protocols/native_tool_use.py`) runs the OpenAI/vLLM function-calling protocol: the environment advertises tool schemas, the server's `--tool-call-parser` extracts the calls, and each result returns as a `tool` message.
 
 Serve the model with its family's parser ([Tool calls](../../episodes.md#tool-calls)). Without one, vLLM rejects the request (400) and SGLang returns the calls as plain text, so every episode ends on its first turn.
 
@@ -99,7 +99,7 @@ The endpoint needs tool calling enabled. Flags and the `--training_config` contr
 A custom tool set goes through the constructor ([A custom tool](../custom.md#a-custom-tool)):
 
 ```python
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from src.environments.tools.toolsets import build_combined_tools
 
 env = NativeToolUseEnvironment(tool_registry=build_combined_tools(), max_turns=10)

@@ -87,7 +87,7 @@ trainer = DistributedAsyncEnvironmentalGRPOTrainer(
 )
 ```
 
-For an unregistered `BaseEnvironment` subclass, pass `environment_cls=MyEnvironment` with `environment_kwargs={...}`
+For an unregistered `EnvironmentBase` subclass, pass `environment_cls=MyEnvironment` with `environment_kwargs={...}`
 instead. One of the two is required.
 
 ## Testing a setup

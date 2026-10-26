@@ -33,9 +33,8 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from typing import Any
 
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY
 from src.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
-from src.environments.registry import resolve_environment
+from src.environments.registry import build_environment
 from src.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,
@@ -46,6 +45,7 @@ from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS
 from src.environments.tasks.coding.grading import grade_solution
 from src.environments.tasks.coding.program_source import normalized_program
 from src.environments.tasks.coding.verdicts import FloatTolerance, find_stated_float_tolerance
+from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
 from src.environments.tools.definitions import NativeToolCall, ToolArgumentError
 
 # Meta keys a re-grade needs: env_type/adapter/dataset/split select the environment and rebuild the
@@ -123,7 +123,7 @@ def rebuild_environment(meta: dict[str, Any]) -> CodeContestsEnvironment:
     against the class default would report a lower s@k than the online number. A meta line naming no
     protocol ran the harness."""
     env_kwargs = {k: v for k, v in (meta.get("env_kwargs") or {}).items() if k not in _TOP_LEVEL_ENV_KEYS}
-    return resolve_environment(
+    return build_environment(
         meta["env_type"],
         {
             **env_kwargs,

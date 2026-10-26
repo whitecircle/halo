@@ -33,16 +33,16 @@ import time
 import pytest
 import torch
 
-from src.environments.base import (
+from src.environments.episode import RolloutResult
+from src.environments.episode_keys import (
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
-    REWARD_PENDING_KEY,
     SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.episode import RolloutResult
+from src.environments.episode_scoring import REWARD_PENDING_KEY
+from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from src.environments.protocols.react import ReActEnvironment
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import (
     LOCAL_FSIZE_LIMIT,

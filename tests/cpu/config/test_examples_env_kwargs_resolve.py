@@ -5,7 +5,7 @@
 misspelled env kwarg, one meant for another ``environment_type``, or an invalid
 ``reasoning_effort_profiles`` entry parses cleanly and only raises inside a Ray actor — after the
 cluster and the rollout servers are up. Here each example's environment fields go through the chain
-the trainer uses (YAML → ``EnvironmentConfig`` → ``to_env_config`` → ``resolve_environment``), so
+the trainer uses (YAML → ``EnvironmentConfig`` → ``to_env_config`` → ``build_environment``), so
 those raise on the CPU tier instead. The resolved environment also pins what each example's judge is told: a
 tool it names must be one that environment offers.
 
@@ -20,7 +20,7 @@ import pytest
 import yaml
 
 from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.registry import resolve_environment
+from src.environments.registry import build_environment
 from src.rewards.terms import JudgeTerm
 from tests.common.repo import REPO_ROOT
 
@@ -52,7 +52,7 @@ def coding_example() -> Path:
 def offered_tools(config: Path) -> frozenset[str]:
     """The tool names the example's environment offers the policy, as its transcripts spell them."""
     cfg = environment_config(config)
-    env = resolve_environment(cfg.environment_type, cfg.to_env_config())
+    env = build_environment(cfg.environment_type, cfg.to_env_config())
     try:
         return frozenset(schema["function"]["name"] for schema in env.get_tools_schema() or [])
     finally:
@@ -69,7 +69,7 @@ def judge_text(config: Path) -> str:
     """What the example's judge terms tell the judge, as its environment resolves them (a rubric the environment
     declares included): each context and each check's or requirement's description."""
     cfg = environment_config(config)
-    env = resolve_environment(cfg.environment_type, cfg.to_env_config())
+    env = build_environment(cfg.environment_type, cfg.to_env_config())
     try:
         judges = [term for term in env.reward_terms if isinstance(term, JudgeTerm)]
     finally:
@@ -107,7 +107,7 @@ def test_environmental_examples_tree_is_not_empty():
 def test_example_environment_resolves(config):
     """The environment the example names accepts every kwarg and profile the example gives it."""
     cfg = environment_config(config)
-    env = resolve_environment(cfg.environment_type, cfg.to_env_config())
+    env = build_environment(cfg.environment_type, cfg.to_env_config())
     try:
         assert env.max_turns >= 1
     finally:
@@ -120,7 +120,7 @@ def test_an_unknown_environment_kwarg_is_still_rejected():
     env_config = cfg.to_env_config()
     env_config["timout_per_test"] = 5
     with pytest.raises(TypeError, match="timout_per_test"):
-        resolve_environment(cfg.environment_type, env_config)
+        build_environment(cfg.environment_type, env_config)
 
 
 def test_an_invalid_effort_profile_is_still_rejected():
@@ -129,7 +129,7 @@ def test_an_invalid_effort_profile_is_still_rejected():
     env_config = cfg.to_env_config()
     env_config["reasoning_effort_profiles"] = {"high": {"thinking_budget": 16384}}
     with pytest.raises(ValueError, match="thinking_budget"):
-        resolve_environment(cfg.environment_type, env_config)
+        build_environment(cfg.environment_type, env_config)
 
 
 def test_some_example_runs_a_judge():

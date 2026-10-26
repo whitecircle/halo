@@ -238,7 +238,7 @@ def test_dropped_thinking_budget_is_announced_once(caplog):
     payload builder came from the environment's ``reasoning_effort_profiles``. The recipe still states
     it and the template still renders it, so dropping it silently leaves a cap nothing enforces.
     """
-    engine_wire._THINKING_BUDGET_UNENFORCED_WARNED.discard("sglang")
+    engine_wire._thinking_budget_unenforced_warned.discard("sglang")
     try:
         with caplog.at_level(logging.WARNING, logger=engine_wire.__name__):
             _build_payload("sglang", max_thinking_tokens=4096)
@@ -248,12 +248,12 @@ def test_dropped_thinking_budget_is_announced_once(caplog):
         message = dropped[0].getMessage()
         assert "4096" in message and "sglang" in message
     finally:
-        engine_wire._THINKING_BUDGET_UNENFORCED_WARNED.discard("sglang")
+        engine_wire._thinking_budget_unenforced_warned.discard("sglang")
 
 
 def test_vllm_never_warns_about_the_budget_it_enforces(caplog):
     """Anti-vacuity: the warning is backend-specific, not emitted whenever a budget is set."""
-    engine_wire._THINKING_BUDGET_UNENFORCED_WARNED.discard("vllm")
+    engine_wire._thinking_budget_unenforced_warned.discard("vllm")
     with caplog.at_level(logging.WARNING, logger=engine_wire.__name__):
         _build_payload("vllm", max_thinking_tokens=4096)
     assert not [r for r in caplog.records if "NOT enforced" in r.getMessage()]
@@ -380,13 +380,13 @@ def test_capture_flags_absent_when_capture_disabled():
 
 
 def test_rollout_config_backend_roster_matches_the_gate_and_the_readers():
-    """``RolloutConfig.backend`` mirrors ``AsyncTrainingConfig.rollout_backend`` (the validated gate), and every
-    selectable backend has a token-capture reader — the import-time guard in ``engine_wire`` depends on both."""
+    """``RolloutConfig.backend`` mirrors ``AsyncTrainingConfig.rollout_backend`` (the validated gate), and the
+    selectable backends and the token-capture readers are one set: a backend without a reader would fail on its
+    first captured turn, a reader without a backend is dead."""
     gate = set(get_args(get_type_hints(AsyncTrainingConfig)["rollout_backend"]))
     mirror = set(get_args(get_type_hints(RolloutConfig)["backend"]))
     assert gate and gate == mirror
-    assert frozenset(gate) == engine_wire._SELECTABLE_BACKENDS
-    assert not engine_wire._UNREADABLE_BACKENDS
+    assert set(engine_wire._TOKEN_CAPTURE) == gate
 
 
 if __name__ == "__main__":

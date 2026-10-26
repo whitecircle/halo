@@ -45,15 +45,12 @@ class _NeverReturningActor:
 async def test_a_request_timeout_inside_the_episode_is_a_masked_error():
     actor = _actor()
 
-    async def _client():
-        return None
-
     async def _timed_out_generate(
         client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
     ):
         raise TimeoutError()  # the builtin, with an empty message
 
-    actor._get_http_client = _client
+    actor._http_client = None
     actor._generate = _timed_out_generate
 
     result = await actor.run_episode("2+2?", {"answer": "4"}, "http://x", RolloutConfig(max_retries=0))

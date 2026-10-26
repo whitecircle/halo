@@ -86,16 +86,15 @@ class SDPGArguments(ValidatedConfig):
         # raise, a negative one inverts them.
         require_finite(type(self).__name__, gt=0, sdpg_temperature=self.sdpg_temperature)
         # A NaN coefficient NaNs every loss; a negative one trains the student away from the teacher.
-        require_finite(type(self).__name__, sdpg_beta_base=self.sdpg_beta_base)
-        if self.sdpg_beta_base < 0:
-            raise ValueError(
-                f"sdpg_beta_base must be a finite value >= 0 (0 drops the OPD term), got {self.sdpg_beta_base}"
-            )
+        require_finite(type(self).__name__, ge=0, sdpg_beta_base=self.sdpg_beta_base)
         # The schedule reads a negative length as off, so one is a typo the run would not report.
-        for name in ("sdpg_beta_warmup_steps", "sdpg_beta_decay_steps"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"{name} must be an int >= 0 (0 = off), got {value!r}")
+        require_int(
+            type(self).__name__,
+            ge=0,
+            why=" (0 = off)",
+            sdpg_beta_warmup_steps=self.sdpg_beta_warmup_steps,
+            sdpg_beta_decay_steps=self.sdpg_beta_decay_steps,
+        )
         self._validate_hint_template()
 
     def _validate_hint_template(self) -> None:
@@ -201,9 +200,7 @@ class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
     def _validate_fields(self) -> None:
         super()._validate_fields()
         # A NaN coefficient NaNs every loss; a negative one pushes the student away from the anchor.
-        require_finite(type(self).__name__, reference_kl_coef=self.reference_kl_coef)
-        if self.reference_kl_coef < 0:
-            raise ValueError(f"reference_kl_coef must be a finite value >= 0, got {self.reference_kl_coef}")
+        require_finite(type(self).__name__, ge=0, reference_kl_coef=self.reference_kl_coef)
         # p <= 0 inverts or flattens the weighting, and a zero confidence then divides by zero.
         require_finite(type(self).__name__, gt=0, confidence_power=self.confidence_power)
         unfilled = sorted(
@@ -299,8 +296,6 @@ class DistillationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArgum
         super()._validate_fields()
         owner = type(self).__name__
         require_finite(owner, gt=0, distill_temperature=self.distill_temperature)
-        require_finite(owner, distill_alpha=self.distill_alpha)
+        require_finite(owner, ge=0, le=1, distill_alpha=self.distill_alpha)
         # A non-positive length is legal: it resolves to the student's context window at launch.
         require_int(owner, **present(max_length=self.max_length))
-        if not 0.0 <= self.distill_alpha <= 1.0:
-            raise ValueError(f"distill_alpha must be in [0, 1], got {self.distill_alpha}")

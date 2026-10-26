@@ -122,7 +122,7 @@ def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labe
         mock.patch.object(
             classification, "load_script_datasets", return_value=(DatasetDict({"train": train, "test": test}), False)
         ),
-        mock.patch.object(classification, "require_multimodal_sequence_classification_head"),
+        mock.patch.object(classification, "reject_multimodal_model_without_seq_cls_head"),
         mock.patch.object(classification, "load_model_and_tokenizer", return_value=(model, object())),
         mock.patch.object(classification, "apply_max_length", side_effect=lambda config, args, model, tok: tok),
         mock.patch.object(classification, "configure_adapter_training", return_value=None),

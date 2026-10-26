@@ -1,13 +1,9 @@
 """Per-rank training-FLOPs model behind MFU / S-MFU: PaLM/Megatron ``6·N`` plus the attention-score term of
-:mod:`src.models.attention.layout`.
+:mod:`src.models.attention.layout`. Every count is the RANK's own (``local_numel`` reads the TP/PP shard off the
+parameter, the layout comes off this rank's decoder layers), so the estimate describes what this GPU computes."""
 
-Every count is the RANK's own (``local_numel`` reads the TP/PP shard off the parameter, the layout comes off
-this rank's decoder layers), so the estimate describes what this GPU computes.
-"""
-
+import logging
 from dataclasses import dataclass
-
-from transformers.utils import logging as hf_logging
 
 from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.parallelism_config import ParallelismConfig
@@ -17,7 +13,7 @@ from src.models.moe.config_fields import resolve_expert_count, resolve_router_to
 from src.models.moe.family_specs import expert_weight_roots, experts_container_attrs
 from src.runtime.dtensor import local_numel
 
-logger = hf_logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -106,6 +102,21 @@ def _moe_param_split(model, num_experts: int, top_k: int) -> tuple[float, float,
     )
 
 
+def _linear_flops_per_token(model, trainable_params: float, frozen_params: float) -> float:
+    """The ``6·N`` term; a parameter-less (meta) model stands in 12·d²·L trainable parameters."""
+    if next(model.parameters(), None) is not None:
+        return _training_flops_per_token(trainable_params, frozen_params)
+    config = getattr(model, "config", None)
+    d_model = getattr(config, "hidden_size", None)
+    n_layers = getattr(config, "num_hidden_layers", None)
+    if d_model is None or n_layers is None:
+        raise ValueError(
+            "Cannot estimate model FLOPS/token: the model exposes no parameters and its config "
+            "carries neither hidden_size nor num_hidden_layers."
+        )
+    return _training_flops_per_token(12 * d_model * d_model * n_layers, 0)
+
+
 def estimate_rank_flops(
     model, *, seq_len: int, parallelism_config: ParallelismConfig, full_model_params: float | None
 ) -> RankFlopsModel:
@@ -119,19 +130,7 @@ def estimate_rank_flops(
     )
     local_params, trainable_params = count_model_parameters(model)
     frozen_params = local_params - trainable_params
-    if next(model.parameters(), None) is None:
-        # A parameter-less (meta) model stands in 12·d²·L trainable parameters.
-        config = getattr(model, "config", None)
-        d_model = getattr(config, "hidden_size", None)
-        n_layers = getattr(config, "num_hidden_layers", None)
-        if d_model is None or n_layers is None:
-            raise ValueError(
-                "Cannot estimate model FLOPS/token: the model exposes no parameters and its config "
-                "carries neither hidden_size nor num_hidden_layers."
-            )
-        linear_flops = _training_flops_per_token(12 * d_model * d_model * n_layers, 0)
-    else:
-        linear_flops = _training_flops_per_token(trainable_params, frozen_params)
+    linear_flops = _linear_flops_per_token(model, trainable_params, frozen_params)
 
     has_full_baseline = full_model_params is not None and full_model_params > 0
     full_params = float(full_model_params) if has_full_baseline else float(local_params)

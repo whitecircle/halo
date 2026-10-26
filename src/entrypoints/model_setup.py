@@ -8,7 +8,6 @@ from accelerate.logging import get_logger
 from huggingface_hub import hf_hub_download, is_offline_mode
 from huggingface_hub.errors import LocalEntryNotFoundError, RemoteEntryNotFoundError
 from transformers import (
-    AutoConfig,
     AutoModelForSequenceClassification,
     AutoProcessor,
     AutoTokenizer,
@@ -24,7 +23,7 @@ from src.entrypoints.script import ScriptContext
 from src.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
 from src.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from src.model_loading.parallel.loader import load_distributed_model
-from src.model_loading.parallel.model_source import probe_checkpoint
+from src.model_loading.parallel.model_source import fetch_checkpoint_config, probe_checkpoint
 from src.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
 from src.models.context_window import is_bounded_length, resolve_length_to_context
 from src.models.modality import is_vlm_model
@@ -66,21 +65,14 @@ def default_padded_attn_implementation(
     return "sdpa" if sinks_reset else None
 
 
-def require_multimodal_sequence_classification_head(model_config: ModelArguments) -> None:
+def reject_multimodal_model_without_seq_cls_head(model_config: ModelArguments) -> None:
     """Refuse a multimodal checkpoint with no sequence-classification head, before the model load.
 
     ``AutoModelForSequenceClassification`` refuses such a family with "Unrecognized configuration
     class", naming neither the modality nor an alternative, and only after the distributed init on every
     rank; this names the families that work, from the registry the resolution reads.
     """
-    config = hub_metadata_main_first(
-        "seq_cls_head_probe",
-        lambda: AutoConfig.from_pretrained(
-            model_config.model_name_or_path,
-            trust_remote_code=model_config.trust_remote_code,
-            revision=model_config.model_revision,
-        ),
-    )
+    config = fetch_checkpoint_config(model_config, tag="seq_cls_head_probe")
     # Exactly the containment test ``from_config`` resolves through, so this cannot disagree with it.
     if not is_vlm_model(model_config.model_name_or_path, config=config) or (
         type(config) in AutoModelForSequenceClassification._model_mapping
@@ -94,23 +86,26 @@ def require_multimodal_sequence_classification_head(model_config: ModelArguments
     )
 
 
-def _load_policy(
+def load_model_and_tokenizer(
     context: ScriptContext,
     training_config,
     model_config: ModelArguments,
     args,
     *,
-    attn_default: str | None,
+    attn_default: str | None = None,
     model_class=None,
     model_config_overrides: dict | None = None,
     init_from_scratch: bool = False,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
-    """``load_distributed_model`` for the run's policy, with ``model_init_kwargs`` consumed and Liger
-    re-finalized.
+    """The run's policy and its tokenizer through ``load_distributed_model``, for a script that pins its own
+    head or takes no VLM, and for both branches of :func:`load_policy_model`.
 
-    The config's ``model_init_kwargs`` reach the loader under ``model_config_overrides`` and are cleared
-    so TRL does not re-apply them; the Liger flags are captured before the load so they can be replayed
-    on the built model. A Path-B resume reads the weights from the checkpoint at its own precision.
+    ``model_class`` is the ``Auto*`` class of a non-default head (``AutoModelForSequenceClassification``,
+    ``AutoModel``); ``model_config_overrides`` (``num_labels``) merge over the config's ``model_init_kwargs``,
+    which are cleared so TRL does not re-apply them. The Liger flags are captured before the load and replayed
+    on the built model. A Path-B resume reads the weights from the checkpoint at its own precision and keeps
+    the run's base as ``_name_or_path``, the ``base_model`` TRL's model card names; where the weights were read
+    stays on the loader's ``LOADED_WEIGHTS_FROM_ATTR`` stamp.
     """
     overrides = {**(getattr(training_config, "model_init_kwargs", None) or {}), **(model_config_overrides or {})}
     # Non-TRL configs (DistillationConfig, the plain HF classification/embedding ones) carry none.
@@ -136,36 +131,6 @@ def _load_policy(
         preserve_checkpoint_precision=context.policy_from_checkpoint,
     )
     finalize_liger_after_direct_load(training_config, use_liger_kernel, model)
-    return model, tokenizer
-
-
-def load_model_and_tokenizer(
-    context: ScriptContext,
-    training_config,
-    model_config: ModelArguments,
-    args,
-    *,
-    model_class=None,
-    model_config_overrides: dict | None = None,
-    attn_default: str | None = None,
-) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
-    """The policy and its tokenizer, for a script that pins its own head or takes no VLM.
-
-    ``model_class`` is the ``Auto*`` class of a non-default head (``AutoModelForSequenceClassification``,
-    ``AutoModel``); ``model_config_overrides`` (``num_labels``) merge over ``model_init_kwargs``.
-    A policy built from the resume checkpoint keeps the run's base as its ``_name_or_path``, the
-    ``base_model`` TRL's model card names; where the weights were read stays on the loader's
-    ``LOADED_WEIGHTS_FROM_ATTR`` stamp.
-    """
-    model, tokenizer = _load_policy(
-        context,
-        training_config,
-        model_config,
-        args,
-        attn_default=attn_default,
-        model_class=model_class,
-        model_config_overrides=model_config_overrides,
-    )
     if context.policy_from_checkpoint:
         model.config._name_or_path = model_config.model_name_or_path
     return model, tokenizer
@@ -245,7 +210,7 @@ def _load_vlm_model_and_processor(
             ),
         )
     )
-    model, _ = _load_policy(context, training_config, model_config, args, attn_default=attn_default)
+    model, _ = load_model_and_tokenizer(context, training_config, model_config, args, attn_default=attn_default)
     if is_global_main_process():
         logger.info(f"Loaded VLM model: {type(model).__name__}")
     return model, processor if processor is not None else tokenizer, tokenizer
@@ -282,7 +247,7 @@ def load_policy_model(
             context, training_config, model_config, args, vlm_run=vlm_run, attn_default=attn_default
         )
         return PolicyLoad(model, processing_class, tokenizer, is_vlm=True)
-    model, tokenizer = _load_policy(
+    model, tokenizer = load_model_and_tokenizer(
         context, training_config, model_config, args, attn_default=attn_default, init_from_scratch=init_from_scratch
     )
     return PolicyLoad(model, tokenizer, tokenizer, is_vlm=False)

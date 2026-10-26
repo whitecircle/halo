@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from src.environments.base import REWARD_COMPONENTS_KEY
+from src.environments.episode_keys import REWARD_COMPONENTS_KEY
 from src.environments.sandbox.base import SandboxExecutor
 from src.environments.sandbox.results import SandboxResult
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment

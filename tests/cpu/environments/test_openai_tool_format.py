@@ -16,7 +16,7 @@ import warnings
 
 import pytest
 
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,

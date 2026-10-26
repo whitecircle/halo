@@ -36,16 +36,7 @@ from openai import (
 )
 
 import src.environments.eval_runner as eval_runner
-from src.environments.base import (
-    EPISODE_ERROR_KEY,
-    RANDOM_REASONING_EFFORT,
-    REWARD_COMPONENTS_KEY,
-    SOLVE_RATE_KEY,
-    Message,
-    Trajectory,
-    stable_reasoning_effort,
-)
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
+from src.environments.episode_keys import EPISODE_ERROR_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
 from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
@@ -56,10 +47,14 @@ from src.environments.eval_runner import (
     trajectory_path,
     write_trajectories_jsonl,
 )
-from src.environments.rollout_config import RolloutConfig
+from src.environments.messages import Message, Trajectory
+from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from src.environments.reasoning_effort import stable_reasoning_effort
+from src.environments.rollout_config import RANDOM_REASONING_EFFORT, RolloutConfig
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry
 from src.environments.tools.toolsets import build_simulated_file_tools
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
+from tests.common.fake_chat_client import chat_reply, scripted_chat
 
 
 def test_trajectory_path_slugifies_per_run():
@@ -98,15 +93,14 @@ def test_serialize_trajectory_keeps_messages_and_verdict():
     assert s["info"]["eval_stats"]["completion_tokens"] == 50  # telemetry renamed from _eval_stats
 
 
-def test_serialize_trajectory_keeps_each_turns_cap():
-    """The reasoning cap each turn ran under is what a record of an eval shows beside the render; the eval
-    counts no reasoning (it asks for no ids), so no count rides along, and a turn that recorded no cap
-    carries no key."""
+def test_serialize_trajectory_keeps_each_turns_cap_and_reasoning_count():
+    """A record of an eval shows beside each turn's render the reasoning cap it ran under and the reasoning it
+    sampled, as training counts it; a turn that recorded neither carries no key."""
     trajectory = _leaky_traj()
     trajectory.messages.append(Message.assistant("again", thinking_cap=18000, reasoning_tokens=17999))
     turns = [m for m in serialize_trajectory(trajectory)["messages"] if m["role"] == "assistant"]
-    assert "thinking_cap" not in turns[0]
-    assert turns[1]["thinking_cap"] == 18000 and "reasoning_tokens" not in turns[1]
+    assert "thinking_cap" not in turns[0] and "reasoning_tokens" not in turns[0]
+    assert turns[1]["thinking_cap"] == 18000 and turns[1]["reasoning_tokens"] == 17999
 
 
 def test_serialize_trajectory_drops_answer_key_and_internals():
@@ -185,38 +179,17 @@ def _tooled_env(**kw) -> NativeToolUseEnvironment:
 
 def _tool_call_response():
     fn = types.SimpleNamespace(name="echo", arguments="{}")
-    return types.SimpleNamespace(
+    return chat_reply(
         answer="",
         finish_reason="tool_calls",
         completion_tokens=3,
         tool_calls=[types.SimpleNamespace(id="c1", function=fn)],
         reasoning=None,
-        token_ids=None,
     )
 
 
-def _call_record(model, messages, client, kwargs) -> dict:
-    """One transport call as a keyword view: the positional ``model``/``messages`` and the keyword-only
-    ``client`` beside the rest."""
-    return {"model": model, "messages": messages, "client": client, **kwargs}
-
-
-def _scripted_generate(script):
-    """An async stand-in for ``generate_openai_response`` — in its call shape, ``(model, messages, *,
-    client, ...)`` — driven by a list of responses/exceptions."""
-    queue = list(script)
-
-    async def _generate(model, messages, *, client, **kwargs):
-        item = queue.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return item
-
-    return _generate
-
-
 async def _run_scripted_episode(env, script, monkeypatch):
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate(script))
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat(script))
     return await run_episode(
         env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
     )
@@ -266,9 +239,7 @@ async def test_completed_episode_still_pays_success(monkeypatch):
     """The happy path is untouched: a real final text answer completes and earns the objective term's
     full weight."""
     env = _tooled_env()
-    final = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None, token_ids=None
-    )
+    final = chat_reply(answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None)
     traj = await _run_scripted_episode(env, [final], monkeypatch)
     assert traj.done and not traj.truncated
     assert traj.info["completed"] is True
@@ -284,17 +255,14 @@ async def test_length_cutoff_is_recovered_offline_exactly_as_online(monkeypatch)
     what online would have nudged and retried — diverging the identical online/offline verdict the
     grading module is built to promise."""
     env = _tooled_env()
-    cut_off = types.SimpleNamespace(
+    cut_off = chat_reply(
         answer="a thought that ran out of",
         finish_reason="length",
         completion_tokens=9,
         tool_calls=None,
         reasoning=None,
-        token_ids=None,
     )
-    final = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None, token_ids=None
-    )
+    final = chat_reply(answer="done", finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None)
     traj = await _run_scripted_episode(env, [cut_off, final], monkeypatch)
 
     assert traj.info["length_cutoff_turns"] == 1
@@ -314,19 +282,17 @@ async def test_the_eval_keeps_a_cut_call_on_its_turn_and_in_the_record_without_r
     partial = types.SimpleNamespace(
         id="c1", function=types.SimpleNamespace(name="echo", arguments='{"x": "# still re')
     )
-    cut = types.SimpleNamespace(
+    cut = chat_reply(
         answer="Computing", finish_reason="length", completion_tokens=16, tool_calls=[partial], reasoning=None
     )
-    done = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None
-    )
+    done = chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
     script, sent, ran = [cut, done], [], []
 
-    async def _generate(model, messages, *, client, **kwargs):
-        sent.append(messages)
+    async def _generate(client, **request):
+        sent.append(request["messages"])
         return script.pop(0)
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", _generate)
     registry = NativeToolRegistry()
     registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: ran.append(a)))
     traj = await run_episode(
@@ -356,13 +322,12 @@ async def test_eval_records_the_reasoning_channel_without_writing_it_to_the_json
     CoT into the ``--save_trajectories`` file, and the file is what gets shared.
     """
     env = _tooled_env()
-    final = types.SimpleNamespace(
+    final = chat_reply(
         answer="done",
         finish_reason="stop",
         completion_tokens=2,
         tool_calls=None,
         reasoning="secret CoT",
-        token_ids=None,
     )
     traj = await _run_scripted_episode(env, [final], monkeypatch)
 
@@ -385,15 +350,13 @@ async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
     def _schema():
         return real_schema() if seen.get("reset_done") else []
 
-    async def _generate(model, messages, *, client, tools, **kwargs):
-        seen["tools"] = tools
-        return types.SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
-        )
+    async def _generate(client, **request):
+        seen["tools"] = request.get("tools")
+        return chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
 
     monkeypatch.setattr(env, "reset", _reset)
     monkeypatch.setattr(env, "get_tools_schema", _schema)
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", _generate)
     await run_episode(
         env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
     )
@@ -416,13 +379,11 @@ async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypa
         levels.append(contexts[0]["reasoning_effort"])
         return real_reset(prompts, contexts)
 
-    async def _generate(model, messages, *, client, **kwargs):
-        return types.SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
-        )
+    async def _generate(client, **request):
+        return chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
 
     monkeypatch.setattr(env, "reset", _reset)
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", _generate)
     rollout = RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
     problems = [f"problem {i}" for i in range(12)]
     for _ in range(2):
@@ -440,15 +401,56 @@ def test_a_conversation_with_no_user_turn_has_no_level_to_draw():
         stable_reasoning_effort([{"role": "system", "content": "frame"}])
 
 
+async def test_a_captured_turn_records_the_reasoning_it_sampled(monkeypatch):
+    """Under a resolved reasoning close the eval asks for the sampled ids and counts each turn's reasoning up to
+    the close, as training does, so ``episode/thinking_cap_turns`` reads the same off an eval record."""
+    end, sent = 7, []
+
+    async def _chat(client, **request):
+        sent.append(request)
+        return chat_reply("done", completion_tokens=6, token_ids=[3, 3, 3, end, 9, 9])
+
+    monkeypatch.setattr(eval_runner, "chat_completion", _chat)
+    rollout = RolloutConfig(
+        model_name="m", max_tokens=16, max_thinking_tokens=8, capture_token_ids=True, reasoning_end_token_id=end
+    )
+    traj = await run_episode(_tooled_env(), "task", {}, client=object(), rollout=rollout)
+    turn = next(m for m in serialize_trajectory(traj)["messages"] if m["role"] == "assistant")
+    assert (turn["reasoning_tokens"], turn["thinking_cap"]) == (4, 8)
+    assert sent[0]["extra_body"]["logprobs"] is True and sent[0]["extra_body"]["return_token_ids"] is True
+
+
+async def test_a_call_cut_at_the_cap_is_recorded_as_the_policy_wrote_it(monkeypatch):
+    """As in training, the eval decodes the ids a cut turn wrote past its reasoning close (vLLM's ``/detokenize``,
+    at the server root under the client's ``/v1`` base) and records them as the cut call's arguments."""
+    end, ids, decoded = 99, [11, 99, 12, 99, 21, 22, 23], []
+    partial = types.SimpleNamespace(id="c1", function=types.SimpleNamespace(name="echo", arguments='{"x": "1+'))
+    cut = chat_reply("", finish_reason="tool_calls", completion_tokens=len(ids), tool_calls=[partial], token_ids=ids)
+
+    class _Client:
+        base_url = httpx.URL("http://x:8000/v1/")
+
+        async def post(self, url, *, cast_to, body, options):
+            decoded.append((url, body["tokens"]))
+            return types.SimpleNamespace(json=lambda: {"prompt": "<call>echo 1+ # cut"})
+
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([cut, chat_reply("done")]))
+    rollout = RolloutConfig(model_name="m", max_tokens=len(ids), capture_token_ids=True, reasoning_end_token_id=end)
+    traj = await run_episode(_tooled_env(), "task", {}, client=_Client(), rollout=rollout)
+    turn = next(m for m in traj.messages if m.role == "assistant")
+    assert decoded == [("http://x:8000/detokenize", [21, 22, 23])]
+    assert turn.cut_tool_calls[0]["function"]["arguments"] == "<call>echo 1+ # cut"
+
+
 async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):
     """An exception escaping the episode loop must still release the trajectory (try/finally), else
     every failed episode leaks its trajectory + sandbox session for the run's lifetime."""
     env = _tooled_env()
 
-    async def _boom(model, messages, *, client, **kwargs):
+    async def _boom(client, **request):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _boom)
+    monkeypatch.setattr(eval_runner, "chat_completion", _boom)
     monkeypatch.setattr(env, "finalize_truncated", lambda eids: (_ for _ in ()).throw(RuntimeError("finalize boom")))
     with pytest.raises(RuntimeError, match="finalize boom"):
         await run_episode(
@@ -513,13 +515,11 @@ async def test_collect_results_forwards_the_whole_rollout_contract(monkeypatch):
     """
     seen: list[dict] = []
 
-    async def _capture(model, messages, *, client, **kwargs):
-        seen.append(_call_record(model, messages, client, kwargs))
-        return types.SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
-        )
+    async def _capture(client, **request):
+        seen.append({"client": client, **request})
+        return chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _capture)
+    monkeypatch.setattr(eval_runner, "chat_completion", _capture)
     rollout = RolloutConfig(
         model_name="served-model", temperature=0.3, top_p=0.71, max_tokens=128, request_timeout=42.0
     )
@@ -532,7 +532,7 @@ async def test_collect_results_forwards_the_whole_rollout_contract(monkeypatch):
     assert seen[0]["temperature"] == pytest.approx(0.3)
     assert seen[0]["max_tokens"] == 128
     assert seen[0]["model"] == "served-model"
-    assert seen[0]["request_timeout"] == pytest.approx(42.0)
+    assert seen[0]["timeout"] == pytest.approx(42.0)
     assert results[0]["samples"][0]["success"] is True
 
 
@@ -546,10 +546,8 @@ async def test_a_conversation_prompt_hands_the_environment_its_last_user_turn(mo
         {"role": "assistant", "content": "ack"},
         {"role": "user", "content": "the task"},
     ]
-    done = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
-    )
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([done]))
+    done = chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([done]))
     (row,) = await collect_results(
         _tooled_env(),
         [{"prompt": convo, "context": {}}],
@@ -562,10 +560,10 @@ async def test_a_conversation_prompt_hands_the_environment_its_last_user_turn(mo
 
 
 async def test_a_conversation_without_a_user_turn_is_refused_before_any_episode(monkeypatch):
-    async def _never(model, messages, *, client, **kwargs):
+    async def _never(client, **request):
         raise AssertionError("no episode may run for a prompt with no task in it")
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _never)
+    monkeypatch.setattr(eval_runner, "chat_completion", _never)
     with pytest.raises(ValueError, match="no 'user' message"):
         await collect_results(
             _tooled_env(),
@@ -583,10 +581,8 @@ async def test_a_content_part_user_turn_hands_the_environment_its_text(monkeypat
         {"role": "system", "content": "dataset framing"},
         {"role": "user", "content": [{"type": "text", "text": "the "}, {"type": "text", "text": "task"}]},
     ]
-    done = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
-    )
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([done]))
+    done = chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([done]))
     (row,) = await collect_results(
         _tooled_env(),
         [{"prompt": convo, "context": {}}],
@@ -602,10 +598,10 @@ async def test_a_content_part_the_environment_cannot_carry_is_refused_before_any
     """An environment's conversation is text, so an image part would be dropped and the task graded
     without it; the row is refused, naming the part, before anything is generated."""
 
-    async def _never(model, messages, *, client, **kwargs):
+    async def _never(client, **request):
         raise AssertionError("no episode may run for a task the environment cannot carry")
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _never)
+    monkeypatch.setattr(eval_runner, "chat_completion", _never)
     content = [{"type": "text", "text": "what is shown?"}, {"type": "image_url", "image_url": {"url": "x"}}]
     with pytest.raises(ValueError, match=r"other than text \(\['image_url'\]\)"):
         await collect_results(
@@ -619,10 +615,8 @@ async def test_a_content_part_the_environment_cannot_carry_is_refused_before_any
 async def test_a_recorded_native_episode_carries_its_tool_calls_once(monkeypatch):
     """The messages carry every call and result; a second log of them in ``info`` would be pickled through
     Ray and the TP broadcast and written to the JSONL for nothing."""
-    done = types.SimpleNamespace(
-        answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
-    )
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([_tool_call_response(), done]))
+    done = chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([_tool_call_response(), done]))
     (row,) = await collect_results(
         _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, collect_trajectories=True
     )
@@ -637,13 +631,11 @@ async def test_collect_results_omits_the_model_for_a_single_model_endpoint(monke
     model instead of answering with what it serves."""
     seen: list[dict] = []
 
-    async def _capture(model, messages, *, client, **kwargs):
-        seen.append(_call_record(model, messages, client, kwargs))
-        return types.SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None, token_ids=None
-        )
+    async def _capture(client, **request):
+        seen.append({"client": client, **request})
+        return chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _capture)
+    monkeypatch.setattr(eval_runner, "chat_completion", _capture)
     await collect_results(
         _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=RolloutConfig(), num_samples=1
     )
@@ -663,19 +655,18 @@ async def test_eval_driver_keeps_contextvar_writes_across_turns(monkeypatch):
 
     def _call(name, **arguments):
         fn = types.SimpleNamespace(name=name, arguments=json.dumps(arguments))
-        return types.SimpleNamespace(
+        return chat_reply(
             answer="",
             finish_reason="tool_calls",
             completion_tokens=1,
             tool_calls=[types.SimpleNamespace(id=f"c-{name}", function=fn)],
             reasoning=None,
-            token_ids=None,
         )
 
     monkeypatch.setattr(
         eval_runner,
-        "generate_openai_response",
-        _scripted_generate(
+        "chat_completion",
+        scripted_chat(
             [
                 _call("write_file", path="/home/user/x.txt", content="persisted"),
                 _call("read_file", path="/home/user/x.txt"),
@@ -731,9 +722,7 @@ def _bad_request(message: str) -> BadRequestError:
 
 
 def _final(answer="done"):
-    return types.SimpleNamespace(
-        answer=answer, finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None, token_ids=None
-    )
+    return chat_reply(answer=answer, finish_reason="stop", completion_tokens=2, tool_calls=None, reasoning=None)
 
 
 _RETRYING = RolloutConfig(model_name="m", temperature=0.0, max_tokens=16, max_retries=2, retry_base_wait=0.0)
@@ -741,13 +730,13 @@ _RETRYING = RolloutConfig(model_name="m", temperature=0.0, max_tokens=16, max_re
 
 async def _episode_under_retries(env, script, monkeypatch, rollout=_RETRYING):
     calls = []
-    scripted = _scripted_generate(script)
+    scripted = scripted_chat(script)
 
-    async def _counting(model, messages, *, client, **kwargs):
-        calls.append(_call_record(model, messages, client, kwargs))
-        return await scripted(model, messages, client=client, **kwargs)
+    async def _counting(client, **request):
+        calls.append({"client": client, **request})
+        return await scripted(client, **request)
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _counting)
+    monkeypatch.setattr(eval_runner, "chat_completion", _counting)
     traj = await run_episode(env, "task", {}, client=object(), rollout=rollout)
     return traj, len(calls)
 
@@ -764,9 +753,7 @@ async def test_an_engine_serialization_fault_is_retried_like_a_training_rollout(
 
 
 async def test_an_engine_abort_is_re_issued_not_stepped(monkeypatch):
-    aborted = types.SimpleNamespace(
-        answer="partial", finish_reason="abort", completion_tokens=3, tool_calls=None, reasoning=None, token_ids=None
-    )
+    aborted = chat_reply(answer="partial", finish_reason="abort", completion_tokens=3, tool_calls=None, reasoning=None)
     traj, calls = await _episode_under_retries(_tooled_env(), [aborted, _final()], monkeypatch)
 
     assert calls == 2
@@ -795,7 +782,7 @@ async def test_a_failure_the_episode_itself_caused_is_graded_not_dropped(monkeyp
     """A conversation that outgrew the served context, or a turn that outran the timeout on every client
     retry, follows the episode's own length: dropping those samples would score only the episodes short
     enough to finish. They are graded on what they earned, as misses."""
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([_tool_call_response(), failure]))
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([_tool_call_response(), failure]))
 
     (row,) = await collect_results(
         _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
@@ -821,7 +808,7 @@ async def test_a_client_error_the_episode_did_not_cause_is_a_generation_error(mo
     """A terminal client error other than a context overflow says nothing about the episode: an unknown
     model or route, a rejected key, a request the driver built wrong. Graded as a miss it would score
     the endpoint's misconfiguration as the policy's failure."""
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([_tool_call_response(), failure]))
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([_tool_call_response(), failure]))
 
     (row,) = await collect_results(
         _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
@@ -835,7 +822,7 @@ async def test_a_client_error_the_episode_did_not_cause_is_a_generation_error(mo
 
 async def test_an_engine_fault_past_the_retries_is_a_generation_error_row(monkeypatch):
     fault = _bad_request("Out of range float values are not JSON compliant: nan")
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate([fault] * 3))
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([fault] * 3))
 
     (row,) = await collect_results(
         _tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING, num_samples=1
@@ -890,19 +877,18 @@ class _VerdictEnv(NativeToolUseEnvironment):
 
 
 def _cut_then_final():
-    cut = types.SimpleNamespace(
+    cut = chat_reply(
         answer="a thought that ran",
         finish_reason="length",
         completion_tokens=9,
         tool_calls=None,
         reasoning=None,
-        token_ids=None,
     )
     return [cut, _final()]
 
 
 async def _one_sample(env, monkeypatch, success_threshold=1.0):
-    monkeypatch.setattr(eval_runner, "generate_openai_response", _scripted_generate(_cut_then_final()))
+    monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat(_cut_then_final()))
     (row,) = await collect_results(
         env,
         [{"prompt": "q", "context": {}}],

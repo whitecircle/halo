@@ -74,7 +74,7 @@ def test_regrade_file_validates_before_it_grades_anything(tmp_path, monkeypatch)
         raise AssertionError("the meta must be validated before the dataset load / environment build")
 
     monkeypatch.setattr(regrade_trajectories, "_load_payloads", unreachable)
-    monkeypatch.setattr(regrade_trajectories, "resolve_environment", unreachable)
+    monkeypatch.setattr(regrade_trajectories, "build_environment", unreachable)
     path = _write_trajectories(tmp_path / "run_env.jsonl", _RUN_ENV_META)
 
     with pytest.raises(ValueError, match="trajectory meta is missing"):
@@ -285,7 +285,7 @@ def test_an_episode_past_the_rebuilt_problems_refuses_the_file(tmp_path, monkeyp
 
 
 def test_a_language_list_in_the_meta_rebuilds_the_choosing_environment():
-    env = regrade_trajectories.resolve_environment("code_contests", {"language": ["python", "cpp"]})
+    env = regrade_trajectories.build_environment("code_contests", {"language": ["python", "cpp"]})
     assert env.chooses_language and env.languages == ("python", "cpp")
     assert env.grading_spec.language == "python", "the contract's language is the set's first"
 

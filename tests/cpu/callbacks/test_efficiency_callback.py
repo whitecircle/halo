@@ -507,6 +507,20 @@ def test_initialize_metrics_measures_normal_model():
     assert cb.flops_model.local_params == 1_000_000.0
 
 
+@pytest.mark.parametrize("max_length", [None, 0, -1])
+def test_a_one_sided_budget_keeps_its_declared_length(max_length):
+    """A prompt budget with no completion cap still sizes the MFU sequence length, and a non-positive
+    ``max_length`` is no bound; either way wrong, the estimate would run at another length."""
+    model = MockModel(
+        named_params=[("model.layers.0.self_attn.q_proj.weight", MockParam(1_000_000))],
+        config=MockConfig(hidden_size=128, num_hidden_layers=2),
+    )
+    cb = EfficiencyCallback(_NO_PARALLELISM, script_args=SimpleNamespace(max_prompt_length=300))
+    cb.on_init_end(MockTrainingArgs(bf16=True, max_length=max_length), MockTrainerState(), None, model=model)
+
+    assert cb.flops_model.model_flops_per_token == 6 * 1_000_000 + 12 * 2 * 300 * 128
+
+
 # The logs dict's key order, which wandb/tb series and the bench lines read: the step clock, throughput,
 # memory, then MFU and S-MFU when diagnostics are on.
 _LOGGED_KEYS = (

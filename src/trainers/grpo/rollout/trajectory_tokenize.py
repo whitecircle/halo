@@ -12,9 +12,10 @@ from typing import NamedTuple
 
 import torch
 
-from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, engine_view
 from src.environments.episode import RolloutResult
-from src.environments.registry import create_environment
+from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
+from src.environments.messages import engine_view
+from src.environments.registry import build_environment
 from src.environments.rollout_config import (
     REASONING_BUDGET_SOFT_TEMPLATE_VAR,
     REASONING_BUDGET_TEMPLATE_VAR,
@@ -127,7 +128,7 @@ class TrajectoryTokenizeMixin:
     def _rollout_env(self):
         """A throwaway instance of the run's environment: what the rollout sent the engine (tool schema,
         carried reasoning) is read off it, so the trainer's renders condition on the engine's context."""
-        return create_environment(self._environment_spec, self._env_config_dict)
+        return build_environment(self._environment_spec, self._env_config_dict)
 
     @cached_property
     def _tools_schema(self) -> list[dict] | None:

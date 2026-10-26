@@ -203,9 +203,7 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Va
         owner = type(self).__name__
         require_finite(
             owner,
-            target_margin=self.target_margin,
             initial_margin=self.initial_margin,
-            chosen_sft_ratio=self.chosen_sft_ratio,
             learning_rate=self.learning_rate,
             logging_steps=self.logging_steps,
         )
@@ -218,25 +216,13 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Va
             ge=1,
             **present(max_prompt_length=self.max_prompt_length, max_completion_length=self.max_completion_length),
         )
-        if self.target_margin < 0:
-            raise ValueError("target_margin must be >= 0")
-
+        require_finite(owner, ge=0, target_margin=self.target_margin)
         if self.use_margin_schedule and self.initial_margin >= self.target_margin:
             raise ValueError(
                 f"initial_margin ({self.initial_margin}) must be < target_margin ({self.target_margin}) "
                 "when using margin schedule"
             )
-
-        if self.lower_clip_percentile is not None and not (0 < self.lower_clip_percentile <= 0.5):
-            raise ValueError("lower_clip_percentile must be in (0, 0.5]")
-
-        if self.upper_clip_percentile is not None and not (0.5 <= self.upper_clip_percentile < 1):
-            raise ValueError("upper_clip_percentile must be in [0.5, 1)")
-
-        if self.min_log_prob is not None:
-            require_finite(owner, min_log_prob=self.min_log_prob)
-            if self.min_log_prob >= 0:
-                raise ValueError("min_log_prob must be negative (log probabilities are <= 0)")
-
-        if not (0 <= self.chosen_sft_ratio <= 1):
-            raise ValueError("chosen_sft_ratio must be in [0, 1]")
+        require_finite(owner, gt=0, le=0.5, **present(lower_clip_percentile=self.lower_clip_percentile))
+        require_finite(owner, ge=0.5, lt=1, **present(upper_clip_percentile=self.upper_clip_percentile))
+        require_finite(owner, lt=0, why=" (log probabilities are <= 0)", **present(min_log_prob=self.min_log_prob))
+        require_finite(owner, ge=0, le=1, chosen_sft_ratio=self.chosen_sft_ratio)

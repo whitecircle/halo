@@ -13,7 +13,8 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
-from src.environments.base import BaseEnvironment, Message, Trajectory
+from src.environments.environment_base import EnvironmentBase
+from src.environments.messages import Message, Trajectory
 from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.rollout_metrics import _summarize_episode_generation_tokens
 from tests.common.models import QWEN3_0_6B
@@ -132,7 +133,7 @@ def test_add_action_message_carries_reasoning_from_context():
     assistant Message so the final turn's CoT is trainable."""
     traj = Trajectory()
     # Instance method: it reads self.max_tool_calls_per_turn, whose None default means no truncation.
-    BaseEnvironment._add_action_message(
+    EnvironmentBase._add_action_message(
         SimpleNamespace(max_tool_calls_per_turn=None),
         traj,
         "the answer",
@@ -149,7 +150,7 @@ def test_add_action_message_caps_tool_calls_to_execution_limit():
     advertises more calls than there are tool-result messages, a structural mismatch."""
     traj = Trajectory()
     ctx = {"tool_calls": [{"id": f"c{i}"} for i in range(8)]}
-    BaseEnvironment._add_action_message(SimpleNamespace(max_tool_calls_per_turn=5), traj, "act", ctx)
+    EnvironmentBase._add_action_message(SimpleNamespace(max_tool_calls_per_turn=5), traj, "act", ctx)
     assert len(traj.messages[-1].tool_calls) == 5
 
 

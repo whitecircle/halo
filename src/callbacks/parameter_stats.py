@@ -4,17 +4,17 @@ Counts are per rank throughout (``local_numel``): the callback runs on the wrapp
 ``numel()`` would report FSDP2/TP DTensor params globally but FSDP-ignored EP experts locally.
 """
 
+import logging
 import re
 from collections import defaultdict
 
 import torch
 from transformers import TrainerCallback
-from transformers.utils import logging as hf_logging
 
 from src.runtime.dtensor import local_numel
 from src.runtime.ranks import is_global_main_process
 
-logger = hf_logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 def count_model_parameters(model: torch.nn.Module) -> tuple[int, int]:

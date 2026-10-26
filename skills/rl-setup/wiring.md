@@ -137,7 +137,7 @@ set it in YAML (e.g. `vllm_group_port: 51216`).
 class's own default, listed per environment in
 `agent-docs/training-methods/async-grpo/environments/README.md#registry`), `environment_kwargs` (per-env dict).
 `to_env_config()` forwards the terms as `reward_terms` plus an explicitly-set `max_turns`,
-merged with `environment_kwargs`, to `resolve_environment(environment_type, config)`.
+merged with `environment_kwargs`, to `build_environment(environment_type, config)`.
 
 `rewards` is parsed into typed dataclasses at config time (`src/rewards/terms.py`), so a bad term
 fails before any server is touched. Each term prices one source's score in `[0, 1]` as
@@ -213,13 +213,13 @@ Per-env `environment_kwargs`: `search_backend` (qa_search, exam_qa, react_search
 `open_book` (exam_qa), `mcp_server` (mcp), `timeout_per_test`, `max_grading_seconds`,
 `compiled_time_limit_scale` and `verdict_detail` (code_contests), `include_python_tools` (qa_search),
 `sandbox_backend` / `sandbox_url` (swe, code_contests). Every environment also takes the
-`BaseEnvironment` knobs (`src/environments/base.py`): `reasoning_effort` /
+`EnvironmentBase` knobs (`src/environments/environment_base.py`): `reasoning_effort` /
 `reasoning_effort_profiles`, `carry_reasoning` (refused under `rollout_backend: sglang`),
 `requires_answer`, `max_observation_chars`, `max_length_cutoff_recoveries` and the
 `tool_success_reward` / `tool_error_penalty` / `tool_reward_cap` turn shaping. The common keys are
 listed under EnvironmentConfig in `agent-docs/reference/configuration-reference.md`; each
 environment's page lists its own. Custom env: pass `environment_cls`
-(a `src.environments.base.BaseEnvironment` subclass) + `environment_kwargs`
+(a `src.environments.environment_base.EnvironmentBase` subclass) + `environment_kwargs`
 instead of `environment_config`.
 
 ## 5. Launch examples

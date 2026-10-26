@@ -19,7 +19,7 @@ from dataclasses import replace
 import pytest
 
 from scripts.environments.inference.run_code_contests import parse_language_flag, refuse_flag_owned_env_kwargs
-from src.environments.base import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY, TOOL_CALL_COUNTS_KEY
+from src.environments.episode_keys import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY
 from src.environments.sandbox.base import SandboxExecutor
 from src.environments.sandbox.languages import LANGUAGES
 from src.environments.sandbox.local import LocalSubprocessSandbox
@@ -28,6 +28,7 @@ from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tasks.coding.code_contests_prompts import SUBMISSION_AFTER_ACCEPT_REPLY
 from src.environments.tasks.coding.grading import GradingSpec, grade_solution
 from src.environments.tasks.coding.program_source import find_evident_language
+from src.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
 
 _ADD = {"answer": {"tests": [{"input": "2 3\n", "output": "5\n"}], "time_limit": 1.0}}
 # Every recording run answers 5, so this answer fails each submission and none ends the episode early.

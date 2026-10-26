@@ -18,7 +18,7 @@ import types
 import pytest
 from openai.types.chat import ChatCompletion
 
-from scripts.inference.reward_model import _common as rm_common
+from scripts.inference.reward_model import reward_model_arguments
 
 # A chat completion as vLLM serializes it: every optional field present, null or empty.
 _SERVED_REPLY = {
@@ -61,7 +61,9 @@ _ARGS = types.SimpleNamespace(model="gen-model", temperature=0.0, max_gen_tokens
 
 def _generate(client):
     return asyncio.run(
-        rm_common.generate_chat_message(client, [{"role": "user", "content": "q"}], _ARGS, {"type": "text"})
+        reward_model_arguments.generate_chat_message(
+            client, [{"role": "user", "content": "q"}], _ARGS, {"type": "text"}
+        )
     )
 
 

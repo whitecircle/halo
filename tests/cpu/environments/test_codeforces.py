@@ -21,8 +21,8 @@ import pytest
 
 from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
 from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.base import REWARD_COMPONENTS_KEY
-from src.environments.registry import get_registered_environments, resolve_environment
+from src.environments.episode_keys import REWARD_COMPONENTS_KEY
+from src.environments.registry import build_environment, get_registered_environments
 from src.environments.sandbox.base import SandboxExecutor
 from src.environments.sandbox.factory import build_sandbox
 from src.environments.sandbox.results import SandboxResult
@@ -643,14 +643,14 @@ def test_max_time_limit_below_the_per_test_floor_is_refused():
 
 def test_registry_codeforces_is_token_comparison_preset():
     assert "codeforces" in get_registered_environments()
-    env = resolve_environment(
+    env = build_environment(
         "codeforces", EnvironmentConfig(environment_type="codeforces", max_turns=4).to_env_config()
     )
     assert isinstance(env, CodeContestsEnvironment)
     assert env.grading_spec.comparison == "tokens"
     assert env.max_turns == 4
 
-    cc = resolve_environment("code_contests", EnvironmentConfig(environment_type="code_contests").to_env_config())
+    cc = build_environment("code_contests", EnvironmentConfig(environment_type="code_contests").to_env_config())
     assert cc.grading_spec.comparison == "exact"
 
 
@@ -668,14 +668,14 @@ def test_invalid_reasoning_effort_rejected():
 
 def test_codeforces_preset_forwards_reasoning_effort():
     """The codeforces/code_contests registry presets thread reasoning_effort onto the env."""
-    env = resolve_environment("codeforces", {"max_turns": 4, "reasoning_effort": "high"})
+    env = build_environment("codeforces", {"max_turns": 4, "reasoning_effort": "high"})
     assert env.reasoning_effort == "high"
-    assert resolve_environment("code_contests", {}).reasoning_effort == "medium"
+    assert build_environment("code_contests", {}).reasoning_effort == "medium"
 
 
 def test_non_coding_env_defines_no_reasoning_effort():
     """Only the coding env opts in; other envs leave the attribute unset so getattr(...) is None."""
-    env = resolve_environment("native_math", {"max_turns": 2})
+    env = build_environment("native_math", {"max_turns": 2})
     assert getattr(env, "reasoning_effort", None) is None
 
 
