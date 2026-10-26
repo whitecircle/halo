@@ -51,6 +51,7 @@ from src.distributed.runtime import (
     barrier,
     get_local_world_size,
     is_global_main_process,
+    rank_consensus,
     reject_divergent_settings,
 )
 from src.env import env_flag, env_int, env_positive_int, resolve_nccl_timeout_minutes, resolve_store_timeout_hours
@@ -63,7 +64,8 @@ logger = logging.getLogger(__name__)
 # bound it).
 _WARNED_ENV: set = set()
 
-# Insertion-ordered (build order == forward order, rank-identical) so the collective buffer.destroy() matches.
+# The dispatchers teardown marks destroyed. Weak, so its contents follow each rank's garbage collector: it
+# never decides which buffers are freed or in what order (see destroy_all_dispatchers).
 _LIVE_DISPATCHERS: weakref.WeakValueDictionary = weakref.WeakValueDictionary()
 
 # Fallback SM count when get_theoretical_num_sms divides by zero on an inter-node Blackwell topology.
@@ -185,23 +187,30 @@ def destroy_all_dispatchers() -> None:
 
     Unconditional, never gated on ``_LIVE_DISPATCHERS``: a pipeline stage holding no MoE layers has
     no dispatchers, and a gated barrier would be rank-asymmetric.
+
+    The live dispatchers only drop their claims; every arena is then freed in the order it was built.
+    Which dispatchers are still live here is not rank-uniform once a model has been dropped earlier in
+    the process: its dispatchers are reclaimed on each rank's own garbage-collector schedule, so
+    freeing an arena as its last live claim drops would free the arenas in a rank-dependent order,
+    and each rank would spin in the destroy barrier of a different buffer.
     """
     barrier()
     for dispatcher in list(_LIVE_DISPATCHERS.values()):
-        dispatcher.destroy()
-    free_unclaimed_ep_buffers()
+        dispatcher.destroy(free_buffer=False)
+    _SharedArena.free_all()
     # The capacity entries hold their EP group (see ``_CAPACITY_CACHE``); keeping them past teardown
     # would pin every communicator the job ever built for the life of the process.
     _CAPACITY_CACHE.clear()
 
 
 def free_unclaimed_ep_buffers() -> int:
-    """Free every DeepEP buffer no live MoE layer still claims. Returns how many were freed.
+    """Free every DeepEP buffer no MoE layer on any rank of its group claims; returns how many it freed.
 
     Collective — call only where every rank arrives, and only after a barrier. Sweeps up claims
     dropped by the garbage collector, which cannot free a buffer itself
     (:meth:`_SharedArena.release`); without it a model that went out of scope leaks its arena for the
-    rest of the process.
+    rest of the process. A buffer some rank has not collected yet stays until
+    :func:`destroy_all_dispatchers`.
     """
     return _SharedArena.free_unclaimed()
 
@@ -251,8 +260,8 @@ class _SharedArena:
     dispatch leaves an earlier layer's pending backward intact.
 
     Subclasses build the buffer and define the shape key that decides who may share one; this class
-    holds the refcount and frees the buffer once the last layer releases it. Every arena is
-    registered, shared or not, so :meth:`free_unclaimed` sees all of them.
+    holds the refcount and frees the buffer once no layer on any rank of its group claims it. Every
+    arena is registered, shared or not, so :meth:`free_unclaimed` and :meth:`free_all` see all of them.
     """
 
     _REGISTRY: dict[tuple, _SharedArena] = {}
@@ -288,19 +297,20 @@ class _SharedArena:
         return [self.buffer] if self.buffer is not None else []
 
     def release(self, *, free_buffer: bool) -> None:
-        """Drop one layer's claim; the last claim released frees the buffer when ``free_buffer``.
+        """Drop one layer's claim; with ``free_buffer``, free the buffer once no rank of the group claims it.
 
         Freeing is collective: ``buffer.destroy()`` spins on the device-side NVLink barrier for
         ``HALO_DEEPEP_GPU_TIMEOUT_SECONDS``. A finalizer must therefore pass ``free_buffer=False``,
         since it runs whenever this rank's garbage collector fires, at a moment no other rank agrees
         on, and one rank entering that barrier alone spends the whole budget and aborts the job with
-        ``cudaErrorLaunchFailure``. :func:`free_unclaimed_ep_buffers` sweeps up what a finalizer
-        leaves behind, at a host-aligned teardown.
+        ``cudaErrorLaunchFailure``. The claims a finalizer drops are then this rank's alone until its
+        peers collect too, so with ``free_buffer`` the ranks of the group agree before freeing (a
+        collective over the group). :func:`free_unclaimed_ep_buffers` and
+        :func:`destroy_all_dispatchers` free what is left.
         """
         self._users -= 1
-        if self._users > 0 or not free_buffer:
-            return
-        self._free()
+        if free_buffer and self._unclaimed_on_every_rank():
+            self._free()
 
     def _free(self) -> None:
         """Destroy every buffer this arena holds (collective; host-aligned callers only)."""
@@ -314,17 +324,34 @@ class _SharedArena:
 
     @classmethod
     def free_unclaimed(cls) -> int:
-        """Free every arena no live layer still claims. Returns how many were freed.
+        """Free every arena no live layer claims on any rank of its group. Returns how many were freed.
 
         A dispatcher dropped by the garbage collector decrements its arena without freeing it (see
-        :meth:`release`), leaving it at zero claims with nobody left to free it. Claimed arenas are
-        left alone: a second model in the same process (a distillation teacher, a reference policy)
-        may still be dispatching through one.
+        :meth:`release`), leaving it at zero claims with nobody left to free it. That happens on each
+        rank's own collector schedule, so the ranks of a group first agree, arena by arena in build
+        order, and free only what none of them still claims; the rest waits for :meth:`free_all`.
+        Claimed arenas are left alone: a second model in the same process (a distillation teacher, a
+        reference policy) may still be dispatching through one.
         """
-        unclaimed = [arena for arena in cls._REGISTRY.values() if arena._users <= 0]
+        unclaimed = [arena for arena in cls._REGISTRY.values() if arena._unclaimed_on_every_rank()]
         for arena in unclaimed:
             arena._free()
         return len(unclaimed)
+
+    @classmethod
+    def free_all(cls) -> None:
+        """Free every arena, claimed or not, in the order they were built (collective; teardown only).
+
+        Every rank of a group built its arenas in the same order, each at a collective first
+        dispatch, so freeing in that order keeps the destroy barriers matched whatever each rank's
+        garbage collector has reclaimed.
+        """
+        for arena in list(cls._REGISTRY.values()):
+            arena._free()
+
+    def _unclaimed_on_every_rank(self) -> bool:
+        """Whether no rank of this arena's group still claims it (collective over the group)."""
+        return rank_consensus(self._users <= 0, group=self.group)[0]
 
 
 class _ElasticArena(_SharedArena):
@@ -875,9 +902,10 @@ class DeepEPDispatcher:
         self._destroyed = False
 
     def destroy(self, *, free_buffer: bool = True) -> None:
-        """Release this layer's DeepEP buffer, freeing it when no layer is left to use it (idempotent).
+        """Release this layer's DeepEP buffer, freeing it once no layer on any rank of its group uses it
+        (idempotent).
 
-        Collective by default: call it only from a rank-synchronized point.
+        Collective over the EP group by default: call it only from a rank-synchronized point.
         """
         if self._destroyed:
             return
@@ -895,7 +923,7 @@ class DeepEPDispatcher:
         # Never free the buffer from a finalizer: freeing runs a collective on DeepEP's device-side
         # NVLink barrier, and the garbage collector fires at a moment no other rank agrees on, so the
         # first rank in spends its whole timeout budget and aborts the job. Drop the claim only;
-        # free_unclaimed_ep_buffers() collects what this leaves behind, at a barriered teardown.
+        # destroy_all_dispatchers() frees what this leaves behind, at a barriered teardown.
         with contextlib.suppress(Exception):
             self.destroy(free_buffer=False)
 

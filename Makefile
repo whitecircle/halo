@@ -163,12 +163,12 @@ test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside T
 # make bench runs the rows of tests/gpu/profiling/run_baseline_benchmarks.sh on one 8-GPU node BENCH_REPEATS
 # times, one log per repeat under evidence/. BAND=1 then holds the run to the committed baselines in
 # tests/baselines/bench; RECORD=1 makes those baselines the run's, which takes a clean tree (a baseline names
-# the commit it was measured at) and the 3 repeats it defaults to, MIN_REPEATS in
+# the commit it was measured at) and the 5 repeats it defaults to, MIN_REPEATS in
 # tests/common/equivalence/bench_band.py.
 BAND ?=
 RECORD ?=
 BENCH_MODE ?= $(if $(filter 1,$(RECORD)),record,check)
-BENCH_REPEATS ?= $(if $(filter record,$(BENCH_MODE)),3,1)
+BENCH_REPEATS ?= $(if $(filter record,$(BENCH_MODE)),5,1)
 BENCH_REVISION = $(shell git rev-parse HEAD 2>/dev/null)$(if $(shell git status --porcelain --untracked-files=no 2>/dev/null),-dirty)
 BENCH_LOGS = $(foreach repeat,$(shell seq $(BENCH_REPEATS)),evidence/bench-$(BENCH_REVISION)-$(repeat).log)
 

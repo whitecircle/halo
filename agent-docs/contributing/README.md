@@ -448,23 +448,36 @@ grouped-GEMM defaults:
 Every rank prints one `__HALO_BENCH__` line per key (`tests/common/reporting.py`) with its rank, the world
 size, the command and the metrics. The key names the golden `tests/baselines/bench/<key>.json`: the commit,
 image, date, world size and command it was measured with, and the metrics of each of its repeats, at least
-three. `make bench BAND=1` holds the run to them (`tests/common/equivalence/bench_band.py`, evidence in
+five. `make bench BAND=1` holds the run to them (`tests/common/equivalence/bench_band.py`, evidence in
 `evidence/bench_band-<revision>.json`); `make bench-band` re-checks the logs `make bench` left at HEAD
 without GPUs. Each gated metric has a band around the mean of its baseline repeats, give or take the larger
-of a margin and twice their spread. `tokens_per_second` (mean over ranks) and `save_seconds` must stay within
-theirs, on either side, at a 2% margin: a faster run fails too, since a band a speedup left behind would pass
+of a margin and twice their spread. `tokens_per_second` (mean over ranks, 2% margin) and `save_seconds` (6%)
+must stay within theirs, on either side: a faster run fails too, since a band a speedup left behind would pass
 the regression that undoes it, so a change that is meant to speed a row up re-records its baseline.
-`peak_allocated_gb` and `save_peak_rss_gib` (the save's peak resident host memory), each the highest over
-ranks, must not rise above their band's upper edge, at a 0.5% margin. That edge is never below the highest
-repeat, and it is not the highest repeat itself because a peak that varies between runs would fail one run
-in four against the highest of three. MFU, S-MFU and TFLOPS stay under `metrics.diagnostics`, never gated.
+`peak_allocated_gb` (0.5%) and `save_peak_rss_gib` (1%; the save's peak resident host memory), each the
+highest over ranks, must not rise above their band's upper edge. That edge is never below the highest repeat,
+and it is not the highest repeat itself because a peak that varies between runs would fail one run in six
+against the highest of five. Every row trains on one corpus, `create_benchmark_dataset` in
+`tests/common/datasets.py`: seeded uniform token ids over the regular vocabulary, every position real. No
+model can fit it, so an MoE row's routing, and with it the hottest EP rank's step time and peak, stays put
+within and between runs: EP8, EP8 × TP2 and EP4 × ETP2 repeat within 1% in throughput and 0.02 GB in peak.
+On a corpus the model fits, the routing drifts as it fits, differently each run under the default
+non-deterministic dispatch (EP8 moved 4% in throughput and 1.2 GB in peak between runs). A row that shares
+the host with another job's CPU and network load (a model download) runs 4–17% slow, so recording refuses
+that repeat and a band run that meets one fails: keep the node to the bench while it runs. The save is
+host I/O into the page cache: its time moves by up to 6% between runs and its peak resident memory in steps
+of about 1%, hence their own margins. Five repeats measure the spread well enough for a later run of the same
+commit to pass its band. MFU, S-MFU and TFLOPS stay under `metrics.diagnostics`, never gated.
 A key compares only with a baseline measured by the same command on as many ranks of the same GPU model, so
 editing a row means re-recording it; a measured key with no baseline, and a baseline the run did not
 measure, fail too.
 
-`make bench RECORD=1` runs the rows three times on a clean tree and writes the baselines only when each
-repeat falls inside the band of the other two, removing any baseline the run no longer measures; it touches
-nothing else under `tests/baselines/`. Commit the files it writes. The gate's negative control holds the GPU
+`make bench RECORD=1` runs the rows five times on a clean tree and writes the baselines only when no repeat
+is outlying, removing any baseline the run no longer measures; it touches nothing else under
+`tests/baselines/`. A rate or a duration is outlying outside the band of the other repeats widened to four
+times their spread, a disturbed repeat rather than one at the edge of the spread four repeats measure; a
+peak is outlying only above that band's upper edge, since a lower peak widens the spread its ceiling is
+drawn from. Commit the files it writes. The gate's negative control holds the GPU
 idle before every EP layer's forward:
 `make bench BAND=1 EXTRA_DOCKER_ENV="-e HALO_TEST_EP_FORWARD_DELAY_MS=2"` must fail every EP row's
 `tokens_per_second` and pass the dense rows and the save.

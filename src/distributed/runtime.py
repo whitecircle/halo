@@ -462,8 +462,9 @@ def reject_divergent_settings(values: dict[str, object], what: str, guidance: st
         )
 
 
-def rank_consensus(local_ok: bool) -> tuple[bool, bool]:
-    """``(all_ok, any_ok)`` across ranks in one SUM all-reduce. COLLECTIVE — every rank must call it.
+def rank_consensus(local_ok: bool, group: dist.ProcessGroup | None = None) -> tuple[bool, bool]:
+    """``(all_ok, any_ok)`` across the ranks of ``group`` (default: the world) in one SUM all-reduce.
+    COLLECTIVE — every rank of the group must call it.
 
     The seam for an all-or-nothing decision taken from a per-rank observation (a checkpoint file
     present on some nodes only): such a decision gates collectives, so a split verdict leaves half
@@ -472,9 +473,9 @@ def rank_consensus(local_ok: bool) -> tuple[bool, bool]:
     """
     if is_multi_rank_run():
         count = torch.tensor([1 if local_ok else 0], device=collective_device())
-        dist.all_reduce(count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(count, op=dist.ReduceOp.SUM, group=group)
         n = int(count.item())
-        return n == dist.get_world_size(), n > 0
+        return n == dist.get_world_size(group), n > 0
     return local_ok, local_ok
 
 

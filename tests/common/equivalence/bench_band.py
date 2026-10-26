@@ -7,8 +7,8 @@ and a peak must not rise above it. A key compares only with a baseline measured 
 ranks of the same GPU model; a measured key with no baseline, and a baseline the run did not measure, fail too.
 
 ``check`` writes ``evidence/bench_band-<revision>.json`` and exits non-zero on a failure. ``record`` makes the
-baselines the run's: one file per key from at least :data:`MIN_REPEATS` repeats of one clean commit, refusing
-repeats that do not each fall inside the band of the others. Standard library only.
+baselines the run's: one file per key from at least :data:`MIN_REPEATS` repeats of one clean commit, refusing a
+repeat that a baseline of the others would fail by more than ordinary spread. Standard library only.
 """
 
 from __future__ import annotations
@@ -32,31 +32,30 @@ BASELINE_DIR = REPO_ROOT / "tests" / "baselines" / "bench"
 STORE_PLACEHOLDER = ".gitkeep"
 # A band is the baseline repeats' mean, give or take the larger of a margin (a fraction of the mean) and
 # SPREAD_FACTOR times their spread (highest minus lowest). A peak's margin is narrower, but a peak gets one: held
-# to the highest of three repeats exactly, a peak that varies between runs fails one run in four.
+# to its highest repeat exactly, a peak that varies between runs fails one run in MIN_REPEATS + 1.
 RATE_MARGIN = 0.02
 PEAK_MARGIN = 0.005
+# The gathered save is host I/O into the page cache, whose time moves by up to 6% between runs of one commit;
+# its peak resident memory moves in steps of about 1%.
+SAVE_TIME_MARGIN = 0.06
+HOST_PEAK_MARGIN = 0.01
 SPREAD_FACTOR = 2
-MIN_REPEATS = 3
+# The spread of a few repeats is a noisy estimate of a run's own variation: five repeats keep a band that a
+# later run of the same commit passes, where three refuse to record almost every run.
+MIN_REPEATS = 5
+# Recording refuses a repeat outside the others' band widened to OUTLIER_FACTOR times their spread: a disturbed
+# repeat (a row sharing the host with another job), not one at the edge of the spread four repeats measure.
+OUTLIER_FACTOR = 4
 PROVENANCE_FIELDS = ("commit", "image", "measured", "world_size", "command")
 LINE_FIELDS = frozenset({"key", "rank", "world_size", "command", "metrics"})
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
-def band(repeats: Sequence[float], margin: float) -> tuple[float, float]:
+def band(repeats: Sequence[float], margin: float, spread_factor: float = SPREAD_FACTOR) -> tuple[float, float]:
     """The ``(low, high)`` band a metric's baseline repeats span, at the precision the metrics carry."""
     center = statistics.fmean(repeats)
-    half_width = max(margin * center, SPREAD_FACTOR * (max(repeats) - min(repeats)))
+    half_width = max(margin * center, spread_factor * (max(repeats) - min(repeats)))
     return round(center - half_width, BENCH_DECIMALS), round(center + half_width, BENCH_DECIMALS)
-
-
-def outliers(repeats: Sequence[float], margin: float) -> list[int]:
-    """The repeats outside the band of the others."""
-    found = []
-    for index, value in enumerate(repeats):
-        low, high = band([*repeats[:index], *repeats[index + 1 :]], margin)
-        if not low <= value <= high:
-            found.append(index)
-    return found
 
 
 @dataclass(frozen=True)
@@ -74,6 +73,10 @@ class Banded:
         verdict = "below" if value < low else "above" if value > high else "within"
         return {"run": value, "band": [low, high], "verdict": verdict}
 
+    def outlying(self, others: Sequence[float], value: float) -> str | None:
+        low, high = band(others, self.margin, OUTLIER_FACTOR)
+        return None if low <= value <= high else "lies outside the band of the others"
+
 
 @dataclass(frozen=True)
 class Ceiling:
@@ -89,12 +92,18 @@ class Ceiling:
         _, high = band(repeats, self.margin)
         return {"run": value, "ceiling": high, "verdict": "above" if value > high else "within"}
 
+    def outlying(self, others: Sequence[float], value: float) -> str | None:
+        """Only a repeat above the others' ceiling: a lower one widens the spread, so the ceiling recorded with
+        it still clears every repeat."""
+        _, high = band(others, self.margin, OUTLIER_FACTOR)
+        return None if value <= high else "lies above the ceiling of the others"
+
 
 GATES: dict[str, Banded | Ceiling] = {
     "tokens_per_second": Banded(margin=RATE_MARGIN),
     "peak_allocated_gb": Ceiling(margin=PEAK_MARGIN),
-    "save_seconds": Banded(margin=RATE_MARGIN),
-    "save_peak_rss_gib": Ceiling(margin=PEAK_MARGIN),
+    "save_seconds": Banded(margin=SAVE_TIME_MARGIN),
+    "save_peak_rss_gib": Ceiling(margin=HOST_PEAK_MARGIN),
 }
 
 
@@ -144,7 +153,7 @@ def read_logs(logs: Sequence[Path]) -> dict[str, list[Measurement]]:
 
 
 def _inconsistencies(repeats: Sequence[Mapping]) -> list[str]:
-    """Each gated metric some repeats lack, and each repeat outside the band of the others."""
+    """Each gated metric some repeats lack, and each repeat its gate finds outlying among the others."""
     problems = []
     for name, gate in GATES.items():
         holding = [name in repeat for repeat in repeats]
@@ -152,10 +161,9 @@ def _inconsistencies(repeats: Sequence[Mapping]) -> list[str]:
             problems.append(f"{name} is missing from some repeats")
         elif all(holding):
             values = [repeat[name] for repeat in repeats]
-            problems += [
-                f"repeat {index + 1}'s {name} {values[index]} lies outside the band of the others"
-                for index in outliers(values, gate.margin)
-            ]
+            for index, value in enumerate(values):
+                if reason := gate.outlying([*values[:index], *values[index + 1 :]], value):
+                    problems.append(f"repeat {index + 1}'s {name} {value} {reason}")
     return problems
 
 
@@ -170,7 +178,7 @@ class Baseline:
 
 def load_baselines(directory: Path) -> dict[str, Baseline]:
     """Every baseline in ``directory`` by key. A file whose key is not its name, whose provenance is incomplete,
-    or whose repeats are too few or do not each fall inside the band of the others raises."""
+    or whose repeats are too few or hold an outlying one (as :func:`record` refuses it) raises."""
     baselines = {}
     for path in sorted(directory.glob("*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -250,7 +258,8 @@ def record(
     """Make ``directory`` hold ``run``'s baselines, measured at ``commit``: one file per key, every other baseline
     in it removed. Writes nothing and raises when ``commit`` is not a full commit hash (a modified tree's revision
     is not), or a key has fewer than :data:`MIN_REPEATS` repeats, repeats of differing commands or world sizes, or
-    a repeat outside the band of the others."""
+    a repeat its gate finds outlying: a rate or a duration outside the others' band widened to
+    :data:`OUTLIER_FACTOR` times their spread, a peak above that band's upper edge."""
     if not _COMMIT.fullmatch(commit):
         raise ValueError(f"a baseline names the clean commit it was measured at, and {commit!r} is not one")
     if not run:

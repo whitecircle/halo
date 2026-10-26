@@ -1,0 +1,97 @@
+{
+  "key": "sft_ep_gpt-oss-20b_ep1_s4096",
+  "provenance": {
+    "commit": "46c2c7006da7641824561c4a7381645807f9e86d",
+    "image": "halo-r12:blackwell@sha256:61d64844d08e5e864e443b92c6223783ed1a980cbfeef7d5955161db72e6cbb8",
+    "measured": "2026-10-19",
+    "world_size": 8,
+    "command": "tests/gpu/profiling/benchmark_sft_ep.py --model gpt-oss-20b --ep 1 --seq 4096 --steps 20 --warmup 3"
+  },
+  "repeats": [
+    {
+      "tokens_per_second": 11285.44,
+      "cluster_tokens_per_second": 90337.9,
+      "peak_allocated_gb": 60.29,
+      "training_peak_allocated_gb": 60.29,
+      "avg_step_time_seconds": 0.36,
+      "diagnostics": {
+        "gpu_model": "B300",
+        "precision": "bf16",
+        "mfu_percent": 64.23,
+        "smfu_percent": 13.86,
+        "achieved_tflops_dense": 1445.18,
+        "achieved_tflops_active": 311.85,
+        "local_params_b": 20.915,
+        "sparsity_factor": 0.125
+      }
+    },
+    {
+      "tokens_per_second": 11309.96,
+      "cluster_tokens_per_second": 90572.71,
+      "peak_allocated_gb": 60.29,
+      "training_peak_allocated_gb": 60.29,
+      "avg_step_time_seconds": 0.36,
+      "diagnostics": {
+        "gpu_model": "B300",
+        "precision": "bf16",
+        "mfu_percent": 64.4,
+        "smfu_percent": 13.9,
+        "achieved_tflops_dense": 1448.94,
+        "achieved_tflops_active": 312.66,
+        "local_params_b": 20.915,
+        "sparsity_factor": 0.125
+      }
+    },
+    {
+      "tokens_per_second": 11327.15,
+      "cluster_tokens_per_second": 90638.24,
+      "peak_allocated_gb": 60.29,
+      "training_peak_allocated_gb": 60.29,
+      "avg_step_time_seconds": 0.36,
+      "diagnostics": {
+        "gpu_model": "B300",
+        "precision": "bf16",
+        "mfu_percent": 64.44,
+        "smfu_percent": 13.91,
+        "achieved_tflops_dense": 1449.98,
+        "achieved_tflops_active": 312.88,
+        "local_params_b": 20.915,
+        "sparsity_factor": 0.125
+      }
+    },
+    {
+      "tokens_per_second": 11314.1,
+      "cluster_tokens_per_second": 90342.94,
+      "peak_allocated_gb": 60.29,
+      "training_peak_allocated_gb": 60.29,
+      "avg_step_time_seconds": 0.36,
+      "diagnostics": {
+        "gpu_model": "B300",
+        "precision": "bf16",
+        "mfu_percent": 64.23,
+        "smfu_percent": 13.86,
+        "achieved_tflops_dense": 1445.26,
+        "achieved_tflops_active": 311.86,
+        "local_params_b": 20.915,
+        "sparsity_factor": 0.125
+      }
+    },
+    {
+      "tokens_per_second": 11233.62,
+      "cluster_tokens_per_second": 89921.56,
+      "peak_allocated_gb": 60.29,
+      "training_peak_allocated_gb": 60.29,
+      "avg_step_time_seconds": 0.36,
+      "diagnostics": {
+        "gpu_model": "B300",
+        "precision": "bf16",
+        "mfu_percent": 63.93,
+        "smfu_percent": 13.8,
+        "achieved_tflops_dense": 1438.52,
+        "achieved_tflops_active": 310.41,
+        "local_params_b": 20.915,
+        "sparsity_factor": 0.125
+      }
+    }
+  ]
+}

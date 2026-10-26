@@ -155,9 +155,13 @@ and as the real number for a single-domain group (an NVL72 `ep64` is single-doma
 **Freeing a buffer is a collective**, so it never happens from a Python finalizer — a rank that enters
 the NVLink barrier alone on its garbage collector's schedule burns the whole
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` budget and aborts the job with `cudaErrorLaunchFailure`. A dropped
-dispatcher only relinquishes its claim; `free_unclaimed_ep_buffers()` sweeps up the remainder at the
-explicit teardown (`cleanup_ep`, `destroy_all_dispatchers`), where every rank is aligned
-(`tests/gpu/parallelism/ep/test_ep_buffer_gc_safety.py`).
+dispatcher only relinquishes its claim, so which claims remain differs between ranks until each has
+collected, and no free is decided from them alone: `destroy_all_dispatchers()` frees every buffer in the
+order it was built, claimed or not, and every other free (the `free_unclaimed_ep_buffers()` sweep, a
+layer's `destroy()` as `cleanup_ep` calls it, a top-k or determinism change moving a layer to a new
+buffer) happens only once no rank of the buffer's group still claims it
+(`tests/cpu/parallelism/test_ep_buffer_teardown_order.py`,
+`tests/gpu/parallelism/ep/test_ep_buffer_gc_safety.py`).
 
 **Budget the retained generations, not just the live arena.** Grow-only means the capacity latches to
 the largest count any rank of the group has ever presented. The first oversized batch, or a larger

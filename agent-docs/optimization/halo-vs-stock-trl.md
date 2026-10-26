@@ -222,8 +222,9 @@ per_device_batch_size`. Baseline `trl.SFTTrainer` with `fsdp="full_shard auto_wr
 `fsdp_config={"version": 2, "reshard_after_forward": …}` (True = ZeRO-3, False = ZeRO-2), `adamw_torch_fused`;
 Halo `DistributedSFTTrainer`, FSDP2, `use_grouped_gemm=True`, AdamWBF16. Hardware 8× B300 SXM6 (288 GB), `halo:blackwell`.
 
-**Dataset.** `create_benchmark_dataset` builds 64 filler examples tokenized to *exactly* `seq` tokens with
-`labels = input_ids`, so every microbatch is a `[batch, seq]` tensor. It is a shape fixture, not real data:
-the content is irrelevant to tokens/s and peak memory, and the fixed length isolates the framework
-comparison. No packing / padding-free — with every example already exactly `seq` long there is nothing to
+**Dataset.** `create_benchmark_dataset` builds 64 rows of *exactly* `seq` token ids, drawn uniformly from
+the regular vocabulary with a fixed seed, with `labels = input_ids`, so every microbatch is a `[batch, seq]`
+tensor. It is a shape fixture, not real data: a dense model's tokens/s and peak memory do not depend on the
+ids, an MoE model cannot fit them so its routing stays put across steps and runs, and the fixed length
+isolates the framework comparison. No packing / padding-free — with every example already exactly `seq` long there is nothing to
 pack.

@@ -1,6 +1,6 @@
 """Synthetic dataset generators shared across test files.
 
-One generator per task shape (SFT, preference, offline GRPO, VLM preference, benchmark filler), plus
+One generator per task shape (SFT, preference, offline GRPO, VLM preference, benchmark corpus), plus
 the writer of a text-mode ``prepare_dataset`` artifact. A generator only one test needs, because its
 dataset shape is the subject of that test, stays inline in that file.
 """
@@ -356,30 +356,23 @@ def create_variable_length_sft_dataset(
     return Dataset.from_list(data)
 
 
-# Benchmark Dataset (pre-tokenized, for profiling)
+# Benchmark corpus (pre-tokenized, for profiling)
 
 
-def create_benchmark_dataset(
-    tokenizer,
-    seq_len: int,
-    num_samples: int = 64,
-) -> Dataset:
-    """Create pre-tokenized dummy dataset for profiling benchmarks.
+def create_benchmark_dataset(tokenizer, seq_len: int, num_samples: int = 64, seed: int = 0) -> Dataset:
+    """The profiling benchmarks' corpus: ``num_samples`` rows of ``seq_len`` token ids drawn uniformly from the
+    tokenizer's regular vocabulary (``vocab_size``, no added special tokens) with a fixed seed, every token
+    attended and trained on, identical on every rank.
 
-    Returns dataset with input_ids, attention_mask, labels columns.
+    Uniform ids give a model nothing to fit, so an MoE model's routing, and with it each EP rank's load, step
+    time and peak memory, stays where it starts instead of drifting as the model fits its data, which it would
+    do differently on every run under non-deterministic dispatch.
     """
-    data = []
-    for i in range(num_samples):
-        text = f"Sample {i}: " + "word " * (seq_len // 2)
-        tokens = tokenizer(text, truncation=True, padding="max_length", max_length=seq_len)
-        data.append(
-            {
-                "input_ids": tokens["input_ids"],
-                "attention_mask": tokens["attention_mask"],
-                "labels": tokens["input_ids"].copy(),
-            }
-        )
-    return Dataset.from_list(data)
+    rng = random.Random(seed)
+    rows = [[rng.randrange(tokenizer.vocab_size) for _ in range(seq_len)] for _ in range(num_samples)]
+    return Dataset.from_dict(
+        {"input_ids": rows, "attention_mask": [[1] * seq_len for _ in rows], "labels": [list(row) for row in rows]}
+    )
 
 
 def digit_image(d: int, size: int = 64) -> Image.Image:
