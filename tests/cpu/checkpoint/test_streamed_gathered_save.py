@@ -3,9 +3,9 @@
 
 ``stream_gathered_checkpoint`` writes a gathered checkpoint chunk by chunk instead of buffering the
 whole state dict, so the save rank's host RAM peaks at one decoder layer plus one pending shard
-rather than the whole model (800 GB at Qwen3.5-397B-A17B). The artifact must stay indistinguishable
-from the buffered writer's: the same keys, the same values, the same save-dtype and hub expert
-layout, the same tie-consistency verdict. Only the part BOUNDARIES differ, which no reader sees.
+rather than the whole model (800 GB at Qwen3.5-397B-A17B). The artifact must hold what converting the
+whole state dict at once gives: the same keys, the same values, the same save-dtype and hub expert
+layout, the same tie-consistency verdict.
 
     python tests/cpu/checkpoint/test_streamed_gathered_save.py
 """
@@ -32,7 +32,7 @@ from src.checkpoint.parallel.writing import (
     stream_gathered_checkpoint,
 )
 from src.checkpoint.reading import load_full_state_dict
-from src.checkpoint.writing import StreamingShardWriter, normalize_gathered_state_dict, write_gathered_checkpoint
+from src.checkpoint.writing import StreamingShardWriter, normalize_gathered_state_dict
 from src.distributed.tensor_parallel.plain_params import register_hand_sliced
 from tests.common.checkpoint_io import save_context, weight_files
 
@@ -75,10 +75,28 @@ def _stream(model, output_dir, *, is_save_rank=True, max_shard_size=SHARD_SIZE):
     )
 
 
-def test_chunks_partition_the_state_dict_by_layer():
+@pytest.mark.parametrize(
+    ("name", "chunk"),
+    [
+        ("model.layers.0.mlp.gate.weight", "model.layers.0"),
+        ("model.language_model.layers.2.self_attn.q_proj.weight", "model.language_model.layers.2"),
+        ("layers.0.mlp.gate.weight", "layers.0"),
+        ("h.3.attn.c_attn.weight", "h.3"),
+        ("embed_tokens.weight", ""),
+        ("model.norm.weight", ""),
+        ("model.xlayers.1.weight", ""),
+    ],
+)
+def test_a_name_chunks_with_its_decoder_layer_at_any_depth(name, chunk):
+    assert conversion_chunk_key(name) == chunk
+
+
+@pytest.mark.parametrize("bare", [False, True], ids=["causal-lm", "bare-backbone"])
+def test_chunks_partition_the_state_dict_by_layer(bare):
     """Every key reaches exactly one chunk, and a decoder layer is never split across two — a split
-    layer would hand the reverse conversion half of a fusion's sources."""
-    model = _tiny_moe()
+    layer would hand the reverse conversion half of a fusion's sources. A bare backbone (an embedding
+    run's AutoModel) holds its layers at the top level."""
+    model = _tiny_moe().model if bare else _tiny_moe()
     chunks = list(chunked_saveable_tensors(model, retain=True))
     seen = [key for chunk in chunks for key in chunk]
     assert len(seen) == len(set(seen)), "a key reached two chunks"
@@ -94,21 +112,17 @@ def test_non_writer_ranks_write_nothing(tmp_path):
     assert not [name for name in os.listdir(tmp_path) if name.endswith(".safetensors")]
 
 
-def test_streamed_artifact_matches_the_buffered_writer(tmp_path):
-    """Same keys, same values, same hub expert layout — the file split is the only difference."""
+def test_streamed_artifact_matches_the_whole_dict_conversion(tmp_path):
+    """Same keys, same values, same hub expert layout as one conversion of the whole state dict."""
     model = _tiny_moe()
-    streamed, buffered = str(tmp_path / "streamed"), str(tmp_path / "buffered")
-    os.makedirs(streamed)
-    os.makedirs(buffered)
 
-    _stream(model, streamed)
-    write_gathered_checkpoint(model, {k: v.clone() for k, v in model.state_dict().items()}, buffered, SHARD_SIZE)
+    _stream(model, str(tmp_path))
 
-    streamed_state = load_full_state_dict(streamed)
-    buffered_state = load_full_state_dict(buffered)
-    assert set(streamed_state) == set(buffered_state)
+    streamed_state = load_full_state_dict(str(tmp_path))
+    whole = normalize_gathered_state_dict(model, {k: v.clone() for k, v in model.state_dict().items()})
+    assert set(streamed_state) == set(whole)
     for key, tensor in streamed_state.items():
-        assert torch.equal(tensor, buffered_state[key]), key
+        assert torch.equal(tensor, whole[key]), key
     fused = [key for key in streamed_state if key.endswith(("experts.gate_up_proj", "experts.down_proj"))]
     assert not fused, f"the per-chunk revert left module-fused expert keys: {fused}"
     assert any(".experts.0." in key for key in streamed_state), "premise: the hub layout is per-expert"

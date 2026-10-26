@@ -17,9 +17,12 @@ instead of pairing one rank's sums with another's names.
 import datetime
 import json
 import math
+from contextlib import ExitStack
+from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from src.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.gloo import run_gloo_ranks
@@ -63,6 +66,16 @@ def test_tensor_metrics_drain_identically_to_item():
     t.log(logs)
     expected = torch.tensor([v.item() for v in values]).mean().item()
     assert logs["distillation_loss"] == pytest.approx(expected)
+
+
+def test_the_fold_keeps_float64_precision():
+    """Rows times a float64 value sum on the host in float64: an fp32 fold would round 1 + 1e-10 to 1."""
+    t = _Trainer()
+    t.store_metrics({"m": 1.0 + 1e-10}, rows=3)
+    t.store_metrics({"m": torch.tensor(1.0 + 1e-10, dtype=torch.float64)})
+    logs = {"loss": 0.1}
+    t.log(logs)
+    assert logs["m"] == pytest.approx(1.0 + 1e-10, rel=1e-14, abs=0)
 
 
 def test_train_eval_buffers_are_separate():
@@ -131,9 +144,12 @@ def _world_mean_worker(rank: int, out: str) -> None:
     for value, rows in _RANK_ENTRIES[rank]:
         t.store_metrics({"m": value, "eval_n": float(rank)}, train_eval="eval", rows=rows)
     logs = {"eval_loss": 0.1}
-    t.log(logs)
+    with ExitStack() as stack:
+        names = ("all_reduce", "all_gather_object")
+        counted = {name: stack.enter_context(patch.object(dist, name, wraps=getattr(dist, name))) for name in names}
+        t.log(logs)
     with open(f"{out}.{rank}", "w") as fh:
-        json.dump(logs, fh)
+        json.dump({**logs, "collectives": {name: mock.call_count for name, mock in counted.items()}}, fh)
 
 
 def test_every_rank_logs_the_world_mean_not_rank_zeros(tmp_path):
@@ -144,6 +160,8 @@ def test_every_rank_logs_the_world_mean_not_rank_zeros(tmp_path):
             logs = json.load(fh)
         assert logs["eval_m"] == pytest.approx(_WORLD_MEAN), f"rank {rank} logged {logs['eval_m']}"
         assert logs["eval_n"] == pytest.approx(1 * 2 / 4), f"rank {rank}: an eval_ key must not gain a second prefix"
+        # The key check rides the gather that carries the sums: one collective per logging step.
+        assert logs["collectives"] == {"all_reduce": 0, "all_gather_object": 1}, f"rank {rank}"
 
 
 def _mismatch_worker(rank: int, out: str) -> None:

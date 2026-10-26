@@ -39,8 +39,8 @@ from src.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMi
 from src.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
 from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from src.trainers.grpo.rollout.weight_push import sync_trainer_weights
-from src.trainers.grpo.world_metrics import gathered_fractions
 from src.trainers.token_metrics import effective_loss_mask
+from src.trainers.world_metrics import world_sums
 
 logger = get_logger(__name__, log_level="info")
 
@@ -332,16 +332,15 @@ class DistributedGRPOTrainer(
     def _clamp_kl_reference(self, result: dict[str, torch.Tensor | Any]) -> None:
         """The k3 tail clamp on the reference log-probs, and ``kl_clamp_frac`` over the batch's loss
         tokens (:func:`kl_clamp_counts`). Both tensors exist only when ``beta != 0`` and TRL's
-        recompute gate fired, config verdicts every rank shares, so the gather is reached by all or none."""
+        recompute gate fired, config verdicts every rank shares, so the all-reduce is reached by all or none."""
         old_logps = result.get("old_per_token_logps")
         ref_logps = result.get("ref_per_token_logps")
         if old_logps is None or ref_logps is None:
             return
         result["ref_per_token_logps"], clamped = clamp_ref_logps(ref_logps, old_logps)
         mode = "train" if self.model.training else "eval"
-        self._metrics[mode][KL_CLAMP_FRAC_KEY].extend(
-            gathered_fractions([kl_clamp_counts(clamped, effective_loss_mask(result))], self.accelerator.gather)
-        )
+        clamped_tokens, loss_tokens = world_sums(kl_clamp_counts(clamped, effective_loss_mask(result)))
+        self._metrics[mode][KL_CLAMP_FRAC_KEY].append(clamped_tokens / loss_tokens if loss_tokens else 0.0)
 
     def _gathered_rewards(self) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Stashed full (gathered) rewards as ``(rewards, unscorable)``, or ``None`` outside train.

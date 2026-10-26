@@ -1,57 +1,17 @@
-"""Offline GRPO tokenization: each stored ``(prompt, completions, rewards)`` group becomes one training row
-per completion, carrying its group-relative advantage."""
+"""Offline GRPO's dataset rows: each stored ``(prompt, completions, rewards)`` group becomes one tokenized training
+row per completion, carrying its group-relative advantage."""
 
 from typing import Any
 
 from accelerate.logging import get_logger
 
-from src.data.pipeline.chat_render import lacks_emitted_bos
 from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
-from src.data.turn_markers import lacks_terminator, resolve_eos_token_ids
+from src.data.pipeline.prompt_completion import tokenize_prompt_completions
+from src.data.turn_markers import resolve_eos_token_ids
 from src.model_loading.tokenizer_setup import resolve_tokenizer
-from src.models.context_window import is_bounded_length
 from src.trainers.grpo.objective.advantages import compute_group_advantages
 
 logger = get_logger(__name__, log_level="INFO")
-
-
-def tokenize_prompt_completion(
-    prompt: str,
-    completion: str,
-    processing_class: Any,
-    *,
-    max_prompt_length: int | None,
-    max_completion_length: int | None,
-    eos_token_ids: frozenset[int] = frozenset(),
-) -> dict[str, list[int]]:
-    """Tokenize one stored ``(prompt, completion)`` rollout under the two length budgets."""
-    tokenizer = resolve_tokenizer(processing_class)
-    # Left-truncate the prompt (keep tokens nearest the completion — TRL convention).
-    prompt_input_ids = processing_class(prompt, add_special_tokens=False)["input_ids"]
-    if is_bounded_length(max_prompt_length):
-        prompt_input_ids = prompt_input_ids[-max_prompt_length:]
-    # truncation must follow the cap: HF resolves `truncation=True, max_length=None` against
-    # `tokenizer.model_max_length`, so an unset cap would truncate at whatever the run pinned there
-    # instead of meaning "no cap".
-    completion_input_ids = processing_class(
-        completion,
-        truncation=is_bounded_length(max_completion_length),
-        max_length=max_completion_length,
-        add_special_tokens=False,
-    )["input_ids"]
-
-    # Only within the prompt budget: the caps bound PP's fixed P2P shape.
-    if lacks_emitted_bos(prompt_input_ids, tokenizer) and (
-        not is_bounded_length(max_prompt_length) or len(prompt_input_ids) < max_prompt_length
-    ):
-        prompt_input_ids = [tokenizer.bos_token_id] + prompt_input_ids
-
-    # EOS only within the budget: supervising it at a truncation cut teaches premature stopping.
-    if lacks_terminator(completion_input_ids, tokenizer, eos_token_ids) and (
-        not is_bounded_length(max_completion_length) or len(completion_input_ids) < max_completion_length
-    ):
-        completion_input_ids = completion_input_ids + [tokenizer.eos_token_id]
-    return {"prompt_input_ids": prompt_input_ids, "completion_input_ids": completion_input_ids}
 
 
 def tokenize_offline_grpo_rows(
@@ -68,6 +28,7 @@ def tokenize_offline_grpo_rows(
 ) -> dict[str, list]:
     """Tokenize a batch, expanding each ``(prompt, completions, rewards)`` group into one training row per
     completion with its computed advantage and group metadata."""
+    tokenizer = resolve_tokenizer(processing_class)
     columns = {
         name: [] for name in ("prompt_input_ids", "completion_input_ids", "group_id", "group_size", "advantage")
     }
@@ -90,24 +51,26 @@ def tokenize_offline_grpo_rows(
             continue
         advantages_list = compute_group_advantages(rewards_list, advantage_method, best_completion_emphasis)
 
-        for completion, advantage in zip(completions_list, advantages_list, strict=True):
-            tokenized = tokenize_prompt_completion(
-                prompt,
-                completion,
-                processing_class,
-                max_prompt_length=max_prompt_length,
-                max_completion_length=max_completion_length,
-                eos_token_ids=eos_token_ids,
+        prompt_ids, completion_ids_list = tokenize_prompt_completions(
+            prompt,
+            completions_list,
+            tokenizer,
+            max_prompt_length=max_prompt_length,
+            max_completion_length=max_completion_length,
+            truncation_mode="keep_end",
+            joint_boundary=False,
+            eos_token_ids=eos_token_ids,
+        )
+        # Raised here, inside the coordinated map, so every rank aborts: the collator is the one
+        # rank that drew the row, and a raise there strands its peers in the next collective.
+        if completions_list and not prompt_ids:
+            raise ValueError(
+                f"Offline GRPO row {idx}: the prompt tokenizes to no tokens, so its completions "
+                f"would train against no context. Fix or drop the row."
             )
-            # Raised here, inside the coordinated map, so every rank aborts: the collator is the one
-            # rank that drew the row, and a raise there strands its peers in the next collective.
-            if not tokenized["prompt_input_ids"]:
-                raise ValueError(
-                    f"Offline GRPO row {idx}: the prompt tokenizes to no tokens, so its completions "
-                    f"would train against no context. Fix or drop the row."
-                )
-            columns["prompt_input_ids"].append(tokenized["prompt_input_ids"])
-            columns["completion_input_ids"].append(tokenized["completion_input_ids"])
+        for completion_ids, advantage in zip(completion_ids_list, advantages_list, strict=True):
+            columns["prompt_input_ids"].append(prompt_ids)
+            columns["completion_input_ids"].append(completion_ids)
             columns["group_id"].append(idx)
             columns["group_size"].append(len(completions_list))
             columns["advantage"].append(advantage)

@@ -1,12 +1,12 @@
 """CPU tests for the gathered-save preamble: every rank must issue the SAME gather collectives.
 
-A gathered save (FSDP2 / TP / CP) resolves parameters, persistent buffers and the neutralized GptOss
-sinks, but only the writer keeps the host copies. Resolving a DTensor is ``full_tensor()`` — a
-mesh-wide collective — so a leg placed behind the ``retain`` gate hangs the save: the writer enters
-the all-gather and its peers never do, and the run dies on the NCCL watchdog with no diagnostic.
-Buffers are the leg at risk (no shipped family carries a DTensor persistent buffer, but nothing
-prevents one), so these tests count gather calls on both
-sides of ``retain`` rather than waiting for a live hang to prove it.
+A gathered save (FSDP2 / TP / CP and the injected-LoRA embedding save) resolves parameters, persistent
+buffers and the neutralized GptOss sinks, but only the writer keeps the host copies. Resolving a DTensor
+is ``full_tensor()`` — a mesh-wide collective — so a leg placed behind the ``retain`` gate hangs the
+save: the writer enters the all-gather and its peers never do, and the run dies on the NCCL watchdog
+with no diagnostic. Buffers are the leg at risk (no shipped family carries a DTensor persistent buffer,
+but nothing prevents one), so these tests count gather calls on both sides of ``retain`` rather than
+waiting for a live hang to prove it.
 
 Counting is done by replacing the gather primitives where every branch reads them — the pair
 ``src.runtime.dtensor.resolve_retained`` reads (``full_cpu_tensor`` / ``materialize_dtensor``). The
@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 
 import src.runtime.dtensor as dtensor_mod
-from src.checkpoint.parallel.writing import chunked_saveable_tensors, gather_saveable_tensors
+from src.checkpoint.parallel.writing import chunked_saveable_tensors
 
 
 class _BufferModel(nn.Module):
@@ -48,36 +48,21 @@ def _count_gathers(monkeypatch):
     return counter
 
 
-@pytest.mark.parametrize(
-    ("gather", "expected"),
-    [
-        pytest.param(
-            lambda model, retain: gather_saveable_tensors(model, retain=retain),
-            2,  # one parameter + one persistent buffer
-            id="fsdp2",
-        ),
-        pytest.param(
-            lambda model, retain: list(chunked_saveable_tensors(model, retain=retain)),
-            2,  # the streamed FSDP2 / CP / TP save, chunk by chunk
-            id="streamed",
-        ),
-    ],
-)
-def test_retain_does_not_change_the_number_of_gathers(monkeypatch, gather, expected):
-    """The writer and the non-writers must run the identical collective sequence."""
+def test_retain_does_not_change_the_number_of_gathers(monkeypatch):
+    """The writer and the non-writers must run the identical collective sequence: one gather for the
+    parameter and one for the persistent buffer, chunk by chunk."""
     model = _BufferModel()
 
     counter = _count_gathers(monkeypatch)
-    gather(model, True)
+    list(chunked_saveable_tensors(model, retain=True))
     retaining = counter["n"]
 
     counter = _count_gathers(monkeypatch)
-    gather(model, False)
+    list(chunked_saveable_tensors(model, retain=False))
     non_retaining = counter["n"]
 
-    assert retaining == non_retaining == expected, (
-        f"asymmetric gather: writer issued {retaining} collectives, a non-writer {non_retaining} "
-        f"(expected {expected} on both)"
+    assert retaining == non_retaining == 2, (
+        f"asymmetric gather: writer issued {retaining} collectives, a non-writer {non_retaining} (expected 2 on both)"
     )
 
 
@@ -86,8 +71,6 @@ def test_only_the_retaining_rank_keeps_the_tensors(monkeypatch):
     model = _BufferModel()
     _count_gathers(monkeypatch)
 
-    assert set(gather_saveable_tensors(model, retain=True)) == {"fc.weight", "layer_scalar"}
-    assert gather_saveable_tensors(model, retain=False) == {}
     streamed = list(chunked_saveable_tensors(model, retain=True))
     assert {key for chunk in streamed for key in chunk} == {"fc.weight", "layer_scalar"}
     assert all(chunk == {} for chunk in chunked_saveable_tensors(model, retain=False))

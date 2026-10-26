@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""Distributed SFT training (text or VLM).
+"""Distributed SFT (text or VLM): the model class follows the checkpoint, the data path the run (``resolve_vlm_run``).
 
-Supervised fine-tuning for both language and vision-language models. The model class follows the
-checkpoint; the data path follows the run (``is_vlm_run``), so a natively-multimodal checkpoint
-trained on a text-only dataset takes the text path. That path supports packing (flat, or as
-prefix-sharing trees under ``tree_packing``), padding-free, pre-processed datasets, QLoRA and
-``init_from_scratch``; the VLM path loads an ``AutoModelForImageTextToText`` plus processor and uses
-the VLM collators (packing/padding-free do not apply to images).
-
-Parallelism: every axis set ``ParallelismConfig`` admits (``SUPPORTED_AXIS_SETS``), CP and PP
-included. CP and PP are incompatible with padding-free and text-only: the CP wrapper raises on a
-batch carrying ``pixel_values``, and the pipeline gate refuses an image-feeding run.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/sft.py \\
-        examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml
+Usage: torchrun --nproc_per_node=8 scripts/training/sft.py examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml
 """
 
 from accelerate.logging import get_logger
@@ -27,11 +14,10 @@ from src.configs.script_arguments import ModelArguments
 from src.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
 from src.data.collators.factory import select_data_collator
 from src.data.collators.tree_packing import DataCollatorWithTreePacking
-from src.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
+from src.data.collators.vlm import PreprocessedVLMDataCollator
 from src.data.pipeline.coordinated_map import coordinated_map_and_filter, coordinated_pack, resolve_map_num_proc
 from src.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from src.data.pipeline.tree_rows import prepare_tree_dataset
-from src.data.pipeline.vlm_rows import prepare_vlm_dataset
 from src.data.preprocessed.metadata import load_preprocessed_metadata, verify_preprocessed_dataset
 from src.data.sources.loading import load_datasets_auto
 from src.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
@@ -39,6 +25,8 @@ from src.entrypoints.data_setup import (
     disable_trl_dataset_prep,
     load_script_datasets,
     log_script_dataset_examples,
+    prepare_chat_text_split,
+    prepare_raw_vlm_split,
     reject_trl_dataset_prep_args,
     resolve_vlm_run,
 )
@@ -68,24 +56,23 @@ from src.models.attention.tree import (
     reject_unsupported_tree_attention,
     resolve_tree_plan_options,
 )
-from src.models.context_window import is_bounded_length
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.runtime.collectives import barrier
 from src.runtime.consensus import agree_probe_across_ranks
 from src.runtime.ranks import is_global_main_process
 from src.trainers.sft import DistributedSFTTrainer
+from src.trainers.sft_rules import (
+    reject_unsupported_sft_data_options,
+    reject_unsupported_tree_packing,
+    reject_unsupported_vlm_sft_options,
+)
 
 logger = get_logger(__name__, log_level="INFO")
 
 
 def _reject_empty_split(dataset, split: str, max_length: int) -> None:
-    """Raise on a split the length filter emptied, before packing fails further from the cause.
-
-    The chat processor drops rows whose tokenized length exceeds ``max_length`` rather than
-    truncating them mid-turn, and packing an empty split yields a dataset with no ``seq_lengths``
-    column. On a presharded corpus the length is per-rank, so the verdict is agreed across the world
-    and the raise lands on every rank at once.
-    """
+    """COLLECTIVE: raise on a split the length filter emptied, before packing fails further from the cause; on a
+    presharded corpus the length is per-rank, so the verdict is agreed and the raise lands on every rank at once."""
     if agree_probe_across_ranks(len(dataset) == 0, f"the {split} split", "split emptied by tokenization"):
         raise ValueError(
             f"All {split} rows were dropped after tokenization on at least one data-parallel rank: "
@@ -94,36 +81,13 @@ def _reject_empty_split(dataset, split: str, max_length: int) -> None:
         )
 
 
-def _reject_unsupported_tree_packing(args, sft_config, dist_args) -> None:
-    """Refuse the options tree packing cannot honour, before the model load.
-
-    A tree row that reaches the model without its attention plan runs as one causal sequence and its
-    branches attend each other, so every path that would drop or reshape the plan is closed here
-    instead of being left to produce a plausible loss.
-    """
-    row_parallelism = (dist_args.context_parallel_size, dist_args.pipeline_parallel_size)
-    requirements = {
-        "tree_share_markers (what the rows share is found up to one of them)": bool(args.tree_share_markers),
-        "packing: true (trees are packed rows)": sft_config.packing,
-        "packing_strategy: bfd (the other strategies cut a row below a tree)": sft_config.packing_strategy == "bfd",
-        "eval_packing left on (one collator serves both splits)": sft_config.eval_packing is not False,
-        "train_on_completions_only: true (a shared prefix carries no labels)": args.train_on_completions_only,
-        "no context or pipeline parallelism (each slices or re-collates the row)": max(row_parallelism) == 1,
-        "no tensor parallelism (unverified under tree attention)": dist_args.tensor_parallel_size == 1,
-        "torch_compile off (unverified under tree attention)": not sft_config.torch_compile,
-        "train_sinks off (the sink-gradient rescale is unverified under tree attention)": not args.train_sinks,
-    }
-    unmet = [requirement for requirement, met in requirements.items() if not met]
-    if unmet:
-        raise ValueError("tree_packing needs: " + "; ".join(unmet) + ".")
-
-
 def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_kwargs):
-    """Raw splits to tree rows; ``processor_kwargs`` are the render and map arguments of the flat path."""
+    """Raw splits to tree rows, as ``(train, eval)``; ``processor_kwargs`` are the render and map arguments of
+    the flat path."""
     reject_unusable_response_marker(
         tokenizer, args.assistant_message_template, args.train_on_completions_only, "tree packing"
     )
-    return prepare_tree_dataset(
+    ds = prepare_tree_dataset(
         ds,
         tokenizer,
         sft_config.max_length,
@@ -135,69 +99,71 @@ def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_k
         train_on_last_assistant_only=args.train_on_last_assistant_only,
         **processor_kwargs,
     )
+    return ds["train"], ds["test"]
+
+
+def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
+    """COLLECTIVE: raw text splits to ``(train, eval, generate)``: one chat-template tokenize, as flat rows or
+    trees, then the packing."""
+    render_kwargs = text_render_kwargs(args)
+    num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
+    common = {"tokenizer": tokenizer, "max_length": sft_config.max_length, **render_kwargs}
+    # From the raw test split, before the train map consumes it.
+    generate_dataset = coordinated_map_and_filter(
+        ds["test"],
+        build_chat_row_processor(**common, add_generation_prompt=True, use_padding=True),
+        desc="Processing generate dataset",
+        cache_key_extras={**render_kwargs, "add_generation_prompt": True},
+        num_proc=num_proc,
+    )
+    if args.tree_packing:
+        train_dataset, eval_dataset = _prepare_tree_rows(
+            ds, args, sft_config, tokenizer, hf_config, **render_kwargs, num_proc=num_proc
+        )
+    else:
+        train_dataset, eval_dataset = prepare_chat_text_split(
+            ds, tokenizer, args, sft_config, desc="Processing dataset", use_padding=not sft_config.padding_free
+        )
+    _reject_empty_split(train_dataset, "training", sft_config.max_length)
+    if sft_config.packing:
+        pack = {"seq_length": sft_config.max_length, "strategy": sft_config.packing_strategy}
+        train_dataset = coordinated_pack(train_dataset, **pack, split="train")
+        if sft_config.eval_packing is not False:
+            _reject_empty_split(eval_dataset, "evaluation", sft_config.max_length)
+            eval_dataset = coordinated_pack(eval_dataset, **pack, split="eval")
+    return train_dataset, eval_dataset, generate_dataset
+
+
+def _load_verified_metadata(args, sft_config, model_config):
+    """The pre-processed dataset's metadata, verified against this run's length, model, masking, render and
+    packing."""
+    metadata = load_preprocessed_metadata(args.dataset)
+    verify_preprocessed_dataset(
+        metadata,
+        required_max_length=sft_config.max_length,
+        required_model=model_config.model_name_or_path,
+        required_train_on_completions_only=args.train_on_completions_only,
+        render_args=args,
+        required_packing=sft_config.packing,
+    )
+    return metadata
 
 
 def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, tokenizer, parallelism_config, hf_config):
-    """Text dataset path: preprocessed passthrough, or raw tokenize (+ packing, flat or as trees);
-    returns (train, eval, generate, collator)."""
-    tree_packing = args.tree_packing
+    """Text dataset path: the pre-processed splits as baked, or the raw ones tokenized and packed; returns
+    ``(train, eval, generate, collator)``."""
     if is_preprocessed:
-        metadata = load_preprocessed_metadata(args.dataset)
-        verify_preprocessed_dataset(
-            metadata,
-            required_max_length=sft_config.max_length,
-            required_model=model_config.model_name_or_path,
-            required_train_on_completions_only=args.train_on_completions_only,
-            render_args=args,
-            required_packing=sft_config.packing,
-        )
         # Offline-packed data still needs the packing collator: without per-document position_ids from
         # seq_lengths documents attend across pack boundaries. Keyed on metadata.packed, not the flag.
-        collator_packing = metadata.packed
+        collator_packing = _load_verified_metadata(args, sft_config, model_config).packed
         train_dataset, eval_dataset, generate_dataset = ds["train"], ds["test"], None
     else:
         collator_packing = sft_config.packing
-        cache_extras = text_render_kwargs(args)
-        common = {"tokenizer": tokenizer, "max_length": sft_config.max_length, **cache_extras}
-        generate_processor = build_chat_row_processor(**common, add_generation_prompt=True, use_padding=True)
-        map_kwargs = {"num_proc": resolve_map_num_proc(sft_config.dataset_num_proc)}
-        # Build the generation set from the raw test split before the train map remaps `ds`.
-        generate_dataset = coordinated_map_and_filter(
-            ds["test"],
-            generate_processor,
-            desc="Processing generate dataset",
-            cache_key_extras={**cache_extras, "add_generation_prompt": True},
-            **map_kwargs,
+        train_dataset, eval_dataset, generate_dataset = _prepare_raw_text_splits(
+            ds, args, sft_config, tokenizer, hf_config
         )
-        if tree_packing:
-            ds = _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **cache_extras, **map_kwargs)
-        else:
-            train_processor = build_chat_row_processor(
-                **common, add_generation_prompt=False, use_padding=not sft_config.padding_free
-            )
-            ds = coordinated_map_and_filter(
-                ds,
-                train_processor,
-                # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
-                remove_columns=sorted(set(ds["train"].column_names)),
-                desc="Processing dataset",
-                cache_key_extras={**cache_extras, "add_generation_prompt": False},
-                **map_kwargs,
-            )
-        train_dataset, eval_dataset = ds["train"], ds["test"]
-        _reject_empty_split(train_dataset, "training", sft_config.max_length)
-        if sft_config.packing:
-            eval_packing = sft_config.eval_packing if sft_config.eval_packing is not None else sft_config.packing
-            train_dataset = coordinated_pack(
-                train_dataset, seq_length=sft_config.max_length, strategy=sft_config.packing_strategy, split="train"
-            )
-            if eval_packing:
-                _reject_empty_split(eval_dataset, "evaluation", sft_config.max_length)
-                eval_dataset = coordinated_pack(
-                    eval_dataset, seq_length=sft_config.max_length, strategy=sft_config.packing_strategy, split="eval"
-                )
 
-    if tree_packing:
+    if args.tree_packing:
         logger.info(f"Using DataCollatorWithTreePacking (full layers: {args.tree_full_attention})")
         collator = DataCollatorWithTreePacking(
             tokenizer, full_form=args.tree_full_attention, **resolve_tree_plan_options(hf_config)
@@ -222,54 +188,16 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
 
 
 def _prepare_vlm_data(ds, is_preprocessed, args, sft_config, model_config, processor, tokenizer, hf_config):
-    """VLM dataset path: preprocessed passthrough, or raw VLM map; returns
-    (train, eval, generate, collator)."""
-    if is_preprocessed:
-        metadata = load_preprocessed_metadata(args.dataset)
-        verify_preprocessed_dataset(
-            metadata,
-            required_max_length=sft_config.max_length,
-            required_model=model_config.model_name_or_path,
-            required_train_on_completions_only=args.train_on_completions_only,
-            render_args=args,
-            required_packing=sft_config.packing,
+    """VLM dataset path: the pre-processed splits as baked, or the raw VLM map; returns
+    ``(train, eval, None, collator)``, since GenerateExamplesCallback needs tokenized input_ids."""
+    if not is_preprocessed:
+        train_dataset, eval_dataset, collator = prepare_raw_vlm_split(
+            ds, args, sft_config, processor, tokenizer, hf_config, desc="Processing train/eval dataset"
         )
-        if not metadata.is_vlm:
-            raise ValueError(f"Dataset at '{args.dataset}' is not a VLM preprocessed dataset.")
-        collator = PreprocessedVLMDataCollator(tokenizer=tokenizer, max_length=sft_config.max_length)
-        return ds["train"], ds["test"], None, collator
-
-    # Reject options the VLM path does not implement; ignoring them would train something other than
-    # the config states.
-    if sft_config.packing or sft_config.padding_free:
-        raise ValueError("packing / padding_free are not supported for VLM training (images cannot be packed).")
-    if args.train_on_last_assistant_only:
-        raise ValueError(
-            "train_on_last_assistant_only is not implemented on the VLM path (all assistant turns train)."
-        )
-
-    num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
-    ds = prepare_vlm_dataset(
-        ds,
-        args,
-        processor,
-        tokenizer,
-        sft_config.max_length,
-        num_proc,
-        desc="Processing train/eval dataset",
-    )
-    # The mapped columns (history/images/…) are not model-forward kwargs — HF's default
-    # remove_unused_columns=True would strip them before they reach the collator.
-    sft_config.remove_unused_columns = False
-    collator = VLMDataCollator(
-        processor,
-        tokenizer,
-        sft_config.max_length,
-        response_prompt_template=args.assistant_message_template if args.train_on_completions_only else None,
-        train_on_completions_only=args.train_on_completions_only,
-        model_config=hf_config,
-    )
-    # No generate dataset: GenerateExamplesCallback needs tokenized input_ids and is skipped for VLM.
+        return train_dataset, eval_dataset, None, collator
+    if not _load_verified_metadata(args, sft_config, model_config).is_vlm:
+        raise ValueError(f"Dataset at '{args.dataset}' is not a VLM preprocessed dataset.")
+    collator = PreprocessedVLMDataCollator(tokenizer=tokenizer, max_length=sft_config.max_length)
     return ds["train"], ds["test"], None, collator
 
 
@@ -278,32 +206,9 @@ def main():
         SFTScriptArguments, SFTConfig, ModelArguments, ParallelismArguments
     )
 
-    if dist_args.context_parallel_size > 1 and sft_config.padding_free:
-        raise ValueError("Context Parallelism (CP) is NOT compatible with padding_free mode. Disable padding_free.")
-    if dist_args.pipeline_parallel_size > 1 and sft_config.padding_free:
-        # The trainer mixin rejects this too, keyed on the live collator, but only after the model
-        # load and dataset prep. Check it here so the run stops before that work.
-        raise ValueError(
-            "Pipeline Parallelism (PP) is NOT compatible with padding_free mode (the flattened "
-            "width varies every step while the pipeline's P2P buffers freeze on the first). Use "
-            "packing instead."
-        )
-    if sft_config.packing and sft_config.padding_free:
-        raise ValueError("Cannot use both 'packing' and 'padding_free' simultaneously.")
-    # A null/non-positive max_length resolves to the model's context window, but packing uses it as the
-    # fixed pack size that bounds memory, so it must be explicit there.
-    if sft_config.packing and not is_bounded_length(sft_config.max_length):
-        raise ValueError(
-            "packing=True requires an explicit max_length (the fixed pack/sequence size that bounds "
-            "memory); it cannot default to the model context window. Set max_length in the config."
-        )
-    if sft_config.eval_packing and not sft_config.packing:
-        raise ValueError(
-            "eval_packing=True packs nothing without packing=True: it can only turn packing off for the "
-            "eval split. Set packing: true to pack both splits, or remove eval_packing."
-        )
+    reject_unsupported_sft_data_options(sft_config, dist_args)
     if args.tree_packing:
-        _reject_unsupported_tree_packing(args, sft_config, dist_args)
+        reject_unsupported_tree_packing(args, sft_config, dist_args)
     else:
         reject_non_default_args("Halo SFT with tree_packing off", args, *TREE_PACKING_FIELDS)
     reject_trl_dataset_prep_args(
@@ -313,9 +218,8 @@ def main():
         "scripts/before_training/prepare_dataset.py --mode text",
     )
 
-    # The checkpoint's modality names the run, which init_training_script needs before the dataset
-    # exists. Pinned like the model load: an unpinned probe reads hub `main`, whose config can
-    # name a different modality than the commit this run trains.
+    # The modality names the run before the dataset exists. Pinned like the model load: hub `main`'s config can name
+    # another modality than the commit this run trains.
     checkpoint_config, is_vlm_checkpoint = probe_checkpoint(
         model_config.model_name_or_path,
         revision=model_config.model_revision,
@@ -349,25 +253,20 @@ def main():
         )
 
     (ds, is_preprocessed), dataset_presharded = load_script_datasets(
-        args,
-        parallelism_config,
-        loader=load_datasets_auto,
-        conversation_field=args.conversation_field,
+        args, parallelism_config, loader=load_datasets_auto, conversation_field=args.conversation_field
     )
     if is_preprocessed:
         # Both splits are used as baked, so eval_packing has nothing to decide.
         reject_non_default_args("Halo SFT on a pre-processed dataset", sft_config, "eval_packing")
         reject_non_default_args("Halo SFT on a pre-processed dataset", args, "tree_packing")
 
-    # The run's data path, decided before the model load because it also decides whether the
-    # checkpoint's processor is required: a multimodal checkpoint carrying text-only rows is a text
-    # run, and packing / padding_free / train_on_last_assistant_only stay legal for it. The model
-    # class is unaffected; it follows the checkpoint.
+    # Before the model load, which needs the checkpoint's processor only for an image run: a multimodal checkpoint
+    # carrying text-only rows is a text run, its model class unchanged.
     is_vlm = resolve_vlm_run(
         args, model_config, ds, text_only_model=args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
     )
     if is_vlm:
-        reject_non_default_args("Halo SFT on the VLM path", args, "tree_packing")
+        reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
 
     policy = load_policy_model(
         context, sft_config, model_config, args, vlm_run=is_vlm, init_from_scratch=dist_args.init_from_scratch
@@ -400,8 +299,6 @@ def main():
 
     generate_callback = GenerateExamplesCallback.from_config(args, sft_config, generate_dataset, tokenizer)
     if generate_callback is None and args.generate_eval_examples and is_global_main_process():
-        # Both paths that build no generate split: a VLM run (no tokenized input_ids) and a
-        # pre-processed dataset (baked input_ids/labels, no raw conversations to render a prompt from).
         logger.warning(
             "generate_eval_examples skipped: %s.",
             "not supported for VLM datasets" if is_vlm else "a pre-processed dataset carries no raw prompts",
@@ -425,12 +322,7 @@ def main():
         callbacks=callbacks,
         **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
-    run_trainer(
-        trainer,
-        context,
-        method_name="SFT",
-        extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"],
-    )
+    run_trainer(trainer, context, method_name="SFT", extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"])
 
 
 if __name__ == "__main__":

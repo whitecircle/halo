@@ -47,7 +47,7 @@ output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 | `sigmoid` | `-log_sigmoid(z)` | Never reaches zero (DPO-like) |
 | `ipo` | `z²` | Targets the margin exactly, penalizing overshoot |
 
-`max_length` is the total budget and defaults to `1024`; `null` or a non-positive value resolves it to the context window. An unset `max_prompt_length` takes half of it and `max_completion_length` the remainder. Shares summing past `max_length` are rejected at construction — the two truncate independently. Prompts cut per `truncation_mode` (`keep_end`), completions from the end, keeping the terminal EOS.
+`max_length` is the total budget and defaults to `1024`; `null` or a non-positive value resolves it to the context window. An unset `max_prompt_length` takes half of it and `max_completion_length` the remainder. Shares summing past `max_length` are rejected at construction — the two truncate independently. Prompts cut per `truncation_mode` (`keep_end`), completions from the end; a completion cut by `max_completion_length` carries no EOS.
 
 `padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` outside CP included. It is also incompatible with CP and VLM runs.
 

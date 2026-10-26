@@ -13,7 +13,7 @@ from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, 
 
 class OfflineGRPOPipelineMixin:
     """The offline objective as a pipeline loss and the pipeline reference sweep, over the host trainer's
-    ``_joined_rows``, ``_token_objective``, ``_live_min_log_prob`` and ``_buffer_sign_metrics``. Mixed in
+    ``_joined_rows``, ``_token_objective``, ``_live_min_log_prob`` and ``_record_sign_metrics``. Mixed in
     ahead of the spine's pipeline mixin, whose ``_configure_pipeline_parallel`` builds the adapter once."""
 
     # Non-None only while the PP reference sweep drives the schedule: the last stage's loss stashes
@@ -56,7 +56,7 @@ class OfflineGRPOPipelineMixin:
         per_token_loss, sample_values = self._token_objective(
             token_logps, advantages, ref_logps, self._pp_min_log_prob
         )
-        self._buffer_sign_metrics(sample_values, advantages, mask, rows=rows_with_labels(target["labels"]))
+        self._record_sign_metrics(sample_values, advantages, mask, rows=rows_with_labels(target["labels"]))
         return offline_loss_numerator(per_token_loss, mask, target["group_size"], loss_type=self.loss_type)
 
     def _pp_batch_transform(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

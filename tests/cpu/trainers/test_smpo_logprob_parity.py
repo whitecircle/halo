@@ -209,10 +209,11 @@ def test_a_rank_of_eval_padding_alone_scores_zero():
 @torch.no_grad()
 def test_the_eval_step_predicts_per_pair_and_weighs_its_real_pairs():
     trainer = _eval_trainer(3)
+    stored_rows = set()
+    trainer.store_metrics = lambda metrics, train_eval="train", rows=1: stored_rows.add(rows)
     loss, predictions, labels = trainer.prediction_step(_TokenTableLM(), _batch(), prediction_loss_only=False)
 
     assert predictions.shape == (4, 2) and labels.shape == (4,)
-    stored_rows = {rows for entries in trainer._stored_metrics["eval"].values() for _, rows in entries}
     assert stored_rows == {3}, f"eval metrics must weigh the batch's real pairs, got {stored_rows}"
     assert torch.isfinite(loss)
 

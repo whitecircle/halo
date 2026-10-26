@@ -16,12 +16,10 @@ owns token shards of the same rows, and PP's microbatch numerators share the who
 
 from collections import defaultdict
 from collections.abc import Callable
-from functools import partial
 from typing import Any, Union
 
 import datasets
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from accelerate.logging import get_logger
 from peft import PeftConfig
@@ -64,6 +62,7 @@ from src.trainers.grpo.objective.offline_loss import (
     offline_loss,
     offline_token_objective,
 )
+from src.trainers.grpo.offline.group_rows import tokenize_offline_splits
 from src.trainers.grpo.offline.group_sampler import GroupedLoaderMixin
 from src.trainers.grpo.offline.offline_rules import (
     reject_encoder_decoder,
@@ -76,8 +75,8 @@ from src.trainers.grpo.offline.offline_rules import (
 )
 from src.trainers.grpo.offline.pipeline_loss import OfflineGRPOPipelineMixin
 from src.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
-from src.trainers.grpo.offline.tokenization import tokenize_offline_splits
 from src.trainers.training_args_overrides import keep_all_dataset_columns
+from src.trainers.world_metrics import WorldMetrics
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -146,7 +145,7 @@ class OfflineGRPOTrainer(
             parallelism_config, ref_model, self._reference_mode(model, parallelism_config, peft_config)
         )
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
-        self._sign_metric_buffer = {"train": defaultdict(list), "eval": defaultdict(list)}
+        self._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
 
         self._configure_objective(args, require_processing_class(processing_class))
         self._precompute_reference = self.sweeps_run_start_reference(
@@ -353,7 +352,7 @@ class OfflineGRPOTrainer(
             max_completion_length=self.max_completion_length,
         )
 
-        self._buffer_sign_metrics(sample_values, advantages, completion_mask)
+        self._record_sign_metrics(sample_values, advantages, completion_mask)
         return loss
 
     def _compute_cp_loss_inner(self, model, inputs):
@@ -392,7 +391,7 @@ class OfflineGRPOTrainer(
             row_token_counts=loss_token_counts_per_row(labels),
             cp_config=self.cp_config,
         )
-        self._buffer_sign_metrics(sample_values, advantages, supervised)
+        self._record_sign_metrics(sample_values, advantages, supervised)
         return loss
 
     @staticmethod
@@ -453,16 +452,17 @@ class OfflineGRPOTrainer(
             ref_logps_unclamped=ref_logps,
         )
 
-    def _buffer_sign_metrics(
+    def _record_sign_metrics(
         self,
         sample_values: dict[str, torch.Tensor],
         advantages: torch.Tensor,
         mask: torch.Tensor,
         rows: torch.Tensor | None = None,
     ) -> None:
-        """Buffer one batch's per-sample means of the objective's diagnostics on device (a per-microbatch
-        ``.item()`` would be dozens of host syncs a step) for ``log``'s drain. ``rows`` selects the real rows
-        of a row-padded pipeline batch, whose inert rows would count as zero-valued positive samples."""
+        """Record the moments of one batch's per-sample means of the objective's diagnostics, split by advantage
+        sign, for ``log``'s flush (on device: a per-microbatch ``.item()`` would be dozens of host syncs a step).
+        ``rows`` selects the real rows of a row-padded pipeline batch, whose inert rows would count as zero-valued
+        positive samples."""
         # Count and every detached diagnostic travel in one CP sum. Each CP shard owns
         # tokens of the same logical rows; off CP this is the same local row reduction.
         keys = tuple(sample_values)
@@ -472,12 +472,13 @@ class OfflineGRPOTrainer(
         )
         totals = cp_sum_rows(totals, self.cp_config if self.parallelism_config.is_cp_mode else None)
         counts = totals[0].clamp(min=1)
-        buffer = self._sign_metric_buffer["train" if self.model.training else "eval"]
+        metrics = self._sign_metrics["train" if self.model.training else "eval"]
         positive = advantages.detach() >= 0
-        buffer["positive_mask"].append(positive if rows is None else positive[rows])
+        real = torch.ones_like(positive) if rows is None else rows
+        signs = {"positive": real & positive, "negative": real & ~positive}
         for index, key in enumerate(keys, start=1):
-            values = totals[index] / counts
-            buffer[key].append(values if rows is None else values[rows])
+            for sign in self._SIGN_METRIC_KEYS[key]:
+                metrics.moments(f"{sign}/{key}", totals[index] / counts, signs[sign])
 
     def _score_reference_batch(self, batch) -> list[torch.Tensor]:
         """Mode-specific scoring inside the shared reference-sweep lifecycle."""
@@ -506,7 +507,7 @@ class OfflineGRPOTrainer(
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys: list[str] | None = None):
         if self._pp_runner is not None:
-            # compute_loss (and its sign-metric buffering) needs the full model, so the mixin drives
+            # compute_loss (and its sign-metric recording) needs the full model, so the mixin drives
             # the schedule instead.
             return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
         inputs = self._prepare_inputs(inputs)
@@ -519,10 +520,15 @@ class OfflineGRPOTrainer(
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         # model.training, not control.should_evaluate: HF sets should_evaluate alongside should_log in
         # on_step_end and only clears it after evaluate() runs, so on a step that both logs and evals
-        # the training log call would read "eval", dropping the train sign metrics (their buffer is
-        # never drained) and prefixing eval_* onto a train line.
+        # the training log call would read "eval", dropping the train sign metrics (their records are
+        # never flushed) and prefixing eval_* onto a train line.
         mode = "train" if self.model.training else "eval"
-        self._drain_sign_metrics(mode)
+        # COLLECTIVE when anything was recorded. Under PP only the last stage's ranks record anything, as DP
+        # replicas of the whole sample set, so they fold over the stage group (a world flush would block the other
+        # stages in a collective they never enter) and the chain gets the scalars from the broadcast below.
+        sign_metrics = self._sign_metrics[mode]
+        if sign_metrics:
+            sign_metrics.flush(self._metrics[mode], group=self._pp_stage_group)
         metrics = {key: sum(val) / len(val) for key, val in self._metrics[mode].items()}
 
         current_min_log_prob = self._live_min_log_prob
@@ -538,45 +544,3 @@ class OfflineGRPOTrainer(
         logs = {**logs, **metrics}
         super().log(logs, start_time)
         self._metrics[mode].clear()
-
-    def _drain_sign_metrics(self, mode: str) -> None:
-        """Gather the buffered per-sample values once per log step and emit summary statistics.
-
-        Runs on every rank (the gather is a collective; log() is invoked rank-uniformly); statistics
-        are computed over the pooled global sample set of the whole logging window.
-        """
-        buffer = self._sign_metric_buffer[mode]
-        if not buffer:
-            return
-        # Under PP only the last stage's ranks buffer anything, and they are the DP replicas of the
-        # whole sample set; a world gather would block the other stages in a collective they never
-        # enter. The chain gets the drained scalars from ``log``.
-        gather = (
-            partial(
-                all_gather_cat,
-                dim=0,
-                group=self._pp_stage_group,
-                world_size=dist.get_world_size(self._pp_stage_group),
-            )
-            if self._pp_runner is not None
-            else self.accelerator.gather
-        )
-        positive = gather(torch.cat(buffer["positive_mask"]))
-        for key, chunks in buffer.items():
-            if key == "positive_mask":
-                continue
-            values = gather(torch.cat(chunks))
-            for sign in self._SIGN_METRIC_KEYS[key]:
-                subset = values[positive if sign == "positive" else ~positive]
-                if subset.numel() == 0:
-                    continue
-                prefix = f"{sign}/{key}"
-                self._metrics[mode][f"{prefix}_mean"].append(subset.mean().item())
-                self._metrics[mode][f"{prefix}_std"].append(
-                    subset.std(unbiased=False).item() if subset.numel() > 1 else 0.0
-                )
-                low, high = subset.min().item(), subset.max().item()
-                self._metrics[mode][f"{prefix}_min"].append(low)
-                self._metrics[mode][f"{prefix}_max"].append(high)
-                self._metrics[mode][f"{prefix}_range"].append(high - low)
-        buffer.clear()

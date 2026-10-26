@@ -253,12 +253,16 @@ def test_sft_forwards_the_runtime_masking_flag_to_the_preprocessed_check():
     """The cases above drive the leaf helper; this pins the wiring that reaches it.
 
     ``required_train_on_completions_only=None`` makes the check skip entirely, so dropping the
-    kwarg from either call site turns a baked/runtime mismatch back into a silent wrong-masking run
+    kwarg from the call site turns a baked/runtime mismatch back into a silent wrong-masking run
     — and none of the helper-level cases above would notice.
     """
     tree = ast.parse((_TRAINING_DIR / "sft.py").read_text(encoding="utf-8"))
     calls = _named_calls(tree, "verify_preprocessed_dataset")
-    assert len(calls) == 2, f"sft.py makes {len(calls)} preprocessed-metadata checks; expected the text + VLM paths"
+    assert len(calls) == 1, f"sft.py makes {len(calls)} preprocessed-metadata checks; expected one for both paths"
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    checker = next(name for name, node in functions.items() if _named_calls(node, "verify_preprocessed_dataset"))
+    for path in ("_prepare_text_data", "_prepare_vlm_data"):
+        assert _named_calls(functions[path], checker), f"sft.py {path} skips the preprocessed-metadata check"
     for call in calls:
         value = {kw.arg: kw.value for kw in call.keywords}.get("required_train_on_completions_only")
         assert isinstance(value, ast.Attribute), (
@@ -269,11 +273,11 @@ def test_sft_forwards_the_runtime_masking_flag_to_the_preprocessed_check():
 
 def test_sft_forwards_render_args_and_packing_to_the_preprocessed_check():
     """``render_args=None`` / ``required_packing=None`` skip those checks entirely, so dropping
-    either kwarg from a call site silently reverts render-knob verification (baked rows vs YAML)
+    either kwarg from the call site silently reverts render-knob verification (baked rows vs YAML)
     and the unpacked-artifact-with-packing warning."""
     tree = ast.parse((_TRAINING_DIR / "sft.py").read_text(encoding="utf-8"))
     calls = _named_calls(tree, "verify_preprocessed_dataset")
-    assert len(calls) == 2, f"sft.py makes {len(calls)} preprocessed-metadata checks; expected the text + VLM paths"
+    assert len(calls) == 1, f"sft.py makes {len(calls)} preprocessed-metadata checks; expected one for both paths"
     for call in calls:
         kwargs = {kw.arg: kw.value for kw in call.keywords}
         assert isinstance(kwargs.get("render_args"), ast.Name), (

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 import sentence_transformers
@@ -35,8 +36,8 @@ from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR, 
 from src.checkpoint.parallel.completeness import mark_resume_adapter_complete
 from src.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
 from src.checkpoint.parallel.save import save_checkpoint, save_tokenizer
-from src.checkpoint.parallel.writing import gather_saveable_tensors
-from src.checkpoint.writing import write_gathered_checkpoint
+from src.checkpoint.parallel.writing import stream_gathered_checkpoint
+from src.checkpoint.writing import normalize_gathered_state_dict
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
@@ -54,7 +55,7 @@ from src.trainers.embedding.embedding_rules import (
     reject_unresolved_max_length,
 )
 from src.trainers.embedding.injected_lora import (
-    folded_backbone_items,
+    folded_backbone_chunks,
     has_injected_lora,
     require_injected_lora_config,
     restore_injected_lora,
@@ -474,8 +475,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
 
     def _save_distributed_embedding_model(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool = False):
         """COLLECTIVE. Save the backbone through the ``save_checkpoint`` ladder, or, under injected LoRA (no
-        ``PeftModel``), gathered with its adapters folded in (:func:`folded_backbone_items`); then the ST
-        pipeline config. Only the save rank writes.
+        ``PeftModel``), streamed through the gathered writer with its adapters folded in
+        (:func:`folded_backbone_chunks`); then the ST pipeline config. Only the save rank writes.
         """
         backbone = ctx.model
         # Fenced: one rank writes while all reach the trailing barrier, so a failed write (ENOSPC,
@@ -483,13 +484,14 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         with barrier_on_exit():
             if has_injected_lora(backbone):
                 save_tokenizer(ctx, output_dir)
-                # Gather on all ranks (collective); only the writer retains (else N× host RAM per node).
-                state_dict = gather_saveable_tensors(
-                    backbone, retain=ctx.is_save_rank, items=folded_backbone_items(backbone)
+                stream_gathered_checkpoint(
+                    backbone,
+                    folded_backbone_chunks(backbone, retain=ctx.is_save_rank),
+                    output_dir,
+                    is_save_rank=ctx.is_save_rank,
+                    max_shard_size=ctx.max_shard_size,
+                    normalize=partial(normalize_gathered_state_dict, backbone),
                 )
-                if ctx.is_save_rank:
-                    write_gathered_checkpoint(backbone, state_dict, output_dir, max_shard_size=ctx.max_shard_size)
-                del state_dict
             elif not save_checkpoint(ctx, output_dir):
                 # No active parallelism left to gather: ST's own writer handles the plain-tensor
                 # layout. Not the mixin's save_model, which would rebuild a context around the ST

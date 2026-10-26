@@ -60,6 +60,24 @@ def _reject_dense_attention_rows(model_config, *, padding_free: bool, packing: b
         )
 
 
+def reject_padding_free_conflicts(*, padding_free: bool, packing: bool, use_context_parallel: bool) -> None:
+    """Refuse padding_free beside packing or context parallelism, reading only the flags, so a script can run it
+    before the model load."""
+    if packing and padding_free:
+        raise ValueError(
+            "Cannot use both 'packing' and 'padding_free' simultaneously. "
+            "Choose one:\n"
+            "  - packing=True: Traditional sequence packing (pad to max_length)\n"
+            "  - padding_free=True: flattening for a varlen flash-attention kernel (no padding)"
+        )
+    if use_context_parallel and padding_free:
+        raise ValueError(
+            "Context Parallelism (CP) is NOT compatible with padding_free mode. "
+            "CP requires fixed-length sequences for collective synchronization. "
+            "Please disable padding_free when using CP."
+        )
+
+
 def reject_unsupported_collator_options(
     tokenizer,
     *,
@@ -75,13 +93,9 @@ def reject_unsupported_collator_options(
 ) -> None:
     """Refuse (or warn about) the option combinations no collator can serve, reading only the caller's
     arguments, the model's attention backend and its segment markers."""
-    if packing and padding_free:
-        raise ValueError(
-            "Cannot use both 'packing' and 'padding_free' simultaneously. "
-            "Choose one:\n"
-            "  - packing=True: Traditional sequence packing (pad to max_length)\n"
-            "  - padding_free=True: flattening for a varlen flash-attention kernel (no padding)"
-        )
+    reject_padding_free_conflicts(
+        padding_free=padding_free, packing=packing, use_context_parallel=use_context_parallel
+    )
     # Loss-less on every backend, so a warning; PP keeps its rows.
     if packing and per_device_train_batch_size > 1 and not keeps_packed_rows and is_global_main_process():
         logger.warning(
@@ -95,12 +109,6 @@ def reject_unsupported_collator_options(
             per_device_train_batch_size,
         )
     _reject_dense_attention_rows(model_config, padding_free=padding_free, packing=packing)
-    if use_context_parallel and padding_free:
-        raise ValueError(
-            "Context Parallelism (CP) is NOT compatible with padding_free mode. "
-            "CP requires fixed-length sequences for collective synchronization. "
-            "Please disable padding_free when using CP."
-        )
     reject_unusable_response_marker(
         tokenizer, assistant_message_template, train_on_completions_only, "select_data_collator"
     )

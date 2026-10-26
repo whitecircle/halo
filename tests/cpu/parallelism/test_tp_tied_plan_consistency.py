@@ -18,7 +18,7 @@ from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import CONFIG_MAPPING, AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
-from src.checkpoint.parallel.writing import gather_saveable_tensors
+from src.checkpoint.parallel.writing import chunked_saveable_tensors
 from src.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, validate_tied_pair_consistent
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -34,6 +34,10 @@ TIED_CONFIG_KWARGS = {
 def _tiny_tied_model(tie: bool = True):
     config = AutoConfig.for_model("qwen3", **{**TINY_QWEN3_CONFIG, "tie_word_embeddings": tie})
     return AutoModelForCausalLM.from_config(config)
+
+
+def _saved_keys(model) -> set[str]:
+    return {key for chunk in chunked_saveable_tensors(model, retain=True) for key in chunk}
 
 
 @pytest.mark.parametrize("model_type", sorted(TIED_CONFIG_KWARGS), ids=["plain", "composite"])
@@ -162,11 +166,11 @@ def test_a_tied_pair_reaches_the_export_as_one_key():
     toolkit gathered save de-duplicates FIRST (``named_parameters()`` visits a tied pair once), so
     the export carries the embedding key alone and pays one ``full_tensor()`` instead of two.
     """
-    tied_keys = set(gather_saveable_tensors(_tiny_tied_model(), retain=True))
+    tied_keys = _saved_keys(_tiny_tied_model())
     assert "model.embed_tokens.weight" in tied_keys
     assert "lm_head.weight" not in tied_keys
     # Anti-vacuity: an UNTIED head is its own parameter and must still reach the export.
-    assert "lm_head.weight" in set(gather_saveable_tensors(_tiny_tied_model(tie=False), retain=True))
+    assert "lm_head.weight" in _saved_keys(_tiny_tied_model(tie=False))
 
 
 if __name__ == "__main__":

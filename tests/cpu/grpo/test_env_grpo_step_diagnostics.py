@@ -25,15 +25,16 @@ from src.environments.messages import Trajectory
 from src.trainers.grpo.environmental.rollout_metrics import group_solve_counts
 from src.trainers.grpo.environmental.step_batch import BatchRows
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.world_metrics import WorldMetrics
-from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
+from src.trainers.world_metrics import WorldMetrics
+from tests.common.world_metrics import attach_world_metrics, fake_world, flushed_metrics
 
 _Trainer = DistributedAsyncEnvironmentalGRPOTrainer
 
 
 def _fold(world: WorldMetrics, *peers: WorldMetrics) -> dict[str, list[float]]:
     target = defaultdict(list)
-    world.flush(target, gather_fn=lambda own: [*own, *(peer._materialized() for peer in peers)])
+    with fake_world(world, *peers):
+        world.flush(target)
     return target
 
 
@@ -203,8 +204,7 @@ def _log_round(host, results: list, mode: str = "train") -> None:
     host._log_rollout_metrics(results, mode, [[] for _ in results])
 
 
-def test_the_truncation_alarm_fires_on_a_crossing_and_logs_every_round(monkeypatch, caplog):
-    monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
+def test_the_truncation_alarm_fires_on_a_crossing_and_logs_every_round(caplog):
     host = _RoundHost(alarm_rate=0.25)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
         for truncated in (2, 3, 0, 2):
@@ -225,9 +225,8 @@ def test_the_truncation_alarm_fires_on_a_crossing_and_logs_every_round(monkeypat
     ids=["kept", "masked"],
 )
 def test_the_truncation_warning_states_what_the_loss_does_with_a_truncated_episode(
-    monkeypatch, caplog, mask_truncated, said, unsaid
+    caplog, mask_truncated, said, unsaid
 ):
-    monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
     host = _RoundHost(alarm_rate=0.25, mask_truncated=mask_truncated)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
         _log_round(host, _round(2))
@@ -241,8 +240,7 @@ def test_a_truncation_alarm_rate_that_could_never_or_always_fire_is_refused(rate
         AsyncTrainingConfig(truncation_alarm_rate=rate)
 
 
-def test_the_truncation_alarm_off_logs_nothing(monkeypatch, caplog):
-    monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
+def test_the_truncation_alarm_off_logs_nothing(caplog):
     host = _RoundHost(alarm_rate=None)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
         _log_round(host, _round(4))

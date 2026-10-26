@@ -26,8 +26,8 @@ from src.trainers.grpo.rollout.engine_preflight import _probe_prompt_logprobs, v
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from tests.common.fake_engines import GRAPH_CAPTURE_TOKENS, FakeEngineServer, fake_server_class
-from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 from tests.common.repo import REPO_ROOT
+from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 PartialState()  # the re-score reports through accelerate's logger, which refuses to log without it
 

@@ -19,12 +19,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.trainers.grpo.environmental.step_batch import BatchBuildFence
 from tests.common.env_grpo_batch import batch_host, episode, row
-
-PartialState()  # the world-metrics flush gathers through accelerate, which reads the process state
 
 
 class _RecordingFence(BatchBuildFence):

@@ -13,8 +13,8 @@ from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
 from src.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
-from src.trainers.grpo.offline.tokenization import tokenize_offline_grpo_rows
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset

@@ -13,6 +13,7 @@ from torch import nn
 
 from src.trainers.grpo.objective.offline_loss import offline_token_objective
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from src.trainers.world_metrics import WorldMetrics
 from tests.common.gloo import run_gloo_ranks
 
 
@@ -22,9 +23,8 @@ def _trainer(*, cp_size=1, cp_rank=0, training=True):
     trainer.parallelism_config = SimpleNamespace(is_cp_mode=cp_size > 1)
     trainer.cp_config = SimpleNamespace(cp_size=cp_size, cp_rank=cp_rank, process_group=dist.group.WORLD)
     trainer._pp_runner = None
-    trainer._sign_metric_buffer = {"train": defaultdict(list), "eval": defaultdict(list)}
+    trainer._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
-    trainer.accelerator = SimpleNamespace(gather=lambda values: values)
     return trainer
 
 
@@ -40,32 +40,24 @@ def _diagnostics_worker(rank, cp_size, training):
     }
     start, end = rank * (12 // cp_size), (rank + 1) * (12 // cp_size)
     mode = "train" if training else "eval"
+    shards = {key: value[:, start:end] for key, value in values.items()}
     expected = _trainer(training=training)
-    expected._buffer_sign_metrics(values, advantages, mask)
+    expected._record_sign_metrics(values, advantages, mask)
     actual = _trainer(cp_size=cp_size, cp_rank=rank, training=training)
-    actual._buffer_sign_metrics(
-        {key: value[:, start:end] for key, value in values.items()}, advantages, mask[:, start:end]
-    )
-    for key in expected._sign_metric_buffer[mode]:
-        torch.testing.assert_close(
-            actual._sign_metric_buffer[mode][key][0], expected._sign_metric_buffer[mode][key][0], atol=1e-5, rtol=1e-6
-        )
-    expected._drain_sign_metrics(mode)
-    actual._drain_sign_metrics(mode)
-    assert actual._metrics[mode].keys() == expected._metrics[mode].keys()
-    for key, summaries in expected._metrics[mode].items():
-        assert actual._metrics[mode][key] == pytest.approx(summaries, abs=1e-5, rel=1e-6)
-    assert not actual._sign_metric_buffer[mode]
-
+    actual._record_sign_metrics(shards, advantages, mask[:, start:end])
     broken = _trainer(cp_size=cp_size, cp_rank=rank, training=training)
     with patch("src.trainers.grpo.offline.trainer.cp_sum_rows", side_effect=lambda totals, _config: totals):
-        broken._buffer_sign_metrics(
-            {key: value[:, start:end] for key, value in values.items()}, advantages, mask[:, start:end]
-        )
-    full_means = (values["logps"] * mask).sum(1) / mask.sum(1).clamp(min=1)
-    assert not torch.allclose(broken._sign_metric_buffer[mode]["logps"][0], full_means), (
-        "fixture lost reduction sensitivity"
-    )
+        broken._record_sign_metrics(shards, advantages, mask[:, start:end])
+    for trainer in (expected, actual, broken):
+        trainer._sign_metrics[mode].flush(trainer._metrics[mode])
+
+    assert actual._metrics[mode].keys() == expected._metrics[mode].keys()
+    for key, summaries in expected._metrics[mode].items():
+        assert actual._metrics[mode][key] == pytest.approx(summaries, abs=1e-5, rel=1e-6), key
+    assert not actual._sign_metrics[mode]
+    assert broken._metrics[mode]["positive/logps_mean"] != pytest.approx(
+        expected._metrics[mode]["positive/logps_mean"], abs=1e-3
+    ), "fixture lost reduction sensitivity"
 
 
 @pytest.mark.parametrize("cp_size", [2, 4])
@@ -87,13 +79,27 @@ def test_drained_metrics_name_the_policy_gradient_term_not_a_reward():
         ref_logps=logps - 0.1,
         ref_logps_unclamped=logps - 0.1,
     )
-    trainer._buffer_sign_metrics(sample_values, advantages, torch.ones_like(logps))
-    trainer._drain_sign_metrics("train")
+    trainer._record_sign_metrics(sample_values, advantages, torch.ones_like(logps))
+    trainer._sign_metrics["train"].flush(trainer._metrics["train"])
     metrics = trainer._metrics["train"]
     assert not any("rewards" in key for key in metrics), sorted(metrics)
     # The pre-KL advantage-weighted log-prob, log π · A, averaged over each row's tokens.
     assert metrics["positive/pg_objective_mean"] == [pytest.approx(-0.75)]
     assert metrics["negative/pg_objective_mean"] == [pytest.approx(1.125)]
+
+
+def test_a_pipeline_batchs_filler_rows_are_no_samples():
+    """PP pads a batch with all-ignore rows of zero advantage; read as real they would be zero-valued positive
+    samples, pulling the positive mean and minimum toward 0."""
+    values = {key: torch.tensor([[-2.0, -1.0], [-3.0, -0.5], [0.0, 0.0]]) for key in ("logps", "pg_objective")}
+    advantages, mask = torch.tensor([1.0, 0.5, 0.0]), torch.tensor([[1, 1], [1, 1], [0, 0]])
+    padded, alone = _trainer(), _trainer()
+    padded._record_sign_metrics(values, advantages, mask, rows=torch.tensor([True, True, False]))
+    alone._record_sign_metrics({key: value[:2] for key, value in values.items()}, advantages[:2], mask[:2])
+    for trainer in (padded, alone):
+        trainer._sign_metrics["train"].flush(trainer._metrics["train"])
+    assert padded._metrics["train"] == alone._metrics["train"]
+    assert padded._metrics["train"]["positive/logps_max"] == [-1.5]
 
 
 if __name__ == "__main__":

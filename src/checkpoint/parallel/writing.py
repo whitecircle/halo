@@ -34,7 +34,7 @@ from src.runtime.ranks import is_global_main_process
 logger = logging.getLogger(__name__)
 
 # One decoder layer is the chunk a streamed save converts as a unit; see :func:`conversion_chunk_key`.
-_LAYER_CHUNK_RE = re.compile(rf"^(.*\.(?:{'|'.join(DECODER_LAYER_LIST_ATTRS)})\.\d+)\.")
+_LAYER_CHUNK_RE = re.compile(rf"^((?:.*\.)?(?:{'|'.join(DECODER_LAYER_LIST_ATTRS)})\.\d+)\.")
 
 
 def saveable_items(
@@ -49,25 +49,9 @@ def saveable_items(
     )
 
 
-def gather_saveable_tensors(
-    model: nn.Module, *, retain: bool, items: Iterable[tuple[str, torch.Tensor]] | None = None
-) -> dict[str, torch.Tensor]:
-    """COLLECTIVE: everything a gathered save writes for ``model`` — :func:`saveable_items` and the GptOss
-    sinks — resolved, kept only where ``retain``.
-
-    Non-persistent buffers (rotary caches, masks) are recomputed on load and stay out. GptOss under
-    FA2 drops ``sinks`` from ``named_parameters()``; they are re-emitted neutralized so the reload
-    matches, and a live sink is left alone.
-    """
-    state_dict = resolve_retained(saveable_items(model, items), retain=retain)
-    if retain:
-        for name, tensor in neutralized_gpt_oss_sinks(model).items():
-            state_dict.setdefault(name, tensor)
-    return state_dict
-
-
 def conversion_chunk_key(name: str) -> str:
-    """The group ``name`` must be save-converted with: its decoder-layer prefix, else ``""``.
+    """The group ``name`` must be save-converted with: its decoder-layer prefix (``model.layers.3``, or
+    ``layers.3`` on a bare backbone), else ``""``.
 
     :func:`~src.checkpoint.hub_layout.revert_to_load_layout` cannot take one tensor at a time: a reverse
     fusion (a vision tower's q/k/v into ``in_proj``, a per-expert hub split) needs every source key of
@@ -83,11 +67,14 @@ def chunked_saveable_tensors(
     *,
     retain: bool,
     items: Iterable[tuple[str, torch.Tensor]] | None = None,
+    fold: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> Iterator[dict[str, torch.Tensor]]:
-    """COLLECTIVE: :func:`gather_saveable_tensors`, yielded in conversion-closed chunks instead of one dict.
+    """COLLECTIVE: :func:`saveable_items` and the GptOss sinks, resolved in conversion-closed chunks and kept
+    only where ``retain``.
 
     The chunk plan is built from names only, so every rank builds the same one; the writer's host RAM
-    peaks at one decoder layer plus one pending shard rather than the whole model.
+    peaks at one decoder layer plus one pending shard rather than the whole model. ``fold`` derives each
+    tensor's saved value (an out-of-place LoRA fold) inside its chunk's gather, never all up front.
     """
     pairs = list(saveable_items(model, items))
     # The sinks FA2 dropped from named_parameters() join the walk in their own layer's chunk rather
@@ -98,7 +85,7 @@ def chunked_saveable_tensors(
     for name, tensor in pairs:
         groups.setdefault(conversion_chunk_key(name), []).append((name, tensor))
     for group in groups.values():
-        yield resolve_retained(group, retain=retain)
+        yield resolve_retained(group if fold is None else ((name, fold(t)) for name, t in group), retain=retain)
 
 
 def gather_hand_sliced_params(

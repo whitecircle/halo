@@ -234,21 +234,24 @@ def test_render_omits_effort_when_unset():
 def test_episode_generation_tokens_mean_max_p90():
     # Guards the aggregation the trainer logs as episode/generation_tokens{,_max,_p90}.
     vals = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]  # each = one episode's total (summed over turns)
-    episodes = [
-        {
-            "latency": 0.0,
-            "requests_expired_in_sync": 0,
-            "generation_tokens": v,
-            "turns": 1,
-            "success": True,
-            "truncated": False,
-            "error": False,
-        }
+    results = [
+        SimpleNamespace(
+            latency=0.0,
+            requests_expired_in_sync=0,
+            generation_tokens=v,
+            episode_length=1,
+            success=True,
+            trajectory=None,
+            error=None,
+            total_reward=0.0,
+            metrics={},
+        )
         for v in vals
     ]
-    host = SimpleNamespace(_sound_truncation_alarm=lambda rate, mode: None)
-    m = defaultdict(list)
-    DistributedAsyncEnvironmentalGRPOTrainer._log_episode_metrics(host, m, episodes, "train")
+    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    host._metrics = {"train": defaultdict(list)}
+    host._log_rollout_metrics(results, "train", [[] for _ in vals])
+    m = host._metrics["train"]
     assert m["episode/generation_tokens"] == [55.0]  # mean, NOT the max/last
     assert m["episode/generation_tokens_max"] == [100.0]
     # nearest-rank p90 of 10 sorted values -> ceil(0.9 * 10) = 9th = 90

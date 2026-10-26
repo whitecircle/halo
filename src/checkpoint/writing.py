@@ -1,5 +1,5 @@
 """Model weight files: save-dtype casts, the gathered-state normalization, the stale-file sweeps and the merged
-index, the whole-dict and streaming shard writers, and the tied-embedding reconcile."""
+index, the streaming shard writer, and the tied-embedding reconcile."""
 
 from __future__ import annotations
 
@@ -11,18 +11,13 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
-from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.serialization._base import parse_size_to_int
 
 from src.checkpoint.atomic import save_safetensors_file
-from src.checkpoint.config_export import save_model_config
 from src.checkpoint.format import (
-    DEFAULT_MAX_SHARD_SIZE,
-    LEGACY_WEIGHTS_FILE,
     SAFETENSORS_FAMILY_GLOB,
     SAFETENSORS_INDEX_FILE,
     SAFETENSORS_METADATA,
-    SAFETENSORS_SHARD_PATTERN,
     SAFETENSORS_WEIGHTS_FILE,
     STREAM_PART_PREFIX,
     hf_shard_filename,
@@ -151,26 +146,6 @@ def publish_streamed_parts(
         remove_stale_checkpoint_files(output_dir, set(final_names.values()))
 
 
-def save_sharded_state_dict(
-    state_dict: dict[str, torch.Tensor], output_dir: str, max_shard_size: str = DEFAULT_MAX_SHARD_SIZE
-) -> None:
-    """Write a gathered state dict as HF-standard sharded safetensors, split by HF's own splitter. Shards
-    land as streamed parts renamed only once all are on disk, so a re-save dying midway cannot mix two
-    saves under one index."""
-    state_dict = {k: (v.contiguous() if torch.is_tensor(v) else v) for k, v in state_dict.items()}
-    split = split_torch_state_dict_into_shards(
-        state_dict, filename_pattern=SAFETENSORS_SHARD_PATTERN, max_shard_size=max_shard_size
-    )
-    final_names: dict[str, str] = {}
-    for part_index, (filename, keys) in enumerate(split.filename_to_tensors.items(), start=1):
-        part = stream_part_filename(STREAM_PART_PREFIX, part_index)
-        save_safetensors_file(
-            {k: state_dict[k] for k in keys}, os.path.join(output_dir, part), metadata=SAFETENSORS_METADATA
-        )
-        final_names[part] = filename
-    publish_streamed_parts(output_dir, final_names, split.tensor_to_filename, split.metadata)
-
-
 def _unique_key_by_suffix(state_dict: dict, suffix: str) -> str | None:
     """The one key equal to ``suffix`` or ending in ``.{suffix}``; ``None`` when absent or ambiguous."""
     matches = [k for k in state_dict if k == suffix or k.endswith(f".{suffix}")]
@@ -206,31 +181,6 @@ def reconcile_tie_word_embeddings(model, state_dict: dict) -> None:
             f"{lm_key} and {emb_key} diverged during training; "
             f"saving config with tie_word_embeddings=False for checkpoint consistency."
         )
-
-
-def write_gathered_checkpoint(
-    model: torch.nn.Module, state_dict: dict, output_dir: str, max_shard_size: str = DEFAULT_MAX_SHARD_SIZE
-) -> None:
-    """Write a whole gathered state dict as HF-standard safetensors, with its config. Save rank only; the
-    ``.bin`` fallback is this path's alone, since only it still holds the whole dict."""
-    reconcile_tie_word_embeddings(model, state_dict)
-    save_model_config(model, output_dir)
-    # EP-gathered dicts never arrive here: their saver's gather already emits hub-layout expert keys.
-    state_dict = normalize_gathered_state_dict(model, state_dict)
-    try:
-        save_sharded_state_dict(state_dict, output_dir, max_shard_size=max_shard_size)
-    except Exception as e:
-        logger.warning(f"sharded safetensors save failed: {e}, using pytorch format")
-        # The .bin lands before the sweep: resume prefers an index over it, but sweeping first would
-        # let a second failure destroy the only checkpoint the directory held.
-        torch.save(state_dict, os.path.join(output_dir, LEGACY_WEIGHTS_FILE))
-        try:
-            remove_stale_checkpoint_files(output_dir, keep=set())
-        except OSError as sweep_error:
-            logger.warning(
-                f"stale safetensors sweep after the .bin fallback failed: {sweep_error} — "
-                f"resume prefers an index over the .bin, so this directory may resume the OLD weights"
-            )
 
 
 class StreamingShardWriter:

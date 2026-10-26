@@ -486,7 +486,7 @@ def test_example_parallelism_fits_the_model_shape(config):
     )
 
 
-# Knobs the VLM data path refuses outright (sft.py::_prepare_vlm_data, prepare_vlm_dataset).
+# Knobs the VLM data path refuses outright (sft_rules.reject_unsupported_vlm_sft_options, prepare_vlm_dataset).
 _VLM_REFUSED_KNOBS = ("packing", "padding_free", "train_on_last_assistant_only", "interleaved_thinking")
 
 

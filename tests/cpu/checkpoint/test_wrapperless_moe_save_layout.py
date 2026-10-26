@@ -20,7 +20,6 @@ recorded (``None``: built from its config), as in transformers' own revert.
 """
 
 import os
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -39,7 +38,6 @@ PartialState()  # save_model_config logs through accelerate's logger
 from src.checkpoint.hub_layout import save_pretrained_layout
 from src.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint
 from src.checkpoint.reading import load_full_state_dict
-from src.checkpoint.writing import write_gathered_checkpoint
 from tests.common.checkpoint_io import save_context, written_keys
 from tests.common.models import TINY_QWEN35_MOE_CONFIG
 
@@ -77,10 +75,8 @@ def _write_fused_checkpoint(model, output_dir: str) -> None:
     )
 
 
-def _write_gathered(model, output_dir: str) -> None:
-    ctx = SimpleNamespace(has_ep_layers=False, max_shard_size="5GB")
-    state_dict = {k: v.clone() for k, v in model.state_dict().items()}
-    write_gathered_checkpoint(model, state_dict, output_dir, ctx.max_shard_size)
+def _save_fsdp2(model, output_dir: str) -> None:
+    save_fsdp2_checkpoint(save_context(model), output_dir)
 
 
 def _assert_hub_expert_layout(written: set[str]) -> None:
@@ -98,8 +94,7 @@ def test_wrapperless_save_writes_hub_expert_layout(tmp_path):
     # (and this test) must be re-decided, not silently skipped.
     assert any(k.endswith("mlp.experts.gate_up_proj") for k in state_dict), "premise: live module is fused"
 
-    ctx = SimpleNamespace(has_ep_layers=False, max_shard_size="5GB")
-    write_gathered_checkpoint(model, state_dict, str(tmp_path), ctx.max_shard_size)
+    _save_fsdp2(model, str(tmp_path))
 
     _assert_hub_expert_layout(written_keys(str(tmp_path)))
 
@@ -123,7 +118,7 @@ def test_a_fused_layout_source_writes_the_layout_it_read(tmp_path):
     conversions = model._weight_conversions
     assert conversions == [], f"premise: a fused-layout source uses no converter, got {conversions!r}"
 
-    _write_gathered(model, str(out))
+    _save_fsdp2(model, str(out))
 
     assert written_keys(str(out)) == written_keys(str(source)), "the save must write the layout the load read"
     # The model keeps training and saving after this call; a later save must see what the load left.
@@ -148,7 +143,7 @@ def test_a_hub_layout_source_keeps_the_conversions_its_load_used(tmp_path):
     conversions = model._weight_conversions
     assert conversions, "premise: a hub-layout load fuses the experts, so it USES converters"
 
-    _write_gathered(model, str(out))
+    _save_fsdp2(model, str(out))
 
     _assert_hub_expert_layout(written_keys(str(out)))
     assert model._weight_conversions is conversions
@@ -191,18 +186,14 @@ def test_the_gathered_tp_writer_applies_the_save_dtype(tmp_path):
 
 
 def test_a_model_without_a_config_still_gets_the_normalized_safetensors_artifact(tmp_path):
-    """Only the config write is gated on the model carrying a config. A ``torch.save`` short-circuit
-    there would hand one caller a raw ``pytorch_model.bin`` at raw fp32 while every other gathered
-    save writes safetensors at the save dtype — a silent per-path format and dtype split, in the one
-    writer whose reason to exist is that the two cannot diverge. (The hub expert layout is the one
-    thing such a model cannot get: the revert reads its config, and warns when it cannot.)"""
+    """Only the config write is gated on the model carrying a config: the weights still export at the
+    save dtype. (The hub expert layout is the one thing such a model cannot get: the revert reads its
+    config, and warns when it cannot.)"""
     model = _tiny_qwen3_moe()
-    state_dict = {k: v.clone() for k, v in model.state_dict().items()}
     del model.config  # a stage-like module: the tree, and its dtypes, without a config
 
-    write_gathered_checkpoint(model, state_dict, str(tmp_path))
+    _save_fsdp2(model, str(tmp_path))
 
-    assert not (tmp_path / "pytorch_model.bin").exists(), "a config-less model must not fall back to .bin"
     state = load_full_state_dict(str(tmp_path))
     assert state["model.embed_tokens.weight"].dtype == torch.bfloat16, "weights must export at the save dtype"
     norm_key = next(k for k in state if k.endswith("input_layernorm.weight"))
@@ -240,10 +231,6 @@ _SOURCES = {
 }
 
 
-def _save_fsdp2(model, output_dir: str) -> None:
-    save_fsdp2_checkpoint(save_context(model), output_dir)
-
-
 def _save_tp(model, output_dir: str) -> None:
     save_tp_checkpoint(save_context(model), output_dir)
 
@@ -256,7 +243,6 @@ def _save_pretrained(model, output_dir: str) -> None:
 _SAVERS = {
     "fsdp2": _save_fsdp2,
     "tp": _save_tp,
-    "gathered": _write_gathered,
     "save_pretrained": _save_pretrained,
 }
 

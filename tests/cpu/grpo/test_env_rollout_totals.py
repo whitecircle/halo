@@ -3,8 +3,8 @@
 
 ``RolloutManager`` is built on every rank and each one collects its own DP shard, so counters kept
 manager-side under-report a 512-GPU job by ~512x while ``async/total_rollouts`` reads as
-authoritative. The totals are therefore accumulated from the gathered-global per-episode population
-:meth:`_log_rollout_metrics` already builds for its means — no second collective.
+authoritative. The totals are therefore accumulated from the world sums :meth:`_log_rollout_metrics`
+already folds for its means — no second collective.
 
 Run::
 
@@ -19,6 +19,7 @@ from collections import defaultdict
 import pytest
 
 import src.trainers.grpo.environmental.rollout_metrics as rm
+from src.trainers import world_metrics
 
 
 class _MetricsHost(rm.RolloutMetricsMixin):
@@ -43,9 +44,8 @@ def _episode(latency: float, tokens: int, requests_expired_in_sync: int = 0):
 
 
 def _fake_dp_world(monkeypatch, world: int):
-    """Make ``gather_object`` behave like a ``world``-rank all-gather of identical shards."""
-    monkeypatch.setattr(rm, "gather_object", lambda values: [item for _ in range(world) for item in values])
-    monkeypatch.setattr(rm, "is_multi_rank_run", lambda: world > 1)
+    """Make the metrics flush gather ``world`` ranks holding this rank's identical shard."""
+    monkeypatch.setattr(world_metrics, "_gathered", lambda payload, group: [payload] * world)
 
 
 def _log_round(host, results: list, mode: str = "train") -> None:
@@ -111,6 +111,23 @@ def test_requests_expired_in_sync_is_the_worlds_count_not_a_mean(monkeypatch) ->
     _log_round(host, [_episode(1.0, 10, 1), _episode(1.0, 10, 0), _episode(1.0, 10, 2)])
 
     assert host._metrics["train"]["async/requests_expired_in_sync"] == [6.0]
+
+
+def test_an_environment_metric_named_like_a_total_stays_the_environments_mean(monkeypatch) -> None:
+    """The totals fold under the trainer's own ``async/total_*`` names: an environment reporting a bare
+    ``generation_tokens`` or ``rollouts`` logs its own mean and leaves the totals alone."""
+    _fake_dp_world(monkeypatch, world=2)
+    host = _MetricsHost()
+    episode = _episode(1.0, 10)
+    episode.metrics = {"generation_tokens": 7.0, "rollouts": 3.0}
+
+    _log_round(host, [episode])
+
+    logged = host._metrics["train"]
+    assert logged["generation_tokens"] == [7.0] and logged["rollouts"] == [3.0]
+    assert not any(key.startswith("async/total_") for key in logged), sorted(logged)
+    totals = host.cumulative_rollout_metrics()
+    assert totals["async/total_rollouts"] == 2.0 and totals["async/total_generation_tokens"] == 20.0
 
 
 if __name__ == "__main__":

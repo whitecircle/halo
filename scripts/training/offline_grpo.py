@@ -16,7 +16,7 @@ from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
 from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content
 from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
-from src.data.pipeline.preferences import split_rendered_completion
+from src.data.pipeline.prompt_completion import render_prompt_completions
 from src.data.pipeline.text_rows import prepare_generative_row
 from src.data.vlm_routing import reject_image_columns
 from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
@@ -42,36 +42,18 @@ from src.trainers.grpo.offline.offline_rules import reject_unsupported_reference
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 
-def build_chat_template_row_fn(tokenizer, tools_field: str | None):
-    """Row transform rendering ``prompt``/``completions`` message lists to text.
-
-    Completions are rendered as ``template(prompt + completion)`` minus the rendered-prompt prefix,
-    not standalone: strict templates (Qwen3.5) raise on assistant-only message lists, and
-    BOS-emitting templates would inject a mid-sequence BOS into every completion.
-
-    Offline GRPO is text-only, so an image content part is refused per row rather than rendered as
-    placeholder tokens with no pixels behind them.
-    """
-
-    def apply_chat_templates(row):
-        template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=tools_field)
-        prompt_messages = row["prompt"]
-        reject_image_content(prompt_messages, "offline GRPO field 'prompt'")
-        for completion in row["completions"]:
-            reject_image_content(completion, "offline GRPO field 'completions'")
-        prompt_text = tokenizer.apply_chat_template(prompt_messages, tokenize=False, **template_kwargs)
-        row["completions"] = [
-            split_rendered_completion(
-                prompt_text,
-                tokenizer.apply_chat_template(prompt_messages + completion, tokenize=False, **template_kwargs),
-                "completions",
-            )
-            for completion in row["completions"]
-        ]
-        row["prompt"] = prompt_text
-        return row
-
-    return apply_chat_templates
+def render_offline_grpo_row(row, tokenizer, tools_field: str | None):
+    """A row's ``prompt`` and ``completions`` message lists rendered to text (:func:`render_prompt_completions`)."""
+    reject_image_content(row["prompt"], "offline GRPO field 'prompt'")
+    for completion in row["completions"]:
+        reject_image_content(completion, "offline GRPO field 'completions'")
+    template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=tools_field)
+    row["prompt"], row["completions"] = render_prompt_completions(
+        partial(tokenizer.apply_chat_template, tokenize=False, **template_kwargs),
+        row["prompt"],
+        [("completions", completion) for completion in row["completions"]],
+    )
+    return row
 
 
 def _load_kl_reference(
@@ -172,16 +154,12 @@ def main():
 
     log_model_info(model, tokenizer)
 
-    apply_chat_templates = build_chat_template_row_fn(tokenizer, args.tools_field)
-
-    chat_template_cache_extras = {"tools_field": args.tools_field}
     map_kwargs = {"num_proc": resolve_map_num_proc(offline_grpo_config.dataset_num_proc)}
 
     ds_processed = coordinated_map(
         ds,
-        apply_chat_templates,
+        partial(render_offline_grpo_row, tokenizer=tokenizer, tools_field=args.tools_field),
         desc="Applying chat templates",
-        cache_key_extras=chat_template_cache_extras,
         **map_kwargs,
     )
 
@@ -196,7 +174,6 @@ def main():
                 tools_field=args.tools_field,
             ),
             desc="Preparing generation dataset",
-            cache_key_extras=chat_template_cache_extras,
             **map_kwargs,
         )
         if args.generate_eval_examples

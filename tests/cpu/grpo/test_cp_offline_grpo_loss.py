@@ -1,7 +1,6 @@
 """The CP trainer consumes right-padded labels and raw checkpointed KL scores."""
 
 import datetime
-from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +17,7 @@ from src.data.collators.offline_grpo import (
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from src.trainers.world_metrics import WorldMetrics
 from tests.common.gloo import run_gloo_ranks
 
 _KL_SCORES = [[-2.0, -2.3, -1.8, -2.2, -2.6, -1.7, -3.2], [-1.2, -2.7, -3.1, -1.9, -2.8, -1.5, -2.4]]
@@ -60,7 +60,7 @@ def _trainer(logps, *, beta: float, loss_type: str):
     trainer.loss_type = loss_type
     trainer.max_completion_length = 4
     trainer.policy_gradient_formulation = "reinforce"
-    trainer._sign_metric_buffer = {"train": defaultdict(list), "eval": defaultdict(list)}
+    trainer._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
     trainer._cp_chunked_logps = lambda model, ids, mask, labels: (logps, labels[:, 1:])
     return trainer
 

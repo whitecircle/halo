@@ -97,7 +97,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.models.peft_adapters import lora_fold_targets
 from src.runtime import filesystem
 from src.trainers.embedding.embedding_rules import reject_modules_outside_backbone
-from src.trainers.embedding.injected_lora import folded_backbone_items, has_injected_lora
+from src.trainers.embedding.injected_lora import folded_backbone_chunks, has_injected_lora
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import fake_process_group_mesh
@@ -754,7 +754,7 @@ def test_the_fold_keeps_a_backbones_own_lora_parameters_and_trains_only_the_inje
     _lora_model(run.base, seed=1, model=model)
     backbone = model[0].auto_model
 
-    written = dict(folded_backbone_items(backbone))
+    written = {key for chunk in folded_backbone_chunks(backbone, retain=True) for key in chunk}
 
     assert has_injected_lora(backbone)
     assert all(name in written for name in native), "the fold dropped the backbone's own LoRA factors"

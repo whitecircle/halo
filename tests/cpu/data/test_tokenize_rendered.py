@@ -18,12 +18,12 @@ Usage:
 """
 
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 from datasets import Dataset, DatasetDict
 
 from src.data.pipeline.chat_render import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
+from src.entrypoints.data_setup import prepare_chat_text_split
 from tests.common.repo import load_script_module
 
 BOS_ID = 1
@@ -473,14 +473,14 @@ def test_classification_row_skips_the_unlabeled_sentinel_in_a_multi_label_row(se
     assert out["label"] == [0.0, 0.0, 1.0]
 
 
-def test_teacher_distill_text_rows_are_length_filtered_on_the_ids_they_train_on():
-    """The distillation text path drops an over-length conversation by the tokenization it trains on.
+def test_chat_text_rows_are_length_filtered_on_the_ids_they_train_on():
+    """The chat-text prepare step (SFT, teacher distillation) drops an over-length conversation by the
+    tokenization it trains on.
 
     Measuring the rendered text with a bare ``tokenizer(text)`` counts the post-processor's BOS on
     top of the template's (gemma-3; Zaya also its doubled terminator), so a conversation that exactly
     fills ``max_length`` was dropped as over-length.
     """
-    module = load_script_module("scripts/training/distillation/teacher_distill.py", "halo_teacher_distill_text_path")
     tok = BosTokenizer()
     fits = [{"role": "user", "content": "one two"}, {"role": "assistant", "content": "three"}]
     too_long = [{"role": "user", "content": "one two three four"}, {"role": "assistant", "content": "five six"}]
@@ -498,10 +498,14 @@ def test_teacher_distill_text_rows_are_length_filtered_on_the_ids_they_train_on(
     )
     training_config = SimpleNamespace(dataset_num_proc=1, max_length=len(trained_ids))
 
-    with mock.patch.object(module, "_text_distill_collator"):
-        train, test, _ = module._prepare_text_distill_data(
-            DatasetDict({"train": split, "test": split}), args, training_config, tok, None
-        )
+    train, test = prepare_chat_text_split(
+        DatasetDict({"train": split, "test": split}),
+        tok,
+        args,
+        training_config,
+        desc="Processing dataset",
+        use_padding=False,
+    )
 
     for rows in (train, test):
         assert rows["input_ids"] == [trained_ids], f"expected only the fitting row, as trained: {rows['input_ids']}"

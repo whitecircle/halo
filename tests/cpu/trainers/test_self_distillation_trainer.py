@@ -83,16 +83,23 @@ def _trainer(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_c
     trainer.state = types.SimpleNamespace(global_step=4, max_steps=10)
     trainer._warned_empty_labels = True
     trainer._vision_reuse_setup, trainer._vision_reuse_active = True, False
+    # Every (metrics, train_eval, rows) the trainer stores, passed on to StoredMetricsMixin's own store.
+    trainer.stored = []
+    mixin_store = trainer.store_metrics
+    trainer.store_metrics = lambda metrics, train_eval="train", rows=1: (
+        trainer.stored.append((metrics, train_eval, rows)),
+        mixin_store(metrics, train_eval, rows),
+    )
     return trainer
 
 
 def _stored(trainer, train_eval: str = "train") -> dict:
-    """The latest value of each metric in StoredMetricsMixin's buffer, the one ``log`` drains.
+    """The latest value of each metric the trainer stored, the one ``log`` folds.
 
-    Read through the mixin rather than a stub, so a trainer that stops storing through it (or stops
-    inheriting it) fails here. Each entry is ``(value, rows)``.
+    Recorded on the way into the mixin's ``store_metrics``, so a trainer that stops storing through it (or
+    stops inheriting it) fails here.
     """
-    return {key: entries[-1][0] for key, entries in trainer._stored_metrics[train_eval].items()}
+    return {key: value for metrics, mode, _ in trainer.stored if mode == train_eval for key, value in metrics.items()}
 
 
 def _inputs():
@@ -166,7 +173,7 @@ def test_the_loss_is_sft_plus_scheduled_opd_plus_the_reference_anchor(confidence
     assert all(not value.requires_grad for value in stored.values() if torch.is_tensor(value)), (
         "metrics must be detached"
     )
-    train_rows = {rows for entries in trainer._stored_metrics["train"].values() for _, rows in entries}
+    train_rows = {rows for _, mode, rows in trainer.stored if mode == "train"}
     assert train_rows == {1}, "a train micro-batch weighs 1, whatever its row count"
 
 
@@ -184,7 +191,7 @@ def test_an_eval_split_s_padding_rows_leave_every_term():
     torch.testing.assert_close(stored["sft_loss"], sft)
     torch.testing.assert_close(stored["opd_loss"], opd)
     torch.testing.assert_close(stored["reference_kl"], ref)
-    assert {rows for entries in trainer._stored_metrics["eval"].values() for _, rows in entries} == {2}
+    assert {rows for _, mode, rows in trainer.stored if mode == "eval"} == {2}
 
 
 def test_a_rank_of_eval_padding_alone_scores_zero():

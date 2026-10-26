@@ -35,8 +35,9 @@ fails if a sibling base ever intercepts one.
 Three mixins sit outside that composition, in `src/trainers/`. `StoredMetricsMixin`
 (`stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
 distillation, and SDPG for buffered per-step metric logging. `log` reports
-each metric's row-weighted world mean: one all-reduce of `(Σ value·rows, Σ rows)` per log call, after
-the ranks agree on the key set (a mismatch raises on every rank). `store_metrics(..., rows=n)` weights
+each metric's row-weighted world mean through one `WorldMetrics` flush per log call: one object gather
+carries every rank's `(Σ value·rows, Σ rows)` and its key set, and ranks that stored different keys raise
+on every rank. `store_metrics(..., rows=n)` weights
 a value by the real rows it averages. Every eval store passes `rows=eval_split_rows(n)` (pairs for
 SMPO) and computes its values over those rows — the distillation and SDPG trainers through
 `store_batch_metrics`, which weighs a train micro-batch 1; the eval losses read
@@ -50,6 +51,11 @@ the embedding trainer's eval metrics go into `output.metrics` for best-model tra
 on-policy trainers decouple the completions table from the metric drain. The embedding trainer's
 `eval_embed/*` values are rank 0's per-batch means and count a padded final round's repeated rows
 ([Embedding](../training-methods/embedding.md#what-to-watch)).
+
+`WorldMetrics` (`world_metrics.py`) is the one cross-rank metric accumulator: `StoredMetricsMixin`, SFT's CP
+metrics, offline GRPO's sign metrics and the GRPO step and rollout metrics record rank-local sums into it, and
+one collective per flush derives each world value. `world_sums` is the one-shot form for a value read outside
+a window (the trust-region breaker, the KL clamp fraction, the prefetch and routing-replay counters).
 
 `ModeSetupMixin` dispatches by method, not by mode string: `_apply_ep_fsdp2`,
 `_apply_cp_fsdp2` and `_apply_ep_tp_fsdp2` are called directly from the mode ladder
@@ -458,8 +464,8 @@ applies once for every trainer that declares it.
 ## CP loss and metrics in SFT
 
 `UlyssesModel.forward()` owns the boundary handling and the globally-normalized sum loss
-([the two corrections](../parallelism/context-parallelism.md)); `_cp_metric_row()` mirrors the
-boundary handling for accuracy, and the rows are reduced once per log. `DistributedSFTTrainer` calls base `Trainer.compute_loss`, not
+([the two corrections](../parallelism/context-parallelism.md)); `_record_cp_metrics()` mirrors the
+boundary handling for accuracy into a `WorldMetrics` window that flushes once per log. `DistributedSFTTrainer` calls base `Trainer.compute_loss`, not
 `SFTTrainer.compute_loss`: the TRL version adds metrics that assume logits cover the full sequence,
 but under CP they cover only the local chunk.
 
@@ -486,8 +492,7 @@ The `src/trainers/grpo/` package keeps the online trainer (`online.py`), the `of
 packages, and these shared leaves at the top level: `on_policy.py`, the constructor spine
 (`OnPolicyGRPOInitMixin`) and generation-round geometry (`GenerationRoundMixin`) both on-policy trainers
 compose; `grpo_rules.py`, their construction refusals as pure `reject_*` functions called ahead of TRL's
-constructor; `early_stop.py`; `world_metrics.py`, the step metrics folded from every rank's counts in one
-collective; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
+constructor; `early_stop.py`; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
 `src/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
 `_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
 its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`

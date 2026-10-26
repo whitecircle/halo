@@ -4,7 +4,7 @@
 ``EmbeddingTrainer`` owns one genuine difference from every other trainer: its top-level model is a
 ``SentenceTransformer`` ``nn.Sequential``, so the checkpoint context has to be re-pointed at the
 ``auto_model`` backbone. Everything downstream of that — save dtype, hub expert layout, shard size,
-the ``.bin`` fallback, and the single retaining rank on a gathered save — must come from
+the streamed writer, and the single retaining rank on a gathered save — must come from
 ``save_checkpoint`` and the shared gather/write leaves rather than a local re-implementation. A run
 with nothing to gather is the mixin's save alone, so every save step (reshard, router-balancing
 sidecar, writer) runs once on either branch.
@@ -13,27 +13,52 @@ Run: pytest tests/cpu/trainers/test_embedding_save_routing.py
 """
 
 import contextlib
+import os
+import weakref
 from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
+from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformerTrainer
 
+import src.checkpoint.writing as writing_mod
+import src.models.peft_adapters as peft_adapters
 import src.trainers.checkpointing as checkpointing_mod
+from src.checkpoint.parallel.writing import conversion_chunk_key
+from src.checkpoint.reading import load_full_state_dict
+from src.checkpoint.writing import cast_to_save_dtype, normalize_gathered_state_dict
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.trainers.embedding import trainer as embedding_module
 from src.trainers.embedding.injected_lora import has_injected_lora
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.gloo import run_gloo_ranks
 from tests.common.peft_helpers import randomize_adapters
 
+WORLD_SIZE = 2
 
-class _Backbone(nn.Module):
+
+class _Block(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear = nn.Linear(4, 4, bias=False)
+
+
+class _Backbone(nn.Module):
+    """A linear, then two blocks under ``encoder.layers`` or, as a bare AutoModel holds them, ``layers``."""
+
+    def __init__(self, bare: bool = False):
+        super().__init__()
+        self.linear = nn.Linear(4, 4, bias=False)
+        blocks = nn.ModuleList([_Block(), _Block()])
+        if bare:
+            self.layers = blocks
+        else:
+            self.encoder = nn.Module()
+            self.encoder.layers = blocks
 
 
 class _SharedExpertEPLayer(StubEPLayerBase):
@@ -52,8 +77,8 @@ class _SentenceTransformerLike(nn.Module):
         self.transformer = backbone
 
 
-def _host(*, has_lora: bool = False, is_save_rank: bool = True, max_shard_size: str = "3GB"):
-    backbone = _Backbone()
+def _host(*, has_lora: bool = False, is_save_rank: bool = True, max_shard_size: str = "3GB", bare: bool = False):
+    backbone = _Backbone(bare)
     if has_lora:
         inject_adapter_in_model(LoraConfig(r=2, lora_alpha=8, target_modules=["linear"]), backbone)
         randomize_adapters(backbone, lora_b_only=True)
@@ -133,47 +158,104 @@ def test_gathered_lora_save_retains_only_on_the_writer(monkeypatch, tmp_path):
     ctx = _context(host, monkeypatch)
     seen = {}
 
-    def _gather(model, retain: bool = True, items=None):
+    def _chunks(model, *, retain):
         seen["retain"] = retain
-        return {}
+        return iter(())
 
-    monkeypatch.setattr(embedding_module, "gather_saveable_tensors", _gather)
-    monkeypatch.setattr(embedding_module, "write_gathered_checkpoint", lambda *a, **k: seen.setdefault("wrote", True))
+    monkeypatch.setattr(embedding_module, "folded_backbone_chunks", _chunks)
+    monkeypatch.setattr(
+        embedding_module, "stream_gathered_checkpoint", lambda *a, is_save_rank, **k: seen.update(writes=is_save_rank)
+    )
 
     EmbeddingTrainer._save_distributed_embedding_model(host, ctx, str(tmp_path))
 
-    assert seen["retain"] is False
-    assert "wrote" not in seen  # a non-writer rank runs the collective and nothing else
+    assert seen == {"retain": False, "writes": False}  # a non-writer rank runs the collectives and writes nothing
 
 
-def test_gathered_lora_save_writes_the_fold_through_the_shared_writer(monkeypatch, tmp_path):
-    """The folded tensors must go through ``write_gathered_checkpoint``, under the plain names.
-
-    Writing them straight to ``save_sharded_state_dict`` skips ``normalize_gathered_state_dict``, so an
-    fp32-master run exports fp32 while the same model under EP/TP exports the save dtype, a MoE
-    backbone exports module-fused expert keys vLLM rejects, and there is no ``.bin`` recovery.
-    """
-    host, backbone, _ = _host(has_lora=True, is_save_rank=True)
+@pytest.mark.parametrize("bare", [False, True], ids=["prefixed-layers", "bare-layers"])
+def test_injected_lora_save_streams_the_fold_one_conversion_chunk_at_a_time(monkeypatch, tmp_path, bare):
+    """The fold reaches disk through the streamed writer, normalized one conversion chunk (a decoder block) at a
+    time, so the save rank never holds the whole backbone, under the base model's names at the save dtype."""
+    host, backbone, _ = _host(has_lora=True, bare=bare)
     ctx = _context(host, monkeypatch)
-    layer = backbone.linear
-    expected = layer.base_layer.weight + layer.get_delta_weight("default")
-    assert not torch.equal(expected, layer.base_layer.weight), "premise: the adapter moves its base"
-    written = {}
+    expected = {
+        f"{name}.weight": cast_to_save_dtype((module.base_layer.weight + module.get_delta_weight("default")).detach())
+        for name, module in backbone.named_modules()
+        if isinstance(module, LoraLayer)
+    }
+    chunks = []
 
-    def _write(model, state_dict, output_dir, max_shard_size=None):
-        written["model"] = model
-        written["state_dict"] = state_dict
-        written["max_shard_size"] = max_shard_size
+    def recording(model, chunk, **kwargs):
+        chunks.append({conversion_chunk_key(key) for key in chunk})
+        return normalize_gathered_state_dict(model, chunk, **kwargs)
 
-    monkeypatch.setattr(embedding_module, "write_gathered_checkpoint", _write)
+    monkeypatch.setattr(embedding_module, "normalize_gathered_state_dict", recording)
 
     EmbeddingTrainer._save_distributed_embedding_model(host, ctx, str(tmp_path))
 
-    assert written["model"] is backbone
-    assert written["max_shard_size"] == ctx.max_shard_size
-    assert sorted(written["state_dict"]) == ["linear.weight"]  # adapters folded, base_layer spelling gone
-    assert torch.equal(written["state_dict"]["linear.weight"], expected.detach())
+    layers = "layers" if bare else "encoder.layers"
+    assert chunks == [{""}, {f"{layers}.0"}, {f"{layers}.1"}]
+    written = load_full_state_dict(str(tmp_path))
+    assert written.keys() == expected.keys()  # adapters folded, base_layer spelling gone
+    for key, tensor in expected.items():
+        assert torch.equal(written[key], tensor), key
     assert host.processing_class.saved_to == str(tmp_path)
+
+
+def test_the_injected_lora_save_folds_one_target_at_a_time(monkeypatch, tmp_path):
+    """Each fold is a device copy of its target: folded all up front, every one would be alive at once."""
+    host, _, _ = _host(has_lora=True)
+    ctx = _context(host, monkeypatch)
+    real_fold = peft_adapters.lora_folded
+    alive = made = peak = 0
+
+    def released():
+        nonlocal alive
+        alive -= 1
+
+    def counting_fold(param, layers):
+        nonlocal alive, made, peak
+        folded = real_fold(param, layers)
+        weakref.finalize(folded, released)
+        alive, made = alive + 1, made + 1
+        peak = max(peak, alive)
+        return folded
+
+    monkeypatch.setattr(peft_adapters, "lora_folded", counting_fold)
+
+    EmbeddingTrainer._save_distributed_embedding_model(host, ctx, str(tmp_path))
+
+    assert made == 3, "premise: one fold per adapted linear"
+    assert peak == 1
+
+
+def _enospc(*args, **kwargs):
+    raise OSError(28, "No space left on device")
+
+
+def _failing_write_worker(rank: int, tmp_dir: str) -> None:
+    host, _, _ = _host(has_lora=True, is_save_rank=rank == 0)
+    outcome = "NO RAISE"
+    with pytest.MonkeyPatch.context() as patcher:
+        ctx = _context(host, patcher)
+        patcher.setattr(writing_mod, "save_safetensors_file", _enospc)
+        try:
+            EmbeddingTrainer._save_distributed_embedding_model(host, ctx, tmp_dir)
+        except RuntimeError as error:
+            outcome = str(error)
+    with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
+        fh.write(outcome)
+
+
+def test_a_failed_injected_lora_write_raises_on_every_rank(tmp_path):
+    """No ``pytorch_model.bin`` fallback: a failed write stops every rank rather than leaving a format no
+    other gathered save writes, or stranding the peers."""
+    run_gloo_ranks(_failing_write_worker, WORLD_SIZE, str(tmp_path))
+
+    for rank in range(WORLD_SIZE):
+        outcome = (tmp_path / f"result_{rank}.txt").read_text()
+        assert "No space left on device" in outcome, f"rank {rank}: {outcome}"
+    assert not (tmp_path / "pytorch_model.bin").exists()
 
 
 def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():

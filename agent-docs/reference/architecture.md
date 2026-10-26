@@ -55,7 +55,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/checkpoint/reading.py` | raw checkpoint reads: the layout cascade, the JSON configs, the streaming reader, the partial-checkpoint refusals, the tools' shard walks and header sizing — no model |
 | `src/model_loading/checkpoint_keys.py` | where each checkpoint key lands on the live names, planned once on transformers' rename rules from key names alone (no shard read, no collective), and the conversion mapping it plans with, so a lazy build and a resume read the same keys |
 | `src/checkpoint/hub_layout.py` | the transformers load conversions a save reverts to write the hub's tensor names, and `ModuleLayoutView`, which reads a saved layout under the live names |
-| `src/checkpoint/writing.py` | save-dtype casts, the stale-file sweep, the merged index, the whole-dict and streaming shard writers, the tied-embedding reconcile |
+| `src/checkpoint/writing.py` | save-dtype casts, the stale-file sweep, the merged index, the streaming shard writer, the tied-embedding reconcile |
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules, with no boto3 import |
 | `src/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected; one protocol for both dataset caches, so their crash and staleness semantics cannot drift |
 | `src/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool and the default-bucket helpers |

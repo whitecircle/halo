@@ -1,16 +1,11 @@
 #!/usr/bin/env python
-"""SMPO percentile clipping and prompt/completion boundary tokenization.
+"""SMPO percentile clipping.
 
-Two mechanisms with no other coverage:
-
-* the percentile clip bound is a FLOOR, so it must not carry gradient — left differentiable, every
-  clamped token routes its gradient back through the quantile into the single element that IS the
-  quantile, handing that one token ``clamped_count`` times the gradient (the opposite of the
-  outlier suppression the clip exists for), and disagreeing with the CP path where the all-gather
-  detaches the bound anyway;
-* when the tokenizer merges the last prompt token with the first completion character, the split
-  point moves back one token — and the PROMPT must move with it, because the trainer concatenates
-  ``prompt_input_ids ++ completion_input_ids`` verbatim.
+The percentile clip bound is a FLOOR, so it must not carry gradient — left differentiable, every
+clamped token routes its gradient back through the quantile into the single element that IS the
+quantile, handing that one token ``clamped_count`` times the gradient (the opposite of the outlier
+suppression the clip exists for), and disagreeing with the CP path where the all-gather detaches the
+bound anyway.
 """
 
 from types import SimpleNamespace
@@ -19,7 +14,6 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.data.pipeline.preferences import tokenize_preference_row
 from src.trainers.preference.smpo_objective import SMPOObjective, cp_quantile
 from tests.common.gloo import run_gloo_ranks
 
@@ -218,88 +212,6 @@ def test_cp_sliced_clip_matches_the_whole_sequence_clip(tmp_path):
     run_gloo_ranks(_cp_clip_worker, CP_WORLD_SIZE, out)
     with open(out) as fh:
         assert fh.read() == "PASS"
-
-
-class _MergingTokenizer:
-    """Char-level tokenizer where 'a'+'b' merges into a single token — the BPE boundary case."""
-
-    bos_token_id = None
-    eos_token_id = None
-
-    def __call__(self, text, add_special_tokens=False):
-        ids, i = [], 0
-        while i < len(text):
-            if text[i : i + 2] == "ab":
-                ids.append(1000)  # the merged token
-                i += 2
-            else:
-                ids.append(ord(text[i]))
-                i += 1
-        return {"input_ids": ids}
-
-
-def _assembled(row):
-    return row["prompt_input_ids"] + row["chosen_input_ids"]
-
-
-def _assembled_rejected(row):
-    return row["prompt_input_ids"] + row["rejected_input_ids"]
-
-
-def test_boundary_merge_keeps_prompt_plus_completion_equal_to_the_true_render():
-    """prompt_input_ids ++ completion_input_ids must equal tok(prompt + completion), exactly."""
-    tokenizer = _MergingTokenizer()
-    prompt, chosen, rejected = "xya", "bz", "bq"
-
-    row = tokenize_preference_row(
-        {"prompt": prompt, "chosen": chosen, "rejected": rejected},
-        tokenizer,
-        max_prompt_length=None,
-        max_completion_length=None,
-        truncation_mode="keep_start",
-    )
-
-    assert _assembled(row) == tokenizer(prompt + chosen)["input_ids"], (
-        "chosen assembles to a different token sequence than tokenizing prompt+chosen directly — "
-        "the merged boundary token is duplicated"
-    )
-    assert _assembled_rejected(row) == tokenizer(prompt + rejected)["input_ids"]
-
-
-def test_boundary_merge_on_one_side_only_keeps_both_prompts_identical():
-    """Chosen and rejected share one prompt field; a per-side split would condition them differently."""
-    tokenizer = _MergingTokenizer()
-    # 'b' merges with the prompt's trailing 'a'; 'q' does not.
-    prompt, chosen, rejected = "xya", "bz", "qq"
-
-    row = tokenize_preference_row(
-        {"prompt": prompt, "chosen": chosen, "rejected": rejected},
-        tokenizer,
-        max_prompt_length=None,
-        max_completion_length=None,
-        truncation_mode="keep_start",
-    )
-
-    assert _assembled(row) == tokenizer(prompt + chosen)["input_ids"]
-    assert _assembled_rejected(row) == tokenizer(prompt + rejected)["input_ids"]
-
-
-def test_no_merge_leaves_the_split_untouched():
-    """The common (non-merging) path must be unchanged."""
-    tokenizer = _MergingTokenizer()
-    prompt, chosen, rejected = "xyz", "qq", "rr"
-
-    row = tokenize_preference_row(
-        {"prompt": prompt, "chosen": chosen, "rejected": rejected},
-        tokenizer,
-        max_prompt_length=None,
-        max_completion_length=None,
-        truncation_mode="keep_start",
-    )
-
-    assert row["prompt_input_ids"] == tokenizer(prompt)["input_ids"]
-    assert _assembled(row) == tokenizer(prompt + chosen)["input_ids"]
-    assert _assembled_rejected(row) == tokenizer(prompt + rejected)["input_ids"]
 
 
 if __name__ == "__main__":

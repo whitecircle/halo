@@ -1,10 +1,8 @@
 """Rollout diagnostics for environmental GRPO: completion logs and per-episode metrics, every number over the
-GATHERED-GLOBAL episode population."""
+world's episode population."""
 
 import json
 import logging
-import math
-from collections import defaultdict
 from collections.abc import Mapping, Sequence
 
 import torch
@@ -19,6 +17,7 @@ from src.rewards.terms import REWARD_COMPONENT_PREFIX
 from src.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
 from src.runtime.ranks import is_global_main_process, is_multi_rank_run
 from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
+from src.trainers.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -46,17 +45,6 @@ def _episode_info_json(trajectory: Trajectory | None, key: str) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
 
-def _percentile(values: list[float], q: float) -> float:
-    """Nearest-rank percentile (``q`` in [0, 100]) of a non-empty numeric list."""
-    ordered = sorted(values)
-    rank = max(1, min(len(ordered), math.ceil(q / 100.0 * len(ordered))))
-    return float(ordered[rank - 1])
-
-
-def _mean(values: list[float]) -> float:
-    return sum(values) / len(values)
-
-
 def group_solve_counts(solved: Sequence[bool | None], group_size: int) -> tuple[int, int, int, int]:
     """``(groups, all_pass, all_fail, any_pass)`` over consecutive groups of ``group_size`` solve verdicts, each
     group judged on the episodes that carry one (not ``None``); a group with none is not counted."""
@@ -74,8 +62,7 @@ def group_solve_counts(solved: Sequence[bool | None], group_size: int) -> tuple[
 class RolloutMetricsMixin:
     """Completion logging and rollout diagnostics for the environmental GRPO trainer; no training signal."""
 
-    # Cumulative totals over the gathered-global population, never this rank's shard; ``+=`` rebinds per
-    # instance.
+    # Cumulative totals over the world's population, never this rank's shard; ``+=`` rebinds per instance.
     _total_rollouts = 0
     _total_rollout_latency = 0.0
     _total_generation_tokens = 0
@@ -150,36 +137,59 @@ class RolloutMetricsMixin:
 
     def _log_rollout_metrics(self, results: list[RolloutResult], mode: str, reasoning_tokens: list[list[int]]):
         """COLLECTIVE. Log per-rollout diagnostics grouped by prefix (``async/*``, ``episode/*``, ``outcome/*``,
-        ``reward/*``), means over the gathered-global population of this rank's ``results``.
+        ``reward/*``, ``<slice>/<value>/*``), world values over every rank's ``results`` in one flush.
         ``reasoning_tokens`` is each episode's per-turn count, taken once for the step."""
-        # Lightweight, picklable per-episode summary (the full RolloutResult carries a heavy trajectory).
-        local = [
-            {
-                "latency": r.latency,
-                "generation_tokens": r.generation_tokens,
-                "requests_expired_in_sync": r.requests_expired_in_sync,
-                "turns": r.episode_length,
-                "success": bool(r.success),
-                "truncated": bool(r.trajectory and r.trajectory.truncated),
-                "error": bool(r.error),
-                "total_reward": r.total_reward,
-                "slices": self._episode_slices(r.trajectory),
-                "reasoning_tokens": sum(tokens),
-                "metrics": r.metrics,
-            }
-            for r, tokens in zip(results, reasoning_tokens, strict=True)
-        ]
-        episodes = gather_object(local)
-        if not episodes:
+        metrics = WorldMetrics()
+        for result, tokens in zip(results, reasoning_tokens, strict=True):
+            self._record_episode(metrics, result, sum(tokens))
+        world = metrics.flush()
+        if not world:
             return
+        self._total_rollouts += int(world.pop("async/total_rollouts"))
+        self._total_rollout_latency += world.pop("async/total_rollout_latency")
+        self._total_generation_tokens += int(world.pop("async/total_generation_tokens"))
+        self._sound_truncation_alarm(world["episode/truncation_rate"], mode)
+        for key, value in world.items():
+            self._metrics[mode][key].append(value)
 
-        self._total_rollouts += len(episodes)
-        self._total_rollout_latency += sum(e["latency"] for e in episodes)
-        self._total_generation_tokens += sum(e["generation_tokens"] for e in episodes)
-        m = self._metrics[mode]
-        self._log_episode_metrics(m, episodes, mode)
-        self._log_env_metrics(m, episodes)
-        self._log_slice_metrics(m, episodes)
+    def _record_episode(self, metrics: WorldMetrics, result: RolloutResult, reasoning_tokens: int) -> None:
+        """One episode's latency, length and outcome, every metric its environment reported, and the per-value
+        breakdown of every slice it carries."""
+        truncated = float(bool(result.trajectory and result.trajectory.truncated))
+        metrics.sum("async/total_rollouts", 1)
+        metrics.sum("async/total_rollout_latency", result.latency)
+        metrics.sum("async/total_generation_tokens", result.generation_tokens)
+        metrics.mean("async/mean_rollout_latency", result.latency)
+        # A count, not a mean: each one threw away a turn the engine had already started.
+        metrics.sum("async/requests_expired_in_sync", result.requests_expired_in_sync)
+        metrics.mean("episode/generation_tokens", result.generation_tokens)
+        metrics.maximum("episode/generation_tokens_max", result.generation_tokens)
+        metrics.percentile("episode/generation_tokens_p90", result.generation_tokens, 90.0)
+        metrics.mean("episode/turns", result.episode_length)
+        metrics.mean("episode/natural_termination_rate", float(bool(result.success)))
+        metrics.mean("episode/truncation_rate", truncated)
+        metrics.mean("episode/error_rate", float(bool(result.error)))
+        for key, value in result.metrics.items():
+            metrics.mean(key, value)
+        components = [v for k, v in result.metrics.items() if k.startswith(REWARD_COMPONENT_PREFIX)]
+        if components:
+            # Components must sum EXACTLY to the reward; a nonzero mean |residue| means a channel bypasses them.
+            metrics.mean("reward/composition_residue", abs(result.total_reward - sum(components)))
+        for name, value in self._episode_slices(result.trajectory).items():
+            prefix = f"{name}/{value}"
+            metrics.sum(f"{prefix}/count", 1)
+            metrics.mean(f"{prefix}/reward", result.total_reward)
+            metrics.mean(f"{prefix}/generation_tokens", result.generation_tokens)
+            metrics.mean(f"{prefix}/reasoning_tokens", reasoning_tokens)
+            metrics.mean(f"{prefix}/turns", result.episode_length)
+            metrics.mean(f"{prefix}/truncation_rate", truncated)
+            if SOLVE_RATE_KEY in result.metrics:
+                metrics.mean(f"{prefix}/solve_rate", result.metrics[SOLVE_RATE_KEY])
+            # The env's per-episode strategy metrics (episode/*), sliced by the value that conditions
+            # them — env-agnostic: any environment's episode/* keys split automatically.
+            for key, value in result.metrics.items():
+                if key.startswith("episode/"):
+                    metrics.mean(f"{prefix}/{key.removeprefix('episode/')}", value)
 
     @staticmethod
     def _episode_slices(traj) -> dict[str, str]:
@@ -198,23 +208,6 @@ class RolloutMetricsMixin:
             if name != "effort" and isinstance(value, str) and value:
                 slices[str(name)] = value
         return slices
-
-    def _log_episode_metrics(self, m: dict[str, list[float]], episodes: list[dict], mode: str) -> None:
-        """The ``async/*`` latency and ``episode/*`` length and outcome rates of the gathered episodes."""
-        m["async/mean_rollout_latency"].append(_mean([e["latency"] for e in episodes]))
-        # A count, not a mean: each one threw away a turn the engine had already started.
-        m["async/requests_expired_in_sync"].append(float(sum(e["requests_expired_in_sync"] for e in episodes)))
-        # Each episode's generated tokens, summed across its turns.
-        generation_tokens = [e["generation_tokens"] for e in episodes]
-        m["episode/generation_tokens"].append(_mean(generation_tokens))
-        m["episode/generation_tokens_max"].append(float(max(generation_tokens)))
-        m["episode/generation_tokens_p90"].append(_percentile(generation_tokens, 90.0))
-        m["episode/turns"].append(_mean([e["turns"] for e in episodes]))
-        m["episode/natural_termination_rate"].append(_mean([1.0 if e["success"] else 0.0 for e in episodes]))
-        truncation_rate = _mean([1.0 if e["truncated"] else 0.0 for e in episodes])
-        m["episode/truncation_rate"].append(truncation_rate)
-        self._sound_truncation_alarm(truncation_rate, mode)
-        m["episode/error_rate"].append(_mean([1.0 if e["error"] else 0.0 for e in episodes]))
 
     def _sound_truncation_alarm(self, truncation_rate: float, mode: str) -> None:
         """``episode/truncation_alarm`` for this round, and a warning when the rate crosses over
@@ -237,48 +230,6 @@ class RolloutMetricsMixin:
                 f"the rate has dropped back under the threshold."
             )
         self._truncation_alarmed = self._truncation_alarmed | {mode} if alarmed else self._truncation_alarmed - {mode}
-
-    @staticmethod
-    def _log_env_metrics(m: dict[str, list[float]], episodes: list[dict]) -> None:
-        """The mean of every metric an environment reported, and how far the reward components fall short of
-        summing to the reward."""
-        for key in {k for e in episodes for k in e["metrics"]}:
-            vals = [e["metrics"][key] for e in episodes if key in e["metrics"]]
-            if vals:
-                m[key].append(_mean(vals))
-        # Components must sum EXACTLY to the reward; a nonzero mean |residue| means a channel bypasses them.
-        residues = [
-            abs(e["total_reward"] - sum(v for k, v in e["metrics"].items() if k.startswith(REWARD_COMPONENT_PREFIX)))
-            for e in episodes
-            if any(k.startswith(REWARD_COMPONENT_PREFIX) for k in e["metrics"])
-        ]
-        if residues:
-            m["reward/composition_residue"].append(_mean(residues))
-
-    @staticmethod
-    def _log_slice_metrics(m: dict[str, list[float]], episodes: list[dict]) -> None:
-        """The per-value breakdown (``<slice>/<value>/count``, ``.../solve_rate`` ...) of every slice an episode
-        carries."""
-        groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
-        for e in episodes:
-            for name, value in e["slices"].items():
-                groups[(name, value)].append(e)
-        for (name, value), group in groups.items():
-            prefix = f"{name}/{value}"
-            m[f"{prefix}/count"].append(float(len(group)))
-            m[f"{prefix}/reward"].append(_mean([e["total_reward"] for e in group]))
-            m[f"{prefix}/generation_tokens"].append(_mean([e["generation_tokens"] for e in group]))
-            m[f"{prefix}/reasoning_tokens"].append(_mean([e["reasoning_tokens"] for e in group]))
-            m[f"{prefix}/turns"].append(_mean([e["turns"] for e in group]))
-            m[f"{prefix}/truncation_rate"].append(_mean([1.0 if e["truncated"] else 0.0 for e in group]))
-            solves = [e["metrics"][SOLVE_RATE_KEY] for e in group if SOLVE_RATE_KEY in e["metrics"]]
-            if solves:
-                m[f"{prefix}/solve_rate"].append(_mean(solves))
-            # The env's per-episode strategy metrics (episode/*), sliced by the value that conditions
-            # them — env-agnostic: any environment's episode/* keys split automatically.
-            for key in {k for e in group for k in e["metrics"] if k.startswith("episode/")}:
-                vals = [e["metrics"][key] for e in group if key in e["metrics"]]
-                m[f"{prefix}/{key.removeprefix('episode/')}"].append(_mean(vals))
 
     def cumulative_rollout_metrics(self) -> dict[str, float]:
         """The ``async/*`` totals since train start, as the trainer logs them."""

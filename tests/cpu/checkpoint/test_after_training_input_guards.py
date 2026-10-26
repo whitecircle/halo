@@ -51,7 +51,7 @@ from src.checkpoint.reading import (
     is_ep_sharded_checkpoint,
     reject_partial_checkpoint,
 )
-from src.checkpoint.writing import save_sharded_state_dict
+from src.checkpoint.writing import StreamingShardWriter
 from src.models.moe.family_specs import per_expert_hub_model_types
 from tests.common.repo import REPO_ROOT
 
@@ -471,13 +471,14 @@ def test_index_less_shards_are_found_under_the_writers_own_pattern(tmp_path):
     glob is the only thing left. A reader that re-types the pattern reports "no weights found" for a
     real checkpoint the moment the two spellings drift.
     """
-    out = tmp_path / "sharded"
-    out.mkdir()
     state = {f"model.layers.{i}.weight": torch.zeros(512) for i in range(3)}
-    save_sharded_state_dict(state, str(out), max_shard_size="1KB")
-    os.remove(out / SAFETENSORS_INDEX_FILE)
+    writer = StreamingShardWriter(str(tmp_path), "1KB", enabled=True)
+    for key, tensor in state.items():
+        writer.add(key, tensor)
+    writer.close_as_hf_checkpoint()
+    os.remove(tmp_path / SAFETENSORS_INDEX_FILE)
 
-    found = checkpoint_shard_files(str(out))
+    found = checkpoint_shard_files(str(tmp_path))
     assert len(found) == 3, f"expected every shard, got {[os.path.basename(p) for p in found]}"
     recovered = {key for shard in found for key in load_file(shard)}
     assert recovered == set(state), "the glob found shards that do not add up to the checkpoint"

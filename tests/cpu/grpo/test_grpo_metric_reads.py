@@ -20,7 +20,6 @@ from collections import defaultdict
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
@@ -30,8 +29,6 @@ from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.gloo import run_gloo_ranks
 from tests.common.routing import BareEPLayer
-
-PartialState()  # the world-metrics flush gathers through accelerate, which reads the process state
 
 # Row 0 is three completion tokens, the middle one tool output; row 1 is one token right-padded to three.
 _LOSS_MASK = torch.tensor([[1, 0, 1], [1, 0, 0]])

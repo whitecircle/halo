@@ -39,8 +39,8 @@ from src.trainers.grpo.environmental.trajectory_tokenize import (
     UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY,
 )
 from src.trainers.grpo.objective.logratio import zero_engine_forced_closes
-from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 from tests.common.routing import BareEPLayer, npy_routing_payload
+from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 _ROLE_TOKENS = {"user": 1001, "assistant": 1002, "tool": 1003, "system": 1004}
 _END_TOKEN = 1000

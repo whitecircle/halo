@@ -35,8 +35,8 @@ from src.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanc
 from src.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
 from src.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
 from src.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin, unbounded_completion_logs
-from src.trainers.grpo.world_metrics import WorldMetrics
 from src.trainers.training_args_overrides import keep_all_dataset_columns
+from src.trainers.world_metrics import WorldMetrics
 
 
 def _resolve_environment_spec(environment_config, environment_cls, environment_kwargs) -> tuple[Any, dict]:

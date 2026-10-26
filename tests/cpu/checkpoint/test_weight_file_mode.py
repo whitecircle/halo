@@ -21,7 +21,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3Model
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from src.checkpoint.adapters import write_adapter_file
 from src.checkpoint.offline_export import save_full_checkpoint
-from src.checkpoint.writing import StreamingShardWriter, save_sharded_state_dict
+from src.checkpoint.writing import StreamingShardWriter
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.embedding.preloaded_transformer import PreloadedTransformer
@@ -55,19 +55,15 @@ def _tensors(count: int = 4) -> dict[str, torch.Tensor]:
     return {f"layer.{index}.weight": torch.full((64, 64), float(index)) for index in range(count)}
 
 
-def test_streamed_checkpoint_files_follow_the_umask(umask, tmp_path):
-    writer = StreamingShardWriter(str(tmp_path), "5GB", enabled=True)
+@pytest.mark.parametrize("max_shard_size", ["5GB", "20KB"], ids=["single-file", "sharded"])
+def test_streamed_checkpoint_files_follow_the_umask(umask, max_shard_size, tmp_path):
+    writer = StreamingShardWriter(str(tmp_path), max_shard_size, enabled=True)
     for key, tensor in _tensors().items():
         writer.add(key, tensor)
     writer.close_as_hf_checkpoint()
-    assert _modes(tmp_path) == _expect(umask, ["model.safetensors"])
-
-
-def test_sharded_state_dict_files_follow_the_umask(umask, tmp_path):
-    save_sharded_state_dict(_tensors(), str(tmp_path), max_shard_size="20KB")
-    shards = [name for name in os.listdir(tmp_path) if name.endswith(".safetensors")]
-    assert len(shards) > 1, f"premise: the save is sharded: {shards}"
-    assert _modes(tmp_path) == _expect(umask, shards)
+    files = [name for name in os.listdir(tmp_path) if name.endswith(".safetensors")]
+    assert len(files) == (1 if max_shard_size == "5GB" else 4), f"premise: the layout this case stands for: {files}"
+    assert _modes(tmp_path) == _expect(umask, files)
 
 
 def test_adapter_file_follows_the_umask(umask, tmp_path):

@@ -144,8 +144,9 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Va
     max_completion_length: int | None = field(
         default=None,
         metadata={
-            "help": "Completion share of max_length; a longer completion is truncated from the end, keeping the "
-            "terminal EOS. Unset = the max_length - max_prompt_length remainder, which an explicit value must fit."
+            "help": "Completion share of max_length; a longer completion is truncated from the end. The budget "
+            "includes the EOS, so a completion that reaches it ends without one, as in offline GRPO. Unset = the "
+            "max_length - max_prompt_length remainder, which an explicit value must fit."
         },
     )
     truncation_mode: Literal["keep_end", "keep_start"] = field(

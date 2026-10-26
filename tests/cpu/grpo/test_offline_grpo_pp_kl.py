@@ -12,7 +12,6 @@ Run: python tests/cpu/grpo/test_offline_grpo_pp_kl.py
 """
 
 import types
-from collections import defaultdict
 
 import pytest
 import torch
@@ -22,6 +21,7 @@ from src.kernels.logprobs import LABEL_IGNORE_INDEX, token_logprobs
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from src.trainers.grpo.offline.offline_rules import reject_offline_pp_options, resolve_pp_max_length
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from src.trainers.world_metrics import WorldMetrics
 
 BATCH, PROMPT, COMPLETION, VOCAB, MAX_LENGTH = 4, 3, 4, 16, 10
 PAD = 0
@@ -105,7 +105,8 @@ def _stub(*, beta, loss_type, pg, min_log_prob, policy, reference) -> types.Simp
         _precompute_reference=False,
         # The non-PP side scores through TRL's full-logits path, the one PP's last stage replaces.
         _scores_full_logits=True,
-        _sign_metric_buffer={"train": defaultdict(list), "eval": defaultdict(list)},
+        _sign_metrics={"train": WorldMetrics(), "eval": WorldMetrics()},
+        _SIGN_METRIC_KEYS=OfflineGRPOTrainer._SIGN_METRIC_KEYS,
         _pp_ref_sweep=None,
         _pp_min_log_prob=min_log_prob,
         _live_min_log_prob=min_log_prob,
@@ -117,7 +118,7 @@ def _stub(*, beta, loss_type, pg, min_log_prob, policy, reference) -> types.Simp
         "_token_objective",
         "_reference_policy",
         "_pp_batch_transform",
-        "_buffer_sign_metrics",
+        "_record_sign_metrics",
         "_pp_normalizer",
         "_pp_token_loss",
     ):
@@ -155,17 +156,15 @@ def test_pp_kl_loss_matches_compute_loss(loss_type, pg, min_log_prob):
     beta = 0.3
     me = _stub(beta=beta, loss_type=loss_type, pg=pg, min_log_prob=min_log_prob, policy=policy, reference=reference)
     non_pp = me._compute_loss_inner(me.policy, {k: v for k, v in batch.items() if k != REF_PER_TOKEN_LOGPS_COLUMN})
-    buffered_off_pp = {key: torch.cat(chunks).clone() for key, chunks in me._sign_metric_buffer["train"].items()}
-    me._sign_metric_buffer["train"].clear()
+    buffered_off_pp = me._sign_metrics["train"].flush()
     pp = _pp_loss(me, policy, batch)
     assert torch.allclose(pp, non_pp, atol=1e-5, rtol=1e-5), f"PP {pp.item()} vs non-PP {non_pp.item()}"
 
-    # The same per-sample diagnostics the non-PP loss buffers must reach the buffer under PP too —
+    # The same per-sample diagnostics the non-PP loss records must be recorded under PP too —
     # they are the only thing offline GRPO logs per step, and the last stage is where they exist.
-    buffered_under_pp = {key: torch.cat(chunks) for key, chunks in me._sign_metric_buffer["train"].items()}
+    buffered_under_pp = me._sign_metrics["train"].flush()
     assert buffered_under_pp.keys() == buffered_off_pp.keys()
-    for key, values in buffered_off_pp.items():
-        assert torch.allclose(buffered_under_pp[key], values, atol=1e-5, rtol=1e-5), key
+    assert buffered_under_pp == pytest.approx(buffered_off_pp, abs=1e-5, rel=1e-5)
 
     # The KL term genuinely enters: the kl_beta=0 objective must NOT match.
     me_zero = _stub(

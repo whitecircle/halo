@@ -51,10 +51,11 @@ from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.model_loading.lazy_safetensors.conversion import Concat
 from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
-from src.models.moe.family_specs import experts_container_attrs, is_expert_weight_attr, moe_model_types
+from src.models.moe.family_specs import expert_weight_roots, experts_container_attrs, moe_model_types
 from src.models.param_roles import persistent_buffers
-from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from src.trainers.grpo.rollout.weight_push import _dense_params, gather_and_send_weights
 from tests.common.checkpoint_io import loading_problems, save_context
+from tests.common.ep_stubs import StubEPLayerBase, bare_ep_layer
 from tests.common.models import TINY_STEP3P7_CONFIG
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, TinyFamily, tiny_family_model
@@ -128,14 +129,16 @@ def _live_name(model: torch.nn.Module, key: str) -> str:
 
 def _in_expert_bank(loaded: _Loaded, key: str) -> bool:
     """Whether checkpoint ``key`` loads into an EP layer's expert weights — the one place the save's
-    layout may differ from the hub's (fused against per expert)."""
+    layout may differ from the hub's (fused against per expert). The live name is the HF block's, whose
+    expert spelling the EP layer need not share (Qwen3's fused ``gate_up_proj`` against its split pair),
+    so it is matched against every family's roots."""
     live = _live_name(loaded.model, key)
     for path in loaded.ep_layers:
         if live.startswith(f"{path}."):
             segments = live[len(path) + 1 :].split(".")
             if segments[0] in experts_container_attrs():
                 segments = segments[2:] if segments[1].isdigit() else segments[1:]
-            return is_expert_weight_attr(".".join(segments))
+            return segments[0] in expert_weight_roots()
     return False
 
 
@@ -246,6 +249,23 @@ def test_weight_sync_forwards_what_the_gathered_save_writes(name, tmp_path):
     )
     for key, tensor in sender.sent.items():
         assert torch.equal(tensor.to(loaded.saved[key].dtype), loaded.saved[key]), f"{name}: {key} differs"
+
+
+def test_save_and_sync_split_experts_by_the_layers_own_roots():
+    """A replicated tensor spelled like another family's expert root (GptOss's ``gate_up_proj_bias``) is this
+    layer's replicated state: the save writes it beside the experts, so the sync must push it densely."""
+    layer = bare_ep_layer(
+        StubEPLayerBase,
+        gate_up_proj=torch.zeros(2, 4, 8),
+        down_proj=torch.zeros(2, 4, 4),
+        gate_up_proj_bias=torch.ones(8),
+    )
+    model = torch.nn.Module()
+    model.moe = layer
+
+    assert "moe.gate_up_proj_bias" in layer.gather_layer_state_dict("moe")
+    assert [name for name, _ in _dense_params(model, {"moe": layer})] == ["moe.gate_up_proj_bias"]
+    assert layer.is_expert_param("gate_up_proj") and not layer.is_expert_param("gate_up_proj_bias")
 
 
 @pytest.mark.parametrize("name", list(FAMILIES))

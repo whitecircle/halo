@@ -16,7 +16,7 @@ import pytest
 from datasets import Dataset
 
 from src.data.pipeline.coordinated_map import coordinated_map
-from src.trainers.grpo.offline.tokenization import tokenize_offline_grpo_rows
+from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

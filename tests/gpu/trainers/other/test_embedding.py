@@ -6,7 +6,7 @@ Tests multiple loss types (MNRL, CoSENT) as well as capability checks.
 Uses sentence-transformers/paraphrase-MiniLM-L3-v2 for speed; production
 workloads use Qwen/Qwen3-Embedding-0.6B.
 
-Every leg runs collectives (``dist.barrier``, ``gather_saveable_tensors``, ``trainer.train``), so a
+Every leg runs collectives (``dist.barrier``, ``chunked_saveable_tensors``, ``trainer.train``), so a
 failure must end the process rather than fall through to the next leg: a rank that swallowed its own
 exception would enter the NEXT leg's collective while its peer is still in the previous one and hang
 until the NCCL timeout. :func:`gpu_test_main` owns that — a raise is a reported failure and an exit.
@@ -25,7 +25,7 @@ from peft import LoraConfig, TaskType, inject_adapter_in_model
 from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformer
 
-from src.checkpoint.parallel.writing import gather_saveable_tensors
+from src.checkpoint.parallel.writing import chunked_saveable_tensors
 from src.checkpoint.writing import save_dtype_caster
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.parallelism_config import ParallelismConfig
@@ -112,6 +112,11 @@ def lora_model() -> SentenceTransformer:
     for name, param in model.named_parameters():
         param.requires_grad = "lora_" in name
     return model
+
+
+def _gathered(model) -> dict[str, torch.Tensor]:
+    """COLLECTIVE: every tensor a gathered save of ``model`` writes, full and on host, before the save's casts."""
+    return {key: tensor for chunk in chunked_saveable_tensors(model, retain=True) for key, tensor in chunk.items()}
 
 
 def check_capability_flags() -> bool:
@@ -225,7 +230,7 @@ def check_save_roundtrip_fsdp2(ctx, shared_dir: str) -> bool:
     trainer.train()
 
     # collective — must run on ALL ranks
-    ref_sd = gather_saveable_tensors(trainer._backbone_model(), retain=True)
+    ref_sd = _gathered(trainer._backbone_model())
     cast_expected = save_dtype_caster(trainer._backbone_model())
 
     trainer.save_model(output_dir)
@@ -288,7 +293,7 @@ def check_lora_save_roundtrip(ctx, shared_dir: str) -> bool:
     # collective gather — must run on ALL ranks
     backbone = trainer._backbone_model()
     scaling = next(module.scaling["default"] for module in backbone.modules() if isinstance(module, LoraLayer))
-    full = gather_saveable_tensors(backbone, retain=True)
+    full = _gathered(backbone)
     target = next(
         k[: -len(".base_layer.weight")]
         for k in full

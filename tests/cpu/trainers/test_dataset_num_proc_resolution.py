@@ -28,7 +28,7 @@ from src.data.pipeline.coordinated_map import (
     resolve_map_num_proc,
 )
 from src.data.pipeline.preferences import tokenize_preference_row
-from src.trainers.grpo.offline.tokenization import tokenize_offline_grpo_rows
+from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 
 # >1 is what makes datasets pickle the mapped callable.

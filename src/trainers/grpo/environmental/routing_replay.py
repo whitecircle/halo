@@ -25,7 +25,7 @@ from src.trainers.grpo.environmental.environmental_rules import reject_unsupport
 from src.trainers.grpo.environmental.step_batch import StepRows
 from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from src.trainers.grpo.logprob_scoring import dense_row_spans, rows_forward_densely
-from src.trainers.grpo.world_metrics import world_sums
+from src.trainers.world_metrics import world_sums
 
 logger = get_logger(__name__, log_level="INFO")
 

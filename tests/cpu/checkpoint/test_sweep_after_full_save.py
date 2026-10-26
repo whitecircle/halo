@@ -26,14 +26,10 @@ the previous run's weights out of a directory the tool reported as saved.
 import json
 import os
 import time
-from types import SimpleNamespace
 
 import pytest
-import torch
-import torch.nn as nn
 
-import src.checkpoint.writing as checkpoint_writing
-from src.checkpoint.writing import sweep_after_full_save, write_gathered_checkpoint
+from src.checkpoint.writing import sweep_after_full_save
 
 INDEX = "model.safetensors.index.json"
 SINGLE = "model.safetensors"
@@ -178,114 +174,6 @@ def test_non_weight_files_are_never_swept(tmp_path):
         "adapter_model.safetensors",
         "router_balancing_biases.pt",
     }
-
-
-def _plant_previous_sharded_run(out) -> set[str]:
-    """A complete, back-dated sharded save — the checkpoint a failed re-save must not destroy."""
-    _plant(
-        out,
-        "model-00001-of-00002.safetensors",
-        "model-00002-of-00002.safetensors",
-        index={"a.weight": "model-00001-of-00002.safetensors", "b.weight": "model-00002-of-00002.safetensors"},
-        age=10,
-    )
-    return _files(out)
-
-
-def test_save_sharded_state_dict_sweeps_only_after_a_completed_write(tmp_path, monkeypatch):
-    """The shared writer must follow its own module's contract: sweeping the directory BEFORE
-    writing leaves a write that dies (ENOSPC, preemption) with neither the previous checkpoint nor
-    a new one — the inverse of everything this file pins about sweep_after_full_save."""
-    out = tmp_path / "out"
-    before = _plant_previous_sharded_run(out)
-
-    def failing_write(*args, **kwargs):
-        raise OSError("No space left on device")
-
-    monkeypatch.setattr(checkpoint_writing, "save_safetensors_file", failing_write)
-    with pytest.raises(OSError):
-        checkpoint_writing.save_sharded_state_dict({"w": torch.ones(2)}, str(out))
-
-    assert _files(out) == before, "a failed save destroyed the directory's previous checkpoint"
-
-
-def test_save_sharded_state_dict_still_sweeps_stale_files_after_success(tmp_path):
-    """Anti-vacuity for the ordering test: the sweep still runs — after the write — so a completed
-    save leaves exactly its own layout, never the previous run's beside it."""
-    out = tmp_path / "out"
-    _plant_previous_sharded_run(out)
-
-    checkpoint_writing.save_sharded_state_dict({"w": torch.ones(2)}, str(out))
-
-    assert _files(out) == {SINGLE}
-
-
-def _hf_like_model():
-    """The gathered writer's config/tie steps branch on ``hasattr(model, "config")``.
-
-    A bare ``nn.Module`` (the writer's save-dtype keep-set walks the module tree) with no config —
-    the config/tie steps skip, no norms/balancing keep anything — so the write ordering is what
-    remains under test."""
-    return nn.Module()
-
-
-def test_the_bin_fallback_writes_before_it_sweeps(tmp_path, monkeypatch):
-    """The gathered writer's pytorch-format fallback must not delete every safetensors file BEFORE
-    writing the .bin — a second failure (the likely case: the safetensors save already failed for a
-    disk reason) then leaves the directory empty."""
-    out = tmp_path / "out"
-    before = _plant_previous_sharded_run(out)
-
-    def failing(*args, **kwargs):
-        raise OSError("No space left on device")
-
-    monkeypatch.setattr(checkpoint_writing, "save_sharded_state_dict", failing)
-    monkeypatch.setattr(checkpoint_writing.torch, "save", failing)
-    ctx = SimpleNamespace(max_shard_size="5GB")
-    with pytest.raises(OSError):
-        write_gathered_checkpoint(_hf_like_model(), {"w": torch.ones(2)}, str(out), ctx.max_shard_size)
-
-    assert _files(out) == before, "the fallback swept the previous checkpoint before its .bin existed"
-
-
-def test_the_bin_fallback_replaces_the_weights_then_sweeps(tmp_path, monkeypatch):
-    """Anti-vacuity: when the .bin write succeeds, the stale safetensors do go — resume prefers an
-    index over the .bin, so leaving them would serve the previous run's weights."""
-    out = tmp_path / "out"
-    _plant_previous_sharded_run(out)
-
-    def failing(*args, **kwargs):
-        raise OSError("No space left on device")
-
-    monkeypatch.setattr(checkpoint_writing, "save_sharded_state_dict", failing)
-    ctx = SimpleNamespace(max_shard_size="5GB")
-    write_gathered_checkpoint(_hf_like_model(), {"w": torch.ones(2)}, str(out), ctx.max_shard_size)
-
-    assert _files(out) == {"pytorch_model.bin"}
-
-
-def test_a_failed_sweep_after_the_bin_fallback_is_loud(tmp_path, monkeypatch, caplog):
-    """The sweep exists because resume prefers an index over the .bin: if it fails, the directory
-    resumes the PREVIOUS run's weights. That must be a warning, not a suppressed OSError."""
-    out = tmp_path / "out"
-    _plant_previous_sharded_run(out)
-
-    def failing(*args, **kwargs):
-        raise OSError("No space left on device")
-
-    def failing_sweep(*args, **kwargs):
-        raise OSError("Operation not permitted")
-
-    monkeypatch.setattr(checkpoint_writing, "save_sharded_state_dict", failing)
-    monkeypatch.setattr(checkpoint_writing, "remove_stale_checkpoint_files", failing_sweep)
-    ctx = SimpleNamespace(max_shard_size="5GB")
-    with caplog.at_level("WARNING", logger=checkpoint_writing.logger.name):
-        write_gathered_checkpoint(_hf_like_model(), {"w": torch.ones(2)}, str(out), ctx.max_shard_size)
-
-    assert "pytorch_model.bin" in _files(out), "the fallback .bin must survive a failed sweep"
-    assert any("resume the OLD weights" in record.message for record in caplog.records), (
-        "a failed stale sweep left the directory silently resuming the previous run's weights"
-    )
 
 
 if __name__ == "__main__":

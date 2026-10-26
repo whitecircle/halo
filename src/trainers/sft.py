@@ -21,28 +21,12 @@ from src.models.unwrapping import base_transformers_model
 from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.parallelism.trainer_rules import reject_compressed_kv_collator, reject_cp_packed_collator
+from src.trainers.world_metrics import WorldMetrics
 
 logger = get_logger(__name__)
 
 # TRL SFTTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
 _CTOR_POSITIONS = resolve_ctor_positions(SFTTrainer, "model", "args", "data_collator")
-
-# CP metric row deferred to log time: every column is a sum, so one reduce per log gives the same
-# totals as one reduce per micro-batch. Fixed width, so the collective's shape does not depend on
-# what a rank accumulated.
-_CP_METRIC_COLUMNS = (
-    "microbatches",
-    "correct_tokens",
-    "loss_tokens",
-    "entropy_sum",
-    "entropy_tokens",
-    "attended_tokens",
-    "aux_loss_sum",
-    "aux_loss_count",
-)
-# fp64: the token counts stay exact through the reduce (integers well under 2**53) while the
-# entropy/aux sums keep more precision than the bf16 logits they were computed from.
-_CP_METRIC_DTYPE = torch.float64
 
 
 def _replace_chunked_nll_loss_type(training_args) -> None:
@@ -61,53 +45,35 @@ def _replace_chunked_nll_loss_type(training_args) -> None:
     training_args.loss_type = "nll"
 
 
-def _cp_metric_row(outputs, full_labels, full_attention_mask, cp_rank: int, cp_size: int, *, training: bool):
-    """One micro-batch's CP metric sums over this rank's chunk as a ``_CP_METRIC_COLUMNS`` row, or ``None`` without
-    labels or logits. No collective and no host sync; a non-final rank's last logit predicts the next chunk's
-    first token, as in the loss."""
+@torch.no_grad()
+def _record_cp_metrics(
+    metrics: WorldMetrics, outputs, full_labels, full_attention_mask, cp_rank: int, cp_size: int, *, training: bool
+) -> None:
+    """Record one micro-batch's CP metrics over this rank's chunk, nothing without labels or logits. A non-final
+    rank's last logit predicts the next chunk's first token, as in the loss."""
     if full_labels is None or outputs.logits is None:
-        return None
-    with torch.no_grad():
-        shift_logits, shift_labels = cp_shift_against_full_labels(outputs.logits, full_labels, cp_rank, cp_size)
-        mask = shift_labels != LABEL_IGNORE_INDEX
-        correct_predictions = (shift_logits.argmax(dim=-1) == shift_labels) & mask
+        return
+    shift_logits, shift_labels = cp_shift_against_full_labels(outputs.logits, full_labels, cp_rank, cp_size)
+    mask = shift_labels != LABEL_IGNORE_INDEX
+    correct = (shift_logits.argmax(dim=-1) == shift_labels) & mask
+    metrics.fraction("mean_token_accuracy", correct.sum(), mask.sum())
 
-        per_token_entropy = entropy_from_logits(outputs.logits)
-        if full_attention_mask is not None:
-            start, end = cp_chunk_bounds(full_attention_mask.size(1), cp_rank, cp_size)
-            local_attention_mask = full_attention_mask[:, start:end]
-            entropy_sum = torch.sum(per_token_entropy * local_attention_mask)
-            entropy_tokens = local_attention_mask.sum()
-            attended_tokens = entropy_tokens
-        else:
-            entropy_sum = per_token_entropy.sum()
-            entropy_tokens = torch.tensor(per_token_entropy.numel(), device=per_token_entropy.device)
-            attended_tokens = torch.tensor(
-                outputs.logits.shape[0] * outputs.logits.shape[1], device=outputs.logits.device
-            )
+    per_token_entropy = entropy_from_logits(outputs.logits)
+    if full_attention_mask is not None:
+        start, end = cp_chunk_bounds(full_attention_mask.size(1), cp_rank, cp_size)
+        local_attention_mask = full_attention_mask[:, start:end]
+        attended_tokens = local_attention_mask.sum()
+        metrics.fraction("entropy", torch.sum(per_token_entropy * local_attention_mask), attended_tokens)
+    else:
+        attended_tokens = outputs.logits.shape[0] * outputs.logits.shape[1]
+        metrics.fraction("entropy", per_token_entropy.sum(), per_token_entropy.numel())
+    # Only train accumulates the run's token counter; eval contributes a structural zero.
+    metrics.sum("attended_tokens", attended_tokens * int(training))
 
-        aux_loss = getattr(outputs, "aux_loss", None)
-        columns = {
-            # Whether this window saw a CP forward at all, world-wide; the drain emits nothing
-            # rather than a 0.0 accuracy when it did not.
-            "microbatches": entropy_sum.new_ones(()),
-            "correct_tokens": correct_predictions.sum(),
-            "loss_tokens": mask.sum(),
-            "entropy_sum": entropy_sum,
-            "entropy_tokens": entropy_tokens,
-            # Only train accumulates the run's token counter; eval contributes a structural zero.
-            "attended_tokens": attended_tokens * int(training),
-            # mean(), not the raw tensor: torch.stack needs a 0-dim column, and a family whose
-            # aux loss arrives per-layer would otherwise crash the metric path.
-            "aux_loss_sum": entropy_sum.new_zeros(()) if aux_loss is None else aux_loss.detach().mean(),
-            "aux_loss_count": entropy_sum.new_full((), float(aux_loss is not None)),
-        }
-        # Stacked by name, so a renamed or dropped column raises here instead of swapping two metrics'
-        # slots; the width check catches a column added to the dict alone. Cast per column: the counts
-        # are int64 and the sums float, and torch.stack refuses a mixed list.
-        if len(columns) != len(_CP_METRIC_COLUMNS):
-            raise ValueError(f"CP metric columns {sorted(columns)} do not match {_CP_METRIC_COLUMNS}")
-        return torch.stack([columns[name].to(_CP_METRIC_DTYPE) for name in _CP_METRIC_COLUMNS])
+    aux_loss = getattr(outputs, "aux_loss", None)
+    if aux_loss is not None:
+        # mean(): a family whose aux loss arrives per layer must still record one value.
+        metrics.fraction("aux_loss", aux_loss.detach().mean(), 1)
 
 
 class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
@@ -136,8 +102,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
             self.model_accepts_loss_kwargs = False
         self._configure_distributed_modes()
 
-        # Per-mode CP metric sums awaiting their once-per-log reduce (:meth:`_drain_cp_metrics`).
-        self._cp_metric_accum: dict[str, torch.Tensor | None] = {}
+        # Per-mode CP metrics awaiting their once-per-log flush (:meth:`_drain_cp_metrics`).
+        self._cp_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """TRL's loss with the router aux term weighed at its coefficient and the attended-token counter corrected
@@ -147,7 +113,6 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
             loss, outputs = self._compute_cp_loss(model, inputs)
             return (loss, outputs) if return_outputs else loss
 
-        # TRL's gather().sum() double-counts attended tokens under TP/ETP (identical data per rank).
         prev_tokens = self._total_train_tokens
 
         tree_plan = inputs.get(TREE_ATTENTION_KEY)
@@ -156,7 +121,12 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
                 model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
             )
         loss = self._weigh_router_aux_loss(model, loss, outputs, num_items_in_batch)
-        self._correct_replicated_token_count(prev_tokens)
+        # TRL's gather().sum() counts a TP/ETP group's identical batch once per rank.
+        non_dp_factor = self.parallelism_config.non_dp_replication_factor
+        added = self._total_train_tokens - prev_tokens
+        if non_dp_factor > 1 and self.model.training and added > 0:
+            self._total_train_tokens = prev_tokens + added // non_dp_factor
+            self._metrics["train"]["num_tokens"] = [self._total_train_tokens]
         # TRL's num_tokens counts attended (non-padding) tokens, apart from num_input_tokens_seen (padding
         # included) and num_unmasked_output_tokens_seen (loss tokens only).
         for mode_metrics in self._metrics.values():
@@ -172,7 +142,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         inputs["use_cache"] = False
         loss, outputs = Trainer.compute_loss(self, model, inputs, return_outputs=True)
         training = self.model.training
-        row = _cp_metric_row(
+        _record_cp_metrics(
+            self._cp_metrics["train" if training else "eval"],
             outputs,
             full_labels,
             full_attention_mask,
@@ -180,10 +151,6 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
             self.parallelism_config.cp_size,
             training=training,
         )
-        if row is not None:
-            mode = "train" if training else "eval"
-            previous = self._cp_metric_accum.get(mode)
-            self._cp_metric_accum[mode] = row if previous is None else previous + row
         return loss, outputs
 
     def _pad_to_cp_multiple(self, inputs) -> None:
@@ -206,15 +173,6 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         for key, fill in fills.items():
             if key in inputs:
                 inputs[key] = torch.nn.functional.pad(inputs[key], (0, pad_len), value=fill)
-
-    def _correct_replicated_token_count(self, prev_tokens: int) -> None:
-        """Divide the attended tokens TRL added this step by the ranks that see the same batch (TP/ETP)."""
-        non_dp_factor = self.parallelism_config.non_dp_replication_factor
-        if non_dp_factor > 1 and self.model.training:
-            added = self._total_train_tokens - prev_tokens
-            if added > 0:
-                self._total_train_tokens = prev_tokens + added // non_dp_factor
-                self._metrics["train"]["num_tokens"] = [self._total_train_tokens]
 
     def _weigh_router_aux_loss(self, model, loss, outputs, num_items_in_batch):
         """Weigh the router aux loss at its coefficient: ``coef x mean(aux)`` per optimizer step, ``coef x aux`` in an
@@ -248,36 +206,20 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         super().log(logs, start_time)
 
     def _drain_cp_metrics(self):
-        """COLLECTIVE under CP: reduce this log window's CP metric sums across the world, once, and emit the
-        token-weighted ratios. Rank-uniform: a fixed-width row, zeros from a rank with an empty window, and a
-        ``reduce`` rather than an O(world) gather."""
+        """COLLECTIVE under CP: fold this log window's CP metrics across the world in one flush and emit them. A
+        window with no CP forward anywhere (the final log of a run, or a mode that never ran) emits nothing rather
+        than a 0.0 accuracy, a verdict every rank reads off the same flushed result."""
         if not self.parallelism_config.is_cp_mode:
             return
         mode = "train" if self.model.training else "eval"
-        row = self._cp_metric_accum.get(mode)
-        if row is None:
-            row = torch.zeros(len(_CP_METRIC_COLUMNS), dtype=_CP_METRIC_DTYPE, device=self.accelerator.device)
-        # One tolist() is the window's only device→host sync, against three .item()s per micro-batch.
-        totals = dict(zip(_CP_METRIC_COLUMNS, self.accelerator.reduce(row, reduction="sum").tolist(), strict=True))
-        self._cp_metric_accum[mode] = None
-        # Read off the reduced count, after the reduce, so the decision is world-wide and identical
-        # on every rank. A window with no CP forward anywhere (the final log of a run, or a mode
-        # that never ran) emits nothing rather than a 0.0 accuracy.
-        if totals["microbatches"] == 0:
+        world = self._cp_metrics[mode].flush()
+        if not world:
             return
-
-        loss_tokens = totals["loss_tokens"]
-        entropy_tokens = totals["entropy_tokens"]
-        accuracy = totals["correct_tokens"] / loss_tokens if loss_tokens > 0 else 0.0
-        self._metrics[mode]["mean_token_accuracy"].append(accuracy)
-        self._metrics[mode]["entropy"].append(totals["entropy_sum"] / entropy_tokens if entropy_tokens > 0 else 0.0)
-
         # One token per CP rank, distinct sequences per DP group and no TP+CP, so this cannot double-count.
-        self._total_train_tokens += int(totals["attended_tokens"])
+        self._total_train_tokens += int(world.pop("attended_tokens"))
         self._metrics[mode]["num_attended_tokens_seen"] = [self._total_train_tokens]
-
-        if totals["aux_loss_count"] > 0:
-            self._metrics[mode]["aux_loss"].append(totals["aux_loss_sum"] / totals["aux_loss_count"])
+        for key, value in world.items():
+            self._metrics[mode][key].append(value)
 
     @cached_property
     def _forward_accepts_skip_logits(self) -> bool:

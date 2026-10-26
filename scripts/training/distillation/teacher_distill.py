@@ -1,19 +1,8 @@
 #!/usr/bin/env python
-"""Distributed off-policy distillation (text or VLM).
+"""Distributed off-policy distillation (text or VLM): the student is fit to a frozen teacher's token distribution.
 
-Trains a student to match a frozen teacher's token distribution. One script serves both text and
-vision-language models: ``load_policy_model`` auto-detects the student modality and the
-teacher is loaded with the matching class. The distillation trainer forwards ``model(**inputs)`` /
-``teacher(**inputs)``, so ``pixel_values`` thread to both models. Teacher and student must share
-processor/tokenizer geometry (full-vocabulary logit alignment).
-
-CP is not supported (the teacher is unparallelized); use EP and/or TP.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/distillation/teacher_distill.py \\
-        examples/distillation/qwen3_5/distill-qwen3.5-9b-from-qwen3.6-35b-a3b.yaml
-
-EP applies to the student, so the dense-student config above takes no --expert_parallel_size.
+Usage: torchrun --nproc_per_node=8 scripts/training/distillation/teacher_distill.py \\
+    examples/distillation/qwen3_5/distill-qwen3.5-9b-from-qwen3.6-35b-a3b.yaml
 """
 
 from accelerate.logging import get_logger
@@ -24,11 +13,13 @@ from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
 from src.data.collators.factory import select_data_collator
 from src.data.collators.padded import DataCollatorForCausalLMWithPadding
-from src.data.collators.vlm import VLMDataCollator
-from src.data.pipeline.coordinated_map import coordinated_map_and_filter, resolve_map_num_proc
-from src.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
-from src.data.pipeline.vlm_rows import prepare_vlm_dataset
-from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
+from src.entrypoints.data_setup import (
+    load_script_datasets,
+    log_script_dataset_examples,
+    prepare_chat_text_split,
+    prepare_raw_vlm_split,
+    resolve_vlm_run,
+)
 from src.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
@@ -58,16 +49,9 @@ logger = get_logger(__name__, log_level="INFO")
 
 
 def _load_distill_teacher(*, args, model_config, training_config, is_vlm: bool, local_rank: int) -> PreTrainedModel:
-    """Load the frozen teacher: its own pinned revision, the run's dtype, and a backend resolved
-    against the teacher's own config under the student's sinks policy.
-
-    ``teacher_model_revision`` pins the teacher repo; the student's ``model_revision`` names a commit
-    in a different repo and would 404.
-
-    Its batches are padded, so the backend request is the shared padded-workload one, which under
-    live sinks falls back to auto-detection: a teacher on a sink-dropping backend would shift every
-    logprob it scores against its student.
-    """
+    """Load the frozen teacher at ``teacher_model_revision`` (the student's pin names a commit in another repo), in
+    the run's dtype, on the shared padded-workload backend request, which under live sinks falls back to
+    auto-detection: a sink-dropping teacher would shift every logprob it scores against its student."""
     requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
     return load_frozen_auxiliary_model(
         args.teacher_model,
@@ -117,51 +101,6 @@ def _text_distill_collator(args, tokenizer, model_config):
     ) or DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False)
 
 
-def _prepare_text_distill_data(ds, args, training_config, tokenizer, model_config):
-    """SFT's chat row processor: each conversation is templated and tokenized once, and one over
-    ``max_length`` is dropped rather than truncated mid-turn, measured on the ids it trains on. The
-    collator derives the labels the losses mask on."""
-    render_kwargs = text_render_kwargs(args)
-    ds = coordinated_map_and_filter(
-        ds,
-        build_chat_row_processor(
-            tokenizer=tokenizer, max_length=training_config.max_length, use_padding=False, **render_kwargs
-        ),
-        # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
-        remove_columns=sorted(set(ds["train"].column_names)),
-        desc="Processing distillation dataset",
-        cache_key_extras={**render_kwargs, "add_generation_prompt": False},
-        num_proc=resolve_map_num_proc(training_config.dataset_num_proc),
-    )
-    return ds["train"], ds["test"], _text_distill_collator(args, tokenizer, model_config)
-
-
-def _prepare_vlm_distill_data(ds, args, training_config, processor, tokenizer, model_config):
-    """Map raw conversations to history/images and collate with VLMDataCollator."""
-    num_proc = resolve_map_num_proc(training_config.dataset_num_proc)
-    ds = prepare_vlm_dataset(
-        ds,
-        args,
-        processor,
-        tokenizer,
-        training_config.max_length,
-        num_proc,
-        desc="Processing VLM distillation dataset",
-    )
-    # The mapped columns (history/images/…) are not model-forward kwargs, so HF's default
-    # remove_unused_columns=True would strip them before they reach the collator.
-    training_config.remove_unused_columns = False
-    collator = VLMDataCollator(
-        processor,
-        tokenizer,
-        training_config.max_length,
-        response_prompt_template=args.assistant_message_template if args.train_on_completions_only else None,
-        train_on_completions_only=args.train_on_completions_only,
-        model_config=model_config,
-    )
-    return ds["train"], ds["test"], collator
-
-
 def main():
     args, training_config, model_config, dist_args = parse_script_args(
         TeacherDistillScriptArguments, DistillationConfig, ModelArguments, ParallelismArguments
@@ -177,14 +116,7 @@ def main():
     )
     parallelism_config = context.parallelism_config
 
-    ds, dataset_presharded = load_script_datasets(
-        args,
-        parallelism_config,
-        conversation_field=args.conversation_field,
-    )
-    # The data path follows the run, not the checkpoint class: a natively-multimodal student
-    # distilled on text-only rows is a text run (see is_vlm_run). Decided before the model load,
-    # which requires the checkpoint's processor for an image run.
+    ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=args.conversation_field)
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
     # Same padded-workload request the teacher load makes: the two forwards are compared token by
@@ -221,13 +153,20 @@ def main():
         logger.info(f"Teacher model: {args.teacher_model} ({teacher_params:.2f}B params)")
 
     if is_vlm:
-        train_dataset, eval_dataset, data_collator = _prepare_vlm_distill_data(
-            ds, args, training_config, processing_class, tokenizer, student_model.config
+        train_dataset, eval_dataset, data_collator = prepare_raw_vlm_split(
+            ds,
+            args,
+            training_config,
+            processing_class,
+            tokenizer,
+            student_model.config,
+            desc="Processing VLM distillation dataset",
         )
     else:
-        train_dataset, eval_dataset, data_collator = _prepare_text_distill_data(
-            ds, args, training_config, tokenizer, student_model.config
+        train_dataset, eval_dataset = prepare_chat_text_split(
+            ds, tokenizer, args, training_config, desc="Processing distillation dataset", use_padding=False
         )
+        data_collator = _text_distill_collator(args, tokenizer, student_model.config)
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, training_config)
 
@@ -249,10 +188,7 @@ def main():
         **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(
-        trainer,
-        context,
-        method_name="Distillation",
-        extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"],
+        trainer, context, method_name="Distillation", extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"]
     )
 
 

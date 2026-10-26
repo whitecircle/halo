@@ -17,7 +17,7 @@ from src.trainers.grpo.environmental.step_batch import BatchBuildFence
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from src.trainers.grpo.rollout.completions_logging import unbounded_completion_logs
-from tests.common.grpo_metrics import attach_world_metrics
+from tests.common.world_metrics import attach_world_metrics
 
 
 def episode(reward: float, *, valid: bool = True) -> RolloutResult:

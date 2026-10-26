@@ -35,7 +35,7 @@ from src.trainers.grpo.environmental.reasoning import (
 )
 from src.trainers.grpo.environmental.step_batch import BatchBuildFence
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
+from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 PRICE = {"low": 0.01, "medium": 0.005, "high": 0.001}
 # The example prices the async-GRPO templates show.

@@ -368,7 +368,7 @@ def test_offline_grpo_renderer_refuses_an_image_content_part(field):
     else:
         row["completions"] = [[{"role": "assistant", "content": [{"type": "image", "image": "b64"}]}]]
     with pytest.raises(ValueError, match="image content part"):
-        module.build_chat_template_row_fn(_UnreachableTokenizer(), None)(row)
+        module.render_offline_grpo_row(row, _UnreachableTokenizer(), None)
 
 
 def test_classification_renderer_refuses_an_image_content_part():

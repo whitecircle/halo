@@ -71,8 +71,7 @@ def test_sdpg_routes_through_stored_metrics_mixin():
     assert issubclass(DistributedSDPGTrainer, StoredMetricsMixin)
     t = DistributedSDPGTrainer.__new__(DistributedSDPGTrainer)
     t.store_metrics({"opd_loss": torch.tensor(1.5)}, train_eval="train")
-    value, _rows = t._stored_metrics["train"]["opd_loss"][0]
-    assert torch.is_tensor(value)
+    assert t._stored_metrics["train"].flush() == {"opd_loss": 1.5}
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
-"""Script-side dataset loading, the run's VLM verdict, and the switches for TRL's own dataset prep."""
+"""Script-side dataset loading, the run's VLM verdict, the prepare steps scripts share, and the switches for TRL's
+own dataset prep."""
 
 import logging
 import os
@@ -10,8 +11,11 @@ from transformers import PreTrainedTokenizer
 
 from src.callbacks.generate_examples import GenerateExamplesCallback
 from src.config_validation import reject_non_default_args, reject_unsupported_args
-from src.data.pipeline.coordinated_map import resolve_map_num_proc
+from src.data.collators.vlm import VLMDataCollator
+from src.data.pipeline.coordinated_map import coordinated_map_and_filter, resolve_map_num_proc
 from src.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
+from src.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
+from src.data.pipeline.vlm_rows import prepare_vlm_dataset
 from src.data.sources.loading import is_presharded_dataset_load, load_datasets
 from src.data.vlm_routing import dataset_declares_images, is_vlm_run, reject_image_columns
 from src.distributed.parallelism_config import ParallelismConfig
@@ -26,12 +30,9 @@ logger = logging.getLogger(__name__)
 def reject_trl_dataset_prep_args(
     context: str, sft_config, *unread_fields: str, render_remedy: str | None = None
 ) -> None:
-    """Refuse the ``SFTConfig`` knobs only TRL's own dataset prep and default collator read.
-
-    A script that renders and masks its rows itself replaces both (:func:`disable_trl_dataset_prep`),
-    so each knob would parse and do nothing. ``unread_fields`` are further defaulted fields the
-    caller's path leaves unread; ``render_remedy`` is what the script offers instead.
-    """
+    """Refuse the ``SFTConfig`` knobs only TRL's own dataset prep and default collator read, which a script that
+    renders and masks its rows replaces (:func:`disable_trl_dataset_prep`). ``unread_fields`` are further defaulted
+    fields the caller's path leaves unread; ``render_remedy`` is what the script offers instead."""
     reject_unsupported_args(
         f"{context} (it masks completions through train_on_completions_only + assistant_message_template)",
         # Tri-state: an explicit False ("train on the full sequence") is ignored the same as True.
@@ -48,24 +49,16 @@ def reject_trl_dataset_prep_args(
 
 
 def load_script_datasets(
-    args,
-    parallelism_config: ParallelismConfig,
-    *,
-    loader: Callable[..., Any] = load_datasets,
-    **loader_kwargs,
+    args, parallelism_config: ParallelismConfig, *, loader: Callable[..., Any] = load_datasets, **loader_kwargs
 ) -> tuple[Any, bool]:
-    """The script's datasets loaded for this data-parallel rank: ``(loader_result, dataset_presharded)``.
-
-    ``loader`` is any ``load_datasets``-shaped loader (``load_datasets_auto``'s ``(DatasetDict,
-    is_preprocessed)`` passes through); ``loader_kwargs`` forward extras such as ``conversation_field``
-    (with ``conversation_knob`` when another config field names that column) or ``seed``.
-    """
+    """The script's datasets loaded for this data-parallel rank: ``(loader_result, dataset_presharded)``. ``loader``
+    is any ``load_datasets``-shaped loader; ``loader_kwargs`` forward extras such as ``conversation_field`` (with
+    ``conversation_knob`` when another config field names that column) or ``seed``."""
     data_parallel_rank = parallelism_config.get_data_parallel_rank()
     data_parallel_size = parallelism_config.data_parallel_size
     dataset_presharded = is_presharded_dataset_load(args.dataset, data_parallel_size)
-    # Threaded for every script so a declared tools column is validated at load; a typo'd knob
-    # otherwise renders the whole run without tools. The scripts that cannot render it (KTO,
-    # environmental GRPO) reject the knob through reject_unsupported_args before their load.
+    # Threaded for every script so a typo'd tools column fails the load instead of rendering the run without tools;
+    # the scripts that cannot render it (KTO, environmental GRPO) refuse the knob before their load.
     loader_kwargs.setdefault("tools_field", args.tools_field)
     ds = loader(
         args.dataset,
@@ -79,12 +72,9 @@ def load_script_datasets(
 
 
 def _reject_images_under_text_only_model(args, datasets, *, text_only_model: bool) -> None:
-    """Refuse image data on a run that loads a multimodal checkpoint through its text-only class.
-
-    ``is_vlm_run`` reads the checkpoint's config, which still says multimodal, so each image
-    declaration it counts (``images_field``, an image column, parts embedded in
-    ``conversation_field``) would route the run to a VLM data path with no vision model behind it.
-    """
+    """Refuse image data on a run that loads a multimodal checkpoint through its text-only class: ``is_vlm_run``
+    reads the still-multimodal checkpoint config, so each image declaration it counts would route the run to a VLM
+    data path with no vision model behind it."""
     if not text_only_model:
         return
     images_field = getattr(args, "images_field", None)
@@ -107,12 +97,9 @@ def _reject_images_under_text_only_model(args, datasets, *, text_only_model: boo
 def resolve_vlm_run(
     args, model_config, datasets, *, text_only_model: bool, vlm_checkpoint: bool | None = None
 ) -> bool:
-    """Whether the run takes the VLM data path (:func:`is_vlm_run`), decided once the dataset is in hand
-    and before the model load, which needs the checkpoint's processor for an image run.
-
-    Without a ``vlm_checkpoint`` verdict the script already probed, :func:`probe_checkpoint` reads the
-    checkpoint at ``model_revision`` under ``trust_remote_code``, as the load does.
-    """
+    """Whether the run takes the VLM data path (:func:`is_vlm_run`), decided before the model load, which needs the
+    checkpoint's processor for an image run. Without the ``vlm_checkpoint`` verdict the script already probed,
+    :func:`probe_checkpoint` reads the checkpoint as the load does."""
     _reject_images_under_text_only_model(args, datasets, text_only_model=text_only_model)
     if vlm_checkpoint is None:
         _, vlm_checkpoint = probe_checkpoint(
@@ -124,12 +111,7 @@ def resolve_vlm_run(
 
 
 def _write_decoded_samples(
-    dataset: Dataset,
-    *,
-    name: str,
-    num_examples: int,
-    tokenizer: PreTrainedTokenizer,
-    output_dir: str,
+    dataset: Dataset, *, name: str, num_examples: int, tokenizer: PreTrainedTokenizer, output_dir: str
 ) -> None:
     """Decode ``dataset``'s first rows into ``<output_dir>/log/<name>_sample.txt`` (the test split's as ``eval``)."""
     if "input_ids" not in dataset.column_names:
@@ -205,6 +187,43 @@ def log_script_dataset_examples(datasets: dict, tokenizer: PreTrainedTokenizer, 
     )
 
 
+def prepare_chat_text_split(ds, tokenizer, args, training_config, *, desc: str, use_padding: bool):
+    """COLLECTIVE: ``(train, eval)`` chat-templated and tokenized once, a row over ``max_length`` dropped rather than
+    truncated mid-turn (measured on the ids it trains on); ``desc`` keys the map's cache."""
+    render_kwargs = text_render_kwargs(args)
+    ds = coordinated_map_and_filter(
+        ds,
+        build_chat_row_processor(
+            tokenizer=tokenizer, max_length=training_config.max_length, use_padding=use_padding, **render_kwargs
+        ),
+        # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
+        remove_columns=sorted(set(ds["train"].column_names)),
+        desc=desc,
+        cache_key_extras={**render_kwargs, "add_generation_prompt": False},
+        num_proc=resolve_map_num_proc(training_config.dataset_num_proc),
+    )
+    return ds["train"], ds["test"]
+
+
+def prepare_raw_vlm_split(ds, args, training_config, processor, tokenizer, model_config, *, desc: str):
+    """COLLECTIVE: ``(train, eval, collator)``, raw conversations mapped to ``history``/``images`` for
+    :class:`VLMDataCollator`; ``desc`` keys the map's cache."""
+    num_proc = resolve_map_num_proc(training_config.dataset_num_proc)
+    ds = prepare_vlm_dataset(ds, args, processor, tokenizer, training_config.max_length, num_proc, desc=desc)
+    # The mapped columns (history/images/…) are not model-forward kwargs, so HF's default
+    # remove_unused_columns=True would strip them before they reach the collator.
+    training_config.remove_unused_columns = False
+    collator = VLMDataCollator(
+        processor,
+        tokenizer,
+        training_config.max_length,
+        response_prompt_template=args.assistant_message_template if args.train_on_completions_only else None,
+        train_on_completions_only=args.train_on_completions_only,
+        model_config=model_config,
+    )
+    return ds["train"], ds["test"], collator
+
+
 def prepare_script_preference_data(
     args,
     training_config,
@@ -214,51 +233,34 @@ def prepare_script_preference_data(
     is_vlm_data: bool,
     generation_max_prompt_length: int | None,
 ):
-    """Tokenize a preference dataset and its generation-eval split, and log the examples; returns
-    ``(train_dataset, eval_dataset, generate_callback)``, the callback ``None`` when nothing generates.
-
-    The VLM arm passes the rows through: both trainers chat-template and tokenize vision preference
-    rows themselves, so a prep here would render them twice.
-    """
+    """Tokenize a preference dataset and its generation-eval split, and log the examples; returns ``(train_dataset,
+    eval_dataset, generate_callback)``, the callback ``None`` when nothing generates. VLM rows pass through: both
+    trainers chat-template and tokenize them themselves."""
     generate_dataset = None
     if is_vlm_data:
         train_dataset, eval_dataset = ds["train"], ds.get("test")
     else:
         num_proc = resolve_map_num_proc(training_config.dataset_num_proc)
         train_dataset, eval_dataset = prepare_preference_datasets(
-            ds["train"],
-            ds["test"],
-            tokenizer,
-            num_proc=num_proc,
-            tools_field=args.tools_field,
+            ds["train"], ds["test"], tokenizer, num_proc=num_proc, tools_field=args.tools_field
         )
         # Only when the callback will consume it — the prep tokenizes the whole test split.
         if args.generate_eval_examples:
             generate_dataset = prepare_generative_dataset(
-                ds["test"],
-                tokenizer,
-                generation_max_prompt_length,
-                num_proc=num_proc,
-                tools_field=args.tools_field,
+                ds["test"], tokenizer, generation_max_prompt_length, num_proc=num_proc, tools_field=args.tools_field
             )
 
     log_script_dataset_examples(
-        {"train": train_dataset, "test": eval_dataset, "generate": generate_dataset},
-        tokenizer,
-        args,
-        training_config,
+        {"train": train_dataset, "test": eval_dataset, "generate": generate_dataset}, tokenizer, args, training_config
     )
     generate_callback = GenerateExamplesCallback.from_config(args, training_config, generate_dataset, tokenizer)
     return train_dataset, eval_dataset, generate_callback
 
 
 def disable_trl_dataset_prep(sft_config) -> None:
-    """Turn TRL's own dataset preparation off on a config whose data the script already prepared.
-
-    ``skip_prepare_dataset`` alone is not enough: TRL reads ``packing`` and ``padding_free`` again at
-    collator-selection time, and either one left on replaces the script's collator with TRL's own,
-    over rows TRL never tokenized.
-    """
+    """Turn TRL's own dataset preparation off on a config whose data the script already prepared: TRL reads
+    ``packing`` and ``padding_free`` again at collator selection, and either one left on replaces the script's
+    collator with TRL's own, over rows TRL never tokenized."""
     sft_config.dataset_kwargs = {"skip_prepare_dataset": True}
     sft_config.padding_free = False
     sft_config.packing = False

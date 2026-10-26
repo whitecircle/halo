@@ -25,7 +25,8 @@ changes.
 | `src/trainers/parallelism/trainer_rules.py` | `agent-docs/parallelism/context-parallelism.md`; `agent-docs/reference/trainer-architecture.md` |
 | `src/trainers/trl_dataset_prep.py` | `agent-docs/data/filesystem-handling.md`; `agent-docs/reference/trainer-architecture.md` |
 | `src/trainers/token_metrics.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
-| `src/trainers/sft.py` | `agent-docs/training-methods/sft.md`, `agent-docs/training-methods/pretraining.md` |
+| `src/trainers/world_metrics.py` | `agent-docs/reference/trainer-architecture.md`, `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/grpo/online.md` |
+| `src/trainers/sft.py`, `src/trainers/sft_rules.py` | `agent-docs/training-methods/sft.md`, `agent-docs/training-methods/pretraining.md` |
 | `src/trainers/preference/` | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/smpo.md`, `agent-docs/training-methods/preference/kto.md` |
 | `src/trainers/preference/trl_preference.py` | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/kto.md` |
 | `src/trainers/grpo/` | `agent-docs/training-methods/grpo/{README,online,offline}.md`, `agent-docs/training-methods/async-grpo/*.md` |
@@ -68,7 +69,6 @@ changes.
 | `src/trainers/grpo/environmental/{trajectory_tokenize,trajectory_spans}.py` | `agent-docs/training-methods/async-grpo/objective.md` |
 | `src/trainers/grpo/environmental/rollout_metrics.py`, `src/trainers/grpo/rollout/completions_logging.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md` |
 | `src/trainers/grpo/early_stop.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/grpo/online.md`, `agent-docs/reference/configuration-reference.md` |
-| `src/trainers/grpo/world_metrics.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/grpo/online.md` |
 | `src/trainers/grpo/objective/` | `agent-docs/training-methods/async-grpo/objective.md`, `agent-docs/training-methods/grpo/{online,offline}.md` |
 | `src/trainers/grpo/logprob_scoring.py`, `src/kernels/head_logprobs.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/environments/ray_actors.py` | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/async-grpo/setup.md` |
@@ -126,6 +126,7 @@ changes.
 |---|---|
 | `src/data/collators/` | `agent-docs/data/collators.md`, `agent-docs/optimization/padding-free-collator.md` |
 | `src/data/collators/{offline_grpo,vlm_preference}.py`, `src/data/pipeline/preferences.py` | `agent-docs/training-methods/grpo/offline.md`, `agent-docs/training-methods/preference/reward-modeling.md` |
+| `src/data/pipeline/prompt_completion.py` | `agent-docs/training-methods/preference/smpo.md`, `agent-docs/training-methods/grpo/offline.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/data/collators/factory.py`, `src/data/collators/collator_rules.py` | `agent-docs/data/collators.md` |
 | `src/data/tree_layout.py`, `src/data/pipeline/tree_rows.py`, `src/data/collators/tree_packing.py`, `src/models/attention/{tree_plan,tree}.py` | `agent-docs/optimization/tree-packing.md`, `agent-docs/reference/configuration-reference.md` |
 | `src/data/turn_markers.py`, `src/data/completion_spans.py` | `agent-docs/data/collators.md`, `agent-docs/data/dataset-preparation.md` |

@@ -8,12 +8,11 @@ from datasets import Dataset, Features, Sequence, Value
 from datasets import Image as ImageFeature
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
-from src.data.pipeline.chat_render import lacks_emitted_bos
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, reject_image_content
 from src.data.pipeline.coordinated_map import DATASET_NUM_PROC, coordinated_map
+from src.data.pipeline.prompt_completion import render_prompt_completions, tokenize_prompt_completions
 from src.data.pipeline.text_rows import prepare_generative_row
 from src.data.pipeline.vlm_rows import normalize_vlm_conversation
-from src.data.turn_markers import lacks_terminator
 from src.data.vlm_render import extract_conversation_images, render_vlm_text
 from src.data.vlm_routing import VLM_RAW_IMAGE_COLUMNS
 from src.model_loading.tokenizer_setup import resolve_tokenizer
@@ -33,19 +32,6 @@ def _shared_message_prefix_len(a: list[dict[str, Any]], b: list[dict[str, Any]])
             break
         n += 1
     return n
-
-
-def split_rendered_completion(prompt_text: str, full_text: str, field: str) -> str:
-    """``full_text`` (``template(prompt + completion)``) minus its ``prompt_text`` prefix, raising on a template
-    that breaks the prefix invariant. A completion never renders alone: strict templates (Qwen3.5) refuse
-    assistant-only message lists."""
-    if not full_text.startswith(prompt_text):
-        raise ValueError(
-            f"Chat template broke the prefix invariant: template(prompt + {field}) does not start "
-            "with template(prompt), so the completion cannot be split off. "
-            f"prompt head: {prompt_text[:120]!r} / full head: {full_text[:120]!r}"
-        )
-    return full_text[len(prompt_text) :]
 
 
 def normalize_preference_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -123,26 +109,6 @@ def render_vlm_preference_row(features: dict[str, Any], processing_class: Proces
     return {**rendered, "images": pil_images}
 
 
-def _aligned_prompt_split(prompt_ids: list[int], full_chosen_ids: list[int], full_rejected_ids: list[int]) -> int:
-    """Where the prompt ends in both full sequences: one token earlier when a boundary merge shifted it on either
-    side, so the trainer's verbatim ``prompt ⧺ completion`` never duplicates the merged token and both sides
-    condition on one prompt."""
-    split = len(prompt_ids)
-    if full_chosen_ids[:split] != prompt_ids or full_rejected_ids[:split] != prompt_ids:
-        # Exact on the non-merging side too: its first split - 1 tokens still match the prompt.
-        split -= 1
-    return split
-
-
-def _truncate_keep_eos(ids: list[int], max_length: int, eos_id: int | None) -> list[int]:
-    """``ids`` capped at ``max_length``, keeping their final EOS so the model still learns to stop."""
-    if len(ids) <= max_length:
-        return ids
-    if eos_id is None:
-        return ids[:max_length]
-    return ids[: max_length - 1] + [eos_id]
-
-
 def tokenize_preference_row(
     features: dict[str, str],
     processing_class: PreTrainedTokenizerBase,
@@ -152,38 +118,19 @@ def tokenize_preference_row(
     truncation_mode: str,
     eos_token_ids: frozenset[int] = frozenset(),
 ) -> dict[str, list[int]]:
-    """Tokenize one rendered (prompt, chosen, rejected) example from its full prompt+completion sequences, so a
+    """Tokenize one rendered (prompt, chosen, rejected) example jointly (:func:`tokenize_prompt_completions`), so a
     token merged across the boundary splits the same way on both sides."""
-    prompt = features["prompt"]
-    prompt_ids = processing_class(prompt, add_special_tokens=False)["input_ids"]
-    full_chosen = processing_class(prompt + features["chosen"], add_special_tokens=False)["input_ids"]
-    full_rejected = processing_class(prompt + features["rejected"], add_special_tokens=False)["input_ids"]
-    split = _aligned_prompt_split(prompt_ids, full_chosen, full_rejected)
-    prompt_ids, chosen_input_ids, rejected_input_ids = prompt_ids[:split], full_chosen[split:], full_rejected[split:]
-
-    if lacks_emitted_bos(prompt_ids, processing_class):
-        prompt_ids = [processing_class.bos_token_id] + prompt_ids
-
-    # A spurious ender would sit inside the mean log-prob the SMPO margin is computed from.
-    eos_id = processing_class.eos_token_id
-    if lacks_terminator(chosen_input_ids, processing_class, eos_token_ids):
-        chosen_input_ids = chosen_input_ids + [eos_id]
-    if lacks_terminator(rejected_input_ids, processing_class, eos_token_ids):
-        rejected_input_ids = rejected_input_ids + [eos_id]
-
-    if max_prompt_length and len(prompt_ids) > max_prompt_length:
-        keep_start = truncation_mode == "keep_start"
-        prompt_ids = prompt_ids[:max_prompt_length] if keep_start else prompt_ids[-max_prompt_length:]
-
-    if max_completion_length:
-        chosen_input_ids = _truncate_keep_eos(chosen_input_ids, max_completion_length, eos_id)
-        rejected_input_ids = _truncate_keep_eos(rejected_input_ids, max_completion_length, eos_id)
-
-    return {
-        "prompt_input_ids": prompt_ids,
-        "chosen_input_ids": chosen_input_ids,
-        "rejected_input_ids": rejected_input_ids,
-    }
+    prompt_ids, (chosen_ids, rejected_ids) = tokenize_prompt_completions(
+        features["prompt"],
+        (features["chosen"], features["rejected"]),
+        processing_class,
+        max_prompt_length=max_prompt_length,
+        max_completion_length=max_completion_length,
+        truncation_mode=truncation_mode,
+        joint_boundary=True,
+        eos_token_ids=eos_token_ids,
+    )
+    return {"prompt_input_ids": prompt_ids, "chosen_input_ids": chosen_ids, "rejected_input_ids": rejected_ids}
 
 
 def tokenize_vlm_preference_row(
@@ -196,30 +143,27 @@ def tokenize_vlm_preference_row(
     eos_token_ids: frozenset[int] = frozenset(),
 ) -> dict[str, Any]:
     """Prepare one raw VLM (prompt, chosen, rejected[, images]) example for SMPO: completions split off by the
-    text pipeline's prefix strip and tokenized through :func:`tokenize_preference_row`; the prompt stays text plus
+    text pipeline's prefix strip and tokenized as :func:`tokenize_preference_row` does; the prompt stays text plus
     PIL images for the collator to expand."""
-    tokenizer = resolve_tokenizer(processing_class)
     prompt_history, pil_images, completions = split_vlm_preference_row(features, "VLM SMPO row")
-
-    prompt_text = render_vlm_text(processing_class, prompt_history)
-    completion_texts = {
-        side: split_rendered_completion(prompt_text, render_vlm_text(processing_class, prompt_history + history), side)
-        for side, history in completions.items()
-    }
-
-    tokenized = tokenize_preference_row(
-        {"prompt": prompt_text, "chosen": completion_texts["chosen"], "rejected": completion_texts["rejected"]},
-        tokenizer,
+    prompt_text, completion_texts = render_prompt_completions(
+        partial(render_vlm_text, processing_class), prompt_history, completions.items()
+    )
+    _, (chosen_ids, rejected_ids) = tokenize_prompt_completions(
+        prompt_text,
+        completion_texts,
+        resolve_tokenizer(processing_class),
         max_prompt_length=max_prompt_length,
         max_completion_length=max_completion_length,
         truncation_mode=truncation_mode,
+        joint_boundary=True,
         eos_token_ids=eos_token_ids,
     )
     return {
         "prompt_text": prompt_text,
         "images": pil_images,
-        "chosen_input_ids": tokenized["chosen_input_ids"],
-        "rejected_input_ids": tokenized["rejected_input_ids"],
+        "chosen_input_ids": chosen_ids,
+        "rejected_input_ids": rejected_ids,
     }
 
 
@@ -228,9 +172,8 @@ def render_preference_row(
     tokenizer: PreTrainedTokenizer,
     tools_field: str | None = None,
 ) -> dict[str, str]:
-    """Chat-template a normalized preference row's prompt, then each completion as ``template(prompt +
-    completion)`` minus the rendered prompt (:func:`split_rendered_completion`); ``tools_field`` reaches the
-    template."""
+    """Chat-template a normalized preference row's prompt and both completions (:func:`render_prompt_completions`);
+    ``tools_field`` reaches the template."""
     row = normalize_preference_row(row)
 
     # DPO's run-intent dispatch reads image columns only, so an embedded-image row reaches here undetected.
@@ -238,13 +181,11 @@ def render_preference_row(
         reject_image_content(row[field], f"preference field '{field}'")
 
     template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=tools_field)
-
-    prompt_messages = row["prompt"]
-    prompt_text = tokenizer.apply_chat_template(prompt_messages, tokenize=False, **template_kwargs)
-    for field in ("chosen", "rejected"):
-        full_text = tokenizer.apply_chat_template(prompt_messages + row[field], tokenize=False, **template_kwargs)
-        row[field] = split_rendered_completion(prompt_text, full_text, field)
-    row["prompt"] = prompt_text
+    row["prompt"], (row["chosen"], row["rejected"]) = render_prompt_completions(
+        partial(tokenizer.apply_chat_template, tokenize=False, **template_kwargs),
+        row["prompt"],
+        [(field, row[field]) for field in ("chosen", "rejected")],
+    )
     return row
 
 
@@ -292,5 +233,4 @@ def prepare_generative_dataset(
         ),
         num_proc=num_proc,
         desc="Preparing dataset for generation",
-        cache_key_extras={"tools_field": tools_field},
     )

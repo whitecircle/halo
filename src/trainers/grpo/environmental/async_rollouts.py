@@ -28,7 +28,7 @@ from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure, rank_consensus
 from src.runtime.ranks import get_global_rank, get_global_world_size, get_num_nodes, is_global_main_process
 from src.trainers.grpo.rollout.weight_push import sync_trainer_weights
-from src.trainers.grpo.world_metrics import world_sums
+from src.trainers.world_metrics import world_sums
 from src.weight_sync.clients.base import WeightSyncClientBase
 from src.weight_sync.pool import WeightSyncPool
 from src.weight_sync.registry import resolve_weight_sync_client

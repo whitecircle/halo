@@ -30,9 +30,9 @@ rung even at `ep_size == 1` (experts replicated, FSDP2-sharded), for every train
 `EmbeddingTrainer` runs the same ladder with the checkpoint context re-pointed from the
 `SentenceTransformer` `nn.Sequential` at the `auto_model` backbone, then writes the ST pipeline config
 beside it. Its in-place-injected LoRA is not a `PeftModel`, so the PEFT rung never sees it: that branch
-skips the ladder (writing the tokenizer through the same `save_tokenizer`), folds the adapter into the
-gathered state dict and writes it through `write_gathered_checkpoint`. How it resumes, LoRA or full
-fine-tune: [Embedding — Saving](../training-methods/embedding.md#saving).
+skips the ladder (writing the tokenizer through the same `save_tokenizer`), folds the adapter into each
+tensor as it is gathered and streams the result through `stream_gathered_checkpoint`. How it resumes,
+LoRA or full fine-tune: [Embedding — Saving](../training-methods/embedding.md#saving).
 
 **Gathered saves** (the default everywhere) produce HuggingFace checkpoints `from_pretrained()` loads.
 The optional **per-rank sharded EP save** (`save_sharded_ep`) is a write-bandwidth option that must be
@@ -52,8 +52,8 @@ on every rank.
 
 The streamed parts are renamed to HF's own `model-{i}-of-{n}` once the count is known, so
 `from_pretrained` reads the result exactly as a `save_pretrained` checkpoint. Part *boundaries* can
-differ from `save_sharded_state_dict`'s — the streaming writer flushes a block before an oversized
-tensor — so the file count and key→file mapping can differ while both load the same.
+differ from HF's splitter's — the streaming writer flushes a block before an oversized tensor — so the
+file count and key→file mapping can differ while both load the same.
 
 ## What lands on disk — four layouts
 
@@ -141,10 +141,9 @@ file or on the directory it owns — each sentence-transformers module folder (`
 ACL applies too. Export copies omit every unpublished file an interrupted save leaves: a staged write's
 stage, the withheld `.trainer_state.json.uncommitted`, and the `.<name>.<uuid hex>.tmp` spelling.
 
-The `.bin`-then-sweep fallback belongs to `write_gathered_checkpoint`, the whole-dict writer the
-injected-LoRA embedding save uses: it needs a dict still whole after the failure, which a streamed save
-does not hold. Only the config write is gated on the model carrying one; a model without a config still
-gets normalized weights in safetensors.
+A failed write raises on every rank; no gathered save falls back to `pytorch_model.bin`. Only the
+config write is gated on the model carrying one; a model without a config still gets normalized weights
+in safetensors.
 
 ### Exported `config.json`
 

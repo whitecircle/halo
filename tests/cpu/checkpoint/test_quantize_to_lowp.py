@@ -638,7 +638,7 @@ def test_an_unreadable_config_is_refused_before_any_write(tmp_path):
 
 
 def test_quantize_refuses_to_write_into_its_own_input_dir():
-    """save_sharded_state_dict-style rewrites delete the shards they do not own, so an in-place
+    """The output's stale-file sweep deletes the shards this run did not write, so an in-place
     conversion destroys the source checkpoint."""
     with tempfile.TemporaryDirectory() as src:
         save_file({"model.layers.0.mlp.down_proj.weight": torch.randn(64, 64)}, os.path.join(src, "model.safetensors"))

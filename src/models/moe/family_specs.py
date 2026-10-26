@@ -14,7 +14,6 @@ from types import MappingProxyType
 from src.models.config_access import config_sources
 from src.models.moe.config_fields import has_routed_experts
 from src.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS, ExpertLayout, ExpertLayoutKind
-from src.models.moe.expert_lora_spec import EXPERT_LORA_SUFFIXES
 
 GLU_PROJECTIONS: tuple[str, ...] = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
 
@@ -333,12 +332,3 @@ def per_expert_fusion_map() -> dict[str, tuple[str, int]]:
                 )
             claimed_by.setdefault(key, spec.model_types[0])
     return fusion
-
-
-def is_expert_weight_attr(param_name: str) -> bool:
-    """Whether a live parameter name belongs to an expert weight, by its leading segment: a native expert adapter
-    counts as its weight, since the EP gather folds it in and an engine cannot load it raw."""
-    root = param_name.split(".")[0]
-    for suffix in EXPERT_LORA_SUFFIXES:
-        root = root.removesuffix(suffix)
-    return root in expert_weight_roots()

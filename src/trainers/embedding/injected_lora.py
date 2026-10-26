@@ -1,8 +1,10 @@
 """LoRA injected in place into an embedding backbone: the fold its saves write and the resume adapter it restores."""
 
+import itertools
 import logging
 import os
 from collections.abc import Iterator
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -13,6 +15,7 @@ from src.checkpoint.adapters import missing_resume_adapter_reason, resume_adapte
 from src.checkpoint.format import RESUME_ADAPTER_DIR
 from src.checkpoint.parallel.adapters import read_adapter_across_ranks
 from src.checkpoint.parallel.resume_weights import built_from_checkpoint_across_ranks
+from src.checkpoint.parallel.writing import chunked_saveable_tensors
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.log import KEY_PREVIEW_COUNT
 from src.models.param_roles import persistent_buffers
@@ -44,17 +47,21 @@ def require_injected_lora_config(model: nn.Module) -> LoraConfig:
     )
 
 
-def folded_backbone_items(backbone: nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
-    """The backbone's saveable tensors with its injected LoRA folded in out of place, under the base model's
-    names: the tensors the tuner layers own are dropped by identity (a backbone's own ``lora_``-named
-    parameters stay). Under FSDP2 each fold is a DTensor collective, in ``named_parameters`` order."""
-    folds = lora_fold_targets(backbone)
+def folded_backbone_chunks(backbone: nn.Module, *, retain: bool) -> Iterator[dict[str, torch.Tensor]]:
+    """COLLECTIVE: :func:`chunked_saveable_tensors` over the backbone with its injected LoRA folded in out of
+    place, under the base model's names: the tensors the tuner layers own are dropped by identity (a backbone's
+    own ``lora_``-named parameters stay). Each target folds inside its chunk's gather, in the chunk order every
+    rank shares (a DTensor collective under FSDP2)."""
     adapters = tuner_adapter_param_ids(backbone)
-    for name, param in backbone.named_parameters():
-        if id(param) not in adapters:
-            yield strip_base_layer_segment(name), lora_folded_data(param, folds)
-    for name, buffer in persistent_buffers(backbone):
-        yield strip_base_layer_segment(name), buffer
+    # The parameters themselves, not their data: the fold finds its targets by identity.
+    params = ((name, param) for name, param in backbone.named_parameters() if id(param) not in adapters)
+    base = itertools.chain(params, persistent_buffers(backbone))
+    return chunked_saveable_tensors(
+        backbone,
+        retain=retain,
+        items=((strip_base_layer_segment(name), tensor) for name, tensor in base),
+        fold=partial(lora_folded_data, folds=lora_fold_targets(backbone)),
+    )
 
 
 def trainable_tensors(model: nn.Module) -> dict[str, torch.Tensor]:

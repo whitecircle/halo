@@ -20,10 +20,12 @@ import weakref
 
 import pytest
 import torch
+from huggingface_hub import split_torch_state_dict_into_shards
 from safetensors.torch import safe_open
 
+import src.checkpoint.writing as checkpoint_writing
 from src.checkpoint.format import STREAM_PART_PREFIX
-from src.checkpoint.writing import StreamingShardWriter, merge_shard_index, save_sharded_state_dict, write_merged_index
+from src.checkpoint.writing import StreamingShardWriter, merge_shard_index, write_merged_index
 
 PREFIX = "model-pp00000-of-00002"
 
@@ -188,7 +190,7 @@ def test_written_parts_round_trip(tmp_path):
 
 
 def _stream(dir_path, state_dict, max_shard_size):
-    dir_path.mkdir()
+    dir_path.mkdir(exist_ok=True)
     writer = StreamingShardWriter(str(dir_path), max_shard_size, enabled=True)
     for key, tensor in state_dict.items():
         writer.add(key, tensor)
@@ -196,26 +198,20 @@ def _stream(dir_path, state_dict, max_shard_size):
     return json.loads((dir_path / "model.safetensors.index.json").read_text())
 
 
-def test_hf_finalize_is_readable_exactly_like_the_buffered_splitter(tmp_path):
-    """The streamed save must be READABLE like ``save_sharded_state_dict``'s output — not identical.
+def test_hf_finalize_is_readable_exactly_like_hfs_splitter(tmp_path):
+    """The streamed save must be READABLE like a save split by HF's own splitter — not identical.
 
-    That helper is the whole-dict writer behind ``write_gathered_checkpoint``, for a caller already
-    holding every tensor in host RAM. What a reader needs is the HF naming, an index naming every key, the same total_size, and
-    the same bytes reachable through it. Part BOUNDARIES are deliberately not guaranteed — see the
-    next test — so asserting the same filenames or key→file map would pin a property the writer
-    explicitly disclaims.
+    What a reader needs is the HF naming, an index naming every key, the same total_size, and the same
+    bytes reachable through it. Part BOUNDARIES are deliberately not guaranteed — see the next test — so
+    asserting the same filenames or key→file map would pin a property the writer explicitly disclaims.
     """
     state_dict = {f"w{i}": torch.randn(250_000) for i in range(20)}  # 1 MB each, none over the cap
-
-    buffered_dir = tmp_path / "buffered"
-    buffered_dir.mkdir()
-    save_sharded_state_dict(dict(state_dict), str(buffered_dir), max_shard_size="4MB")
-    buffered_index = json.loads((buffered_dir / "model.safetensors.index.json").read_text())
+    split = split_torch_state_dict_into_shards(state_dict, max_shard_size="4MB")
 
     streamed_index = _stream(tmp_path / "streamed", state_dict, "4MB")
 
-    assert set(streamed_index["weight_map"]) == set(buffered_index["weight_map"])
-    assert streamed_index["metadata"]["total_size"] == buffered_index["metadata"]["total_size"]
+    assert set(streamed_index["weight_map"]) == set(split.tensor_to_filename)
+    assert streamed_index["metadata"]["total_size"] == split.metadata["total_size"]
     for name in streamed_index["weight_map"].values():
         assert re.fullmatch(r"model-\d{5}-of-\d{5}\.safetensors", name), f"not an HF shard name: {name}"
     for key, tensor in state_dict.items():
@@ -236,21 +232,13 @@ def test_an_oversized_tensor_diverges_from_hf_but_still_round_trips(tmp_path):
         "big": torch.randn(2_000_000),  # 8 MB — over the 4 MB cap
         "small_b": torch.randn(250_000),
     }
-
-    buffered_dir = tmp_path / "buffered"
-    buffered_dir.mkdir()
-    save_sharded_state_dict(dict(state_dict), str(buffered_dir), max_shard_size="4MB")
-    buffered_index = json.loads((buffered_dir / "model.safetensors.index.json").read_text())
+    split = split_torch_state_dict_into_shards(state_dict, max_shard_size="4MB")
 
     streamed_index = _stream(tmp_path / "streamed", state_dict, "4MB")
 
-    streamed_parts = set(streamed_index["weight_map"].values())
-    buffered_parts = set(buffered_index["weight_map"].values())
-    assert len(streamed_parts) == 3, "the writer should flush, isolate the oversized tensor, then reopen"
-    assert len(buffered_parts) == 2, "HF keeps its block open across the oversized tensor"
-
-    assert set(streamed_index["weight_map"]) == set(buffered_index["weight_map"])
-    assert streamed_index["metadata"]["total_size"] == buffered_index["metadata"]["total_size"]
+    assert len(set(streamed_index["weight_map"].values())) == 3, "the writer should flush, isolate, then reopen"
+    assert len(split.filename_to_tensors) == 2, "HF keeps its block open across the oversized tensor"
+    assert streamed_index["metadata"]["total_size"] == split.metadata["total_size"]
     for key, tensor in state_dict.items():
         assert torch.equal(_tensors(tmp_path / "streamed" / streamed_index["weight_map"][key])[key], tensor)
 
@@ -311,6 +299,31 @@ def test_an_abandoned_save_never_passes_for_a_checkpoint_and_the_next_finalize_s
     writer.close_as_hf_checkpoint()
 
     assert os.listdir(tmp_path) == ["model.safetensors"]
+
+
+def test_a_crash_mid_resave_leaves_the_previous_checkpoint_intact(tmp_path, monkeypatch):
+    """Parts take HF's names only once all are on disk, so a re-save dying after part *k* cannot leave new
+    parts 1..k beside old parts k+1..N under the old index — which ``from_pretrained`` reads as one healthy
+    checkpoint holding half of each save."""
+    out = tmp_path / "out"
+    previous = _stream(out, {f"w{i}": torch.full((250_000,), 1.0) for i in range(3)}, "1MB")
+    real_save = checkpoint_writing.save_safetensors_file
+    written = []
+
+    def crash_on_the_second_part(tensors, path, **kwargs):
+        written.append(path)
+        if len(written) == 2:
+            raise OSError(28, "No space left on device")
+        return real_save(tensors, path, **kwargs)
+
+    monkeypatch.setattr(checkpoint_writing, "save_safetensors_file", crash_on_the_second_part)
+    with pytest.raises(OSError):
+        _stream(out, {f"w{i}": torch.full((250_000,), 2.0) for i in range(3)}, "1MB")
+    assert len(written) == 2, "premise: the crash lands after one part of the re-save was written"
+
+    assert json.loads((out / "model.safetensors.index.json").read_text()) == previous
+    for key, part in previous["weight_map"].items():
+        assert torch.equal(_tensors(out / part)[key], torch.full((250_000,), 1.0)), key
 
 
 def test_hf_finalize_refuses_to_replace_a_checkpoint_with_nothing(tmp_path):

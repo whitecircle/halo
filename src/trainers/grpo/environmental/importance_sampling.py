@@ -29,7 +29,7 @@ from src.trainers.grpo.objective.logratio import (
     select_mask_logratio,
     zero_engine_forced_closes,
 )
-from src.trainers.grpo.world_metrics import gathered_fractions
+from src.trainers.world_metrics import world_sums
 from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = get_logger(__name__, log_level="INFO")
@@ -300,10 +300,10 @@ class ImportanceSamplingMixin:
         and every optimizer step of the round is skipped; the next sync re-anchors the rollouts."""
         if self._skip_update_masked_frac is None or mode != "train" or traj_row_ids is None:
             return False
-        traj_frac, token_frac = gathered_fractions(
-            _masked_fraction_counts(importance_sampling_ratio, eff_corrected, traj_row_ids, num_trajectories),
-            self.accelerator.gather,
-        )
+        counts = _masked_fraction_counts(importance_sampling_ratio, eff_corrected, traj_row_ids, num_trajectories)
+        traj_masked, traj_total, token_masked, token_total = world_sums([count for pair in counts for count in pair])
+        traj_frac = traj_masked / traj_total if traj_total else 0.0
+        token_frac = token_masked / token_total if token_total else 0.0
         self._metrics[mode]["sampling/is_masked_traj_frac"].append(traj_frac)
         self._metrics[mode]["sampling/is_masked_token_frac"].append(token_frac)
         skipped = max(traj_frac, token_frac) > self._skip_update_masked_frac

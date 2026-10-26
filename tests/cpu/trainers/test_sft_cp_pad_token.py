@@ -18,6 +18,7 @@ from transformers import Trainer
 
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.sft import DistributedSFTTrainer
+from src.trainers.world_metrics import WorldMetrics
 
 
 def _inputs(seq_len):
@@ -43,6 +44,7 @@ def _trainer(processing_class, cp_size=2):
         cp_config=SimpleNamespace(cp_rank=0),
         processing_class=processing_class,
         model=SimpleNamespace(training=True),
+        _cp_metrics={"train": WorldMetrics()},
     )
 
 

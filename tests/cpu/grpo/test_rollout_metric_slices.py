@@ -17,6 +17,8 @@ import pytest
 from src.environments.episode import RolloutResult
 from src.environments.episode_keys import EPISODE_SLICES_KEY
 from src.environments.messages import Trajectory
+from src.rewards.terms import REWARD_COMPONENT_PREFIX
+from src.trainers import world_metrics
 from src.trainers.grpo.environmental import rollout_metrics
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
@@ -65,8 +67,7 @@ def test_episode_slices_take_the_effort_level_and_the_envs_string_stamps():
     assert rollout_metrics.RolloutMetricsMixin._episode_slices(hijack) == {"effort": "low"}, "effort is the trainer's"
 
 
-def test_metrics_are_sliced_per_value_of_every_slice(monkeypatch):
-    monkeypatch.setattr(rollout_metrics, "gather_object", lambda values: values)
+def test_metrics_are_sliced_per_value_of_every_slice():
     host = _host()
     results = [
         _result("high", {"language": "cpp"}, solve=1.0, test_calls=2.0, reward=1.2),
@@ -85,6 +86,39 @@ def test_metrics_are_sliced_per_value_of_every_slice(monkeypatch):
     assert m["effort/low/solve_rate"] == [pytest.approx(0.5)]
     assert "language/None/count" not in m, "an episode without the stamp joins no language slice"
     assert m["outcome/solve_rate"] == [pytest.approx(0.5)], "the unsliced means stay"
+
+
+def test_slices_and_the_p90_pool_every_ranks_episodes(monkeypatch):
+    """A rank's own episodes are not the batch: a slice's count and means and the token p90 are the world's
+    (cpp reward (1.2 + 0.2 + 0.4) / 3, where a mean of the two ranks' means reads 0.55)."""
+    peer = [
+        _result("high", {"language": "cpp"}, 1.0, 1.0, reward=0.4, tokens=500),
+        _result("low", {}, 0.0, 1.0, tokens=50),
+    ]
+    payloads = []
+    monkeypatch.setattr(world_metrics, "_gathered", lambda payload, group: payloads.append(payload) or [payload])
+    _host()._log_rollout_metrics(peer, "train", [[10]] * len(peer))
+    monkeypatch.setattr(world_metrics, "_gathered", lambda payload, group: [payload, *payloads])
+    host = _host()
+    own = [
+        _result("high", {"language": "cpp"}, 1.0, 1.0, reward=1.2, tokens=100),
+        _result("high", {"language": "cpp"}, 0.0, 1.0, reward=0.2, tokens=300),
+    ]
+    host._log_rollout_metrics(own, "train", [[10]] * len(own))
+    m = host._metrics["train"]
+    assert m["language/cpp/count"] == [3.0] and m["language/cpp/reward"] == [pytest.approx(0.6)]
+    assert m["episode/generation_tokens_p90"] == [500.0] and m["episode/generation_tokens"] == [950 / 4]
+    assert host.cumulative_rollout_metrics()["async/total_generation_tokens"] == 950.0
+
+
+def test_the_composition_residue_is_the_mean_shortfall_either_way():
+    """Components 0.5 under a reward of 1.0 and 1.5 over it: each misses by 0.5, which signed would cancel."""
+    host = _host()
+    results = [_result("high", None, 1.0, 1.0), _result("high", None, 1.0, 1.0)]
+    for result, component in zip(results, (0.5, 1.5), strict=True):
+        result.metrics[f"{REWARD_COMPONENT_PREFIX}correctness"] = component
+    host._log_rollout_metrics(results, "train", [[10]] * len(results))
+    assert host._metrics["train"]["reward/composition_residue"] == [pytest.approx(0.5)]
 
 
 if __name__ == "__main__":

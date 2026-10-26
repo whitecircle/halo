@@ -8,7 +8,7 @@ from src.data.collators.offline_grpo import (
     OfflineGRPOCPDataCollatorWithPadding,
     OfflineGRPODataCollatorWithPadding,
 )
-from src.trainers.grpo.offline.tokenization import tokenize_offline_grpo_rows
+from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
 
 
 class _Tokenizer:

@@ -37,7 +37,7 @@ from src.checkpoint.reading import resolve_checkpoint_weights
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.model_loading.parallel.ep import load_ep_model_lazy
-from src.models.moe.family_specs import is_expert_weight_attr
+from src.models.moe.family_specs import expert_weight_roots
 from tests.common.models import (
     TINY_DSV4_CONFIG,
     TINY_GLM5_CONFIG,
@@ -132,6 +132,11 @@ def reference(family):
     return {key: value.detach().clone() for key, value in model.state_dict().items()}
 
 
+def _is_expert_key(key: str) -> bool:
+    """Whether ``key`` names an expert bank of any family on the roster (no layer exists here to ask)."""
+    return key.rpartition(".")[2] in expert_weight_roots()
+
+
 def _mismatches(lazy_sd: dict, reference: dict, expert_slice: slice | None = None) -> list[str]:
     """Keys whose lazy tensor differs from the reference (expert tensors: from its ``expert_slice``).
 
@@ -142,7 +147,7 @@ def _mismatches(lazy_sd: dict, reference: dict, expert_slice: slice | None = Non
     bad = []
     for key, lazy in lazy_sd.items():
         expected = reference[key]
-        if expert_slice is not None and is_expert_weight_attr(key.rpartition(".")[2]) and expected.dim() == 3:
+        if expert_slice is not None and _is_expert_key(key) and expected.dim() == 3:
             expected = expected[expert_slice]
         if lazy.is_floating_point() and lazy.dtype != expected.dtype:
             narrow = min(lazy.dtype, expected.dtype, key=lambda dt: torch.finfo(dt).bits)
@@ -183,10 +188,8 @@ def test_ep2_rank0_loads_the_first_expert_half_of_every_source(family, reference
     _, model_class, path = family
     model = _lazy(model_class, path, ep_size=2)
     lazy_sd = model.state_dict()
-    num_experts = next(
-        v.shape[0] for k, v in reference.items() if is_expert_weight_attr(k.rpartition(".")[2]) and v.dim() == 3
-    )
-    sliced = [k for k, v in lazy_sd.items() if is_expert_weight_attr(k.rpartition(".")[2]) and v.dim() == 3]
+    num_experts = next(v.shape[0] for k, v in reference.items() if _is_expert_key(k) and v.dim() == 3)
+    sliced = [k for k, v in lazy_sd.items() if _is_expert_key(k) and v.dim() == 3]
     assert sliced and all(lazy_sd[k].shape[0] == num_experts // 2 for k in sliced)
     assert not _mismatches(lazy_sd, reference, expert_slice=slice(0, num_experts // 2))
 

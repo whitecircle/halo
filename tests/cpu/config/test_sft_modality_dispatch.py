@@ -73,10 +73,10 @@ def _dataset(extra_columns: dict | None = None) -> DatasetDict:
 def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: bool, tokenizer=None, loads=None):
     """Run ``sft.py:main()`` up to the data dispatch against a multimodal checkpoint.
 
-    The VLM prep is left REAL unless ``stub_vlm_prep``: its packing rejection is the exact error a
-    misrouted text recipe hits, so that failure mode is what this asserts on. ``tokenizer``
-    stands in for the processor's own, whose padding side the run must settle. ``loads`` collects
-    the keyword arguments of every model load.
+    ``stub_vlm_prep`` stubs ``_prepare_vlm_data``; the VLM option refusals (the packing one is the exact error a
+    misrouted text recipe hits) run in ``main()`` before the load either way. ``tokenizer`` stands in for the
+    processor's own, whose padding side the run must settle. ``loads`` collects the keyword arguments of every
+    model load.
     """
     tokenizer = tokenizer if tokenizer is not None else types.SimpleNamespace(padding_side="left")
     module = _script_module("sft.py")
@@ -254,9 +254,17 @@ def test_image_column_still_dispatches_to_the_vlm_path(tmp_path):
 
 def test_vlm_run_still_rejects_packing(tmp_path):
     """The VLM path's refusals must be intact for runs that really do carry images — the dispatch
-    decides which runs reach them, not what they do."""
+    decides which runs reach them, not what they do. They are pure config, so they land before the model load."""
+    loads = []
     with pytest.raises(ValueError, match="packing / padding_free are not supported for VLM"):
-        _run_sft(tmp_path, "packing: true\nimages_field: images\n", _dataset({"images": [[]]}), stub_vlm_prep=False)
+        _run_sft(
+            tmp_path,
+            "packing: true\nimages_field: images\n",
+            _dataset({"images": [[]]}),
+            stub_vlm_prep=False,
+            loads=loads,
+        )
+    assert not loads
 
 
 def test_embedded_image_conversation_still_dispatches_to_the_vlm_path(tmp_path):

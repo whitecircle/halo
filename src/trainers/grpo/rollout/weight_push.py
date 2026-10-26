@@ -28,7 +28,6 @@ from src.models.moe.balancing import (
     is_transient_balancing_router,
     iter_balancing_routers,
 )
-from src.models.moe.family_specs import is_expert_weight_attr
 from src.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
 from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
 from src.runtime.collectives import barrier_on_exit
@@ -60,7 +59,8 @@ def _dense_params(
     hand_sliced = hand_sliced_suffixes(model)
     for name, param in model.named_parameters():
         expert = any(
-            name.startswith(root + ".") and is_expert_weight_attr(name[len(root) + 1 :]) for root in ep_layers
+            name.startswith(root + ".") and layer.is_expert_param(name[len(root) + 1 :])
+            for root, layer in ep_layers.items()
         )
         if expert or (hand_sliced and name.endswith(hand_sliced)):
             continue

@@ -251,15 +251,14 @@ def test_vlm_row_prep_prefix_invariant_raises():
         prep_row(trainer, make_features(), BrokenTemplateProcessor(StubTokenizer()))
 
 
-def test_vlm_row_prep_completion_truncation_keeps_eos():
+def test_vlm_row_prep_completion_truncation_cuts_plainly():
     tokenizer = StubTokenizer()
     processor = StubProcessor(tokenizer)
     trainer = make_trainer(max_completion_length=3)
 
     row = prep_row(trainer, make_features(), processor)
 
-    assert len(row["chosen_input_ids"]) == 3
-    assert row["chosen_input_ids"][-1] == EOS_ID
+    assert row["chosen_input_ids"] == tokenizer._encode("[assistant] A red square [end]\n")[:3]
 
 
 def make_collator(processor, **kwargs):

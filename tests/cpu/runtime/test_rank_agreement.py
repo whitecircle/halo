@@ -6,8 +6,7 @@
 setting at startup, costs nothing proportional to the world: no object gather, no per-rank
 unpickle. Only a disagreement gathers the objects, to name them. The pins:
 
-* agreement issues exactly one all-reduce and no object collective, for ``reject_divergent_settings``
-  and for the stored-metric key check alike;
+* agreement issues exactly one all-reduce and no object collective, for ``reject_divergent_settings``;
 * the digest is canonical across processes (a mapping's insertion order does not matter, and
   Python's per-process ``hash`` salt never enters);
 * a disagreement still raises on every rank with the caller's message;
@@ -32,7 +31,6 @@ from src.runtime.consensus import (
     reject_across_ranks,
     reject_divergent_settings,
 )
-from src.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.gloo import run_gloo_ranks
 
 WORLD = 3
@@ -58,15 +56,6 @@ def _counted_collectives(counts: dict[str, int]):
     finally:
         for name, original in originals.items():
             setattr(dist, name, original)
-
-
-class _Recorder:
-    def log(self, logs, start_time=None):
-        return logs
-
-
-class _Trainer(StoredMetricsMixin, _Recorder):
-    pass
 
 
 def _worker(rank: int, out: str) -> None:
@@ -137,13 +126,6 @@ def _worker(rank: int, out: str) -> None:
     except RuntimeError as exc:
         results["reject_one_rank"] = str(exc)
 
-    counts = {}
-    trainer = _Trainer()
-    trainer.store_metrics({"m": float(rank)})
-    with _counted_collectives(counts):
-        trainer.log({"loss": 0.1})
-    results["log_fast_path"] = counts
-
     with open(f"{out}.{rank}", "w") as fh:
         json.dump(results, fh)
 
@@ -199,12 +181,6 @@ def test_an_abstaining_rank_leaves_the_verdict_and_names_where_to_read(per_rank)
     for rank, results in enumerate(per_rank):
         assert results["abstain"] == [True, 1, True], f"rank {rank}: {results['abstain']}"
         assert results["all_abstain"] == [True, None, True], f"rank {rank}: {results['all_abstain']}"
-
-
-def test_the_stored_metric_log_is_two_all_reduces_and_no_object_collective(per_rank):
-    """One for the key agreement, one for the sums — the cost of a logging step at any world size."""
-    for rank, results in enumerate(per_rank):
-        assert results["log_fast_path"] == {"all_reduce": 2}, f"rank {rank}: {results['log_fast_path']}"
 
 
 def test_a_rejection_nobody_needs_is_one_all_reduce(per_rank):

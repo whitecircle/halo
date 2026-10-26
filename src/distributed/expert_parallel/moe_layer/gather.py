@@ -87,6 +87,11 @@ class EPGatherMixin:
         del local
         return to_hub_expert_tensors(self.FAMILY.expert_layout, gathered, device=device) if retain else {}
 
+    def is_expert_param(self, name: str) -> bool:
+        """Whether ``name``, relative to this layer, is one of its expert tensors: its first segment names one of
+        :meth:`expert_named_params`, native expert adapters included. Save and weight sync split by it."""
+        return name.split(".")[0] in {attr for attr, _param in self.expert_named_params()}
+
     def gather_layer_state_dict(self, layer_name: str, *, merge_lora: bool = False, retain: bool = True) -> dict:
         """COLLECTIVE (see :meth:`gather_expert_tensors`, plus each FSDP2-sharded replicated tensor). The whole layer
         for a checkpoint under ``layer_name``, in the hub spelling: the gathered experts, then every persistent
@@ -99,9 +104,8 @@ class EPGatherMixin:
         experts = self.gather_expert_state_dict(merge_lora=merge_lora, retain=retain)
         gathered = {f"{layer_name}.{self.FAMILY.to_hub_key(key)}": tensor for key, tensor in experts.items()}
         del experts
-        expert_roots = {name.split(".")[0] for name, _ in self.expert_named_params()}
         for name, tensor in itertools.chain(self.named_parameters(), persistent_buffers(self)):
-            if name.split(".")[0] in expert_roots:
+            if self.is_expert_param(name):
                 continue
             if retain:
                 gathered.setdefault(f"{layer_name}.{self.FAMILY.to_hub_key(name)}", full_cpu_tensor(tensor.data))

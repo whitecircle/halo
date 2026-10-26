@@ -29,7 +29,7 @@ from transformers import GptOssConfig, Qwen3Config
 PartialState()  # the dataset stages log through accelerate, which refuses to log without it
 
 from scripts.training import sft as sft_script
-from scripts.training.sft import _prepare_text_data, _reject_unsupported_tree_packing
+from scripts.training.sft import _prepare_text_data
 from src.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking
 from src.data.collators.tree_packing import DataCollatorWithTreePacking
 from src.data.pipeline.text_rows import build_chat_row_processor
@@ -229,39 +229,6 @@ def test_a_row_opening_on_the_response_marker_leaves_its_first_token_untrained_a
     assert trained == (flat != LABEL_IGNORE_INDEX).tolist() and trained[1] and not trained[0]
     row = serialize_tree(build_trie([input_ids], [share_limit(trained)], 16), [input_ids], [trained])
     assert _tree_examples(_collate(tokenizer, [row])) == [(input_ids, flat.tolist())]
-
-
-def _tree_run() -> dict[str, SimpleNamespace]:
-    """The arguments of a run tree packing supports, by parameter of the refusal."""
-    return {
-        "args": SimpleNamespace(tree_share_markers=list(MARKERS), train_on_completions_only=True, train_sinks=False),
-        "sft_config": SimpleNamespace(packing=True, packing_strategy="bfd", eval_packing=None, torch_compile=False),
-        "dist_args": SimpleNamespace(context_parallel_size=1, pipeline_parallel_size=1, tensor_parallel_size=1),
-    }
-
-
-@pytest.mark.parametrize(
-    ("holder", "field", "value", "match"),
-    [
-        ("args", "tree_share_markers", [], "tree_share_markers"),
-        ("sft_config", "packing", False, "packing: true"),
-        ("sft_config", "packing_strategy", "wrapped", "packing_strategy: bfd"),
-        ("sft_config", "eval_packing", False, "eval_packing left on"),
-        ("args", "train_on_completions_only", False, "train_on_completions_only: true"),
-        ("dist_args", "context_parallel_size", 2, "no context or pipeline parallelism"),
-        ("dist_args", "pipeline_parallel_size", 2, "no context or pipeline parallelism"),
-        ("dist_args", "tensor_parallel_size", 2, "no tensor parallelism"),
-        ("sft_config", "torch_compile", True, "torch_compile off"),
-        ("args", "train_sinks", True, "train_sinks off"),
-    ],
-)
-def test_tree_packing_refuses_every_option_that_would_reshape_a_tree_row(holder, field, value, match):
-    run = _tree_run()
-    _reject_unsupported_tree_packing(**run)  # the supported shape passes
-    setattr(run[holder], field, value)
-    with pytest.raises(ValueError, match=match) as refusal:
-        _reject_unsupported_tree_packing(**run)
-    assert str(refusal.value).count(";") == 0, "only the option that was changed is named"
 
 
 def _run_sft_main(tmp_path, yaml_body: str) -> None:
