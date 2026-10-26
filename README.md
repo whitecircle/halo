@@ -37,7 +37,7 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 
 - **Parallelism is added to the existing model.** EP wraps MoE blocks, CP wraps attention, and TP/ETP shard weights in place. There is no separate distributed implementation of the model.
 
-- **The distributed stack is built on PyTorch.** FSDP2, DTensor, and DeviceMesh provide the underlying primitives, while DeepEP handles the all-to-all communication for Expert Parallelism. EP, CP, TP, and ETP each have their own setting; EP combines with CP, TP, or ETP across GPUs and nodes, and other pairings are rejected at config time.
+- **The distributed stack is built on PyTorch.** FSDP2, DTensor, and DeviceMesh provide the underlying primitives, while DeepEP handles the all-to-all communication for Expert Parallelism. EP, CP, TP, ETP, and PP each have their own setting; EP combines with CP, TP, or ETP across GPUs and nodes, PP splits a model's layers across nodes with EP or ETP inside each stage, and other pairings are rejected at config time.
 
 - **Training methods share the same infrastructure.** Pre-training, SFT, preference optimization, distillation, and RL use the same parallelism and checkpointing code, so new methods don't need their own distributed implementation.
 
@@ -240,13 +240,14 @@ Full results and methodology: [Performance](human-docs/performance.md)
 
 ## Parallelism
 
-Each axis has its own flag. EP combines with one of CP, TP, or ETP; any other pairing is rejected at config time:
+Each axis has its own flag. EP combines with one of CP, TP, or ETP, and PP with EP or ETP; any other pairing is rejected at config time:
 
 ```bash
 --expert_parallel_size=N          # MoE experts across GPUs (DeepEP)
 --context_parallel_size=N         # long sequences (Ulysses attention)
 --tensor_parallel_size=N          # model weights (DTensor; attention only on MoE)
 --expert_tensor_parallel_size=N   # expert-FFN sharding (MoE, experimental)
+--pipeline_parallel_size=N        # decoder layers in stages across nodes (registered families)
 ```
 
 | Mode | Best for                                  |
@@ -258,6 +259,8 @@ Each axis has its own flag. EP combines with one of CP, TP, or ETP; any other pa
 | EP+CP | MoE + long-context training               |
 | EP+TP | MoE + weight sharding                     |
 | EP+ETP | MoE + sharded experts                     |
+| PP | Split a model's layers across nodes       |
+| PP+EP, PP+ETP | MoE across nodes, experts inside each stage |
 
 Pass them directly to `torchrun`, or after the config with `halo launch`:
 

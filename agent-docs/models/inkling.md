@@ -10,7 +10,7 @@ Transformers ships `transformers.models.inkling` natively (the image pins 5.16.1
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
 | Inkling-Small | Yes | **No** ¹ | **No** ¹ | Yes | **No** ¹ | **No** ¹ | Yes ² |
 
-¹ Architectural, not a missing registration — see [Why CP and TP are out](#why-cp-and-tp-are-out). Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+¹ Architectural, not a missing registration — see [Why CP and TP are out](#why-cp-and-tp-are-out). Pipeline parallelism refuses Inkling (`INKLING_PP`): loader-only validation, with no schedule, end-to-end or save/resume row ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ² Tiny-model LoRA verified (`test_lora_merged_save_resume_families.py`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume); no full-scale LoRA run.
 
@@ -36,7 +36,7 @@ The hub checkpoint stores the expert width as `intermediate_size: 2048`, but tra
 
 The checkpoint ships Thinking Machines' original namespace (`model.llm.*`, `attn.wq_du`, interleaved `experts.w13_weight`), which transformers converts inside `from_pretrained` (`transformers/conversion_mapping.py`, keyed `inkling_mm_model`).
 
-The lazy loaders read the same declarative entries through the family's `_HUB_CONVERSION_KEYS` declaration, replayed by `src/distributed/expert_parallel/hub_conversion.py`: renames plus a closed op vocabulary (de-interleave, chunk) applied at materialization, after the ranged per-expert read. The default lazy path therefore loads the hub checkpoint directly, each rank reading only its expert slice, pinned bitwise against `from_pretrained` by `tests/gpu/parallelism/ep/test_lazy_load_inkling.py`.
+The lazy loaders read the same declarative entries through the family's `_HUB_CONVERSION_KEYS` declaration, scoped and translated by `src/model_loading/lazy_safetensors/conversion_selection.py`: renames plus a closed op vocabulary (de-interleave, chunk) applied at materialization, after the ranged per-expert read. The default lazy path therefore loads the hub checkpoint directly, each rank reading only its expert slice, pinned bitwise against `from_pretrained` by `tests/gpu/parallelism/ep/test_lazy_load_inkling.py`.
 
 The `from_pretrained` fallback still works but materializes the full checkpoint per concurrently-loading rank: 532 GB for Inkling-Small, so `max_concurrent_loading: 4` ≈ 2.1 TB peak host RAM.
 

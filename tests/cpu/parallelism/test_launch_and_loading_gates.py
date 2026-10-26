@@ -42,23 +42,22 @@ from transformers.models.qwen3_vl import Qwen3VLConfig
 
 from src.configs.script_arguments import ModelLoadArguments
 from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
-from src.distributed.expert_parallel.loading import load_ep_model
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.mesh import MeshDim
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.tensor_parallel.hf_plan import plan_shards_param
+from src.model_loading.dtype import resolve_load_dtype
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.model_loading.lazy_safetensors.weights import resolve_run_dtype
 from src.model_loading.parallel import loader as model_loading
 from src.model_loading.parallel import tp as tp_loading
 from src.model_loading.parallel import whole_model
 from src.model_loading.parallel.cp import load_cp_model
+from src.model_loading.parallel.ep import load_ep_model_lazy
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
 from src.model_loading.parallel.loader import load_distributed_model
 from src.model_loading.parallel.model_source import ModelSource
+from src.model_loading.parallel.pp import _load_stage_lazy
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.attention.selection import resolve_attn_implementation
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -567,12 +566,11 @@ def test_every_loader_names_the_run_dtype_dtype():
     """
     for loader in (
         load_distributed_model,
-        load_ep_model,
         load_ep_model_lazy,
-        load_pp_stage_model,
+        _load_stage_lazy,
         load_frozen_auxiliary_model,
         instantiate_on_meta,
-        resolve_run_dtype,
+        resolve_load_dtype,
         resolve_attn_implementation,
     ):
         params = inspect.signature(loader).parameters

@@ -20,7 +20,7 @@ from transformers.models.inkling.modeling_inkling import InklingTopkRouter
 
 from src.distributed.context_parallel.model_rules import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
+from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
 from src.models.moe_balancing import ROUTER_EXPERT_COUNT_FIELDS, get_first_router_field
@@ -54,12 +54,12 @@ def test_capability_contracts():
     assert EPInklingMoELayer._HUB_CONVERSION_KEYS == ("inkling_mm_model",)
     assert EPInklingMoELayer._supports_lazy_loading is True
     assert EPInklingMoELayer._supports_weight_sync is False
-    # PP: the text backbone's spec keeps ``embed_norm`` on stage 0 with the embedding it normalizes and
-    # is otherwise the generic split; the composite class goes through the generic multimodal
-    # admission in the trainer mixin (text-only admitted, image-feeding refused).
+    # PP: refused until a schedule, end-to-end and save/resume row cover it, yet declared in full: its
+    # spec keeps ``embed_norm`` on stage 0 with the embedding it normalizes for the loader rows.
     spec = PP_SPEC_MAP["InklingTextModel"]
     assert spec.input_module_attrs == ("embed_norm",)
-    assert spec.refusal is None and spec.stream_forward is None and not spec.layer_types_rebase_safe
+    assert "loader-only validation" in spec.refusal and not spec.validated
+    assert spec.stream_forward is None and not spec.layer_types_rebase_safe
     # CP: the short convolutions run over the sequence axis; the veto fires before the
     # attention-class scan so the refusal names the mechanism.
     assert "InklingShortConvolution" in _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
@@ -70,7 +70,7 @@ def test_lazy_loader_admits_inkling_checkpoints(tmp_path):
     spelling silently routes the 532 GB checkpoint to the from_pretrained fallback."""
     for model_type in ("inkling_mm_model", "inkling_text"):
         (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
-        assert lazy_loader_supports_checkpoint(str(tmp_path)) is True, model_type
+        assert is_lazy_loadable(str(tmp_path)) is True, model_type
 
 
 # Router parity — against the real transformers.models.inkling block

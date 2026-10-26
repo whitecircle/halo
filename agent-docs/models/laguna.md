@@ -6,9 +6,9 @@ Transformers ships `transformers.models.laguna` natively, and the released check
 
 | | EP | CP | TP | ETP | PP | EP+CP | EP+TP | LoRA |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Laguna S / XS 2.1 | Yes | **No** | **No** | Yes ² | — ¹ | **No** | **No** | Yes |
+| Laguna S / XS 2.1 | Yes | **No** | **No** | Yes ² | **No** ¹ | **No** | **No** | Yes |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+¹ Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ² Tiny-model verified: pure ETP and EP+ETP train, save and resume (`tests/gpu/trainers/preference/test_preference_precompute_resume_families.py --mode etp2`, `test_preference_precompute_resume_ep_etp.py`); the released checkpoints are not run under ETP.
 

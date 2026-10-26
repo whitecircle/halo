@@ -4,9 +4,9 @@
 
 | | EP | CP | TP | ETP | PP | EP+TP | EP+CP |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| GLM-4 MoE Lite | Yes | Yes (MLA path) | Yes (selective) | Yes | — ¹ | Yes | Yes |
+| GLM-4 MoE Lite | Yes | Yes (MLA path) | Yes (selective) | Yes | **No** ¹ | Yes | Yes |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+¹ Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAttention-4 backward NaN on Blackwell, so the loader falls back from FA4 to SDPA (`is_fa4_backward_nan_prone`). See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 

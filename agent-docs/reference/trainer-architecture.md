@@ -119,9 +119,7 @@ token objective across CP with the shared autograd SUM. Its CP path rejects adap
 recomputed from trained weights on resume.
 
 **PP** needs a single-forward objective on one stage's logits, and the conditional rows above are
-constructor-time gates rather than class attributes. These are the seam's gates: they fire only on a
-hand-built PP config, since the entry rejects every `pp_size > 1` before a trainer is constructed.
-Rejections land in three places.
+constructor-time gates rather than class attributes. Rejections land in three places.
 
 `PipelineTrainerMixin._maybe_prepare_pipeline_model` rejects the generic blockers on every trainer:
 an unset `max_length`, `save_sharded_ep`, reentrant gradient checkpointing, `peft_config`, TRL's
@@ -132,8 +130,9 @@ every step); packing passes the gates, at one packed row per microbatch.
 `src/trainers/parallelism/trainer_rules.py` holds the shared vocabulary the preference and offline-GRPO
 wrappers add on top — a live `ref_model`, missing precomputed reference columns, and
 `compute_metrics` (no PP reduction reproduces their non-PP prediction convention). A tied-embedding
-checkpoint, live MTP tail layers, an unsupported model family, and aux-loss MoE balancing are
-rejected later, at the model split (`src/distributed/pipeline_parallel/model_rules.py`). See
+checkpoint, live MTP tail layers, a family that is refused or not registered in `PP_FAMILY_SPECS`,
+and aux-loss MoE balancing are rejected later, at the model split
+(`src/distributed/pipeline_parallel/model_rules.py`). See
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 
 ## Modality support
@@ -218,7 +217,7 @@ step on scaled gradients.
 **`_setup_distributed_modes()`** dispatches on the mode flags, in this order:
 
 ```text
-is_pp_mode         -> _setup_pipeline_parallel()   # stage-scoped (EP-aware) FSDP, runtime, clip
+is_pp_mode         -> _setup_pipeline_parallel()   # stage-scoped (EP-aware) FSDP, runner, clip
 has_ep_group + TP  -> _setup_ep_tp()               # EP + attention TP
 has_ep_group + CP  -> _setup_ep_cp()               # EP + CP
 is_cp_mode         -> _setup_cp_only()

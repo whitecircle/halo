@@ -149,7 +149,7 @@ class EPMoELayerBase(
     # False where the lazy loader cannot express this family's on-disk expert layout → from_pretrained + patch.
     _supports_lazy_loading: bool = True
 
-    # transformers' conversion-mapping key(s) for this hub checkpoint (``hub_conversion.py``); empty = canonical.
+    # transformers' conversion-mapping key(s) for this hub checkpoint (``conversion_selection.py``); empty = canonical.
     _HUB_CONVERSION_KEYS: tuple[str, ...] = ()
 
     # True where transformers' serialization of this config is a schema no pinned serving engine reads:

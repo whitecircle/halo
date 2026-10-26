@@ -30,6 +30,7 @@ from src.checkpoint.reading import (
     load_full_state_dict,
     reject_partial_checkpoint,
 )
+from src.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint
 
 
 def _write_index(tmp_path, payload: str) -> str:
@@ -99,19 +100,21 @@ def test_load_full_state_dict_rejects_per_rank_shards(tmp_path):
 
 
 def test_every_ep_sharded_refusal_gives_one_reason(tmp_path):
-    """The resume reader, the resume refusal and the tools' gate refuse the same artifact, so they tell the
-    user one thing."""
+    """The resume reader, the resume refusal, the load refusal and the tools' gate refuse the same artifact,
+    so they tell the user one thing."""
     payload = json.dumps({"metadata": {"format": "ep_sharded"}, "weight_map": {"w": "model-00001.safetensors"}})
     checkpoint_dir = _write_index(tmp_path, payload)
     with pytest.raises(ValueError) as read:
         load_full_state_dict(checkpoint_dir)
     with pytest.raises(ValueError) as resume:
         reject_ep_sharded_resume(checkpoint_dir)
+    with pytest.raises(ValueError) as load:
+        reject_ep_sharded_checkpoint(ModelSource("checkpoints/run", None, checkpoint_dir))
     with pytest.raises(ValueError) as tool:
         reject_partial_checkpoint(checkpoint_dir)
 
     reason = ep_sharded_checkpoint_reason(checkpoint_dir)
-    assert str(read.value) == str(resume.value) == str(tool.value) == reason
+    assert str(read.value) == str(resume.value) == str(load.value) == str(tool.value) == reason
     assert "per-rank sharded checkpoint" in str(tool.value) and "merge_ep_shards" in str(tool.value)
 
 

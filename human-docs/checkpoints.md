@@ -1,9 +1,10 @@
 # Checkpoints: Save, Resume, Export, Upload
 
 A run writes standard HuggingFace checkpoints to `output_dir` on the cadence set
-by `save_strategy` / `save_steps`. Every mode (FSDP2, EP, TP, CP and their
-combinations) writes a gathered checkpoint that `from_pretrained` loads. The
-exceptions are the opt-in sharded EP save and LoRA adapters.
+by `save_strategy` / `save_steps`. Every mode (FSDP2, EP, TP, CP, PP and their
+combinations) writes a checkpoint that `from_pretrained` loads. The exceptions
+are the opt-in sharded EP save, a PP save on per-node storage, and LoRA
+adapters.
 
 Every save uses the tensor names of the checkpoint the run loaded, vision towers
 included. FSDP2, CP and TP saves also keep its expert layout. An EP save writes
@@ -17,6 +18,7 @@ layout for Step-3.7 Flash
 | FSDP2, CP, TP | gathered HF checkpoint | yes |
 | EP (default) | gathered HF checkpoint, experts at global indices | yes |
 | EP with `save_sharded_ep: true` | one expert shard per rank | merge first |
+| PP | one part set per stage plus the full index | yes; on per-node storage, merge the nodes' directories first |
 | LoRA / QLoRA | adapter only (`adapter_model.safetensors`) | serve as an adapter, or merge into the base |
 
 EP expert LoRA cannot be merged afterwards: train it with
@@ -92,6 +94,16 @@ more than one data-parallel replica. Export the best checkpoint yourself
 instead. Dense pure TP is allowed, and adapter-only runs are exempt unless
 `merge_expert_lora_on_save` merges them into a full checkpoint.
 
+## Per-node PP saves
+
+On per-node storage (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) a PP save leaves each
+node only the parts of the stages it ran, beside the full index. Each node
+resumes from its own directory as long as the topology and node ranks stay the
+same. To load, serve or upload the result, copy every node's directory onto one
+host and run `halo run merge-pp-stages --input_dir <node0 dir> <node1 dir>
+--output_dir <merged dir>`; it refuses a part no directory holds
+([Per-node export](../agent-docs/parallelism/pipeline-parallelism.md#per-node-export) ↗).
+
 ## Post-processing tools
 
 All run as `halo run <tool> <flags>`; `halo run <tool> -- --help` lists the
@@ -100,6 +112,7 @@ flags.
 | Tool | Use it to |
 | --- | --- |
 | `merge-ep-shards` | make a sharded EP save loadable |
+| `merge-pp-stages` | merge the per-node directories of a PP save into one checkpoint |
 | `merge-peft-adapters` | merge a LoRA adapter into its base as one checkpoint |
 | `merge-models` | combine models in weight space (linear, SLERP, task arithmetic, TIES) |
 | `convert-to-bf16` | cast an fp32 or mixed checkpoint to bf16 for serving |
@@ -138,7 +151,8 @@ only where the pinned engine reads that family's layout:
   Rewrite such a checkpoint with `unfuse-moe-experts` first; the result is the
   hub's own layout
   ([per-engine loaders](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
-- **Sharded EP saves** need `merge-ep-shards` first.
+- **Sharded EP saves** need `merge-ep-shards` first, and per-node PP saves
+  `merge-pp-stages`.
 - **LoRA runs** serve as base plus adapter, or merged.
 
 Serving during training, for the RL methods, is

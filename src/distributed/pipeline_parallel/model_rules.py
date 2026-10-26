@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import torch.nn as nn
 
-from src.distributed.pipeline_parallel.families import resolve_pp_spec
+from src.distributed.pipeline_parallel.families import PP_SPEC_MAP, resolve_pp_spec
 from src.models.config_access import get_config_field, text_config, ties_word_embeddings
 from src.models.head_transform import resolve_head_transform
 from src.models.module_tree import backbone_with_layers, decoder_layers, embedding_module
@@ -112,18 +112,25 @@ def reject_unsupported_pp_structure(model: nn.Module) -> None:
     """Raise if this model's structure cannot be split into pipeline stages.
 
     Raises:
-        ValueError: the family's :class:`~src.distributed.pipeline_parallel.families.PPFamilySpec`
-            carries a refusal, the model has no decoder-layer list, ties its embedding to its head,
-            built multi-token-prediction tail layers, or transforms its head path beyond its declared
-            :class:`~src.models.head_transform.HeadTransform`.
+        ValueError: the model has no decoder-layer list, its family's
+            :class:`~src.distributed.pipeline_parallel.families.PPFamilySpec` carries a refusal, it ties
+            its embedding to its head, transforms its head path beyond its declared
+            :class:`~src.models.head_transform.HeadTransform`, built multi-token-prediction tail layers,
+            or its backbone is not registered (``validated``) in ``PP_FAMILY_SPECS``.
     """
     backbone = require_backbone(model)
+    backbone_name = type(backbone).__name__
     spec = resolve_pp_spec(backbone)
     if spec.refusal is not None:
-        raise ValueError(f"{type(backbone).__name__} does not support pipeline parallelism. {spec.refusal}")
+        raise ValueError(f"{backbone_name} is refused for pipeline parallelism. {spec.refusal}")
     _reject_tied_embeddings(model)
     resolve_head_transform(model)  # raises on a head path the last stage cannot reproduce
     _reject_live_mtp_layers(model)
+    if not spec.validated:
+        registered = ", ".join(name for name, claim in PP_SPEC_MAP.items() if claim.validated)
+        raise ValueError(
+            f"{backbone_name} is not registered for pipeline parallelism (PP_FAMILY_SPECS); registered: {registered}."
+        )
 
 
 def reject_unsupported_pp_model(model: nn.Module, moe_balancing: str = "auto", *, pre_sliced: bool = False) -> None:

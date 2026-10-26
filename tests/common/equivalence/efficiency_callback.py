@@ -47,6 +47,7 @@ from tests.common.equivalence.revisions import (
     write_evidence,
 )
 from tests.common.parallelism import make_parallelism_config
+from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.repo import REPO_ROOT
 from tests.common.reporting import snapshot_efficiency
 from tests.common.tiny_models import (
@@ -300,7 +301,9 @@ def _model(case: EfficiencyCase, scenario: Scenario, parallelism) -> torch.nn.Mo
     if case.family in MOE_FAMILIES and parallelism.needs_ep_wrappers:
         patch_moe_model_for_ep(model, parallelism.ep_config())
     if parallelism.pp_size > 1:
-        model = build_pipeline_stage(model, parallelism.pp_rank, parallelism.pp_size, moe_balancing="none")
+        # The FLOPs accounting is family-agnostic; Qwen3-MoE is not registered for pipeline parallelism.
+        with registered_pp_backbones("Qwen3MoeModel"):
+            model = build_pipeline_stage(model, parallelism.pp_rank, parallelism.pp_size, moe_balancing="none")
     if scenario.model == "lora":
         targets = list(family.attention_targets or ("q_proj", "v_proj"))
         model = get_peft_model(model, LoraConfig(r=8, lora_alpha=16, target_modules=targets))

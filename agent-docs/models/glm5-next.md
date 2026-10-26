@@ -4,9 +4,9 @@
 
 | | EP | CP | TP | ETP | PP | FSDP2 |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
-| GLM-5 Next | Yes | **No** | **No** | Yes | — ¹ | Yes |
+| GLM-5 Next | Yes | **No** | **No** | Yes | Yes ¹ | Yes |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+¹ Text tower only (`GLM5_NEXT_PP`): a text-only run of the composite is admitted and re-emits the vision tower in every checkpoint, image data is refused, and no stage may begin on a `shared` DSA indexer layer ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 

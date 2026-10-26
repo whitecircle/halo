@@ -159,3 +159,13 @@ def configure_float32_matmul_precision() -> None:
         precision = "highest"
     torch.set_float32_matmul_precision(precision)
     torch.backends.cudnn.allow_tf32 = precision != "highest"
+
+
+def resolve_load_dtype(dtype: torch.dtype | None, config) -> torch.dtype:
+    """The dtype a load builds and casts to: the explicit override, else the checkpoint config's, else bf16.
+
+    Keyed on the value, not the attribute: a config declaring no dtype carries ``dtype = None``, which the
+    meta shell would resolve to torch's fp32 and the materializer to no cast, mixing a family's fp32-pinned
+    modules with bf16 ones in one FSDP2 shard group.
+    """
+    return dtype or getattr(config, "dtype", None) or torch.bfloat16

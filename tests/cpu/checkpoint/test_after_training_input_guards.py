@@ -136,13 +136,13 @@ def test_an_index_naming_absent_shards_is_refused_and_names_them(tmp_path):
     """One node's directory from a PP save on a non-shared filesystem: the index is whole, the parts
     are not. A ``from_pretrained``-based tool would random-initialize the other stage's layers; a
     streaming one would die inside ``safe_open`` with its output directory already created. The
-    refusal must name the absent file and the gather-the-nodes fix, and a gathered (complete)
+    refusal must name the absent file and the merge-the-nodes fix, and a gathered (complete)
     directory of the same shape must pass — the PP layout is loadable once every part is present."""
     node = _write_pp_per_node_checkpoint(tmp_path / "node0")
     with pytest.raises(ValueError, match="does not hold") as excinfo:
         reject_partial_checkpoint(str(node))
     assert "model-pp00001-of-00002-00001.safetensors" in str(excinfo.value)
-    assert "gather every node" in str(excinfo.value)
+    assert "merge_pp_stages.py" in str(excinfo.value)
     with pytest.raises(ValueError, match="does not hold"):
         checkpoint_shard_files(str(node))
 

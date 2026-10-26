@@ -42,15 +42,15 @@ class _Dispatched(Exception):
 DISPATCH_CASES = {
     "dp": ({}, Qwen3MoeConfig, "_load_undistributed_model"),
     "cp_only": ({"cp_size": 2}, Qwen3MoeConfig, "load_cp_model"),
-    "ep": ({"ep_size": 8}, Qwen3MoeConfig, "_load_ep_model"),
+    "ep": ({"ep_size": 8}, Qwen3MoeConfig, "load_ep_model"),
     "ep_cp": ({"ep_size": 8, "cp_size": 2}, Qwen3MoeConfig, "load_ep_cp_model"),
     "dense_tp": ({"tp_size": 2}, Qwen3Config, "load_tp_model"),
     "moe_tp": ({"tp_size": 2}, Qwen3MoeConfig, "load_tp_moe_model"),
     "ep_tp": ({"ep_size": 8, "tp_size": 2}, Qwen3MoeConfig, "load_ep_tp_model"),
-    "pure_etp": ({"expert_tp_size": 2}, Qwen3MoeConfig, "_load_ep_model"),
-    "ep_etp": ({"ep_size": 4, "expert_tp_size": 2}, Qwen3MoeConfig, "_load_ep_model"),
-    "pp": ({"pp_size": 2}, Qwen3MoeConfig, "_load_pp_stage_model"),
-    "pp_ep": ({"pp_size": 2, "ep_size": 8}, Qwen3MoeConfig, "_load_pp_stage_model"),
+    "pure_etp": ({"expert_tp_size": 2}, Qwen3MoeConfig, "load_ep_model"),
+    "ep_etp": ({"ep_size": 4, "expert_tp_size": 2}, Qwen3MoeConfig, "load_ep_model"),
+    "pp": ({"pp_size": 2}, Qwen3MoeConfig, "load_pp_stage_model"),
+    "pp_ep": ({"pp_size": 2, "ep_size": 8}, Qwen3MoeConfig, "load_pp_stage_model"),
 }
 
 

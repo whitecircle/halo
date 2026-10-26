@@ -16,9 +16,9 @@ tied embeddings, and a `logit_scale` multiplier on the lm_head output (the confi
 
 | | EP | CP | TP | ETP | PP | EP+CP | EP+TP | EP+ETP |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Cohere2 MoE | Yes | Yes | Yes (selective) | Yes (pure, `ep_size=1`) | — | Yes ¹ | Yes | Experimental |
+| Cohere2 MoE | Yes | Yes | Yes (selective) | Yes (pure, `ep_size=1`) | **No** | Yes ¹ | Yes | Experimental |
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). The shipped checkpoints also tie `lm_head` to `embed_tokens`, which the tie gate refuses first.
 
 ¹ Node-local EP+CP requires `ep_group_size == nvlink_domain_size`; on an 8-GPU node that pins
 `ep_size` to 8, with `cp_size` dividing the domain (EP is orthogonal to DP — ep8+cp2 is a valid

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Stage splitting: layer partition, per-family rejection, and GLOBAL parameter naming.
+"""Stage splitting: layer partition, family registration and rejection, and GLOBAL parameter naming.
 
 The naming property is the load-bearing one. Slicing the decoder-layer list re-bases local indices
 to 0, so stage 1's first layer is ``layers.0`` locally while being layer N globally. Any consumer
@@ -26,7 +26,7 @@ from transformers import (
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 
 from src.distributed.pipeline_parallel import model_rules
-from src.distributed.pipeline_parallel.families import GENERIC_PP, PP_SPEC_MAP, resolve_pp_spec
+from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
 from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
 from src.distributed.pipeline_parallel.partition import (
     compute_layer_partition,
@@ -39,7 +39,14 @@ from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from src.models.moe_balancing import ROUTER_TOPK_FIELDS
 from src.models.param_roles import persistent_buffers
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_INKLING_PP_OVERRIDES, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
-from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.pp_fakes import registered_pp_backbones
+from tests.common.tiny_models import (
+    TINY_DENSE_FAMILIES,
+    TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
+    TINY_UNWRAPPED_MOE_FAMILY,
+    tiny_family_model,
+)
 
 # Qwen3 MoE balances through the HF router aux loss (auto → aux_loss) — the path a stage severs, so
 # this file needs the coefficient LIVE at its transformers default. Deliberately NOT tests/common's
@@ -373,6 +380,7 @@ def test_stage_zero_owns_embedding_and_last_owns_head():
     assert "model.norm.weight" in last and "model.norm.weight" not in first
 
 
+@registered_pp_backbones("InklingTextModel")
 def test_input_modules_stay_on_stage_zero_with_the_embedding():
     """Inkling's ``embed_norm`` normalizes the token embedding only stage 0 computes: a later stage
     drops it at the build (else every stage writes it), and its loader counts the module droppable,
@@ -439,6 +447,7 @@ def test_untied_model_is_accepted():
     reject_unsupported_pp_model(model)
 
 
+@registered_pp_backbones("Qwen3MoeModel")
 def test_aux_loss_balanced_moe_is_rejected():
     """A stage bypasses *ForCausalLM.forward, where the router aux loss is added to the loss."""
     assert _moe_model().config.router_aux_loss_coef > 0
@@ -446,6 +455,7 @@ def test_aux_loss_balanced_moe_is_rejected():
         build_pipeline_stage(_moe_model(), 0, 2)
 
 
+@registered_pp_backbones("Qwen3MoeModel")
 def test_bias_update_balanced_moe_is_accepted():
     """Families balanced by the aux-loss-free bias update do not touch the severed path.
 
@@ -459,12 +469,14 @@ def test_bias_update_balanced_moe_is_accepted():
     reject_unsupported_pp_model(model)
 
 
+@registered_pp_backbones("Qwen3MoeModel")
 def test_explicit_non_aux_loss_balancing_is_accepted():
     """The gate judges the run's resolved strategy, not the family in the abstract."""
     for requested in ("bias_update", "none"):
         reject_unsupported_pp_model(_moe_model(), requested)
 
 
+@registered_pp_backbones("Qwen3VLMoeTextModel")
 def test_composite_vlm_moe_is_rejected():
     """A VLM carries the expert fields on text_config; a top-level-only read would miss the family.
 
@@ -481,6 +493,7 @@ def test_composite_vlm_moe_is_rejected():
         reject_unsupported_pp_model(Qwen3VLMoeForConditionalGeneration(config), "aux_loss")
 
 
+@registered_pp_backbones("Qwen3MoeModel")
 def test_aux_loss_gate_sees_a_coefficient_only_the_wrapper_declares(monkeypatch):
     """The coefficient is read through the wrapper-safe router seam, not off ``text_config`` alone.
 
@@ -503,6 +516,7 @@ def test_aux_loss_gate_sees_a_coefficient_only_the_wrapper_declares(monkeypatch)
         reject_unsupported_pp_model(model, "aux_loss")
 
 
+@registered_pp_backbones("Qwen3MoeModel")
 def test_moe_sequence_classification_is_accepted():
     """Only the causal-LM forward adds the aux term; a score head never does, so PP drops nothing."""
     model = Qwen3MoeForSequenceClassification(Qwen3MoeConfig(**_PP_SPLIT_MOE_CONFIG, num_labels=2))
@@ -510,6 +524,7 @@ def test_moe_sequence_classification_is_accepted():
     reject_unsupported_pp_model(model)
 
 
+@registered_pp_backbones("Qwen3MoeModel")
 def test_moe_without_an_aux_loss_term_is_accepted():
     """coef=0 means no aux term is added at all, so a stage drops nothing."""
     reject_unsupported_pp_model(_moe_model(router_aux_loss_coef=0.0))
@@ -521,10 +536,81 @@ def test_unsupported_families_are_rejected_with_a_mechanism():
         assert len(spec.refusal or "") > 40, f"{backbone_name} rejects PP without a reason"
 
 
-def test_unclaimed_family_gets_the_permissive_generic_spec():
-    """Absence of a spec means supported — new families cost no code."""
-    assert resolve_pp_spec(_model().model) is GENERIC_PP
-    reject_unsupported_pp_model(_model())
+# Written out rather than read off PP_FAMILY_SPECS, so a family dropped from or slipped into the
+# registry fails here.
+REGISTERED_BACKBONES = {
+    "GptOssModel",
+    "Qwen3Model",
+    "Qwen3_5TextModel",
+    "Qwen3_5MoeTextModel",
+    "Step3p7TextModel",
+    "DeepseekV4Model",
+    "Glm5NextTextModel",
+}
+_TINY_FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
+# The tiny families whose backbone is neither registered nor refused with a spec of its own.
+_UNREGISTERED_FAMILIES = ("bailing_moe", "cohere2_moe", "glm4_moe_lite", "laguna", "lfm2_moe", "mistral4", "qwen3_moe")
+
+
+def test_the_registry_holds_exactly_the_validated_families():
+    assert {name for name, spec in PP_SPEC_MAP.items() if spec.validated} == REGISTERED_BACKBONES
+    assert all(PP_SPEC_MAP[name].refusal is None for name in REGISTERED_BACKBONES)
+
+
+@pytest.mark.parametrize(
+    "family", ["qwen3", "qwen3_5", "gpt_oss", "qwen3_5_moe_text", "qwen3_5_moe", "step3p7", "deepseek_v4", "glm5_next"]
+)
+def test_every_registered_family_passes_the_structure_gate(family):
+    model = tiny_family_model(_TINY_FAMILIES[family])
+    reject_unsupported_pp_model(model, "none")
+
+
+@pytest.mark.parametrize("family", _UNREGISTERED_FAMILIES)
+def test_an_unregistered_backbone_is_refused_by_name(family):
+    """The verdict names the backbone class and the registered ones, so it reads the same on every
+    rank: it depends on nothing but the class."""
+    model = tiny_family_model(_TINY_FAMILIES[family], overrides={"tie_word_embeddings": False})
+    backbone = type(model.get_decoder()).__name__
+    assert backbone not in PP_SPEC_MAP, f"premise: {backbone} has no spec"
+    with pytest.raises(ValueError, match=rf"^{backbone} is not registered for pipeline parallelism") as refusal:
+        reject_unsupported_pp_model(model, "none")
+    assert all(name in str(refusal.value) for name in REGISTERED_BACKBONES)
+    with pytest.raises(ValueError, match="is not registered"):
+        build_pipeline_stage(model, 0, 2, moe_balancing="none")
+
+
+def test_a_backbone_without_a_family_wrapper_is_refused_by_name():
+    with pytest.raises(ValueError, match=r"^Qwen3NextModel is not registered"):
+        reject_unsupported_pp_model(tiny_family_model(TINY_UNWRAPPED_MOE_FAMILY), "none")
+
+
+def test_registration_opt_in_admits_and_restores():
+    """The tests' opt-in admits an unregistered family for its block only."""
+    model = _moe_model(router_aux_loss_coef=0.0)
+    with registered_pp_backbones("Qwen3MoeModel"):
+        reject_unsupported_pp_model(model)
+    with pytest.raises(ValueError, match="Qwen3MoeModel is not registered"):
+        reject_unsupported_pp_model(model)
+
+
+def test_a_family_refusal_comes_before_the_registration_verdict():
+    model = _inkling_model()
+    with pytest.raises(ValueError, match=r"^InklingTextModel is refused for pipeline parallelism\. .*loader-only"):
+        reject_unsupported_pp_model(model, "none")
+
+
+def test_the_tie_refusal_comes_before_the_registration_verdict():
+    """An unregistered tied model is told about the tie, the reason no registration would lift."""
+    with pytest.raises(ValueError, match="tie_word_embeddings"):
+        reject_unsupported_pp_model(_moe_model(tie_word_embeddings=True, router_aux_loss_coef=0.0))
+
+
+def test_the_mtp_refusal_comes_before_the_registration_verdict():
+    model = _moe_model(router_aux_loss_coef=0.0)
+    model.config.num_nextn_predict_layers = 1
+    model.model.layers.append(model.model.layers[-1])
+    with pytest.raises(ValueError, match="num_nextn_predict_layers=1"):
+        reject_unsupported_pp_model(model)
 
 
 def test_model_without_a_layer_list_is_rejected():

@@ -4,9 +4,9 @@
 
 | | EP | CP | TP | ETP | PP | EP+CP | EP+TP | EP+ETP |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Mistral4 MoE | Yes | Yes | Yes (selective) | Yes (pure, `ep_size=1`) | — ² | partial ¹ | Yes | Experimental |
+| Mistral4 MoE | Yes | Yes | Yes (selective) | Yes (pure, `ep_size=1`) | **No** ² | partial ¹ | Yes | Experimental |
 
-² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+² Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 EP+ETP (`ep_size>1` and `expert_tp_size>1`) is experimental; its expert-TP groups stay NVLink-local, and it cannot combine with attention TP (`tp_size>1`). The Mistral4 suite runs `ep_size=2, expert_tp_size=4`; the sibling `ep_size=4, expert_tp_size=2` is a legal shape that this model's matrix does not cover.
 

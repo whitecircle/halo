@@ -133,7 +133,7 @@ class EpIntrospectionMixin:
 
         Iterates the full top-level model so ``lm_head`` (non-EP on untied-embedding models) is
         upcast too; EP params keep their own precision control. The toolkit loaders already hold the
-        checkpoint-backed masters at FP32 (:func:`~src.distributed.expert_parallel.fp32_masters.fp32_master_param_keys`),
+        checkpoint-backed masters at FP32 (:func:`~src.model_loading.parallel.fp32_masters.fp32_master_param_keys`),
         so this pass changes only what no loader read from a checkpoint: PEFT and wrapper-added
         parameters, and every parameter of a model handed in by a caller that bypassed those loaders,
         which keeps its run-dtype rounding.

@@ -17,7 +17,7 @@ Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no pa
 - **FSDP2** — default under torchrun; under `accelerate launch` the `--config_file` decides.
 - **TP** — native HF `tp_plan="auto"` shards attention and MLP.
 - **CP** — `Qwen3Attention` uses the same `Qwen3MoeUlyssesAttention` wrapper as Qwen3 MoE and Qwen3-VL.
-- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
+- **PP** — registered for the dense family; the tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate, 8B and up split. Two-node recipe: `examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml`. Qwen3 MoE is not registered ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 - **LoRA** — under FSDP/DP and CP; rejected at construction under TP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
 
 ### Configs
@@ -27,6 +27,7 @@ Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no pa
 | `examples/sft/qwen3/qwen3-4b-ultrachat.yaml` | SFT (full), 4K seq | `Qwen/Qwen3-4B-Instruct-2507` |
 | `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` | SFT (LoRA) | `Qwen/Qwen3-4B-Instruct-2507` |
 | `examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml` | SFT (QLoRA) | `Qwen/Qwen3-4B-Instruct-2507` |
+| `examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml` | SFT (full), `pp2` across two 8-GPU nodes | `Qwen/Qwen3-8B` |
 | `examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml` | Embedding | `Qwen/Qwen3-Embedding-4B` |
 | `examples/grpo/online/qwen3/online-grpo-qwen3-{4b,8b}-smoke.yaml` | Online GRPO smoke | `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-8B` |
 | `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml` | Online GRPO (RLVR + RLRR) | `Qwen/Qwen3-8B` |

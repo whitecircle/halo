@@ -8,11 +8,8 @@ from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
-from src.distributed.expert_parallel.loading import load_ep_model
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.hardware import is_blackwell_gpu
 from src.model_loading.buffer_repair import finalize_loaded_model
@@ -24,9 +21,11 @@ from src.model_loading.model_preparation import (
     resolve_auto_model_class,
 )
 from src.model_loading.parallel.cp import load_cp_model, load_ep_cp_model
+from src.model_loading.parallel.ep import load_ep_model
 from src.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
 from src.model_loading.parallel.lowp_compute import apply_lowp_compute
-from src.model_loading.parallel.model_source import ModelSource, resolve_lazy_checkpoint, resolve_model_source
+from src.model_loading.parallel.model_source import ModelSource, resolve_model_source
+from src.model_loading.parallel.pp import load_pp_stage_model
 from src.model_loading.parallel.tp import load_ep_tp_model, load_tp_model, load_tp_moe_model
 from src.model_loading.parallel.whole_model import cast_loaded_parameters, load_whole_model, warm_attention_kernels
 from src.model_loading.remote_code import apply_remote_code_compat_shims
@@ -36,7 +35,7 @@ from src.models.attention.selection import resolve_attn_implementation, validate
 from src.models.config_access import apply_config_overrides
 from src.models.moe_balancing import config_has_experts
 from src.runtime.consensus import reject_across_ranks
-from src.runtime.load_coordination import joined_node_load, timed_global_load
+from src.runtime.load_coordination import joined_node_load
 from src.runtime.ranks import get_local_rank
 
 logger = get_logger(__name__)
@@ -95,80 +94,6 @@ def _resolve_run_attention(
     return apply_family_patches(model_config, attn_implementation)
 
 
-def _load_pp_stage_model(
-    source: ModelSource,
-    pc: ParallelismConfig,
-    model_class,
-    from_pretrained_kwargs: dict,
-    *,
-    preserve_checkpoint_precision: bool,
-    wraps_experts: bool,
-) -> PreTrainedModel:
-    """COLLECTIVE: load this pipeline stage's decoder layers only, streamed per rank from safetensors.
-
-    Returns a normal ``*ForCausalLM`` whose layer list is this stage's slice re-based to 0, MoE stages
-    already EP- or grouped-GEMM-wrapped; ``build_pipeline_stage`` finishes the split in the trainer.
-    """
-    # Before the lazy gate: ep_config() issues new_group on every rank, so a per-rank filesystem
-    # decision must never come first.
-    ep_config = pc.ep_config() if wraps_experts else None
-    if not resolve_lazy_checkpoint(source, lazy_requested=True, layout_supported=lazy_loader_supports_checkpoint):
-        raise ValueError(
-            f"Pipeline parallelism needs a safetensors checkpoint the stage-aware loader can read, "
-            f"but {source.name!r} has none. Falling back to a whole-model load would make "
-            f"every rank hold all pipeline_parallel_size={pc.pp_size} stages — the ceiling PP "
-            f"exists to remove. Either the checkpoint is not safetensors (convert it), or this "
-            f"family's EP layer declares _supports_lazy_loading=False / nests its expert index "
-            f"under an extra module (pre-5.14 Zaya checkpoints), in which case the model cannot "
-            f"use PP at all (see agent-docs/parallelism/pipeline-parallelism.md)."
-        )
-    # No reason left to carry (resolve_model_source verified every rank's directory); the join stays in
-    # the load's collective sequence.
-    reject_across_ranks(None, "Resolving the pipeline stage checkpoint")
-
-    model = timed_global_load(
-        "PP",
-        "pp_stage_lazy",
-        lambda: load_pp_stage_model(
-            source.local_dir,
-            pc.pp_rank,
-            pc.pp_size,
-            pp_split=pc.pp_split,
-            ep_config=ep_config,
-            model_class=model_class,
-            keep_fp32_params=pc.fp32_non_ep_params,
-            preserve_checkpoint_precision=preserve_checkpoint_precision,
-            **from_pretrained_kwargs,
-        ),
-    )
-    logger.info(f"Model loaded for PP stage {pc.pp_rank}/{pc.pp_size} (ep={pc.ep_size}, dp={pc.data_parallel_size})")
-    return model
-
-
-def _load_ep_model(
-    source: ModelSource,
-    pc: ParallelismConfig,
-    model_class,
-    from_pretrained_kwargs: dict,
-    *,
-    preserve_checkpoint_precision: bool,
-) -> PreTrainedModel:
-    """COLLECTIVE: load a MoE with its experts distributed by EP (all-to-all expert routing)."""
-    model = load_ep_model(
-        source,
-        pc.ep_config(),
-        model_class=model_class,
-        max_concurrent_loading=pc.max_concurrent_loading,
-        lazy=pc.ep_lazy_loading,
-        keep_fp32_params=pc.fp32_non_ep_params,
-        preserve_checkpoint_precision=preserve_checkpoint_precision,
-        **from_pretrained_kwargs,
-    )
-    scope_str = "node-local" if pc.ep_scope == "node" else "cross-node"
-    logger.info(f"Model loaded with EP (ep_size={pc.ep_size}, {scope_str})")
-    return model
-
-
 def _build_random_init(model_class, pc: ParallelismConfig, from_pretrained_kwargs: dict, *, wraps_experts: bool):
     """COLLECTIVE: a random-weight model built from the config onto this rank's GPU, a node's ranks at a time."""
     # from_config materializes on CPU before .to(cuda), so it needs the same concurrency gate.
@@ -212,7 +137,7 @@ def _load_undistributed_model(
     else:
         model = load_whole_model(
             model_class,
-            source.name,
+            source,
             load_phase="Model load",
             max_concurrent_loading=pc.max_concurrent_loading,
             ep_config=ep_config,
@@ -244,9 +169,13 @@ def _dispatch_model_loading(
     rung = (source, pc, model_class, from_pretrained_kwargs)
     # First: a stage owns only its layer slice, so every other loader materializes pp_size× too much.
     if pc.is_pp_mode:
-        return _load_pp_stage_model(
+        model = load_pp_stage_model(
             *rung, preserve_checkpoint_precision=preserve_checkpoint_precision, wraps_experts=wraps_experts
         )
+        logger.info(
+            f"Model loaded for PP stage {pc.pp_rank}/{pc.pp_size} (ep={pc.ep_size}, dp={pc.data_parallel_size})"
+        )
+        return model
     if pc.has_ep_group and pc.is_tp_mode:
         return load_ep_tp_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
     if pc.is_tp_mode and config_has_experts(from_pretrained_kwargs["config"]):
@@ -260,7 +189,11 @@ def _dispatch_model_loading(
         logger.info(f"Model loaded with EP+CP (ep={pc.ep_size}, cp={pc.cp_size})")
         return model
     if pc.has_ep_group:
-        return _load_ep_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
+        model = load_ep_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
+        logger.info(
+            f"Model loaded with EP (ep_size={pc.ep_size}, {'node-local' if pc.ep_scope == 'node' else 'cross-node'})"
+        )
+        return model
     if pc.is_cp_mode:
         model = load_cp_model(
             *rung, preserve_checkpoint_precision=preserve_checkpoint_precision, wraps_experts=wraps_experts

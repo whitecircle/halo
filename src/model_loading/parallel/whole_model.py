@@ -11,14 +11,14 @@ from accelerate.logging import get_logger
 from transformers import PreTrainedModel
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
 from src.distributed.expert_parallel.patching import ep_claimed_blocks
 from src.hardware import current_device
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.dtype import cast_parameters_to_run_dtype, normalize_model_init_dtype
 from src.model_loading.model_preparation import auto_load_model
-from src.model_loading.parallel.model_source import resolve_model_source
+from src.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
+from src.model_loading.parallel.model_source import ModelSource, resolve_model_source
 from src.models.attention.backend_setup import warm_fa4_kernels
 from src.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
 from src.models.config_access import set_config_field_run_scoped
@@ -54,7 +54,7 @@ def move_model_to_local_device(model: torch.nn.Module) -> torch.nn.Module:
 
 def load_whole_model(
     model_class,
-    model_name_or_path: str,
+    source: ModelSource,
     *,
     load_phase: str,
     max_concurrent_loading: int | None,
@@ -75,20 +75,19 @@ def load_whole_model(
     would wait on queued ranks.
     """
     from_pretrained_kwargs.setdefault("device_map", "cpu")
-    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {model_name_or_path}")
-    with joined_node_load(f"{load_phase} from {model_name_or_path}", max_concurrent_loading):
-        model = from_pretrained_verified(model_class, model_name_or_path, **from_pretrained_kwargs)
+    precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {source.name}")
+    with joined_node_load(f"{load_phase} from {source.name}", max_concurrent_loading):
+        model = from_pretrained_verified(model_class, source.name, **from_pretrained_kwargs)
         cast_loaded_parameters(
             model, from_pretrained_kwargs.get("dtype"), keep_fp32=keep_fp32_non_ep, ep_wrapped=ep_wrapped
         )
         precision_guard.run(
             lambda: restore_fp32_master_parameters(
                 model,
-                model_name_or_path,
+                source.local_dir,
                 ep_config,
                 keep_non_ep=keep_fp32_non_ep,
                 strict=preserve_checkpoint_precision,
-                revision=from_pretrained_kwargs.get("revision"),
             )
         )
         if place_on_device and precision_guard.reason is None:

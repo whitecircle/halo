@@ -41,7 +41,7 @@ class EPInklingMoELayer(EPMoELayerBase):
 
     # The hub checkpoint keeps Thinking Machines' original namespace (``model.llm.*``,
     # ``wq_du``/``wk_dv``, interleaved ``w13_weight``); the lazy loaders translate it through the
-    # transformers conversion entry declared here (renames + de-interleave, ``hub_conversion.py``).
+    # transformers conversion entry declared here (renames + de-interleave, ``conversion_selection.py``).
     # Weight sync stays off: no sync into either pinned engine's Inkling loader has been validated.
     _HUB_CONVERSION_KEYS = ("inkling_mm_model",)
     _supports_weight_sync = False

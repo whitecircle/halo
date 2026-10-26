@@ -48,7 +48,7 @@ class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
     # The hub checkpoint keeps the vendor namespace transformers converts inside ``from_pretrained``:
     # hyper-connection ``hc_attn_*``/``hc_ffn_*`` tensors, the KDA ``f_a_proj``/``A_log`` family
     # under ``forget_gate``, and the three-source ``q/k/v_conv1d → conv1d`` Concatenate. The lazy
-    # loaders replay that mapping per key (``hub_conversion.py``); the per-expert entries are the
+    # loaders replay that mapping per key (``conversion_selection.py``); the per-expert entries are the
     # ExpertFuser's.
     _HUB_CONVERSION_KEYS = ("glm5_next",)
 

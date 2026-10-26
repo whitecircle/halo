@@ -129,18 +129,18 @@ of `src/model_loading/` stays sharding-agnostic. The collective checkpoint half,
 These packages import each other acyclically
 (`tests/cpu/conventions/test_import_layering.py`).
 
-No parallelism package imports `src/model_loading/parallel/`, so
-what both sides need sits in the parallelism packages: `expert_parallel/fp32_masters.py` selects
-configured FP32 parameter masters on the pre-wrapper HF tree off the EP layer registry, and
-`expert_parallel/master_weights.py` streams their stored values back for eager construction
-([Load precision](../models/README.md#load-precision)).
+No parallelism package imports `src/model_loading/parallel/`, so what both sides need sits in the
+parallelism packages: `expert_parallel/lazy_plan.py` holds the expert-key vocabulary, the lazy gate, the
+per-key weight planner, the family key mapping and the prologue both lazy loaders share, and
+`expert_parallel/expert_fuser.py` stacks a per-expert checkpoint's local experts. The loaders themselves
+sit in the dispatch package: `ep.py`, `pp.py`, and `fp32_masters.py`, which selects the configured FP32
+parameter masters off the EP layer registry, captures them for a lazy load and streams their stored
+values back for eager construction ([Load precision](../models/README.md#load-precision)).
 
-The lazy-loading machinery both the EP and PP loaders share — safetensors index resolution,
-checkpoint-key alignment, per-key weight plans, hub-conversion op math, meta-shell instantiation —
-lives in `src/model_loading/lazy_safetensors/` (`conversion.py`, `weights.py`, `meta_shell.py`):
-model-loading machinery with no parallelism knowledge, on the sharding-agnostic side. The EP
-package keeps only the expert-domain knowledge: key patterns, planner, fuser, per-family
-conversion/rename resolution.
+The machinery both lazy loaders share — conversion-op math and key alignment (`conversion.py`), which
+transformers conversions apply (`conversion_selection.py`), per-key weight plans and the shared stream
+tail (`materialization.py`), meta-shell instantiation (`meta_shell.py`) — lives in
+`src/model_loading/lazy_safetensors/`, with no parallelism knowledge.
 
 The FSDP2, HSDP, and TP axes ride a torch `DeviceMesh` (`src/distributed/mesh.py`); EP and CP use
 hand-built `dist.new_group` groups whose all-to-all patterns do not map to a mesh. The trainer reads

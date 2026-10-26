@@ -7,7 +7,7 @@ device-placement sweep replaces it with ``torch.empty`` — uninitialized memory
 rank, behind one warning.
 ``examples/classification/gptoss/clf-gptoss-20b-mage-ep.yaml`` is exactly this shape.
 
-These run the real :func:`~src.distributed.expert_parallel.lazy_loader.load_ep_model_lazy` against a
+These run the real :func:`~src.model_loading.parallel.ep.load_ep_model_lazy` against a
 tiny fused-expert checkpoint written to disk (EP patching stubbed — it needs DeepEP and process
 groups), which is the only way to catch that the head is initialized AT ALL, at the RUN's dtype, and
 from the RNG rather than from the allocator.
@@ -27,10 +27,10 @@ from transformers import (
     Qwen3Config,
 )
 
-import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
+import src.model_loading.parallel.ep as ep_lazy_loader
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
-from src.model_loading.lazy_safetensors.weights import init_checkpoint_absent_modules
+from src.model_loading.lazy_safetensors.materialization import init_checkpoint_absent_modules
+from src.model_loading.parallel.ep import load_ep_model_lazy
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.models import TINY_GPTOSS_CONFIG
 

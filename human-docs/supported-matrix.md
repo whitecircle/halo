@@ -59,18 +59,18 @@ Every trainer supports EP, TP, ETP and EP+TP. CP is enabled per trainer, only fo
 SFT, SMPO and offline GRPO; on any other loss it would silently mis-pool across
 sequence shards.
 
-| Method | Script | CP | Notes |
-| --- | --- | :---: | --- |
-| SFT | `scripts/training/sft.py` | Yes | also VLM and continued pretraining |
-| SMPO | `scripts/training/preference/smpo.py` | Yes | reference-free preference |
-| DPO / KTO | `scripts/training/preference/{dpo,kto}.py` | No | reference log-prob sums block CP |
-| Reward modeling | `scripts/training/preference/rewards.py` | No | full-sequence pooling blocks CP |
-| Classification | `scripts/training/classification.py` | No | full-sequence pooling blocks CP |
-| Offline GRPO | `scripts/training/offline_grpo.py` | Yes | CP is full fine-tuning only: PEFT, native expert LoRA and an explicit `ref_model` are rejected |
-| Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | No | needs vLLM; `--use_sdpg=true` runs online SDPG |
-| Async GRPO with environments | `scripts/training/environmental_grpo.py` | No | needs Ray and a vLLM or SGLang server |
-| Distillation | `scripts/training/distillation/` | No | teacher and self distillation |
-| Embedding | `scripts/training/embedding.py` | No | SentenceTransformer trainer |
+| Method | Script | CP | PP | Notes |
+| --- | --- | :---: | :---: | --- |
+| SFT | `scripts/training/sft.py` | Yes | Yes | also VLM and continued pretraining |
+| SMPO | `scripts/training/preference/smpo.py` | Yes | Yes | reference-free preference |
+| DPO / KTO | `scripts/training/preference/{dpo,kto}.py` | No | Yes | reference log-prob sums block CP; PP needs precomputed reference log-probs, and KTO `loss_type: apo_zero_unpaired` |
+| Reward modeling | `scripts/training/preference/rewards.py` | No | Yes | full-sequence pooling blocks CP |
+| Classification | `scripts/training/classification.py` | No | Yes | full-sequence pooling blocks CP |
+| Offline GRPO | `scripts/training/offline_grpo.py` | Yes | Yes | CP is full fine-tuning only: PEFT, native expert LoRA and an explicit `ref_model` are rejected |
+| Online GRPO (RLVR) | `scripts/training/online_grpo/rlvr.py` | No | No | needs vLLM; `--use_sdpg=true` runs online SDPG |
+| Async GRPO with environments | `scripts/training/environmental_grpo.py` | No | No | needs Ray and a vLLM or SGLang server |
+| Distillation | `scripts/training/distillation/` | No | No | teacher and self distillation |
+| Embedding | `scripts/training/embedding.py` | No | No | SentenceTransformer trainer |
 
 ### Rollout engines
 
@@ -103,7 +103,7 @@ be served from this repo's image. Setup, ports, weight sync and
 | EP+CP, EP+TP | supported for selected families | MoE plus long context or attention sharding |
 | EP+ETP | experimental | expert memory pressure; each ETP group stays inside one NVLink domain, and cross-node EP+ETP forms one ETP group per domain |
 | TP+CP, TP+ETP, ETP+CP, any three axes | unsupported | rejected at config validation |
-| PP, PP+EP, PP+ETP | supported for selected families | depth across NVLink domains; each stage is a whole number of domains |
+| PP, PP+EP, PP+ETP | supported for registered families | depth across NVLink domains; each stage is a whole number of domains, so two nodes at least |
 
 Layout rules and the shapes rejected before a run starts:
 [Parallelism](parallelism.md).
@@ -114,26 +114,26 @@ Any HuggingFace `AutoModelForCausalLM` runs under FSDP2; this table covers
 advanced parallelism. What each family is for:
 [Supported Models](models.md).
 
-| Model family | FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Notes |
-| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | --- |
-| Qwen3 (dense) | Yes | — | Yes | Yes | — | — | — | Yes | reference dense family |
-| Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | broadest coverage |
-| Qwen3-VL (text) | Yes | — | Yes | No | — | — | — | Yes | CP on text-only batches (a batch with images raises mid-run); TP raises at load, so keep `tensor_parallel_size=1` |
-| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | linear attention blocks CP; VL checkpoints train (MoE-VL with EP, dense 9B-VL on plain FSDP with `sdpa`) |
-| GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
-| GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | |
-| Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | only EP validated on the 200B+ checkpoint; the other modes and LoRA pass tiny-model GPU tests |
-| Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | No | No | Yes | native in transformers; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
-| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | Yes | KV-shared layers block CP/TP; no router balancing; LoRA adapts the language model only |
-| Bailing/Ling | Yes | Yes | Yes | No | Yes | partial | No | Yes | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only |
-| LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | short-conv layers block CP |
-| Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | partial | Yes | Yes | |
-| DeepSeek-V4 | Yes | Yes | No | No | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; LoRA skips the grouped `o_a_proj` |
-| Zaya | Yes | Yes | No | No | Yes | No | No | Yes | always without gradient checkpointing |
-| Inkling | Yes | Yes | No | No | Yes | No | No | Yes | multimodal MoE; LoRA passes tiny-model GPU tests only |
-| GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first |
-| Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM, SDPA only; sharded EP saves refused |
-| Any other HF causal LM | Yes | — | No | if the model has a `tp_plan` | — | — | — | Yes | a dense model without a TP plan raises under TP |
+| Model family | FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | PP | LoRA | Notes |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | --- |
+| Qwen3 (dense) | Yes | — | Yes | Yes | — | — | — | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
+| Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes | broadest coverage |
+| Qwen3-VL (text) | Yes | — | Yes | No | — | — | — | No | Yes | CP on text-only batches (a batch with images raises mid-run); TP raises at load, so keep `tensor_parallel_size=1` |
+| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | Yes | linear attention blocks CP; VL checkpoints train (MoE-VL with EP, dense 9B-VL on plain FSDP with `sdpa`) |
+| GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
+| GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes | |
+| Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes | only EP validated on the 200B+ checkpoint; the other modes and LoRA pass tiny-model GPU tests |
+| Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | No | No | No | Yes | native in transformers; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
+| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | No | Yes | KV-shared layers block CP/TP; no router balancing; LoRA adapts the language model only |
+| Bailing/Ling | Yes | Yes | Yes | No | Yes | partial | No | No | Yes | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only |
+| LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | No | Yes | short-conv layers block CP |
+| Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | partial | Yes | No | Yes | |
+| DeepSeek-V4 | Yes | Yes | No | No | Yes | No | No | Yes | Yes | eager only; `packing` and `padding_free` refused; LoRA skips the grouped `o_a_proj` |
+| Zaya | Yes | Yes | No | No | Yes | No | No | No | Yes | always without gradient checkpointing |
+| Inkling | Yes | Yes | No | No | Yes | No | No | No | Yes | multimodal MoE; LoRA passes tiny-model GPU tests only |
+| GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | Yes | composite VLM, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first |
+| Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | Yes | composite VLM, SDPA only; sharded EP saves refused |
+| Any other HF causal LM | Yes | — | No | if the model has a `tp_plan` | — | — | — | No | Yes | a dense model without a TP plan raises under TP |
 
 `partial` marks a shape that only a tiny-model LoRA GPU test runs; validate a
 short run before you rely on it. Online RL support per family is in

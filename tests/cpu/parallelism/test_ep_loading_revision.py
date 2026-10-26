@@ -17,14 +17,14 @@ import torch.nn as nn
 from accelerate import PartialState
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.loading import load_ep_model
 from src.model_loading.parallel.cp import load_ep_cp_model
+from src.model_loading.parallel.ep import load_ep_model
 from src.model_loading.parallel.model_source import ModelSource
 from src.model_loading.parallel.tp import load_ep_tp_model
 
 PartialState()  # the loaders' accelerate logger needs accelerate state initialized
 
-_EP_LOADING = "src.distributed.expert_parallel.loading"
+_EP_LOADING = "src.model_loading.parallel.ep"
 _CP_LOADING = "src.model_loading.parallel.cp"
 _TP_LOADING = "src.model_loading.parallel.tp"
 
@@ -37,9 +37,15 @@ def _make_ep_config() -> EPConfig:
     return EPConfig(ep_size=2, stage_world_size=2, nvlink_domain_size=2, experts_fsdp_managed=False)
 
 
+def _ep_pc(**overrides) -> SimpleNamespace:
+    fields = {"ep_config": _make_ep_config, "ep_lazy_loading": True, "fp32_non_ep_params": False}
+    return SimpleNamespace(**{**fields, "max_concurrent_loading": 1, **overrides})
+
+
 # The loaders take the dispatcher's already-loaded config; every load here is patched out, so what
 # it is never matters — only that it is threaded through.
 _MODEL_CONFIG = SimpleNamespace()
+_KWARGS = {"config": _MODEL_CONFIG, "revision": _REVISION}
 
 
 def test_lazy_fallback_level_separates_a_family_property_from_an_environment_failure():
@@ -49,11 +55,11 @@ def test_lazy_fallback_level_separates_a_family_property_from_an_environment_fai
     def _run(*, has_safetensors: bool):
         with (
             patch(f"{_EP_LOADING}.resolve_lazy_checkpoint", lambda *a, **k: False),
-            patch(f"{_EP_LOADING}.has_safetensors_checkpoint", lambda *a, **k: has_safetensors),
+            patch(f"{_EP_LOADING}.has_whole_model_weight_file", lambda *a, **k: has_safetensors),
             patch(f"{_EP_LOADING}._load_ep_model_huggingface", lambda *a, **k: nn.Linear(2, 2)),
             patch(f"{_EP_LOADING}.logger") as log,
         ):
-            load_ep_model(_SOURCE, _make_ep_config(), _MODEL_CONFIG)
+            load_ep_model(_SOURCE, _ep_pc(), None, _KWARGS, preserve_checkpoint_precision=False)
         return log
 
     unmappable = _run(has_safetensors=True)
@@ -65,34 +71,29 @@ def test_lazy_fallback_level_separates_a_family_property_from_an_environment_fai
     assert "no_safetensors" in no_safetensors.warning.call_args.args[0]
 
 
-# load_ep_model threading
-
-
 def test_load_ep_model_threads_revision():
     """The ``from_pretrained`` fallback loads the agreed source at the pinned revision."""
     seen = {}
 
-    def fake_hf_load(model_name_or_path, ep_config, *args, revision=None, **kwargs):
-        seen["hf"] = (model_name_or_path, revision)
+    def fake_hf_load(source, pc, ep_config, model_class, from_pretrained_kwargs, **kwargs):
+        seen["hf"] = (source.name, from_pretrained_kwargs.get("revision"))
         return nn.Linear(2, 2)
 
     with (
         patch(f"{_EP_LOADING}.resolve_lazy_checkpoint", return_value=False),
         patch(f"{_EP_LOADING}._load_ep_model_huggingface", fake_hf_load),
     ):
-        load_ep_model(_SOURCE, _make_ep_config(), _MODEL_CONFIG, revision=_REVISION)
+        load_ep_model(_SOURCE, _ep_pc(), None, _KWARGS, preserve_checkpoint_precision=False)
 
     assert seen["hf"] == ("org/repo", _REVISION)
 
 
 def test_load_ep_model_lazy_path_reads_pinned_snapshot():
-    """The lazy safetensors loader reads the revision-pinned snapshot dir; the revision kwarg itself is
-    absorbed (a local dir needs no hub revision)."""
+    """The lazy safetensors loader reads the revision-pinned snapshot dir, not the source's name."""
     seen = {}
 
     def fake_lazy(local_dir, ep_config, config, **kwargs):
         seen["lazy_dir"] = local_dir
-        seen["lazy_kwargs"] = kwargs
         return nn.Linear(2, 2)
 
     with (
@@ -100,10 +101,9 @@ def test_load_ep_model_lazy_path_reads_pinned_snapshot():
         patch(f"{_EP_LOADING}.resolve_lazy_checkpoint", return_value=True),
         patch(f"{_EP_LOADING}.load_ep_model_lazy", fake_lazy),
     ):
-        load_ep_model(_SOURCE, _make_ep_config(), _MODEL_CONFIG, revision=_REVISION)
+        load_ep_model(_SOURCE, _ep_pc(), None, _KWARGS, preserve_checkpoint_precision=False)
 
     assert seen["lazy_dir"] == "/fake/pinned/snapshot"
-    assert "revision" not in seen["lazy_kwargs"]
 
 
 # EP+CP and EP+TP call sites
@@ -113,17 +113,11 @@ def test_load_ep_cp_model_threads_revision():
     """load_ep_cp_model forwards the source and its revision pin into load_ep_model."""
     seen = {}
 
-    def fake_load_ep_model(source, ep_config, *args, revision=None, **kwargs):
-        seen["load"] = (source, revision)
+    def fake_load_ep_model(source, pc, model_class, from_pretrained_kwargs, **kwargs):
+        seen["load"] = (source, from_pretrained_kwargs.get("revision"))
         return nn.Linear(2, 2)
 
-    pc = SimpleNamespace(
-        ep_config=lambda: SimpleNamespace(ep_size=2),
-        cp_config=lambda: SimpleNamespace(cp_size=2),
-        max_concurrent_loading=1,
-        ep_lazy_loading=True,
-        fp32_non_ep_params=False,
-    )
+    pc = _ep_pc(ep_config=lambda: SimpleNamespace(ep_size=2), cp_config=lambda: SimpleNamespace(cp_size=2))
     with (
         patch(f"{_CP_LOADING}.load_ep_model", fake_load_ep_model),
         patch(f"{_CP_LOADING}.UlyssesModel", side_effect=lambda model, cp_config: model),
@@ -132,7 +126,7 @@ def test_load_ep_cp_model_threads_revision():
             _SOURCE,
             pc,
             None,
-            {"config": _MODEL_CONFIG, "revision": _REVISION},
+            _KWARGS,
             preserve_checkpoint_precision=False,
         )
 

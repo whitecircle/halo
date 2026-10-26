@@ -26,6 +26,7 @@ from transformers.core_model_loading import (
     revert_weight_conversion,
 )
 
+from src.model_loading.lazy_safetensors.conversion import is_expert_bank_merge, is_sub_model_prefix_change
 from src.models.model_classes import transformers_model_class
 from src.models.param_roles import persistent_buffers
 
@@ -59,18 +60,6 @@ def _family_conversions(model: torch.nn.Module, *, add_legacy: bool) -> list:
     finally:
         for module, wrapped_class in swapped:
             module.__class__ = wrapped_class
-
-
-def is_sub_model_prefix_change(conversion) -> bool:
-    """Whether ``conversion`` strips the leading level of a sub-model's own keys: a ``PrefixChange``
-    scoped to the sub-model, such as the ``vision_model`` level of a SigLIP tower (Command A+,
-    LFM2-VL), which the hub index and both engines' loaders keep and the module tree drops."""
-    return (
-        isinstance(conversion, PrefixChange)
-        and bool(conversion.scope_prefix)
-        and bool(conversion.prefix_to_remove)
-        and not conversion.model_prefix
-    )
 
 
 def conversions_to_revert(model: torch.nn.Module) -> list:
@@ -149,7 +138,7 @@ def revert_to_load_layout(model: torch.nn.Module, state_dict: dict) -> dict:
 
 
 def reversed_export_transforms(conversions: list) -> tuple[list[WeightRenaming], list[WeightConverter]]:
-    """``conversions`` (:func:`~src.distributed.expert_parallel.hub_conversion.gathered_export_conversions`)
+    """``conversions`` (:func:`export_conversions`)
     reversed in transformers' save-side order and split for a key-by-key respell
     (``rename_source_key(..., reverse=True)``): a rename maps one key on its own, a key a reverse converter
     claims needs that converter's other sources beside it."""
@@ -264,3 +253,14 @@ class ModuleLayoutView:
                     )
                 if target in self._live:
                     yield target, tensor[0] if isinstance(tensor, list) else tensor
+
+
+def export_conversions(model: torch.nn.Module) -> list:
+    """The conversions an EP export inverts: :func:`conversions_to_revert` minus the expert-bank merges.
+
+    Every other recorded rename and converter is reverted, on the non-expert params and the gathered layers
+    alike, so the export writes the namespace the load read (a SigLIP tower's ``vision_model`` level, Inkling's
+    ``model.llm.*``); the expert banks keep the layout their family's gather emits, which ``from_pretrained``
+    and both engines read either way.
+    """
+    return [c for c in conversions_to_revert(model) if not is_expert_bank_merge(c)]

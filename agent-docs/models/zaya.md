@@ -46,7 +46,7 @@ RL weight sync is refused at construction on both engines, each for its own load
 
 **CP** — the CCA convolutions run over the sequence axis and the delayed `v_proj_delayed` shifts each token's value to the previous timestep. Both break Ulysses partitioning at chunk boundaries: the conv receptive field crosses them with no handshake, and the delay would pull a sequence element from another rank.
 
-**PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
+**PP** — refused (`ZAYA_PP`): the fp32 residual stream and the accumulating EDA router state cross every layer boundary, a two-tensor, mixed-dtype boundary the single-activation pipeline contract does not carry ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 **ETP** is supported via the shared fused-GLU helper: gate/up halves store as separate shards at `expert_tp_size > 1` so each rank holds matching intermediate positions, while the router (owning the EDA state) and the discard-slot masking stay replicated and FSDP-managed. EP+ETP without GC carries the same constraints as plain EP.
 

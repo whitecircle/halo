@@ -4,10 +4,10 @@
 
 | | EP | CP | TP | ETP | PP |
 |---|:--:|:--:|:--:|:--:|:--:|
-| Bailing MoE / Ling 2.0 | Yes | Yes | **No** | Yes | — ¹ |
-| Ring-mini-linear-2.0, Ling 3.0 | Yes | **No** | **No** | Yes | — ¹ |
+| Bailing MoE / Ling 2.0 | Yes | Yes | **No** | Yes | **No** ¹ |
+| Ring-mini-linear-2.0, Ling 3.0 | Yes | **No** | **No** | Yes | **No** ¹ |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+¹ Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 The shipped config trains `inclusionAI/Ling-mini-2.0` (`model_type: bailing_moe`). The sibling `inclusionAI/Ring-mini-linear-2.0` is a **different** architecture (`BailingMoeLinearV2ForCausalLM`, `model_type: bailing_moe_linear`) that swaps softmax attention for Lightning Attention-2. Both share the `BailingMoeV2SparseMoeBlock` the EP wrapper targets.
 

@@ -21,6 +21,7 @@ run. Paths are relative to the repo root; anything that executes runs **inside t
 | Selective TP | `src/distributed/tensor_parallel/parallelize_attention.py` (`TP_SHARDABLE_ATTENTION_CLASSES`) |
 | Head transform (forward scales, caps or cuts logits around `lm_head`) | `src/models/head_transform.py` (`HeadTransformSpec`) + the family's tiny model in `tests/cpu/models/test_head_transform.py` |
 | Attention backend (auto-detection falls short) | the family's patch in `src/models/attention/selection.py`, gated on `model_type_matches` (`src/models/config_access.py`) in `resolve_attn_implementation` or `apply_family_patches` (`src/model_loading/model_preparation.py`) |
+| PP registration | `src/distributed/pipeline_parallel/families.py` — add the backbone class to a `validated=True` `PPFamilySpec` (`STOCK_FORWARD_PP` when the upstream forward splits as-is) once its PP GPU rows pass; an unregistered backbone is refused by name |
 | Vendoring | `src/models/<name>/` + a side-effect import in `src/model_loading/model_preparation.py` |
 | Configs | `examples/sft/<family>/` |
 | Tests | `tests/gpu/parallelism/ep/`, `tests/gpu/trainers/sft/`, `tests/cpu/models/`, `tests/gpu/manifest.py` |

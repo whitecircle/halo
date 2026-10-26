@@ -11,6 +11,8 @@
 
 For plain FSDP, no work is needed — any `AutoModelForCausalLM` works.
 
+Pipeline parallelism is an allowlist: a new backbone splits under PP only once its class is in a `validated=True` `PPFamilySpec` in `PP_FAMILY_SPECS` (`src/distributed/pipeline_parallel/families.py`; `STOCK_FORWARD_PP` when the upstream forward splits as-is), added after its PP GPU rows pass. Until then `reject_unsupported_pp_structure` refuses it by name.
+
 Multimodal models work too: the loaders resolve the class through `resolve_auto_model_class()` (`src/model_loading/model_preparation.py`), so any `model_type` in transformers' image-text-to-text mapping loads via `AutoModelForImageTextToText` rather than dropping the vision tower. The training scripts detect a VLM from its config and route the load through `load_distributed_model`, so a MoE VLM gets EP/CP/TP on the multimodal wrapper (`config_has_experts` finds the experts on the nested `text_config`). No EP-wrapper work is VLM-specific.
 
 ## Attention backend

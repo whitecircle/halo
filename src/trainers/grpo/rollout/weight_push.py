@@ -13,7 +13,7 @@ import torch
 from accelerate.utils import is_peft_model
 from transformers.core_model_loading import rename_source_key
 
-from src.checkpoint.hub_layout import reversed_export_transforms, revert_conversions
+from src.checkpoint.hub_layout import export_conversions, reversed_export_transforms, revert_conversions
 from src.diagnostics.profiling import log_cuda_memory
 from src.distributed.expert_parallel.expert_weights import (
     config_model_types,
@@ -21,7 +21,6 @@ from src.distributed.expert_parallel.expert_weights import (
     is_expert_weight_attr,
     to_hub_layer_key,
 )
-from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, iter_hand_sliced_full
@@ -209,7 +208,7 @@ class _HubForwarder:
         self._held_bytes = 0
         # The list the gathered save inverts.
         self._model = base_transformers_model(model)
-        self._conversions = gathered_export_conversions(self._model)
+        self._conversions = export_conversions(self._model)
         self._renamings, self._converters = reversed_export_transforms(self._conversions)
 
     def send(self, name: str, tensor: torch.Tensor) -> None:

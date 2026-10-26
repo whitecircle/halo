@@ -29,22 +29,25 @@ import torch.nn as nn
 from safetensors.torch import save_file
 from transformers import AutoConfig, GptOssConfig, GptOssForCausalLM
 
-import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
+import src.model_loading.parallel.ep as ep_lazy_loader
 import src.model_loading.parallel.model_source as model_source
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner, ExpertFuser, load_ep_model_lazy
-from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
+from src.distributed.expert_parallel.expert_fuser import ExpertFuser
+from src.distributed.expert_parallel.lazy_plan import WeightPlanner
+from src.model_loading.lazy_safetensors.materialization import SafetensorsWeightLoader, WeightAction, WeightPlan
+from src.model_loading.parallel.ep import load_ep_model_lazy
 from src.runtime import consensus
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.repo import REPO_ROOT
 
 E_GLOBAL, M, H = 8, 6, 4
-LOADER_LOGGER = "src.distributed.expert_parallel.lazy_loader"
+LOADER_LOGGER = "src.distributed.expert_parallel.lazy_plan"
 
 # Loaders that open the lazy safetensors path and must reach it through the shared rank-0 gate.
 _LAZY_GATE_CALL_SITES = (
-    REPO_ROOT / "src/distributed/expert_parallel/loading.py",
-    REPO_ROOT / "src/model_loading/parallel/loader.py",
+    REPO_ROOT / "src/model_loading/parallel/ep.py",
+    REPO_ROOT / "src/model_loading/parallel/pp.py",
     REPO_ROOT / "src/model_loading/parallel/tp.py",
 )
 
@@ -79,7 +82,9 @@ class _MoEModel(nn.Module):
 
 def _load(tmp_path, model: nn.Module, tensors: dict[str, torch.Tensor], plans: list[WeightPlan]) -> None:
     save_file(tensors, str(tmp_path / "model.safetensors"))
-    SafetensorsWeightLoader(str(tmp_path), ["model.safetensors"], device="cpu").load_into_model(model, plans)
+    SafetensorsWeightLoader(
+        str(tmp_path), resolve_checkpoint_weights(str(tmp_path)).weight_map, device="cpu"
+    ).load_into_model(model, plans)
 
 
 # --------------------------------------------------------------------------------------------
@@ -170,7 +175,7 @@ def test_an_fp8_disk_tensor_is_refused(tmp_path):
     model = nn.Linear(H, 3, bias=False)
     plan = WeightPlan(WeightAction.REPLICATE, "model.safetensors", "weight", "weight")
     save_file({"weight": torch.randn(3, H).to(torch.float8_e4m3fn)}, str(tmp_path / "model.safetensors"))
-    loader = SafetensorsWeightLoader(str(tmp_path), ["model.safetensors"], device="cpu")
+    loader = SafetensorsWeightLoader(str(tmp_path), resolve_checkpoint_weights(str(tmp_path)).weight_map, device="cpu")
 
     with pytest.raises(ValueError, match=r"'weight'.*Dequantize it to bf16"):
         loader.load_into_model(model, [plan], dtype=torch.bfloat16)
@@ -180,7 +185,7 @@ def test_an_fp8_disk_tensor_is_refused(tmp_path):
 def test_the_planner_records_the_configs_expert_count_on_every_shard_plan():
     """The count has to travel with the plan, or the check above is unreachable in production."""
     ep_config = SimpleNamespace(expert_start_idx=4, expert_end_idx=8, num_experts=E_GLOBAL)
-    planner = EPWeightPlanner(ep_config)
+    planner = WeightPlanner(ep_config)
     key = "layers.0.mlp.experts.gate_up_proj"
     plans = planner.build({key: "model.safetensors"}, {key: key}, {key})
     shard_plans = [p for p in plans if p.action == WeightAction.EXPERT_SHARD]
@@ -252,12 +257,12 @@ def test_a_complete_in_range_fusion_still_loads(tmp_path):
 
 
 # --------------------------------------------------------------------------------------------
-# EPWeightPlanner: unexpected checkpoint keys, and one model tensor claimed twice
+# WeightPlanner: unexpected checkpoint keys, and one model tensor claimed twice
 # --------------------------------------------------------------------------------------------
 
 
 def _identity_plan(weight_map: dict[str, str], model_keys: set[str], disk_to_model=None):
-    return EPWeightPlanner(None).build(weight_map, disk_to_model or {k: k for k in weight_map}, model_keys)
+    return WeightPlanner(None).build(weight_map, disk_to_model or {k: k for k in weight_map}, model_keys)
 
 
 def test_checkpoint_keys_matching_no_model_tensor_are_reported_once(caplog):
@@ -312,7 +317,7 @@ def test_expert_index_beyond_the_config_is_reported(caplog):
         "s.safetensors",
     )
     with caplog.at_level(logging.WARNING, logger=LOADER_LOGGER):
-        EPWeightPlanner(ep_config).build(weight_map, {k: k for k in weight_map}, {"layers.0.mlp.experts.gate_up_proj"})
+        WeightPlanner(ep_config).build(weight_map, {k: k for k in weight_map}, {"layers.0.mlp.experts.gate_up_proj"})
     warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
     assert len(warnings) == 1, [record.getMessage() for record in warnings]
     message = warnings[0].getMessage()
@@ -430,7 +435,7 @@ def test_the_lazy_gate_is_decided_by_rank_zero_alone(monkeypatch):
     spelled out at each of its three call sites (EP, EP+TP, PP stage).
     """
     _ungated(monkeypatch)
-    monkeypatch.setattr(model_source, "has_safetensors_checkpoint", lambda _dir: True)
+    monkeypatch.setattr(model_source, "has_whole_model_weight_file", lambda _dir, **_kw: True)
     monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda _value: "rank0-verdict")
 
     for layout_supported in (False, True):
@@ -455,7 +460,7 @@ def test_the_lazy_gate_needs_the_request_safetensors_and_a_supported_layout(
     """All three conditions, and the layout probe is only asked about a directory holding safetensors."""
     _ungated(monkeypatch)
     asked: list[str] = []
-    monkeypatch.setattr(model_source, "has_safetensors_checkpoint", lambda _dir: has_safetensors)
+    monkeypatch.setattr(model_source, "has_whole_model_weight_file", lambda _dir, **_kw: has_safetensors)
     monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda value: value)
 
     def _layout(path):
@@ -481,7 +486,7 @@ def test_a_lazy_loader_call_site_goes_through_the_one_gate(call_site):
     source = call_site.read_text(encoding="utf-8")
     assert "resolve_lazy_checkpoint" in source, f"{call_site.name} no longer routes its lazy gate through the helper"
     # The inlined shape, in every wrapping: the layout probe ANDed into the caller's own expression.
-    assert "and lazy_loader_supports_checkpoint(" not in " ".join(source.split()), (
+    assert "and is_lazy_loadable(" not in " ".join(source.split()), (
         f"{call_site.name} re-inlined the layout probe into its own gate expression instead of "
         f"handing it to resolve_lazy_checkpoint"
     )

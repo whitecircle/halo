@@ -4,12 +4,12 @@ A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSpars
 
 | | EP | CP | TP | ETP | PP | EP+TP |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
-| Qwen3.5 / 3.6 MoE | Yes | **No** ¹ | Yes | Yes | — ² | Yes |
-| Qwen3.5 / 3.6 dense | — | **No** ¹ | Yes | — | — ² | — |
+| Qwen3.5 / 3.6 MoE | Yes | **No** ¹ | Yes | Yes | Yes ² | Yes |
+| Qwen3.5 / 3.6 dense | — | **No** ¹ | Yes | — | Yes ² | — |
 
 ¹ The full-attention block has a working CP wrapper; the hybrid linear-attention layers are the blocker — see [Why CP is blocked](#why-cp-is-blocked-on-real-checkpoints).
 
-² Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+² Text towers only, registered for pipeline parallelism: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, no packing (the GatedDeltaNet rows carry no per-row `cu_seq_lens`), and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 

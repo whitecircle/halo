@@ -42,7 +42,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint.hub_layout import revert_conversions
+from src.checkpoint.hub_layout import export_conversions, revert_conversions
 from src.checkpoint.parallel.context import CheckpointLoadContext
 from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from src.checkpoint.parallel.optimizer import OptimizerShardStore
@@ -53,12 +53,11 @@ from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.checkpoint.writing import save_dtype_caster
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
-from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
+from src.model_loading.parallel.pp import _load_stage_lazy
 from src.models.attention.gpt_oss_sinks import neutralized_sink_value
 from src.models.param_roles import persistent_buffers
 from src.runtime import dtensor
@@ -74,7 +73,7 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_QWEN3_CONFIG,
 )
-from tests.common.pp_fakes import hand_built_stage
+from tests.common.pp_fakes import hand_built_stage, registered_pp_backbones
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.utils import safetensors_state_dict
 
@@ -130,6 +129,8 @@ PP_FAMILY_OVERRIDES = {
     "inkling_mm_model": TINY_INKLING_PP_OVERRIDES,
 }
 PP_FAMILY_SPLITS = {"laguna": [4, 4], "gpt_oss": [4, 4]}
+# The fixture families unregistered for PP: the save and its reads are family-agnostic.
+UNREGISTERED_PP_BACKBONES = ("LagunaModel", "Mistral4Model", "InklingTextModel", "Qwen3MoeModel")
 SINGLE_RANK_EP_CONFIG = {
     "ep_size": 1,
     "stage_world_size": 1,
@@ -507,7 +508,7 @@ def _composite_worker(rank: int, out_dir: str, verdict_path: str) -> None:
     reference = unsplit.state_dict()
     # Under the hub's names, as the EP-gathered save writes them (the tower's untouched, its text
     # tower's hyper-connections respelled).
-    conversions = gathered_export_conversions(unsplit)
+    conversions = export_conversions(unsplit)
     hub_keys = set(revert_conversions(unsplit, dict(reference), conversions))
     vision_keys = set(
         revert_conversions(unsplit, {k: v for k, v in reference.items() if k.startswith("model.visual.")}, conversions)
@@ -677,6 +678,7 @@ def _pp_family_model(name: str, *, ep_wrapped: bool = True):
     return model
 
 
+@registered_pp_backbones(*UNREGISTERED_PP_BACKBONES)
 def _pp_family_stage(name: str, pp_rank: int, model) -> PipelineStageModule:
     return build_pipeline_stage(model, pp_rank, PP_SIZE, moe_balancing="none", pp_split=PP_FAMILY_SPLITS.get(name))
 
@@ -734,7 +736,7 @@ def test_pp_save_writes_the_names_and_values_of_the_ep_gathered_save(tmp_path, n
     holds only part of the model, so it reverts through what it took from the whole one at the split;
     without that a renamed family's PP save keeps the live names a serving engine does not read
     (DeepSeek-V4's ``attn_hc.*``, GLM-5 Next's hyper-connections, Step-3.7's ``model.language_model.*``)."""
-    renames = bool(gathered_export_conversions(_pp_family_model(name)))
+    renames = bool(export_conversions(_pp_family_model(name)))
     assert renames == (name not in PP_RENAME_FREE), f"premise: {name}'s load renames iff it is not a control"
     ep_dir, pp_dir = str(tmp_path / "ep"), str(tmp_path / "pp")
     save_ep_gathered_checkpoint(save_context(_pp_family_model(name)), ep_dir)
@@ -756,16 +758,17 @@ def test_a_pp_save_resumes_through_both_reads(tmp_path, name):
 
     family = PP_FAMILIES[name]
     for pp_rank in range(PP_SIZE):
-        loaded = load_pp_stage_model(
-            pp_dir,
-            pp_rank,
-            PP_SIZE,
-            config=AutoConfig.from_pretrained(pp_dir),
-            pp_split=PP_FAMILY_SPLITS.get(name),
-            ep_config=EPConfig(**SINGLE_RANK_EP_CONFIG),
-            model_class=family.load_class,
-            trust_remote_code=False,
-        )
+        with registered_pp_backbones(*UNREGISTERED_PP_BACKBONES):
+            loaded = _load_stage_lazy(
+                pp_dir,
+                pp_rank,
+                PP_SIZE,
+                config=AutoConfig.from_pretrained(pp_dir),
+                pp_split=PP_FAMILY_SPLITS.get(name),
+                ep_config=EPConfig(**SINGLE_RANK_EP_CONFIG),
+                model_class=family.load_class,
+                trust_remote_code=False,
+            )
         built = _stage_tensors(_pp_family_stage(name, pp_rank, loaded))
         reference = _pp_family_stage(name, pp_rank, _pp_family_model(name))
         cast = save_dtype_caster(reference)
@@ -791,7 +794,7 @@ def test_pp_save_without_ep_wrappers_writes_the_whole_model_revert(tmp_path, nam
     model = _pp_family_model(name, ep_wrapped=False)
     cast = save_dtype_caster(model)
     state = {key: cast(key, tensor) for key, tensor in model.state_dict().items()}
-    expected = revert_conversions(model, dict(state), gathered_export_conversions(model))
+    expected = revert_conversions(model, dict(state), export_conversions(model))
     assert set(expected) != set(state), f"premise: {name}'s load renames nothing"
     written = safetensors_state_dict(pp_dir)
     assert set(written) == set(expected), sorted(set(written) ^ set(expected))[:6]

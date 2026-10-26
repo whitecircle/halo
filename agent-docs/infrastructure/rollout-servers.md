@@ -263,7 +263,7 @@ run has none; `use_grouped_gemm: true` (the torchrun default) installs the wrapp
 **Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry. Where
 the live module tree and the hub checkpoint differ, the rewrite is derived, not tabulated: Laguna's
 `_EXPORT_KEY_RENAMES` pairs, then transformers' own save-side revert of what the load converted
-outside the per-expert merges (`gathered_export_conversions`, the list the gathered save inverts).
+outside the per-expert merges (`export_conversions` in `src/checkpoint/hub_layout.py`, the list the gathered save inverts).
 
 One-to-one renames stream tensor by tensor. A tensor a reverse converter claims (a fused
 `gate_up_proj` the hub stores split, a vision tower's q/k/v the hub stores fused) is held until its

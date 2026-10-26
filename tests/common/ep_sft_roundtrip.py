@@ -17,7 +17,7 @@ from transformers import AutoTokenizer, PreTrainedModel
 from trl import SFTConfig
 
 from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
+from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.distributed.parallelism_config import ParallelismConfig
 from src.entrypoints.script import ScriptContext, configure_balancing_and_build_callbacks
 from src.model_loading.parallel.loader import load_distributed_model
@@ -122,7 +122,7 @@ class EPSftRoundTrip:
 
         if self.hub_conversion:
             # The hub layout is lazy-loadable (declared conversion keys), so every rank takes the lazy route.
-            checks["lazy_loading_admitted"] = lazy_loader_supports_checkpoint(base_dir) is True
+            checks["lazy_loading_admitted"] = is_lazy_loadable(base_dir) is True
 
         pc = ParallelismConfig(ep_size=ctx.world_size)
         model, _ = load_distributed_model(

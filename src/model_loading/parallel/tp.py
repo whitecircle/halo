@@ -6,8 +6,7 @@ from __future__ import annotations
 from accelerate.logging import get_logger
 from transformers import DistributedConfig, PreTrainedModel
 
-from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint, load_ep_model_lazy
-from src.distributed.expert_parallel.master_weights import restore_fp32_master_parameters
+from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
@@ -15,6 +14,8 @@ from src.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, fin
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.parallel.ep import load_ep_model_lazy
+from src.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
 from src.model_loading.parallel.model_source import ModelSource, resolve_lazy_checkpoint
 from src.model_loading.parallel.whole_model import load_whole_model
 from src.runtime.consensus import DeferredRankFailure
@@ -58,11 +59,7 @@ def load_tp_model(
     with joined_node_load(f"FP32-master TP restore from {source.name}", pc.max_concurrent_loading):
         precision_guard.run(
             lambda: restore_fp32_master_parameters(
-                model,
-                source.name,
-                keep_non_ep=pc.fp32_non_ep_params,
-                strict=preserve_checkpoint_precision,
-                revision=from_pretrained_kwargs.get("revision"),
+                model, source.local_dir, keep_non_ep=pc.fp32_non_ep_params, strict=preserve_checkpoint_precision
             )
         )
     precision_guard.reject()
@@ -103,7 +100,7 @@ def load_tp_moe_model(
     ep_config = pc.ep_config() if wraps_experts else None
     model = load_whole_model(
         model_class,
-        source.name,
+        source,
         load_phase="Model load",
         max_concurrent_loading=pc.max_concurrent_loading,
         ep_config=ep_config,
@@ -142,9 +139,7 @@ def load_ep_tp_model(
     # Before the lazy gate: ep_config() issues new_group on every rank, so a per-rank
     # filesystem probe ahead of it would order the groups per rank (deadlock).
     ep_config = pc.ep_config()
-    use_lazy = resolve_lazy_checkpoint(
-        source, lazy_requested=pc.ep_lazy_loading, layout_supported=lazy_loader_supports_checkpoint
-    )
+    use_lazy = resolve_lazy_checkpoint(source, lazy_requested=pc.ep_lazy_loading, layout_supported=is_lazy_loadable)
     if use_lazy:
         logger.info(f"[Rank {rank}] Using lazy safetensors loader for EP+TP")
     elif pc.ep_lazy_loading:
@@ -163,7 +158,7 @@ def load_ep_tp_model(
         else:
             model = load_whole_model(
                 model_class,
-                source.name,
+                source,
                 load_phase="Model load",
                 max_concurrent_loading=pc.max_concurrent_loading,
                 ep_config=ep_config,

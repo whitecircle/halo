@@ -4,9 +4,9 @@
 
 | | EP | CP | TP | ETP | PP | FSDP2 |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
-| Step-3.7 Flash | Yes | **No** | **No** | Yes | — ¹ | Yes |
+| Step-3.7 Flash | Yes | **No** | **No** | Yes | Yes ¹ | Yes |
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+¹ Text tower only, registered for pipeline parallelism: a text-only run of the composite is admitted and re-emits the vision tower in every checkpoint, image data is refused, and stage boundaries land on the period-4 `layer_types` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 

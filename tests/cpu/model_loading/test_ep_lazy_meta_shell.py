@@ -11,7 +11,7 @@ load-bearing and neither is visible from a passing training run:
     redirects tensor factories, so it still streams the whole checkpoint into HOST RAM — an
     unconditional host OOM on a production MoE, reached silently.
 
-    python tests/cpu/parallelism/test_ep_lazy_meta_shell.py
+    python tests/cpu/model_loading/test_ep_lazy_meta_shell.py
 """
 
 import pytest

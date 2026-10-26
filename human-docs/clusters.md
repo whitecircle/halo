@@ -99,6 +99,30 @@ On 2×8 GPUs, `ep8 + tp2` forms two EP groups and is rejected at config time;
 `ep16 + tp2` with `ep_scope=global` runs. Pure EP has no such rule: node-local
 `ep8` on 2×8 is two DP replicas and runs as is.
 
+## Pipeline parallelism across nodes
+
+PP puts one stage per node, so only the boundary activations cross nodes; two
+recipes ship, each for 2 × 8 GPUs and launched as above:
+
+```bash
+torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
+    --master_addr=$MASTER_ADDR --master_port=29500 \
+    scripts/training/sft.py examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml
+```
+
+`examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` adds EP inside each
+stage. With `DIST_SHARED_FILESYSTEM=0` each node saves only its own stage's
+parts: copy both nodes' checkpoint directories onto one host and merge them
+before loading the result.
+
+```bash
+halo run merge-pp-stages --input_dir /copies/node0/checkpoint-500 \
+    /copies/node1/checkpoint-500 --output_dir /models/merged
+```
+
+Only registered families split
+([Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md) ↗).
+
 ## HSDP
 
 Plain FSDP2 shards every parameter across the whole job, so every all-gather

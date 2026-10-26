@@ -8,7 +8,7 @@ each declaring family's real mapping is pinned bitwise against ``from_pretrained
 ``tests/cpu/parallelism/test_lazy_load_converted_families.py`` and
 ``tests/gpu/parallelism/ep/test_lazy_load_inkling.py``.
 
-    python tests/cpu/parallelism/test_hub_conversion.py
+    python tests/cpu/model_loading/test_conversion_selection.py
 """
 
 import json
@@ -30,24 +30,29 @@ from transformers.core_model_loading import (
     WeightRenaming,
 )
 
-import src.distributed.expert_parallel.hub_conversion as hub_conversion
+import src.model_loading.lazy_safetensors.conversion_selection as conversion_selection
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.expert_parallel.hub_conversion import resolve_conversion_steps, resolve_loaded_conversion_steps
-from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner, build_family_key_mapping
+from src.distributed.expert_parallel.lazy_plan import WeightPlanner, family_key_mapping, loaded_key_mapping
 from src.model_loading.lazy_safetensors.conversion import (
     Concat,
     Deinterleave,
     PermuteRope,
+    RenameStep,
     TakeChunk,
+    build_key_mapping,
     convert_disk_keys,
     translate_converter,
     translate_renaming,
 )
-from src.model_loading.lazy_safetensors.weights import (
+from src.model_loading.lazy_safetensors.conversion_selection import (
+    replay_loaded_conversions,
+    resolve_conversion_steps,
+)
+from src.model_loading.lazy_safetensors.materialization import (
     SafetensorsWeightLoader,
     WeightAction,
     WeightPlan,
-    build_key_mapping,
 )
 from src.model_loading.model_preparation import resolve_auto_model_class
 from tests.common.tiny_models import module_with_weight_keys
@@ -306,7 +311,7 @@ def test_planner_carries_ops_and_rejects_shard_axis_ops():
     model_keys = {"model.experts.gate_up_proj", "model.shared.gate_proj.weight", "model.shared.up_proj.weight"}
     weight_map = {"disk.expert": "a.safetensors", "disk.shared": "a.safetensors"}
 
-    plans = EPWeightPlanner(_EP()).build(weight_map, {}, model_keys, fanout=fanout)
+    plans = WeightPlanner(_EP()).build(weight_map, {}, model_keys, fanout=fanout)
     by_key = {p.model_key: p for p in plans}
     assert len(plans) == 3
     assert by_key["model.experts.gate_up_proj"].action == WeightAction.EXPERT_SHARD
@@ -315,7 +320,7 @@ def test_planner_carries_ops_and_rejects_shard_axis_ops():
 
     bad = {"disk.expert": (("model.experts.gate_up_proj", (Deinterleave(dim=0),)),)}
     with pytest.raises(ValueError, match="expert shard axis"):
-        EPWeightPlanner(_EP()).build(weight_map, {}, model_keys, fanout=bad)
+        WeightPlanner(_EP()).build(weight_map, {}, model_keys, fanout=bad)
 
 
 class _EP:
@@ -336,18 +341,18 @@ def test_planner_consumes_fan_in_siblings_and_checks_the_concat_axis():
     model_keys = {"l.mlp.experts.gate_up_proj"}
     fanout = {gate: (("l.mlp.experts.gate_up_proj", (Concat(1, (up,)),)),)}
 
-    (plan,) = EPWeightPlanner(_EP()).build(weight_map, {}, model_keys, fanout=fanout)
+    (plan,) = WeightPlanner(_EP()).build(weight_map, {}, model_keys, fanout=fanout)
     assert plan.action == WeightAction.EXPERT_SHARD and plan.ops == (Concat(1, (up,)),)
     assert plan.disk_keys == (gate, up)
 
     on_axis = {gate: (("l.mlp.experts.gate_up_proj", (Concat(0, (up,)),)),)}
     with pytest.raises(ValueError, match="expert shard axis"):
-        EPWeightPlanner(_EP()).build(weight_map, {}, model_keys, fanout=on_axis)
+        WeightPlanner(_EP()).build(weight_map, {}, model_keys, fanout=on_axis)
 
 
 def test_materializer_reads_every_fan_in_source_through_the_expert_slice(tmp_path):
     """The fused expert tensor of a fan-in is this rank's slice of EACH source concatenated — never
-    a whole source — and a sibling living in a shard the loader was not handed opens on demand."""
+    a whole source — and a sibling living in a shard no plan names opens on demand."""
     gate, up = torch.randn(E, M, H), torch.randn(E, M, H)
     save_file({"l.moe.gate_proj.weight": gate}, str(tmp_path / "a.safetensors"))
     save_file({"l.moe.up_proj.weight": up}, str(tmp_path / "b.safetensors"))
@@ -367,18 +372,19 @@ def test_materializer_reads_every_fan_in_source_through_the_expert_slice(tmp_pat
         ops=(Concat(1, ("l.moe.up_proj.weight",)),),
         shard_total=E,
     )
-    loader = SafetensorsWeightLoader(str(tmp_path), ["a.safetensors"], device="cpu")
-    loader._open()
-    try:
-        assert torch.equal(loader._materialize(plan), torch.cat([gate[1:3], up[1:3]], dim=1))
-        # The expert-count guard covers the sibling too: a wider sibling must not be silently sliced.
-        save_file({"l.moe.up_proj.weight": torch.randn(2 * E, M, H)}, str(tmp_path / "b.safetensors"))
-        loader._close()
-        loader._open()
-        with pytest.raises(RuntimeError, match="config declares"):
-            loader._materialize(plan)
-    finally:
-        loader._close()
+    loader = SafetensorsWeightLoader(str(tmp_path), resolve_checkpoint_weights(str(tmp_path)).weight_map)
+    model = torch.nn.Module()
+    model.add_module("l", torch.nn.Module())
+    model.l.add_module("mlp", torch.nn.Module())
+    model.l.mlp.add_module("experts", torch.nn.Module())
+    model.l.mlp.experts.gate_up_proj = torch.nn.Parameter(torch.empty(E, 2 * M, H, device="meta"))
+    loader.load_into_model(model, [plan])
+    assert torch.equal(model.l.mlp.experts.gate_up_proj, torch.cat([gate[1:3], up[1:3]], dim=1))
+    # The expert-count guard covers the sibling too: a wider sibling must not be silently sliced.
+    save_file({"l.moe.up_proj.weight": torch.randn(2 * E, M, H)}, str(tmp_path / "b.safetensors"))
+    model.l.mlp.experts.gate_up_proj = torch.nn.Parameter(torch.empty(E, 2 * M, H, device="meta"))
+    with pytest.raises(RuntimeError, match="config declares"):
+        loader.load_into_model(model, [plan])
 
 
 def _shell(model_type: str):
@@ -403,9 +409,11 @@ def _shell(model_type: str):
 
 def test_resolution_is_declaration_gated():
     """Families that declare no conversion keys resolve to None — the pass cannot perturb them."""
-    assert resolve_conversion_steps("qwen3_moe", _shell("qwen3_moe")) is None
-    assert resolve_conversion_steps("", torch.nn.Module()) is None
-    assert resolve_conversion_steps("glm4_moe_lite", _shell("glm4_moe_lite")) is None
+    assert resolve_conversion_steps(_shell("qwen3_moe"), ep_layer_class_by_model_type().get("qwen3_moe")) is None
+    assert resolve_conversion_steps(torch.nn.Module(), None) is None
+    assert (
+        resolve_conversion_steps(_shell("glm4_moe_lite"), ep_layer_class_by_model_type().get("glm4_moe_lite")) is None
+    )
 
 
 def test_a_declared_key_that_resolves_to_nothing_raises(monkeypatch):
@@ -413,19 +421,21 @@ def test_a_declared_key_that_resolves_to_nothing_raises(monkeypatch):
     mapping is absent must not collapse into it — the loader would read the vendor namespace
     unconverted, the planner would skip every unmatched key, and the model would train from its
     meta-device init values with no error anywhere."""
-    monkeypatch.setattr(hub_conversion, "get_checkpoint_conversion_mapping", lambda key: None)
+    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
     with pytest.raises(ValueError, match="declares hub-conversion key"):
-        resolve_conversion_steps("inkling_mm_model", _shell("inkling_mm_model"))
+        resolve_conversion_steps(_shell("inkling_mm_model"), ep_layer_class_by_model_type().get("inkling_mm_model"))
 
 
 def test_a_resolvable_key_still_returns_its_steps(monkeypatch):
     """Anti-vacuity: the raise is about an EMPTY resolution, not about declaring a key at all."""
-    monkeypatch.setattr(hub_conversion, "get_checkpoint_conversion_mapping", lambda key: [_ENTRIES[0]])
-    steps = resolve_conversion_steps("inkling_mm_model", _shell("inkling_mm_model"))
+    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: [_ENTRIES[0]])
+    steps = resolve_conversion_steps(
+        _shell("inkling_mm_model"), ep_layer_class_by_model_type().get("inkling_mm_model")
+    )
     # The entry must come back TRANSLATED, not merely counted: a resolution of the right arity that
     # dropped the rename would load the vendor namespace unconverted just the same.
     (step,) = steps
-    assert isinstance(step, hub_conversion.Rename)
+    assert isinstance(step, RenameStep)
     assert step.pattern.pattern == _ENTRIES[0].source_patterns[0]
     assert step.replacement == _ENTRIES[0].target_patterns[0]
 
@@ -433,8 +443,8 @@ def test_a_resolvable_key_still_returns_its_steps(monkeypatch):
 def test_a_non_declaring_family_is_untouched_by_an_absent_mapping(monkeypatch):
     """Anti-vacuity: the raise keys on the family's declaration, not on the mapping lookup — a family
     that declares nothing never looks one up."""
-    monkeypatch.setattr(hub_conversion, "get_checkpoint_conversion_mapping", lambda key: None)
-    assert resolve_conversion_steps("qwen3_moe", _shell("qwen3_moe")) is None
+    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
+    assert resolve_conversion_steps(_shell("qwen3_moe"), ep_layer_class_by_model_type().get("qwen3_moe")) is None
 
 
 def test_a_sub_model_key_is_scoped_under_its_module_path(monkeypatch):
@@ -456,11 +466,11 @@ def test_a_sub_model_key_is_scoped_under_its_module_path(monkeypatch):
             ),
         ],
     }
-    monkeypatch.setattr(hub_conversion, "get_checkpoint_conversion_mapping", entries.get)
+    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", entries.get)
     monkeypatch.setattr(ep_layer_class_by_model_type()["step3p7"], "_HUB_CONVERSION_KEYS", tuple(entries))
     shell = _shell("step3p7")
 
-    root, attn, in_proj = resolve_conversion_steps("step3p7", shell)
+    root, attn, in_proj = resolve_conversion_steps(shell, ep_layer_class_by_model_type().get("step3p7"))
     assert (root.scope, attn.scope, in_proj.scope) == ("", "vision_model", "vision_model")
     heads = shell.config.vision_config.num_attention_heads
     assert dict(in_proj.targets)["attn.q_proj.weight"] == (TakeChunk(0, 0, 3), PermuteRope(heads))
@@ -496,11 +506,11 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
         f"extend the oracle with the family's gathered-save layout."
     )
     model = _shell(model_type)
-    steps = resolve_conversion_steps(model_type, model)
+    steps = resolve_conversion_steps(model, ep_layer_class_by_model_type().get(model_type))
     assert steps, f"{model_type} declares {layer_cls._HUB_CONVERSION_KEYS} but resolved no steps"
 
     keys = list(_canonical_checkpoint_keys(model_type))
-    disk_to_model, fanout = build_family_key_mapping(model, keys)
+    disk_to_model, fanout = family_key_mapping(model, keys)
 
     assert not fanout, (
         f"{model_type}: {len(fanout)} canonical checkpoint key(s) still convert on a resume — the "
@@ -553,7 +563,7 @@ def test_eager_replay_does_not_invent_conversions_for_a_canonical_load(recorded)
     model = torch.nn.Module()
     if recorded != "absent":
         model._weight_conversions = recorded
-    assert resolve_loaded_conversion_steps(model) is None
+    assert replay_loaded_conversions(model) is None
 
 
 def test_eager_replay_accepts_text_only_prefix_changes():
@@ -562,9 +572,9 @@ def test_eager_replay_accepts_text_only_prefix_changes():
     model.config = SimpleNamespace(model_type="qwen3_moe")
     model._weight_conversions = [PrefixChange(prefix_to_remove="language_model", model_prefix="model")]
     disk_key = "model.language_model.linear.weight"
-    steps = resolve_loaded_conversion_steps(model)
+    steps = replay_loaded_conversions(model)
     assert steps and convert_disk_keys([disk_key], steps) == {disk_key: (("model.linear.weight", ()),)}
-    mapping, fanout = build_family_key_mapping(model, [disk_key], loaded_conversions=True)
+    mapping, fanout = loaded_key_mapping(model, [disk_key])
     assert mapping == {disk_key: "model.linear.weight"}
     assert fanout == {disk_key: (("model.linear.weight", ()),)}
 
@@ -581,7 +591,7 @@ def test_eager_replay_refuses_renames_it_cannot_reproduce_without_silent_loss(en
     model = torch.nn.Module()
     model._weight_conversions = [entry]
     with pytest.raises(ValueError, match="rename|renaming|Renaming"):
-        resolve_loaded_conversion_steps(model)
+        replay_loaded_conversions(model)
 
 
 def test_unsupported_declared_conversion_names_its_original_mapping_key(monkeypatch):
@@ -590,9 +600,9 @@ def test_unsupported_declared_conversion_names_its_original_mapping_key(monkeypa
     layer = ep_layer_class_by_model_type()["step3p7"]
     monkeypatch.setattr(layer, "_HUB_CONVERSION_KEYS", ("vendor_bad_entry",))
     bad = WeightConverter(source_patterns=["a", "b"], target_patterns="c", operations=[Chunk(dim=0)])
-    monkeypatch.setattr(hub_conversion, "get_checkpoint_conversion_mapping", lambda _key: [bad])
+    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda _key: [bad])
     with pytest.raises(ValueError, match="multi-source.*vendor_bad_entry"):
-        resolve_conversion_steps("step3p7", model)
+        resolve_conversion_steps(model, ep_layer_class_by_model_type().get("step3p7"))
 
 
 if __name__ == "__main__":

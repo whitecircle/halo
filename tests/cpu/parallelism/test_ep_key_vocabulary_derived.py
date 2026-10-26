@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """The EP checkpoint-key vocabulary must be DERIVED from the layer classes, not restated.
 
-Hand-written expert-key regexes in ``lazy_loader.py`` drift from the expert-container attributes the
+Hand-written expert-key regexes in ``lazy_plan.py`` drift from the expert-container attributes the
 layer classes declare: most families declare the base's single ``experts`` while GLM-4/Laguna also
 serve ``routed_experts``, and an alternation naming only one of them plans every fused expert key
 ``REPLICATE`` for the other — each rank reading the whole ``[E, 2M, H]`` tensor onto its own GPU,
 OOM-ing against CUDA rather than the loader — while the per-expert variant falls through
-``CheckpointFormat.detect`` to ``FUSED``, so the fuser never runs and the params die on meta. Both
+``ExpertKeyLayout.detect`` to ``FUSED``, so the fuser never runs and the params die on meta. Both
 are silent.
 
 Run: pytest tests/cpu/parallelism/test_ep_key_vocabulary_derived.py
@@ -26,11 +26,11 @@ from src.distributed.expert_parallel.expert_weights import (
 from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
 from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.lazy_loader import (
-    _FUSED_EXPERT_PATTERN,
-    _INDIVIDUAL_EXPERT_PATTERN,
-    CheckpointFormat,
-    lazy_loader_supports_checkpoint,
+from src.distributed.expert_parallel.lazy_plan import (
+    FUSED_EXPERT_KEY_PATTERN,
+    PER_EXPERT_KEY_PATTERN,
+    ExpertKeyLayout,
+    is_lazy_loadable,
 )
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
@@ -41,11 +41,11 @@ def test_every_declared_container_is_matched_by_both_patterns():
     for container in experts_container_attrs():
         fused = f"model.layers.0.mlp.{container}.gate_up_proj"
         individual = f"model.layers.0.mlp.{container}.3.gate_proj.weight"
-        assert _FUSED_EXPERT_PATTERN.search(fused), container
-        assert CheckpointFormat.detect({fused: "model.safetensors"}) is CheckpointFormat.FUSED
-        m = _INDIVIDUAL_EXPERT_PATTERN.search(individual)
+        assert FUSED_EXPERT_KEY_PATTERN.search(fused), container
+        assert ExpertKeyLayout.detect({fused: "model.safetensors"}) is ExpertKeyLayout.FUSED
+        m = PER_EXPERT_KEY_PATTERN.search(individual)
         assert m is not None and m.group(1) == container and int(m.group(2)) == 3
-        assert CheckpointFormat.detect({individual: "model.safetensors"}) is CheckpointFormat.INDIVIDUAL
+        assert ExpertKeyLayout.detect({individual: "model.safetensors"}) is ExpertKeyLayout.PER_EXPERT
 
 
 def test_container_vocabulary_is_the_union_of_the_class_declarations():
@@ -66,7 +66,7 @@ def test_fused_key_vocabulary_covers_the_expert_biases():
     assert set(hf_fused_expert_keys()) == {key for cls in ep_layer_classes() for key in cls._HF_FUSED_EXPERT_KEYS}
     assert {"gate_up_proj_bias", "down_proj_bias"} <= set(hf_fused_expert_keys())
     for key in ("gate_up_proj_bias", "down_proj_bias"):
-        assert _FUSED_EXPERT_PATTERN.search(f"model.layers.0.mlp.experts.{key}")
+        assert FUSED_EXPERT_KEY_PATTERN.search(f"model.layers.0.mlp.experts.{key}")
 
 
 def test_gptoss_expert_roots_extend_the_base_rather_than_restate_them():
@@ -112,10 +112,10 @@ def test_lazy_support_is_read_from_the_class_declaration(tmp_path):
     (tmp_path / "config.json").write_text('{"model_type": "zaya"}')
 
     with patch.object(EPZayaMoELayer, "_supports_lazy_loading", False):
-        assert lazy_loader_supports_checkpoint(str(tmp_path)) is False
+        assert is_lazy_loadable(str(tmp_path)) is False
 
     (tmp_path / "config.json").write_text('{"model_type": "gpt_oss"}')
-    assert lazy_loader_supports_checkpoint(str(tmp_path)) is True
+    assert is_lazy_loadable(str(tmp_path)) is True
 
 
 def test_zaya_supports_lazy_loading_but_the_legacy_nested_layout_is_still_refused(tmp_path):
@@ -128,17 +128,17 @@ def test_zaya_supports_lazy_loading_but_the_legacy_nested_layout_is_still_refuse
     (tmp_path / "config.json").write_text('{"model_type": "zaya"}')
 
     _write_index(tmp_path, ["model.layers.0.mlp.experts.gate_up_proj", "model.layers.0.mlp.experts.down_proj"])
-    assert lazy_loader_supports_checkpoint(str(tmp_path)) is True
+    assert is_lazy_loadable(str(tmp_path)) is True
 
     _write_index(tmp_path, ["model.layers.0.mlp.experts.local_experts.0.linear_fc1.weight"])
-    assert lazy_loader_supports_checkpoint(str(tmp_path)) is False
+    assert is_lazy_loadable(str(tmp_path)) is False
 
 
 def test_unclaimed_model_type_still_falls_back_to_the_structural_probe(tmp_path):
     """No class claims the model_type, so the nested-per-expert-module layout must still be caught."""
     (tmp_path / "config.json").write_text('{"model_type": "some_unregistered_moe"}')
     _write_index(tmp_path, ["model.layers.0.blk.experts.local_experts.0.linear_fc1.weight"])
-    assert lazy_loader_supports_checkpoint(str(tmp_path)) is False
+    assert is_lazy_loadable(str(tmp_path)) is False
 
 
 if __name__ == "__main__":

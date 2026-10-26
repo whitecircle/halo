@@ -23,9 +23,9 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 
-from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner
 from src.distributed.pipeline_parallel.partition import resolve_layer_partition
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage, slice_backbone_to_stage
+from src.model_loading.parallel.pp import StageKeyFilter
 from tests.common.models import TINY_QWEN3_CONFIG
 
 # 8 tiny layers: pp2 is the uniform split (as pp4 would be), pp3 the uneven one.
@@ -49,27 +49,27 @@ def _stages(pp_size: int, pp_split=None, cls=Qwen3ForCausalLM):
     return [build_pipeline_stage(_model(cls), rank, pp_size, pp_split=pp_split) for rank in range(pp_size)]
 
 
-def _planners(pp_size: int, pp_split=None) -> list[PPWeightPlanner]:
+def _planners(pp_size: int, pp_split=None) -> list[StageKeyFilter]:
     partition = resolve_layer_partition(_model(), pp_size, pp_split)
-    return [PPWeightPlanner(lo, hi, LAYER_ROOT) for lo, hi in partition]
+    return [StageKeyFilter(lo, hi, LAYER_ROOT) for lo, hi in partition]
 
 
 # The rebase helper itself
 
 
 def test_stage_key_shifts_only_the_layer_index():
-    planner = PPWeightPlanner(4, 8, LAYER_ROOT)
+    planner = StageKeyFilter(4, 8, LAYER_ROOT)
     assert planner.stage_key("model.layers.5.mlp.down_proj.weight") == "model.layers.1.mlp.down_proj.weight"
     assert planner.stage_key("model.layers.4.input_layernorm.weight") == "model.layers.0.input_layernorm.weight"
     # Non-layer keys are replicated verbatim on every stage.
     assert planner.stage_key("model.embed_tokens.weight") == "model.embed_tokens.weight"
     assert planner.stage_key("lm_head.weight") == "lm_head.weight"
     # A double-digit index must not be truncated by the single-character partition.
-    assert PPWeightPlanner(10, 20, LAYER_ROOT).stage_key("model.layers.13.q.weight") == "model.layers.3.q.weight"
+    assert StageKeyFilter(10, 20, LAYER_ROOT).stage_key("model.layers.13.q.weight") == "model.layers.3.q.weight"
 
 
 def test_owns_is_half_open_on_the_layer_range():
-    planner = PPWeightPlanner(4, 8, LAYER_ROOT)
+    planner = StageKeyFilter(4, 8, LAYER_ROOT)
     assert not planner.owns("model.layers.3.q.weight")
     assert planner.owns("model.layers.4.q.weight")
     assert planner.owns("model.layers.7.q.weight")
@@ -164,7 +164,7 @@ def test_rebased_keys_land_on_the_sliced_model(pp_size):
 
 def test_manual_split_partitions_the_checkpoint_exactly():
     layer_keys = {k for k in _checkpoint_keys() if k.startswith(LAYER_ROOT)}
-    planners = [PPWeightPlanner(lo, hi, LAYER_ROOT) for lo, hi in resolve_layer_partition(_model(), 2, [5, 3])]
+    planners = [StageKeyFilter(lo, hi, LAYER_ROOT) for lo, hi in resolve_layer_partition(_model(), 2, [5, 3])]
     claimed = [{k for k in layer_keys if planner.owns(k)} for planner in planners]
     assert set().union(*claimed) == layer_keys
     assert sum(len(c) for c in claimed) == len(layer_keys)

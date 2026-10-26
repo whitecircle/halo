@@ -1,8 +1,14 @@
-"""Hand-built pipeline stages and a stand-in torch schedule for the CPU pipeline tests."""
+"""Hand-built pipeline stages, a stand-in torch schedule and the family-registration opt-in for the
+pipeline tests."""
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import replace
 
 import torch
 import torch.nn as nn
 
+from src.distributed.pipeline_parallel.families import GENERIC_PP, PP_SPEC_MAP
 from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, StageLayout
 from src.distributed.pipeline_parallel.stage_losses import TokenLoss
@@ -15,6 +21,21 @@ CAUSAL_LM_LAYOUT = StageLayout(
     post_layer_paths=("model.norm",),
     input_paths=("model.embed_tokens",),
 )
+
+
+@contextmanager
+def registered_pp_backbones(*names: str) -> Iterator[None]:
+    """Register the backbone classes ``names`` for pipeline parallelism inside the block (or the decorated
+    test): a claimed class keeps its spec with the refusal lifted, an unclaimed one takes the default probes."""
+    saved = dict(PP_SPEC_MAP)
+    PP_SPEC_MAP.update(
+        {name: replace(PP_SPEC_MAP.get(name, GENERIC_PP), refusal=None, validated=True) for name in names}
+    )
+    try:
+        yield
+    finally:
+        PP_SPEC_MAP.clear()
+        PP_SPEC_MAP.update(saved)
 
 
 class _StageSource(nn.Module):

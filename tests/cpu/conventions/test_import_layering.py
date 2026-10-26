@@ -116,36 +116,16 @@ _PACKAGE_INTERNAL = {
 _PENDING_MOVES = {
     "distributed.nccl": "weight_sync.transport",
     "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
-    "distributed.pipeline_parallel.lazy_loader": "model_loading.parallel.pp",
     "distributed.expert_parallel.expert_gather": "distributed.expert_parallel.moe_layer.gather",
     "distributed.expert_parallel.expert_weights": "distributed.expert_parallel.families.roster",
-    "distributed.expert_parallel.fp32_masters": "model_loading.parallel.fp32_masters",
-    "distributed.expert_parallel.hub_conversion": "model_loading.lazy_safetensors.conversion_selection",
     "distributed.expert_parallel.layers": "distributed.expert_parallel.families",
-    "distributed.expert_parallel.lazy_loader": "distributed.expert_parallel.lazy_plan",
-    "distributed.expert_parallel.loading": "model_loading.parallel.ep",
-    "distributed.expert_parallel.master_weights": "model_loading.parallel.fp32_masters",
     "distributed.expert_parallel.patching": "distributed.expert_parallel.parallelize",
 }
 # The breaks today's tree still makes, as (rule, importer, imported) on final paths. The move or split that fixes
 # one drops its entry; any other break fails.
 _KNOWN_LAYER_BREAKS = frozenset(
     {
-        ("layer order", "checkpoint.parallel.pp", "model_loading.parallel.pp"),
-        ("layer order", "distributed.expert_parallel.lazy_plan", "model_loading.parallel.fp32_masters"),
-        (
-            "layer order",
-            "model_loading.lazy_safetensors.conversion_selection",
-            "distributed.expert_parallel.families.roster",
-        ),
-        ("layer order", "model_loading.lazy_safetensors.conversion_selection", "checkpoint.hub_layout"),
         ("layer order", "weight_sync.clients.sglang", "distributed.expert_parallel.families.step3p7"),
-        ("module cycle", "distributed.expert_parallel.lazy_plan, model_loading.parallel.fp32_masters", ""),
-        (
-            "tool-safe",
-            "model_loading.lazy_safetensors.conversion_selection",
-            "distributed.expert_parallel.families.roster",
-        ),
     }
 )
 
@@ -494,7 +474,7 @@ def test_no_distributed_package_imports_the_loader_dispatch(path):
     assert not offending, (
         f"{path.relative_to(REPO_ROOT)} imports {offending}. src/model_loading/parallel/ dispatches to "
         f"every parallelism package, so an import back closes a package cycle — move what both sides "
-        f"need into the lower package (the FP32-master selector and restore live in expert_parallel/)."
+        f"need into the lower package (the expert-key plan and fuser live in expert_parallel/)."
     )
 
 

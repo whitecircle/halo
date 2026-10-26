@@ -1,39 +1,89 @@
-"""Stream configured FP32 masters back from the checkpoint before parallel wrapping.
+"""Configured FP32 parameter masters: which HF parameters train at fp32, and their checkpoint values kept
+or restored at fp32 before any parallel wrap.
 
-HF eager construction may already have rounded those values to the run dtype. Replaying its
-conversion/key plan restores only the parameter master set, not a whole FP32 model or its buffers.
-The EP planner/fuser owns expert layouts; selection and restore are shared by dense, CP and EP
-construction. Native dense TP is the exception to plain pre-wrap storage: its existing 1-D TP
-DTensors are rebuilt with their placements and all tied aliases before the trainer adds DP/FSDP2.
+Selected off the EP layer registry, the accessors the wrappers adopt through, so every loader (eager, lazy
+EP, PP stage) keeps one checkpoint-backed set. A native dense TP master is rebuilt as its 1-D TP DTensor.
 """
 
 from __future__ import annotations
 
-import os
 from collections import defaultdict
+from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from huggingface_hub import snapshot_download
 from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from src.checkpoint.reading import StreamingCheckpointReader, resolve_checkpoint_weights
 from src.distributed.expert_parallel.config import EPConfig, get_num_experts
-from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys, verify_fp32_master_coverage
-from src.distributed.expert_parallel.lazy_loader import (
-    CheckpointFormat,
-    EPWeightPlanner,
-    ExpertFuser,
-    build_family_key_mapping,
-)
+from src.distributed.expert_parallel.expert_fuser import ExpertFuser
+from src.distributed.expert_parallel.lazy_plan import ExpertKeyLayout, WeightPlanner, loaded_key_mapping
+from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks
 from src.distributed.mesh import MeshDim
-from src.model_loading.dtype import reject_fp8_tensor
-from src.model_loading.lazy_safetensors.weights import (
+from src.log import KEY_PREVIEW_COUNT
+from src.model_loading.dtype import is_packed_4bit_parameter, reject_fp8_tensor
+from src.model_loading.lazy_safetensors.materialization import (
     assign_tensor_to_model,
     materialize_weight_plan,
     verify_loaded_shape,
 )
+
+
+def fp32_master_param_keys(
+    model: nn.Module, ep_config: EPConfig | None = None, *, keep_non_ep: bool
+) -> frozenset[str]:
+    """HF parameter keys whose configured training storage is fp32: every non-EP parameter under
+    ``keep_non_ep``, and ``ep_config``'s routers and experts through the family's own accessors.
+
+    Shared experts stay at the run dtype, and FSDP-managed ep1 experts ignore ``fp32_experts`` as at wrapper
+    init. Selected by object identity, so tied aliases count and a persistent float buffer does not.
+    """
+    blocks = ep_claimed_blocks(model) if ep_config is not None else []
+    ep_params = {id(param) for _path, block in blocks for param in block.parameters()}
+    masters = {id(param) for param in model.parameters() if keep_non_ep and id(param) not in ep_params}
+    for _path, block in blocks:
+        layer_cls = MOE_LAYER_MAP[type(block).__name__]
+        if ep_config.fp32_router:
+            router = layer_cls._find_gate_or_router(block)
+            if isinstance(router, nn.Parameter):
+                masters.add(id(router))
+            elif router is not None:
+                masters.update(id(param) for param in router.parameters())
+        if ep_config.fp32_experts and not ep_config.experts_fsdp_managed:
+            masters.update(id(param) for param in layer_cls._find_experts_container(block).parameters())
+    return frozenset(
+        name
+        for name, param in model.state_dict(keep_vars=True).items()
+        if isinstance(param, nn.Parameter)
+        and param.is_floating_point()
+        and not is_packed_4bit_parameter(param)
+        and id(param) in masters
+    )
+
+
+def capture_fp32_masters(
+    model: nn.Module, ep_config: EPConfig | None, *, keep_non_ep: bool, strict: bool
+) -> tuple[frozenset[str], dict[str, torch.Tensor] | None]:
+    """A lazy load's masters, and under ``strict`` (a resume) the identity-keyed state their coverage check
+    groups tied aliases by, read on the shell before a fusion replaces parameters."""
+    masters = fp32_master_param_keys(model, ep_config, keep_non_ep=keep_non_ep)
+    return masters, model.state_dict(keep_vars=True) if strict else None
+
+
+def verify_fp32_master_coverage(
+    state: dict[str, torch.Tensor], masters: frozenset[str], loaded: Iterable[str], *, source: str
+) -> None:
+    """Require every selected master's identity, aliases included, among ``loaded``: a resume cannot keep a
+    rounded or random master through a missing-key exemption."""
+    loaded_ids = {id(state[key]) for key in loaded}
+    missing = sorted(key for key in masters if id(state[key]) not in loaded_ids)
+    if missing:
+        raise RuntimeError(
+            f"FP32-master checkpoint load from {source}: {len(missing)} configured master "
+            f"tensor(s) were not restored: {missing[:KEY_PREVIEW_COUNT]}. A full-finetune resume "
+            "must restore every master; missing-key exemptions cannot retain rounded or random weights."
+        )
 
 
 def _replace_tp_master(model: nn.Module, aliases: list[str], target: DTensor, local: torch.Tensor) -> None:
@@ -62,7 +112,7 @@ def _replace_tp_master(model: nn.Module, aliases: list[str], target: DTensor, lo
 
 
 def _install_tp_master(model: nn.Module, aliases: list[str], target: DTensor, tensor: torch.Tensor) -> None:
-    # Every rank reads the same full tensor. Split on CPU before uploading only the local shard.
+    # Every rank reads the same full tensor: split on CPU, then upload only the local shard.
     placement = target.placements[0]
     if isinstance(placement, (Shard, _StridedShard)):
         local = placement._shard_tensor(tensor, target.device_mesh, 0, src_data_rank=None)
@@ -96,59 +146,52 @@ def _promote_exact_bf16_master(
 
 def restore_fp32_master_parameters(
     model: nn.Module,
-    model_path: str,
+    local_dir: str,
     ep_config: EPConfig | None = None,
     *,
     keep_non_ep: bool,
     strict: bool = False,
-    revision: str | None = None,
 ) -> None:
-    """Reread configured masters for any checkpoint start; resume provenance makes coverage strict.
+    """Reread the configured masters at fp32 out of the checkpoint in ``local_dir`` (``ModelSource.local_dir``),
+    after an eager load and before any EP/CP/TP/FSDP2 wrap; ``strict`` (a resume) requires every one restored.
 
-    Reads remain rank-local. Callers defer failures until after their node-serialized loading region
-    and before EP/CP/TP/FSDP2 wrapping. Local paths and already-downloaded Hub revisions share the
-    same streaming reader. A fresh task head may be initialized under the normal load gate; a full
-    finetune resume cannot use a missing-key exemption for a configured master.
+    Rank-local: callers defer a failure until after their node-serialized loading region.
     """
     masters = fp32_master_param_keys(model, ep_config, keep_non_ep=keep_non_ep)
     if not masters:
         return
-    source = model_path
-    if not os.path.isdir(model_path):
-        model_path = snapshot_download(model_path, revision=revision, local_files_only=True)
     state = model.state_dict(keep_vars=True)
     aliases = defaultdict(list)
     for key, param in state.items():
         if isinstance(param, nn.Parameter):
             aliases[id(param)].append(key)
-    layout = resolve_checkpoint_weights(model_path)
+    layout = resolve_checkpoint_weights(local_dir)
     disk_keys = layout.key_set()
     weight_map = {key: layout.legacy_bin for key in disk_keys} if layout.legacy_bin is not None else layout.weight_map
-    disk_to_model, fanout = build_family_key_mapping(model, list(weight_map), loaded_conversions=True)
-    plans = EPWeightPlanner(None).build(weight_map, disk_to_model, set(state), fanout=fanout)
+    disk_to_model, fanout = loaded_key_mapping(model, list(weight_map))
+    plans = WeightPlanner(None).build(weight_map, disk_to_model, set(state), fanout=fanout)
     plans = [plan for plan in plans if plan.model_key in masters]
 
     tasks = []
     fuser = None
-    if CheckpointFormat.detect(weight_map) == CheckpointFormat.INDIVIDUAL:
+    if ExpertKeyLayout.detect(weight_map) == ExpertKeyLayout.PER_EXPERT:
         fuser = ExpertFuser(0, get_num_experts(model.config))
-        tasks = [task for task in fuser.detect_tasks(weight_map, disk_to_model, set(state)) if task[0] in masters]
-    fusion_keys = {task[0] for task in tasks}
+        tasks = [
+            task for task in fuser.detect_tasks(weight_map, disk_to_model, set(state)) if task.model_key in masters
+        ]
+    fusion_keys = {task.model_key for task in tasks}
     plans = [plan for plan in plans if plan.model_key not in fusion_keys]
     requested = {key for plan in plans for key in plan.disk_keys}
-    requested.update(
-        key for _target, _kind, experts in tasks for slots in experts.values() for key, _sf in slots.values()
-    )
+    requested.update(key for task in tasks for key in task.disk_keys)
     restored = set()
     restored_ids = set()
-    with StreamingCheckpointReader(model_path, requested) as reader:
+    with StreamingCheckpointReader(local_dir, requested) as reader:
         if tasks:
             replay_tasks = []
             for task in tasks:
-                key, kind, experts = task
-                fuser.validate_task(key, kind, experts)
-                disk_keys = [disk_key for slots in experts.values() for disk_key, _shard in slots.values()]
-                if _promote_exact_bf16_master(model, aliases[id(state[key])], state[key], disk_keys, reader):
+                fuser.validate_task(task)
+                key = task.model_key
+                if _promote_exact_bf16_master(model, aliases[id(state[key])], state[key], task.disk_keys, reader):
                     restored.add(key)
                 else:
                     replay_tasks.append(task)
@@ -156,9 +199,9 @@ def restore_fp32_master_parameters(
                 fuser.execute(
                     replay_tasks,
                     model,
-                    model_path,
+                    local_dir,
                     torch.float32,
-                    state[tasks[0][0]].device,
+                    state[tasks[0].model_key].device,
                     reader=reader,
                     preserve_parameters=True,
                 )
@@ -183,4 +226,4 @@ def restore_fp32_master_parameters(
                 restored_ids.add(id(target))
             restored.add(plan.model_key)
     if strict:
-        verify_fp32_master_coverage(state, masters, restored, source=source)
+        verify_fp32_master_coverage(state, masters, restored, source=local_dir)

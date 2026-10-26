@@ -17,7 +17,7 @@ from accelerate import init_empty_weights
 from transformers import GenerationConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-from src.model_loading.lazy_safetensors.weights import resolve_run_dtype
+from src.model_loading.dtype import resolve_load_dtype
 from src.models.param_roles import fp32_pin_matches
 
 logger = logging.getLogger(__name__)
@@ -28,13 +28,11 @@ _ATTN_IMPLEMENTATION_CHECK = "_check_and_adjust_attn_implementation"
 
 
 def _resolve_remote_code_class(model_class, config, trust_remote_code: bool):
-    """Resolve a concrete remote-code model class from the hub-id-bearing config.
+    """The concrete remote-code model class, resolved from the config's hub id at the commit it was read from.
 
-    Auto dispatch against the local snapshot dir hits a transformers HF-cache-symlink bug
-    (``FileNotFoundError`` on relative imports); resolving from the hub id avoids it, and a concrete
-    class skips Auto resolution entirely. The modeling file is fetched at the commit the config was
-    read from (``_commit_hash``): unpinned, it would come from the repo's ``main`` while the config
-    and weights come from the run's revision.
+    Auto dispatch against the local snapshot dir hits a transformers HF-cache-symlink bug (relative imports
+    fail); unpinned, the modeling file would come from the repo's ``main`` while the weights come from the
+    run's revision.
     """
     auto_map = getattr(config, "auto_map", None)
     class_name = getattr(model_class, "__name__", "")
@@ -51,13 +49,10 @@ def _resolve_remote_code_class(model_class, config, trust_remote_code: bool):
 
 
 def _restore_checkpoint_generation_config(model: nn.Module, model_name_or_path: str, revision=None) -> None:
-    """Re-read ``generation_config.json`` onto a config-only shell.
+    """Re-read ``generation_config.json`` onto a config-only shell, which ``from_config`` derives from the model
+    config alone and the next save would write without the checkpoint's eos set and sampling defaults.
 
-    ``from_config`` derives the generation config from the model config alone (every generation
-    parameter is popped at ``PretrainedConfig.__init__``), so the checkpoint's own file (custom eos
-    sets, sampling defaults) would be dropped from the next save. An absent file keeps the derived
-    defaults, as a full ``from_pretrained`` would; a file that exists but cannot be read raises,
-    since ignoring it drops the EOS set and the export never stops generating.
+    An absent file keeps the derived defaults, as ``from_pretrained`` does; an unreadable one raises.
     """
     try:
         model.generation_config = GenerationConfig.from_pretrained(model_name_or_path, revision=revision)
@@ -67,14 +62,9 @@ def _restore_checkpoint_generation_config(model: nn.Module, model_name_or_path: 
 
 
 def _apply_fp32_dtype_plan(model: nn.Module, dtype: torch.dtype) -> None:
-    """Give a config-built shell the fp32 pins ``from_pretrained`` loads at ``dtype``.
-
-    ``from_pretrained`` keeps the ``_keep_in_fp32_modules[_strict]`` parameters in fp32 through its
-    dtype plan, which ``from_config`` never applies. The lazy loaders read which parameters load fp32
-    off the shell (a run keeping fp32 masters keeps those as stored), so a config-built shell without
-    the pins would round them through ``dtype``. The plan only ever keeps entries in fp32; matched with
-    transformers' own rule, on meta parameters, so nothing is allocated. A module that is not a
-    transformers model declares no pins.
+    """Give a config-built shell the fp32 pins (``_keep_in_fp32_modules[_strict]``) ``from_pretrained``'s dtype
+    plan applies and ``from_config`` does not: the lazy loaders read which parameters load fp32 off the shell.
+    Matched with transformers' own rule on meta parameters, so nothing is allocated.
     """
     if not isinstance(model, PreTrainedModel):
         return
@@ -84,19 +74,12 @@ def _apply_fp32_dtype_plan(model: nn.Module, dtype: torch.dtype) -> None:
 
 
 def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_code: bool, **model_kwargs) -> nn.Module:
-    """Build the model shell from the config alone: parameters on meta, buffers real.
+    """The model shell built from the config alone: parameters on meta, buffers real.
 
-    ``init_empty_weights(include_buffers=False)`` puts only parameters on meta, so every buffer
-    computes normally in ``__init__``. They must be real: checkpoints do not carry the non-persistent
-    ones and not every family's can be recomputed afterwards. A config-less rotary (Qwen VL vision)
-    derives ``inv_freq`` from ctor args it never stores, and the trainer's meta-buffer gate then
-    rejects the model.
-
-    ``from_pretrained`` is not used inside the context: it would stream every checkpoint tensor into
-    host RAM. Only ``dtype`` / ``attn_implementation`` are forwarded, since ``from_config`` hands
-    anything else straight to ``__init__``, and the rest is already resolved into ``config``. The
-    fp32 pins ``from_pretrained`` would apply are applied after the build
-    (:func:`_apply_fp32_dtype_plan`), so both shells carry the same parameter dtypes.
+    Buffers must be real: checkpoints do not carry the non-persistent ones, and not every family's can be
+    recomputed afterwards (a config-less rotary derives ``inv_freq`` from ctor args it never stores). Only
+    ``dtype`` and ``attn_implementation`` are forwarded, since ``from_config`` hands anything else to
+    ``__init__``; the fp32 pins follow the build, so both shells carry the same parameter dtypes.
     """
     kwargs: dict = {"dtype": dtype}
     if "attn_implementation" in model_kwargs:
@@ -139,12 +122,9 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
 def _materialize_nonpersistent_buffers_from_config_twin(
     model: nn.Module, model_class, config, dtype, trust_remote_code: bool, **model_kwargs
 ) -> None:
-    """Repair non-persistent buffers ``from_pretrained(device_map="meta")`` strands on meta.
-
-    The meta dispatch moves buffers to meta too and their values are then lost, while a config-only
-    twin's are real by construction, so they are grafted across. Persistent meta buffers are left
-    alone (the checkpoint carries them); a buffer the twin cannot supply either stays on meta and is
-    named by the trainer's meta-buffer gate.
+    """Graft the non-persistent buffers ``from_pretrained(device_map="meta")`` strands on meta from a
+    config-only twin, whose buffers are real by construction. Persistent ones stay meta (the checkpoint
+    carries them); one the twin cannot supply either is named by the trainer's meta-buffer gate.
     """
     stranded = [
         (module_name, attr)
@@ -173,24 +153,21 @@ def instantiate_on_meta(
     model_class,
     config,
     dtype: torch.dtype | None = None,
-    trust_remote_code: bool = True,
+    *,
+    trust_remote_code: bool,
     config_only: bool = False,
     **model_kwargs,
 ) -> nn.Module:
-    """Instantiate a HuggingFace model on the meta device (zero RAM).
+    """Instantiate a HuggingFace model on the meta device (zero RAM), at the run's ``dtype``.
 
-    Tries ``from_pretrained(device_map="meta")`` first (it handles weight tying and custom init) and
-    repairs the buffers its dispatch strands; falls back to a config-only build if that fails (GLM4's
-    non-Parameter attrs). ``config_only=True`` skips ``from_pretrained`` entirely, which would open
-    every shard the index names; that is impossible on a legitimately incomplete checkpoint (a
-    per-node pipeline save holds only this node's stage shard plus the full index).
-
-    ``dtype`` is the run's, not the checkpoint config's: every materialized tensor is cast to it, so
-    a shell at the checkpoint's dtype would leave what the checkpoint omits (a task head) in the
-    wrong dtype.
+    ``from_pretrained(device_map="meta")`` first (it handles weight tying and custom init), with the buffers
+    its dispatch strands repaired; a config-only build when that fails (GLM4's non-Parameter attrs) or under
+    ``config_only``, for a checkpoint whose index names shards this filesystem lacks (a per-node pipeline
+    save), which ``from_pretrained`` would open. The run's dtype, not the checkpoint's: what the checkpoint
+    omits (a task head) keeps the shell's dtype.
     """
     model_class = _resolve_remote_code_class(model_class, config, trust_remote_code)
-    dtype = resolve_run_dtype(dtype, config)
+    dtype = resolve_load_dtype(dtype, config)
     if not config_only:
         try:
             model = model_class.from_pretrained(

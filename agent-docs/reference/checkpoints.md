@@ -76,7 +76,7 @@ safetensors *file* header is the container format, not this marker.
 |---|---|---|---|---|
 | **Single file** | `model.safetensors` | any gathered save under the shard threshold | *(no index)* | Yes |
 | **Gathered HF-sharded** | `model-00001-of-000NN.safetensors` + index | any gathered save over the threshold — the default for production-size models | none | Yes |
-| **PP per-stage** | `model-pp00000-of-00004-00001.safetensors` — one or more parts per stage + merged index | `pp_size > 1` | none | Yes — **no merge step** |
+| **PP per-stage** | `model-pp00000-of-00004-00001.safetensors` — one or more parts per stage + merged index | `pp_size > 1` | none | Yes on a shared output FS; per-node directories `merge_pp_stages.py` first |
 | **EP per-rank sharded** | `model-00000-of-000NN.safetensors` (`.shard_{rank}` keys) + index | `save_sharded_ep: true` | `format: "ep_sharded"` | No — `merge_ep_shards.py` first |
 
 Shard size defaults to 5 GB (`save_max_shard_size` overrides it). It bounds the **gathered** writers
@@ -101,6 +101,11 @@ into HF's native multi-shard layout. That is why it deliberately carries no mark
 Each stage owns a filename prefix derived from its own `pp_rank` and never coordinates with the
 other writers, so they stream concurrently into one directory. Merging the index refuses a key
 claimed by two stages, since a global parameter lives on exactly one.
+
+On a per-node output filesystem each node's directory holds the full index but only the parts of the
+stages it ran; every tool refuses it, naming the absent parts. `scripts/after_training/merge_pp_stages.py`
+(`merge_pp_stage_parts`, `src/checkpoint/pp_stage_merge.py`) merges the node directories into one
+loadable checkpoint ([Per-node export](../parallelism/pipeline-parallelism.md#per-node-export)).
 
 The exchange gathers the per-writer weight-map fragments to rank 0 and broadcasts back the merged
 map, so no other rank ever holds one fragment per rank of it. The collision verdict rides the same
@@ -298,8 +303,9 @@ prefix the load added), Mistral 3's legacy llava prefixes. Each writer reverts t
 load recorded (`conversions_to_revert` in `src/checkpoint/hub_layout.py`); a model with no record (built
 from its config, or by the lazy loader), or whose load dequantized fp8/MXFP4 weights, reverts the
 family's registered mapping. The EP-gathered save and
-the RL weight sync leave out only the per-expert merges (`gathered_export_conversions` in
-`src/distributed/expert_parallel/hub_conversion.py`), since the gather owns the expert layout. vLLM
+the RL weight sync leave out only the per-expert merges (`export_conversions` in
+`src/checkpoint/hub_layout.py`), since the gather owns the expert layout; the load side picks its
+conversions in `src/model_loading/lazy_safetensors/conversion_selection.py`. vLLM
 0.26.0 raises on a SigLIP tower key that lacks its `vision_model` level.
 
 Two rules apply to some MoE families, on both engines.

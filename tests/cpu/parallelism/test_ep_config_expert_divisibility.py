@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner
+from src.distributed.expert_parallel.lazy_plan import WeightPlanner
 
 
 def _config(ep_size: int, **kwargs) -> EPConfig:
@@ -81,9 +81,9 @@ def test_planner_refuses_an_unfinalized_config():
     each rank would materialize the full unsharded expert set on a job that asked for EP. "Shard no
     experts" is spelled ``ep_config=None``, which stays legal."""
     with pytest.raises(RuntimeError, match="not finalized"):
-        EPWeightPlanner(_config(ep_size=2))
+        WeightPlanner(_config(ep_size=2))
 
-    assert EPWeightPlanner(None).start is None
+    assert WeightPlanner(None).start is None
 
 
 if __name__ == "__main__":

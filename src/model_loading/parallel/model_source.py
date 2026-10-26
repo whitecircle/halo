@@ -22,14 +22,18 @@ from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
 from transformers import AutoConfig, PretrainedConfig
 from trl import ModelConfig
 
-from src.checkpoint.format import EP_SHARDED_FORMAT, SAFETENSORS_INDEX_FILE, index_declares_ep_shards
-from src.checkpoint.reading import read_checkpoint_index, resolve_checkpoint_weights
+from src.checkpoint.format import SAFETENSORS_INDEX_FILE, index_declares_ep_shards
+from src.checkpoint.reading import (
+    ep_sharded_checkpoint_reason,
+    has_whole_model_weight_file,
+    read_checkpoint_index,
+    resolve_checkpoint_weights,
+)
 from src.log import KEY_PREVIEW_COUNT, warn_once
-from src.model_loading.lazy_safetensors.weights import has_safetensors_checkpoint
 from src.models.modality import is_vlm_model, is_vlm_name
 from src.runtime.collectives import broadcast_from_rank0
 from src.runtime.consensus import (
-    DeferredRankFailure,
+    rank0_verdict,
     rank_consensus,
     reject_across_ranks,
     reject_divergent_settings,
@@ -41,7 +45,6 @@ from src.runtime.filesystem import (
     is_fs_load_rank,
     is_input_shared_filesystem,
 )
-from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -196,36 +199,15 @@ def resolve_model_source(
     return ModelSource(model_name_or_path, view.resolved, view.snapshot)
 
 
-def _detect_checkpoint_format(path: str) -> str:
-    """``ep_sharded`` for a ``save_ep_sharded_checkpoint`` checkpoint, else ``huggingface``; a torn index raises."""
-    index = read_checkpoint_index(path, missing_ok=True)
-    return EP_SHARDED_FORMAT if index_declares_ep_shards(index) else "huggingface"
-
-
 def reject_ep_sharded_checkpoint(source: ModelSource) -> None:
-    """COLLECTIVE: refuse a per-rank EP-sharded checkpoint on every rank, with the merge instructions.
-
-    Only rank 0 reads the index, fenced so a torn one cannot take rank 0 out while its peers block in
-    the broadcast. Past here, an ep_sharded directory's per-rank keys would match no expert pattern and
-    surface as "never materialized" instead of "merge the shards".
-    """
-    guard = DeferredRankFailure(f"EP checkpoint-format probe of {source.name!r}")
-    local_verdict = None
-    if is_global_main_process():
-        local_verdict = guard.run(lambda: _detect_checkpoint_format(source.local_dir))
-    verdict = broadcast_from_rank0(local_verdict)
-    guard.reject()
-    if verdict == EP_SHARDED_FORMAT:
-        raise NotImplementedError(
-            f"Direct loading of sharded EP checkpoints is not supported.\n\n"
-            f"Sharded checkpoints must be merged first using merge_ep_shards.py:\n\n"
-            f"    python scripts/after_training/merge_ep_shards.py \\\n"
-            f"        --input_dir {source.local_dir} \\\n"
-            f"        --output_dir /path/to/merged_checkpoint\n\n"
-            f"Then set model_name_or_path to /path/to/merged_checkpoint.\n\n"
-            f"Alternatively, train with save_sharded_ep: false to save in gathered format, "
-            f"which loads directly without merging."
-        )
+    """COLLECTIVE (rank 0's probe): refuse a per-rank EP-sharded checkpoint on every rank. Past here its
+    per-rank keys would match no expert pattern and surface as "never materialized" instead of "merge the
+    shards"; a torn index raises inside the probe and is joined after the broadcast."""
+    if rank0_verdict(
+        lambda: index_declares_ep_shards(read_checkpoint_index(source.local_dir, missing_ok=True)),
+        f"EP checkpoint-format probe of {source.name!r}",
+    ):
+        raise ValueError(ep_sharded_checkpoint_reason(source.local_dir))
 
 
 def resolve_lazy_checkpoint(
@@ -239,7 +221,9 @@ def resolve_lazy_checkpoint(
     """
     reject_ep_sharded_checkpoint(source)
     return broadcast_from_rank0(
-        lazy_requested and has_safetensors_checkpoint(source.local_dir) and layout_supported(source.local_dir)
+        lazy_requested
+        and has_whole_model_weight_file(source.local_dir, safetensors_only=True)
+        and layout_supported(source.local_dir)
     )
 
 

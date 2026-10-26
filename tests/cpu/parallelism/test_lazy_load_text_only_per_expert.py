@@ -6,7 +6,7 @@ wrapper's ``language_model.`` segment. Its experts are fused in memory, so a per
 (a Qwen3.5/3.6 checkpoint ``unfuse_moe_experts.py`` wrote, or a wrapper-less save of a model built from
 its config) is never a model key itself: the fuser finds the fused parameter it feeds from the key's
 namespace, which must therefore have the segment dropped too. Driven through the real
-:func:`~src.distributed.expert_parallel.lazy_loader.load_ep_model_lazy` (EP patching stubbed — it needs
+:func:`~src.model_loading.parallel.ep.load_ep_model_lazy` (EP patching stubbed — it needs
 DeepEP and process groups) against ``from_pretrained`` of the same text-only class.
 
     python tests/cpu/parallelism/test_lazy_load_text_only_per_expert.py
@@ -16,10 +16,10 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3_5MoeConfig, Qwen3_5MoeForConditionalGeneration
 
-import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
+import src.model_loading.parallel.ep as ep_lazy_loader
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
-from src.model_loading.lazy_safetensors.weights import resolve_safetensors_index
+from src.model_loading.parallel.ep import load_ep_model_lazy
 from tests.common.models import TINY_QWEN35_MOE_CONFIG
 
 RUN_DTYPE = torch.bfloat16
@@ -37,7 +37,7 @@ def checkpoint(tmp_path_factory) -> str:
         vision_config={**VISION, "out_hidden_size": TINY_QWEN35_MOE_CONFIG["hidden_size"]},
     )
     Qwen3_5MoeForConditionalGeneration(config).to(RUN_DTYPE).save_pretrained(path)
-    weight_map, _ = resolve_safetensors_index(str(path))
+    weight_map = resolve_checkpoint_weights(str(path)).weight_map
     assert any(".language_model." in key and ".experts.0." in key for key in weight_map), (
         "premise: per-expert keys under the multimodal prefix"
     )

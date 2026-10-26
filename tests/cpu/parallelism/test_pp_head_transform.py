@@ -24,6 +24,7 @@ from tests.common.models import (
     TINY_GRANITE_CONFIG,
     TINY_MINICPM3_CONFIG,
 )
+from tests.common.pp_fakes import registered_pp_backbones
 
 _BATCH, _SEQ = 2, 16
 
@@ -45,6 +46,14 @@ _FAMILIES = {
     "minicpm3": ("MiniCPM3ForCausalLM", "MiniCPM3Config", TINY_MINICPM3_CONFIG),
     "gemma2": ("Gemma2ForCausalLM", "Gemma2Config", TINY_GEMMA2_CONFIG),
 }
+
+
+@pytest.fixture(autouse=True)
+def _transform_families_registered():
+    """None of these families is registered for PP; the head-path math under test is family-agnostic.
+    HyperCLOVAX stays unregistered: its head-transform refusal must come first."""
+    with registered_pp_backbones("Cohere2MoeModel", "GraniteModel", "MiniCPM3Model", "Gemma2Model"):
+        yield
 
 
 def _build(family: str) -> torch.nn.Module:

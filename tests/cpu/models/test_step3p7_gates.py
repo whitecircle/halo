@@ -170,11 +170,12 @@ def test_tp_head_divisibility_checks_every_per_layer_head_count():
 
 
 def test_pp_accepts_a_loaded_step3p7_text_model():
-    """No refusal spec: the decoder threads hidden states only (no cross-layer streams), the
-    embeddings are untied, and a freshly constructed model declares no MTP tail
+    """Registered on the stock forward: the decoder threads hidden states only (no cross-layer
+    streams), the embeddings are untied, and a freshly constructed model declares no MTP tail
     (``num_nextn_predict_layers`` stays 0 — the registered spelling — because transformers drops
-    the checkpoint's MTP layers at load), so the generic contiguous split must accept it."""
-    assert "Step3p7TextModel" not in PP_SPEC_MAP
+    the checkpoint's MTP layers at load), so the contiguous split must accept it."""
+    spec = PP_SPEC_MAP["Step3p7TextModel"]
+    assert spec.validated and spec.refusal is None and spec.stream_forward is None
     assert "num_nextn_predict_layers" in MTP_LAYER_COUNT_FIELDS
     model = _tiny_text_model()
     assert model.config.num_nextn_predict_layers == 0

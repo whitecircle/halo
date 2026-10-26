@@ -55,7 +55,7 @@ class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
     # returns None and ``unfuse_moe_experts`` rejects the family. The checkpoint keeps the vendor
     # namespace transformers converts inside ``from_pretrained``: the prefix renames, ``moe.*`` →
     # ``mlp.*``, the two-source ``gate_proj + up_proj → gate_up_proj`` Concatenate (sliced through
-    # both sources on the expert axis), and the vision tower's entries. See ``hub_conversion.py``.
+    # both sources on the expert axis), and the vision tower's entries. See ``conversion_selection.py``.
     _HUB_CONVERSION_KEYS = ("step3p7", "step3p5_vision")
 
     # The pinned server has no ``step3p7`` config class: it reads the family only through the

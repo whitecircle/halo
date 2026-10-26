@@ -6,7 +6,7 @@ GLM-5 Next's vendor-namespace KDA / hyper-connection keys, per-expert projection
 three-source ``q/k/v_conv1d → conv1d`` Concatenate; Step-3.7's prefix renames, ``moe.*`` → ``mlp.*``,
 the two-source per-layer ``moe.gate_proj + moe.up_proj → gate_up_proj`` Concatenate and the Step-3.5
 vision tower's chunked, RoPE-permuted ``in_proj``. The lazy loaders replay that mapping per key
-(``_HUB_CONVERSION_KEYS`` → ``hub_conversion.py``), so this gate proves, against a
+(``_HUB_CONVERSION_KEYS`` → ``conversion_selection.py``), so this gate proves, against a
 ``from_pretrained`` reference on the same checkpoint (written by the family's own ``save_pretrained``):
 
   1. **EP=2** — every expert shard equals the reference's slice bitwise (a fan-in sliced through
@@ -28,9 +28,10 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditio
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint, load_ep_model_lazy
+from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.ep import load_ep_model_lazy
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import (
@@ -113,7 +114,7 @@ def run(ctx):
     input_ids = torch.randint(0, vocab_size, (BATCH, SEQ), device=device)
     labels = input_ids.clone()
 
-    checks["lazy_gate_admits_checkpoint"] = lazy_loader_supports_checkpoint(ckpt)
+    checks["lazy_gate_admits_checkpoint"] = is_lazy_loadable(ckpt)
 
     # ── Reference: from_pretrained on the same hub-layout checkpoint ──────────
     ref = model_class.from_pretrained(ckpt, dtype=torch.bfloat16, attn_implementation="eager").to(device)

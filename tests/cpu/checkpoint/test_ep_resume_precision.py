@@ -42,12 +42,15 @@ from src.distributed.mesh import create_dp_tp_mesh
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from src.model_loading.parallel.cp import load_ep_cp_model
-from src.model_loading.parallel.loader import _load_ep_model, _load_pp_stage_model, _load_undistributed_model
+from src.model_loading.parallel.ep import load_ep_model
+from src.model_loading.parallel.loader import _load_undistributed_model
 from src.model_loading.parallel.model_source import ModelSource
+from src.model_loading.parallel.pp import load_pp_stage_model
 from src.model_loading.parallel.tp import load_ep_tp_model, load_tp_moe_model
 from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
+from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.tiny_models import TINY_MOE_FAMILIES
 
 PartialState()
@@ -201,7 +204,7 @@ def _construct(
         ep_config=lambda: ep_config,
         cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
     )
-    loader = {"ep_cp": load_ep_cp_model, "ep": _load_ep_model, "ep1": _load_undistributed_model}[mode]
+    loader = {"ep_cp": load_ep_cp_model, "ep": load_ep_model, "ep1": _load_undistributed_model}[mode]
     config = AutoConfig.from_pretrained(path)
     extra = {"wraps_experts": True, "init_from_scratch": False} if mode == "ep1" else {}
     model = loader(
@@ -441,6 +444,8 @@ def test_resume_missing_selected_master_is_never_randomly_initialized(
         _construct(path, preserve=True, **kwargs)
 
 
+# Qwen3-MoE is unregistered for PP; it stands in as the per-expert checkpoint format here.
+@registered_pp_backbones("Qwen3MoeModel")
 def _construct_pp_stage(
     path, pp_rank, *, fp32_router, fp32_experts, fp32_non_ep, preserve, managed_experts=False, model_class=None
 ):
@@ -458,7 +463,7 @@ def _construct_pp_stage(
         ep_config=lambda: ep_config,
     )
     config = AutoConfig.from_pretrained(path)
-    return _load_pp_stage_model(
+    return load_pp_stage_model(
         ModelSource(path, None, path),
         pc,
         model_class or TINY_MOE_FAMILIES[config.model_type].load_class,

@@ -156,8 +156,8 @@ forward**, after the whole model has loaded, with nothing in the message naming 
 ## What loads at all
 
 Only two loaders shard at load time: `WeightAction.EXPERT_SHARD`
-(`src/model_loading/lazy_safetensors/`, planned by `EPWeightPlanner` in
-`src/distributed/expert_parallel/lazy_loader.py`) and HF `tp_plan="auto"` for **dense** models.
+(`src/model_loading/lazy_safetensors/`, planned by `WeightPlanner` in
+`src/distributed/expert_parallel/lazy_plan.py`) and HF `tp_plan="auto"` for **dense** models.
 
 Every other branch of `_dispatch_model_loading` materializes all 396.8 B on one GPU: **794 GB, never
 starts**. That kills plain FSDP2, pure TP (MoE TP has no shard-aware load), pure ETP (`ep_size == 1`

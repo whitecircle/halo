@@ -2,7 +2,7 @@
 """Text-only Inkling under PP: stage-aware loading of the TM-layout checkpoint, bitwise vs full-load.
 
 The hub checkpoint keeps Thinking Machines' namespace; the stage loader reads it through the
-family's conversion entry (``hub_conversion.py``). This gate builds a 4-layer text-only artifact
+family's conversion entry (``conversion_selection.py``). This gate builds a 4-layer text-only artifact
 (TM-layout weights + `InklingTextConfig` ``config.json``, ``layer_types`` period 2 so the pp2
 boundary lands on a whole pattern period) and asserts, for both stages of a virtual ``pp_size=2``
 pipeline walked by both ranks:
@@ -34,11 +34,12 @@ from transformers.models.inkling.modeling_inkling import InklingForCausalLM, Ink
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
-from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
-from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from src.model_loading.parallel.ep import load_ep_model_lazy
+from src.model_loading.parallel.pp import _load_stage_lazy
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG
+from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.utils import cleanup_memory, log
 
 PP_SIZE = 2
@@ -89,6 +90,8 @@ def _release(*models) -> None:
     cleanup_memory()
 
 
+# Inkling is refused for PP until a schedule, end-to-end and save/resume row cover it; this is its loader row.
+@registered_pp_backbones("InklingTextModel")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
@@ -123,7 +126,7 @@ def run(ctx):
         ref_range = reference.layer_range
         _release(reference, reference_model)
 
-        stage_model = load_pp_stage_model(
+        stage_model = _load_stage_lazy(
             ckpt,
             pp_rank,
             PP_SIZE,

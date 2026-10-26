@@ -71,6 +71,12 @@ Read it before giving a verdict on any non-trivial combo.
    stage's layers, so the load ceiling falls with `pp_size`. Composes with the expert
    axes only — **EP, or pure ETP (`ep_size=1`)** — never both, never TP/CP.
    Needs at least two NVLink domains: every stage must be a whole number of them.
+   Only the families registered in `PP_FAMILY_SPECS` split — Qwen3 dense (untied),
+   Qwen3.5/3.6, GPT-OSS, DeepSeek-V4, the Step-3.7 and GLM-5 Next text towers; any
+   other backbone is refused by name at load (`reject_unsupported_pp_structure`), so
+   do not recommend PP for Qwen3 MoE, GLM-4, Ling, Mistral4, Laguna, LFM-2, Cohere2 MoE,
+   Gemma 4, Zaya or Inkling. A per-node (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) save
+   exports through `scripts/after_training/merge_pp_stages.py`.
 6. Compute `dp_size` with the formula above and sanity-check it's >= 1 and the
    global batch is what you intend.
 

@@ -2,10 +2,10 @@
 """EP+TP loading must apply the same lazy-loader layout gate as pure EP loading.
 
 ``load_ep_model`` routes a checkpoint to the lazy safetensors loader only when
-``lazy_loader_supports_checkpoint`` accepts its expert layout; a layout nesting one module per
+``is_lazy_loadable`` accepts its expert layout; a layout nesting one module per
 expert (``...experts.local_experts.N.linear_fc{1,2}``, as pre-5.14 Zaya checkpoints did) falls back
 to ``from_pretrained`` + EP patch because the lazy fuser cannot map it. ``load_ep_tp_model`` must
-gate identically — gating only on ``has_safetensors_checkpoint`` would route a TP-capable family
+gate identically — gating only on the safetensors probe would route a TP-capable family
 with nested per-expert keys into the lazy loader and silently drop its experts.
 
 Run: ``python tests/cpu/parallelism/test_ep_tp_lazy_gate.py`` (or ``pytest -m cpu``).

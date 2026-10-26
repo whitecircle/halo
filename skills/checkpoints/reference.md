@@ -12,12 +12,12 @@ filename (`agent-docs/reference/checkpoints.md`):
 |---|---|---|---|---|
 | Single file | `model.safetensors` | *(no index)* | yes | none |
 | Gathered HF-sharded | `model-0000N-of-…` + index | *absent* | yes | none |
-| PP per-stage | `model-pp0000N-of-…` + merged index | *absent* | yes | none |
+| PP per-stage | `model-pp0000N-of-…` + merged index | *absent* | yes (a per-node save: no) | `merge_pp_stages.py` for per-node directories |
 | EP per-rank sharded | `model-…` + `.shard_{rank}` keys + index | `ep_sharded` | no | `merge_ep_shards.py` |
 
 Gathered is the default for every mode; the sharded EP save is an opt-in write-bandwidth option
 (there is no per-rank TP save). Nothing loads `ep_sharded` directly: `reject_ep_sharded_checkpoint`
-raises world-uniformly at EP load (`src/distributed/expert_parallel/loading.py`) and
+raises world-uniformly at EP load (`src/model_loading/parallel/ep.py`) and
 `load_full_state_dict` refuses the marker with the merge instructions
 (`src/checkpoint/reading.py`); a shard directory whose index never landed is caught tool-side by the
 `.shard_N` header peek (`_reject_indexless_ep_shards`, the same module). `merge_ep_shards`

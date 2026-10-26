@@ -1,7 +1,7 @@
 """CPU tests for the stage-aware pipeline loader against a REAL safetensors checkpoint.
 
 ``tests/cpu/parallelism/test_pp_lazy_key_map.py`` pins the key algebra; this file runs
-:func:`~src.distributed.pipeline_parallel.lazy_loader.load_pp_stage_model` end to end on a tiny
+:func:`~src.model_loading.parallel.pp._load_stage_lazy` end to end on a tiny
 checkpoint written to disk, which is the only way to catch what the key map cannot:
 
   * every stage's tensors carry the VALUES of the global layers it claims (a correct-looking
@@ -22,11 +22,20 @@ import shutil
 import pytest
 import torch
 from safetensors.torch import save_file
-from transformers import AutoConfig, AutoModelForSequenceClassification, Qwen3Config, Qwen3ForCausalLM
+from transformers import (
+    AutoConfig,
+    AutoModelForSequenceClassification,
+    Qwen3Config,
+    Qwen3ForCausalLM,
+    Qwen3MoeConfig,
+    Qwen3MoeForCausalLM,
+)
 
-from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
-from tests.common.models import TINY_QWEN3_CONFIG
+from src.model_loading.parallel import pp
+from src.model_loading.parallel.pp import _load_stage_lazy
+from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
+from tests.common.pp_fakes import registered_pp_backbones
 
 PP_SIZE = 2
 NUM_LAYERS = TINY_QWEN3_CONFIG["num_hidden_layers"]
@@ -45,7 +54,7 @@ def checkpoint(tmp_path_factory) -> tuple[str, dict[str, torch.Tensor]]:
 
 
 def _load(path: str, pp_rank: int, **kwargs):
-    return load_pp_stage_model(
+    return _load_stage_lazy(
         path,
         pp_rank,
         PP_SIZE,
@@ -129,6 +138,43 @@ def test_absent_head_comes_from_the_rng_so_every_stage_draws_the_same(checkpoint
 
     assert torch.equal(heads[0], heads[1])
     assert not torch.equal(heads[-1], reseeded)
+
+
+@pytest.fixture(scope="module")
+def unregistered_checkpoint(tmp_path_factory) -> str:
+    """A tiny checkpoint of a family no PPFamilySpec registers."""
+    torch.manual_seed(0)
+    path = tmp_path_factory.mktemp("pp_unregistered_ckpt")
+    Qwen3MoeForCausalLM(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)).to(torch.bfloat16).save_pretrained(path)
+    return str(path)
+
+
+class _ReachedCollective(Exception):
+    """The stage loader got as far as its first cross-rank verdict, a collective under torchrun."""
+
+
+@pytest.fixture
+def first_collective_raises(monkeypatch):
+    def reached(*_args):
+        raise _ReachedCollective
+
+    monkeypatch.setattr(pp, "reject_across_ranks", reached)
+
+
+@pytest.mark.parametrize("pp_rank", range(PP_SIZE))
+def test_an_unregistered_backbone_is_refused_before_any_collective(
+    unregistered_checkpoint, first_collective_raises, pp_rank
+):
+    """Refused on the meta shell by the backbone's name alone, so every rank raises the same verdict
+    before the loader's first cross-rank one and before a weight is read."""
+    with pytest.raises(ValueError, match=r"^Qwen3MoeModel is not registered for pipeline parallelism"):
+        _load(unregistered_checkpoint, pp_rank, dtype=torch.bfloat16)
+
+
+def test_a_registered_backbone_reaches_the_first_collective(unregistered_checkpoint, first_collective_raises):
+    """Anti-vacuity for the test above: past the gate, the loader does reach the patched verdict."""
+    with registered_pp_backbones("Qwen3MoeModel"), pytest.raises(_ReachedCollective):
+        _load(unregistered_checkpoint, 0, dtype=torch.bfloat16)
 
 
 # Per-node PP checkpoints (DIST_OUTPUT_SHARED_FILESYSTEM=0)

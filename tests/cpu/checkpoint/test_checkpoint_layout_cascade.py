@@ -2,7 +2,7 @@
 
 The cascade (sharded index → single ``model.safetensors`` → legacy ``pytorch_model.bin``) has one
 implementation, ``resolve_checkpoint_weights``; the resume key readers, ``load_full_state_dict``,
-the lazy loaders' ``resolve_safetensors_index`` and the standalone tools' ``checkpoint_shard_files``
+the lazy loaders' ``require_safetensors`` and the standalone tools' ``checkpoint_shard_files``
 are policy on top of it. These tests fail when one of them re-forks the walk — a divergent
 precedence (a stale single file shadowing the index), a lost leg, or an index read that starts
 opening shards.
@@ -24,7 +24,11 @@ from src.checkpoint.reading import (
     read_checkpoint_config,
     resolve_checkpoint_weights,
 )
-from src.model_loading.lazy_safetensors.weights import has_safetensors_checkpoint, resolve_safetensors_index
+
+
+def _lazy_index(directory: str):
+    layout = resolve_checkpoint_weights(directory).require_safetensors("checkpoint")
+    return layout.weight_map, list(layout.shard_files)
 
 
 def _write_sharded(directory, shards: dict[str, dict[str, torch.Tensor]]) -> None:
@@ -49,7 +53,7 @@ def test_readers_agree_on_a_sharded_index(tmp_path):
 
     assert resolve_checkpoint_weights(directory).key_set() == expected
     assert set(load_full_state_dict(directory)) == expected
-    assert set(resolve_safetensors_index(directory)[0]) == expected
+    assert set(_lazy_index(directory)[0]) == expected
     assert {os.path.basename(p) for p in checkpoint_shard_files(directory)} == {
         "model-00001-of-00002.safetensors",
         "model-00002-of-00002.safetensors",
@@ -64,7 +68,7 @@ def test_readers_agree_on_a_single_file(tmp_path):
 
     assert resolve_checkpoint_weights(directory).key_set() == {"a.weight"}
     assert set(load_full_state_dict(directory)) == {"a.weight"}
-    weight_map, shard_files = resolve_safetensors_index(directory)
+    weight_map, shard_files = _lazy_index(directory)
     assert weight_map == {"a.weight": "model.safetensors"}
     assert shard_files == ["model.safetensors"]
     assert checkpoint_shard_files(directory) == [os.path.join(directory, "model.safetensors")]
@@ -78,7 +82,7 @@ def test_an_index_is_read_as_the_map_itself(tmp_path):
     directory = str(tmp_path)
 
     assert resolve_checkpoint_weights(directory).key_set() == {"a.weight"}
-    assert resolve_safetensors_index(directory) == (
+    assert _lazy_index(directory) == (
         {"a.weight": "model-00001-of-00001.safetensors"},
         ["model-00001-of-00001.safetensors"],
     )
@@ -94,7 +98,7 @@ def test_the_index_wins_over_a_stale_single_file(tmp_path):
 
     assert resolve_checkpoint_weights(directory).key_set() == {"fresh.weight"}
     assert set(load_full_state_dict(directory)) == {"fresh.weight"}
-    assert set(resolve_safetensors_index(directory)[0]) == {"fresh.weight"}
+    assert set(_lazy_index(directory)[0]) == {"fresh.weight"}
     assert checkpoint_shard_files(directory) == [os.path.join(directory, "model-00001-of-00001.safetensors")]
 
 
@@ -108,7 +112,7 @@ def test_the_legacy_bin_is_the_last_leg_and_only_the_resume_readers_take_it(tmp_
     assert set(load_full_state_dict(directory)) == {"a.weight"}
     # The lazy loaders and the standalone tools are safetensors-only: a .bin reads as absent.
     with pytest.raises(FileNotFoundError):
-        resolve_safetensors_index(directory)
+        _lazy_index(directory)
     with pytest.raises(FileNotFoundError):
         checkpoint_shard_files(directory)
 
@@ -125,8 +129,7 @@ def test_every_whole_model_filename_answers_both_probes_the_same_way(tmp_path, f
     directory = str(tmp_path)
 
     assert has_whole_model_weight_file(directory)
-    assert has_safetensors_checkpoint(directory) == has_whole_model_weight_file(directory, safetensors_only=True)
-    assert has_safetensors_checkpoint(directory) is (filename != LEGACY_WEIGHTS_FILE), (
+    assert has_whole_model_weight_file(directory, safetensors_only=True) is (filename != LEGACY_WEIGHTS_FILE), (
         f"the lazy gate must accept every whole-model filename but {LEGACY_WEIGHTS_FILE}"
     )
 

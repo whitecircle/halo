@@ -36,6 +36,7 @@ from src.runtime import load_coordination
 from tests.common.collective_recorder import CollectiveTrace, rebind_everywhere, recording_rank
 from tests.common.goldens import regen_main
 from tests.common.parallelism import make_parallelism_config
+from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILY,
     TINY_MOE_FAMILIES,
@@ -253,6 +254,8 @@ def trace_rank(
         cpu_model_builds(trace),
         recorded_load_phases(trace),
         patch.object(rank_uniform_env, "_env_uniformity_verified", True),
+        # The traced branches are family-agnostic; the tiny MoE's backbone is not registered for pipeline parallelism.
+        registered_pp_backbones("Qwen3MoeModel"),
     ):
         if case.frozen_reference:
             load_frozen_auxiliary_model(

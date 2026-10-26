@@ -10,7 +10,7 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 
 | Model Family | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA ⁷ | Training Configs |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--|
-| [Qwen3 (dense)](qwen3.md) | — | Yes | Yes | — | — | — | Yes | `examples/sft/qwen3/qwen3-4b-*` |
+| [Qwen3 (dense)](qwen3.md) | — | Yes | Yes | — | — | — | Yes | `examples/sft/qwen3/*` |
 | [Qwen3 MoE](qwen3.md#qwen3-moe) | Yes | Yes | Yes | Yes | Yes ⁶ | Yes | Yes | — |
 | [Qwen3-VL (text)](qwen3.md#qwen3-vl) | — | Yes | **No** ⁵ | — | — | — | Yes | — |
 | [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | Yes | **No** ¹ | Yes | Yes | **No** | Yes | Yes | `examples/sft/qwen3_5/*` |
@@ -29,7 +29,7 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 | [Step-3.7 Flash](step3p7.md) | Yes | **No** ¹¹ | **No** ¹¹ | Yes | **No** | **No** | Yes | `examples/sft/step3p7/*` |
 | Any other HF model with `tp_plan` (Llama, Mistral, Phi, …) | — | — | Yes | — | — | — | Yes | — |
 
-**Pipeline parallelism** is not a column above because it is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+**Pipeline parallelism** is not a column above: it runs on the families registered in `PP_FAMILY_SPECS` — Qwen3 dense, Qwen3.5/3.6, GPT-OSS, the Step-3.7 and GLM-5 Next text towers, DeepSeek-V4 — and refuses any other backbone by name ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 Trainer × parallelism support is tracked in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
@@ -90,7 +90,7 @@ FP32 on every loader, including the lazy EP loader's `e_score_correction_bias`, 
 biases are FP32 by design.
 
 Configured FP32 parameter masters are the exception. The shared selector in
-`src/distributed/expert_parallel/fp32_masters.py` preserves non-EP weights under `fp32_non_ep_params`
+`src/model_loading/parallel/fp32_masters.py` (selection, lazy capture, coverage check and eager restore) preserves non-EP weights under `fp32_non_ep_params`
 and the EP wrapper's selected router/expert weights under their flags. Eager construction streams
 those checkpoint values back before wrapping; lazy EP construction reads and fuses them at FP32
 directly. Native dense TP rebuilds its existing TP shards at FP32 before the DP wrap, preserving tied

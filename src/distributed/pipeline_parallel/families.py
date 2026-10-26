@@ -1,8 +1,8 @@
-"""Per-family pipeline-split contracts, keyed by the HF backbone class.
+"""Per-family pipeline-split contracts, keyed by the HF backbone class: the registered families and the
+refused ones. A backbone no spec claims is refused by name.
 
-A family needs a spec only where its forward threads state a contiguous cut would sever, or where its
-modules sit under other names. The hyper-connection families' non-first stages run their own forward
-minus the embedding widen: collapsing the ``[B, S, hc_mult, D]`` stream mid-network is lossy.
+The hyper-connection families' non-first stages run their own forward minus the embedding widen:
+collapsing the ``[B, S, hc_mult, D]`` stream mid-network is lossy.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ class PPFamilySpec:
 
     Attributes:
         hf_module_names: the backbone classes (the module holding the decoder-layer list) claimed.
-        refusal: why the family cannot be split, naming the mechanism; ``None`` = supported.
+        refusal: why the family is refused (the state a cut would sever, or the missing validation).
         final_norm_attrs: the post-layers norm, probed in order; neutralized off the last stage.
         head_attrs: the model's task head, probed in order; held by the last stage only.
         tail_module_attrs: further post-layers backbone modules (the hyper-connection collapse
@@ -39,7 +39,7 @@ class PPFamilySpec:
             driven through ``inputs_embeds``.
         reject_severed_boundaries: ``(model, partition)`` raising when a boundary severs the
             family's cross-layer state.
-        validated: the family's stages reproduce the unsplit model on the pipeline GPU tier.
+        validated: the family is registered: its stages reproduce the unsplit model on the pipeline GPU tier.
     """
 
     hf_module_names: tuple[str, ...] = ()
@@ -219,8 +219,13 @@ def _reject_severed_dsa_chains(model: nn.Module, partition: list[tuple[int, int]
         )
 
 
-# A backbone no spec claims: the generic contiguous split.
+# A backbone no spec claims: the default probes, unregistered.
 GENERIC_PP = PPFamilySpec()
+# The registered families whose upstream forward splits contiguously as-is.
+STOCK_FORWARD_PP = PPFamilySpec(
+    hf_module_names=("GptOssModel", "Qwen3Model", "Qwen3_5TextModel", "Qwen3_5MoeTextModel", "Step3p7TextModel"),
+    validated=True,
+)
 ZAYA_PP = PPFamilySpec(
     hf_module_names=("ZayaModel",),
     refusal=(
@@ -240,8 +245,14 @@ DEEPSEEK_V4_PP = PPFamilySpec(
     layer_types_rebase_safe=True,
     stream_forward=deepseek_v4_stream_forward,
     reject_severed_boundaries=_reject_stranded_hash_routers,
+    validated=True,
 )
-INKLING_PP = PPFamilySpec(hf_module_names=("InklingTextModel",), input_module_attrs=("embed_norm",))
+# Refused pending validation, yet declared in full for the stage-aware loader rows that admit it.
+INKLING_PP = PPFamilySpec(
+    hf_module_names=("InklingTextModel",),
+    refusal="Its stages have loader-only validation: no schedule, end-to-end or save/resume row.",
+    input_module_attrs=("embed_norm",),
+)
 GEMMA4_PP = PPFamilySpec(
     hf_module_names=("Gemma4TextModel",),
     refusal=(
@@ -259,15 +270,16 @@ GLM5_NEXT_PP = PPFamilySpec(
     layer_types_rebase_safe=True,
     stream_forward=glm5_next_stream_forward,
     reject_severed_boundaries=_reject_severed_dsa_chains,
+    validated=True,
 )
-PP_FAMILY_SPECS = (ZAYA_PP, DEEPSEEK_V4_PP, INKLING_PP, GEMMA4_PP, GLM5_NEXT_PP)
+PP_FAMILY_SPECS = (STOCK_FORWARD_PP, ZAYA_PP, DEEPSEEK_V4_PP, INKLING_PP, GEMMA4_PP, GLM5_NEXT_PP)
 PP_SPEC_MAP: dict[str, PPFamilySpec] = {name: spec for spec in PP_FAMILY_SPECS for name in spec.hf_module_names}
 if len(PP_SPEC_MAP) != sum(len(spec.hf_module_names) for spec in PP_FAMILY_SPECS):
     raise ValueError("Two PPFamilySpec constants in PP_FAMILY_SPECS claim one HF backbone class name.")
 
 
 def resolve_pp_spec(backbone: nn.Module) -> PPFamilySpec:
-    """The spec claiming ``backbone``'s class, or :data:`GENERIC_PP`."""
+    """The spec claiming ``backbone``'s class, or the unregistered :data:`GENERIC_PP`."""
     return PP_SPEC_MAP.get(type(backbone).__name__, GENERIC_PP)
 
 

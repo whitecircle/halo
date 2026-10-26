@@ -19,10 +19,9 @@ from torch.utils.checkpoint import checkpoint
 from transformers import PretrainedConfig
 
 from src.checkpoint.config_export import hf_architecture_name
-from src.checkpoint.hub_layout import CheckpointNamespace
+from src.checkpoint.hub_layout import CheckpointNamespace, export_conversions
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
-from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.pipeline_parallel.families import require_pp_attr, resolve_pp_spec
 from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
@@ -173,7 +172,7 @@ class PipelineStageModule(nn.Module):
         # loss instead of logits, so no [mb, S, V] plane is built.
         self.fused_loss_fn: FusedHeadLossFn | None = None
 
-        self.export_conversions = tuple(gathered_export_conversions(source))
+        self.export_conversions = tuple(export_conversions(source))
         self.checkpoint_namespace = CheckpointNamespace.of(source)
         self._remote_code_model_class = remote_code_model_class(source)
         if source.can_generate():

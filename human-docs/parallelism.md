@@ -90,10 +90,18 @@ sequence length to fit.
 ## Pipeline parallelism
 
 `pipeline_parallel_size` splits the decoder layers into stages, each a whole
-number of NVLink domains, so only point-to-point activations cross nodes. It
-composes with EP or pure ETP and covers SFT, SMPO, DPO and KTO
-(precompute-only), offline GRPO, reward and classification
-([Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md) ↗).
+number of NVLink domains, so only point-to-point activations cross nodes and a
+run needs at least two nodes. It composes with EP or pure ETP and covers SFT,
+SMPO, DPO and KTO (precompute-only), offline GRPO, reward and classification.
+
+Only registered families split: Qwen3 dense (untied, 8B and up), Qwen3.5/3.6,
+GPT-OSS, DeepSeek-V4, and the Step-3.7 and GLM-5 Next text towers. Any other
+model is refused by name before a weight loads. Every batch pads to
+`max_length`, so use `packing` (except on Qwen3.5/3.6, whose packing PP
+refuses). On per-node storage, merge the nodes' checkpoint directories with
+`halo run merge-pp-stages` before loading the result
+([Clusters](clusters.md#pipeline-parallelism-across-nodes),
+[Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md) ↗).
 
 ## Picking a shape
 

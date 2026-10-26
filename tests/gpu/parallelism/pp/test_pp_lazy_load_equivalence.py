@@ -55,16 +55,17 @@ from transformers import (
     Qwen3MoeForCausalLM,
 )
 
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
-from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.partition import resolve_layer_partition
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
-from src.model_loading.lazy_safetensors.weights import resolve_safetensors_index
+from src.model_loading.parallel.ep import load_ep_model_lazy
+from src.model_loading.parallel.pp import _load_stage_lazy
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
+from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.utils import cleanup_memory, log
 
 PP_SIZE = 2
@@ -113,6 +114,8 @@ def _write_checkpoint(ctx) -> str:
     return path
 
 
+# The --moe_family qwen3_moe rows split a family unregistered for PP; the loader math is family-agnostic.
+@registered_pp_backbones("Qwen3MoeModel")
 def _reference_stage(ckpt: str, pp_rank: int, ep_config, device):
     """The whole-model path: load everything, then drop the other stages' layers."""
     if ep_config is None:
@@ -137,6 +140,7 @@ def _absent_head_is_usable(head: torch.Tensor | None, device) -> bool:
     return bool(torch.equal(rank0, head.float().to(device)))
 
 
+@registered_pp_backbones("Qwen3MoeModel")
 def _stage_aware_stage(ckpt: str, pp_rank: int, ep_config, device):
     """The stage-aware path: stream only this stage's layers, then finish the split.
 
@@ -144,7 +148,7 @@ def _stage_aware_stage(ckpt: str, pp_rank: int, ep_config, device):
     stage at load and dropped from all but the last.
     """
     del device
-    model = load_pp_stage_model(
+    model = _load_stage_lazy(
         ckpt,
         pp_rank,
         PP_SIZE,
@@ -226,7 +230,7 @@ def run(ctx):
     )
 
     # The checkpoint's own key set, in the unsplit model's naming — the keys both paths must carry.
-    checkpoint_keys = set(resolve_safetensors_index(ckpt)[0])
+    checkpoint_keys = set(resolve_checkpoint_weights(ckpt).weight_map)
 
     checks, metrics = {}, {}
     worst_mismatch = None

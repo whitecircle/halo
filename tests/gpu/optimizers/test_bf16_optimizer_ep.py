@@ -23,17 +23,18 @@ Usage (8 GPUs required):
 import argparse
 import math
 import os
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.loading import load_ep_model
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.parallel.ep import load_ep_model
 from src.model_loading.parallel.model_source import resolve_model_source
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.optimizers.adamw_bf16 import AdamWBF16
@@ -51,6 +52,23 @@ NUM_TRAIN_SAMPLES = 16
 MAX_SEQ_LENGTH = 64
 NUM_TRAIN_STEPS = 5
 BATCH_SIZE = 2
+
+
+def _load_ep_policy() -> nn.Module:
+    """GPT-OSS with its experts distributed over ``EP_SIZE`` ranks, at bf16."""
+    ep_config = EPConfig(ep_size=EP_SIZE, experts_fsdp_managed=False)
+    pc = SimpleNamespace(
+        ep_config=lambda: ep_config, ep_lazy_loading=True, fp32_non_ep_params=False, max_concurrent_loading=None
+    )
+    from_pretrained_kwargs = {
+        "config": AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),
+        "dtype": torch.bfloat16,
+        "trust_remote_code": True,
+        # Auto-detect: FA4 on Blackwell handles gpt-oss sinks; FA2 forces the Hopper-only S-aux path.
+        "attn_implementation": None,
+    }
+    source = resolve_model_source(MODEL_PATH, None, tag="policy")
+    return load_ep_model(source, pc, AutoModelForCausalLM, from_pretrained_kwargs, preserve_checkpoint_precision=False)
 
 
 # ── Test 1: Full Training with bf16_optimizer ─────────────────────────────────
@@ -71,15 +89,7 @@ def test_full_training(output_dir: str) -> bool:
 
     # Load model with EP
     log("Loading model with EP...")
-    ep_config = EPConfig(ep_size=EP_SIZE, experts_fsdp_managed=False)
-    model = load_ep_model(
-        resolve_model_source(MODEL_PATH, None, tag="policy"),
-        ep_config,
-        AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation=None,  # auto-detect (FA4 on Blackwell handles gpt-oss sinks; FA2 forces the Hopper-only S-aux path)
-    )
+    model = _load_ep_policy()
 
     total_params = sum(p.numel() for p in model.parameters())
     bf16_params = sum(p.numel() for p in model.parameters() if p.dtype == torch.bfloat16)
@@ -200,15 +210,7 @@ def test_lora_training(output_dir: str) -> bool:
 
     # Load model with EP
     log("Loading model with EP...")
-    ep_config = EPConfig(ep_size=EP_SIZE, experts_fsdp_managed=False)
-    model = load_ep_model(
-        resolve_model_source(MODEL_PATH, None, tag="policy"),
-        ep_config,
-        AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation=None,  # auto-detect (FA4 on Blackwell handles gpt-oss sinks; FA2 forces the Hopper-only S-aux path)
-    )
+    model = _load_ep_policy()
 
     # Apply LoRA (attention-only, not MoE experts)
     log("Applying LoRA...")

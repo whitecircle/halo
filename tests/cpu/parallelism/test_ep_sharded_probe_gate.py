@@ -23,6 +23,7 @@ import pytest
 from accelerate import PartialState
 
 import src.model_loading.parallel.model_source as model_source
+import src.runtime.consensus as consensus
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
 from src.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint, resolve_lazy_checkpoint
 from tests.common.repo import REPO_ROOT
@@ -32,7 +33,7 @@ PartialState()  # the loader logs through accelerate's logger
 
 # The PP stage loader and the EP+TP loader, each a module that could hold a probe of its own.
 LOADER_MODULES = {
-    "_load_pp_stage_model": REPO_ROOT / "src/model_loading/parallel/loader.py",
+    "load_pp_stage_model": REPO_ROOT / "src/model_loading/parallel/pp.py",
     "load_ep_tp_model": REPO_ROOT / "src/model_loading/parallel/tp.py",
 }
 
@@ -44,13 +45,13 @@ def _checkpoint(tmp_path: pathlib.Path, fmt: str | None) -> ModelSource:
 
 
 def test_rank0_refuses_a_sharded_checkpoint_with_the_merge_instructions(tmp_path):
-    with pytest.raises(NotImplementedError, match="merge_ep_shards.py"):
+    with pytest.raises(ValueError, match="merge_ep_shards.py"):
         reject_ep_sharded_checkpoint(_checkpoint(tmp_path, "ep_sharded"))
 
 
 def test_the_refusal_names_the_gathered_save_knob(tmp_path):
     """The gathered-save alternative is the YAML setting a user writes, not an internal call."""
-    with pytest.raises(NotImplementedError) as err:
+    with pytest.raises(ValueError) as err:
         reject_ep_sharded_checkpoint(_checkpoint(tmp_path, "ep_sharded"))
     assert "save_sharded_ep: false" in str(err.value), err.value
     assert "save_ep_model(" not in str(err.value), err.value
@@ -64,11 +65,11 @@ def test_only_rank0_touches_the_filesystem(tmp_path, monkeypatch):
     """The whole point of the gate: a non-zero rank must not run the probe at all, so a torn or
     half-fetched index on its node cannot raise it out of the collective its peers are in."""
 
-    def _explode(_path):
+    def _explode(*_args, **_kwargs):
         raise AssertionError("a non-zero rank probed the checkpoint itself")
 
-    monkeypatch.setattr(model_source, "is_global_main_process", lambda: False)
-    monkeypatch.setattr(model_source, "_detect_checkpoint_format", _explode)
+    monkeypatch.setattr(consensus, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(model_source, "read_checkpoint_index", _explode)
     assert reject_ep_sharded_checkpoint(_checkpoint(tmp_path, "ep_sharded")) is None
 
 
@@ -78,9 +79,9 @@ def test_a_torn_index_on_rank0_is_deferred_past_the_collective(tmp_path, monkeyp
     gate exists to prevent, moved one line earlier. It has to be fenced: recorded locally, the
     broadcast still entered, and the real cause raised uniformly afterwards."""
     (tmp_path / SAFETENSORS_INDEX_FILE).write_text('{"metadata": {"format": "ep_sha')
-    broadcast = model_source.broadcast_from_rank0
+    broadcast = consensus.broadcast_from_rank0
     entered: list = []
-    monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda v: entered.append(v) or broadcast(v))
+    monkeypatch.setattr(consensus, "broadcast_from_rank0", lambda v: entered.append(v) or broadcast(v))
 
     with pytest.raises(RuntimeError, match="JSONDecodeError"):
         reject_ep_sharded_checkpoint(ModelSource("checkpoints/run", None, str(tmp_path)))
@@ -89,15 +90,15 @@ def test_a_torn_index_on_rank0_is_deferred_past_the_collective(tmp_path, monkeyp
 
 
 def test_the_lazy_checkpoint_verdict_refuses_a_sharded_checkpoint(tmp_path):
-    with pytest.raises(NotImplementedError, match="merge_ep_shards.py"):
+    with pytest.raises(ValueError, match="merge_ep_shards.py"):
         resolve_lazy_checkpoint(_checkpoint(tmp_path, "ep_sharded"), lazy_requested=True, layout_supported=bool)
 
 
 @pytest.mark.parametrize("loader", sorted(LOADER_MODULES))
 def test_every_loader_that_can_be_handed_a_sharded_dir_runs_the_shared_gate(loader):
-    """Drift pin: importing the raw detector is what a re-introduced per-rank probe would need."""
+    """Drift pin: importing the index predicate is what a re-introduced per-rank probe would need."""
     module = LOADER_MODULES[loader]
-    assert not imports_name(module, "_detect_checkpoint_format")
+    assert not imports_name(module, "index_declares_ep_shards")
     tree = ast.parse(module.read_text(encoding="utf-8"))
     function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == loader)
     called = {

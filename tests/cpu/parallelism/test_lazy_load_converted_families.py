@@ -3,7 +3,7 @@
 
 A family whose hub checkpoint needs transformers' conversion mapping declares its key(s) on the EP
 layer class (``_HUB_CONVERSION_KEYS``) and the lazy loaders replay that mapping per key. This drives
-the REAL :func:`~src.distributed.expert_parallel.lazy_loader.load_ep_model_lazy` (EP patching
+the REAL :func:`~src.model_loading.parallel.ep.load_ep_model_lazy` (EP patching
 stubbed — it needs DeepEP and process groups) on a tiny checkpoint each family writes through its
 own ``save_pretrained`` (the hub layout: vendor namespaces, split or per-expert projections, the
 Step-3.5 vision tower's fused ``in_proj``), against the ``from_pretrained`` reference on the same
@@ -31,11 +31,13 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditio
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
+import src.distributed.expert_parallel.lazy_plan as lazy_plan
+import src.model_loading.parallel.ep as ep_lazy_loader
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, is_expert_weight_attr
-from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint, load_ep_model_lazy
-from src.model_loading.lazy_safetensors.weights import resolve_safetensors_index
+from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
+from src.model_loading.parallel.ep import load_ep_model_lazy
 from tests.common.models import (
     TINY_DSV4_CONFIG,
     TINY_GLM5_CONFIG,
@@ -147,7 +149,7 @@ def _mismatches(lazy_sd: dict, reference: dict, expert_slice: slice | None = Non
 
 def test_ep1_lazy_load_equals_from_pretrained(family, reference):
     model_type, model_class, path = family
-    assert lazy_loader_supports_checkpoint(path)
+    assert is_lazy_loadable(path)
 
     model = _lazy(model_class, path, ep_size=1)
     lazy_sd = model.state_dict()
@@ -164,7 +166,7 @@ def test_ep1_load_consumes_every_disk_key(family, caplog):
     """No hub key may fall through the mapping: an unexpected-key warning here means a tensor the
     reference loads and the lazy model initializes from the meta shell instead."""
     _, model_class, path = family
-    with caplog.at_level("WARNING", logger=ep_lazy_loader.logger.name):
+    with caplog.at_level("WARNING", logger=lazy_plan.logger.name):
         _lazy(model_class, path, ep_size=1)
     unexpected = [
         record.getMessage() for record in caplog.records if "align to no model tensor" in record.getMessage()
@@ -188,7 +190,7 @@ def test_the_hub_layout_is_not_the_canonical_one(family):
     """Anti-vacuity: the saved checkpoint really is in a namespace the model does not spell, so the
     equality above went through the conversion rather than a plain key-for-key read."""
     _, model_class, path = family
-    weight_map, _ = resolve_safetensors_index(path)
+    weight_map = resolve_checkpoint_weights(path).weight_map
     with torch.device("meta"):
         live = set(model_class.from_pretrained(path, device_map="meta").state_dict())
     assert set(weight_map) - live, "every disk key is a live key — nothing to convert"

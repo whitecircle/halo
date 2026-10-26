@@ -51,12 +51,12 @@ LOADING_PACKAGE = "src/model_loading"
 # so a renamed, removed or added loader is a deliberate edit rather than a silently shrunk sweep.
 DISPATCHED_LOADERS = frozenset(
     {
-        "_load_pp_stage_model",
+        "load_pp_stage_model",
         "load_ep_tp_model",
         "load_tp_model",
         "load_tp_moe_model",
         "load_ep_cp_model",
-        "_load_ep_model",
+        "load_ep_model",
         "load_cp_model",
         "_load_undistributed_model",
     }
@@ -72,8 +72,8 @@ TERMINAL_LOADERS = (
     ("src/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
     ("src/model_loading/parallel/whole_model.py", "resolve_trainer_model"),
     ("src/model_loading/parallel/whole_model.py", "load_whole_model"),
-    ("src/distributed/expert_parallel/lazy_loader.py", "load_ep_model_lazy"),
-    ("src/distributed/pipeline_parallel/lazy_loader.py", "load_pp_stage_model"),
+    ("src/model_loading/parallel/ep.py", "load_ep_model_lazy"),
+    ("src/model_loading/parallel/pp.py", "_load_stage_lazy"),
 )
 
 # Tool loaders whose model is handed to a FORWARD — reward scores, dedup embeddings, the

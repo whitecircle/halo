@@ -4,9 +4,9 @@ Liquid AI's `Lfm2MoeForCausalLM` — a hybrid MoE (interleaved short-convolution
 
 | | EP | CP | TP | ETP | PP | EP+TP |
 |---|:--:|:--:|:--:|:--:|:--:|:--:|
-| LFM-2 MoE | Yes | **No** | Yes | Yes | — | Yes |
+| LFM-2 MoE | Yes | **No** | Yes | Yes | **No** | Yes |
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). The checkpoints also tie their head (`tie_word_embeddings` is the config-class default) and ship no `lm_head` tensor, so the tie gate refuses them first.
 
 ## EP wrapper
 

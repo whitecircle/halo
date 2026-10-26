@@ -1,14 +1,9 @@
-"""The closed hub-conversion op vocabulary and the walker that applies it to checkpoint keys.
+"""The closed hub-conversion op vocabulary, the entry kinds left to other owners, and the translation of
+checkpoint keys into module keys.
 
-Some hub checkpoints keep the vendor's tensor namespace and layouts, bridged only by transformers'
-declarative conversion entries inside ``from_pretrained``. The lazy loaders read safetensors
-directly, so those entries are translated here into ops the materializer applies after its ranged
-read, and :func:`convert_disk_keys` walks the ordered steps over the checkpoint's keys.
-
-The vocabulary is closed: each op acts on one declared dim, so the expert planner can assert
-orthogonality to the expert shard axis and keep its ranged per-expert reads. An entry using any
-other transformers op raises at translation rather than loading wrong tensors. Which family declares
-which entries is injected by the EP package's hub-conversion seam.
+transformers' declarative conversion entries become ops the materializer applies after its ranged read;
+each acts on one declared dim, so the expert planner can keep its per-expert ranged reads. An entry using
+any other transformers op raises at translation rather than loading wrong tensors.
 """
 
 from __future__ import annotations
@@ -18,14 +13,21 @@ from collections import defaultdict
 from dataclasses import dataclass
 
 import torch
+import torch.nn as nn
 from transformers.core_model_loading import (
     Chunk,
     Concatenate,
     Interleave,
     PermuteForRope,
+    PrefixChange,
     WeightConverter,
     WeightRenaming,
 )
+
+# The attribute a multimodal wrapper nests its text model under; a text-only load of its checkpoint drops it.
+_LANGUAGE_MODEL_PREFIX = "language_model."
+# A conversion source addressing one tensor per module-list index (``…experts.*.w1.weight``).
+_PER_INDEX_SOURCE = re.compile(r"\.\*\.")
 
 
 @dataclass(frozen=True)
@@ -97,7 +99,7 @@ ConvertTargets = tuple[tuple[str, tuple[Concat | TensorOp, ...]], ...]
 
 
 @dataclass(frozen=True)
-class Rename:
+class RenameStep:
     pattern: re.Pattern
     replacement: str
     # Module path (relative to ``base_model_prefix``) whose keys alone this step sees; "" means all.
@@ -105,7 +107,7 @@ class Rename:
 
 
 @dataclass(frozen=True)
-class Convert:
+class ConvertStep:
     # One pattern per declared source; more than one is a fan-in whose first source carries a Concat.
     patterns: tuple[re.Pattern, ...]
     # Per canonical target: (replacement for the matched span, op pipeline).
@@ -114,17 +116,62 @@ class Convert:
     scope: str = ""
 
 
+def _op_kind(op) -> str:
+    if isinstance(op, Interleave):
+        return "interleave" if not op.inverse else "interleave_inverse"
+    if isinstance(op, PermuteForRope):
+        return "permute_rope"
+    if isinstance(op, Concatenate):
+        return "concat"
+    return "chunk" if isinstance(op, Chunk) else type(op).__name__
+
+
 def _compile_source(pattern: str) -> re.Pattern:
     """A conversion source pattern as transformers matches it: a regex with ``*`` meaning ``.*``."""
     return re.compile(pattern.replace("*", ".*"))
 
 
-def translate_renaming(entry: WeightRenaming, scope: str = "") -> Rename:
-    """One transformers ``WeightRenaming`` → :class:`Rename`."""
-    return Rename(_compile_source(entry.source_patterns[0]), entry.target_patterns[0], scope)
+def is_expert_bank_merge(entry) -> bool:
+    """Whether ``entry`` fuses one-tensor-per-expert checkpoint keys into an expert bank: a converter whose
+    every source carries a per-index wildcard, which in transformers' mappings is only ever an expert list.
+
+    That layout is owned at both ends by the expert code, never by a generic conversion replay: the lazy
+    loaders' ``ExpertFuser`` reads it, each family's ``gather_expert_state_dict`` writes it.
+    """
+    return isinstance(entry, WeightConverter) and all(_PER_INDEX_SOURCE.search(p) for p in entry.source_patterns)
 
 
-def translate_converter(entry: WeightConverter, config=None, scope: str = "") -> Convert:
+def is_sub_model_prefix_change(conversion) -> bool:
+    """Whether ``conversion`` strips the leading level of a sub-model's own keys: a ``PrefixChange`` scoped to
+    the sub-model, such as the ``vision_model`` level of a SigLIP tower (Command A+, LFM2-VL), which the hub
+    index and both engines' loaders keep and the module tree drops."""
+    return (
+        isinstance(conversion, PrefixChange)
+        and bool(conversion.scope_prefix)
+        and bool(conversion.prefix_to_remove)
+        and not conversion.model_prefix
+    )
+
+
+def translate_renaming(entry: WeightRenaming, scope: str = "") -> RenameStep:
+    """One transformers ``WeightRenaming`` → :class:`RenameStep`."""
+    return RenameStep(_compile_source(entry.source_patterns[0]), entry.target_patterns[0], scope)
+
+
+def _permute_rope(op: PermuteForRope, config, entry: WeightConverter) -> PermuteRope:
+    """The head count transformers' op reads at conversion: ``config[.subconfig_key]``'s
+    ``num_attention_heads``, with its own default of 1 where the config lacks the field."""
+    if config is None or op.permute_layer_names is None:
+        raise ValueError(
+            f"PermuteForRope for {entry.source_patterns[0]!r} needs the model config for its head "
+            f"count and the target names it permutes; got config={config is not None}, "
+            f"permute_layer_names={op.permute_layer_names!r}."
+        )
+    source = getattr(config, op.subconfig_key, config) if op.subconfig_key else config
+    return PermuteRope(getattr(source, "num_attention_heads", 1), inverse=op.inverse)
+
+
+def translate_converter(entry: WeightConverter, config=None, scope: str = "") -> ConvertStep:
     """One transformers ``WeightConverter`` → the closed-vocabulary equivalent, or raise.
 
     Supported pipelines: ``[Interleave]`` (one target), ``[Chunk]``, ``[Interleave, Chunk]``,
@@ -135,17 +182,7 @@ def translate_converter(entry: WeightConverter, config=None, scope: str = "") ->
     ops = tuple(entry.operations)
     targets = tuple(entry.target_patterns)
     sources = tuple(_compile_source(pattern) for pattern in entry.source_patterns)
-
-    def _kind(op) -> str:
-        if isinstance(op, Interleave):
-            return "interleave" if not op.inverse else "interleave_inverse"
-        if isinstance(op, PermuteForRope):
-            return "permute_rope"
-        if isinstance(op, Concatenate):
-            return "concat"
-        return "chunk" if isinstance(op, Chunk) else type(op).__name__
-
-    kinds = tuple(_kind(op) for op in ops)
+    kinds = tuple(_op_kind(op) for op in ops)
     concat_dim = None
     if len(sources) > 1 and (kinds != ("concat",) or len(targets) != 1):
         raise ValueError(
@@ -167,7 +204,13 @@ def translate_converter(entry: WeightConverter, config=None, scope: str = "") ->
     elif kinds == ("chunk", "permute_rope") and len(targets) > 1:
         permute = _permute_rope(ops[1], config, entry)
         per_target = tuple(
-            (t, (TakeChunk(ops[0].dim, i, len(targets)), *((permute,) if _permutes_target(ops[1], t) else ())))
+            (
+                t,
+                (
+                    TakeChunk(ops[0].dim, i, len(targets)),
+                    *((permute,) if any(name in t for name in ops[1].permute_layer_names) else ()),
+                ),
+            )
             for i, t in enumerate(targets)
         )
     else:
@@ -176,24 +219,7 @@ def translate_converter(entry: WeightConverter, config=None, scope: str = "") ->
             f"{entry.source_patterns[0]!r}: the lazy loaders support Interleave/Chunk/PermuteForRope "
             f"pipelines and a multi-source Concatenate only."
         )
-    return Convert(sources, per_target, concat_dim, scope)
-
-
-def _permute_rope(op: PermuteForRope, config, entry: WeightConverter) -> PermuteRope:
-    """The head count transformers' op reads at conversion: ``config[.subconfig_key]``'s
-    ``num_attention_heads``, with its own default of 1 where the config lacks the field."""
-    if config is None or op.permute_layer_names is None:
-        raise ValueError(
-            f"PermuteForRope for {entry.source_patterns[0]!r} needs the model config for its head "
-            f"count and the target names it permutes; got config={config is not None}, "
-            f"permute_layer_names={op.permute_layer_names!r}."
-        )
-    source = getattr(config, op.subconfig_key, config) if op.subconfig_key else config
-    return PermuteRope(getattr(source, "num_attention_heads", 1), inverse=op.inverse)
-
-
-def _permutes_target(op: PermuteForRope, target: str) -> bool:
-    return any(name in target for name in op.permute_layer_names)
+    return ConvertStep(sources, per_target, concat_dim, scope)
 
 
 def _scoped(key: str, scope: str, base_prefix: str) -> tuple[str, str] | None:
@@ -211,21 +237,24 @@ def _scoped(key: str, scope: str, base_prefix: str) -> tuple[str, str] | None:
     return None
 
 
+def _apply_tail_renames(key: str, tail: tuple[RenameStep | ConvertStep, ...], base_prefix: str) -> str:
+    for step in tail:
+        if isinstance(step, RenameStep) and (scoped := _scoped(key, step.scope, base_prefix)) is not None:
+            prefix, remainder = scoped
+            key = prefix + step.pattern.sub(step.replacement, remainder)
+    return key
+
+
 def convert_disk_keys(
-    disk_keys: list[str], steps: tuple[Rename | Convert, ...], base_prefix: str = ""
+    disk_keys: list[str], steps: tuple[RenameStep | ConvertStep, ...], base_prefix: str = ""
 ) -> dict[str, ConvertTargets]:
-    """Map each disk key to its canonical target(s) with ops; keys the steps do not change are absent.
+    """Each disk key's canonical target(s) with ops; keys the steps do not change are absent.
 
-    Walks the steps in declaration order: a rename substitutes at every occurrence in the key as it
-    flows, the first matching converter claims the key and fans it out, and renames declared after
-    that converter still apply to the produced targets (the table's ordering comments rely on it). A
-    scoped step sees only the keys under its sub-model path. transformers reaches the same targets by
-    a different route, so equality with ``from_pretrained`` holds per declared entry set rather than
-    by construction, and is pinned bitwise by the per-family lazy-load round-trip tests.
-
-    A multi-source converter is a fan-in: members are grouped by the target they produce and the
-    first source carries the group as a leading :class:`Concat`, so the siblings are absent from the
-    result. A partially present group raises rather than materializing a truncated tensor.
+    Steps walk in declaration order: a rename substitutes as the key flows, the first matching converter
+    claims and fans it out, and later renames still apply to its targets; a scoped step sees only its
+    sub-model's keys. Equality with ``from_pretrained`` (which takes another route) is pinned bitwise by the
+    per-family lazy-load round-trip tests. A multi-source converter's first source carries its group as a
+    leading :class:`Concat`; a partially present group raises rather than load a truncated tensor.
     """
     converted: dict[str, ConvertTargets] = {}
     # (step position, target key) -> {source index: disk key}: the members of one fan-in group.
@@ -239,7 +268,7 @@ def convert_disk_keys(
             if scoped is None:
                 continue
             prefix, remainder = scoped
-            if isinstance(step, Rename):
+            if isinstance(step, RenameStep):
                 current = prefix + step.pattern.sub(step.replacement, remainder)
                 continue
             source = next((i for i, pattern in enumerate(step.patterns) if pattern.search(remainder)), None)
@@ -287,9 +316,91 @@ def convert_disk_keys(
     return converted
 
 
-def _apply_tail_renames(key: str, tail: tuple[Rename | Convert, ...], base_prefix: str) -> str:
-    for step in tail:
-        if isinstance(step, Rename) and (scoped := _scoped(key, step.scope, base_prefix)) is not None:
-            prefix, remainder = scoped
-            key = prefix + step.pattern.sub(step.replacement, remainder)
-    return key
+def _align_key(key: str, model_keys: set[str], base_prefix: str, hub_renames, wrapperless: bool) -> str:
+    """One checkpoint key in the model's state-dict spelling, each step running only while it is unresolved:
+    a nested ``language_model.model.`` text model moved under the wrapper (Mistral3), the base-model prefix
+    added then stripped, the hub → module renames, then a ``language_model.`` segment dropped for a VLM
+    checkpoint loaded text-only.
+
+    Every step keeps a candidate only when it is a model key, except that the segment drop also keeps one for
+    a ``wrapperless`` model: a per-expert key is never a model key, and the fuser locates the fused parameter
+    it feeds from the namespace this step gives it.
+    """
+    new_key = key
+    # Mistral3's hub spelling of its text model's own ``model.`` level under the wrapper attribute.
+    nested = f"{_LANGUAGE_MODEL_PREFIX}model."
+    if new_key not in model_keys and new_key.startswith(nested):
+        candidate = f"{base_prefix}{_LANGUAGE_MODEL_PREFIX}{new_key[len(nested) :]}"
+        if candidate in model_keys:
+            new_key = candidate
+
+    if new_key not in model_keys and base_prefix and not new_key.startswith(base_prefix):
+        prefixed = base_prefix + new_key
+        if prefixed in model_keys:
+            new_key = prefixed
+
+    if new_key not in model_keys and base_prefix and new_key.startswith(base_prefix):
+        stripped = new_key[len(base_prefix) :]
+        if stripped in model_keys:
+            new_key = stripped
+
+    if new_key not in model_keys:
+        for hub_spelling, module_spelling in hub_renames:
+            candidate = new_key.replace(hub_spelling, module_spelling, 1)
+            if candidate in model_keys:
+                new_key = candidate
+                break
+
+    if new_key not in model_keys and f".{_LANGUAGE_MODEL_PREFIX}" in new_key:
+        stripped = new_key.replace(f".{_LANGUAGE_MODEL_PREFIX}", ".", 1)
+        if stripped in model_keys or wrapperless:
+            new_key = stripped
+    if new_key not in model_keys and new_key.startswith(_LANGUAGE_MODEL_PREFIX):
+        stripped = new_key[len(_LANGUAGE_MODEL_PREFIX) :]
+        if stripped in model_keys or wrapperless:
+            new_key = stripped
+
+    return new_key
+
+
+def build_key_mapping(
+    model: nn.Module,
+    disk_keys: list[str],
+    steps: tuple[RenameStep | ConvertStep, ...] | None = None,
+    hub_renames: tuple[tuple[str, str], ...] = (),
+) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
+    """``disk_key → model_key`` (a converted key's first target), and every converted key's targets with ops.
+
+    The ``steps`` (``None`` for a canonical checkpoint) run first; every target then goes through
+    :func:`_align_key`. An unmapped key is skipped by the planner, so an unapplied rename loses a whole module.
+    A converted key whose targets all miss the model while the key itself resolves stays unconverted:
+    transformers' sources are not vendor-anchored (deepseek_v4's ``\\.norm\\.`` → ``.kv_norm.`` also matches
+    the canonical ``model.norm.weight``), and its own loader undoes such a rename too.
+    """
+    prefix = getattr(model, "base_model_prefix", "")
+    base_prefix = f"{prefix}." if prefix else ""
+    model_keys = set(model.state_dict().keys())
+    wrapperless = not any(f".{_LANGUAGE_MODEL_PREFIX}" in f".{key}" for key in model_keys)
+    if steps is None:
+        return {key: _align_key(key, model_keys, base_prefix, hub_renames, wrapperless) for key in disk_keys}, {}
+
+    converted = convert_disk_keys(disk_keys, steps, base_prefix)
+
+    disk_to_model: dict[str, str] = {}
+    fanout: dict[str, ConvertTargets] = {}
+    for key in disk_keys:
+        plain = _align_key(key, model_keys, base_prefix, hub_renames, wrapperless)
+        aligned = None
+        targets = converted.get(key)
+        if targets is not None:
+            aligned = tuple(
+                (_align_key(target, model_keys, base_prefix, hub_renames, wrapperless), ops) for target, ops in targets
+            )
+            if plain in model_keys and all(target not in model_keys for target, _ in aligned):
+                aligned = None
+        if aligned is None:
+            disk_to_model[key] = plain
+        else:
+            disk_to_model[key] = aligned[0][0]
+            fanout[key] = aligned
+    return disk_to_model, fanout

@@ -22,8 +22,8 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForSequenceClassification, Qwen3Config, Qwen3ForCausalLM
 
-from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_structure
+from src.model_loading.parallel.pp import _load_stage_lazy
 from src.models.config_access import tie_flag_configs
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -53,7 +53,7 @@ def tied_checkpoint(tmp_path_factory) -> str:
 
 
 def _load(path: str, pp_rank: int = 0, **kwargs):
-    return load_pp_stage_model(
+    return _load_stage_lazy(
         path,
         pp_rank,
         PP_SIZE,

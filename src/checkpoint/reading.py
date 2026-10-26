@@ -181,7 +181,7 @@ def ep_sharded_checkpoint_reason(checkpoint_dir: str) -> str:
     return (
         f"{checkpoint_dir} is a per-rank sharded checkpoint: EP shards under a reused index, each holding "
         f"partial per-rank tensors, so it cannot be read as a whole model. Merge it first with "
-        f"scripts/after_training/merge_ep_shards.py, or re-save gathered (save_sharded_ep=False)."
+        f"scripts/after_training/merge_ep_shards.py, or re-save gathered (save_sharded_ep: false)."
     )
 
 
@@ -267,8 +267,8 @@ def _reject_absent_index_shards(checkpoint_dir: str) -> None:
             f"{checkpoint_dir}/{SAFETENSORS_INDEX_FILE} names {len(absent)} shard file(s) the directory "
             f"does not hold ({', '.join(absent[:4])}{', …' if len(absent) > 4 else ''}). A "
             f"pipeline-parallel save on a non-shared output filesystem leaves each node holding its "
-            f"own stage's parts under a copy of the whole-model index — gather every node's "
-            f"model-*.safetensors into one directory first. Otherwise the checkpoint was copied "
+            f"own stage's parts under a copy of the whole-model index — merge every node's directory "
+            f"with scripts/after_training/merge_pp_stages.py first. Otherwise the checkpoint was copied "
             f"incompletely; restore the missing shards."
         )
 
@@ -372,3 +372,11 @@ def detect_model_type(checkpoint_dir: str) -> str:
     the ``text_config`` one of a composite config that declares none."""
     model_types = detect_model_types(checkpoint_dir)
     return model_types[-1] if model_types else ""
+
+
+# Why a stage finds its own tensors absent from a per-node pipeline checkpoint: each node's directory holds
+# only the shards of the stages that node ran.
+PER_NODE_PLACEMENT_REMEDY = (
+    "A per-node pipeline checkpoint resumes only onto the same topology and rank placement; for "
+    "anything else merge every node's directory with scripts/after_training/merge_pp_stages.py first."
+)

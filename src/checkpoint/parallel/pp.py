@@ -16,7 +16,7 @@ from src.checkpoint.hub_layout import ModuleLayoutView, revert_conversions
 from src.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
 from src.checkpoint.parallel.reading import joined_streaming_reader, reject_ep_sharded_resume
 from src.checkpoint.parallel.writing import chunked_saveable_tensors
-from src.checkpoint.reading import resolve_checkpoint_weights
+from src.checkpoint.reading import PER_NODE_PLACEMENT_REMEDY, resolve_checkpoint_weights
 from src.checkpoint.weights_source import (
     LOADED_WEIGHTS_FROM_ATTR,
     built_from_checkpoint,
@@ -27,7 +27,6 @@ from src.checkpoint.writing import StreamingShardWriter, merge_shard_index, save
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.pipeline_parallel.lazy_loader import PER_NODE_PLACEMENT_REMEDY
 from src.log import KEY_PREVIEW_COUNT
 from src.models.unwrapping import unwrap_toolkit_wrappers
 from src.runtime.collectives import barrier, barrier_on_exit, combine_across_ranks
@@ -180,8 +179,8 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
                 logger.warning(
                     "Non-shared output filesystem: writing one copy of stage %d's shard per node "
                     "(%d nodes in this stage, so %dx duplication of this stage's bytes across the "
-                    "job). Each node's directory resumes on its own; to export, gather every node's "
-                    "directory into one before from_pretrained.",
+                    "job). Each node's directory resumes on its own; to export, merge every node's "
+                    "directory with scripts/after_training/merge_pp_stages.py before from_pretrained.",
                     config.pp_rank,
                     nodes_per_stage,
                     nodes_per_stage,

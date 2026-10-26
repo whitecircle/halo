@@ -15,7 +15,7 @@ from transformers.core_model_loading import rename_source_key
 
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.format import EP_SHARD_KEY_INFIX, ep_shard_filename, ep_sharded_index_metadata
-from src.checkpoint.hub_layout import reversed_export_transforms, revert_conversions
+from src.checkpoint.hub_layout import export_conversions, reversed_export_transforms, revert_conversions
 from src.checkpoint.parallel.context import CheckpointContext
 from src.checkpoint.parallel.writing import gather_hand_sliced_params, stream_gathered_checkpoint
 from src.checkpoint.writing import (
@@ -32,7 +32,6 @@ from src.distributed.expert_parallel.expert_weights import (
     supported_ep_merge_model_types,
     to_hub_layer_key,
 )
-from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from src.models.param_roles import persistent_buffers
@@ -68,17 +67,6 @@ def _save_key_remap(*, cp_key_remap: bool, peft_prefix: str | None) -> Callable[
         return strip_cp_attention_level(key) if cp_key_remap else key
 
     return remap
-
-
-def _hub_namespace_export(model: torch.nn.Module) -> Callable[[dict], dict]:
-    """The hub-namespace respell of one gathered chunk: transformers' save-side revert of what the load
-    recorded, minus the per-expert merges the gather owns; the identity where the load converted
-    nothing else. It raises rather than leave a chunk in the module spelling beside hub-spelled ones.
-    """
-    conversions = gathered_export_conversions(model)
-    if not conversions:
-        return lambda state: state
-    return partial(revert_conversions, model, conversions=conversions)
 
 
 def _resolve_and_cast(
@@ -145,7 +133,7 @@ def _ep_chunk_normalizer(
     carry — a folded LoRA adapter, or the frozen ``original_module`` half of a ``modules_to_save`` pair —
     never an expert weight.
     """
-    export = _hub_namespace_export(model)
+    export = partial(revert_conversions, model, conversions=export_conversions(model))
 
     def normalize(chunk: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         return export({key: cast(live, tensor) for live, tensor in chunk.items() if (key := remap(live)) is not None})
@@ -260,7 +248,7 @@ def reject_unmergeable_ep_sharded_save(
     # engine uses. Name-only, so rank-uniform; read off the plain transformers tree, whose names the
     # checkpoint carries.
     base = base_transformers_model(model)
-    renamings, converters = reversed_export_transforms(gathered_export_conversions(base))
+    renamings, converters = reversed_export_transforms(export_conversions(base))
     stuck = []
     if renamings or converters:
         for name, _ in itertools.chain(base.named_parameters(), persistent_buffers(base)):

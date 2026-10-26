@@ -194,7 +194,7 @@ def test_a_dropped_optimizer_moment_is_a_delta(monkeypatch, tmp_path):
 
 def test_an_export_left_in_the_module_namespace_is_a_key_delta(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", [VENDOR_NAMESPACE_EXPORT])
-    monkeypatch.setattr(ep_save, "gathered_export_conversions", lambda model: [])
+    monkeypatch.setattr(ep_save, "export_conversions", lambda model: [])
 
     [delta] = compare_outputs(baseline, _produced(tmp_path / "mutated", [VENDOR_NAMESPACE_EXPORT]))
 

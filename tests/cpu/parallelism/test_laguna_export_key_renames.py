@@ -33,7 +33,7 @@ from src.distributed.expert_parallel.expert_weights import (
     to_hub_layer_key,
 )
 from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.lazy_loader import build_family_key_mapping
+from src.distributed.expert_parallel.lazy_plan import family_key_mapping
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 LAGUNA_MOE_LAYER = 1  # layer 0 is dense (first_k_dense_replace)
@@ -150,7 +150,7 @@ def test_lazy_loader_maps_hub_keys_onto_the_live_module():
         f"{prefix}.shared_expert.down_proj.weight",
         f"{prefix}.gate.weight",
     ]
-    mapping, _ = build_family_key_mapping(model, hub_keys)
+    mapping, _ = family_key_mapping(model, hub_keys)
     live = set(model.state_dict())
     for hub_key in hub_keys:
         assert mapping[hub_key] in live, f"{hub_key} -> {mapping[hub_key]} matches no live tensor"

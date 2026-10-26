@@ -233,6 +233,11 @@
   "Glm4MoeLiteAttention": "Glm4MoeLiteUlyssesAttention"
  },
  "pp backbone claims": [
+  "GptOssModel",
+  "Qwen3Model",
+  "Qwen3_5TextModel",
+  "Qwen3_5MoeTextModel",
+  "Step3p7TextModel",
   "ZayaModel",
   "DeepseekV4Model",
   "InklingTextModel",

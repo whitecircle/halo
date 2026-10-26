@@ -30,25 +30,27 @@ from transformers import AutoConfig
 from trl import ModelConfig
 
 import scripts.training.embedding as embedding_script
-import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
-import src.distributed.pipeline_parallel.lazy_loader as pp_lazy_loader
+import src.model_loading.parallel.ep as ep_lazy_loader
+import src.model_loading.parallel.pp as pp_lazy_loader
+from src.checkpoint.reading import resolve_checkpoint_weights
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
-from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.expert_parallel.patching import ep_claimed_blocks
-from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner, load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, StageLayout
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import cast_parameters_to_run_dtype
+from src.model_loading.lazy_safetensors.materialization import SafetensorsWeightLoader, WeightAction, WeightPlan
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
+from src.model_loading.parallel.ep import load_ep_model_lazy
+from src.model_loading.parallel.fp32_masters import fp32_master_param_keys
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from src.model_loading.parallel.pp import StageKeyFilter, _load_stage_lazy
 from src.model_loading.parallel.whole_model import cast_loaded_parameters, resolve_trainer_model
 from src.models.param_roles import fp32_pinned_names
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B
 from tests.common.pinned_params import pins_off_stored, stored_fp32_pins
+from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.source_sweep import builds_a_model, functions_calling
 from tests.common.tiny_models import PINNED_FP32_FAMILIES, TINY_MOE_FAMILIES, build_tiny_family_checkpoint
 from tests.common.tokenizers import load_cached_tokenizer
@@ -378,7 +380,9 @@ def _load_with(
     }
     if loader.startswith("ep_lazy"):
         return load_ep_model_lazy(path, ep_config, config, **common)
-    return load_pp_stage_model(path, pp_rank, pp_size, config=config, ep_config=ep_config, **common)
+    # Inkling is refused for PP, but its stage loader is exercised.
+    with registered_pp_backbones("InklingTextModel"):
+        return _load_stage_lazy(path, pp_rank, pp_size, config=config, ep_config=ep_config, **common)
 
 
 def _outside_moe_blocks(model: nn.Module, *, aliases: bool = False) -> frozenset[str]:
@@ -447,7 +451,7 @@ def test_a_later_pp_stage_keeps_the_pins_of_its_own_layers(stored_fp32_checkpoin
     model = _load_with("pp_stage", "deepseek_v4", path, keep_fp32, monkeypatch, pp_rank=1, pp_size=2)
 
     lo, hi = getattr(model, PP_STAGE_PARTITION_ATTR)[1]
-    planner = PPWeightPlanner(lo, hi, StageLayout.of(model).layer_root)
+    planner = StageKeyFilter(lo, hi, StageLayout.of(model).layer_root)
     stage_pins = {planner.stage_key(name): name for name in pinned if planner.owns(name)}
     stage_names = {name for name, _ in model.named_parameters()}
     assert lo > 0 and set(stage_pins) != pinned & stage_names
@@ -492,7 +496,7 @@ def test_the_weight_loader_keeps_only_the_named_keys_fp32(tmp_path, keep_fp32):
     plans = [WeightPlan(WeightAction.REPLICATE, "model.safetensors", key, key) for key in stored]
     with torch.device("meta"):
         model = nn.Linear(8, 8)
-    loader = SafetensorsWeightLoader(str(tmp_path), ["model.safetensors"], device="cpu")
+    loader = SafetensorsWeightLoader(str(tmp_path), resolve_checkpoint_weights(str(tmp_path)).weight_map, device="cpu")
 
     loader.load_into_model(model, plans, dtype=torch.bfloat16, keep_fp32=keep_fp32)
 

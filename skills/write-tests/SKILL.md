@@ -83,7 +83,10 @@ Rules:
    skeleton; do not hand-roll init/finally.
 2. **Register in `tests/gpu/manifest.py`** — add one `TestSpec(nproc=..., markers=(...),
    timeout=..., ...)`. A script on disk but absent from the manifest fails collection
-   (`unregistered_scripts`). Markers must come from `ALL_MARKERS`.
+   (`unregistered_scripts`). Markers must come from `ALL_MARKERS`; a pipeline suite carries `pp`
+   and lives under `tests/gpu/parallelism/pp/`, and the PP tier is `pytest -m 'gpu and pp' tests/gpu`.
+   A PP test on a family not registered in `PP_FAMILY_SPECS` opts it in explicitly with
+   `registered_pp_backbones(...)` (`tests/common/pp_fakes.py`, a context manager and decorator).
 3. **Ports** — never hardcode `--master_port`; the launcher allocates a free one via
    `tests/common/ports.py`. Your script reads it from the env (handled by `init_distributed`).
 4. **Tolerances** — import named constants from `tests/common/tolerances.py` (`TOL.*`); never

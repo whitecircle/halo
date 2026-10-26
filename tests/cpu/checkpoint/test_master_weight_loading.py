@@ -24,16 +24,17 @@ from transformers import AutoConfig, BitsAndBytesConfig, Qwen3Config, Qwen3ForCa
 from transformers.core_model_loading import Chunk, WeightConverter, WeightRenaming
 from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 
-import src.distributed.expert_parallel.master_weights as master_loading
 import src.model_loading.parallel.cp as cp_loading
+import src.model_loading.parallel.fp32_masters as master_loading
 import src.model_loading.parallel.loader as loading
 import src.model_loading.parallel.tp as tp_loading
 import src.model_loading.parallel.whole_model as whole_model
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
-from src.distributed.expert_parallel.hub_conversion import resolve_loaded_conversion_steps
-from src.distributed.expert_parallel.lazy_loader import ExpertFuser, build_family_key_mapping
+from src.distributed.expert_parallel.expert_fuser import ExpertFuser, FusionTask
+from src.distributed.expert_parallel.lazy_plan import family_key_mapping
+from src.model_loading.lazy_safetensors.conversion_selection import replay_loaded_conversions
+from src.model_loading.parallel.fp32_masters import fp32_master_param_keys
 from src.model_loading.parallel.model_source import ModelSource
 from src.runtime import consensus, load_coordination
 from tests.common.gloo import run_gloo_ranks
@@ -312,7 +313,7 @@ def test_fused_master_replay_preserves_live_device_instead_of_staging_device(tmp
     state = {f"experts.{rank}.down_proj.weight": expected[rank] for rank in range(2)}
     save_file(state, str(tmp_path / "model.safetensors"))
     tasks = [
-        (
+        FusionTask(
             "experts.down_proj",
             "down",
             {
@@ -349,7 +350,7 @@ def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path)
     state = model.state_dict(keep_vars=True)
     for key, disk_key in ((vision_key, disk_vision_key), (text_key, text_key)):
         state[key].data.copy_(stored[disk_key])
-    plain_mapping, _ = build_family_key_mapping(model, list(stored))
+    plain_mapping, _ = family_key_mapping(model, list(stored))
     assert plain_mapping[disk_vision_key] not in state, "the declared lazy family cannot do this nested rename"
     master_loading.restore_fp32_master_parameters(
         model, str(tmp_path), EPConfig(ep_size=1, experts_fsdp_managed=True), keep_non_ep=True
@@ -404,7 +405,7 @@ def test_prequantized_float_storage_keeps_codes_and_restores_plain_masters(tmp_p
         WeightConverter(source_patterns=["a", "b"], target_patterns="c", operations=[Chunk(dim=0)])
     )
     with pytest.raises(ValueError, match="multi-source.*qwen3"):
-        resolve_loaded_conversion_steps(model)
+        replay_loaded_conversions(model)
 
 
 if __name__ == "__main__":

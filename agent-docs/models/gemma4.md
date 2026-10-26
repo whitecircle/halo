@@ -45,7 +45,7 @@ Gemma 4 attention uses two patterns that need bespoke wrappers:
 
 No Gemma 4 attention class appears in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`) or in the CP wrapper registry (`src/distributed/context_parallel/families.py`), so neither mode patches Gemma 4 attention.
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+Pipeline parallelism refuses Gemma 4 (`GEMMA4_PP`): the per-layer embeddings are sliced by enumerate position, which a sliced layer list re-bases, and the KV-shared layers read an earlier layer's K/V through a forward-threaded dict a stage boundary breaks ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ETP only shards the expert FFN weights (gate/up/down), leaving attention untouched and the sibling `Gemma4TextRouter` FSDP-managed and replicated across ETP ranks. The fused-GLU `gate_up_proj` is split into separate `gate_proj`/`up_proj` shards at init so each rank holds matching gate/up positions on the intermediate dim. See [Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md).
 

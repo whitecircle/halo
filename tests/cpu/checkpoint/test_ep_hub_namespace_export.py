@@ -54,7 +54,7 @@ from src.distributed.expert_parallel.expert_weights import (
     is_expert_weight_attr,
     to_hub_layer_key,
 )
-from src.distributed.expert_parallel.lazy_loader import build_family_key_mapping
+from src.distributed.expert_parallel.lazy_plan import family_key_mapping
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.model_loading.lazy_safetensors.conversion import Concat
@@ -311,7 +311,7 @@ def test_lazy_loader_maps_the_gathered_save(name, tmp_path):
     ``vision_model`` level included."""
     loaded = _loaded(name, tmp_path)
     shell = tiny_family_model(loaded.family)
-    disk_to_model, fanout = build_family_key_mapping(shell, list(loaded.saved))
+    disk_to_model, fanout = family_key_mapping(shell, list(loaded.saved))
 
     live = set(shell.state_dict())
     # A fan-in's other sources (GLM-5 Next's k/v short convolutions) are read through its first one.
