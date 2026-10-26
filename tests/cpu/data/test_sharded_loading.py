@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 from botocore.exceptions import ClientError, NoCredentialsError
-from datasets import Dataset, DatasetDict, load_from_disk
+from datasets import Dataset, DatasetDict
 
 import halo.data.sources.loading as loading
 from halo.data.preprocessed.preparation import shard_dataset
@@ -490,20 +490,20 @@ def test_warm_shard_cache_serves_without_aws_credentials(tmp_path):
     """
     source = tmp_path / "shard_source"
     Dataset.from_dict({"input_ids": [[1, 2, 3]] * 4}).save_to_disk(str(source))
-    real_load_from_disk = load_from_disk
     shard = ShardInfo(id=0, path="train/shard_00000", num_examples=4)
+    cache_dir = patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(tmp_path / "cache"))
 
-    def _load(path, *args, **kwargs):
-        # Stands in for the S3 fetch only; the cache read must go through the real loader.
-        return real_load_from_disk(str(source)) if str(path).startswith("s3://") else real_load_from_disk(path)
-
+    # The first run, with credentials, fills the cache; its fetch stands in for the S3 download.
     with (
-        patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(tmp_path / "cache")),
-        patch("halo.data.sources.sharded_dataset.load_from_disk", side_effect=_load),
-        patch("halo.data.sources.sharded_dataset.S3Client", side_effect=NoCredentialsError()),
+        cache_dir,
+        patch("halo.data.sources.sharded_dataset.S3Client"),
+        patch(
+            "halo.data.sources.sharded_dataset.download_dataset_tree",
+            side_effect=lambda client, key, path: shutil.copytree(source, path),
+        ),
     ):
         ShardedDatasetLoader("s3://bucket/dataset", dp_rank=0, dp_size=1)._load_shard_from_s3(shard)
-        # A fresh loader is the relaunch: the first one has already latched the probe off.
+    with cache_dir, patch("halo.data.sources.sharded_dataset.S3Client", side_effect=NoCredentialsError()):
         relaunched = ShardedDatasetLoader("s3://bucket/dataset", dp_rank=0, dp_size=1)
         served = relaunched._load_shard_from_s3(shard)
 

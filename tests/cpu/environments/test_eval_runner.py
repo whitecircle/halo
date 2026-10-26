@@ -468,17 +468,26 @@ def test_load_hf_split_reads_a_bare_saved_dataset(tmp_path):
     assert split[0] == {"prompt": "p", "answer": "a"}
 
 
-def test_load_hf_split_reads_a_hub_id_from_the_hub_not_off_disk(tmp_path, monkeypatch):
-    """``org/name`` is a Hub id even where a directory of that name sits in the working directory.
+def test_load_hf_split_refuses_a_hub_id_a_local_directory_shadows(tmp_path, monkeypatch):
+    """``org/name`` beside a directory of that name is refused, neither read off disk nor fetched.
 
     Classifying by an existence probe reads whatever local copy happens to shadow the id the caller
-    named — and on a non-shared filesystem it answers differently per rank.
+    named, while the string rule alone silently reads the Hub for a caller who meant the directory.
     """
     shadow = tmp_path / "org" / "name"
     shadow.mkdir(parents=True)
     Dataset.from_list([{"prompt": "local-row"}]).save_to_disk(str(shadow))
     monkeypatch.chdir(tmp_path)
 
+    monkeypatch.setattr(eval_runner, "load_dataset", lambda *a, **k: pytest.fail("a shadowed Hub id was fetched"))
+    monkeypatch.setattr(eval_runner, "load_from_disk", lambda *a, **k: pytest.fail("a Hub id was read off disk"))
+
+    with pytest.raises(ValueError, match=r"'\./org/name'"):
+        load_hf_split("org/name", None, "test")
+
+
+def test_load_hf_split_reads_a_hub_id_from_the_hub(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     seen: dict = {}
 
     def fake_load_dataset(path, config=None, *, split=None, **_kwargs):

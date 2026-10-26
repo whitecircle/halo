@@ -27,8 +27,7 @@ from halo.checkpoint.parallel.writing import (
 from halo.checkpoint.writing import normalize_gathered_state_dict
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from halo.models.unwrapping import find_peft_model, unwrap_toolkit_wrappers
-from halo.runtime.collectives import barrier_on_exit
-from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.filesystem import fs_aware_makedirs
 from halo.runtime.ranks import get_global_world_size
 
@@ -93,12 +92,9 @@ def _streamed_save(
     chunks: Iterable[dict[str, torch.Tensor]],
     saved: str,
 ) -> None:
-    """COLLECTIVE: the FSDP2/CP/TP body — stream ``chunks`` through the gathered writer.
-
-    Fenced because one rank writes while all must reach the trailing barrier: an ENOSPC would
-    otherwise strand the peers.
-    """
-    with barrier_on_exit():
+    """COLLECTIVE: the FSDP2/CP/TP body — stream ``chunks`` through the gathered writer, fenced so the writer's
+    failure (an ENOSPC) raises on every rank."""
+    with barrier_on_exit(f"Writing the checkpoint to {output_dir}"):
         stream_gathered_checkpoint(
             model,
             chunks,

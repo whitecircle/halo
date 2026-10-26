@@ -23,7 +23,7 @@ from transformers.trainer_utils import seed_worker
 
 from halo.hardware import current_device
 from halo.runtime.collectives import all_gather_cat
-from halo.runtime.consensus import rank_consensus, rank_min
+from halo.runtime.consensus import rank_consensus, rank_max
 from halo.runtime.ranks import get_global_world_size, has_process_group, is_global_main_process, is_multi_rank_run
 from halo.trainers.parallelism.trainer_rules import (
     reject_batch_rebalance_on_dp_sharded_loader,
@@ -251,14 +251,17 @@ class DataParallelLoaderMixin:
         return uses_dp_sharded_loader(self.parallelism_config, self._dataset_presharded)
 
     def _equalize_presharded_length(self, dataset, split: str = "train"):
-        """COLLECTIVE. Truncate a pre-sharded dataset to the global-minimum length."""
+        """COLLECTIVE. Truncate a pre-sharded dataset to the global-minimum length, global rank 0 warning of the
+        largest drop any rank takes."""
         if not is_multi_rank_run():
             return dataset
         try:
             n = len(dataset)
         except TypeError:
             return dataset  # IterableDataset
-        (min_len,) = rank_min([n])
+        # One all-reduce for both extremes: the MAX of the negated length is the MIN.
+        max_len, negated_min_len = rank_max([n, -n])
+        min_len = -negated_min_len
         if min_len == 0:
             if split == "train":
                 raise ValueError(
@@ -274,19 +277,18 @@ class DataParallelLoaderMixin:
                 f"metrics. Re-preprocess the {split} split with at least data_parallel_size non-empty "
                 f"shards{', or disable evaluation' if split == 'eval' else ''}."
             )
-        if min_len < n:
-            dropped = n - min_len
-            if is_global_main_process():
-                logger.warning(
-                    f"⚠ Pre-sharded {split} dataset DATA LOSS: this rank holds {n} examples but is truncated to "
-                    f"the global min {min_len} ({dropped} examples / {100.0 * dropped / n:.1f}% of this rank "
-                    f"DROPPED each pass over the split) so all data-parallel ranks run the same number of steps. "
-                    f"Cause: num_shards is not a multiple of data_parallel_size, so some ranks got more shards. "
-                    f"Re-preprocess with num_shards a multiple of the DP degree (ideally >> it, e.g. "
-                    f"k×world_size), so the truncation is even and negligible."
-                )
-            return dataset.select(range(min_len))
-        return dataset
+        if max_len > min_len and is_global_main_process():
+            dropped = max_len - min_len
+            logger.warning(
+                f"⚠ Pre-sharded {split} dataset DATA LOSS: data-parallel ranks hold {min_len} to {max_len} "
+                f"examples, so every rank is truncated to {min_len} and the fullest DROPS {dropped} "
+                f"({100.0 * dropped / max_len:.1f}% of its rows) each pass over the split, so all ranks run the "
+                f"same number of steps. Shards hold whole rows: ranks differ by about a shard when num_shards is "
+                f"not a multiple of data_parallel_size, and by up to one row per shard they hold when it is, since "
+                f"shard sizes differ by one. Re-preprocess with num_shards a multiple of the DP degree to keep the "
+                f"drop to that rounding."
+            )
+        return dataset.select(range(min_len)) if min_len < n else dataset
 
     def _loader_params(self, dataset, batch_size: int, description: str) -> tuple[Any, dict]:
         """Column-pruned dataset plus the ``DataLoader`` kwargs the train, eval and test paths share (HF

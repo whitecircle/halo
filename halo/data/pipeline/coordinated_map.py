@@ -8,7 +8,6 @@ import contextlib
 import functools
 import inspect
 import logging
-import multiprocessing
 import os
 import shutil
 import types
@@ -30,29 +29,40 @@ from halo.data.pipeline.map_cache_key import (
 from halo.data.pipeline.rejected_rows import dataset_total_size, is_valid_example, report_rejected_rows
 from halo.data.sources.dataset_cache import publish_cached_download
 from halo.env import env_int
+from halo.hardware import available_cpu_count
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import store_join_recorded_failure
 from halo.runtime.filesystem import fs_aware_makedirs, is_fs_load_rank
-from halo.runtime.ranks import get_global_rank, is_local_main_process
+from halo.runtime.ranks import get_global_rank, get_local_world_size, is_local_main_process
 
 logger = logging.getLogger(__name__)
 
+# The cache dir :func:`scratch_dataset_maps` redirects coordinated operations to, for its block.
+_scratch_cache_dir: str | None = None
 
-def _resolve_dataset_num_proc() -> int:
-    """Default map/filter worker processes: a quarter of the cores, capped at 4 since every rank spawns them.
-    ``HALO_DATASET_NUM_PROC`` pins it fleet-wide: HF keys its per-worker cache files by the count, so a node
-    deriving another value would miss the writer rank's caches."""
+
+def dataset_num_proc_override() -> int | None:
+    """``HALO_DATASET_NUM_PROC``, or ``None`` while it is unset; below 1 raises."""
     name = "HALO_DATASET_NUM_PROC"
     override = env_int(name, None)
-    if override is None:
-        # max(1, ...): datasets reads 0 as "no multiprocessing" on some paths and rejects it on others.
-        return max(1, min(multiprocessing.cpu_count() // 4, 4))
-    if override < 1:
+    if override is not None and override < 1:
         raise ValueError(
-            f"{name}={override} is invalid: the fleet-wide num_proc pin must be >= 1 "
+            f"{name}={override} is invalid: the num_proc override must be >= 1 "
             f"(use 1 to disable dataset-map multiprocessing)."
         )
     return override
+
+
+def _resolve_dataset_num_proc() -> int:
+    """Default map/filter worker processes, ``HALO_DATASET_NUM_PROC`` overriding: three quarters of the CPUs this
+    process may run on, at most 64. The load rank runs a coordinated operation while its node's other ranks wait
+    and then read its cache files back, whatever their own count; those ranks compute only on a per-rank key (a
+    pre-sharded load), sharing the count then (:func:`coordinated_dataset_operation`)."""
+    override = dataset_num_proc_override()
+    if override is not None:
+        return override
+    # max(1, ...): datasets reads 0 as "no multiprocessing" on some paths and rejects it on others.
+    return max(1, min(available_cpu_count() * 3 // 4, 64))
 
 
 DATASET_NUM_PROC = _resolve_dataset_num_proc()
@@ -63,10 +73,15 @@ def resolve_map_num_proc(configured: int | None) -> int:
     return configured or DATASET_NUM_PROC
 
 
+def datasets_cache_dir() -> str:
+    """The datasets cache dir: ``HF_DATASETS_CACHE``, else HF's default."""
+    return os.environ.get("HF_DATASETS_CACHE") or str(datasets.config.HF_DATASETS_CACHE)
+
+
 def ensure_cache_dir(writer_rank: Callable[[], bool] = is_local_main_process) -> str:
-    """The datasets cache dir every rank agrees on (``HF_DATASETS_CACHE`` or HF's default), created by
-    ``writer_rank`` behind a fenced write, so a read-only or full volume raises on every rank."""
-    cache_dir = os.environ.get("HF_DATASETS_CACHE") or str(datasets.config.HF_DATASETS_CACHE)
+    """COLLECTIVE: :func:`datasets_cache_dir` (inside :func:`scratch_dataset_maps`, its staging dir), created by
+    ``writer_rank`` through :func:`fs_aware_makedirs`, so a read-only or full volume raises on every rank."""
+    cache_dir = _scratch_cache_dir or datasets_cache_dir()
     fs_aware_makedirs(cache_dir, writer_rank=writer_rank)
     return cache_dir
 
@@ -191,6 +206,10 @@ def coordinated_dataset_operation(
     ``ensure_cache_dir``'s barrier would run on the main rank alone and the store joins go off by one."""
     cache_dir = ensure_cache_dir()
 
+    # A follower computes only on a per-rank key (a pre-sharded load), and then every follower of the node maps at
+    # once, so each takes its share of the count; on a cache hit no count spawns a worker.
+    if num_proc is not None and num_proc > 1 and not is_fs_load_rank():
+        num_proc = max(1, num_proc // get_local_world_size())
     # None, not 1: HF still spawns a subprocess at num_proc=1.
     effective_num_proc = None if num_proc is not None and num_proc <= 1 else num_proc
     operation_kwargs = {"num_proc": effective_num_proc, "load_from_cache_file": True}
@@ -216,24 +235,29 @@ def coordinated_dataset_operation(
 
 
 @contextlib.contextmanager
-def _uncached_maps_in(staging_dir: str):
-    """HF's map cache off, with every map's output written under ``staging_dir`` (removed on exit) instead of the
-    process-lifetime ``$TMPDIR/hf_datasets-*`` directory, which keeps every intermediate on the root filesystem;
-    ``datasets`` has no setting for it, so its module-level holder is swapped."""
+def scratch_dataset_maps(staging_dir: str):
+    """Every map inside the block writes under ``staging_dir``, removed on exit: a coordinated operation's cache
+    file (:func:`ensure_cache_dir`) and, with HF's map cache off, every other map's output, which would otherwise
+    sit in the process-lifetime ``$TMPDIR/hf_datasets-*`` directory (``datasets`` has no setting for it, so its
+    module-level holder is swapped). For work no later run re-reads, done by one process: a rank outside the block
+    would key its caches elsewhere."""
+    global _scratch_cache_dir
     caching = datasets.is_caching_enabled()
-    held = hf_fingerprint._TEMP_DIR_FOR_TEMP_CACHE_FILES
+    held_temp_dir, held_cache_dir = hf_fingerprint._TEMP_DIR_FOR_TEMP_CACHE_FILES, _scratch_cache_dir
     os.makedirs(staging_dir)
     hf_fingerprint._TEMP_DIR_FOR_TEMP_CACHE_FILES = types.SimpleNamespace(name=staging_dir)
+    _scratch_cache_dir = staging_dir
     datasets.disable_caching()
     try:
         yield
     finally:
         if caching:
             datasets.enable_caching()
-        hf_fingerprint._TEMP_DIR_FOR_TEMP_CACHE_FILES = held
+        hf_fingerprint._TEMP_DIR_FOR_TEMP_CACHE_FILES = held_temp_dir
+        _scratch_cache_dir = held_cache_dir
         try:
             shutil.rmtree(staging_dir)
-        except OSError as exc:  # never in place of the transform's own error
+        except OSError as exc:  # never in place of the block's own error
             logger.warning(f"Could not remove the dataset-preparation staging directory {staging_dir}: {exc}")
 
 
@@ -254,7 +278,7 @@ def coordinated_dataset_transform(
 
     def prepare_into(tmp_path: str) -> None:
         # Named like the publish's own temp dirs, so its stale-publish reaper collects one a crash left.
-        with _uncached_maps_in(f"{target}.tmp-{uuid.uuid4().hex}"):
+        with scratch_dataset_maps(f"{target}.tmp-{uuid.uuid4().hex}"):
             transform().save_to_disk(tmp_path)
 
     def publish_and_load() -> Dataset:

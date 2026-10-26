@@ -28,7 +28,12 @@ from datasets import Dataset, load_dataset
 from transformers import AutoModel, AutoTokenizer
 
 from halo.data import deduplication
-from halo.data.sources.paths import DATA_FILE_BUILDERS, data_file_builder, parse_dataset_source
+from halo.data.sources.paths import (
+    DATA_FILE_BUILDERS,
+    data_file_builder,
+    parse_dataset_source,
+    reject_ambiguous_hub_source,
+)
 from halo.log import configure_cli_logging
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
@@ -164,7 +169,8 @@ def load_dataset_from_path(
 
     Classified by :func:`parse_dataset_source` rather than by whether the path exists on this host: an
     existence probe would read a stale local file shadowing a Hub id, and read a mistyped local path
-    as a Hub id whose failure names the network instead of the typo. The builder comes from
+    as a Hub id whose failure names the network instead of the typo; a Hub-shaped path naming a local
+    directory is refused. The builder comes from
     :func:`data_file_builder`, over the same table the classifier and ``halo.data.sources.loading`` read,
     so an extension accepted as local always has a builder here.
     """
@@ -178,6 +184,7 @@ def load_dataset_from_path(
         )
 
     if source_type == "hf_hub":
+        reject_ambiguous_hub_source(input_path)
         logger.info(f"Loading dataset from the HuggingFace Hub: {path}")
         dataset = load_dataset(path, name=dataset_config, split=dataset_split)
     else:

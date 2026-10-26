@@ -33,10 +33,11 @@ from torch.distributed import distributed_c10d as c10d
 import halo.weight_sync.clients.base as base_module
 import halo.weight_sync.clients.sglang as sglang_module
 import halo.weight_sync.clients.vllm as vllm_module
+import halo.weight_sync.transport.rendezvous as rendezvous
 from halo.inference.endpoints import is_loopback
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
-from halo.weight_sync.transport.rendezvous import RendezvousListener, _outbound_ip
+from halo.weight_sync.transport.rendezvous import RendezvousListener, _master_address, _route_source_ip
 from tests.common.fake_engines import FakeVLLMServer
 from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
@@ -206,7 +207,7 @@ def test_the_listener_binds_the_advertised_address(client, engine_requests, adve
     advertising the trainer's NIC (a server on another node) listens on that NIC alone."""
     expected = "127.0.0.1"
     if advertise_nic:
-        expected = _outbound_ip()
+        expected = _route_source_ip(NON_LOCAL_ADDRESS)
         if is_loopback(expected):
             pytest.skip("no default route: this host has no NIC address to advertise")
         client.group_host = expected
@@ -349,6 +350,81 @@ def test_a_failure_before_the_store_takes_the_listener_closes_it(
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as rebind:
         rebind.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         rebind.bind(("127.0.0.1", port))  # EADDRINUSE while a detached listener still holds the port
+
+
+class _TwoNicHost:
+    """A host whose default route leaves through a management NIC while the cluster subnet, where the server
+    sits, is reached through another; it binds neither address the tests name, so the server is remote."""
+
+    MANAGEMENT_NIC = "192.168.1.5"
+    CLUSTER_NIC = "10.0.0.5"
+    CLUSTER_SERVER = "10.1.2.3"
+
+    def __init__(self, *, routes: bool = True):
+        self.routes = routes
+        self.dialed: list[tuple[str, int]] = []
+
+    def socket(self, family, kind):
+        return _FakeSocket(self, kind)
+
+
+class _FakeSocket:
+    def __init__(self, host: _TwoNicHost, kind):
+        self.host, self.kind, self.target = host, kind, None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def bind(self, address):
+        raise OSError(99, "Cannot assign requested address")
+
+    def connect(self, address):
+        if not self.host.routes:
+            raise OSError(101, "Network is unreachable")
+        self.host.dialed.append(address)
+        self.target = address[0]
+
+    def getsockname(self):
+        on_cluster = self.target is not None and self.target.startswith("10.")
+        return (_TwoNicHost.CLUSTER_NIC if on_cluster else _TwoNicHost.MANAGEMENT_NIC, 0)
+
+
+def test_a_remote_server_is_told_the_nic_on_the_route_to_it(monkeypatch):
+    """On a multi-homed node the default route can leave through a NIC the server cannot reach; with no host
+    configured the engine is told this host's address on the route to the server itself."""
+    monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
+    host = _TwoNicHost()
+    monkeypatch.setattr(rendezvous.socket, "socket", host.socket)
+
+    address = _master_address(
+        engine="vLLM",
+        server_url=f"http://{host.CLUSTER_SERVER}:8000",
+        server_host=host.CLUSTER_SERVER,
+        advertised_host=None,
+        host_env="VLLM_GROUP_HOST",
+    )
+
+    assert address == host.CLUSTER_NIC, f"advertised {address}, not the NIC that reaches the server"
+    assert [target for target, _port in host.dialed] == [host.CLUSTER_SERVER]
+
+
+def test_a_remote_server_with_no_route_is_refused_naming_the_knob(monkeypatch):
+    monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
+    host = _TwoNicHost(routes=False)
+    monkeypatch.setattr(rendezvous.socket, "socket", host.socket)
+
+    with pytest.raises(RuntimeError, match="no route from this host reaches the server") as refused:
+        _master_address(
+            engine="vLLM",
+            server_url=f"http://{host.CLUSTER_SERVER}:8000",
+            server_host=host.CLUSTER_SERVER,
+            advertised_host=None,
+            host_env="VLLM_GROUP_HOST",
+        )
+    assert "VLLM_GROUP_HOST" in str(refused.value)
 
 
 def test_a_configured_port_already_held_raises_before_the_engine_is_asked_anything(client, server_calls):

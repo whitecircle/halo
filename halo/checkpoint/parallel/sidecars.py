@@ -11,8 +11,8 @@ import torch
 from halo.checkpoint.format import ROUTER_BALANCING_BIASES_FILE, SCHEDULER_STATE_FILE
 from halo.checkpoint.parallel.reading import consensus_read
 from halo.models.moe.balancing import BALANCING_BIASES_ATTR
-from halo.runtime.collectives import barrier_on_exit, combine_across_ranks
-from halo.runtime.consensus import rank_consensus
+from halo.runtime.collectives import combine_across_ranks
+from halo.runtime.consensus import barrier_on_exit, rank_consensus
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import get_global_rank, is_global_main_process
 
@@ -24,7 +24,7 @@ def save_lr_scheduler(lr_scheduler, checkpoint_dir: str) -> None:
     Trainer drops it from: the LR schedule must continue from the resumed step. No-op without a scheduler."""
     if lr_scheduler is None:
         return
-    with barrier_on_exit():
+    with barrier_on_exit(f"Writing {SCHEDULER_STATE_FILE} to {checkpoint_dir}"):
         if is_fs_save_rank():
             os.makedirs(checkpoint_dir, exist_ok=True)
             torch.save(lr_scheduler.state_dict(), os.path.join(checkpoint_dir, SCHEDULER_STATE_FILE))
@@ -91,11 +91,11 @@ def save_balancing_biases(model, output_dir: str, *, is_pp_mode: bool) -> None:
             lambda gathered: {name: bias for stage in gathered for name, bias in stage.items()},
             what="the router balancing biases",
         )
-        with barrier_on_exit():
+        with barrier_on_exit(f"Writing {ROUTER_BALANCING_BIASES_FILE} to {output_dir}"):
             if merged and is_fs_save_rank():
                 torch.save(merged, os.path.join(output_dir, ROUTER_BALANCING_BIASES_FILE))
         return
-    with barrier_on_exit():
+    with barrier_on_exit(f"Writing {ROUTER_BALANCING_BIASES_FILE} to {output_dir}"):
         if biases and is_fs_save_rank():
             torch.save(biases, os.path.join(output_dir, ROUTER_BALANCING_BIASES_FILE))
 

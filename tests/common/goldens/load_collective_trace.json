@@ -21,7 +21,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -45,7 +45,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "undistributed dense init_from_scratch": {
@@ -70,7 +70,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -94,7 +94,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "undistributed moe grouped-GEMM": {
@@ -120,7 +120,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -145,7 +145,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "undistributed moe without an EP class": {
@@ -171,7 +171,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -196,7 +196,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep lazy": {
@@ -225,7 +225,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -252,7 +252,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep lazy per-node filesystem": {
@@ -281,7 +281,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/node0/entered1",
@@ -308,7 +308,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 2": [
       "store add _halo_phase/main_first/model_source/policy/node1/entered0",
@@ -335,7 +335,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep fallback": {
@@ -369,7 +369,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -402,7 +402,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep lazy-disabled": {
@@ -435,7 +435,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -467,7 +467,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep+etp lazy": {
@@ -497,7 +497,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -525,7 +525,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep+cp lazy": {
@@ -556,7 +556,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -585,7 +585,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep+tp lazy": {
@@ -644,7 +644,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -701,7 +701,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep+tp fallback": {
@@ -765,7 +765,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -828,7 +828,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "ep+tp lazy-disabled": {
@@ -891,7 +891,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -953,7 +953,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "tp dense": {
@@ -979,7 +979,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1004,7 +1004,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "tp moe": {
@@ -1063,7 +1063,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1121,7 +1121,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "cp dense": {
@@ -1148,7 +1148,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1174,7 +1174,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "cp moe": {
@@ -1202,7 +1202,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1229,7 +1229,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "pp dense": {
@@ -1260,7 +1260,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1289,7 +1289,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "pp+ep": {
@@ -1325,7 +1325,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1359,7 +1359,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "frozen reference": {
@@ -1380,7 +1380,7 @@
       "store wait _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/reference_model/shared/entered1",
@@ -1399,7 +1399,7 @@
       "store wait _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "hub undistributed dense": {
@@ -1426,7 +1426,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1452,7 +1452,7 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "hub ep lazy": {
@@ -1483,7 +1483,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1512,7 +1512,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "hub ep lazy per-node filesystem": {
@@ -1543,7 +1543,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/node0/entered1",
@@ -1572,7 +1572,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 2": [
       "store add _halo_phase/main_first/model_source/policy/node1/entered0",
@@ -1601,7 +1601,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "hub ep fallback": {
@@ -1637,7 +1637,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1672,7 +1672,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "hub ep+tp lazy": {
@@ -1733,7 +1733,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1792,7 +1792,7 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "hub pp dense": {
@@ -1825,7 +1825,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/policy/shared/entered1",
@@ -1856,7 +1856,7 @@
       "all_reduce MAX int64[1] world",
       "all_reduce MIN float64[1] world",
       "all_reduce MAX float64[1] world",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   },
   "hub frozen reference": {
@@ -1879,7 +1879,7 @@
       "store wait _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ],
     "rank 1": [
       "store add _halo_phase/main_first/model_source/reference_model/shared/entered1",
@@ -1900,7 +1900,7 @@
       "store wait _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
-      "barrier world"
+      "all_reduce MAX int64[1] world"
     ]
   }
 }

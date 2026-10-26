@@ -17,7 +17,7 @@ from halo.data.preprocessed.shard_index import (
     IncompatiblePreprocessedDataset,
     reject_incompatible_stamp,
 )
-from halo.data.sources.paths import METADATA_FILE, hub_repo_id, parse_dataset_source
+from halo.data.sources.paths import METADATA_FILE, hub_repo_id, parse_dataset_source, reject_ambiguous_hub_source
 from halo.data.sources.s3_dataset_store import read_control_json_with_cache
 from halo.model_loading.tokenizer_backend import TokenizerBackend
 from halo.model_loading.tokenizer_setup import load_chat_template
@@ -139,7 +139,8 @@ class PreprocessingConfig:
         },
     )
     num_proc: int | None = field(
-        default=None, metadata={"help": "Map worker processes; unset means HALO_DATASET_NUM_PROC."}
+        default=None,
+        metadata={"help": "Map worker processes; unset means HALO_DATASET_NUM_PROC, else every usable CPU but two."},
     )
     tokenizer_backend: TokenizerBackend = field(
         default="hf", metadata={"help": "Text-to-ids backend; 'gigatoken' is verified to emit the same ids."}
@@ -265,6 +266,7 @@ def _read_metadata_payload(path: str, *, s3_outage_reads_absent: bool) -> dict[s
             return None
 
     if source_type == "hf_hub":
+        reject_ambiguous_hub_source(path)
         try:
             local_path = hf_hub_download(hub_repo_id(path), METADATA_FILE, repo_type="dataset")
         except LocalEntryNotFoundError as e:

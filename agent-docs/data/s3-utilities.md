@@ -7,7 +7,7 @@ dependency it needs:
 
 | File | Holds |
 |---|---|
-| `halo/data/sources/paths.py` | source/destination classification — pure string rules, no boto3 |
+| `halo/data/sources/paths.py` | source/destination classification — string rules, no boto3 |
 | `halo/data/sources/dataset_cache.py` | the local cache-publish protocol — `os`/`shutil`/`filelock`, the fetch injected |
 | `halo/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool, the default-bucket helpers |
 | `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load, the mirrored control-file reads |
@@ -15,7 +15,7 @@ dependency it needs:
 
 ## Dataset path formats
 
-`parse_dataset_source` (`halo/data/sources/paths.py` — pure string rules, no boto3, so the
+`parse_dataset_source` (`halo/data/sources/paths.py` — string rules, no boto3, so the
 loader and the scripts classify a path without an S3 stack) sorts a path into
 `('s3' | 'hf_hub' | 'local', bucket, key)`:
 
@@ -26,6 +26,13 @@ loader and the scripts classify a path without an S3 stack) sorts a path into
   **verbatim including the suffixes**; they are stripped later, at load.
 - **Local**: everything else — an absolute or relative path, a `file://` URI (prefix stripped), or
   any path ending in `.jsonl` / `.json` / `.parquet` / `.arrow` / `.csv`.
+
+A Hub-shaped path that also names a local directory (`preprocessed/my_dataset` beside a directory of
+that name) is refused by every reader, training, `prepare_dataset.py --input` and the eval runner alike,
+rather than guessed: write `./preprocessed/my_dataset` or an absolute path for the directory, without a
+`:config` / `@split` suffix (a saved split is its own subdirectory).
+`reject_ambiguous_hub_source` is the check; on training it runs inside the rank-joined load and probe, so
+a directory present on some nodes only fails every rank with the same cause.
 
 `parse_dataset_destination` is its write-side twin and classifies a bare `org/name` as **local**:
 guessing the Hub is acceptable for a read, but a write only targets the Hub on an explicit
@@ -49,6 +56,8 @@ How it works:
 - **File locking**: `filelock.FileLock` prevents duplicate downloads across processes.
 
 - **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and an ETag content fingerprint of the S3 prefix. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache. A stale tree that cannot be renamed aside (a permission error, say) raises and discards the fresh download, rather than serving the stale rows.
+
+- **One copy on disk**: the tree downloads straight into that temp dir through the client's parallel transfer (`download_dataset_tree`), so no second copy waits under `TMPDIR` for the process to exit. A tree missing its load gates (a torn promote) raises there and its partial download is removed, so it is never published.
 
 - **Staleness check**: on a cache hit the marker's fingerprint is re-validated against live S3 — an in-place re-push to the same URI changes the ETags, and a mismatch triggers a re-download. A marker carrying no fingerprint is trusted and upgraded in place.
 
@@ -76,6 +85,10 @@ On multi-node with a shared filesystem (NFS/Lustre) the cache is shared — only
 own account and bucket; setup and credential failures are in [AWS Auth](../infrastructure/aws-auth.md). For an S3-compatible
 service or non-default bucket, pass `aws_access_key_id` / `aws_secret_access_key` / `endpoint_url` /
 `region_name` directly to `S3Client(...)`.
+
+Retries follow the AWS configuration: `AWS_MAX_ATTEMPTS` / `AWS_RETRY_MODE`, or the profile's
+`max_attempts` / `retry_mode`. A key neither sets takes the toolkit default, 4 total attempts in `standard`
+mode; raise both for a many-node fetch that meets S3 throttling (`SlowDown`).
 
 ## Python API
 

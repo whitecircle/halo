@@ -112,7 +112,12 @@ STRIP = [
     ),
     (
         "NCCL group",
-        ["vllm_group_port 51216", "bound on the trainer host", "+1 per extra server", "VLLM_GROUP_HOST, multi-homed"],
+        [
+            "rollout_group_port 51216",
+            "bound on the trainer host",
+            "+1 per extra server",
+            "VLLM_GROUP_HOST, multi-homed",
+        ],
     ),
     (
         "Ray",

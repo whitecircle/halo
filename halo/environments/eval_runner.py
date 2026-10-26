@@ -17,7 +17,7 @@ import httpx
 from datasets import Dataset, load_dataset, load_from_disk
 from openai import NOT_GIVEN, APIStatusError, APITimeoutError, AsyncOpenAI
 
-from halo.data.sources.paths import parse_dataset_source
+from halo.data.sources.paths import parse_dataset_source, reject_ambiguous_hub_source
 from halo.environments.engine_wire import (
     capture_request_fields,
     generation_control_fields,
@@ -64,7 +64,7 @@ EVAL_STATS_KEY = "_eval_stats"
 def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
     """Load one split from a local ``save_to_disk`` directory or the HuggingFace Hub, the source classified by
     :func:`parse_dataset_source`: an existence probe would let a stale directory shadow a Hub id and read a
-    mistyped path as one."""
+    mistyped path as one, so a Hub-shaped path naming a local directory is refused instead."""
     source_type, _bucket, path = parse_dataset_source(dataset)
     if source_type == "s3":
         raise ValueError(
@@ -72,6 +72,7 @@ def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
             f"Hub dataset id. Download it first, or point --dataset at 'org/name'."
         )
     if source_type == "hf_hub":
+        reject_ambiguous_hub_source(dataset)
         return load_dataset(path, config, split=split)
 
     ds = load_from_disk(path)

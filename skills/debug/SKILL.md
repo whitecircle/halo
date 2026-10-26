@@ -39,7 +39,7 @@ the others never reach.
 1. Dump every rank's stack — the rank *not* in a collective is the culprit:
    `python scripts/profiling/py_spy_diag.py dump` from a shell in the training container attaches
    py-spy to every torchrun rank. No launch-time setup, so it works on a job already hung; one file
-   per rank under `$TMPDIR/halo_diag_stacks`. Attaching needs `--cap-add=SYS_PTRACE` unless the
+   per rank under `$HALO_DATA_ROOT/profiling/py_spy/stacks`. Attaching needs `--cap-add=SYS_PTRACE` unless the
    host's `kernel.yama.ptrace_scope` is 0, else py-spy fails with `Permission denied`.
 2. Suspect a shape/value divergence upstream of the stuck collective →
    `assert_rank_uniform(tuple(t.shape), group=..., label=..., strict=True)`.

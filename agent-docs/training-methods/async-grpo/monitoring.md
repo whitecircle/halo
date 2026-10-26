@@ -99,7 +99,7 @@ The environment's components (all but the trainer's charges) sum exactly to its 
 
 ## Saved trajectories
 
-`save_completions` (default on) writes the rollouts since the previous log to `<output_dir>/completions/completions_<step>.parquet`, plus a `completions` table when wandb is in `report_to`. Eval files take an `_eval` suffix and hold the whole eval set.
+`save_completions` (default on) writes the rollouts since the previous log as one part per rank, `<output_dir>/completions/completions_<step>/rank<NN>.parquet` (the rank zero-padded to the world's width), each holding that rank's own episodes; a step's directory is its record and reads back whole with `pd.read_parquet("completions/completions_00010")`. Eval rounds write `completions_<step>_eval/`, whose parts together hold the whole eval set. Under TP or ETP each group's leader writes the group's episodes, once. A `completions` table is logged when wandb is in `report_to`.
 
 | Column | Holds |
 |---|---|
@@ -109,7 +109,7 @@ The environment's components (all but the trainer's charges) sum exactly to its 
 | `reward_components` | The settled `reward/*` components, as JSON |
 | `reward_details` | Each scored term's rationale by term name, such as a veto judge's fired checks and quotes |
 
-Both JSON columns are `{}` when empty. TRL's `log_completions` controls only the console table, capped by `num_completions_to_print`.
+Both JSON columns are `{}` when empty. TRL's `log_completions` controls only the console table, which prints `num_completions_to_print` rows. The console and wandb tables read a sample gathered to global rank 0, `ceil(num_completions_to_print / world size)` rows from each rank with the text cut to 8,000 characters a cell; leaving `num_completions_to_print` unset sends every row, so set it on a large run. The parquet parts keep every row and the full text.
 
 ### Cut tool calls
 
@@ -117,7 +117,7 @@ A turn the engine cut mid-tool-call shows the partial call after its text, tagge
 
 ### Writer rank
 
-`is_fs_save_rank` picks the writer: global rank 0 on a shared output filesystem, one per node otherwise. A failed write (a full disk, a wandb outage) fails the step on every rank.
+Every rank writes its own part into its node's `output_dir`, so no rank gathers another's trajectories and a node's directory holds its own ranks' parts on per-node storage; only the tables' sample reaches global rank 0. A failed write (a full disk, a wandb outage) fails the step on every rank.
 
 ## Early stop
 

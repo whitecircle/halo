@@ -17,7 +17,8 @@ starts unset, as in a real CLI run):
   columns the input carries.
 
 Plus the artifact contract, unstubbed: a ``--num_shards N`` publish must be what the training-side
-sharded loader hands ``N`` data-parallel ranks — every row exactly once, none twice.
+sharded loader hands ``N`` data-parallel ranks — every row exactly once, none twice; and the bake
+keeps no intermediate map cache behind and stores labels at the width of ``input_ids``.
 
     python tests/cpu/data/test_prepare_dataset_script.py
 """
@@ -282,6 +283,37 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
         for split, rows in seen.items():
             assert len(rows) == len(set(rows)), f"{split}: a row reached two ranks"
         assert len(seen["train"]) + len(seen["test"]) == num_docs, "the ranks' slices do not add up to the corpus"
+
+
+def test_the_bake_leaves_no_map_cache_behind_and_stores_labels_at_input_width():
+    """Each tokenize/filter/label/pack map writes a full copy of the corpus; the single-process tool must not
+    leave them in HF_DATASETS_CACHE, where nothing reuses or removes them. Labels inferred as int64 beside
+    int32 ``input_ids`` would be most of the artifact's bytes."""
+    with tempfile.TemporaryDirectory() as directory:
+        raw, tokenizer_dir, out, cache = (os.path.join(directory, name) for name in ("raw", "tok", "out", "cache"))
+        word_level_tokenizer(_WORDS).save_pretrained(tokenizer_dir)
+        # --pack_sequences reads the model config (the compressed-KV refusal); a stock family's suffices.
+        with open(os.path.join(tokenizer_dir, "config.json"), "w") as f:
+            json.dump({"model_type": "qwen3"}, f)
+        Dataset.from_dict({"text": [f"doc {i}" for i in range(16)]}).save_to_disk(raw)
+        os.makedirs(cache)
+        argv = [
+            sys.executable,
+            _SCRIPT,
+            *("--input", raw, "--output", out, "--model_name_or_path", tokenizer_dir),
+            *("--mode", "text", "--text_field", "text", "--max_length", "8", "--pack_sequences"),
+        ]
+        env = {
+            **os.environ,
+            "PYTHONPATH": str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+            "HF_DATASETS_CACHE": cache,
+        }
+        proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=REPO_ROOT)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+
+        assert os.listdir(cache) == [], f"the bake left map caches behind: {os.listdir(cache)}"
+        features = load_preprocessed_dataset(out)["train"].features
+        assert features["labels"] == features["input_ids"], features
 
 
 if __name__ == "__main__":

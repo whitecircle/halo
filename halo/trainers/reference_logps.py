@@ -17,8 +17,13 @@ from datasets import Dataset
 from halo.checkpoint.atomic import atomic_torch_save
 from halo.checkpoint.format import REFERENCE_LOGPS_FILE
 from halo.checkpoint.parallel.reading import consensus_read
-from halo.runtime.collectives import barrier_on_exit
-from halo.runtime.consensus import DeferredRankFailure, rank_consensus, reject_across_ranks, reject_divergent_settings
+from halo.runtime.consensus import (
+    DeferredRankFailure,
+    barrier_on_exit,
+    rank_consensus,
+    reject_across_ranks,
+    reject_divergent_settings,
+)
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
 
@@ -273,10 +278,8 @@ class ReferenceLogpsMixin:
             else None
         )
         path = os.path.join(checkpoint_dir, REFERENCE_LOGPS_FILE)
-        guard = DeferredRankFailure(f"Writing {REFERENCE_LOGPS_FILE} to {checkpoint_dir}")
-        with barrier_on_exit():
+        with barrier_on_exit(f"Writing {REFERENCE_LOGPS_FILE} to {checkpoint_dir}"):
             if is_fs_save_rank():
-                guard.run(partial(atomic_torch_save, path, self._reference_checkpoint_payload, previous))
-        guard.reject()
+                atomic_torch_save(path, self._reference_checkpoint_payload, previous)
         self._reference_immutable_path = path
         self._reference_saved_generation = self._reference_state_generation

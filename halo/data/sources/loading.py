@@ -19,6 +19,7 @@ from halo.data.sources.paths import (
     hub_repo_id,
     parse_dataset_source,
     parse_hub_spec,
+    reject_ambiguous_hub_source,
     reject_partial_splits,
 )
 from halo.data.sources.replica_identity import reject_divergent_replicas
@@ -57,6 +58,7 @@ def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
         return load_dataset_from_s3_uri(path, keep_in_memory=False)
 
     elif source_type == "hf_hub":
+        reject_ambiguous_hub_source(path)
         # @split picks a split when there is no standard "train" (e.g. @train_sft).
         path, config_name, split_name = parse_hub_spec(path)
         if is_global_main_process():
@@ -330,6 +332,7 @@ def load_preprocessed_dataset(
     """Load a pre-processed dataset, only this rank's shards of a sharded one. Pass the DATA-PARALLEL
     rank/size: CP/TP-group siblings share data, EP ranks (orthogonal to DP) get disjoint shards."""
     if parse_dataset_source(path)[0] == "hf_hub":
+        reject_ambiguous_hub_source(path)
         # Refused on every rank alike, off the path string. ``load_dataset`` infers the Json builder
         # from the saved tree's ``state.json`` sidecars and would hand back those as rows.
         raise ValueError(

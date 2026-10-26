@@ -8,7 +8,13 @@ by the SAME task. These tests stub the transport and session to pin the lifecycl
 - a failure mid-connect (``initialize`` raising) unwinds the already-entered transport, so a partial
   connect never leaks a half-initialized session or the server subprocess;
 - the sync ``close()`` hook (what ``EnvironmentActor.shutdown`` calls) actually drives disconnect —
-  a no-op there leaks the ClientSession and the stdio subprocess on every rollout shutdown.
+  a no-op there leaks the ClientSession and the stdio subprocess on every rollout shutdown;
+- a start cancelled mid-connect (the episode deadline) unwinds the server it was starting;
+- ``scratch_allowlist`` (the filesystem preset) gives a server a fresh directory as its allowlist, kept across a
+  respawn and removed when the server stops, and ``episode_scratch`` scopes it: each episode gets a server of
+  its own over its own directory, so concurrent episodes (a GRPO group's siblings) share no files, while
+  without it one server and directory serve the environment. A server that takes no directory refuses the
+  scope instead of being handed an argument it rejects.
 
 Run: python tests/cpu/environments/test_mcp_lifecycle.py  (or pytest)
 """
@@ -16,6 +22,7 @@ Run: python tests/cpu/environments/test_mcp_lifecycle.py  (or pytest)
 import asyncio
 import importlib
 import logging
+import os
 import types
 from datetime import timedelta
 
@@ -28,9 +35,12 @@ from halo.environments.rollout_config import RolloutConfig
 
 
 class _StubTransport:
-    """Async CM standing in for stdio_client/sse_client; records enter/exit and their owning tasks."""
+    """Async CM standing in for stdio_client/sse_client; records the spawn's extra args, enter/exit and their
+    owning tasks, and hands the session stub on as its read stream."""
 
-    def __init__(self):
+    def __init__(self, session: "_StubSession", args: list[str]):
+        self.session = session
+        self.args = list(args)
         self.entered = False
         self.exited = False
         self.enter_task = None
@@ -39,7 +49,7 @@ class _StubTransport:
     async def __aenter__(self):
         self.entered = True
         self.enter_task = asyncio.current_task()
-        return ("read", "write")
+        return (self, "write")
 
     async def __aexit__(self, *exc):
         self.exited = True
@@ -48,12 +58,16 @@ class _StubTransport:
 
 
 class _StubSession:
-    """Async CM standing in for mcp.ClientSession."""
+    """Async CM standing in for mcp.ClientSession; a call answers with the scratch directory of its server, and
+    ``initialize_gate`` holds ``initialize`` (which sets ``initializing``) until it is set."""
 
-    def __init__(self, fail_initialize: bool = False):
+    def __init__(self, fail_initialize: bool = False, initialize_gate: asyncio.Event | None = None):
         self.fail_initialize = fail_initialize
+        self.initialize_gate = initialize_gate
+        self.initializing = asyncio.Event()
         self.entered = False
         self.exited = False
+        self.args: list[str] = []
 
     async def __aenter__(self):
         self.entered = True
@@ -64,6 +78,9 @@ class _StubSession:
         return False
 
     async def initialize(self):
+        self.initializing.set()
+        if self.initialize_gate is not None:
+            await self.initialize_gate.wait()
         if self.fail_initialize:
             raise RuntimeError("initialize failed")
 
@@ -71,29 +88,38 @@ class _StubSession:
         tool = types.SimpleNamespace(name="stub_tool", description="a stub", inputSchema={})
         return types.SimpleNamespace(tools=[tool])
 
+    async def call_tool(self, name, arguments):
+        text = f"served from {self.args[-1] if self.args else None}"
+        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=text)], isError=False)
+
 
 class _StubMCPEnv(NativeMCPClientEnvironment):
-    """MCP env with the SDK transport stubbed out; :func:`_stub_client_session` stands in for the session."""
+    """MCP env with the SDK transport stubbed out; the first server takes ``stub_session``, every later one a
+    fresh session, and :func:`_stub_client_session` hands each transport's session to the SDK seam."""
 
-    connecting: "_StubMCPEnv | None" = None
-
-    def __init__(self, fail_initialize: bool = False, **kwargs):
+    def __init__(self, fail_initialize: bool = False, initialize_gate: asyncio.Event | None = None, **kwargs):
         super().__init__(server_command="unused", **kwargs)
-        self.stub_transport = _StubTransport()
-        self.stub_session = _StubSession(fail_initialize=fail_initialize)
+        self.stub_session = _StubSession(fail_initialize=fail_initialize, initialize_gate=initialize_gate)
+        self.transports: list[_StubTransport] = []
 
-    def _transport_context(self):
-        _StubMCPEnv.connecting = self
-        return self.stub_transport
+    @property
+    def stub_transport(self) -> _StubTransport:
+        return self.transports[0]
+
+    def _transport_context(self, extra_args):
+        session = _StubSession() if self.transports else self.stub_session
+        session.args = list(extra_args)
+        self.transports.append(_StubTransport(session, extra_args))
+        return self.transports[-1]
 
 
 @pytest.fixture(autouse=True)
 def _stub_client_session(monkeypatch):
-    """``mcp.ClientSession`` as the stub session of the environment whose transport just opened."""
+    """``mcp.ClientSession`` as the stub session of the transport that just opened."""
 
     def _session(read, write, **kwargs):
-        assert (read, write) == ("read", "write")
-        return _StubMCPEnv.connecting.stub_session
+        assert write == "write"
+        return read.session
 
     monkeypatch.setattr(mcp_module, "ClientSession", _session)
 
@@ -126,7 +152,7 @@ async def test_connect_discovers_tools_and_disconnect_unwinds_in_owner_task():
 
     await env.disconnect()
     assert env.stub_session.exited and env.stub_transport.exited
-    assert env._session is None and not env._connected
+    assert env._server.session is None and not env._connected
     assert env.registry.get("stub_tool") is None
     # anyio cancel-scope contract: enter and exit happened in the SAME task.
     assert env.stub_transport.enter_task is env.stub_transport.exit_task
@@ -142,7 +168,27 @@ async def test_failed_connect_unwinds_partial_state():
     assert env.stub_transport.entered and env.stub_transport.exited
     # A session entered but never exited holds the anyio cancel scope open, so the unwind must exit it.
     assert env.stub_session.entered and env.stub_session.exited
-    assert env._session is None and not env._connected
+    assert env._server.session is None and not env._connected
+
+
+async def test_a_start_cancelled_mid_connect_leaves_no_server_running():
+    """The episode deadline cancels a tool call whose first use is still starting the server: the owner task, and
+    the server subprocess its transport holds, must unwind with it rather than run for the actor's lifetime
+    outside every stop."""
+    env = _StubMCPEnv(initialize_gate=asyncio.Event(), scratch_allowlist=True)
+    start = asyncio.create_task(env.connect())
+    await asyncio.wait_for(env.stub_session.initializing.wait(), timeout=5)
+
+    start.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start
+    owner = env.stub_transport.enter_task
+    assert owner.done(), "the owner task outlived the cancelled start"
+    assert env.stub_session.exited and env.stub_transport.exited
+    assert not env._connected
+
+    await env.disconnect()
+    assert not os.path.exists(env.stub_transport.args[-1])
 
 
 async def test_sync_close_from_running_loop_drives_disconnect():
@@ -155,7 +201,7 @@ async def test_sync_close_from_running_loop_drives_disconnect():
     assert env._background_tasks, "close() on the owning loop schedules the disconnect"
     await asyncio.gather(*env._background_tasks)
     assert env.stub_session.exited and env.stub_transport.exited
-    assert env._session is None and not env._connected
+    assert env._server.session is None and not env._connected
 
 
 async def test_disconnect_is_idempotent():
@@ -177,14 +223,14 @@ def test_close_after_asyncio_run_unwound_the_connection_warns_nothing(caplog):
     with caplog.at_level(logging.WARNING, logger=mcp_module.__name__):
         env.close()
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert env._conn_task is None
+    assert not env._connected
 
 
 def test_close_still_warns_when_a_stopped_loop_left_the_connection_open(caplog):
     env = _StubMCPEnv()
     loop = asyncio.new_event_loop()
     loop.run_until_complete(env.connect())
-    task = env._conn_task
+    task, stop = env._server._task, env._server._stop
     assert not task.done()
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=mcp_module.__name__):
@@ -192,7 +238,7 @@ def test_close_still_warns_when_a_stopped_loop_left_the_connection_open(caplog):
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [
         "MCP close(): owning event loop already stopped; connection not unwound"
     ]
-    env._stop.set()
+    stop.set()
     loop.run_until_complete(task)
     loop.close()
 
@@ -256,6 +302,105 @@ async def test_an_mcp_property_without_a_declared_type_takes_any_value():
     assert replies[2] == "Error: fetch: url must be a string, got list"
 
 
+async def test_episode_scratch_gives_each_episode_its_own_server_and_directory():
+    """Concurrent episodes on one environment (a GRPO group's siblings) must not see each other's files: each
+    episode's calls reach a server of its own over a fresh directory, stopped and removed with the episode."""
+    env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=True)
+    ids, _ = await env.reset_async(["task a", "task b"])
+    call = {"id": "c1", "function": {"name": "stub_tool", "arguments": "{}"}}
+    await env.step_async(ids, ["calling", "calling"], [{"finish_reason": "tool_calls", "tool_calls": [call]}] * 2)
+
+    discovery, *episode_servers = env.transports
+    scratch_dirs = [transport.args[-1] for transport in episode_servers]
+    assert len(set(scratch_dirs)) == 2 and all(os.path.isdir(d) for d in scratch_dirs)
+    assert discovery.args[-1] not in scratch_dirs
+    replies = {
+        trajectory.info["episode_id"]: next(m.content for m in trajectory.messages if m.role == "tool")
+        for trajectory in env.get_trajectories(ids)
+    }
+    assert sorted(replies.values()) == sorted(f"served from {d}" for d in scratch_dirs), replies
+
+    env.cleanup(ids)
+    await asyncio.gather(*env._background_tasks)
+    assert all(transport.exited for transport in episode_servers)
+    assert not any(os.path.exists(d) for d in scratch_dirs), "an episode's scratch directory outlived it"
+
+    await env.disconnect()
+    assert discovery.exited and not os.path.exists(discovery.args[-1])
+
+
+async def _call_from_two_episodes(env: _StubMCPEnv) -> list:
+    ids, _ = await env.reset_async(["task a", "task b"])
+    call = {"id": "c1", "function": {"name": "stub_tool", "arguments": "{}"}}
+    await env.step_async(ids, ["calling", "calling"], [{"finish_reason": "tool_calls", "tool_calls": [call]}] * 2)
+    return ids
+
+
+async def test_one_server_serves_every_episode_without_episode_scratch():
+    env = _StubMCPEnv()
+    await _call_from_two_episodes(env)
+    await env.disconnect()
+    assert len(env.transports) == 1 and env.transports[0].args == []
+
+
+async def test_an_environment_scoped_scratch_allowlist_is_one_server_over_its_own_directory():
+    """``episode_scratch: false`` on the filesystem preset shares one server, which still needs its directory
+    allowlist: spawned without one, the server exits on its usage error (or denies every path)."""
+    env = _StubMCPEnv(scratch_allowlist=True)
+    ids = await _call_from_two_episodes(env)
+    ((scratch,),) = [transport.args for transport in env.transports]
+    assert os.path.isdir(scratch)
+    replies = [next(m.content for m in t.messages if m.role == "tool") for t in env.get_trajectories(ids)]
+    assert replies == [f"served from {scratch}"] * 2
+    await env.disconnect()
+    assert not os.path.exists(scratch)
+
+
+async def test_a_respawned_episode_server_keeps_the_episodes_directory():
+    """A server that died mid-episode is respawned by the episode's next call over the same directory, so the
+    files the episode wrote before the crash are still there and the first directory is not orphaned."""
+    env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=True)
+    ids, _ = await env.reset_async(["task"])
+    call = {"id": "c1", "function": {"name": "stub_tool", "arguments": "{}"}}
+    await env.step_async(ids, ["calling"], [{"finish_reason": "tool_calls", "tool_calls": [call]}])
+    (server,) = env._episode_servers.values()
+    scratch = env.transports[-1].args[-1]
+    with open(os.path.join(scratch, "notes.txt"), "w") as f:
+        f.write("written before the crash")
+
+    server._stop.set()  # the server ends without a stop(), as one that crashed does
+    await server._task
+    await env.step_async(ids, ["calling again"], [{"finish_reason": "tool_calls", "tool_calls": [call]}])
+    assert len(env.transports) == 3 and env.transports[-1].args == [scratch]
+    assert os.path.exists(os.path.join(scratch, "notes.txt"))
+
+    env.cleanup(ids)
+    await asyncio.gather(*env._background_tasks)
+    await env.disconnect()
+    assert not os.path.exists(scratch)
+
+
+def test_the_filesystem_preset_scopes_its_allowlist_to_the_episode_unless_told_otherwise():
+    env = build_mcp_environment("filesystem")
+    assert env.scratch_allowlist and env.episode_scratch and "/tmp" not in env.server_args
+    shared = build_mcp_environment("filesystem", episode_scratch=False)
+    assert shared.scratch_allowlist and not shared.episode_scratch
+
+
+def test_a_server_that_takes_no_directory_gets_none_and_refuses_episode_scratch():
+    """``uvx mcp-server-fetch <dir>`` is an argparse error, so a directory goes only to an allowlist server."""
+    env = build_mcp_environment("fetch")
+    assert not env.scratch_allowlist and not env.episode_scratch
+    with pytest.raises(ValueError, match=r"takes none .*\['filesystem'\]"):
+        build_mcp_environment("fetch", episode_scratch=True)
+
+
+@pytest.mark.parametrize("scratch", [{"episode_scratch": True}, {"scratch_allowlist": True}])
+def test_a_scratch_directory_refuses_a_transport_that_spawns_nothing(scratch):
+    with pytest.raises(ValueError, match="spawns none"):
+        NativeMCPClientEnvironment(transport="sse", server_url="http://x/sse", **scratch)
+
+
 # Factory credential forwarding: MCP_SERVERS[...]["env"] must reach the server
 
 
@@ -301,10 +446,10 @@ def test_sse_transport_is_registry_selectable_and_needs_a_url(monkeypatch):
 
     env = build_environment("mcp", {"transport": "sse", "server_url": "http://mcp.example:9000/sse"})
     assert env.transport == "sse"
-    assert env._transport_context() == ("sse-ctx", "http://mcp.example:9000/sse")
+    assert env._transport_context([]) == ("sse-ctx", "http://mcp.example:9000/sse")
 
     with pytest.raises(ValueError, match="server_url required"):
-        NativeMCPClientEnvironment(transport="sse")._transport_context()
+        NativeMCPClientEnvironment(transport="sse")._transport_context([])
 
 
 def test_sse_config_refuses_a_stdio_preset(monkeypatch):
@@ -339,12 +484,13 @@ def test_stdio_transport_merges_credentials_over_sdk_default_env(monkeypatch):
     monkeypatch.setattr(mcp_module, "sse_client", lambda url: "transport-ctx")
 
     env = NativeMCPClientEnvironment(server_command="npx", server_env={"KEY": "v", "PATH": "/custom"})
-    assert env._transport_context() == "transport-ctx"
+    assert env._transport_context([]) == "transport-ctx"
     assert captured[0].env == {"PATH": "/custom", "HOME": "/root", "KEY": "v"}
 
-    env_plain = NativeMCPClientEnvironment(server_command="npx")
-    env_plain._transport_context()
+    env_plain = NativeMCPClientEnvironment(server_command="npx", server_args=["-y", "pkg"])
+    env_plain._transport_context(["/scratch"])
     assert captured[1].env is None
+    assert captured[1].args == ["-y", "pkg", "/scratch"], "a spawn's extra args must follow server_args"
 
 
 if __name__ == "__main__":

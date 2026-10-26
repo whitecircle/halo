@@ -5,13 +5,13 @@ import asyncio
 import hashlib
 import json
 import logging
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm as async_tqdm
 
+from halo.env import data_path
 from halo.inference.openai_client import generate_openai_response
 from halo.inference.response import OpenAIResponse
 
@@ -140,7 +140,8 @@ def resume_store_path(
     max_tokens: int,
     request_tools: _RequestTools,
 ) -> str:
-    """The resume-store path under the temp dir, keyed by the request identity."""
+    """The resume-store path under ``$HALO_DATA_ROOT/inference/resume``, keyed by the request identity: a re-run
+    must find it after the process, and the container, that wrote it are gone."""
     hash_content = {
         "model": model,
         "temperature": temperature,
@@ -150,7 +151,7 @@ def resume_store_path(
         "messages_sample": _sequence_digest(messages),
     }
     task_hash = hashlib.md5(json.dumps(hash_content, sort_keys=True).encode()).hexdigest()
-    return str(Path(tempfile.gettempdir()) / f"openai_requests_{task_hash}.jsonl")
+    return data_path("inference", "resume", f"openai_requests_{task_hash}.jsonl")
 
 
 def load_resume_records(store_path: str, *, result_count: int) -> _ResumeLoad:

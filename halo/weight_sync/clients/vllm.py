@@ -15,11 +15,11 @@ from halo.weight_sync.clients.base import (
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
-    WEIGHT_UPDATE_TIMEOUT_S,
     AsyncCall,
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
+from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.packed_broadcast import (
     PACKED_BUFFER_BYTES,
     PACKED_NUM_BUFFERS,
@@ -146,9 +146,10 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
 
         server_call: AsyncCall | None = None
         try:
+            # vLLM replies once it has received the chunk, so the RPC is bounded by the chunk's own deadline.
             server_call = self._start_collective_rpc(
                 "/update_weights",
-                timeout=WEIGHT_UPDATE_TIMEOUT_S,
+                timeout=CHUNK_SYNC_TIMEOUT_S,
                 json={"update_info": {"names": names, "dtype_names": dtype_names, "shapes": shapes}},
             )
 
@@ -166,7 +167,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                 )
             packed_broadcast_producer(iterator=iter(chunk), group=communicator, streams=self._packed_streams)
 
-            server_call.wait(timeout=WEIGHT_UPDATE_TIMEOUT_S)
+            server_call.wait(timeout=CHUNK_SYNC_TIMEOUT_S)
         except Exception as e:
             self._raise_if_server_failed(e, server_call)
             raise

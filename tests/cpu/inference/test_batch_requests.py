@@ -7,11 +7,11 @@ Run: python tests/cpu/inference/test_batch_requests.py  (or pytest)
 
 import asyncio
 import json
-import tempfile
 from pathlib import Path
 
 import pytest
 
+from halo import env
 from halo.inference import batch_requests
 from halo.inference.batch_requests import (
     append_resume_records,
@@ -122,13 +122,14 @@ def test_parallel_requests_failed_request_yields_none_without_clobbering_others(
 
 def test_parallel_requests_stores_the_rows_that_succeeded_and_retries_the_failed_one(tmp_path, monkeypatch):
     """A failed row stays out of the store, so a re-run requests it and only it; the rows beside it
-    are replayed from the store."""
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    are replayed from the store, which lives under HALO_DATA_ROOT: in the temp dir, it is gone with a
+    container whose TMPDIR is not mounted."""
+    monkeypatch.setattr(env, "HALO_DATA_ROOT", str(tmp_path))
     prompts = ["m0", "m1", "m2"]
 
     first = asyncio.run(parallel_openai_requests("m", prompts, client=_FlakyClient(fail_on={"m1"}), flush_interval=10))
     assert first[1] is None
-    (store,) = tmp_path.glob("openai_requests_*.jsonl")
+    (store,) = tmp_path.glob("inference/resume/openai_requests_*.jsonl")
     stored = load_resume_records(str(store), result_count=3)
     assert stored.processed_indices == {0, 2}
 
@@ -141,7 +142,7 @@ def test_parallel_requests_stores_the_rows_that_succeeded_and_retries_the_failed
 def test_the_store_is_appended_every_flush_interval_completions_and_once_at_the_end(tmp_path, monkeypatch):
     """A failed row counts toward the interval but is never stored; without resume nothing is written.
     The fake answers without yielding, so rows complete in order."""
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(env, "HALO_DATA_ROOT", str(tmp_path))
     flushes: list[list[int]] = []
     monkeypatch.setattr(
         batch_requests, "append_resume_records", lambda path, records: flushes.append([i for i, _ in records])

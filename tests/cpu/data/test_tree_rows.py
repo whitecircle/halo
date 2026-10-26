@@ -445,7 +445,9 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             eval_packing=True,
             packing_strategy="bfd",
             padding_free=False,
-            dataset_num_proc=None,
+            # Pinned: each worker's shard boundary cuts a run into two trees, so the derived default (the host's
+            # CPUs) would leave these 63 rows ungrouped on a many-core host.
+            dataset_num_proc=4,
             per_device_train_batch_size=1,
         )
         train, test, _, collator = _prepare_text_data(

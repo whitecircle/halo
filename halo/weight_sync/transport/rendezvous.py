@@ -18,8 +18,8 @@ logger = logging.getLogger(__name__)
 
 _ALL_INTERFACES = "0.0.0.0"
 _BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
-# A UDP "connect" target that makes the kernel pick the outbound interface; no packet is sent.
-_OUTBOUND_ROUTE_PROBE = ("8.8.8.8", 80)
+# Any port: a UDP connect only asks the kernel for a route, and sends no packet.
+_ROUTE_PROBE_PORT = 9
 
 
 class RendezvousListener:
@@ -89,10 +89,12 @@ class RendezvousListener:
         self.close()
 
 
-def _outbound_ip() -> str:
+def _route_source_ip(host: str) -> str:
+    """This host's IPv4 address on the route to ``host``, the interface the kernel would send from; loopback
+    when no route reaches it (or the name does not resolve)."""
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         try:
-            s.connect(_OUTBOUND_ROUTE_PROBE)
+            s.connect((host, _ROUTE_PROBE_PORT))
             return s.getsockname()[0]
         except OSError:
             return "127.0.0.1"
@@ -114,17 +116,19 @@ def _master_address(
     *, engine: str, server_url: str, server_host: str, advertised_host: str | None, host_env: str
 ) -> str:
     """The address the engine's workers dial back to: ``advertised_host``, else ``host_env``, else loopback for a
-    server on this machine, else the default-route NIC. A remote server is never told to dial loopback."""
+    server on this machine, else this host's address on the route to the server. A remote server is never told
+    to dial loopback."""
     master_address = advertised_host or (env_str(host_env) if host_env else None)
     if not master_address:
         # Same-host groups stay on loopback: firewalls drop hairpin traffic on the external NIC.
-        master_address = "127.0.0.1" if _is_local_address(server_host) else _outbound_ip()
+        master_address = "127.0.0.1" if _is_local_address(server_host) else _route_source_ip(server_host)
 
     if is_loopback(master_address) and not _is_local_address(server_host):
         raise RuntimeError(
             f"{engine} server {server_url} is on a remote host ({server_host}) but the "
-            f"NCCL weight-sync group address resolved to loopback ({master_address}). The server's "
-            f"workers would dial back to themselves and the group would never form. Set "
+            f"NCCL weight-sync group address resolved to loopback ({master_address}): the address set is "
+            f"loopback, or no route from this host reaches the server. The server's workers would dial "
+            f"back to themselves and the group would never form. Set "
             f"{host_env or 'the group host'} (or the per-server group_host) to the "
             f"trainer's routable IP on the subnet the server can reach."
         )
@@ -196,7 +200,8 @@ def open_group_rendezvous(
                 f"Could not bind the weight-transfer group port {bind_address}:{port} ({e}); the "
                 f"{engine} server {server_url} was not asked to join. A connected client holds "
                 f"its group port until close_communicator(), so every server — and every trainer process "
-                f"sharing this host — needs its own group_port / vllm_group_port; a port inside "
+                f"sharing this host — needs its own group_port (rollout_group_port; vllm_group_port under Online "
+                f"GRPO); a port inside "
                 f"net.ipv4.ip_local_port_range can also be taken as an outbound connection's source port "
                 f"unless reserved (net.ipv4.ip_local_reserved_ports)."
             ) from e

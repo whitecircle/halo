@@ -37,6 +37,10 @@ class TPLeaderBroadcastMixin:
                 nccl_safe_broadcast(value, src=src, group=group)
         return result
 
+    def _is_tp_follower(self) -> bool:
+        """Whether this rank holds its TP/ETP-group leader's copy of the generation data rather than data of its own."""
+        return self._get_tp_or_etp_process_group() is not None and self._get_tp_group_src_rank() != get_global_rank()
+
     def _get_tp_or_etp_process_group(self) -> dist.ProcessGroup | None:
         """The group whose ranks must share generation data: the TP group, the expert-TP group, or None."""
         if self.parallelism_config.is_tp_mode:

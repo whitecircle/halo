@@ -88,9 +88,9 @@ round's generation.
 
 - `sync_weights_every_n_steps` (default `1`) trades freshness for pause time; on slow environments sync every 2–4
   steps.
-- `vllm_group_port` (TRL `GRPOConfig`, default `51216`) is bound on the **trainer** host, one listener per server, so
+- `rollout_group_port` (default `51216`, either backend) is bound on the **trainer** host, one listener per server, so
   two servers sharing a port collide even on distinct hosts. With several servers it is the base: an entry with no
-  `group_port` binds `vllm_group_port + index`.
+  `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when the base is `0`. TRL's `vllm_group_port` is refused here; Online GRPO reads it.
 - Startup and every push fail fast: an error on any rank raises on all ranks together.
 - Each EP layer's expert gather transiently materializes the **full expert set** on every rank, so its cost scales
   with total expert count, not `ep_size`.
@@ -144,8 +144,9 @@ address differs per server.
   and two consecutive rounds where none survives halt training ([Batch construction](objective.md#batch-construction)).
 - `num_rollout_workers` actors are created per training rank, soft-pinned to its node; on a shared cluster the budget
   divides by world size ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
-- The trainer's NCCL address must be routable from the serving nodes: set `VLLM_GROUP_HOST` or `SGLANG_GROUP_HOST`
-  when the default-route NIC is wrong ([Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous)).
+- The trainer's NCCL address must be routable from the serving nodes: it defaults to the trainer's address on the route
+  to each server; set `VLLM_GROUP_HOST` or `SGLANG_GROUP_HOST` where the server cannot dial that back (NAT, asymmetric
+  routing) ([Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous)).
 - The sync runs over EFA when both sides use their EFA overlays
   ([Servers on other nodes](../../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)), over sockets
   otherwise.

@@ -164,5 +164,6 @@ def stream_gathered_checkpoint(
             finalize.run(partial(save_model_config, model, output_dir))
         # The index is the last thing written: the parts are only a checkpoint once it names them.
         total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
-    finalize.reject()
+    # Over the store: the peers wait out the writer's last part, unbounded on slow storage.
+    finalize.store_reject("checkpoint/gathered_finalize")
     return written, total_bytes

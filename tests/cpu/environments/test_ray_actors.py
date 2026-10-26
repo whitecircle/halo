@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import pickle
+import tempfile
 import threading
 from contextvars import ContextVar
 from types import SimpleNamespace
@@ -77,6 +78,37 @@ async def test_env_batch_calls_refuse_contexts_that_do_not_pair():
     episode_ids, _ = await async_env.reset_async(["2+2?"], [{}])
     with pytest.raises(ValueError, match="shorter"):
         await async_env.step_async(episode_ids, ["4"], [])
+
+
+# Test: ray.init temp dir
+
+
+@pytest.fixture
+def deep_temp_root(tmp_path, monkeypatch):
+    """A temp root too deep for Ray's socket paths, with no RAY_TMPDIR set; removes the link it gets."""
+    root = tmp_path / ("deep" * 15)
+    root.mkdir()
+    monkeypatch.delenv("RAY_TMPDIR", raising=False)
+    monkeypatch.setattr(tempfile, "tempdir", str(root))
+    yield root
+    temp_dir = ray_init_kwargs().get("_temp_dir")
+    if temp_dir is not None and os.path.islink(temp_dir):
+        os.unlink(temp_dir)
+
+
+def test_a_deep_temp_root_gets_a_short_link_onto_its_own_volume(deep_temp_root):
+    """Ray keeps its session logs and spilled objects under ``_temp_dir``: a short path on the root
+    filesystem in its place would move them off the large volume TMPDIR names."""
+    temp_dir = ray_init_kwargs()["_temp_dir"]
+
+    assert len(temp_dir) <= ray_actors._MAX_RAY_TEMP_DIR_LEN
+    assert os.path.realpath(temp_dir) == os.path.realpath(deep_temp_root / "ray")
+    assert ray_init_kwargs()["_temp_dir"] == temp_dir, "a second launch over the root must reuse the link"
+
+
+def test_a_short_ray_tmpdir_is_used_as_is(deep_temp_root, monkeypatch):
+    monkeypatch.setenv("RAY_TMPDIR", "/tmp/rt")
+    assert "_temp_dir" not in ray_init_kwargs(), "Ray's own short RAY_TMPDIR must not be overridden"
 
 
 # Test: Rollout Manager (Mocked Ray)

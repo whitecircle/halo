@@ -73,7 +73,7 @@ local file or a Hub dataset id and `--output_path` a local path.
 The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
 — run under a shared SIGINT/SIGTERM handler
 (`run_async_cli`) that exits `128 + signo`, the shell's own convention for a signalled process.
-Progress is stored for resume (generation through `parallel_openai_requests` and its JSONL resume store in `halo/inference/batch_requests.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
+Progress is stored for resume (generation through `parallel_openai_requests` and its JSONL resume store under `$HALO_DATA_ROOT/inference/resume`, `halo/inference/batch_requests.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
 `&&` chain from consuming a partial output dataset as a finished one.
 
 A run that produced no usable row raises rather than writing an empty result (`reject_empty_results`), so a dead endpoint or a
@@ -146,8 +146,9 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     `patch_vocab.py`, whose save would overwrite the source's shards in place with no undo, and
     whose post-save sweep then deletes every source shard the save did not rewrite.
 
-    `prepare_dataset.py` is not one of them: it materializes into a temp directory and publishes
-    with a staged swap, so its `--output` is guarded by `--overwrite`, not by this refusal.
+    `prepare_dataset.py` is not one of them: it bakes into a staging sibling of its `--output` (a temp
+    directory for S3 or the Hub) and publishes with a swap once the bake is done, so its `--output` is
+    guarded by `--overwrite`, not by this refusal.
 
     `reset_sinks.py` is the exception: it holds the whole checkpoint in memory and stages the write,
     so in-place is safe there, but never implicit. It takes `--in_place`; an `--output_dir` aimed at

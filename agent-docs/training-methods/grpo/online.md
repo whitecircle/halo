@@ -159,7 +159,7 @@ Weights are pushed before the **next** generation, not at the optimizer step; a 
 
 ### Multi-homed nodes (`VLLM_GROUP_HOST`)
 
-Set `VLLM_GROUP_HOST` to the trainer IP a **remote** server should dial when the default route is not on its subnet; this trainer has no per-server `group_host` (TRL builds its client without one). Resolution order and the rendezvous: [Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous).
+Set `VLLM_GROUP_HOST` to the trainer IP a **remote** server should dial when it cannot dial back to the trainer's address on the route to it (NAT, asymmetric routing); this trainer has no per-server `group_host` (TRL builds its client without one). Resolution order and the rendezvous: [Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous).
 
 > [!NOTE]
 > **Multi-server sync belongs to Async GRPO with Environments**

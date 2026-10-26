@@ -221,7 +221,8 @@ def reject_unsupported_engine_reference(client_cls, async_config, is_correction:
 
 def reject_unread_grpo_knobs(args) -> None:
     """Refuse a GRPOConfig knob this trainer does not honor set away from its default (read off the config
-    class): a sampling knob, the IS lower clip, an IS mode other than :data:`_ENV_IS_MODE`."""
+    class): a sampling knob, TRL's weight-sync group port, the IS lower clip, an IS mode other than
+    :data:`_ENV_IS_MODE`."""
     defaults = {f.name: f.default for f in dataclasses.fields(type(args))}
 
     def changed(names: tuple[str, ...]) -> list[str]:
@@ -240,6 +241,11 @@ def reject_unread_grpo_knobs(args) -> None:
             f"GRPOConfig vllm_importance_sampling_mode={mode!r} is not the correction environmental GRPO "
             f"applies: it truncates each token's ratio from above at vllm_importance_sampling_clip_max, TRL's "
             f"{_ENV_IS_MODE!r}. Set that mode or leave the default; its masks are the isr_* knobs."
+        )
+    if changed(("vllm_group_port",)):
+        raise ValueError(
+            "GRPOConfig 'vllm_group_port' is not read by environmental GRPO, whose weight-sync group port is "
+            "AsyncTrainingConfig's rollout_group_port on either backend. Set rollout_group_port instead."
         )
     if changed(("vllm_importance_sampling_clip_min",)):
         raise ValueError(

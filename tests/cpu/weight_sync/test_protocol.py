@@ -117,7 +117,7 @@ def client(server, monkeypatch):
     """A real client attached to the fake server, with the cleanup/HTTP deadlines shortened."""
     monkeypatch.setattr(wsc, "CLEANUP_TIMEOUT_S", 5)
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
-    monkeypatch.setattr(wsc, "WEIGHT_UPDATE_TIMEOUT_S", 10)
+    monkeypatch.setattr(wsc, "CHUNK_SYNC_TIMEOUT_S", 10)
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
     handle._transport = FakeCommunicator()
     return handle
@@ -175,6 +175,29 @@ def test_pause_keeps_in_flight_generations(server, client, monkeypatch):
 
     assert server.count("POST /pause") == 1
     assert "mode=keep" in server.queries["/pause"], f"pause query was {server.queries['/pause']!r}"
+
+
+def test_a_chunk_waits_on_its_update_rpc_for_the_configured_chunk_deadline(server, client, monkeypatch):
+    """vLLM replies to a chunk's ``/update_weights`` only once it received the chunk, so the RPC is bounded by
+    ``HALO_NCCL_SYNC_TIMEOUT_SECONDS`` like the drain: a fixed RPC timeout below it would fail a chunk the
+    knob allows."""
+    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "CHUNK_SYNC_TIMEOUT_S", 1234.0)
+    deadlines = []
+    real_start = client._start_collective_rpc
+
+    def start(path, *, timeout, json):
+        call = real_start(path, timeout=timeout, json=json)
+        if path == "/update_weights":
+            deadlines.append(("rpc", timeout))
+            real_wait = call.wait
+            call.wait = lambda timeout: deadlines.append(("wait", timeout)) or real_wait(timeout)
+        return call
+
+    monkeypatch.setattr(client, "_start_collective_rpc", start)
+    push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
+
+    assert deadlines == [("rpc", 1234.0), ("wait", 1234.0)], deadlines
 
 
 def test_lost_pause_reply_still_resumes_the_server(server, client, monkeypatch):
@@ -655,7 +678,7 @@ def test_group_port_is_released_on_close(server, monkeypatch):
     """``close_communicator`` must free the port so the next client can bind it.
 
     A trainer that syncs to several servers in sequence, or a test process that builds one trainer
-    after another, reuses the configured ``vllm_group_port``; a listener surviving the close makes
+    after another, reuses the configured group port; a listener surviving the close makes
     every run after the first fail before it starts.
     """
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)

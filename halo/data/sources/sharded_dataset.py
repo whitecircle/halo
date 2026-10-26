@@ -15,7 +15,7 @@ from halo.data.sources.dataset_cache import (
 )
 from halo.data.sources.paths import parse_dataset_source
 from halo.data.sources.s3_client import S3Client
-from halo.data.sources.s3_dataset_store import read_control_json_with_cache
+from halo.data.sources.s3_dataset_store import download_dataset_tree, read_control_json_with_cache
 from halo.log import info_logger
 
 logger = info_logger(__name__)
@@ -179,7 +179,7 @@ class ShardedDatasetLoader:
         serve_cached_tree(
             cache_path,
             shard_uri,
-            lambda tmp_path: load_from_disk(shard_uri).save_to_disk(tmp_path),
+            lambda tmp_path: download_dataset_tree(self._s3(), shard_key, tmp_path),
             lambda: self._shard_fingerprint(shard_key),
             stale_message=(
                 f"Cached shard {shard_uri} no longer matches its S3 content fingerprint (the shard changed on S3, "
@@ -189,6 +189,12 @@ class ShardedDatasetLoader:
         # Memory-map, NOT keep_in_memory: at scale a rank holds tens of shards and would blow host RAM.
         return load_from_disk(cache_path)
 
+    def _s3(self) -> S3Client:
+        """The source bucket's client, built on first use."""
+        if self._s3_client is None:
+            self._s3_client = S3Client(bucket=self.bucket)
+        return self._s3_client
+
     def _shard_fingerprint(self, shard_key: str) -> str | None:
         """The aggregate ETag fingerprint of a shard prefix, or ``None`` ("cannot validate"); an unreachable
         S3, unlike an empty listing, stops the remaining probes."""
@@ -197,9 +203,7 @@ class ShardedDatasetLoader:
         try:
             # Client construction is inside the probe's guard: it resolves credentials and a region,
             # so a warm-cache relaunch without either would otherwise die here instead of serving.
-            if self._s3_client is None:
-                self._s3_client = S3Client(bucket=self.bucket)
-            return compute_etag_fingerprint(self._s3_client.content_entries(shard_key))
+            return compute_etag_fingerprint(self._s3().content_entries(shard_key))
         except Exception as e:  # any transport/credential fault, cache stays servable
             self._s3_fingerprint_unavailable = True
             logger.warning(

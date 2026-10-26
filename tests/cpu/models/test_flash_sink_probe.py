@@ -19,6 +19,7 @@ the VARLEN entry point rather than the DENSE one:
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import sys
 import types
@@ -134,7 +135,6 @@ def warmed(monkeypatch):
     """Run the warm-up against a recording kernel on CPU, with a world of 2 faked."""
     cute = _RecordingCute()
     monkeypatch.setitem(sys.modules, "flash_attn.cute", cute)
-    monkeypatch.setattr(warmup_mod, "barrier", lambda: None)
     monkeypatch.setattr(warmup_mod, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(torch.cuda, "synchronize", lambda *args, **kwargs: None)
     return cute
@@ -169,6 +169,19 @@ def test_the_warmup_stays_inert_for_another_backend(warmed):
     assert warmed.calls == []
 
 
+def _recorded_fences(monkeypatch) -> list[str]:
+    """The fences the warm-up enters, by the failure description each joins under."""
+    fences: list[str] = []
+
+    @contextlib.contextmanager
+    def fence(what: str):
+        yield
+        fences.append(what)
+
+    monkeypatch.setattr(warmup_mod, "barrier_on_exit", fence)
+    return fences
+
+
 @pytest.mark.parametrize(
     ("mutate", "case"),
     [
@@ -176,35 +189,33 @@ def test_the_warmup_stays_inert_for_another_backend(warmed):
         (lambda m: setattr(m, "config", None), "no config"),
     ],
 )
-def test_every_rank_reaches_the_barrier_whatever_it_resolved(monkeypatch, warmed, mutate, case):
-    """The barrier is world-wide, so it cannot sit behind a PER-RANK verdict.
+def test_every_rank_reaches_the_fence_whatever_it_resolved(monkeypatch, warmed, mutate, case):
+    """The fence is world-wide, so it cannot sit behind a PER-RANK verdict.
 
     The backend a rank resolves is its own (auto-detection, an FA4 build present on some nodes only,
-    a composite config that keeps the field elsewhere), and a rank returning before the barrier
+    a composite config that keeps the field elsewhere), and a rank returning before the fence
     leaves every peer that DID warm sitting in it — the same desync the warm-up exists to prevent,
-    moved from the JIT to the barrier. Hence the fence sits at the distributed caller, above every
+    moved from the JIT to the fence. Hence the fence sits at the distributed caller, above every
     per-rank verdict the compile itself takes.
     """
-    barriers: list[int] = []
-    monkeypatch.setattr(warmup_mod, "barrier", lambda: barriers.append(1))
+    fences = _recorded_fences(monkeypatch)
 
     model = _fa4_model()
     mutate(model)
     warm_attention_kernels(model, dtype=torch.bfloat16)
 
     assert warmed.calls == [], f"{case}: nothing should compile here"
-    assert barriers == [1], f"{case}: the rank skipped the barrier its peers are waiting in"
+    assert len(fences) == 1, f"{case}: the rank skipped the fence its peers are waiting in"
 
 
-def test_a_single_process_run_does_not_barrier(monkeypatch, warmed):
-    """Anti-vacuity: world==1 is the one verdict every rank shares, so it may skip the barrier."""
-    barriers: list[int] = []
-    monkeypatch.setattr(warmup_mod, "barrier", lambda: barriers.append(1))
+def test_a_single_process_run_does_not_fence(monkeypatch, warmed):
+    """Anti-vacuity: world==1 is the one verdict every rank shares, so it may skip the fence."""
+    fences = _recorded_fences(monkeypatch)
     monkeypatch.setattr(warmup_mod, "get_global_world_size", lambda: 1)
 
     warm_attention_kernels(_fa4_model(), dtype=torch.bfloat16)
 
-    assert barriers == [] and warmed.calls == []
+    assert fences == [] and warmed.calls == []
 
 
 if __name__ == "__main__":

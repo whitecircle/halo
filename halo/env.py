@@ -1,6 +1,6 @@
 """Helpers for the toolkit's own environment knobs (``HALO_``/``DIST_``/``VLLM_``/``SGLANG_``/``NVLINK_``):
-the parsers, the knob defaults, the NCCL and c10d-store timeout readers, the scratch root and the
-``accelerate`` launch markers. Launcher, HuggingFace, OS and third-party variables are read raw at their
+the parsers, the knob defaults, the NCCL, c10d-store and filesystem-probe timeout readers, the scratch root
+and the ``accelerate`` launch markers. Launcher, HuggingFace, OS and third-party variables are read raw at their
 owner, in their library's own parse. The body is stdlib-only, but importing it runs ``halo/__init__.py``.
 """
 
@@ -19,6 +19,8 @@ DEFAULT_NCCL_TIMEOUT_MINUTES = 30
 WATCHDOG_WARN_FRACTION = 0.8
 # Hours, not minutes: store waits outlast one rank's download or packing, not a collective.
 DEFAULT_STORE_TIMEOUT_HOURS = 4
+# NFS's default ``acdirmax``: a cached negative lookup can hide a peer's new file this long.
+DEFAULT_FS_PROBE_TIMEOUT_SECONDS = 60
 
 
 def _is_set(raw: str | None) -> TypeGuard[str]:
@@ -99,6 +101,12 @@ def watchdog_bounded_seconds() -> float:
 def store_timeout() -> timedelta:
     """Bound on the c10d-store coordination waits (``DIST_STORE_TIMEOUT_HOURS``)."""
     return timedelta(hours=env_positive_int("DIST_STORE_TIMEOUT_HOURS", DEFAULT_STORE_TIMEOUT_HOURS))
+
+
+def fs_probe_timeout() -> timedelta:
+    """How long a rank declared on shared storage polls for the shared-filesystem probe's sentinel
+    (``DIST_FS_PROBE_TIMEOUT_SECONDS``): at least the mount's attribute-cache bound."""
+    return timedelta(seconds=env_positive_int("DIST_FS_PROBE_TIMEOUT_SECONDS", DEFAULT_FS_PROBE_TIMEOUT_SECONDS))
 
 
 @overload

@@ -56,7 +56,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `halo/model_loading/checkpoint_keys.py` | where each checkpoint key lands on the live names, planned once on transformers' rename rules from key names alone (no shard read, no collective), and the conversion mapping it plans with, so a lazy build and a resume read the same keys |
 | `halo/checkpoint/hub_layout.py` | the transformers load conversions a save reverts to write the hub's tensor names, and `ModuleLayoutView`, which reads a saved layout under the live names |
 | `halo/checkpoint/writing.py` | save-dtype casts, the stale-file sweep, the merged index, the streaming shard writer, the tied-embedding reconcile |
-| `halo/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules, with no boto3 import |
+| `halo/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, string rules plus the ambiguous-spelling refusal's one directory probe, with no boto3 import |
 | `halo/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected; one protocol for both dataset caches, so their crash and staleness semantics cannot drift |
 | `halo/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool and the default-bucket helpers |
 | `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load and the mirrored control-file reads |

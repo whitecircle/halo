@@ -219,13 +219,13 @@ def _require_reference_token_ids(args, model_config) -> None:
     if args.reference_kl_coef <= 0 or ref_path == model_config.model_name_or_path:
         return
 
-    def fetch():
-        trust = model_config.trust_remote_code
+    def fetch(local_files_only: bool):
+        options = {"trust_remote_code": model_config.trust_remote_code, "local_files_only": local_files_only}
         return (
             AutoTokenizer.from_pretrained(
-                model_config.model_name_or_path, revision=model_config.model_revision, trust_remote_code=trust
+                model_config.model_name_or_path, revision=model_config.model_revision, **options
             ),
-            AutoTokenizer.from_pretrained(ref_path, trust_remote_code=trust),
+            AutoTokenizer.from_pretrained(ref_path, **options),
         )
 
     verify_same_token_ids(*hub_metadata_main_first("reference_tokenizers", fetch))

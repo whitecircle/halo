@@ -6,7 +6,8 @@ import datetime
 import hashlib
 import logging
 import pickle
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, NamedTuple, TypeVar
 
@@ -111,6 +112,33 @@ def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exce
     if not rank_max([int(bool(local_reason))])[0]:
         return
     _raise_gathered_reasons(gather_rank_reasons(local_reason), what, exc_type)
+
+
+def _raise_joined_failure(failure: BaseException | None, join: Callable[[str | None], None]) -> None:
+    """``join`` a recorded rank-local ``failure`` (its type and message as the reason); the failing rank re-raises
+    its own exception, chained under the uniform ``RuntimeError`` the join raised."""
+    if failure is None:
+        join(None)
+        return
+    try:
+        join(f"{type(failure).__name__}: {failure}")
+    except RuntimeError as uniform:
+        raise failure from uniform
+    raise failure
+
+
+@contextmanager
+def barrier_on_exit(what: str) -> Iterator[None]:
+    """COLLECTIVE: run a rank-gated write, then join its failure across ranks where a barrier would stand (one
+    all-reduce on every rank): a failure on any rank raises on every rank, the failing rank its own exception
+    and the others a ``RuntimeError`` naming the failing ranks. After unbounded single-rank work use
+    :func:`store_join_recorded_failure`."""
+    failure: BaseException | None = None
+    try:
+        yield
+    except BaseException as exc:  # joined below, so every rank raises with it
+        failure = exc
+    _raise_joined_failure(failure, lambda reason: reject_across_ranks(reason, what))
 
 
 def divergent_settings(gathered: list[dict[str, object]]) -> dict[str, list[str]]:
@@ -235,6 +263,11 @@ class DeferredRankFailure:
         """COLLECTIVE: raise on every rank if any recorded a failure."""
         reject_across_ranks(self.reason, self.what, exc_type=self.exc_type)
 
+    def store_reject(self, tag: str) -> None:
+        """COLLECTIVE over the c10d store under ``tag`` (:func:`store_reject_across_ranks`): :meth:`reject` for a
+        region of unbounded file I/O, whose slowest writer the NCCL watchdog would abort its peers over."""
+        store_reject_across_ranks(tag, self.reason, self.what, exc_type=self.exc_type)
+
 
 def rank0_verdict(probe: Callable[[], _T], what: str, exc_type: type[Exception] = RuntimeError) -> _T:
     """COLLECTIVE: run ``probe`` on global rank 0 and return its result on every rank; a raise on rank 0
@@ -336,14 +369,7 @@ def store_reject_across_ranks(
 def store_join_recorded_failure(tag: str, failure: BaseException | None, what: str) -> None:
     """COLLECTIVE over the c10d store: join a recorded rank-local failure; the failing rank re-raises its
     own exception (chained under the uniform one), every other rank a ``RuntimeError`` naming it."""
-    if failure is None:
-        store_reject_across_ranks(tag, None, what)
-        return
-    try:
-        store_reject_across_ranks(tag, f"{type(failure).__name__}: {failure}", what)
-    except RuntimeError as uniform:
-        raise failure from uniform
-    raise failure
+    _raise_joined_failure(failure, lambda reason: store_reject_across_ranks(tag, reason, what))
 
 
 def agree_probe_across_ranks(local: bool, subject, probe: str) -> bool:

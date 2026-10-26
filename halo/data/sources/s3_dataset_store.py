@@ -94,6 +94,13 @@ def read_control_json_with_cache(bucket: str, key: str) -> Any:
     return payload
 
 
+def download_dataset_tree(client: S3Client, full_key: str, local_path: str) -> None:
+    """Download the ``save_to_disk`` tree at ``full_key`` straight into ``local_path`` and open it there, so a tree
+    missing its load gates (a torn promote) raises ``FileNotFoundError`` before any cache publishes it."""
+    client.download_folder(full_key, local_path)
+    load_from_disk(local_path)
+
+
 def _describe(dataset: Dataset | DatasetDict) -> str:
     """``DatasetDict (train: N rows, ...)`` or ``Dataset (N rows)``, as the transfer records name a tree."""
     if isinstance(dataset, DatasetDict):
@@ -262,7 +269,7 @@ def load_dataset(
 
     def _fetch(tmp_path: str) -> None:
         logger.info(f"Downloading dataset from S3: {s3_uri}")
-        load_from_disk(s3_uri, storage_options=client.get_storage_options()).save_to_disk(tmp_path)
+        download_dataset_tree(client, full_key, tmp_path)
 
     try:
         cache_hit = serve_cached_tree(

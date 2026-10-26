@@ -17,8 +17,7 @@ from halo.checkpoint.format import (
     TRAINER_STATE_FILE,
     UNCOMMITTED_TRAINER_STATE_FILE,
 )
-from halo.runtime.collectives import barrier_on_exit
-from halo.runtime.consensus import DeferredRankFailure, rank_consensus
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit, rank_consensus
 from halo.runtime.filesystem import is_fs_save_rank
 
 logger = logging.getLogger(__name__)
@@ -33,7 +32,7 @@ def remove_stale_completion_markers(checkpoint_dir: str) -> None:
     """COLLECTIVE. Remove the :data:`CHECKPOINT_COMPLETION_MARKERS` an earlier save left in ``checkpoint_dir``
     before this save rewrites it in place, so a save torn before its own markers is refused on resume
     rather than vouched for by the abandoned save's."""
-    with barrier_on_exit():
+    with barrier_on_exit(f"Removing the stale completion markers in {checkpoint_dir}"):
         if is_fs_save_rank():
             for name in CHECKPOINT_COMPLETION_MARKERS:
                 with suppress(FileNotFoundError):
@@ -81,7 +80,7 @@ def commit_trainer_state(checkpoint_dir: str) -> None:
 def mark_resume_adapter_complete(checkpoint_dir: str, *, is_save_rank: bool) -> None:
     """COLLECTIVE. Mark ``checkpoint_dir`` as resuming from its :data:`RESUME_ADAPTER_DIR`, on each save rank
     after its own adapter write completed."""
-    with barrier_on_exit():
+    with barrier_on_exit(f"Writing {RESUME_ADAPTER_MARKER_FILE} to {checkpoint_dir}"):
         if is_save_rank:
             with open(os.path.join(checkpoint_dir, RESUME_ADAPTER_MARKER_FILE), "w") as fh:
                 json.dump({"adapter_dir": RESUME_ADAPTER_DIR}, fh, indent=2)

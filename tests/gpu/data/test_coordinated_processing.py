@@ -34,6 +34,7 @@ from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_m
 from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import is_fs_load_rank, is_input_shared_filesystem
 from halo.runtime.ranks import is_global_main_process
+from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log, log_all
 
@@ -125,13 +126,18 @@ def filesystem_mode(shared: bool):
     On a single-node launch local rank 0 IS global rank 0, so the two election branches are
     indistinguishable. Presenting every rank as its own node makes every rank a local main, which is
     exactly the per-node-local-storage contract: each writes and reads its own copy.
+
+    The production init agreed the flags once for the process; that memo is dropped on entry and on exit, so
+    the flags read the mode set here and then the launch's own again.
     """
     saved = {k: os.environ.get(k) for k in ("DIST_SHARED_FILESYSTEM", "LOCAL_RANK", "LOCAL_WORLD_SIZE")}
     os.environ["DIST_SHARED_FILESYSTEM"] = "1" if shared else "0"
     if not shared:
         os.environ["LOCAL_RANK"] = "0"
         os.environ["LOCAL_WORLD_SIZE"] = "1"
+    reset_shared_filesystem_consensus()
     try:
+        assert is_input_shared_filesystem() == shared, "an agreed scope overrode the filesystem mode under test"
         yield
     finally:
         for key, value in saved.items():
@@ -139,6 +145,7 @@ def filesystem_mode(shared: bool):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        reset_shared_filesystem_consensus()
 
 
 def on_disk_source(cache_dir: str, num_samples: int) -> Dataset:

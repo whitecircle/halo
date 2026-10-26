@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Tests for S3 dataset operations using datasets native s3fs support.
-
-These tests validate the S3 dataset loading/pushing that uses HuggingFace
-datasets' native S3 support via s3fs rather than manual boto3
-download/upload code.
+Tests for S3 dataset operations: a push writes through datasets' s3fs support, a load downloads the tree
+straight into its local cache (``download_dataset_tree``).
 
 All S3 calls are mocked — no real AWS access needed.
 
@@ -201,29 +198,22 @@ def test_load_dataset_cache_miss():
 
     client.exists = MagicMock(return_value=True)
 
-    mock_ds = MagicMock(spec=Dataset)
-    mock_ds.__len__ = MagicMock(return_value=10)
-
     with tempfile.TemporaryDirectory() as cache_root:
-        # The cache dir must exist for .download_complete to be written next to it.
-        def fake_save_to_disk(path, **kwargs):
-            os.makedirs(path, exist_ok=True)
+        with (
+            patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root),
+            patch(
+                "halo.data.sources.s3_dataset_store.download_dataset_tree", side_effect=_fake_download(["a", "b"])
+            ) as download,
+        ):
+            loaded = s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
 
-        mock_ds.save_to_disk = MagicMock(side_effect=fake_save_to_disk)
-
-        with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("halo.data.sources.s3_dataset_store.load_from_disk") as mock_load:
-                mock_load.return_value = mock_ds
-
-                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
-
-                assert mock_load.call_count >= 2, f"Expected >= 2 calls to load_from_disk, got {mock_load.call_count}"
-
-                first_call = mock_load.call_args_list[0]
-                assert first_call[0][0] == "s3://test-bucket/my/dataset", (
-                    f"Expected S3 URI in first call, got {first_call[0][0]}"
-                )
-                assert "storage_options" in first_call[1]
+        (call,) = download.call_args_list
+        fetched_client, fetched_key, tmp_path = call.args
+        assert (fetched_client, fetched_key) == (client, "my/dataset")
+        cache_path = os.path.join(cache_root, hashlib.md5(b"test-bucket/my/dataset").hexdigest(), "dataset")
+        assert tmp_path.startswith(f"{cache_path}.tmp-"), "the fetch must land beside the cache it publishes"
+        assert os.path.exists(os.path.join(cache_path, ".download_complete"))
+        assert loaded["text"] == ["a", "b"]
 
     print("  load_dataset cache miss: PASSED")
 
@@ -252,6 +242,15 @@ def _make_validating_client(live_fingerprint):
     client.exists = MagicMock(return_value=True)
     client.content_fingerprint = MagicMock(return_value=live_fingerprint)
     return client
+
+
+def _fake_download(rows: list):
+    """A ``download_dataset_tree`` stand-in that writes a real one-column tree of ``rows`` into the target."""
+
+    def _download(client, full_key, local_path):
+        Dataset.from_dict({"text": rows}).save_to_disk(local_path)
+
+    return _download
 
 
 def test_compute_etag_fingerprint():
@@ -292,26 +291,19 @@ def test_load_dataset_stale_cache_redownloads():
     """
     client = _make_validating_client(live_fingerprint="newfp")
 
-    mock_ds = MagicMock(spec=Dataset)
-    mock_ds.__len__ = MagicMock(return_value=10)
-
     with tempfile.TemporaryDirectory() as cache_root:
         _cache_path, marker = _make_cached_dataset(cache_root, fingerprint="oldfp")
 
-        def fake_save_to_disk(path, **kwargs):
-            os.makedirs(path, exist_ok=True)
+        with (
+            patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root),
+            patch(
+                "halo.data.sources.s3_dataset_store.download_dataset_tree", side_effect=_fake_download(["new"])
+            ) as download,
+        ):
+            loaded = s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
 
-        mock_ds.save_to_disk = MagicMock(side_effect=fake_save_to_disk)
-
-        with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("halo.data.sources.s3_dataset_store.load_from_disk") as mock_load:
-                mock_load.return_value = mock_ds
-                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
-
-                first_call = mock_load.call_args_list[0]
-                assert first_call[0][0] == "s3://test-bucket/my/dataset", (
-                    f"stale cache was served instead of re-downloaded: first load was {first_call[0][0]}"
-                )
+        assert download.call_count == 1, "stale cache was served instead of re-downloaded"
+        assert loaded["text"] == ["new"]
         assert _read_marker_fingerprint(marker) == "newfp"
 
 
@@ -386,30 +378,27 @@ def test_load_shard_from_s3_caches_locally():
     download in parallel and TP/CP siblings (or reruns) reuse the cache without
     re-streaming S3.
     """
-    real_ds = Dataset.from_dict({"x": [1, 2, 3]})
     shard = ShardInfo(id=0, path="train/shard_0000", num_examples=100, byte_size=1024)
 
     with tempfile.TemporaryDirectory() as cache_root:
-        with patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("halo.data.sources.sharded_dataset.load_from_disk") as mock_load:
-                mock_load.return_value = real_ds
+        with (
+            patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", cache_root),
+            patch("halo.data.sources.sharded_dataset.download_dataset_tree", side_effect=_fake_download([1, 2])) as dl,
+        ):
+            loader = _make_s3_loader()
+            loader._s3_client = MagicMock()
+            loader._shard_fingerprint = MagicMock(return_value="fp0")  # hermetic: no live S3 probe
+            first = loader._load_shard_from_s3(shard)
+            again = loader._load_shard_from_s3(shard)
 
-                # The cache dir must exist for the completion marker to be written next to it.
-                def fake_save(path, **kw):
-                    os.makedirs(path, exist_ok=True)
-
-                real_ds.save_to_disk = MagicMock(side_effect=fake_save)
-
-                loader = _make_s3_loader()
-                loader._shard_fingerprint = MagicMock(return_value="fp0")  # hermetic: no live S3 probe
-                loader._load_shard_from_s3(shard)
-
-                assert mock_load.call_args_list[0][0][0] == ("s3://test-bucket/preprocessed/dataset/train/shard_0000")
-
-                key = hashlib.md5(b"test-bucket/preprocessed/dataset/train/shard_0000").hexdigest()
-                marker = os.path.join(cache_root, "shards", key, "shard", ".download_complete")
-                assert os.path.exists(marker), "download completion marker not written"
-                assert mock_load.call_args_list[-1][0][0].endswith(os.path.join(key, "shard"))
+        assert dl.call_count == 1, "a complete shard cache must be re-read from disk, not re-downloaded"
+        fetched_client, fetched_key, tmp_path = dl.call_args.args
+        assert (fetched_client, fetched_key) == (loader._s3_client, "preprocessed/dataset/train/shard_0000")
+        key = hashlib.md5(b"test-bucket/preprocessed/dataset/train/shard_0000").hexdigest()
+        cache_path = os.path.join(cache_root, "shards", key, "shard")
+        assert tmp_path.startswith(f"{cache_path}.tmp-"), "the fetch must land beside the cache it publishes"
+        assert os.path.exists(os.path.join(cache_path, ".download_complete")), "download completion marker not written"
+        assert first["text"] == again["text"] == [1, 2]
 
 
 def _make_cached_shard(cache_root: str, fingerprint: str | None) -> tuple[str, str]:
@@ -430,28 +419,21 @@ def test_load_shard_from_s3_stale_cache_redownloads():
     instead of silently training on OLD data.
     """
     shard = ShardInfo(id=0, path="train/shard_0000", num_examples=100, byte_size=1024)
-    real_ds = Dataset.from_dict({"x": [1, 2, 3]})
 
     with tempfile.TemporaryDirectory() as cache_root:
         _cache_path, marker = _make_cached_shard(cache_root, fingerprint="oldfp")
 
-        with patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("halo.data.sources.sharded_dataset.load_from_disk") as mock_load:
-                mock_load.return_value = real_ds
+        with (
+            patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", cache_root),
+            patch("halo.data.sources.sharded_dataset.download_dataset_tree", side_effect=_fake_download([9])) as dl,
+        ):
+            loader = _make_s3_loader()
+            loader._s3_client = MagicMock()
+            loader._shard_fingerprint = MagicMock(return_value="newfp")
+            loaded = loader._load_shard_from_s3(shard)
 
-                def fake_save(path, **kw):
-                    os.makedirs(path, exist_ok=True)
-
-                real_ds.save_to_disk = MagicMock(side_effect=fake_save)
-
-                loader = _make_s3_loader()
-                loader._shard_fingerprint = MagicMock(return_value="newfp")
-                loader._load_shard_from_s3(shard)
-
-                first_call = mock_load.call_args_list[0][0][0]
-                assert first_call == "s3://test-bucket/preprocessed/dataset/train/shard_0000", (
-                    f"stale shard cache was served instead of re-downloaded: first load was {first_call}"
-                )
+        assert dl.call_count == 1, "stale shard cache was served instead of re-downloaded"
+        assert loaded["text"] == [9]
         assert _read_marker_fingerprint(marker) == "newfp"
 
 

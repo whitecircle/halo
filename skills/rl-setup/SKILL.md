@@ -41,9 +41,9 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
 2. **Point the trainer at it.** Env GRPO reads `AsyncTrainingConfig` from YAML: `rollout_backend`
    (`vllm` default; `sglang` for the families its loaders take an update for — the trainer refuses the
    rest at construction, naming the loader reason), then `rollout_server_url` (single server) or
-   `rollout_server_configs` (multi-server) and `rollout_connection_timeout`. The NCCL group port is TRL's
-   `vllm_group_port` on `GRPOConfig`. Online GRPO (RLVR) uses TRL's native vLLM fields instead
-   (`use_vllm: true`, `vllm_mode: server`, `vllm_server_host`, `vllm_server_port`). Field defaults:
+   `rollout_server_configs` (multi-server), `rollout_connection_timeout` and the NCCL group port
+   `rollout_group_port`. Online GRPO (RLVR) uses TRL's native vLLM fields instead
+   (`use_vllm: true`, `vllm_mode: server`, `vllm_server_host`, `vllm_server_port`, `vllm_group_port`). Field defaults:
    `agent-docs/reference/configuration-reference.md`.
 
 3. **NCCL weight sync** is `VLLMWeightSyncClient` / `SGLangWeightSyncClient`

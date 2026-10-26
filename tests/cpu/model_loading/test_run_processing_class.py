@@ -136,9 +136,25 @@ def test_an_unreachable_hub_is_not_read_as_no_processor_config(monkeypatch):
 
 def test_a_video_processor_config_alone_counts_as_a_shipped_processor(tmp_path):
     """The probe reads the processor files the merge tools copy, the video processor's included."""
-    assert not model_setup._ships_processor_config(str(tmp_path), None)
+    assert not model_setup._ships_processor_config(str(tmp_path), None, local_files_only=False)
     (tmp_path / "video_preprocessor_config.json").write_text("{}")
-    assert model_setup._ships_processor_config(str(tmp_path), None)
+    assert model_setup._ships_processor_config(str(tmp_path), None, local_files_only=False)
+
+
+def test_a_follower_reads_a_cache_miss_as_no_processor_config(monkeypatch):
+    """A follower reads only the cache its scope's main rank filled, where a file the Hub lacks is a miss:
+    online too, the cache then stands for the checkpoint, and the follower asks the Hub nothing."""
+    asked = []
+
+    def download(repo_id, filename, **kwargs):
+        asked.append(kwargs["local_files_only"])
+        raise LocalEntryNotFoundError("not cached")
+
+    monkeypatch.setattr(model_setup, "hf_hub_download", download)
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
+
+    assert not model_setup._ships_processor_config("org/multimodal", None, local_files_only=True)
+    assert asked and all(asked), f"a follower probed the Hub: {asked}"
 
 
 def test_the_resolved_tokenizer_lands_on_whichever_class_the_run_loaded(tmp_path):

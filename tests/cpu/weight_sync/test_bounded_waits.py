@@ -147,7 +147,7 @@ def test_the_drain_deadline_is_read_once_from_the_env(monkeypatch, value, expect
         monkeypatch.setenv("HALO_NCCL_SYNC_TIMEOUT_SECONDS", value)
     script = (
         "from halo.weight_sync.transport import bounded_waits; "
-        f"print({_DRAIN_MARKER!r} + repr(bounded_waits.BROADCAST_DRAIN_TIMEOUT_S))"
+        f"print({_DRAIN_MARKER!r} + repr(bounded_waits.CHUNK_SYNC_TIMEOUT_S))"
     )
     [deadline] = probe_findings(script, _DRAIN_MARKER)
     assert float(deadline) == expected
@@ -174,7 +174,7 @@ def test_a_packed_drain_that_passes_its_deadline_aborts_the_communicator(monkeyp
     """The producer waits out a pack stream before reusing its buffer; a peer that stopped receiving
     leaves the broadcast queued there spinning, and only the communicator's abort ends it."""
     communicator = _Communicator()
-    monkeypatch.setattr(packed_broadcast, "BROADCAST_DRAIN_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(packed_broadcast, "CHUNK_SYNC_TIMEOUT_S", 0.0)
     monkeypatch.setattr(torch.cuda, "Event", _PendingEvent)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: _Stream())
     real_empty = torch.empty

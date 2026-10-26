@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 import torch
 
-from halo.weight_sync.transport.bounded_waits import BROADCAST_DRAIN_TIMEOUT_S, bounded_stream_sync
+from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S, bounded_stream_sync
 from halo.weight_sync.transport.pynccl import PyNcclCommunicator
 
 PACKED_BUFFER_BYTES = 1024 * 1024 * 1024  # 1GB
@@ -75,7 +75,7 @@ def packed_broadcast_producer(
         # Bounded sync: a server death mid-sync raises here instead of hanging the broadcast.
         bounded_stream_sync(
             streams[buffer_idx],
-            timeout_s=BROADCAST_DRAIN_TIMEOUT_S,
+            timeout_s=CHUNK_SYNC_TIMEOUT_S,
             what="packed weight broadcast",
             abort=group.abort,
         )

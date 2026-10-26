@@ -1,11 +1,12 @@
 """Host and accelerator facts: this rank's device, architecture predicates, GPU model detection, the
-dense Tensor-Core peak-FLOPS table and available host RAM.
+dense Tensor-Core peak-FLOPS table, available host RAM and the CPUs this process may run on.
 
 The kernel predicates read compute capability; the FLOPS table is keyed by SKU name, because peaks
 differ within one architecture.
 """
 
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 
@@ -177,3 +178,11 @@ def available_host_ram_bytes() -> int | None:
     except (OSError, ValueError, IndexError):
         return None
     return None
+
+
+def available_cpu_count() -> int:
+    """The CPUs this process may run on: its affinity set (a container cpuset, a NUMA binding), else the host
+    count."""
+    if hasattr(os, "sched_getaffinity"):
+        return max(1, len(os.sched_getaffinity(0)))
+    return os.cpu_count() or 1

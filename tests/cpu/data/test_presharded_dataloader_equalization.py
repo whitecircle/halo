@@ -11,6 +11,7 @@ case stops raising, or if the GRPO trainers stop inheriting the eval path from t
     python tests/cpu/data/test_presharded_dataloader_equalization.py
 """
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -100,12 +101,17 @@ def test_eval_no_equalize_when_not_presharded(trainer_cls):
     assert len(calls) == 0, f"{trainer_cls.__name__}: equalized a non-presharded eval dataset"
 
 
-def _equalize_with_forced_min(dataset, forced_min: int, split: str):
-    """Run the real _equalize_presharded_length with the world MIN forced to ``forced_min``."""
+def _equalize_with_forced_min(dataset, forced_min: int, split: str, forced_max: int = 0):
+    """Run the real _equalize_presharded_length as global rank 0 of a world whose other ranks hold
+    ``forced_min`` and ``forced_max`` rows."""
     with (
-        patch("halo.trainers.dataloaders.rank_min", lambda values: [min(forced_min, values[0])]),
+        patch(
+            "halo.trainers.dataloaders.rank_max",
+            lambda values: [max(forced_max, values[0]), max(-forced_min, values[1])],
+        ),
         # The shared multi-rank probe reads the real torch.distributed, which no CPU test initializes.
         patch("halo.trainers.dataloaders.is_multi_rank_run", return_value=True),
+        patch("halo.trainers.dataloaders.is_global_main_process", return_value=True),
     ):
         return DataParallelLoaderMixin._equalize_presharded_length(None, dataset, split=split)
 
@@ -131,6 +137,31 @@ def test_eval_truncates_to_global_min():
     ds = Dataset.from_dict({"x": [1, 2, 3, 4, 5]})
     out = _equalize_with_forced_min(ds, forced_min=3, split="eval")
     assert len(out) == 3, f"expected truncation to global min 3, got {len(out)}"
+
+
+def _data_loss_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and "DATA LOSS" in r.getMessage()]
+
+
+def test_rank_zero_warns_of_another_ranks_drop_when_it_holds_the_minimum(caplog):
+    """Rank 0 truncating nothing must still report the drop the fullest rank takes, and name both causes:
+    shard sizes differ by one row even when num_shards is a multiple of data_parallel_size."""
+    ds = Dataset.from_dict({"x": list(range(5))})
+    with caplog.at_level(logging.WARNING, logger="halo.trainers.dataloaders"):
+        out = _equalize_with_forced_min(ds, forced_min=5, forced_max=7, split="train")
+
+    assert len(out) == 5
+    (warning,) = _data_loss_warnings(caplog)
+    assert "5 to 7 examples" in warning and "DROPS 2" in warning, warning
+    assert "not a multiple of data_parallel_size" in warning and "one row per shard" in warning, warning
+
+
+def test_equal_ranks_warn_of_nothing(caplog):
+    ds = Dataset.from_dict({"x": list(range(4))})
+    with caplog.at_level(logging.WARNING, logger="halo.trainers.dataloaders"):
+        out = _equalize_with_forced_min(ds, forced_min=4, forced_max=4, split="train")
+    assert len(out) == 4
+    assert _data_loss_warnings(caplog) == []
 
 
 def test_grpo_trainers_inherit_mixin_eval_dataloader():

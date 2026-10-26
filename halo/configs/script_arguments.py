@@ -279,8 +279,9 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
     save_completions: bool = field(
         default=True,
         metadata={
-            "help": "GRPO family: write each step's rollout completions and trajectories to "
-            "<output_dir>/completions/completions_<step>.parquet, plus a wandb completions table. Independent of "
+            "help": "GRPO family: write each step's rollout completions and trajectories under "
+            "<output_dir>/completions/ (completions_<step>.parquet online, one part per rank in completions_<step>/ "
+            "for async GRPO), plus a wandb completions table. Independent of "
             "TRL's console-only log_completions; ignored by trainers that do not generate. "
             "See agent-docs/training-methods/async-grpo/monitoring.md#saved-trajectories."
         },
@@ -353,7 +354,7 @@ class DatasetNumProcArguments(ValidatedConfig):
         default=None,
         metadata={
             "help": "Worker processes for dataset preprocessing (map/filter). Unset means the toolkit "
-            "default (HALO_DATASET_NUM_PROC, else max(1, min(cpu_count // 4, 4))), not one worker."
+            "default (HALO_DATASET_NUM_PROC, else three quarters of the usable CPUs, at most 64), not one worker."
         },
     )
 

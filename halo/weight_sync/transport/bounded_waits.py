@@ -8,9 +8,9 @@ import torch
 
 from halo.env import env_positive_float
 
-# Deadline for draining one chunk's broadcasts over a slow link (HALO_NCCL_SYNC_TIMEOUT_SECONDS), read once
-# at import so a malformed value cannot raise mid-RL-step.
-BROADCAST_DRAIN_TIMEOUT_S = env_positive_float("HALO_NCCL_SYNC_TIMEOUT_SECONDS", None) or 600.0
+# The deadline for one chunk of a sync over a slow link (HALO_NCCL_SYNC_TIMEOUT_SECONDS): the update RPC that
+# declares it and the drain of its broadcasts. Read once at import so a malformed value cannot raise mid-RL-step.
+CHUNK_SYNC_TIMEOUT_S = env_positive_float("HALO_NCCL_SYNC_TIMEOUT_SECONDS", None) or 600.0
 
 
 @contextmanager

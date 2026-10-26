@@ -15,7 +15,7 @@ other server knob is the same for both engines:
 rollout_backend: vllm            # default
 rollout_server_configs:          # one entry per server
 - url: "http://localhost:8000"
-  group_port: 51216              # optional; server N defaults to vllm_group_port + N
+  group_port: 51216              # optional; server N defaults to rollout_group_port + N
 - url: "http://localhost:8001"
   group_port: 51217
   group_host: "127.0.0.1"        # optional per-server override of VLLM_/SGLANG_GROUP_HOST
@@ -27,7 +27,7 @@ defaults sit inside Linux's 32768–60999 range, so reserve them (`net.ipv4.ip_l
 or choose ports outside it.
 
 An entry's keys are read by name with no per-entry validation, so a misspelled `group_port` silently
-falls back to `vllm_group_port + index`. The top-level keys are engine-neutral and the parser renames
+falls back to `rollout_group_port + index`. The top-level keys are engine-neutral and the parser renames
 none: any other spelling raises the unknown-key error. Trainer-side rollout mechanics (prefetch and
 its one-step staleness, sync cadence, trajectory-length knobs) stay on the
 [Async GRPO with Environments](../training-methods/async-grpo/setup.md#weight-synchronization) page.
@@ -81,7 +81,8 @@ reachable only by trusted hosts.**
 
 On both engines the store listens on the advertised address alone: `group_host` /
 `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` when set, else loopback when this host binds the server's
-address itself (no firewalled hairpin traffic), else the default-route NIC. A name is resolved once to
+address itself (no firewalled hairpin traffic), else this host's address on the route to the server
+(the interface the kernel would send to it from; a server no route reaches is refused). A name is resolved once to
 its IPv4 address, and the engine is sent that address. The client binds the listening socket and hands it to torch's
 `TCPStore` (`master_listen_fd`); a store master that opens its own listens on every interface
 whatever address it is given. An address this host cannot bind alone (a NAT or port-mapped address,
@@ -687,9 +688,10 @@ training service too), a same-host value; the fabric recipe excludes `lo` as wel
 host, one every collective can use: the variable is process-wide and filters the interfaces the
 default process group and DeepEP pick too.
 
-The sync's sends drain under a 600 s deadline, the same on both engines
-(`HALO_NCCL_SYNC_TIMEOUT_SECONDS` overrides it); a failed chunk drains the whole stream under a 30 s
-deadline. On expiry the group is aborted instead of parking the trainer.
+Each chunk runs under one 600 s deadline, the same on both engines (`HALO_NCCL_SYNC_TIMEOUT_SECONDS`
+overrides it): the update RPC that declares the chunk, which vLLM answers only once it received it, and
+the drain of the chunk's sends. A failed chunk drains the whole stream under a 30 s deadline. On expiry
+the group is aborted instead of parking the trainer.
 
 ## Servers on other nodes (EFA)
 
@@ -735,8 +737,9 @@ is the env [multi-node training](../parallelism/multi-node.md#rdma-fabrics) alre
 
 GPUDirect RDMA runs through dmabuf with no `nvidia_peermem`; `/dev/gdrdrv` is a cross-node DeepEP
 GIN requirement, not a sync one. Name the trainer address the server dials back to with the entry's
-`group_host` (or `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`) when the default-route NIC is not the one
-the server can reach; Online GRPO has only the env var (TRL builds its client without `group_host`).
+`group_host` (or `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`) when the server cannot dial back to the
+trainer's address on the route to it (NAT, asymmetric routing); Online GRPO has only the env var (TRL
+builds its client without `group_host`).
 
 Verify the transport before training:
 

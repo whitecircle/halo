@@ -144,8 +144,10 @@ is what turns that into a failure.
 
 The length-equalizer (`_equalize_presharded_length`, collective — every rank must reach it) runs for
 **both train and eval**: unequal per-rank lengths make ranks run different step counts and hang at
-the gradient sync or metrics gather, so each split is all-reduce-MIN truncated to the global minimum
-(with a data-loss warning when uneven).
+the gradient sync or metrics gather, so each split is truncated to the global minimum. When ranks
+differ, global rank 0 warns of the largest drop any rank takes: about a shard per rank when
+`num_shards` is not a multiple of `data_parallel_size`, and up to one row per shard a rank holds when
+it is, since shard sizes differ by one row.
 
 A minimum of 0 raises instead of truncating every rank to empty. For eval this means a small test
 split (sharding skips empty shards) must still yield at least `data_parallel_size` non-empty shards,

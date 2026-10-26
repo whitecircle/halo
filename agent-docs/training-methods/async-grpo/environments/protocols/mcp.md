@@ -19,6 +19,7 @@ environment_kwargs:
 | `transport` | `stdio` | `sse` connects to a running server instead |
 | `server_url` | `None` | Required under `sse` |
 | `env_vars` | `{}` | Satisfies or overrides a preset's credentials |
+| `episode_scratch` | `true` for `filesystem` | Scope of the scratch directory a `filesystem` server is jailed to: `true` gives each episode its own server and directory, removed with the episode; `false` one server and directory for the environment, removed when it closes. Refused for a preset that takes no directory |
 
 - A preset's credentials are resolved at construction, so a missing key raises at launch.
 - An `sse` config spawns nothing; passing `mcp_server` or `env_vars` with it raises.
@@ -27,9 +28,14 @@ environment_kwargs:
 
 Whatever the server advertises, discovered on the first episode. A call that hangs returns a tool error after 120 s.
 
+The `filesystem` server's allowlist is a fresh directory under `TMPDIR`. Under `episode_scratch` an
+episode's first tool call starts its own server over its own directory, so concurrent episodes (a GRPO
+group's siblings among them) never read each other's files; a server that dies mid-episode restarts over
+the same directory, and the server stops and the directory goes when the episode is released.
+
 | `mcp_server` | Credential | Tools |
 |---|---|---|
-| `filesystem` | — | File operations, jailed to `/tmp` |
+| `filesystem` | — | File operations, jailed to a scratch directory (`episode_scratch`) |
 | `fetch` | — | HTTP fetch for web content (`uvx`) |
 | `memory` | — | Knowledge-graph memory |
 | `brave_search` | `BRAVE_API_KEY` | Brave web search |

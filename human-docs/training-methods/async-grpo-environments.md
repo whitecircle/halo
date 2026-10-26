@@ -232,7 +232,7 @@ monitor ([Evaluation](../../agent-docs/training-methods/async-grpo/evaluation.md
   names which one. Under `on_error: invalid` those episodes also leave training, and
   `sampling/invalid_episode_frac` rises.
 
-Rollouts land in `<output_dir>/completions/` as parquet. Every metric, including the prefetch hit rate:
+Rollouts land in `<output_dir>/completions/` as parquet, one directory per logged step holding a part per rank. Every metric, including the prefetch hit rate:
 [Monitoring](../../agent-docs/training-methods/async-grpo/monitoring.md) ↗. Symptoms and fixes:
 [Troubleshooting](../../agent-docs/training-methods/async-grpo/troubleshooting.md) ↗.
 

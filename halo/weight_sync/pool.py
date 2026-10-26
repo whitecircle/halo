@@ -28,7 +28,8 @@ class WeightSyncPool:
         base_group_port: int,
     ):
         """``server_configs``: one ``{"url", "group_port", "group_host"}`` dict per server, ``url`` required. A
-        server without its own ``group_port`` takes ``base_group_port + index``."""
+        server without its own ``group_port`` takes ``base_group_port + index``, or a kernel-assigned port (0) when
+        the base is 0."""
         self.server_configs = server_configs
         self.connection_timeout = connection_timeout
         self.base_group_port = base_group_port
@@ -43,9 +44,10 @@ class WeightSyncPool:
         self._reconnect_lock = threading.Lock()
         self._client_cls = client_cls
 
-        # group_port is bound on the trainer host, so two servers sharing one collide.
+        # group_port is bound on the trainer host, so two servers sharing one collide; kernel-assigned ports never do.
         effective_ports = [self._group_port(i) for i in range(len(server_configs))]
-        if len(set(effective_ports)) != len(effective_ports):
+        fixed_ports = [port for port in effective_ports if port]
+        if len(set(fixed_ports)) != len(fixed_ports):
             raise ValueError(
                 f"Duplicate weight-sync group_port across servers: {effective_ports}. Each server "
                 f"needs a UNIQUE group_port — it is bound on the trainer host (one listener "
@@ -140,8 +142,12 @@ class WeightSyncPool:
         logger.info("WeightSyncPool closed all connections")
 
     def _group_port(self, index: int) -> int:
-        """Server ``index``'s trainer-side group port: its own, else the base + index."""
-        return self.server_configs[index].get("group_port", self.base_group_port + index)
+        """Server ``index``'s trainer-side group port: its own, else the base + index, else 0 (kernel-assigned) when
+        the base is."""
+        config = self.server_configs[index]
+        if "group_port" in config:
+            return config["group_port"]
+        return self.base_group_port + index if self.base_group_port else 0
 
     def _connect_client(self, index: int, device: torch.device) -> WeightSyncClientBase:
         """Build server ``index``'s client and form its group on ``device``, for the first connect and a reconnect."""

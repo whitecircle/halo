@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, Features
 from jinja2 import TemplateError
 from PIL import UnidentifiedImageError
 from PIL.Image import DecompressionBombError
@@ -167,8 +167,10 @@ def _bake_labels(
     eos_token_ids: frozenset[int] | None,
 ) -> Dataset:
     """Labels for the tokenized rows, baked for good (the artifact's collators only pad): completion-only under
-    the span policy of the collator that would have masked them at runtime, else a copy of ``input_ids``."""
+    the span policy of the collator that would have masked them at runtime, else a copy of ``input_ids``. Stored
+    at ``input_ids``' integer width, where inference would widen them to int64, most of the artifact's bytes."""
     num_proc = resolve_map_num_proc(config.num_proc)
+    features = Features({**tokenized.features, "labels": tokenized.features["input_ids"]})
     if config.train_on_completions_only:
         marker = config.assistant_message_template
         response_token_ids = tokenize_response_template(marker, tokenizer)
@@ -187,6 +189,7 @@ def _bake_labels(
             },
             desc=f"masking completions in {split_name}",
             num_proc=num_proc,
+            features=features,
             # Two artifacts of one corpus can differ by the span policy alone.
             cache_key_extras={
                 "completion_only": True,
@@ -202,6 +205,7 @@ def _bake_labels(
         lambda x: {"labels": x["input_ids"].copy()},
         desc=f"adding labels to {split_name}",
         num_proc=num_proc,
+        features=features,
         cache_key_extras={"labels": "full_copy"},
     )
 

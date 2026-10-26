@@ -21,8 +21,9 @@ from transformers import AutoConfig, AutoTokenizer
 
 from halo.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
 from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
-from halo.runtime import filesystem
+from halo.runtime import filesystem, process_group
 from halo.runtime.collectives import barrier, broadcast_from_rank0
+from halo.runtime.ranks import get_global_rank, get_global_world_size, get_local_rank
 from tests.common.scratch import SCRATCH_DIR_TAG
 
 
@@ -103,41 +104,17 @@ def fake_process_group_mesh(rank: int, world_size: int):
 
 
 def init_distributed() -> tuple[int, int, int]:
-    """Initialize distributed process group and return (rank, world_size, local_rank).
+    """COLLECTIVE: the production process-group init (``halo.runtime.process_group.init_distributed``: the NCCL
+    watchdog ``DIST_NCCL_TIMEOUT_MINUTES`` sets on the world group and every later subgroup, the device bind and
+    the shared-filesystem consensus); returns ``(rank, world_size, local_rank)``.
 
-    Also sets the CUDA device for the local rank, and anchors the FA4 kernel cache the way
-    production does.
+    The FA4 kernel cache is anchored first, as production anchors it in ``configure_training_run``: a GPU test
+    that loads through ``from_pretrained`` directly would otherwise leave the CuTe DSL with the cache enabled
+    but no directory, and re-JIT every kernel on every run, past any suite timeout.
     """
-    # Before any model load, and so before the first ``import flash_attn.cute``, which reads this env
-    # at import. Production sets it in ``configure_training_run``; a GPU test that loads through
-    # ``from_pretrained`` directly would otherwise leave the CuTe DSL with the cache enabled but no
-    # directory and re-JIT every kernel on every run, past any suite timeout.
     ensure_fa4_kernel_cache_env()
-    # CUDA_DEVICE_MAX_CONNECTIONS=1 is the setting the EP suites are validated with. It must already
-    # be in the process environment (the image ENV / Makefile DOCKER_RUN set it): the driver latches
-    # it at cuInit, which ``import deep_ep`` triggers before this runs, so a write here would be a
-    # no-op. Warn (rank 0) if a launch is missing it.
-    if os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS") != "1" and os.environ.get("RANK", "0") == "0":
-        print(
-            "[init_distributed] WARNING: CUDA_DEVICE_MAX_CONNECTIONS != 1 "
-            f"({os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS')!r}); the EP suites are validated with 1.",
-            flush=True,
-        )
-    local_rank = int(os.environ.get("LOCAL_RANK", os.environ.get("RANK", "0")))
-    if not dist.is_initialized():
-        kwargs = {"backend": "nccl"}
-        if torch.cuda.is_available():
-            # Bind this rank's device before init so the NCCL backend does not infer the device from
-            # the global rank, which warns and can hang on heterogeneous mappings. Mirrors
-            # halo.runtime.process_group.init_distributed.
-            torch.cuda.set_device(local_rank)
-            kwargs["device_id"] = torch.device("cuda", local_rank)
-        dist.init_process_group(**kwargs)
-    rank = dist.get_rank()
-    world_size = dist.get_world_size()
-    if torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
-    return rank, world_size, local_rank
+    process_group.init_distributed()
+    return get_global_rank(), get_global_world_size(), get_local_rank()
 
 
 def pin_deterministic_ep_dispatch() -> None:

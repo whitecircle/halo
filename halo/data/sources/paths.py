@@ -1,8 +1,9 @@
 """Dataset path classification: which of S3 / HuggingFace Hub / local a source or destination spells,
 the on-disk names that verdict depends on, which split of a source holds its held-out rows, and the
-refusal of a source missing one. Pure rules, so a caller classifies a path without importing an S3 stack
-it never calls."""
+refusals of a source missing one or spelled ambiguously. String rules plus that one directory probe, so a
+caller classifies a path without importing an S3 stack it never calls."""
 
+import os
 from collections.abc import Mapping
 
 # A local path ending in one of these is a data file read by that ``datasets`` builder, not a saved dataset.
@@ -90,6 +91,19 @@ def hub_repo_id(path: str) -> str:
     """The bare ``org/name`` of a Hub dataset spec, dropping the ``:config`` / ``@split`` suffixes
     the loader accepts. Hub file APIs address the repo, not a split of it."""
     return parse_hub_spec(path)[0]
+
+
+def reject_ambiguous_hub_source(path: str) -> None:
+    """Refuse a Hub-shaped source (:func:`parse_dataset_source`) that also names a local directory: either reading
+    is a guess, and the wrong one fails far from the cause (the Hub builder reads a ``save_to_disk`` tree's
+    sidecar files as rows)."""
+    if parse_dataset_source(path)[0] == "hf_hub" and os.path.isdir(directory := hub_repo_id(path)):
+        raise ValueError(
+            f"Dataset path '{path}' is spelled as a HuggingFace Hub id, but a local directory of that name "
+            f"exists here. Write './{directory}' or an absolute path to load the directory (a local path takes no "
+            f"':config' or '@split' suffix: name a saved split by its own directory); to load the Hub dataset, "
+            f"run where no such directory exists."
+        )
 
 
 def parse_dataset_destination(path: str) -> tuple[str, str | None, str]:

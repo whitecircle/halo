@@ -41,7 +41,11 @@ with open(os.path.join(os.environ["FAKE_PY_SPY_LOG"], pid + ".json"), "w") as wi
 """
 
 
-def _run(tmp_path, command: str, *, failing: tuple[int, ...] = ()) -> tuple[subprocess.CompletedProcess, str]:
+def _run(
+    tmp_path, command: str, *, failing: tuple[int, ...] = (), default_output: bool = False
+) -> tuple[subprocess.CompletedProcess, str]:
+    """Run ``command`` against the stand-in; ``default_output`` drops ``--output-dir`` and points
+    ``HALO_DATA_ROOT`` at ``tmp_path/data``, ``TMPDIR`` at ``tmp_path/tmp``."""
     bin_dir, log_dir, out_dir = (tmp_path / name for name in ("bin", "log", "out"))
     bin_dir.mkdir()
     log_dir.mkdir()
@@ -54,13 +58,29 @@ def _run(tmp_path, command: str, *, failing: tuple[int, ...] = ()) -> tuple[subp
         "FAKE_PY_SPY_LOG": str(log_dir),
         "FAKE_PY_SPY_FAIL": ",".join(map(str, failing)),
     }
-    argv = [sys.executable, "scripts/profiling/py_spy_diag.py", command, "--output-dir", str(out_dir)]
+    argv = [sys.executable, "scripts/profiling/py_spy_diag.py", command]
+    if default_output:
+        (tmp_path / "tmp").mkdir()
+        env.update(HALO_DATA_ROOT=str(tmp_path / "data"), TMPDIR=str(tmp_path / "tmp"))
+        out_dir = tmp_path / "data" / "profiling" / "py_spy" / ("stacks" if command == "dump" else "flamegraphs")
+    else:
+        argv += ["--output-dir", str(out_dir)]
     argv += [arg for pid in _PIDS for arg in ("--pid", str(pid))]
     if command == "record":
         argv += ["--duration", "1"]
     proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=REPO_ROOT, timeout=120)
     (artifacts,) = out_dir.iterdir()
     return proc, str(artifacts)
+
+
+@pytest.mark.parametrize("command", ["dump", "record"])
+def test_captures_default_under_halo_data_root_not_the_temp_dir(tmp_path, command):
+    """A capture written to TMPDIR is gone with a container whose temp dir is not mounted."""
+    proc, artifacts = _run(tmp_path, command, default_output=True)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert os.listdir(artifacts), "the capture directory is empty"
+    assert os.listdir(tmp_path / "tmp") == [], "a capture landed in the temp dir"
 
 
 @pytest.mark.parametrize("command", ["dump", "record"])

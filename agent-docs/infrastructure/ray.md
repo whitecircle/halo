@@ -29,7 +29,9 @@ Two init settings differ from Ray's defaults:
     ([below](#multi-node)).
 
 - **Temp-dir fallback**: Ray's object-store socket is an AF_UNIX path with a ~107-byte cap, so when
-  `TMPDIR` is longer than 40 characters Ray is redirected to `/tmp/ray`.
+  Ray's temp root (`RAY_TMPDIR`, else `TMPDIR`) is longer than 40 characters, Ray gets a short link
+  under `/tmp` (`halo-ray-<uid>-<hash>`) to `<root>/ray` as its temp dir: the sockets take the short
+  path, while the session logs and spilled objects stay on the root's volume.
 
 Teardown runs in `train()`'s `finally`: the prefetch thread stops, every actor's `shutdown()` is
 awaited sequentially, weight-sync communicators close. `ray.shutdown()` is never called; actors die

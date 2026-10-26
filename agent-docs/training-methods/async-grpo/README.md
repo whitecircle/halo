@@ -26,9 +26,9 @@ One YAML, six dataclasses.
 | Knob family | Class |
 |---|---|
 | `environment_type`, `rewards`, `max_turns`, `environment_kwargs` | `EnvironmentConfig` ([fields](../../reference/configuration-reference.md#environmentconfig)) |
-| Ray, servers, sync cadence, prefetch, rollout sampling, trust region | `AsyncTrainingConfig` ([fields](../../reference/configuration-reference.md#asynctrainingconfig)) |
+| Ray, servers and their group port, sync cadence, prefetch, rollout sampling, trust region | `AsyncTrainingConfig` ([fields](../../reference/configuration-reference.md#asynctrainingconfig)) |
 | Dataset columns, prompt filter, `save_completions`, `reset_sinks` | `EnvironmentalGRPOScriptArguments` |
-| Optimizer, batch, `beta`, `num_generations`, `vllm_group_port` | TRL `GRPOConfig` |
+| Optimizer, batch, `beta`, `num_generations` | TRL `GRPOConfig` |
 | Model id, LoRA, `trust_remote_code` | `ModelArguments` |
 | Parallel sizes | `ParallelismArguments` |
 

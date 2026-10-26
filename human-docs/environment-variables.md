@@ -59,15 +59,17 @@ warning and falls back to the default.
 - **One W&B run across restarts:** a fixed `WANDB_RUN_ID` on the whole job, with
   `WANDB_RESUME=allow` ([Monitoring](monitoring.md)).
 - **S3 helpers given a bare key:** `HALO_S3_DEFAULT_BUCKET`.
-- **Nodes with different CPU counts:** pin `HALO_DATASET_NUM_PROC` cluster-wide.
+- **Dataset map workers:** `HALO_DATASET_NUM_PROC` lowers the default (three
+  quarters of the host's CPUs, at most 64; all but two in `prepare_dataset.py`) on
+  a memory-tight host.
 - **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels) or
   `HALO_FLEX_SLIDING=0` (Gemma 4's FlexAttention, also needed for
   `full_determinism` on more than one GPU).
 - **RL code sandboxes:** `HALO_SANDBOX_BACKEND`; the default `local` does not
   isolate the program ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)).
 - **A rollout server dialing back to the trainer:** `VLLM_GROUP_HOST` /
-  `SGLANG_GROUP_HOST` when the trainer's routable address is not on its
-  default-route NIC ([Rollout servers](rollout-servers.md)).
+  `SGLANG_GROUP_HOST` when the server cannot reach the trainer's address on
+  the route to it, behind NAT say ([Rollout servers](rollout-servers.md)).
 
 The rollout-server switches in the compose files (`VLLM_ENABLE_R3`,
 `VLLM_SPECULATIVE_CONFIG`, the `*_ATTENTION_BACKEND` pair and others) are

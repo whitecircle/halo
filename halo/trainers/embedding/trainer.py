@@ -42,7 +42,8 @@ from halo.configs.embedding import EmbeddingConfig
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.peft_adapters import lora_fold_targets
-from halo.runtime.collectives import barrier_on_exit, broadcast_from_rank0
+from halo.runtime.collectives import broadcast_from_rank0
+from halo.runtime.consensus import barrier_on_exit
 from halo.runtime.dtensor import resolve_retained
 from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
@@ -425,7 +426,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         peft_config = require_injected_lora_config(model)
         adapter_dir = os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)
         fs_aware_makedirs(adapter_dir)
-        with barrier_on_exit():
+        with barrier_on_exit(f"Writing the resume adapter to {adapter_dir}"):
             if is_save_rank:
                 peft_config.save_pretrained(adapter_dir)
                 save_safetensors_file(state, os.path.join(adapter_dir, ADAPTER_SAFETENSORS_FILE))
@@ -479,9 +480,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         (:func:`folded_backbone_chunks`); then the ST pipeline config. Only the save rank writes.
         """
         backbone = ctx.model
-        # Fenced: one rank writes while all reach the trailing barrier, so a failed write (ENOSPC,
-        # say) does not leave the peers blocked.
-        with barrier_on_exit():
+        # Fenced: a failed write (ENOSPC, say) raises on every rank instead of leaving the peers blocked.
+        with barrier_on_exit(f"Writing the embedding model to {output_dir}"):
             if has_injected_lora(backbone):
                 save_tokenizer(ctx, output_dir)
                 stream_gathered_checkpoint(

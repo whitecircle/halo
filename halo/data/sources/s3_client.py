@@ -10,8 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import boto3
+import botocore.session
 from boto3.s3.transfer import TransferConfig
 from botocore.config import Config
+from botocore.configprovider import ConfigChainFactory
 from botocore.exceptions import ClientError
 from tqdm import tqdm
 
@@ -62,6 +64,28 @@ def parallel_s3_transfer(items: list, transfer_one: Callable[[Any], int], *, des
         pbar.close()
 
 
+def _is_aws_configured(session: botocore.session.Session, name: str) -> bool:
+    """Whether the AWS environment or the active profile sets botocore config variable ``name``, botocore's
+    built-in default left out."""
+    config_name, env_vars, _default, typecast = session.session_var_map[name]
+    chain = ConfigChainFactory(session=session).create_config_chain(
+        env_var_names=env_vars, config_property_names=config_name, conversion_func=typecast
+    )
+    return chain.provide() is not None
+
+
+def _retry_defaults(session: botocore.session.Session) -> dict[str, Any]:
+    """The client's ``retries`` config: 4 total attempts and standard mode (botocore's own default is legacy), each
+    only where neither ``AWS_MAX_ATTEMPTS`` / ``AWS_RETRY_MODE`` nor the profile sets it, so botocore reads the
+    rest from them."""
+    retries: dict[str, Any] = {}
+    if not _is_aws_configured(session, "max_attempts"):
+        retries["total_max_attempts"] = 4
+    if not _is_aws_configured(session, "retry_mode"):
+        retries["mode"] = "standard"
+    return retries
+
+
 def _local_files(root_path: str) -> list[tuple[str, str, int]]:
     """``(path, path relative to root_path, size)`` of every file under ``root_path``, in walk order."""
     files = []
@@ -77,6 +101,8 @@ class S3Client:
     """One bucket's boto3 client: existence, listing, deletion and folder transfers.
 
     Credentials default to the standard AWS chain when unset; ``endpoint_url`` targets S3-compatible services.
+    Retries follow ``AWS_MAX_ATTEMPTS`` / ``AWS_RETRY_MODE`` and the profile, the toolkit's defaults filling only
+    what they leave unset.
     """
 
     bucket: str | None = None  # None takes default_bucket()
@@ -97,14 +123,13 @@ class S3Client:
             session_kwargs["aws_secret_access_key"] = self.aws_secret_access_key
         if self.region_name:
             session_kwargs["region_name"] = self.region_name
-        boto_config = Config(
-            max_pool_connections=_S3_MAX_POOL_CONNECTIONS, retries={"max_attempts": 3, "mode": "standard"}
-        )
+        core_session = botocore.session.get_session()
+        boto_config = Config(max_pool_connections=_S3_MAX_POOL_CONNECTIONS, retries=_retry_defaults(core_session))
         self.transfer_config = TransferConfig(max_concurrency=_S3_TRANSFER_THREADS)
         client_kwargs = {"config": boto_config}
         if self.endpoint_url:
             client_kwargs["endpoint_url"] = self.endpoint_url
-        self.boto_client = boto3.Session(**session_kwargs).client("s3", **client_kwargs)
+        self.boto_client = boto3.Session(botocore_session=core_session, **session_kwargs).client("s3", **client_kwargs)
 
     def get_storage_options(self) -> dict:
         """This client's credentials and endpoint as s3fs ``storage_options`` (empty under the default chain)."""
@@ -347,8 +372,11 @@ class S3Client:
                 raise FileExistsError(f"Local folder already exists: {local_path}. Use overwrite=True to replace.")
         os.makedirs(local_path, exist_ok=True)
         prefix = full_key.rstrip("/") + "/"
+        # A key ending in "/" is a folder marker (the S3 console's "Create folder"), not a file.
         files_to_download = [
-            (obj["Key"], obj["Key"][len(prefix) :], obj["Size"]) for obj in self.list_prefix_objects(prefix)
+            (obj["Key"], obj["Key"][len(prefix) :], obj["Size"])
+            for obj in self.list_prefix_objects(prefix)
+            if not obj["Key"].endswith("/")
         ]
         total_size = sum(size for _key, _relative_path, size in files_to_download)
 

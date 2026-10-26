@@ -26,7 +26,7 @@ from halo.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME, RUN_LOG_FILE
 from halo.model_loading.dtype import configure_float32_matmul_precision
 from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.runtime.consensus import reject_across_ranks
-from halo.runtime.filesystem import OUTPUT_FS_PROBE_PREFIX, is_fs_load_rank, is_fs_save_rank
+from halo.runtime.filesystem import FS_PROBE_PREFIX, is_fs_load_rank, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ def _validate_output_dir(output_dir: str) -> None:
         contents = [
             item
             for item in entries
-            if item != RUN_LOG_DIR_NAME and not item.startswith((OUTPUT_FS_PROBE_PREFIX, REFERENCE_CACHE_DIR_NAME))
+            if item != RUN_LOG_DIR_NAME and not item.startswith((FS_PROBE_PREFIX, REFERENCE_CACHE_DIR_NAME))
         ]
         if contents:
             raise ValueError(

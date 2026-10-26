@@ -4,7 +4,6 @@ FP32-master restore, the trainer-constructor load, and the attention warm-up eve
 from __future__ import annotations
 
 import gc
-import logging
 from collections.abc import Callable
 from functools import partial
 
@@ -26,12 +25,9 @@ from halo.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
 from halo.models.attention.tree import warm_tree_kernels
 from halo.models.attention.tree_plan import FullAttentionForm
 from halo.models.config_access import set_config_field_run_scoped
-from halo.runtime.collectives import barrier
-from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import get_global_world_size
-
-logger = logging.getLogger(__name__)
 
 
 def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool, ep_wrapped: bool) -> None:
@@ -148,37 +144,30 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
     return model
 
 
-def _warm_then_barrier(*warmups: Callable[[], None]) -> None:
-    """COLLECTIVE: run rank-local kernel warm-ups on every rank, then barrier. No-op below world 2.
+def _warm_then_join(*warmups: Callable[[], None]) -> None:
+    """COLLECTIVE: run rank-local kernel warm-ups on every rank behind :func:`barrier_on_exit`, so one rank's
+    failed compile raises on every rank. No-op below world 2.
 
     A first-use JIT compile (~10s) on one rank lets its peers race ahead into the next collective. World
     size is the only condition every rank evaluates identically: the resolved backend and an FA4 build
-    are per-rank, and returning on either would skip a barrier peers already wait in.
+    are per-rank, and returning on either would skip a join peers already wait in.
     """
     if get_global_world_size() <= 1:
         return
-    try:
+    with barrier_on_exit("Attention kernel warm-up"):
         for warmup in warmups:
             warmup()
-    finally:
-        try:
-            barrier()
-        except Exception as e:
-            # Swallowed so a barrier failure cannot mask the warm-up's own error, but logged: a
-            # failed teardown barrier is itself the rank skew this fence exists to prevent.
-            logger.warning(
-                f"Attention warmup teardown barrier failed ({type(e).__name__}: {e}) — ranks may be skewed "
-                f"entering the next collective",
-            )
 
 
 def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> None:
-    """COLLECTIVE: pre-compile this model's FA4 or FlexAttention kernels on every rank, then barrier."""
-    _warm_then_barrier(
+    """COLLECTIVE: pre-compile this model's FA4 or FlexAttention kernels on every rank, the warm-up joined across
+    ranks so one rank's failed compile raises on every rank."""
+    _warm_then_join(
         partial(warm_fa4_kernels, model, dtype=dtype), partial(warm_flex_sliding_kernels, model, dtype=dtype)
     )
 
 
 def warm_tree_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype, full_form: FullAttentionForm) -> None:
-    """COLLECTIVE: pre-compile the kernels tree attention adds on every rank, then barrier."""
-    _warm_then_barrier(partial(warm_tree_kernels, model, dtype=dtype, full_form=full_form))
+    """COLLECTIVE: pre-compile the kernels tree attention adds on every rank, the warm-up joined across ranks so
+    one rank's failed compile raises on every rank."""
+    _warm_then_join(partial(warm_tree_kernels, model, dtype=dtype, full_form=full_form))

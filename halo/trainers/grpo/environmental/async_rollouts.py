@@ -202,7 +202,7 @@ class AsyncRolloutMixin:
                 server_configs=self.async_config.rollout_server_configs,
                 connection_timeout=self.async_config.rollout_connection_timeout,
                 client_cls=client_cls,
-                base_group_port=self.args.vllm_group_port,
+                base_group_port=self.async_config.rollout_group_port,
             )
             self._weight_sync_client.init_communicator(device=device)
         else:
@@ -210,7 +210,7 @@ class AsyncRolloutMixin:
 
             self._weight_sync_client = client_cls(
                 base_url=self.async_config.rollout_server_url,
-                group_port=self.args.vllm_group_port,
+                group_port=self.async_config.rollout_group_port,
                 connection_timeout=self.async_config.rollout_connection_timeout,
             )
 
@@ -218,7 +218,7 @@ class AsyncRolloutMixin:
 
             logger.info(
                 f"{client_cls.BACKEND_NAME} weight-sync client initialized: {self.async_config.rollout_server_url}, "
-                f"device={self._weight_sync_client.sync_device}, group_port={self.args.vllm_group_port}"
+                f"device={self._weight_sync_client.sync_device}, group_port={self.async_config.rollout_group_port}"
             )
 
     def _start_rollout_generation(self):

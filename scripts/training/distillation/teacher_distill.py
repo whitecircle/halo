@@ -76,8 +76,12 @@ def _load_teacher_tokenizer(*, args, model_config, student_config, student_token
     student's token ids and logit rows before any teacher weight loads (the trainer checks again).
     """
 
-    def fetch():
-        kwargs = {"revision": args.teacher_model_revision or None, "trust_remote_code": model_config.trust_remote_code}
+    def fetch(local_files_only: bool):
+        kwargs = {
+            "revision": args.teacher_model_revision or None,
+            "trust_remote_code": model_config.trust_remote_code,
+            "local_files_only": local_files_only,
+        }
         return (
             AutoTokenizer.from_pretrained(args.teacher_model, **kwargs),
             AutoConfig.from_pretrained(args.teacher_model, **kwargs),

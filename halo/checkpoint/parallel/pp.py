@@ -28,8 +28,8 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.log import KEY_PREVIEW_COUNT
 from halo.models.unwrapping import unwrap_toolkit_wrappers
-from halo.runtime.collectives import barrier, barrier_on_exit, combine_across_ranks
-from halo.runtime.consensus import DeferredRankFailure, rank_consensus, reject_across_ranks
+from halo.runtime.collectives import barrier, combine_across_ranks
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit, rank_consensus, reject_across_ranks
 from halo.runtime.dtensor import copy_full_tensor
 from halo.runtime.filesystem import is_output_shared_filesystem
 from halo.runtime.ranks import is_global_main_process, is_local_main_process
@@ -158,15 +158,16 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
         wrapper_map, wrapper_bytes = _write_wrapper_state(ctx, output_dir, guard)
         stage_weight_map = {**stage_weight_map, **wrapper_map}
         shard_bytes += wrapper_bytes
-    # A failed write stops every rank here, before an index is built over a missing or truncated shard.
-    guard.reject()
+    # A failed write stops every rank here, before an index is built over a missing or truncated shard; over the
+    # store, since the peers wait out each stage writer's last part.
+    guard.store_reject("checkpoint/pp_stages")
 
     # A global parameter lives on exactly one stage, so the merge's collision check is a real gate here.
     weight_map, total_size = combine_across_ranks(
         (stage_weight_map, shard_bytes) if is_writer else None, merge_shard_index, what="the checkpoint index"
     )
 
-    with barrier_on_exit():
+    with barrier_on_exit(f"Writing the PP checkpoint index to {output_dir}"):
         if ctx.is_save_rank:
             # Every stage's parts are on disk and ``weight_map`` is the merged map, so the sweep inside
             # deletes exactly what no stage claimed.

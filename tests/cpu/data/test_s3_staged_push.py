@@ -11,21 +11,26 @@ The staged protocol is pinned here on an in-memory fake S3, crash point by crash
 copy exists either at the destination or in a sealed staging tree at every instant; an interrupted
 promote leaves the destination loudly unreadable (a load gate missing), never a readable old/new
 mixture and never an empty prefix; ``load_dataset`` recovers from the newest sealed staging tree;
-and a completed push sweeps stale objects and every staging tree.
+and a completed push sweeps stale objects and every staging tree. On the load side a tree is downloaded
+straight into the cache it publishes, and one missing its load gates is never published.
 
     python tests/cpu/data/test_s3_staged_push.py
 """
 
 import uuid
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 
+from halo.data.preprocessed.shard_index import ShardInfo
 from halo.data.sources import s3_dataset_store
+from halo.data.sources.dataset_cache import DOWNLOAD_COMPLETE_MARKER
 from halo.data.sources.s3_client import S3Client
 from halo.data.sources.s3_dataset_store import _PUSH_COMPLETE_MARKER, _PUSH_INFIX
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 
 BUCKET = "test-bucket"
 KEY = "datasets/results"
@@ -106,6 +111,10 @@ class FakeBoto:
 
         return _Paginator()
 
+    def download_file(self, Bucket, Key, Filename, Config=None):
+        self.ops.append(("download", Key))
+        Path(Filename).write_bytes(self.objects[Key])
+
     def head_object(self, Bucket, Key):
         if Key not in self.objects:
             raise ClientError({"Error": {"Code": "404", "Message": "NotFound"}}, "HeadObject")
@@ -167,6 +176,25 @@ def _mock_dataset(save_side_effect) -> MagicMock:
     ds.__len__ = MagicMock(return_value=3)
     ds.save_to_disk = MagicMock(side_effect=save_side_effect)
     return ds
+
+
+def _upload_tree(fake: FakeBoto, local_dir: Path, key: str, *, skip=lambda rel: False) -> None:
+    """Write a real ``save_to_disk`` tree into the fake store under ``key``, leaving out what ``skip`` names."""
+    for path in sorted(local_dir.rglob("*")):
+        rel = path.relative_to(local_dir).as_posix()
+        if path.is_file() and not skip(rel):
+            fake._write(f"{key}/{rel}", path.read_bytes())
+
+
+def _saved_dataset_dict(directory: Path, train: list[int]) -> Path:
+    DatasetDict({"train": Dataset.from_dict({"x": train}), "test": Dataset.from_dict({"x": [0]})}).save_to_disk(
+        directory
+    )
+    return directory
+
+
+def _published_markers(cache_root: Path) -> list[Path]:
+    return list(cache_root.rglob(DOWNLOAD_COMPLETE_MARKER))
 
 
 def _dest_keys(fake: FakeBoto) -> set[str]:
@@ -406,6 +434,72 @@ def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
     ):
         with pytest.raises(FileNotFoundError, match="state.json"):
             s3_dataset_store.load_dataset(client, KEY)
+
+
+def test_load_dataset_downloads_the_tree_straight_into_the_cache(tmp_path):
+    """The fetch is the client's own download into the cache's publish temp, every object once, with no
+    datasets-side copy of the tree held anywhere else for the life of the process."""
+    client, fake = _client()
+    _upload_tree(fake, _saved_dataset_dict(tmp_path / "source", train=[1, 2, 3]), KEY)
+    cache_root = tmp_path / "cache"
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(cache_root)):
+        loaded = s3_dataset_store.load_dataset(client, KEY)
+
+    assert loaded["train"]["x"] == [1, 2, 3]
+    assert sorted(key for op, key in fake.ops if op == "download") == sorted(fake.objects)
+    (marker,) = _published_markers(cache_root)
+    assert Path(loaded["train"].cache_files[0]["filename"]).is_relative_to(marker.parent)
+
+
+def test_folder_marker_objects_are_not_downloaded_as_files(tmp_path):
+    """The S3 console's "Create folder" leaves zero-byte keys ending in "/"; written as files they would fail
+    the download of a tree that loads fine."""
+    client, fake = _client()
+    _upload_tree(fake, _saved_dataset_dict(tmp_path / "source", train=[4]), KEY)
+    for marker in (f"{KEY}/", f"{KEY}/train/"):
+        fake._write(marker, b"")
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path / "cache")):
+        assert s3_dataset_store.load_dataset(client, KEY)["train"]["x"] == [4]
+
+
+def test_a_torn_destination_is_never_published_and_recovers_from_the_sealed_push(tmp_path):
+    """A destination missing its load gates must raise inside the fetch, before the cache marks it complete,
+    leave no partial download behind, and hand the load to the newest sealed push."""
+    client, fake = _client()
+    source = _saved_dataset_dict(tmp_path / "source", train=[7, 8])
+    gate_names = {"dataset_dict.json", "state.json"}
+    _upload_tree(fake, source, KEY, skip=lambda rel: rel.rsplit("/", 1)[-1] in gate_names)
+    cache_root = tmp_path / "cache"
+
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(cache_root)):
+        with pytest.raises(FileNotFoundError):
+            s3_dataset_store.load_dataset(client, KEY)
+        assert _published_markers(cache_root) == []
+        assert [p for p in cache_root.rglob("*") if ".tmp-" in p.name] == [], "a failed fetch left its partial tree"
+
+        sealed = _new_push_key(KEY)
+        _upload_tree(fake, source, sealed)
+        fake.put_object(Bucket=BUCKET, Key=f"{sealed}/{_PUSH_COMPLETE_MARKER}", Body=KEY.encode())
+        recovered = s3_dataset_store.load_dataset(client, KEY)
+
+    assert recovered["train"]["x"] == [7, 8]
+
+
+def test_a_shard_downloads_straight_into_its_own_cache(tmp_path):
+    client, fake = _client()
+    shard = ShardInfo(id=0, path="train/shard_0000", num_examples=2)
+    Dataset.from_dict({"x": [5, 6]}).save_to_disk(tmp_path / "shard")
+    _upload_tree(fake, tmp_path / "shard", f"{KEY}/{shard.path}")
+    loader = ShardedDatasetLoader(f"s3://{BUCKET}/{KEY}", dp_rank=0, dp_size=1)
+    loader._s3_client = client
+    cache_root = tmp_path / "cache"
+    with patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(cache_root)):
+        loaded = loader._load_shard_from_s3(shard)
+
+    assert loaded["x"] == [5, 6]
+    assert sorted(key for op, key in fake.ops if op == "download") == sorted(fake.objects)
+    (marker,) = _published_markers(cache_root)
+    assert Path(loaded.cache_files[0]["filename"]).is_relative_to(marker.parent)
 
 
 if __name__ == "__main__":

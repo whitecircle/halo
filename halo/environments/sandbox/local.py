@@ -30,6 +30,7 @@ from halo.environments.sandbox.results import (
     compile_failure_verdict,
     compile_limit_verdict,
 )
+from halo.hardware import available_cpu_count
 
 # The interpreter :data:`INTERPRETER_PLACEHOLDER` resolves to: this process's own, so a sandboxed
 # Python program runs on the same interpreter as the toolkit.
@@ -73,13 +74,13 @@ _EntryKinds = set[tuple[str, int]]
 
 
 def _resolve_execution_slots() -> int:
-    """Max concurrent sandboxed executions: the CPUs this process may run on (its affinity set, a container
-    cpuset, else the host count) by default, ``HALO_SANDBOX_MAX_CONCURRENCY`` overriding (parsed via
-    :func:`env_int` — a malformed value warns and falls back to the default)."""
+    """Max concurrent sandboxed executions: the CPUs this process may run on (:func:`available_cpu_count`) by
+    default, ``HALO_SANDBOX_MAX_CONCURRENCY`` overriding (parsed via :func:`env_int` — a malformed value warns and
+    falls back to the default)."""
     override = env_int("HALO_SANDBOX_MAX_CONCURRENCY", None)
     if override is not None:
         return max(1, override)
-    return max(1, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1)
+    return available_cpu_count()
 
 
 class ExecutionGate:

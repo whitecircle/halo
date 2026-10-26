@@ -235,21 +235,29 @@ def fetch_checkpoint_config(model_config: ModelArguments, *, tag: str) -> Pretra
     (:func:`~halo.runtime.filesystem.hub_metadata_main_first`), ahead of the source agreement."""
     return hub_metadata_main_first(
         tag,
-        lambda: AutoConfig.from_pretrained(
+        lambda local_files_only: AutoConfig.from_pretrained(
             model_config.model_name_or_path,
             revision=model_config.model_revision,
             trust_remote_code=model_config.trust_remote_code,
+            local_files_only=local_files_only,
         ),
     )
 
 
-def _probe_checkpoint_config(model_name_or_path: str, revision: str | None, trust_remote_code: bool):
+def _probe_checkpoint_config(
+    model_name_or_path: str, revision: str | None, trust_remote_code: bool, *, local_files_only: bool
+):
     """The checkpoint's config for the modality verdict, ``None`` when the hub read itself fails; a
     remote-code config under ``trust_remote_code: false`` is refused, as the model load would refuse it.
     Only the hub read is caught: a coordination failure must not resolve to a per-rank heuristic.
     """
     try:
-        return AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
+        return AutoConfig.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+            local_files_only=local_files_only,
+        )
     except Exception as exc:  # unreachable or missing config: fall back to the name heuristic below
         if any(frame.name == _REMOTE_CODE_GATE for frame in traceback.extract_tb(exc.__traceback__)):
             raise ValueError(
@@ -281,7 +289,10 @@ def probe_checkpoint(
     the ranks would otherwise build different model classes and hang in different store phases.
     """
     config = hub_metadata_main_first(
-        "vlm_probe", lambda: _probe_checkpoint_config(model_name_or_path, revision, trust_remote_code)
+        "vlm_probe",
+        lambda local_files_only: _probe_checkpoint_config(
+            model_name_or_path, revision, trust_remote_code, local_files_only=local_files_only
+        ),
     )
     verdict = is_vlm_model(model_name_or_path, config) if config is not None else is_vlm_name(model_name_or_path)
     vlm = rank_consensus(verdict)

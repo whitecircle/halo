@@ -84,7 +84,7 @@ max_turns: 10
 
 # Rollout server + Ray (AsyncTrainingConfig)
 rollout_server_url: "http://localhost:8000"
-vllm_group_port: 51216          # TRL GRPOConfig field, read by the NCCL client
+rollout_group_port: 51216       # NCCL weight-sync group port, bound on the trainer host
 rollout_connection_timeout: 120.0
 sync_weights_every_n_steps: 1
 num_rollout_workers: 4

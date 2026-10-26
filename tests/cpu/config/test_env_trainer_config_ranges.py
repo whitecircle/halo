@@ -146,6 +146,24 @@ def test_a_numeric_knob_refuses_a_bool_or_a_non_finite_value(config, knob, kwarg
         config(**kwargs)
 
 
+def test_a_rescore_budget_is_read_only_beside_the_engine_reference():
+    """Set with the engine re-score off it would change nothing, so it is refused at parse time."""
+    with pytest.raises(ValueError, match="isr_engine_rescore_per_server set with isr_engine_reference off"):
+        AsyncTrainingConfig(isr_engine_rescore_per_server=64)
+    assert AsyncTrainingConfig(isr_engine_reference=True, isr_engine_rescore_per_server=64)
+
+
+@pytest.mark.parametrize("bad", [-1, 65536])
+def test_a_weight_sync_group_port_outside_the_port_range_is_refused(bad):
+    with pytest.raises(ValueError, match="rollout_group_port"):
+        AsyncTrainingConfig(rollout_group_port=bad)
+
+
+@pytest.mark.parametrize("ok", [0, 51216, 65535])
+def test_a_weight_sync_group_port_in_range_passes(ok):
+    assert AsyncTrainingConfig(rollout_group_port=ok).rollout_group_port == ok
+
+
 @pytest.mark.parametrize("bad", [0.0, -0.1, 1.5, math.nan])
 def test_skip_update_masked_frac_outside_the_unit_interval_is_refused_at_parse_time(bad):
     with pytest.raises(ValueError, match="skip_update_masked_frac must be"):

@@ -37,10 +37,11 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.hardware import available_host_ram_bytes
 from halo.log import KEY_PREVIEW_COUNT
 from halo.models.unwrapping import unwrap_toolkit_wrappers
-from halo.runtime.collectives import barrier, barrier_on_exit, broadcast_from_rank0
+from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.runtime.consensus import (
     DeferredRankFailure,
     RankConsensus,
+    barrier_on_exit,
     gather_rank_reasons,
     gathered_failure_summary,
     rank0_verdict,
@@ -191,7 +192,8 @@ class OptimizerShardStore:
             guard.run(partial(torch.save, osd, os.path.join(output_dir, optimizer_shard_filename(rank))))
 
             # What makes "meta present ⇒ complete shard set" true, which lets resume call a missing shard torn.
-            guard.reject()
+            # Over the store: every rank writes at once, so the slowest shard waits on shared storage.
+            guard.store_reject("checkpoint/optimizer_shards")
 
             pp_partition = (
                 capture_pp_stage_partition(self.model, ctx.parallelism_config)
@@ -211,7 +213,7 @@ class OptimizerShardStore:
             barrier()
         # The base's optimizer.pt/.bin is rank 0's view alone; deleted only now, with its replacement on
         # disk, so there is never a window with neither.
-        with barrier_on_exit():
+        with barrier_on_exit(f"Removing the base optimizer state from {output_dir}"):
             if is_fs_save_rank():
                 for name in OPTIMIZER_STATE_FILES:
                     stale = os.path.join(output_dir, name)

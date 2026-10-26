@@ -528,7 +528,7 @@ def test_the_sidecar_is_written_by_the_save_rank_inside_the_fence(kind, tmp_path
     fence: list[tuple[str, bool]] = []
 
     @contextlib.contextmanager
-    def recording_fence():
+    def recording_fence(_what: str):
         fence.append(("enter", path.exists()))
         try:
             yield
@@ -572,7 +572,7 @@ def test_partial_reference_write_does_not_replace_the_complete_sidecar(kind, tmp
         raise OSError("interrupted reference write")
 
     monkeypatch.setattr(precompute_mod.torch, "save", interrupted_save)
-    with pytest.raises(RuntimeError, match="interrupted reference write"):
+    with pytest.raises(OSError, match="interrupted reference write"):
         trainer._persist_trainer_sidecars(str(tmp_path))
     assert path.read_bytes() == complete
     assert not list(tmp_path.glob(f".{REFERENCE_LOGPS_FILE}.*"))
@@ -658,7 +658,7 @@ def test_directory_sync_failure_keeps_the_previous_reference_checkpoint(kind, tm
         original_sync(descriptor)
 
     monkeypatch.setattr(atomic_mod.os, "fsync", failed_directory_sync)
-    with pytest.raises(RuntimeError, match="reference directory sync failed"):
+    with pytest.raises(OSError, match="reference directory sync failed"):
         trainer._persist_trainer_sidecars(str(second))
     assert trainer._reference_immutable_path == str(first / REFERENCE_LOGPS_FILE)
     assert torch.load(first / REFERENCE_LOGPS_FILE, weights_only=True)["train"]["num_rows"] == N_ROWS
@@ -684,13 +684,16 @@ def _reference_writer_failure_worker(rank: int, root: str, shared: bool) -> None
             def fail_publish(source, destination):
                 raise OSError(errno.ENOSPC, "reference writer ran out of space")
 
+            # The writer raises its own error, chained under the verdict every peer raises.
+            failing = rank == failing_rank
             with pytest.MonkeyPatch.context() as patch:
-                if rank == failing_rank:
+                if failing:
                     patch.setattr(atomic_mod.os, "replace", fail_publish)
-                with pytest.raises(RuntimeError, match="reference writer ran out of space") as raised:
+                with pytest.raises(OSError if failing else RuntimeError, match="out of space") as raised:
                     trainer._persist_trainer_sidecars(second)
-            assert f"1 of {_REFERENCE_WORLD_SIZE} rank(s)" in str(raised.value)
-            assert f"rank {failing_rank}" in str(raised.value)
+            verdict = str(raised.value.__cause__ if failing else raised.value)
+            assert f"1 of {_REFERENCE_WORLD_SIZE} rank(s)" in verdict
+            assert f"rank {failing_rank}" in verdict
             assert trainer._reference_immutable_path == previous
             assert trainer._reference_saved_generation == saved_generation
 

@@ -98,7 +98,7 @@ When GPUs are idle between steps, the bottleneck is CPU-side. Attach to the runn
 shell in the same container — no launch-time flags:
 
 ```bash
-# One SVG per rank → $TMPDIR/halo_diag_flamegraphs/<ts>-rank00/pid<pid>.svg (--output-dir moves it)
+# One SVG per rank → $HALO_DATA_ROOT/profiling/py_spy/flamegraphs/<ts>-rank00/pid<pid>.svg (--output-dir moves it)
 python scripts/profiling/py_spy_diag.py record --duration 30
 ```
 
@@ -227,7 +227,7 @@ timing that decides which step the mismatch lands on.
 ### Dump every rank's stack
 
 ```bash
-python scripts/profiling/py_spy_diag.py dump   # → $TMPDIR/halo_diag_stacks/<ts>-rank00/pid<pid>.txt (--output-dir moves it)
+python scripts/profiling/py_spy_diag.py dump   # → $HALO_DATA_ROOT/profiling/py_spy/stacks/<ts>-rank00/pid<pid>.txt (--output-dir moves it)
 ```
 
 It attaches to every training process on the node, so it needs ptrace access to each ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)).

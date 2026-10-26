@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """The weight-sync pool keeps several rollout servers in step with one push.
 
-What is pinned: each server's group port (its own, else the run's base port plus its index); ONE
-snapshot per param on the pool's resolved sync device, shared read-only by every client and released
-once every server has sent the chunk holding it; no server quiesced before a full chunk exists, and none
+What is pinned: each server's group port (its own, else the run's base port plus its index, a kernel-assigned
+one under a base of 0) and the refusal of two servers on one fixed port; ONE snapshot per param on the pool's
+resolved sync device, shared read-only by every client and released once every server has sent the chunk
+holding it; no server quiesced before a full chunk exists, and none
 for a param the pool refuses; a failed server isolated from its healthy siblings and the failure raised;
 a server that failed AFTER its first chunk went out NOT reconnected (the trainer kept no copy of what
 landed, so a reconnect would leave that engine part old and part new while still answering /health),
@@ -50,7 +51,7 @@ def _bare_pool(num_clients: int, wires: list[Wire] | None = None) -> tuple[Weigh
 
 
 def test_unconfigured_group_ports_are_seeded_from_the_run_knob():
-    """``vllm_group_port`` must mean the same thing whichever client shape is built.
+    """``rollout_group_port`` must mean the same thing whichever client shape is built.
 
     An entry without its own ``group_port`` takes ``base_group_port + index``; binding the module
     default instead would listen on 51216/51217 for a run that configured 52000, while the engines
@@ -67,6 +68,31 @@ def test_unconfigured_group_ports_are_seeded_from_the_run_knob():
         base_group_port=52000,
     )
     assert [pool._group_port(i) for i in range(3)] == [52000, 52001, 9000]
+
+
+def _pool(configs: list[dict], base_group_port: int) -> WeightSyncPool:
+    return WeightSyncPool(
+        server_configs=configs,
+        connection_timeout=0.0,
+        client_cls=VLLMWeightSyncClient,
+        base_group_port=base_group_port,
+    )
+
+
+def test_a_base_port_of_zero_gives_each_unpinned_server_a_kernel_assigned_port():
+    """``rollout_group_port: 0`` asks for kernel-assigned ports; offset by the index it would bind 1, 2, ...,
+    privileged ports nobody chose."""
+    pool = _pool(
+        [{"url": "http://s0:8000"}, {"url": "http://s1:8000"}, {"url": "http://s2:8000", "group_port": 9000}], 0
+    )
+    assert [pool._group_port(i) for i in range(3)] == [0, 0, 9000]
+
+
+def test_two_servers_may_share_a_kernel_assigned_port_but_never_a_fixed_one():
+    """Two listeners on one fixed trainer port collide; the kernel hands each auto-port listener its own."""
+    _pool([{"url": "http://s0:8000", "group_port": 0}, {"url": "http://s1:8000", "group_port": 0}], 51216)
+    with pytest.raises(ValueError, match="Duplicate weight-sync group_port"):
+        _pool([{"url": "http://s0:8000"}, {"url": "http://s1:8000", "group_port": 51216}], 51216)
 
 
 def test_pool_stages_one_snapshot_per_param(monkeypatch):

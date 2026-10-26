@@ -21,12 +21,11 @@ from halo.weight_sync.clients.base import (
     HTTP_PROBE_TIMEOUT_S,
     POST_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
-    WEIGHT_UPDATE_TIMEOUT_S,
     AsyncCall,
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
-from halo.weight_sync.transport.bounded_waits import BROADCAST_DRAIN_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
+from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
 from halo.weight_sync.transport.c10d_group import (
     abort_weight_update_group,
     build_weight_update_group,
@@ -206,7 +205,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
         server_call = self._start_collective_rpc(
             "/update_weights_from_distributed",
-            timeout=WEIGHT_UPDATE_TIMEOUT_S,
+            timeout=CHUNK_SYNC_TIMEOUT_S,
             json={
                 "names": names,
                 "dtypes": dtypes,
@@ -231,7 +230,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 event = torch.cuda.Event()
                 event.record(self._send_stream)
             self._inflight.append(event)
-            server_call.wait(timeout=WEIGHT_UPDATE_TIMEOUT_S)
+            server_call.wait(timeout=CHUNK_SYNC_TIMEOUT_S)
         except Exception as e:
             # A kernel whose peer failed spins and hangs every later device sync; the drain's deadline aborts
             # it. The whole stream is drained, as the failing chunk recorded no event of its own. A passed
@@ -357,7 +356,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         while len(self._inflight) > keep:
             bounded_event_sync(
                 self._inflight.popleft(),
-                timeout_s=BROADCAST_DRAIN_TIMEOUT_S,
+                timeout_s=CHUNK_SYNC_TIMEOUT_S,
                 what=f"{self.BACKEND_NAME} weight broadcast",
                 abort=self._abort_group,
             )

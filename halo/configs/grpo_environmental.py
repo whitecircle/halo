@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, fields
 from datetime import timedelta
 from typing import Any, ClassVar, Literal
 
-from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.config_validation import ValidatedConfig, differs_from_default, present, require_finite, require_int
 from halo.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
@@ -107,6 +107,15 @@ class ISCorrectionArguments(ValidatedConfig):
             "penalty). See agent-docs/training-methods/async-grpo/objective.md#engine-reference."
         },
     )
+    isr_engine_rescore_per_server: int = field(
+        default=128,
+        metadata={
+            "help": "Re-score requests in flight on each rollout server under isr_engine_reference, summed over every "
+            "rank: each rank keeps at most its share (this ÷ world size, at least one) in flight on each server, so "
+            "the load on a server does not grow with the world size. "
+            "See agent-docs/training-methods/async-grpo/objective.md#engine-reference."
+        },
+    )
     skip_update_masked_frac: float | None = field(
         default=None,
         metadata={
@@ -120,6 +129,12 @@ class ISCorrectionArguments(ValidatedConfig):
     def _validate_fields(self) -> None:
         super()._validate_fields()
         self.build_is_mask_config()
+        require_int(type(self).__name__, ge=1, isr_engine_rescore_per_server=self.isr_engine_rescore_per_server)
+        if not self.isr_engine_reference and differs_from_default(self, "isr_engine_rescore_per_server"):
+            raise ValueError(
+                "isr_engine_rescore_per_server set with isr_engine_reference off: nothing re-scores on the engine. "
+                "Remove it, or set isr_engine_reference."
+            )
         # A fraction of the step's corrected trajectories/tokens; 0 would trip on every step, >1 never.
         require_finite(
             type(self).__name__, gt=0, le=1, **present(skip_update_masked_frac=self.skip_update_masked_frac)
@@ -288,6 +303,15 @@ class AsyncTrainingConfig(
             "[{'url': 'http://node1:8000', 'group_port': 51216}]. Overrides rollout_server_url."
         },
     )
+    rollout_group_port: int = field(
+        default=51216,
+        metadata={
+            "help": "Trainer-side port of the NCCL weight-sync group, on either rollout backend; 0 takes a "
+            "kernel-assigned port. With several servers it is the base: a rollout_server_configs entry without its "
+            "own group_port binds rollout_group_port + index, or a kernel-assigned port of its own when this is 0. "
+            "See agent-docs/training-methods/async-grpo/setup.md#weight-synchronization."
+        },
+    )
     sync_weights_every_n_steps: int = field(
         default=1, metadata={"help": "Sync weights to the rollout servers every N training steps, N >= 1."}
     )
@@ -413,6 +437,7 @@ class AsyncTrainingConfig(
                 eval_rollout_batch_size=self.eval_rollout_batch_size,
             ),
         )
+        require_int(owner, ge=0, le=65535, rollout_group_port=self.rollout_group_port)
         # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
         # server is then retried until the NCCL watchdog kills the job.
         require_int(owner, ge=0, why=" (0 = one attempt, no retry)", max_retries=self.max_retries)

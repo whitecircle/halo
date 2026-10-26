@@ -275,7 +275,6 @@ def run_env_grpo_training(
             "gradient_checkpointing": True,
             "gradient_checkpointing_kwargs": {"use_reentrant": False},
             "optim": "adamw_torch_fused",
-            "vllm_group_port": GROUP_PORT,
             "remove_unused_columns": False,
         }
         if extra_grpo_kwargs:
@@ -285,6 +284,7 @@ def run_env_grpo_training(
 
         async_config = AsyncTrainingConfig(
             rollout_server_url=VLLM_SERVER_URL,
+            rollout_group_port=GROUP_PORT,
             rollout_connection_timeout=120.0,
             num_rollout_workers=num_workers,
             max_concurrent_rollouts=max_concurrent,

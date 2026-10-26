@@ -4,6 +4,7 @@ local path, so training skips tokenization at startup. The flags are :class:`Pre
 :class:`PrepareDatasetArguments`'s, and a YAML file of them works as the first argument."""
 
 import contextlib
+import hashlib
 import logging
 import os
 import shutil
@@ -19,13 +20,14 @@ from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTok
 
 from halo.checkpoint.atomic import DISPLACED_SUFFIX, clear_staging_path
 from halo.configs.parser import HaloArgumentParser
-from halo.data.pipeline.coordinated_map import resolve_map_num_proc
+from halo.data.pipeline.coordinated_map import dataset_num_proc_override, ensure_cache_dir, scratch_dataset_maps
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.render_columns import reject_missing_render_column
 from halo.data.sources.loading import load_dataset_from_source
 from halo.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_dataset_destination, parse_s3_uri
 from halo.data.sources.s3_client import S3Client
+from halo.hardware import available_cpu_count
 from halo.log import configure_cli_logging
 from halo.model_loading.tokenizer_setup import (
     adopt_tokenizer_chat_template,
@@ -41,6 +43,9 @@ logger = logging.getLogger(__name__)
 # Fixed so --test_size cuts the same split on every re-run: the assignment is baked into the
 # published artifact, and a re-preparation that reshuffled it would no longer match.
 _SPLIT_SEED = 42
+
+# CPUs the bake's default worker count leaves to the tool's own process and the host.
+_BAKE_RESERVED_CPUS = 2
 
 
 @dataclass
@@ -61,17 +66,26 @@ class PrepareDatasetArguments:
     verbose: bool = field(default=False, metadata={"help": "Log at DEBUG."})
 
 
+def bake_num_proc() -> int:
+    """The bake's default worker count: ``HALO_DATASET_NUM_PROC``, else every CPU the process may run on but
+    :data:`_BAKE_RESERVED_CPUS`. The tool runs alone on its host, so the training default's share and cap would idle
+    most of a large one."""
+    override = dataset_num_proc_override()
+    return override if override is not None else max(1, available_cpu_count() - _BAKE_RESERVED_CPUS)
+
+
 def parse_args() -> tuple[PrepareDatasetArguments, PreprocessingConfig]:
     """The tool's arguments and the bake's config, built before anything is fetched. Where the tool's defaults
     differ from the config's: completion masking follows the mode as training does (on for chat, while text
-    refuses it), the model's own code is trusted, and the worker count and chat template are recorded resolved."""
+    refuses it), the model's own code is trusted, and the worker count (:func:`bake_num_proc`) and chat template are
+    recorded resolved."""
     parser = add_trust_remote_code_arg(HaloArgumentParser((PrepareDatasetArguments, PreprocessingConfig)))
     # The field's dashed alias outlives the canonical flag's takeover of its name, so it takes the default too.
     parser.set_defaults(trust_remote_code=True, train_on_completions_only=None)
     values = parser.load_values()
     values.setdefault("trust_remote_code", parser.get_default("trust_remote_code"))
     values.setdefault("train_on_completions_only", values.get("mode", PreprocessingConfig.mode) == "chat")
-    values["num_proc"] = resolve_map_num_proc(values.get("num_proc"))
+    values["num_proc"] = values.get("num_proc") or bake_num_proc()
     if values.get("chat_template"):
         values["chat_template"] = load_chat_template(values["chat_template"])
     return parser.parse_dict(values)
@@ -189,30 +203,30 @@ def save_to_s3(output_dir: str, s3_uri: str, overwrite: bool = False):
     logger.info(f"Uploaded to {s3_uri}")
 
 
-def save_to_local(output_dir: str, dest: str, overwrite: bool = False):
-    """Publish the staged dataset to a local path through a sibling copy swapped in whole: removing the old one
-    first, a run dying mid-copy would leave a partial tree whose ``metadata.json`` still reads as preprocessed."""
-    dest = os.path.abspath(dest)
+def stage_local_output(dest: str, overwrite: bool = False) -> str:
+    """The sibling of ``dest`` a local output bakes into, cleared of an earlier run's: on the destination's
+    filesystem, so the publish is a rename rather than a second write. An existing ``dest`` without ``overwrite``
+    raises here, before the bake."""
     if os.path.exists(dest) and not overwrite:
         raise FileExistsError(f"Output path already exists: {dest}. Use --overwrite to replace.")
+    return clear_staging_path(dest)
 
-    staged = clear_staging_path(dest)
+
+def publish_local_output(staged: str, dest: str) -> None:
+    """Swap the baked ``staged`` tree in as ``dest`` whole: removing the old one first, a run dying mid-write would
+    leave a partial tree whose ``metadata.json`` still reads as preprocessed."""
     previous = clear_staging_path(dest, DISPLACED_SUFFIX)
+    rotated = os.path.exists(dest)
+    if rotated:
+        os.rename(dest, previous)
     try:
-        shutil.copytree(output_dir, staged)
-        rotated = os.path.exists(dest)
+        os.rename(staged, dest)
+    except OSError:
+        # Never leave the destination missing while the old dataset sits under a scratch name.
         if rotated:
-            os.rename(dest, previous)
-        try:
-            os.rename(staged, dest)
-        except OSError:
-            # Never leave the destination missing while the old dataset sits under a scratch name.
-            if rotated:
-                os.rename(previous, dest)
-            raise
-        shutil.rmtree(previous, ignore_errors=True)
-    finally:
-        shutil.rmtree(staged, ignore_errors=True)
+            os.rename(previous, dest)
+        raise
+    shutil.rmtree(previous, ignore_errors=True)
     logger.info(f"Saved to {dest}")
 
 
@@ -252,6 +266,40 @@ def save_to_hf_hub(
         repo_type="dataset",
     )
     logger.info(f"Uploaded to https://huggingface.co/datasets/{repo_id}")
+
+
+def bake_scratch_path(destination: str) -> str:
+    """The datasets-cache directory a bake to ``destination`` holds its intermediate maps in, cleared of what a killed
+    bake to it left: named after the destination, so a rerun reaps those full corpus copies before it bakes."""
+    path = os.path.join(ensure_cache_dir(), f"prepare-dataset-{hashlib.md5(destination.encode()).hexdigest()}")
+    shutil.rmtree(path, ignore_errors=True)
+    return path
+
+
+def bake(
+    dataset: DatasetDict, tokenizer_or_processor, config: PreprocessingConfig, output_dir: str, destination: str
+) -> None:
+    """Preprocess ``dataset`` into ``output_dir`` for ``destination``. Every intermediate map writes a scratch
+    directory of the datasets cache (:func:`bake_scratch_path`), removed afterwards, since no later run re-reads
+    them."""
+    logger.info(f"Processing dataset into {output_dir}")
+    with scratch_dataset_maps(bake_scratch_path(destination)):
+        metadata = preprocess_dataset(
+            dataset=dataset, tokenizer_or_processor=tokenizer_or_processor, config=config, output_dir=output_dir
+        )["metadata"]
+
+    logger.info("=" * 60)
+    logger.info("Preprocessing Complete")
+    logger.info("=" * 60)
+    logger.info(f"Train examples: {metadata.total_train_examples}")
+    logger.info(f"Test examples: {metadata.total_test_examples}")
+    logger.info(f"Num shards: {metadata.num_shards}")
+    if config.is_vlm:
+        logger.info(f"VLM mode: {metadata.is_vlm}")
+        logger.info(f"Has pixel_values: {metadata.has_pixel_values}")
+    else:
+        logger.info(f"Packed: {metadata.packed}")
+    logger.info("=" * 60)
 
 
 def main():
@@ -294,37 +342,22 @@ def main():
     dataset = load_input_dataset(args)
     require_declared_columns(dataset, config, args.input)
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        logger.info(f"Processing dataset (temp dir: {temp_dir})")
-
-        result = preprocess_dataset(
-            dataset=dataset,
-            tokenizer_or_processor=tokenizer_or_processor,
-            config=config,
-            output_dir=temp_dir,
-        )
-
-        metadata = result["metadata"]
-        logger.info("=" * 60)
-        logger.info("Preprocessing Complete")
-        logger.info("=" * 60)
-        logger.info(f"Train examples: {metadata.total_train_examples}")
-        logger.info(f"Test examples: {metadata.total_test_examples}")
-        logger.info(f"Num shards: {metadata.num_shards}")
-        if config.is_vlm:
-            logger.info(f"VLM mode: {metadata.is_vlm}")
-            logger.info(f"Has pixel_values: {metadata.has_pixel_values}")
-        else:
-            logger.info(f"Packed: {metadata.packed}")
-        logger.info("=" * 60)
-
-        if output_type == "s3":
-            save_to_s3(temp_dir, args.output, args.overwrite)
-        elif output_type == "hf_hub":
-            save_to_hf_hub(temp_dir, output_key, args.private, args.hf_token, args.overwrite)
-        elif output_type == "local":
-            # output_key, not args.output: the destination parser strips a file:// prefix.
-            save_to_local(temp_dir, output_key, args.overwrite)
+    if output_type == "local":
+        # output_key, not args.output: the destination parser strips a file:// prefix.
+        dest = os.path.abspath(output_key)
+        staged = stage_local_output(dest, args.overwrite)
+        try:
+            bake(dataset, tokenizer_or_processor, config, staged, dest)
+            publish_local_output(staged, dest)
+        finally:
+            shutil.rmtree(staged, ignore_errors=True)
+    else:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bake(dataset, tokenizer_or_processor, config, temp_dir, args.output)
+            if output_type == "s3":
+                save_to_s3(temp_dir, args.output, args.overwrite)
+            else:
+                save_to_hf_hub(temp_dir, output_key, args.private, args.hf_token, args.overwrite)
 
     logger.info("Done!")
 

@@ -132,23 +132,24 @@ def load_model_and_tokenizer(
     return model, tokenizer
 
 
-def _ships_processor_config(model_path: str, revision: str | None) -> bool:
+def _ships_processor_config(model_path: str, revision: str | None, *, local_files_only: bool) -> bool:
     """Whether the checkpoint carries a processor config, on a confirmed answer only.
 
-    A local directory answers by its files, the Hub by a 404 for this revision; offline, the cache
-    stands for the checkpoint. A Hub it cannot reach raises rather than reading as absent, which
-    would drop the processor from the run's exports.
+    A local directory answers by its files, the Hub by a 404 for this revision; offline, or under
+    ``local_files_only`` (a follower reading the cache its main rank filled), the cache stands for the
+    checkpoint. A Hub it cannot reach raises rather than reading as absent, which would drop the
+    processor from the run's exports.
     """
     if os.path.isdir(model_path):
         return any(os.path.isfile(os.path.join(model_path, name)) for name in PROCESSOR_FILES)
     for name in PROCESSOR_FILES:
         try:
-            hf_hub_download(model_path, name, revision=revision)
+            hf_hub_download(model_path, name, revision=revision, local_files_only=local_files_only)
             return True
         except RemoteEntryNotFoundError:
             continue
         except LocalEntryNotFoundError:
-            if not is_offline_mode():
+            if not (local_files_only or is_offline_mode()):
                 raise
     return False
 
@@ -164,15 +165,21 @@ def load_vlm_processor(model_config: ModelArguments, *, required: bool = True):
     model_path = model_config.model_name_or_path
     revision = model_config.model_revision
     if not required:
-        shipped = hub_metadata_main_first("processor_probe", lambda: _ships_processor_config(model_path, revision))
+        shipped = hub_metadata_main_first(
+            "processor_probe",
+            lambda local_files_only: _ships_processor_config(model_path, revision, local_files_only=local_files_only),
+        )
         # A shipped config on any rank wins: ranks split between processor and tokenizer would enter
         # different hub phases and save different processing classes.
         if not rank_consensus(shipped).any_ok:
             return None
     return hub_metadata_main_first(
         "vlm_processor",
-        lambda: AutoProcessor.from_pretrained(
-            model_path, trust_remote_code=model_config.trust_remote_code, revision=revision
+        lambda local_files_only: AutoProcessor.from_pretrained(
+            model_path,
+            trust_remote_code=model_config.trust_remote_code,
+            revision=revision,
+            local_files_only=local_files_only,
         ),
     )
 
@@ -199,10 +206,11 @@ def _load_vlm_model_and_processor(
         if hasattr(processor, "tokenizer")
         else hub_metadata_main_first(
             "vlm_tokenizer",
-            lambda: AutoTokenizer.from_pretrained(
+            lambda local_files_only: AutoTokenizer.from_pretrained(
                 model_config.model_name_or_path,
                 trust_remote_code=model_config.trust_remote_code,
                 revision=model_config.model_revision,
+                local_files_only=local_files_only,
             ),
         )
     )

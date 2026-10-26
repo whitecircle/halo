@@ -118,7 +118,7 @@ _DRAIN_DEADLINE = 1234.5
 def _settle_probe(monkeypatch) -> list:
     """Records every settle as ``(event, timeout_s)``; the drain deadline is a sentinel."""
     settled: list = []
-    monkeypatch.setattr(sglang_module, "BROADCAST_DRAIN_TIMEOUT_S", _DRAIN_DEADLINE)
+    monkeypatch.setattr(sglang_module, "CHUNK_SYNC_TIMEOUT_S", _DRAIN_DEADLINE)
     monkeypatch.setattr(
         sglang_module,
         "bounded_event_sync",
@@ -324,7 +324,7 @@ def test_a_deferred_settle_that_passes_the_drain_deadline_aborts_the_group(clien
     """The settle is the only host wait on a chunk's sends once the engine has acknowledged it; a peer
     that stopped receiving leaves those kernels spinning, and without the abort the client is not
     retired and the reconnect's destroy blocks behind them."""
-    monkeypatch.setattr(sglang_module, "BROADCAST_DRAIN_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(sglang_module, "CHUNK_SYNC_TIMEOUT_S", 0.0)
     aborted: list = []
     monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", aborted.append)
     client._inflight.extend(_PendingEvent() for _ in range(sglang_module._INFLIGHT_CHUNKS))

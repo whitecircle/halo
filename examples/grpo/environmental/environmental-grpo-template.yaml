@@ -37,10 +37,10 @@ num_rollout_workers: 16
 # eval_rollout_batch_size: null  # rows per rank in one evaluation rollout round; null = the eval batch
 # ray_address: null  # null = local, or "head-node:6379"
 
-# --- vLLM Server - Single Server (AsyncTrainingConfig fields; vllm_group_port is a GRPOConfig field) ---
+# --- Rollout Server - Single Server (AsyncTrainingConfig fields) ---
 # rollout_backend: vllm  # vllm or sglang
 # rollout_server_url: "http://localhost:8000"
-# vllm_group_port: 51216  # NCCL group port for weight sync
+# rollout_group_port: 51216  # NCCL group port for weight sync; the base port with several servers
 # rollout_connection_timeout: 120.0
 # sync_weights_every_n_steps: 1
 # model_name: null         # model name sent in the rollout requests; null = model_name_or_path

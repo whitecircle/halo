@@ -11,6 +11,7 @@ from collections import defaultdict
 import torch
 
 from halo.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.environments.episode import RolloutResult
 from halo.environments.messages import Message, Trajectory
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
@@ -98,6 +99,7 @@ def batch_host(
     host._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     host._save_completions, host.log_completions = save_completions, False
     host._logs = unbounded_completion_logs()
+    host.parallelism_config = ParallelismConfig()
     return host
 
 

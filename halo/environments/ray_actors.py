@@ -3,10 +3,13 @@ against a rollout server's ``/v1/chat/completions`` (vLLM or SGLang), and :class
 across actors and server URLs under a bounded semaphore. Weight sync is separate (:mod:`halo.weight_sync`)."""
 
 import asyncio
+import hashlib
 import inspect
 import logging
+import os
 import tempfile
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import cached_property, partial
@@ -39,7 +42,8 @@ _PausedClock = Callable[[], float | Awaitable[float]]
 
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR crashes ray.init.
 _MAX_RAY_TEMP_DIR_LEN = 40
-_RAY_FALLBACK_TEMP_DIR = "/tmp/ray"
+# Where the short link to a deep temp root's Ray dir goes.
+_RAY_LINK_PARENT = "/tmp"
 
 # In-flight rollouts per actor when ``max_concurrent_rollouts`` is unset: actors multiplex episodes on one loop,
 # so oversubscribing keeps the servers fed while a turn is graded.
@@ -167,13 +171,31 @@ class _SyncExpiries:
             self.count += 1
 
 
+def _short_ray_temp_dir() -> str | None:
+    """A short ``_temp_dir`` for a Ray temp root (``RAY_TMPDIR``, else the temp dir) too deep for Ray's socket
+    paths: a link under ``/tmp`` to ``<root>/ray``, so the sockets get a short path while the session's logs and
+    spilled objects stay on the root's volume. ``None`` when the root is short enough to use as is."""
+    root = os.environ.get("RAY_TMPDIR") or tempfile.gettempdir()
+    if len(root) <= _MAX_RAY_TEMP_DIR_LEN:
+        return None
+    target = os.path.join(root, "ray")
+    os.makedirs(target, exist_ok=True)
+    link = os.path.join(_RAY_LINK_PARENT, f"halo-ray-{os.getuid()}-{hashlib.md5(target.encode()).hexdigest()[:8]}")
+    staged = f"{link}.{uuid.uuid4().hex}"
+    os.symlink(target, staged)
+    os.replace(staged, link)  # atomic, so concurrent launches over one root agree on the link
+    return link
+
+
 def ray_init_kwargs(**overrides) -> dict:
-    """Kwargs for ``ray.init``, with a short-tempdir fallback."""
+    """Kwargs for ``ray.init``: the dashboard off and, under a temp root too deep for Ray's socket paths, a short
+    ``_temp_dir`` linked onto it (:func:`_short_ray_temp_dir`)."""
     # Dashboard off: unused by the RL actors and exposes Ray's jobs-API HTTP surface
     # (CVE-2023-48022 job-submission RCE, CVE-2025-62593 DNS rebinding).
     kwargs: dict = {"ignore_reinit_error": True, "include_dashboard": False, **overrides}
-    if len(tempfile.gettempdir()) > _MAX_RAY_TEMP_DIR_LEN:
-        kwargs["_temp_dir"] = _RAY_FALLBACK_TEMP_DIR
+    temp_dir = _short_ray_temp_dir()
+    if temp_dir is not None:
+        kwargs["_temp_dir"] = temp_dir
     return kwargs
 
 

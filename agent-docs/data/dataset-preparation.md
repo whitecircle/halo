@@ -93,7 +93,9 @@ template renders, or `--train_on_completions_only false` to bake full-sequence l
 e.g. `HuggingFaceH4/ultrachat_200k@train_sft`), or a local path. `--output` accepts an S3 URI,
 `hf://org/name`, or a local path (add `--private` for a private Hub dataset). Only the explicit
 `hf://` prefix uploads to the Hub — unlike `--input`, a bare `org/name` output is a **local**
-directory, so a relative path such as `preprocessed/my_dataset` is never published.
+directory, so a relative path such as `preprocessed/my_dataset` is never published. Read it back as
+`./preprocessed/my_dataset` or an absolute path: a Hub-shaped source that names a local directory is
+refused as ambiguous ([S3 Utilities → Dataset path formats](s3-utilities.md#dataset-path-formats)).
 
 The output holds two splits, `train` and `test`. A multi-split input must carry `train`; with no
 `test` split its `validation` split is baked as `test`. Any other split (`validation` next to
@@ -151,7 +153,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--images_field` | `None` | (`--is_vlm`) column holding the row's image(s) for datasets that keep them outside the conversation; merged into the messages like the runtime path. An image column named by nothing is refused |
 | `--min_pixels` / `--max_pixels` | `None` | VLM image pixel bounds |
 | `--num_shards` | `1` | `1` writes an unsharded dataset that trains at any data-parallel size. Above `1` see [Sharded loading](#sharded-loading) |
-| `--num_proc` | `HALO_DATASET_NUM_PROC` | Processes for dataset map. Unset, it resolves per host to `max(1, min(cpu_count // 4, 4))`; set `HALO_DATASET_NUM_PROC` to pin one value across nodes, since HF keys its map cache on `num_proc` |
+| `--num_proc` | `HALO_DATASET_NUM_PROC` | Processes for dataset map. With neither set, every CPU the process may run on but two, since the tool runs alone ([`HALO_DATASET_NUM_PROC`](../reference/configuration-reference.md#environment-variables)) |
 | `--tokenizer_backend` | `hf` | `hf` = the model's tokenizer; `gigatoken` = Rust bulk encoder (see above) |
 | `--test_size` | `None` | Test split fraction (e.g. `0.01`), cut from `train`. Refused when the input already carries a `test`/`validation` split — point `--input` at the train split alone. Without it (and without a `test` or `validation` split in the input) the output is train-only: an unsharded one trains with the first 100 train rows warned in as a placeholder test split, and `--num_shards` above `1` is refused before tokenization, since training rejects a sharded dataset with no test split |
 | `--pad_token` / `--eos_token` / `--bos_token` | `None` | Override pad / EOS / BOS token. Recorded in `metadata.json` and re-checked at training time |
@@ -217,8 +219,17 @@ the same on a non-train split warns, since a tiny eval split that does not reach
 legitimate.
 
 `metadata.json` is also the **completion marker** — `is_preprocessed_dataset` keys on it — so it is
-written last and a publish never leaves it beside an incomplete payload. A local `--overwrite` copies
-into a sibling temp directory and swaps, leaving the previous dataset intact if the copy fails.
+written last and a publish never leaves it beside an incomplete payload. A local output is baked once,
+straight into a sibling of the destination (`<output>.halo-staging`, on its filesystem), and swapped in
+by rename, leaving the previous dataset intact if the bake fails; an existing output without
+`--overwrite` is refused before the bake. An S3 or Hub output is baked into a `TMPDIR` temp directory
+and uploaded from it.
+
+Each tokenize, filter, label and pack step writes a full copy of the corpus. The tool writes them to a
+scratch directory under `HF_DATASETS_CACHE`, removed when the bake ends, so peak disk there is those
+copies and nothing stays behind. The directory is named after `--output`, so a rerun to the same
+output first removes the copies a killed bake left there. Labels are stored at the integer width of
+`input_ids` (`int32`).
 
 Hub and S3 `--overwrite` both delete the marker first and re-upload it after the payload, so an
 interrupted upload reads as *raw* (a loud failure) rather than as a silently truncated preprocessed

@@ -175,6 +175,7 @@ def test_one_forced_close_drops_a_whole_turn_row_under_trls_vespo_weight():
         ("repetition_penalty", 1.1, "rollout_repetition_penalty"),
         ("generation_kwargs", {"temperature": 0.7}, "rollout_top_p"),
         ("vllm_importance_sampling_clip_min", 0.5, "vllm_importance_sampling_clip_max"),
+        ("vllm_group_port", 52000, "rollout_group_port"),
     ],
 )
 def test_a_grpo_knob_this_trainer_never_reads_is_refused_when_set(tmp_path, knob, value, named):

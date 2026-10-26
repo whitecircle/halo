@@ -292,7 +292,9 @@ def test_the_checkpoint_config_is_read_once(tmp_path):
     the verdict the prefix already probed rather than reading the checkpoint config a second time."""
     probes = []
     with (
-        mock.patch.object(model_source, "_probe_checkpoint_config", side_effect=lambda *args: probes.append(args)),
+        mock.patch.object(
+            model_source, "_probe_checkpoint_config", side_effect=lambda *args, **kwargs: probes.append(args)
+        ),
         pytest.raises(_TextPathReached),
     ):
         _run_sft(tmp_path, "", _dataset(), stub_vlm_prep=False)

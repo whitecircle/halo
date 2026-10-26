@@ -14,7 +14,7 @@ from halo.entrypoints.run_setup import _validate_output_dir, resume_checkpoint_f
 from halo.log import RUN_LOG_DIR_NAME
 
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
-from halo.runtime.filesystem import OUTPUT_FS_PROBE_PREFIX
+from halo.runtime.filesystem import FS_PROBE_PREFIX
 
 
 def _config(output_dir, resume=None):
@@ -153,7 +153,7 @@ def test_auto_resume_nothing_found_stale_fs_probe_marker_ok(tmp_path):
     the next launch on it bricks the output_dir, and its ns suffix means only a PREFIX match fires."""
     out = tmp_path / "out"
     out.mkdir()
-    (out / f"{OUTPUT_FS_PROBE_PREFIX}123456789").write_text("halo")
+    (out / f"{FS_PROBE_PREFIX}123456789").write_text("halo")
     config = _config(out, resume=True)
     assert resume_checkpoint_from_config(config, overwrite_output_dir=False) is None
 
@@ -163,7 +163,7 @@ def test_stale_fs_probe_marker_does_not_exempt_other_leftovers(tmp_path):
     previous run's leftovers must still refuse the directory even beside a stale marker."""
     out = tmp_path / "out"
     out.mkdir()
-    (out / f"{OUTPUT_FS_PROBE_PREFIX}123456789").write_text("halo")
+    (out / f"{FS_PROBE_PREFIX}123456789").write_text("halo")
     (out / ".nfs00000001").write_text("a previous run's deleted-but-open file")
     config = _config(out, resume=True)
     with pytest.raises(ValueError, match="already exists and is not empty"):

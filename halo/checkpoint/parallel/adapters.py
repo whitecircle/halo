@@ -56,8 +56,7 @@ from halo.models.unwrapping import (
     unwrap_framework_wrappers,
     unwrap_toolkit_wrappers,
 )
-from halo.runtime.collectives import barrier_on_exit
-from halo.runtime.consensus import reject_across_ranks
+from halo.runtime.consensus import barrier_on_exit, reject_across_ranks
 from halo.runtime.dtensor import copy_full_tensor, full_cpu_tensor
 from halo.runtime.filesystem import fs_aware_makedirs
 from halo.runtime.ranks import is_global_main_process
@@ -172,7 +171,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
         saved = f"PEFT adapters to {output_dir}"
 
     fs_aware_makedirs(output_dir)
-    with barrier_on_exit():
+    with barrier_on_exit(f"Writing the PEFT adapters to {output_dir}"):
         if ctx.is_save_rank:
             if state is None:
                 peft_model.save_pretrained(output_dir)
@@ -209,7 +208,7 @@ def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     spec = getattr(ctx.parallelism_config, "expert_lora", None)
     base_name = getattr(ctx.model.config, "_name_or_path", None)
     adapter_config = None if spec is None else expert_lora_adapter_config(spec, base_name)
-    with barrier_on_exit():
+    with barrier_on_exit(f"Writing the EP LoRA adapters to {output_dir}"):
         if ctx.is_save_rank:
             state = (
                 adapters if ctx.training_checkpoint else {key: cast_to_save_dtype(t) for key, t in adapters.items()}

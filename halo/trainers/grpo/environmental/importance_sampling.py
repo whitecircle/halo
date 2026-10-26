@@ -5,11 +5,12 @@ import logging
 import math
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 
 import torch
 from transformers import TrainerCallback
 
-from halo.runtime.ranks import get_global_rank, is_global_main_process
+from halo.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
 from halo.trainers.grpo.early_stop import build_early_stop_callback
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_inert_is_stages,
@@ -34,9 +35,6 @@ from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
-# Concurrent re-score prefills per rank under isr_engine_reference (each is one HTTP request in flight).
-_ENGINE_RESCORE_CONCURRENCY = 16
-
 
 class _BreakerOptimizerSkipCallback(TrainerCallback):
     """Skips the optimizer step while the trust-region breaker is tripped, at the one hook between gradient
@@ -51,6 +49,11 @@ class _BreakerOptimizerSkipCallback(TrainerCallback):
         trainer = self._trainer()
         if trainer is not None and trainer._breaker_tripped_this_step:
             trainer.optimizer.zero_grad(set_to_none=True)
+
+
+def resolve_rescore_concurrency(per_server: int, world_size: int) -> int:
+    """The re-score requests one rank keeps in flight on each server: its share of ``per_server``, at least one."""
+    return max(1, per_server // world_size)
 
 
 def _masked_fraction_counts(
@@ -117,6 +120,13 @@ class ImportanceSamplingMixin:
             reject_unsupported_engine_reference(
                 resolve_weight_sync_client(self._rollout_backend), cfg, self._is_correction
             )
+            world = get_global_world_size()
+            if cfg.isr_engine_rescore_per_server < world and is_global_main_process():
+                logger.warning(
+                    f"isr_engine_rescore_per_server={cfg.isr_engine_rescore_per_server} is below the {world} ranks, "
+                    f"and each rank keeps at least one re-score in flight on each server, so a server can see up to "
+                    f"{world} at once, above the budget."
+                )
         if self._is_correction:
             self.use_vllm = True
 
@@ -132,17 +142,22 @@ class ImportanceSamplingMixin:
                 "isr_engine_reference re-scored a batch before the rollout components started: no score-only "
                 "client was built (_init_async_components builds them on every rank)."
             )
-        row_traj = [traj for traj, turns in enumerate(turns_per_traj) for _ in range(turns)]
+        row_server = [traj % len(clients) for traj, turns in enumerate(turns_per_traj) for _ in range(turns)]
         indices = [i for i, row in enumerate(rows) if row.sampling_logps is not None]
 
         def score(i: int) -> list[float]:
-            client = clients[row_traj[i] % len(clients)]
-            return client.score_completion_logprobs(rows[i].prompt_ids.tolist(), rows[i].completion_ids.tolist())
+            return clients[row_server[i]].score_completion_logprobs(
+                rows[i].prompt_ids.tolist(), rows[i].completion_ids.tolist()
+            )
 
         scored: list[torch.Tensor | None] = [None] * len(rows)
         failures: list[Exception] = []
-        with ThreadPoolExecutor(max_workers=_ENGINE_RESCORE_CONCURRENCY) as pool:
-            futures = {i: pool.submit(score, i) for i in indices}
+        share = resolve_rescore_concurrency(self.async_config.isr_engine_rescore_per_server, get_global_world_size())
+        with ExitStack() as stack:
+            # One pool per server, so this rank's share bounds the requests on each server, not on all of them: every
+            # rank maps its first trajectories to the same server.
+            pools = [stack.enter_context(ThreadPoolExecutor(max_workers=share)) for _ in clients]
+            futures = {i: pools[row_server[i]].submit(score, i) for i in indices}
             for i, future in futures.items():
                 completion_ids = rows[i].completion_ids
                 try:

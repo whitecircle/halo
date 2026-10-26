@@ -7,6 +7,7 @@ import ast
 import inspect
 import math
 import re
+import threading
 import types
 from collections import defaultdict
 from unittest import mock
@@ -78,11 +79,24 @@ class _FakeClient:
         return [-0.5] * len(completion_ids)
 
 
+class _ThreadRecordingClient(_FakeClient):
+    """Records the worker thread of every request: a ``ThreadPoolExecutor`` names its threads after the pool."""
+
+    def __init__(self):
+        super().__init__()
+        self.threads = []
+
+    def score_completion_logprobs(self, prompt_ids, completion_ids):
+        self.threads.append(threading.current_thread().name)
+        return super().score_completion_logprobs(prompt_ids, completion_ids)
+
+
 def _rescore_host(clients):
     host = types.SimpleNamespace(
         _engine_rescore_clients=clients,
         _weight_sync_client=None,  # every rank but the main one holds no sync client
         _metrics={"train": defaultdict(list)},
+        async_config=types.SimpleNamespace(isr_engine_rescore_per_server=128),
     )
     attach_world_metrics(host)
     rescore = DistributedAsyncEnvironmentalGRPOTrainer._rescore_rows_on_engine.__get__(host)
@@ -191,6 +205,40 @@ def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, fail
     getattr(recorder, silent).assert_not_called()
     (msg,), _ = getattr(recorder, level).call_args
     assert msg.startswith("[rank 3] isr_engine_reference:"), msg
+
+
+@pytest.mark.parametrize(("world_size", "per_rank"), [(1, 128), (8, 16), (64, 2), (1024, 1)])
+def test_the_rescore_load_on_a_server_is_bounded_whatever_the_world_size(world_size, per_rank):
+    """Every rank re-scores its own rows on the same servers, so a fixed per-rank width puts world × width requests
+    in flight on a server; each rank keeps its share of the per-server budget there, and one request at the least."""
+    assert importance_sampling.resolve_rescore_concurrency(128, world_size) == per_rank
+    assert per_rank * world_size <= max(128, world_size)
+
+
+def test_each_server_takes_its_requests_through_a_pool_of_this_ranks_share(monkeypatch):
+    """Every rank maps its first trajectories to server 0, so one pool sized for every server would let a rank put
+    all of its width on that one; a pool per server caps each server at this rank's share."""
+    widths = []
+    real_pool = importance_sampling.ThreadPoolExecutor
+
+    def recording_pool(max_workers):
+        widths.append(max_workers)
+        return real_pool(max_workers)
+
+    monkeypatch.setattr(importance_sampling, "ThreadPoolExecutor", recording_pool)
+    monkeypatch.setattr(importance_sampling, "get_global_world_size", lambda: 32)
+    clients = [_ThreadRecordingClient(), _ThreadRecordingClient()]
+    rescore, host = _rescore_host(clients)
+    host.async_config.isr_engine_rescore_per_server = 64
+    prompts = [torch.tensor([i]) for i in range(6)]
+    completions = [torch.tensor([i, i]) for i in range(6)]
+
+    rescore(prompts, completions, [True] * 6, [3, 1, 2])
+
+    assert widths == [2, 2], f"pool widths {widths}, not 64 per server ÷ 32 ranks for each of 2 servers"
+    pools = [{name.rsplit("_", 1)[0] for name in client.threads} for client in clients]
+    assert all(len(pool) == 1 for pool in pools) and pools[0] != pools[1], f"servers shared a pool: {pools}"
+    assert [len(client.threads) for client in clients] == [5, 1], "trajectories 0 and 2 on server 0, 1 on server 1"
 
 
 def test_a_rescore_before_the_components_started_raises():

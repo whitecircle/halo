@@ -91,7 +91,7 @@ def draw(mode):
             RW,
             card_height(2),
             "Server 2 — GPU 7",
-            [":8001 · NCCL group port 51217", "group port = vllm_group_port + index"],
+            [":8001 · NCCL group port 51217", "group port = rollout_group_port + index"],
             color=VIOLET,
         )
         ax.annotate(

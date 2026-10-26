@@ -30,8 +30,7 @@ from halo.models.moe.balancing import (
 )
 from halo.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
 from halo.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
-from halo.runtime.collectives import barrier_on_exit
-from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import materialize_dtensor
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES
 from halo.weight_sync.registry import resolve_weight_sync_client
@@ -394,7 +393,7 @@ def sync_trainer_weights(trainer, client: WeightSyncSender | None) -> None:
         log_cuda_memory("weight-sync pre")
 
     # Every rank waits for the push to land, and a raise must not skip the barrier the peers block in.
-    with barrier_on_exit():
+    with barrier_on_exit(f"Weight sync at step {trainer.state.global_step}"):
         sync_weights_to_client(model, client, is_main, is_tp_main)
 
     if log_memory:

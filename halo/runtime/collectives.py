@@ -1,8 +1,7 @@
 """Hand-built collectives over the default group: the backend's tensor device, barriers, broadcasts,
-fixed-order group creation and the rank-0 combine of per-rank Python objects."""
+fixed-order group creation and the rank-0 gather and combine of per-rank Python objects."""
 
 from collections.abc import Callable
-from contextlib import contextmanager
 from typing import Any, TypeVar
 
 import torch
@@ -31,16 +30,6 @@ def barrier(group: dist.ProcessGroup | None = None):
     """Synchronize the ranks of ``group`` (the default group when None); a no-op without one."""
     if has_process_group():
         dist.barrier(group=group)
-
-
-@contextmanager
-def barrier_on_exit(group: dist.ProcessGroup | None = None):
-    """Run a save-rank-only write, then barrier even if the write raised, so a writer's I/O failure
-    propagates instead of hanging its peers in the barrier. COLLECTIVE."""
-    try:
-        yield
-    finally:
-        barrier(group)
 
 
 def nccl_safe_broadcast(tensor: torch.Tensor, src: int, group: dist.ProcessGroup | None = None) -> None:
@@ -74,6 +63,17 @@ def build_groups(rank_lists: list[list[int]], *, mine: int, what: str) -> dist.P
     return my_group
 
 
+def gather_on_rank0(payload: Any) -> list[Any] | None:
+    """COLLECTIVE: every rank's ``payload`` in rank order on rank 0, None on the others; ``[payload]`` without a
+    process group."""
+    if not has_process_group():
+        return [payload]
+    # Non-None on rank 0 alone, as ``gather_object`` requires.
+    gathered: list[Any] | None = [None] * dist.get_world_size() if dist.get_rank() == 0 else None
+    dist.gather_object(payload, gathered, dst=0)
+    return gathered
+
+
 def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined], *, what: str) -> _Combined:
     """COLLECTIVE: ``combine`` every rank's ``payload`` on rank 0 and return the result on every rank.
 
@@ -84,9 +84,7 @@ def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined]
     if not has_process_group():
         return combine([payload])
 
-    # Non-None on rank 0 alone, as ``gather_object`` requires.
-    gathered: list[Any] | None = [None] * dist.get_world_size() if dist.get_rank() == 0 else None
-    dist.gather_object(payload, gathered, dst=0)
+    gathered = gather_on_rank0(payload)
 
     # Any exception, not just the one the combine raises on purpose: one escaping rank 0 here would leave
     # every peer in the next collective until the watchdog fires.

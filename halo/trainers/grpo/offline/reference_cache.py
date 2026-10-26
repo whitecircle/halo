@@ -27,7 +27,7 @@ from halo.checkpoint.atomic import link_or_copy_file
 from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 from halo.env import nccl_timeout
 from halo.runtime.collectives import all_gather_cat, broadcast_from_rank0, collective_device
-from halo.runtime.consensus import DeferredRankFailure, store_reject_across_ranks
+from halo.runtime.consensus import DeferredRankFailure
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import get_global_rank, get_global_world_size
 from halo.trainers.reference_logps import REFERENCE_SCAN_ROWS
@@ -348,9 +348,7 @@ class ReferenceScoreCache:
 
         if is_fs_save_rank():
             guard.run(merge)
-        store_reject_across_ranks(
-            f"reference-cache/{os.path.basename(self.directory)}/merge", guard.reason, guard.what, exc_type=ValueError
-        )
+        guard.store_reject(f"reference-cache/{os.path.basename(self.directory)}/merge")
         guard = DeferredRankFailure("Mapping the offline GRPO reference cache", exc_type=ValueError)
         mapped = guard.run(lambda: self._map("merged"))
         guard.reject()

@@ -131,7 +131,8 @@ def publish_cached_download(
 ) -> bool:
     """Serve ``cache_path`` from cache or (re)download it with ``fetch(tmp_path)`` and publish it atomically;
     returns cache-hit. Writers serialize on ``lock_path``; ``live_fingerprint`` (``None`` serves the cache
-    unvalidated) invalidates a cache whose source changed and upgrades a fingerprint-less marker in place.
+    unvalidated) invalidates a cache whose source changed and upgrades a fingerprint-less marker in place. A fetch
+    that raises leaves no partial tree behind.
     """
     complete_marker = os.path.join(cache_path, DOWNLOAD_COMPLETE_MARKER)
     with filelock.FileLock(lock_path, timeout=_CACHE_LOCK_TIMEOUT_SECONDS):
@@ -153,7 +154,11 @@ def publish_cached_download(
             return True
 
         tmp_path = f"{cache_path}.tmp-{uuid.uuid4().hex}"
-        fetch(tmp_path)
+        try:
+            fetch(tmp_path)
+        except BaseException:
+            shutil.rmtree(tmp_path, ignore_errors=True)
+            raise
         _write_download_marker(os.path.join(tmp_path, DOWNLOAD_COMPLETE_MARKER), source_uri, fresh_fingerprint())
         _publish_tree(tmp_path, cache_path)
         return False

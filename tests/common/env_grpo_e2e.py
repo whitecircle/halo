@@ -92,7 +92,7 @@ def _make_trainer(
     )
 
 
-def _grpo_config(*, output_dir: str, max_steps: int, group_port: int, save: bool, peft: str | None) -> GRPOConfig:
+def _grpo_config(*, output_dir: str, max_steps: int, save: bool, peft: str | None) -> GRPOConfig:
     return GRPOConfig(
         output_dir=output_dir,
         max_steps=max_steps,
@@ -115,7 +115,6 @@ def _grpo_config(*, output_dir: str, max_steps: int, group_port: int, save: bool
         num_generations=2,
         max_completion_length=128,
         beta=0.0,
-        vllm_group_port=group_port,
         remove_unused_columns=False,
     )
 
@@ -125,6 +124,7 @@ def _async_config(
     backend: str,
     server_url: str,
     pool_urls: tuple[str, ...],
+    group_port: int,
     model_name: str,
     thinking_budget: int | None,
     routing_replay: str,
@@ -132,8 +132,9 @@ def _async_config(
     return AsyncTrainingConfig(
         rollout_backend=backend,
         rollout_server_url=server_url,
-        # Each pool server's group port is the base vllm_group_port plus its index.
+        # Each pool server's group port is the base rollout_group_port plus its index.
         rollout_server_configs=[{"url": url} for url in pool_urls] or None,
+        rollout_group_port=group_port,
         rollout_connection_timeout=180.0,
         num_rollout_workers=2,
         max_concurrent_rollouts=2,
@@ -229,13 +230,12 @@ def run_env_grpo_e2e(
         backend=backend,
         server_url=server_url,
         pool_urls=pool_urls,
+        group_port=group_port,
         model_name=model_name,
         thinking_budget=thinking_budget,
         routing_replay=routing_replay,
     )
-    grpo_config = _grpo_config(
-        output_dir=output_dir, max_steps=max_steps, group_port=group_port, save=resume, peft=peft
-    )
+    grpo_config = _grpo_config(output_dir=output_dir, max_steps=max_steps, save=resume, peft=peft)
 
     parallelism_config = fresh_parallelism_config(ep_size, tp_size, expert_tp_size)
     model, peft_config = load_policy(
@@ -449,9 +449,7 @@ def run_env_grpo_e2e(
         peft_config=peft_config,
         # The resumed phase writes nothing: it is judged on the served policy and on what it
         # restored, and a second full-model checkpoint would only cost scratch space.
-        grpo_config=_grpo_config(
-            output_dir=output_dir, max_steps=max_steps, group_port=group_port, save=False, peft=peft
-        ),
+        grpo_config=_grpo_config(output_dir=output_dir, max_steps=max_steps, save=False, peft=peft),
         async_config=async_config,
         trainer_cls=DistributedAsyncEnvironmentalGRPOTrainer,
         environment_type=environment_type,

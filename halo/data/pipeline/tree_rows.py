@@ -151,7 +151,8 @@ def build_tree_row_processor(
     """Build the batched map that turns runs of adjacent rows with one share key into tree columns: one row per
     tree, more when a run overflows ``max_length`` and splits into trees that each repeat the shared part, and
     several roots in one row when they share under ``min_shared_tokens``. A conversation over ``max_length`` alone
-    is dropped, as on the flat path; a run a batch boundary cuts becomes two trees and changes no example.
+    is dropped, as on the flat path; a run a batch or map-worker boundary cuts becomes two trees and changes no
+    example.
     ``render_kwargs`` are the flat row processor's, so a row renders by the same call."""
     # Partials: the map's cache key reads a partial's bound arguments and skips a dict a closure captures.
     render = functools.partial(

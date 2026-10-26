@@ -33,6 +33,7 @@ _KNOBS_AT_DEFAULT = {
     "HALO_GRAD_BUCKET_MB": "256",
     "DIST_NCCL_TIMEOUT_MINUTES": "30",
     "DIST_STORE_TIMEOUT_HOURS": "4",
+    "DIST_FS_PROBE_TIMEOUT_SECONDS": "60",
 }
 
 
@@ -119,6 +120,14 @@ def test_coordination_timeouts_are_compared(monkeypatch):
 
     assert _settings_with(monkeypatch, {"DIST_NCCL_TIMEOUT_MINUTES": "60"}) != default
     assert _settings_with(monkeypatch, {"DIST_STORE_TIMEOUT_HOURS": "8"}) != default
+
+
+def test_the_filesystem_probe_budget_is_compared(monkeypatch):
+    """A node with a shorter probe budget stops looking for a slow shared mount's file first and reports
+    the mount as unshared while its peers saw it."""
+    default = _settings_with(monkeypatch, {})
+    assert default["DIST_FS_PROBE_TIMEOUT_SECONDS"] == 60
+    assert _settings_with(monkeypatch, {"DIST_FS_PROBE_TIMEOUT_SECONDS": "180"}) != default
 
 
 def test_grad_bucket_is_reported_in_operator_units(monkeypatch):

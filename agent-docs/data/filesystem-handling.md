@@ -25,14 +25,26 @@ put participants of one tag under two different scopes where they never see each
 
 The **output** declaration is additionally checked against the filesystem itself at startup, on
 multi-node runs only (`verify_output_filesystem_sharing`): global rank 0 writes a sentinel under
-`output_dir` and every rank looks for it, waiting up to 60 s when shared is declared, not at all
-when per-node is. Either contradiction raises and names the var to set. The entry scripts probe
+`output_dir` and every rank looks for it, waiting up to `DIST_FS_PROBE_TIMEOUT_SECONDS` (default 60,
+NFS's default `acdirmax`) when shared is declared, not at all when per-node is. Either contradiction
+raises and names the var to set; a shared mount whose attribute cache outlasts the budget (a larger
+`actimeo`/`acdirmax`, or `lookupcache` keeping the negative lookup) reads as unshared until the budget
+is raised, and declaring it per-node instead would race every node's writer. The entry scripts probe
 before resume detection, and every trainer probes again at construction, so a Python-API run is
 checked too; a directory already probed in the process is not probed twice.
 
 Declared shared but invisible to some rank means only global rank 0 writes `trainer_state.json` and
 the save-rank sidecars, so a resume finds every checkpoint incomplete on the other nodes. Declared per-node but
 visible everywhere means every node's local rank 0 writes the same checkpoint paths concurrently.
+
+The **input** declaration is checked the same way (`verify_input_filesystem_sharing`), by every training
+script right after `init_distributed()` and before its first Hub read: global rank 0 writes a sentinel
+under `HF_HUB_CACHE` and `HF_DATASETS_CACHE`, in one round. Declared shared but invisible means the other
+nodes read caches nobody filled (their Hub reads fail, and each of their ranks recomputes every dataset
+map); declared per-node but visible everywhere means every node's local rank 0 fills the same cache files
+at once. A cache global rank 0 cannot write (a read-only, pre-staged mount) is filled by nobody and is
+skipped. The one declaration covers both caches, so both must be on the same kind of storage; an explicit
+`HF_DATASETS_CACHE` does not follow `HF_HOME`.
 
 The split exists because the two sides can want opposite settings on a multi-node run over a slow or
 flaky shared mount (NFS/EFS). Input wants per-node: global rank 0 writing the HF/dataset cache and
@@ -47,7 +59,7 @@ shared mount gives one authoritative copy with no post-hoc gather. That combinat
 
 Owning files: `halo/runtime/filesystem.py` (the shared-FS flags, the writer/reader rank predicates,
 main-first ordering, `fs_aware_makedirs`, the output-FS probe), `halo/runtime/consensus.py` (the
-c10d-store phase, the store and collective rejection joins) and `halo/runtime/load_coordination.py`
+c10d-store phase, the store and collective rejection joins, `barrier_on_exit`) and `halo/runtime/load_coordination.py`
 (the per-node load throttle and its world join).
 
 - `fs_aware_main_first(tag, timeout=None)` — context manager that orders the body main-rank-first.
@@ -66,7 +78,8 @@ c10d-store phase, the store and collective rejection joins) and `halo/runtime/lo
     The bound covers the **main rank's** work only: there is no trailing join, so the main rank's own
     wait for the peers is whatever collective comes next, the watchdog, minutes not hours. A
     **misdeclared input flag** (shared declared over per-node storage) leaves the peers a cache they
-    cannot see, so the toolkit's model and dataset loads do not rely on this primitive alone. A model
+    cannot see; the input probe refuses that declaration at startup, and the toolkit's model and dataset
+    loads do not rely on this primitive alone either. A model
     load joins every rank's view of the source and raises on every rank when some cannot see it. The
     dataset side runs on `run_load_rank_first` (below), whose second phase is store-joined too: each
     peer that cannot see the load rank's cache redoes the download or map itself, under the store
@@ -74,14 +87,16 @@ c10d-store phase, the store and collective rejection joins) and `halo/runtime/lo
     per rank.
 
     Two rules the caller owns. The body must issue **no collective**, directly or through a helper
-    (`ensure_cache_dir()` and `fs_aware_makedirs()` both barrier): while the main rank runs it, the
+    (`ensure_cache_dir()` and `fs_aware_makedirs()` both join across ranks): while the main rank runs it, the
     peers are on a store key, not in a matching collective, so the main rank would block alone.
 
     Every rank must also reach a given `tag` the **same number of times, in the same order**: keep
     one tag per call site and never enter one from a rank-dependent branch.
 
 - `hub_metadata_main_first(tag, fetch)` — `fs_aware_main_first` around a single hub-metadata read
-  (`config.json`, a processor config), returning `fetch()`'s result. Tags live under `hub_meta/`.
+  (`config.json`, a processor config), returning `fetch(local_files_only=...)`'s result. Tags live under
+  `hub_meta/`. Off the load rank `fetch` is told `local_files_only=True`: a follower reads the cache its
+  scope's main rank just filled, so each scope makes one Hub query rather than one per rank.
 
     The bound is 30 minutes rather than the hours-scale store default: a metadata fetch that slow is
     a dead endpoint, not slow work. It resolves the shared-filesystem consensus itself if that has not
@@ -108,8 +123,9 @@ c10d-store phase, the store and collective rejection joins) and `halo/runtime/lo
     writer choice through it.
 
 - `fs_aware_makedirs(path, writer_rank=is_fs_save_rank)` — creates a directory with the correct
-  rank, then barriers. Pass `writer_rank=is_fs_load_rank` for a read-side cache dir (what
-  `halo/entrypoints/run_setup.py` does for `HF_DATASETS_CACHE`).
+  rank behind `barrier_on_exit`, so a read-only or full volume raises on every rank. Pass
+  `writer_rank=is_fs_load_rank` for a read-side cache dir (what `halo/entrypoints/run_setup.py` does
+  for `HF_DATASETS_CACHE`).
 
 - `reject_across_ranks(local_reason, what, exc_type=RuntimeError)` — the collective that joins a
   rank-gated body. Every rank calls it with its own reason or `None`; if **any** is non-`None`, every
@@ -118,6 +134,12 @@ c10d-store phase, the store and collective rejection joins) and `halo/runtime/lo
     Pass `exc_type` to keep a caller's own error contract (a config gate documented as `ValueError`).
     Use it in place of a barrier wherever one rank does work the others wait on, so a failure there
     aborts the job instead of parking the peers in the barrier until the watchdog.
+
+- `barrier_on_exit(what)` — the context-manager form around a rank-gated write: the body's exception
+  is recorded, then joined by `reject_across_ranks` where a barrier would stand (one all-reduce, so
+  collective order matches a barrier's). The failing rank re-raises its own exception, every peer a
+  `RuntimeError` naming the failing ranks. The checkpoint sidecars, adapter writes, index writes and
+  the attention warm-up fence on it.
 
 - `gather_rank_reasons(local_reason)` — the same gather without the raise, for a caller whose answer
   to a failure is not always one: every rank gets the world's reasons, indexed by rank, and
@@ -137,7 +159,9 @@ c10d-store phase, the store and collective rejection joins) and `halo/runtime/lo
     the NCCL watchdog. World-scoped and collective-equivalent: every rank, same tags, same order. Each
     rank writes one key and reads the world's in a single `multi_get`, so a join costs O(world) store
     requests in total rather than O(world) per rank. The coordinated dataset ops and the
-    sharded-dataset loads join through it.
+    sharded-dataset loads join through it, and `DeferredRankFailure.store_reject(tag)` closes a
+    deferred region with it: the checkpoint savers join that way after the per-rank optimizer and
+    sharded-EP shard writes, a gathered save's last part and index, and each pipeline stage's parts.
 
     The tradeoff: a rank that dies *between* joins parks its peers on the store for the full bound
     rather than the watchdog minutes. The timeout diagnostic names the tag and the knob, and the
@@ -184,7 +208,7 @@ joins go permanently off-by-one on the equal-entry invariant.
 | Dataset loading | input | `halo/data/sources/loading.py` | `run_load_rank_first` around the source load (S3, Hub, or local) and the train/test split. The preprocessed-dataset probe runs once per filesystem scope (`agree_input_probe_across_ranks`) and its verdict is shared; a probe that raises raises its cause on every rank. A sharded dataset coordinates per shard with a file lock instead, and joins the world over the store so one rank's shard failure aborts every rank with the cause |
 | Dataset map / filter | input | `halo/data/pipeline/coordinated_map.py` | `coordinated_map` / `coordinated_filter` — self-ordering, see the warning above |
 | Dataset packing | input | `coordinated_pack` (`coordinated_map.py`) | `run_load_rank_first` around a deterministic `cache_file_name`. Unguarded, `pack_dataset` materializes a full corpus copy **per rank** |
-| TRL dataset preparation (DPO, KTO, BT reward) | input | `halo/trainers/trl_dataset_prep.py` (`TRLDatasetPrepMixin`) | `coordinated_dataset_transform` (`coordinated_map.py`): the load rank runs TRL's `_prepare_dataset` with its `main_process_first` barriers disabled and the map cache off, then publishes the result as `HF_DATASETS_CACHE/transform-<md5>`, keyed on the rows, the tokenizer and every training argument but the run's identity; the rest load it. Its intermediate maps write a staging directory beside that copy (`transform-<md5>.tmp-<uuid>`), removed when the preparation ends, rather than `$TMPDIR`. Unguarded, TRL holds the peers in an NCCL barrier for the whole tokenization and writes a full copy per rank per run |
+| TRL dataset preparation (DPO, KTO, BT reward) | input | `halo/trainers/trl_dataset_prep.py` (`TRLDatasetPrepMixin`) | `coordinated_dataset_transform` (`coordinated_map.py`): the load rank runs TRL's `_prepare_dataset` with its `main_process_first` barriers disabled and the map cache off, then publishes the result as `HF_DATASETS_CACHE/transform-<md5>`, keyed on the rows, the tokenizer and every training argument but the run's identity; the rest load it. Its intermediate maps write a staging directory beside that copy (`transform-<md5>.tmp-<uuid>`, through `scratch_dataset_maps`), removed when the preparation ends, rather than `$TMPDIR`. Unguarded, TRL holds the peers in an NCCL barrier for the whole tokenization and writes a full copy per rank per run |
 | EP lazy model loading | input | `halo/distributed/expert_parallel/lazy_plan.py` | A shared prologue orders the meta-device instantiation main-rank-first; each rank then slices its expert range from the safetensors shards |
 | Checkpoint saves | output | `halo/checkpoint/parallel/ep.py`, `halo/checkpoint/parallel/save.py`, `halo/trainers/checkpointing.py` | Writer-rank selection via `is_fs_save_rank()`, with HF's `save_on_each_node` aligned to it ([Checkpoints → Multi-node](../reference/checkpoints.md#multi-node)); a non-shared output FS also rejects a multi-node sharded-EP save (the per-rank expert shards are keyed by global rank and would scatter across nodes' local disks with no gather path) |
 | Optimizer shards and meta | output | `halo/checkpoint/parallel/optimizer.py` | Every rank writes its own `optimizer_shard_<rank>.pt` and the save rank(s) write `optimizer_meta.pt`, so each node's directory carries its own meta. A resume needs each rank's own shard on its node ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)). Multi-group EP replica dedup runs on a shared output FS only |

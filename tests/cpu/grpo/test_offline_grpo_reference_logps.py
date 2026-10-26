@@ -149,7 +149,7 @@ def test_a_failed_sidecar_write_keeps_the_previous_checkpoint(tmp_path, monkeypa
         raise OSError("disk full")
 
     monkeypatch.setattr(reference_mod.torch, "save", fail_save)
-    with pytest.raises(RuntimeError, match="disk full"):
+    with pytest.raises(OSError, match="disk full"):
         trainer.save_checkpoint()
     assert not trainer.rotated
     assert (previous / "sentinel").read_text() == "complete"

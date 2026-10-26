@@ -9,7 +9,8 @@ raise leaves them there until the watchdog, with a traceback naming the collecti
   not reach, and the main process its weight-sync client; the start's verdict and then the client
   formation's join them.
 * the fenced weight sync: the collective gather runs on every rank and can fail on a non-main one.
-* the completions record: only the writer rank writes it, and the step's next collective follows.
+* the completions record: one writer rank writes the world's, every rank its own part (and then joins the
+  tables' sample gather even when its write failed), and the step's next collective follows.
 
 Proven on a real 2-rank gloo group with the external pieces (Ray, the actors, the engine) stubbed, so a
 regression is the hang it would be in production, bounded by the group timeout.
@@ -146,14 +147,21 @@ def _sync_worker(rank: int, tmp_dir: str) -> None:
         fh.write(" ".join(str(seconds) for seconds in host._rollout_manager.credited))
 
 
-def _completions_worker(rank: int, tmp_dir: str) -> None:
-    # A file where the completions directory goes: the writer's makedirs fails, as on a read-only mount.
-    blocked = os.path.join(tmp_dir, "blocked")
+def _completions_worker(rank: int, tmp_dir: str, rank_local: bool) -> None:
+    # A file where the completions directory goes: the writer's makedirs fails, as on a read-only mount. Rank-local
+    # parts are written by every rank, so only the failing rank's node is blocked.
+    blocked = os.path.join(tmp_dir, f"blocked_{rank}")
     with open(blocked, "w"):
         pass
+    unblocked = rank_local and rank != FAILING_RANK
     trainer = types.SimpleNamespace(
+        RANK_LOCAL_COMPLETION_LOGS=rank_local,
         state=types.SimpleNamespace(global_step=7),
-        args=types.SimpleNamespace(output_dir=os.path.join(blocked, "out"), report_to=[]),
+        args=types.SimpleNamespace(
+            output_dir=os.path.join(tmp_dir, f"out_{rank}") if unblocked else os.path.join(blocked, "out"),
+            # A wandb table is wanted, so the per-rank parts' path gathers its sample after the write.
+            report_to=["wandb"],
+        ),
         model=types.SimpleNamespace(training=True),
         num_completions_to_print=1,
         log_unique_prompts=False,
@@ -226,10 +234,14 @@ def test_a_non_main_rank_weight_sync_failure_raises_on_every_rank(tmp_path):
     assert credits[0] == credits[1] >= _PUSH_SECONDS, f"the ranks credited different pauses: {credits}"
 
 
-def test_a_completions_writer_failure_raises_on_every_rank(tmp_path):
-    """Only the writer rank (rank 0, shared output filesystem) touches the disk."""
-    run_gloo_ranks(_completions_worker, WORLD_SIZE, str(tmp_path), pg_timeout=PG_TIMEOUT)
-    _assert_raised_everywhere(_results(tmp_path), "NotADirectoryError", failing_rank=0)
+@pytest.mark.parametrize(
+    ("rank_local", "failing_rank"), [(False, 0), (True, FAILING_RANK)], ids=["world-record", "per-rank-parts"]
+)
+def test_a_completions_writer_failure_raises_on_every_rank(tmp_path, rank_local, failing_rank):
+    """The world's record has one writer (rank 0, shared output filesystem); per-rank parts are written by every
+    rank, here failing on one rank's node only, which must still join the sample gather that follows."""
+    run_gloo_ranks(_completions_worker, WORLD_SIZE, str(tmp_path), rank_local, pg_timeout=PG_TIMEOUT)
+    _assert_raised_everywhere(_results(tmp_path), "NotADirectoryError", failing_rank=failing_rank)
 
 
 if __name__ == "__main__":

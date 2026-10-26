@@ -40,6 +40,11 @@ extracted as the prompt.
 - a local path: JSON/JSONL, Parquet, Arrow, CSV, or a `save_to_disk` directory;
 - an S3 path (`s3://my-bucket/key`), with your own AWS credentials.
 
+A bare `org/name` is read as a Hub ID, so write a local directory as
+`./data/corpus` or an absolute path; an `org/name` that also names a local
+directory is refused as ambiguous
+([Dataset path formats](../agent-docs/data/s3-utilities.md#dataset-path-formats) ↗).
+
 Pass a list to mix sources. `dataset_ratio` is the fraction of each source to
 keep, not a mixing weight:
 

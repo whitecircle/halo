@@ -6,26 +6,32 @@ import functools
 import inspect
 import logging
 from collections.abc import Callable, Sequence
+from datetime import timedelta
 from typing import Any, NamedTuple
 
 import torch
 import torch.distributed as dist
 from accelerate import PartialState
+from huggingface_hub import constants as hub_constants
+from transformers import TrainingArguments
 
 from halo.callbacks.balancing import configure_moe_balancing
 from halo.callbacks.early_stop import StopsTrainingEarly
 from halo.callbacks.factory import build_run_callbacks, reorder_integration_callbacks_last
+from halo.config_validation import differs_from_default
 from halo.configs.parallelism_arguments import parallelism_config_from_args
 from halo.configs.parser import HaloArgumentParser, expand_strftime_directives
+from halo.data.pipeline.coordinated_map import datasets_cache_dir
 from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.rank_uniform_env import agree_rank_uniform_env
 from halo.entrypoints.run_setup import configure_training_run, install_log_tee, prepare_distributed_resume
+from halo.env import nccl_timeout
 from halo.log import configure_training_logging
 from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import raise_rank0_failure
-from halo.runtime.filesystem import verify_output_filesystem_sharing
+from halo.runtime.filesystem import verify_input_filesystem_sharing, verify_output_filesystem_sharing
 from halo.runtime.process_group import init_distributed
 from halo.runtime.ranks import get_local_rank, has_process_group, is_global_main_process
 
@@ -57,9 +63,23 @@ class ScriptContext(NamedTuple):
         return self.resume_checkpoint is not None and self.model_source == self.resume_checkpoint
 
 
+def _reject_ddp_timeout(parsed: Sequence[Any]) -> None:
+    """Refuse a ``ddp_timeout`` set away from its default: the process group is up before any config is built,
+    its NCCL watchdog set by ``DIST_NCCL_TIMEOUT_MINUTES``, so the field would never apply."""
+    for args in parsed:
+        if isinstance(args, TrainingArguments) and differs_from_default(args, "ddp_timeout"):
+            minutes = nccl_timeout() // timedelta(minutes=1)
+            raise ValueError(
+                f"ddp_timeout={args.ddp_timeout} would never apply: the process group starts before the config is "
+                f"parsed, with the NCCL watchdog DIST_NCCL_TIMEOUT_MINUTES sets ({minutes} min here). Remove "
+                f"ddp_timeout and set DIST_NCCL_TIMEOUT_MINUTES in the launch environment, alike on every node."
+            )
+
+
 def parse_script_args(*dataclass_types: type) -> Any:
-    """COLLECTIVE: raise the root logger to INFO, parse the command line into ``dataclass_types``, returned in
-    order (the instance alone for one type), and tee the console into the run's ``output_dir``.
+    """COLLECTIVE: raise the root logger to INFO, probe the HF caches against the declared input sharing, parse
+    the command line into ``dataclass_types``, returned in order (the instance alone for one type), and tee the
+    console into the run's ``output_dir``. A ``ddp_timeout`` the parsed config sets is refused.
 
     The process group comes up before any dataclass is built: constructing a TrainingArguments touches
     ``self.device``, which makes accelerate initialize the default process group without ``device_id``,
@@ -68,6 +88,10 @@ def parse_script_args(*dataclass_types: type) -> Any:
     """
     configure_training_logging()
     init_distributed()
+    # Before the first Hub read: a follower reads only the cache its scope's main rank fills.
+    verify_input_filesystem_sharing(
+        {"HF_HUB_CACHE": hub_constants.HF_HUB_CACHE, "HF_DATASETS_CACHE": datasets_cache_dir()}
+    )
     parser = HaloArgumentParser(dataclass_types)
     values = parser.load_values()
     if isinstance(values.get("output_dir"), str):
@@ -75,6 +99,7 @@ def parse_script_args(*dataclass_types: type) -> Any:
         # non-shared output filesystem each node's save rank would then tee run.log elsewhere.
         values["output_dir"] = broadcast_from_rank0(expand_strftime_directives(values["output_dir"]))
     output = parser.parse_dict(values)
+    _reject_ddp_timeout(output)
     install_log_tee(
         next((obj.output_dir for obj in output if isinstance(getattr(obj, "output_dir", None), str)), None)
     )

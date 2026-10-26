@@ -6,8 +6,6 @@ import logging
 from collections.abc import Mapping, Sequence
 
 import torch
-import torch.distributed as dist
-from accelerate.utils import gather_object
 
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import (
@@ -19,28 +17,11 @@ from halo.environments.episode_keys import (
 from halo.environments.messages import Trajectory
 from halo.rewards.samples import CUT_CALL_NOTE
 from halo.rewards.terms import REWARD_COMPONENT_PREFIX
-from halo.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
-from halo.runtime.ranks import is_global_main_process, is_multi_rank_run
+from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 from halo.trainers.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
-
-
-def _gather_to_completion_writers(values: list) -> list | None:
-    """COLLECTIVE. ``values`` gathered across the world in rank order to the ranks that write the completions
-    artifact (:func:`is_fs_save_rank`), ``None`` elsewhere: the payload is the heaviest this trainer moves, and
-    an all-gather would stage the whole world's text through every rank's device."""
-    if not is_multi_rank_run():
-        return list(values)
-    if not is_output_shared_filesystem():
-        return list(gather_object(values))
-    # Shared output FS ⇒ is_fs_save_rank() is global rank 0, which is what dst names.
-    chunks: list | None = [None] * dist.get_world_size() if is_fs_save_rank() else None
-    dist.gather_object(values, chunks, dst=0)
-    if chunks is None:
-        return None
-    return [item for chunk in chunks for item in chunk]
 
 
 def _episode_info_json(trajectory: Trajectory | None, key: str) -> str:
@@ -67,6 +48,9 @@ def group_solve_counts(solved: Sequence[bool | None], group_size: int) -> tuple[
 class RolloutMetricsMixin:
     """Completion logging and rollout diagnostics for the environmental GRPO trainer; no training signal."""
 
+    # Each rank keeps and writes its own rows: the rendered trajectories are the heaviest payload this trainer
+    # holds, and gathering them would stage the world's text through a device.
+    RANK_LOCAL_COMPLETION_LOGS = True
     # Cumulative totals over the world's population, never this rank's shard; ``+=`` rebinds per instance.
     _total_rollouts = 0
     _total_rollout_latency = 0.0
@@ -83,9 +67,10 @@ class RolloutMetricsMixin:
         advantages: torch.Tensor,
         mode: str,
     ) -> None:
-        """COLLECTIVE. Fill TRL's ``self._logs`` from this step's rollouts: text, reward, advantage, and as JSON
-        the settled reward components and every scored term's rationale. Every gather runs on every rank before
-        any is consumed; rows of the other mode still waiting are written under their own mode first."""
+        """Fill TRL's ``self._logs`` with this rank's rollouts of the step: text, reward, advantage, and as JSON
+        the settled reward components and every scored term's rationale; a TP/ETP follower, which holds its
+        leader's rollouts, keeps none. Rows of the other mode still waiting are written under their own mode first
+        (COLLECTIVE then, a verdict every rank shares)."""
         if not (self._save_completions or self.log_completions):
             return
         if self._completion_logs_mode not in (None, mode):
@@ -93,29 +78,18 @@ class RolloutMetricsMixin:
                 self, console=False, save=self._save_completions, mode=self._completion_logs_mode
             )
         self._completion_logs_mode = mode
-        prompts_text = [r.prompt for r in rollout_results]
-        completions_text = [self._render_trajectory_for_log(r.trajectory) for r in rollout_results]
-        components_json = [_episode_info_json(r.trajectory, REWARD_COMPONENTS_KEY) for r in rollout_results]
-        details_json = [_episode_info_json(r.trajectory, REWARD_DETAILS_KEY) for r in rollout_results]
-        prompts, completions, reward_values, advantage_values, components, details = [
-            _gather_to_completion_writers(values)
-            for values in (
-                prompts_text,
-                completions_text,
-                rewards.tolist(),
-                advantages.tolist(),
-                components_json,
-                details_json,
-            )
-        ]
-        if prompts is None:
+        if self._is_tp_follower():
             return
-        self._logs["prompt"].extend(prompts)
-        self._logs["completion"].extend(completions)
-        self._logs["rewards"]["environment_reward"].extend(reward_values)
-        self._logs["advantages"].extend(advantage_values)
-        self._logs["extra"][REWARD_COMPONENTS_KEY].extend(components)
-        self._logs["extra"][REWARD_DETAILS_KEY].extend(details)
+        self._logs["prompt"].extend(r.prompt for r in rollout_results)
+        self._logs["completion"].extend(self._render_trajectory_for_log(r.trajectory) for r in rollout_results)
+        self._logs["rewards"]["environment_reward"].extend(rewards.tolist())
+        self._logs["advantages"].extend(advantages.tolist())
+        self._logs["extra"][REWARD_COMPONENTS_KEY].extend(
+            _episode_info_json(r.trajectory, REWARD_COMPONENTS_KEY) for r in rollout_results
+        )
+        self._logs["extra"][REWARD_DETAILS_KEY].extend(
+            _episode_info_json(r.trajectory, REWARD_DETAILS_KEY) for r in rollout_results
+        )
 
     @staticmethod
     def _render_trajectory_for_log(trajectory: "Trajectory | None") -> str:

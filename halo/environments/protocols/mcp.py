@@ -3,6 +3,9 @@ in OpenAI-compatible format."""
 
 import asyncio
 import logging
+import shutil
+import tempfile
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
 
@@ -32,10 +35,11 @@ MCP_SERVERS = {
     },
     "filesystem": {
         "command": "npx",
-        # The trailing path is the server's entire access allowlist, so it bounds what a rollout can
-        # reach. Deliberately not HALO_DATA_ROOT, which holds the dataset cache and checkpoints.
-        "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+        # A fresh scratch directory, appended as the trailing path, is the server's entire access allowlist: a
+        # rollout reaches no file of the host, another process or (under episode_scratch) another episode.
+        "args": ["-y", "@modelcontextprotocol/server-filesystem"],
         "env": [],
+        "scratch_allowlist": True,
     },
     "fetch": {
         # Python package (uvx), not npm.
@@ -60,8 +64,97 @@ MCP_SERVERS = {
     },
 }
 
-# Preset used when a config names none: no credentials, no network, restricted to /tmp.
+# Preset used when a config names none: no credentials, no network, restricted to its own scratch directory.
 _DEFAULT_MCP_SERVER = "filesystem"
+
+
+class _ServerConnection:
+    """One spawned MCP server, held open by an owner task that enters and exits its transport and session contexts,
+    as their anyio cancel scopes require. With ``scratch`` the server's last argument is a fresh directory under the
+    temp dir, kept across a respawn of a server that died and removed by :meth:`stop`; ``on_ready`` runs on the
+    session before :meth:`start` returns."""
+
+    def __init__(self, *, scratch: bool, on_ready: Callable[[ClientSession], Awaitable[None]] | None = None):
+        self.session: ClientSession | None = None
+        self._scratch = scratch
+        self._on_ready = on_ready
+        self._scratch_dir: str | None = None
+        self._task: asyncio.Task | None = None
+        self._stop: asyncio.Event | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def is_open(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop | None:
+        """The loop running the owner task, ``None`` while no server runs."""
+        return self._task.get_loop() if self.is_open else None
+
+    async def start(self, transport_context: Callable[[list[str]], Any]) -> ClientSession:
+        """The server's session, starting it first unless it runs; concurrent callers share one start, and a failed
+        start raises leaving no half-started server behind."""
+        async with self._lock:
+            if not self.is_open:
+                await self._spawn(transport_context)
+        return self.session
+
+    async def _run(self, transport_context: Callable[[list[str]], Any], ready: asyncio.Future, stop: asyncio.Event):
+        try:
+            async with (
+                transport_context([self._scratch_dir] if self._scratch_dir else []) as (read, write),
+                ClientSession(read, write, read_timeout_seconds=timedelta(seconds=MCP_REQUEST_TIMEOUT_S)) as session,
+            ):
+                await session.initialize()
+                if self._on_ready is not None:
+                    await self._on_ready(session)
+                self.session = session
+                ready.set_result(None)
+                await stop.wait()
+        except Exception as e:
+            if not ready.done():
+                ready.set_exception(e)
+            else:
+                logger.exception("MCP connection task failed")
+        finally:
+            self.session = None
+
+    async def _spawn(self, transport_context: Callable[[list[str]], Any]) -> None:
+        if self._scratch and self._scratch_dir is None:
+            self._scratch_dir = tempfile.mkdtemp(prefix="halo-mcp-")
+        stop = asyncio.Event()
+        ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        task = asyncio.create_task(self._run(transport_context, ready, stop))
+        try:
+            await ready
+        except BaseException:
+            # A start cancelled mid-connect (the episode deadline) must not leave the owner task and its server running.
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        self._task, self._stop = task, stop
+
+    async def stop(self) -> None:
+        """Stop the server and wait for its owner task to unwind (idempotent), then remove its scratch directory."""
+        task, self._task = self._task, None
+        if task is not None:
+            self._stop.set()
+            try:
+                await task
+            except Exception:
+                logger.exception("MCP disconnect failed")
+        self._remove_scratch()
+
+    def forget(self) -> None:
+        """Drop a server whose loop can run no teardown (already unwound, or stopped), removing its scratch."""
+        self._task = None
+        self._remove_scratch()
+
+    def _remove_scratch(self) -> None:
+        if self._scratch_dir is not None:
+            shutil.rmtree(self._scratch_dir, ignore_errors=True)
+            self._scratch_dir = None
 
 
 class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
@@ -80,42 +173,58 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         server_env: dict[str, str] | None = None,
         server_url: str | None = None,
         transport: str = "stdio",
+        scratch_allowlist: bool = False,
+        episode_scratch: bool = False,
         **kwargs,
     ):
+        """``scratch_allowlist`` appends a fresh scratch directory to a stdio server's arguments (the filesystem
+        server's access allowlist), removed when the server stops. ``episode_scratch`` scopes it to the episode:
+        each episode starts a server of its own over its own directory, stopped with the episode; otherwise one
+        server and its directory serve every episode."""
         super().__init__(tool_registry=NativeToolRegistry(), **kwargs)
+        if transport != "stdio" and (scratch_allowlist or episode_scratch):
+            raise ValueError(
+                f"scratch_allowlist and episode_scratch give a spawned server its scratch directory, but "
+                f"transport={transport!r} connects to one running server and spawns none. Use the stdio "
+                f"transport, or drop them."
+            )
+        if episode_scratch and not scratch_allowlist:
+            presets = sorted(name for name, config in MCP_SERVERS.items() if config.get("scratch_allowlist"))
+            raise ValueError(
+                f"episode_scratch scopes the server's scratch directory to the episode, but this server takes "
+                f"none (scratch_allowlist is off; of the presets, {presets} take one). Drop episode_scratch."
+            )
 
         self.transport = transport
         self.server_command = server_command
         self.server_args = server_args or []
         self.server_env = server_env
         self.server_url = server_url
+        self.scratch_allowlist = scratch_allowlist
+        self.episode_scratch = episode_scratch
 
-        self._session = None
-        self._conn_task: asyncio.Task | None = None
-        self._stop: asyncio.Event | None = None
-        # Serialize the lazy first-episode connect so concurrent episodes don't each spawn a server.
-        self._connect_lock = asyncio.Lock()
+        # Discovers the tools on the first episode; under episode_scratch it serves no call.
+        self._server = _ServerConnection(scratch=scratch_allowlist, on_ready=self._register_tools)
+        self._episode_servers: dict[int, _ServerConnection] = {}
 
     @property
     def _connected(self) -> bool:
-        return self._conn_task is not None and not self._conn_task.done()
+        return self._server.is_open
 
     async def _reset_single_async(self, prompt, context=None):
         # No caller enters the env as a context manager, so connect lazily on the first episode.
-        if not self._connected:
-            async with self._connect_lock:
-                if not self._connected:
-                    await self.connect()
+        await self.connect()
         return await super()._reset_single_async(prompt, context)
 
-    def _transport_context(self):
-        """Build the transport's async context manager (stdio subprocess or SSE stream)."""
+    def _transport_context(self, extra_args: list[str]):
+        """Build the transport's async context manager (stdio subprocess or SSE stream); ``extra_args`` follow
+        ``server_args`` on a stdio spawn."""
         if self.transport == "stdio":
             if not self.server_command:
                 raise ValueError("server_command required for stdio transport")
             # The SDK passes ``env`` verbatim when set, dropping PATH/HOME and breaking the spawn.
             env = {**get_default_environment(), **self.server_env} if self.server_env else None
-            params = StdioServerParameters(command=self.server_command, args=self.server_args, env=env)
+            params = StdioServerParameters(command=self.server_command, args=[*self.server_args, *extra_args], env=env)
             return stdio_client(params)
         if self.transport == "sse":
             if not self.server_url:
@@ -123,42 +232,28 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             return sse_client(self.server_url)
         raise ValueError(f"Unknown transport: {self.transport}")
 
-    async def _connection_main(self, ready: asyncio.Future, stop: asyncio.Event) -> None:
-        """Hold the transport and session contexts in one task from enter to exit, as their anyio cancel scopes
-        require; a failure before ``ready`` resolves unwinds them, leaving no half-started server behind."""
-        try:
-            async with (
-                self._transport_context() as (read, write),
-                ClientSession(read, write, read_timeout_seconds=timedelta(seconds=MCP_REQUEST_TIMEOUT_S)) as session,
-            ):
-                await session.initialize()
-                for mcp_tool in (await session.list_tools()).tools:
-                    self.registry.register(self._build_mcp_tool(mcp_tool))
-                logger.info(f"MCP connected: {len(self.registry)} tools discovered")
-                self._session = session
-                ready.set_result(None)
-                await stop.wait()
-        except Exception as e:
-            if not ready.done():
-                ready.set_exception(e)
-            else:
-                logger.exception("MCP connection task failed")
-        finally:
-            self._session = None
+    async def _register_tools(self, session: ClientSession) -> None:
+        for mcp_tool in (await session.list_tools()).tools:
+            self.registry.register(self._build_mcp_tool(mcp_tool))
+        logger.info(f"MCP connected: {len(self.registry)} tools discovered")
 
     async def connect(self) -> None:
-        """Start the connection-owner task; returns once tools are discovered (raises on failure)."""
-        if self._connected:
-            return
-        self._stop = asyncio.Event()
-        ready: asyncio.Future = asyncio.get_running_loop().create_future()
-        task = asyncio.create_task(self._connection_main(ready, self._stop))
-        try:
-            await ready
-        except Exception:
-            await asyncio.gather(task, return_exceptions=True)  # ensure the partial connect unwound
-            raise
-        self._conn_task = task
+        """Start the environment's server; returns once its tools are discovered (raises on failure)."""
+        await self._server.start(self._transport_context)
+
+    async def _call_session(self) -> ClientSession:
+        """The session a tool call goes to: under ``episode_scratch`` the executing episode's own server, started on
+        its first call, else the environment's."""
+        server = self._server
+        if self.episode_scratch:
+            trajectory = self.active_trajectory()
+            if trajectory is None:
+                raise RuntimeError("An episode-scoped MCP tool was called outside an episode")
+            server = self._episode_servers.setdefault(trajectory.info["episode_id"], _ServerConnection(scratch=True))
+            await server.start(self._transport_context)
+        if server.session is None:
+            raise RuntimeError("MCP session not connected")
+        return server.session
 
     def _build_mcp_tool(self, mcp_tool: Any) -> NativeTool:
         """A NativeTool from an MCP tool definition."""
@@ -192,10 +287,8 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
     async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Call an MCP tool and return its text content; a failure raises, since an error string would be booked
         as a successful call."""
-        if not self._session:
-            raise RuntimeError("MCP session not connected")
-
-        result = await self._session.call_tool(name, arguments=arguments)
+        session = await self._call_session()
+        result = await session.call_tool(name, arguments=arguments)
 
         content_parts = []
         for c in result.content:
@@ -211,28 +304,30 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             raise RuntimeError(content or f"MCP tool {name} returned an error")
         return content
 
+    def _release_episode(self, episode_id: int) -> None:
+        """Stop the episode's own server, removing its scratch directory."""
+        server = self._episode_servers.pop(episode_id, None)
+        if server is not None:
+            self._run_or_schedule(server.stop())
+
+    def _servers(self) -> list[_ServerConnection]:
+        return [self._server, *self._episode_servers.values()]
+
     async def disconnect(self) -> None:
-        """Signal the connection-owner task to unwind its contexts and wait for it (idempotent)."""
-        task, self._conn_task = self._conn_task, None
-        if task is None:
-            return
-        if self._stop is not None:
-            self._stop.set()
-        try:
-            await task
-        except Exception:
-            logger.exception("MCP disconnect failed")
+        """Stop every server and wait for each to unwind (idempotent)."""
+        servers = self._servers()
+        self._episode_servers.clear()
+        await asyncio.gather(*(server.stop() for server in servers))
         self.registry = NativeToolRegistry()
 
     def close(self) -> None:
-        """Drive :meth:`disconnect` from the sync lifecycle hook on the loop owning the connection: scheduled as a
-        task when called from that loop, which it cannot block, else awaited across threads."""
-        task = self._conn_task
-        if task is not None and task.done():
+        """Drive :meth:`disconnect` from the sync lifecycle hook on the loop owning the servers: scheduled as a task
+        when called from that loop, which it cannot block, else awaited across threads."""
+        loop = next((server.loop for server in self._servers() if server.is_open), None)
+        if loop is None:
             # Already unwound: ``asyncio.run`` cancels the tasks its loop leaves behind (a CLI eval).
-            self._conn_task = None
-        elif task is not None:
-            loop = task.get_loop()
+            self._forget_servers()
+        else:
             try:
                 running = asyncio.get_running_loop()
             except RuntimeError:
@@ -243,8 +338,13 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
                 asyncio.run_coroutine_threadsafe(self.disconnect(), loop).result(timeout=_MCP_DISCONNECT_TIMEOUT_S)
             else:
                 logger.warning("MCP close(): owning event loop already stopped; connection not unwound")
-                self._conn_task = None
+                self._forget_servers()
         super().close()
+
+    def _forget_servers(self) -> None:
+        for server in self._servers():
+            server.forget()
+        self._episode_servers.clear()
 
 
 def get_mcp_server_config(name: str) -> dict[str, Any]:
@@ -286,9 +386,13 @@ def build_mcp_environment(
     explicit = dict(env_vars or {})
     declared = [name for name in config["env"] if name not in explicit]
     server_env = {**_resolve_required_env(mcp_server, declared), **explicit}
+    scratch_allowlist = config.get("scratch_allowlist", False)
     return NativeMCPClientEnvironment(
         server_command=config["command"],
         server_args=config["args"],
         server_env=server_env or None,
+        scratch_allowlist=scratch_allowlist,
+        # A preset's scratch directory is the episode's unless the config scopes it to the environment.
+        episode_scratch=kwargs.pop("episode_scratch", scratch_allowlist),
         **kwargs,
     )

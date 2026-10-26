@@ -136,16 +136,18 @@ halo run weight-sync-transport --server-url http://<server>:8000 --backend vllm 
 Async GRPO names one server with `rollout_server_url`, or several with
 `rollout_server_configs` (a list of `{url, group_port}`; `enable_prefetch` needs
 two or more). Online GRPO dials `vllm_server_host` / `vllm_server_port`: the
-address the **trainer dials**, not a bind address. `vllm_group_port` is the
-weight-sync port, bound on the **trainer** host; a server entry without its own
-`group_port` takes it plus the entry's index
+address the **trainer dials**, not a bind address. The weight-sync port,
+bound on the **trainer** host, is `rollout_group_port` for async GRPO (a server
+entry without its own `group_port` takes it plus the entry's index) and
+`vllm_group_port` for Online GRPO
 ([fields and defaults](../agent-docs/reference/configuration-reference.md#asynctrainingconfig) ↗).
 
 - **Group ports are unique across servers**, even on different hosts, because
   all of them bind on the trainer.
-- **Name the trainer's address** if its routable address is not on the
-  default-route NIC: `VLLM_GROUP_HOST` (or `SGLANG_GROUP_HOST`) in the trainer's
-  environment, or a `group_host` entry per server.
+- **Name the trainer's address** if the server cannot reach the trainer's
+  address on the route to it (behind NAT, say): `VLLM_GROUP_HOST` (or
+  `SGLANG_GROUP_HOST`) in the trainer's environment, or a `group_host` entry per
+  server.
 - **Keep the group port private.** It listens on the advertised address only and
   accepts unauthenticated connections until the trainer closes its
   communicator, so only trusted hosts should reach it.

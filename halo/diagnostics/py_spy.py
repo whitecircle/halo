@@ -5,19 +5,18 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-import tempfile
 import time
 from collections.abc import Callable, Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
+from halo.env import data_path
 from halo.runtime.ranks import rank_tag
 
-# On the node's own temp filesystem rather than under HALO_DATA_ROOT, so a hang diagnosis does not
-# itself block on a shared filesystem.
-STACK_DUMP_DIR = os.path.join(tempfile.gettempdir(), "halo_diag_stacks")
-FLAMEGRAPH_DIR = os.path.join(tempfile.gettempdir(), "halo_diag_flamegraphs")
+# Beside the other profiler artifacts, so a capture outlives a container whose TMPDIR is not mounted.
+STACK_DUMP_DIR = data_path("profiling", "py_spy", "stacks")
+FLAMEGRAPH_DIR = data_path("profiling", "py_spy", "flamegraphs")
 
 # A record needs headroom on top of its own ``duration``; pgrep's budget elapses only on a wedged host.
 _PY_SPY_DUMP_TIMEOUT_S = 10

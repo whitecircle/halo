@@ -64,6 +64,7 @@ COLLECTIVE_CALLEES = frozenset(
         "store_reject_across_ranks",
         "ensure_cache_dir",
         "fs_aware_makedirs",
+        "barrier_on_exit",
         "broadcast_from_rank0",
         "resolve_shared_filesystem_consensus",
         "barrier",

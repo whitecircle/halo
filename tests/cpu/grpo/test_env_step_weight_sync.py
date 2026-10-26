@@ -20,6 +20,7 @@ genuine collectives.
     python tests/cpu/grpo/test_env_step_weight_sync.py
 """
 
+import contextlib
 import datetime
 import json
 import os
@@ -32,8 +33,9 @@ import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
 import halo.trainers.grpo.environmental.async_rollouts as async_mod
+import halo.trainers.grpo.rollout.weight_push as weight_push
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.runtime import collectives, consensus
+from halo.runtime import consensus
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
@@ -97,14 +99,16 @@ class _ShardedPolicy(nn.Module):
 
 
 def _push_worker(rank: int, tmp_dir: str) -> None:
-    barriers = []
-    real_barrier = collectives.barrier
+    fences = []
+    real_fence = weight_push.barrier_on_exit
 
-    def counting_barrier(group=None):
-        barriers.append(rank)
-        real_barrier(group)
+    @contextlib.contextmanager
+    def counting_fence(what):
+        with real_fence(what):
+            yield
+        fences.append(rank)
 
-    collectives.barrier = counting_barrier
+    weight_push.barrier_on_exit = counting_fence
     client = _SlowFlush() if rank == 0 else None
     trainer = SimpleNamespace(
         model=_ShardedPolicy(init_device_mesh("cpu", (WORLD_SIZE,))),
@@ -113,7 +117,7 @@ def _push_worker(rank: int, tmp_dir: str) -> None:
         state=SimpleNamespace(global_step=1),
     )
     sync_trainer_weights(trainer, client)
-    record = {"returned": time.monotonic(), "barriers": len(barriers)}
+    record = {"returned": time.monotonic(), "fences": len(fences)}
     if client is not None:
         record.update(landed=client.landed, sent=client.names)
     with open(os.path.join(tmp_dir, f"rank_{rank}.json"), "w") as fh:
@@ -125,7 +129,7 @@ def test_the_push_releases_no_rank_before_it_lands(tmp_path):
     forwarding, peer = (json.loads((tmp_path / f"rank_{rank}.json").read_text()) for rank in range(WORLD_SIZE))
     assert forwarding["sent"] == ["layers.0.weight", "layers.1.weight"]
     assert peer["returned"] >= forwarding["landed"], "a peer left the sync while the engine was mid-update"
-    assert forwarding["barriers"] == peer["barriers"] == 1, "every rank joins the one barrier after the push"
+    assert forwarding["fences"] == peer["fences"] == 1, "every rank joins the one fence after the push"
 
 
 class _EngineClient(RecordingSender):
@@ -175,8 +179,9 @@ def _trainer_outside_train(rank: int):
     trainer.parallelism_config = ParallelismConfig()
     trainer.accelerator = SimpleNamespace(is_main_process=rank == 0, device=torch.device("cpu"))
     trainer.state = SimpleNamespace(global_step=1)
-    trainer.args = SimpleNamespace(report_to=[], vllm_group_port=51216)
+    trainer.args = SimpleNamespace(report_to=[])
     trainer.async_config = SimpleNamespace(
+        rollout_group_port=51216,
         sync_weights_every_n_steps=1,
         rollout_backend="vllm",
         rollout_server_url="http://engine:8000",

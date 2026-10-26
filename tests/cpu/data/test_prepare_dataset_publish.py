@@ -4,15 +4,18 @@
 Three contracts pinned here:
 
 * **Destructive publish.** An ``--overwrite`` that removes the destination before writing (local
-  ``rmtree`` then ``copytree``; the Hub upload replacing files in place) lets a run that dies
-  mid-write destroy the only copy AND leave a partial tree whose ``metadata.json`` makes
+  ``rmtree`` then write; the Hub upload replacing files in place) lets a run that dies mid-write
+  destroy the only copy AND leave a partial tree whose ``metadata.json`` makes
   ``is_preprocessed_dataset`` accept it — training then runs on a silently truncated dataset.
-  ``metadata.json`` is the completion marker, so the local path stages-then-swaps and the Hub path
-  clears it first and uploads it last.
+  ``metadata.json`` is the completion marker, so the local path bakes into a sibling of the
+  destination and swaps it in (one write, no copy), and the Hub path clears it first and uploads it
+  last.
 * **Defaults contradicting training.** ``--conversation_field`` must default to ``prompt`` — the
   training side and the documented SFT shape — not ``conversation``, and
   ``--train_on_completions_only`` must default on in chat mode as training does; otherwise preparing
   with defaults produces a dataset the training defaults reject.
+* **A bake idling the host.** The tool runs alone, so unset its worker count takes every CPU the process may run
+  on but a small reserve, not the training default's three-quarter share capped at 64.
 * **Unrecorded tokenizer mutations.** ``--pad_token/--eos_token/--bos_token/--chat_template`` change
   the ids that get baked, so they must reach ``PreprocessingConfig`` or the compatibility check cannot
   see them.
@@ -25,23 +28,34 @@ import sys
 import types
 
 import pytest
+from datasets import DatasetDict
 
 from halo.checkpoint import atomic
+from halo.data.pipeline import coordinated_map
 from halo.model_loading import tokenizer_setup
 from scripts.before_training import prepare_dataset as mod
 
 
+def _fill(directory) -> str:
+    """Write an output tree shaped like the real one (payload + completion marker) into ``directory``."""
+    os.makedirs(directory)
+    with open(os.path.join(directory, "metadata.json"), "w") as f:
+        f.write('{"preprocessed": true}')
+    os.makedirs(os.path.join(directory, "shard_0000"))
+    with open(os.path.join(directory, "shard_0000", "data.arrow"), "w") as f:
+        f.write("new-payload")
+    return str(directory)
+
+
 def _staged(tmp_path, name="staged"):
-    """A staged output directory shaped like the real one (payload + completion marker)."""
-    staged = tmp_path / name
-    staged.mkdir()
-    (staged / "metadata.json").write_text('{"preprocessed": true}')
-    (staged / "shard_0000").mkdir()
-    (staged / "shard_0000" / "data.arrow").write_text("new-payload")
-    return staged
+    return _fill(tmp_path / name)
 
 
-# Local publish: stage, then swap
+def _publish(dest, overwrite: bool) -> None:
+    mod.publish_local_output(_fill(mod.stage_local_output(str(dest), overwrite)), str(dest))
+
+
+# Local publish: bake beside the destination, then swap
 
 
 def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
@@ -49,7 +63,7 @@ def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
     dest.mkdir()
     (dest / "stale.arrow").write_text("old")
 
-    mod.save_to_local(str(_staged(tmp_path)), str(dest), overwrite=True)
+    _publish(dest, overwrite=True)
 
     assert (dest / "shard_0000" / "data.arrow").read_text() == "new-payload"
     assert not (dest / "stale.arrow").exists(), "the swap must replace the tree, not merge into it"
@@ -57,24 +71,97 @@ def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
     assert not list(tmp_path.glob(f"*{atomic.DISPLACED_SUFFIX}")), "replaced directory leaked"
 
 
-def test_local_publish_keeps_the_old_dataset_when_the_copy_fails(tmp_path, monkeypatch):
+def _stub_main(monkeypatch, tmp_path, output: str, preprocess) -> None:
+    """``main()`` on a local ``output`` with everything but the bake's placement and the publish stubbed."""
+    args = types.SimpleNamespace(
+        input="in", output=output, overwrite=True, verbose=False, dry_run=False, private=False, hf_token=None
+    )
+    config = types.SimpleNamespace(
+        pack_sequences=False, is_vlm=False, model_name_or_path="model", max_length=8, num_shards=1
+    )
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets_cache"))
+    monkeypatch.setattr(mod, "parse_args", lambda: (args, config))
+    monkeypatch.setattr(mod, "PartialState", lambda: types.SimpleNamespace(num_processes=1))
+    monkeypatch.setattr(mod, "setup_tokenizer", lambda config: object())
+    monkeypatch.setattr(mod, "load_input_dataset", lambda args: DatasetDict())
+    monkeypatch.setattr(mod, "require_declared_columns", lambda *a: None)
+    monkeypatch.setattr(mod, "preprocess_dataset", preprocess)
+    monkeypatch.setattr(mod.shutil, "copytree", lambda *a, **k: pytest.fail("the baked output was copied"))
+
+
+def test_a_local_output_is_baked_beside_its_destination_and_written_once(tmp_path, monkeypatch):
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "stale.arrow").write_text("old")
+    baked_into = []
+
+    def _preprocess(*, dataset, tokenizer_or_processor, config, output_dir):
+        baked_into.append(output_dir)
+        _fill(output_dir)
+        return {
+            "metadata": types.SimpleNamespace(
+                total_train_examples=1, total_test_examples=0, num_shards=1, packed=False
+            )
+        }
+
+    _stub_main(monkeypatch, tmp_path, str(dest), _preprocess)
+    mod.main()
+
+    assert baked_into == [f"{dest}{atomic.PUBLISH_STAGING_SUFFIX}"], (
+        "the bake must land on the destination's filesystem"
+    )
+    assert (dest / "shard_0000" / "data.arrow").read_text() == "new-payload"
+    assert not (dest / "stale.arrow").exists()
+    assert not list(tmp_path.glob(f"*{atomic.PUBLISH_STAGING_SUFFIX}")), "staging directory leaked"
+
+
+def test_a_failed_bake_keeps_the_old_dataset_and_leaves_no_staging(tmp_path, monkeypatch):
     """The load-bearing case: an --overwrite that rmtrees the destination FIRST leaves nothing at
-    all when the copy dies. The old dataset must survive a failed publish untouched."""
+    all when the bake dies. The old dataset must survive a failed run untouched."""
     dest = tmp_path / "out"
     dest.mkdir()
     (dest / "metadata.json").write_text('{"preprocessed": true}')
     (dest / "data.arrow").write_text("old-payload")
 
-    def _boom(src, dst, *a, **kw):
+    def _preprocess(*, output_dir, **kwargs):
+        _fill(output_dir)
         raise OSError("disk full")
 
-    monkeypatch.setattr(mod.shutil, "copytree", _boom)
-
+    _stub_main(monkeypatch, tmp_path, str(dest), _preprocess)
     with pytest.raises(OSError, match="disk full"):
-        mod.save_to_local(str(_staged(tmp_path)), str(dest), overwrite=True)
+        mod.main()
 
-    assert (dest / "data.arrow").read_text() == "old-payload", "a failed publish destroyed the previous dataset"
+    assert (dest / "data.arrow").read_text() == "old-payload", "a failed run destroyed the previous dataset"
     assert not list(tmp_path.glob(f"*{atomic.PUBLISH_STAGING_SUFFIX}")), "staging directory leaked after the failure"
+
+
+def test_a_rerun_reaps_the_map_copies_a_killed_bake_left(tmp_path, monkeypatch):
+    """A SIGKILLed bake runs no cleanup, leaving every intermediate map's full corpus copy in the datasets cache:
+    the scratch directory is named after the destination, so the next bake to it starts by removing them."""
+    dest = tmp_path / "out"
+    seen = []
+
+    def _preprocess(*, output_dir, **kwargs):
+        scratch = coordinated_map.ensure_cache_dir()
+        seen.append((scratch, sorted(os.listdir(scratch))))
+        _fill(output_dir)
+        return {
+            "metadata": types.SimpleNamespace(
+                total_train_examples=1, total_test_examples=0, num_shards=1, packed=False
+            )
+        }
+
+    _stub_main(monkeypatch, tmp_path, str(dest), _preprocess)
+    mod.main()
+    ((scratch, _),) = seen
+    assert scratch.startswith(str(tmp_path / "datasets_cache")) and not os.path.exists(scratch)
+
+    os.makedirs(scratch)
+    with open(os.path.join(scratch, "cache-killed.arrow"), "w") as f:
+        f.write("a killed bake's map copy")
+    mod.main()
+    assert seen[1] == (scratch, []), "the rerun baked beside the killed bake's map copies"
+    assert not os.path.exists(scratch)
 
 
 def test_local_publish_restores_the_old_dataset_if_the_swap_fails(tmp_path, monkeypatch):
@@ -96,7 +183,7 @@ def test_local_publish_restores_the_old_dataset_if_the_swap_fails(tmp_path, monk
     monkeypatch.setattr(mod.os, "rename", _fail_second_rename)
 
     with pytest.raises(OSError, match="rename failed"):
-        mod.save_to_local(str(_staged(tmp_path)), str(dest), overwrite=True)
+        _publish(dest, overwrite=True)
 
     assert (dest / "data.arrow").read_text() == "old-payload", "the rotated-aside dataset was not restored"
 
@@ -105,13 +192,13 @@ def test_local_publish_refuses_an_existing_destination_without_overwrite(tmp_pat
     dest = tmp_path / "out"
     dest.mkdir()
     with pytest.raises(FileExistsError, match="--overwrite"):
-        mod.save_to_local(str(_staged(tmp_path)), str(dest), overwrite=False)
+        mod.stage_local_output(str(dest), overwrite=False)
 
 
 def test_local_publish_creates_a_fresh_destination(tmp_path):
     """Anti-over-rejection: the ordinary first-run publish still works."""
     dest = tmp_path / "brand-new"
-    mod.save_to_local(str(_staged(tmp_path)), str(dest), overwrite=False)
+    _publish(dest, overwrite=False)
     assert (dest / "metadata.json").exists()
 
 
@@ -180,6 +267,15 @@ def test_train_on_completions_only_defaults_on_and_is_still_switchable():
     assert _parse(["--assistant_message_template", "<a>"]).train_on_completions_only is True
     assert _parse(["--train_on_completions_only", "false"]).train_on_completions_only is False
     assert _parse(["--mode", "text"]).train_on_completions_only is False
+
+
+def test_the_bake_takes_every_usable_cpu_but_a_reserve_unless_told_otherwise(monkeypatch):
+    monkeypatch.delenv("HALO_DATASET_NUM_PROC", raising=False)
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(192)))
+    assert _parse(["--mode", "text"]).num_proc == 192 - mod._BAKE_RESERVED_CPUS
+    assert _parse(["--mode", "text", "--num_proc", "3"]).num_proc == 3
+    monkeypatch.setenv("HALO_DATASET_NUM_PROC", "7")
+    assert _parse(["--mode", "text"]).num_proc == 7
 
 
 def test_bos_token_override_exists():

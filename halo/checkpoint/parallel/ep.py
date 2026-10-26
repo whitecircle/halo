@@ -37,8 +37,8 @@ from halo.models.unwrapping import (
     strip_cp_attention_level,
     unwrap_toolkit_wrappers,
 )
-from halo.runtime.collectives import barrier_on_exit, combine_across_ranks
-from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.collectives import combine_across_ranks
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import resolve_retained
 from halo.runtime.filesystem import fs_aware_makedirs, is_output_shared_filesystem
 from halo.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
@@ -372,13 +372,14 @@ def save_ep_sharded_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
             logger.info(
                 f"[Rank {rank}] Saved shard: {shard_filename} ({len(shard)} tensors, {total_size / 1e9:.2f}GB)"
             )
-    guard.reject()
+    # Over the store: every rank writes at once, so the slowest shard waits on shared storage.
+    guard.store_reject("checkpoint/ep_shards")
 
     # Key-disjoint by construction (per-rank expert suffixes, rank-0-only replicated keys).
     merged_map, merged_bytes = combine_across_ranks(
         (dict.fromkeys(shard, shard_filename), total_size), merge_shard_index, what="the checkpoint index"
     )
-    with barrier_on_exit():
+    with barrier_on_exit(f"Writing the EP sharded checkpoint index to {output_dir}"):
         if rank == 0:
             # The sweep matters: these shards live in HF's own model-{i}-of-{n} namespace, where a
             # leftover gathered save is indistinguishable from a rank shard to the merge's regex.
