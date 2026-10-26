@@ -77,7 +77,7 @@ def create_scored_pairs_dataset(num_samples: int = 64) -> Dataset:
 
 
 def make_config(output_dir: str, **overrides) -> EmbeddingConfig:
-    """The common EmbeddingConfig; ``fsdp=""`` because the mixin owns FSDP wrapping."""
+    """The common EmbeddingConfig."""
     kwargs = {
         "output_dir": output_dir,
         "max_steps": NUM_TRAIN_STEPS,
@@ -94,7 +94,6 @@ def make_config(output_dir: str, **overrides) -> EmbeddingConfig:
         "loss_type": "mnrl",
         "max_length": 128,
         "dataloader_drop_last": True,
-        "fsdp": "",
         **overrides,
     }
     return EmbeddingConfig(**kwargs)
@@ -119,8 +118,7 @@ def check_capability_flags() -> bool:
     """Verify parallelism capability flags on EmbeddingTrainer."""
     log("Check: capability flags (CP unsupported)")
 
-    assert hasattr(EmbeddingTrainer, "_supports_cp"), "Missing _supports_cp"
-    assert EmbeddingTrainer._supports_cp is False, "_supports_cp should be False"
+    assert EmbeddingTrainer.SUPPORTS_CP is False, "SUPPORTS_CP should be False"
     return True
 
 
@@ -227,8 +225,8 @@ def check_save_roundtrip_fsdp2(ctx, shared_dir: str) -> bool:
     trainer.train()
 
     # collective — must run on ALL ranks
-    ref_sd = gather_saveable_tensors(trainer._get_unwrapped_model(), retain=True)
-    cast_expected = save_dtype_caster(trainer._get_unwrapped_model())
+    ref_sd = gather_saveable_tensors(trainer._backbone_model(), retain=True)
+    cast_expected = save_dtype_caster(trainer._backbone_model())
 
     trainer.save_model(output_dir)
     ctx.barrier()
@@ -288,7 +286,7 @@ def check_lora_save_roundtrip(ctx, shared_dir: str) -> bool:
     trainer.train()  # lora_B starts at 0; training makes the delta (and the merge) non-trivial
 
     # collective gather — must run on ALL ranks
-    backbone = trainer._get_unwrapped_model()
+    backbone = trainer._backbone_model()
     scaling = next(module.scaling["default"] for module in backbone.modules() if isinstance(module, LoraLayer))
     full = gather_saveable_tensors(backbone, retain=True)
     target = next(

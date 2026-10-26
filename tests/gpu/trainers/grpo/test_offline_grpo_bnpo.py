@@ -158,7 +158,6 @@ def run_training(
         report_to="none",
         logging_nan_inf_filter=False,
         dataloader_drop_last=True,
-        fsdp="",
     )
 
     callbacks = []

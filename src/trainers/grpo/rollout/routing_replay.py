@@ -1,15 +1,8 @@
-"""Trainer-side MoE routing replay: capture top-k expert selections during the no-grad logprob-recompute
-pass and replay them in the gradient forward.
+"""Trainer-side MoE routing replay (arXiv:2507.18071): the recompute's top-k selections replayed in the update.
 
-Small numeric differences flip top-k selection near decision boundaries, so the update pass would
-otherwise train through a different token distribution than the importance ratios were computed on
-(Qwen Routing Replay, arXiv:2507.18071). Gate weights are always re-derived from the live router scores
-restricted to the replayed selection; replaying weights or logits zeroes the router gradient (RSPO,
-arXiv:2510.23027).
-
-:class:`RoutingReplayInjector` holds the per-layer capture/arm state on
-:class:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase` as plain attributes (following
-``balancing_biases``); its methods document the capture → arm → disarm → ``flip_rate`` cycle.
+Without it, near-tie top-k flips train the update through other experts than the importance ratios saw. Gate
+weights are re-derived from the live router over the replayed selection: replaying weights zeroes the router
+gradient (RSPO, arXiv:2510.23027). :class:`RoutingReplayInjector` runs capture → arm → disarm → ``flip_rate``.
 """
 
 import base64

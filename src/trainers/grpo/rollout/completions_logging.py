@@ -1,10 +1,8 @@
 """Decoupled completion/trajectory artifact logging for GRPO trainers.
 
-TRL's ``GRPOTrainer.log`` couples the console table, the parquet record, and the wandb table
-under one ``log_completions`` flag. :func:`emit_completion_artifacts` splits them — parquet + wandb
-table gated by ``save``, console table by ``console`` — so a run can keep the record without console
-spam, and :class:`DecoupledCompletionsLogMixin` routes the on-policy trainers' ``log`` through it.
-Built from TRL's ``_logs`` (detokenized text, rewards, advantages, extras, images).
+TRL's ``GRPOTrainer.log`` couples the console table, the parquet record and the wandb table under one flag;
+:func:`emit_completion_artifacts` gates the record (parquet + wandb) by ``save`` and the console table by
+``console``, and :class:`DecoupledCompletionsLogMixin` routes the on-policy trainers' ``log`` through it.
 """
 
 from __future__ import annotations

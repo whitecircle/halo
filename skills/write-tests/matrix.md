@@ -25,9 +25,9 @@ correctness test (loss finite + decreasing over ≥2 steps + cross-rank invarian
 | `EmbeddingTrainer` | Yes | **No** | Yes | Yes | **No** |
 | `DistributedAsyncEnvironmentalGRPOTrainer` | Yes | **No** | Yes | Yes | **No** |
 
-`_supports_cp` / `_supports_pp` (`src/trainers/mixins/base.py`, both default `False`) are the class
-attributes that drive the rejections. CP is incompatible with any trainer using `logits_to_keep`,
-global log-prob sums, full-sequence pooling, dual models, or a separate-length teacher or rollout
+`SUPPORTS_CP` (default `False`) and `PP_REFUSAL` (default a refusal; `None` admits PP), both in
+`src/trainers/mixins/base.py`, are the class declarations that drive the rejections. CP is
+incompatible with any trainer using `logits_to_keep`, global log-prob sums, full-sequence pooling, dual models, or a separate-length teacher or rollout
 sequence; PP additionally rejects PEFT/LoRA, a live `ref_model`, `activation_offloading` and
 reentrant GC at trainer construction, so a PP-supporting trainer still needs those rejection tests.
 Each PP **Yes** cell's suite lives under `tests/gpu/parallelism/pp/`.
@@ -61,7 +61,7 @@ as a **rejection** test (CPU config test is enough), not a correctness test.
 | QLoRA + EP | raises |
 | LoRA/PEFT + TP (`tp_size>1`), native EP expert LoRA included | raises at trainer construction — `_validate_lora_tp_compatibility` |
 | Multi-group >2-rank EP on one NVLink domain (`ep_size>2` with `nvlink_domain_size > ep_group_size`) | fails fast (DeepEP combine race) |
-| `_supports_cp=False` trainer with `cp_size>1`, `_supports_pp=False` with `pp_size>1` | rejects in `parallelism_config_from_args`, and at trainer `__init__` for a hand-built config |
+| `SUPPORTS_CP = False` trainer with `cp_size>1`, a `PP_REFUSAL` trainer with `pp_size>1` | rejects in `parallelism_config_from_args`, and at trainer `__init__` for a hand-built config |
 
 A rejection test asserts the *reason*, not just that something raised:
 
@@ -71,7 +71,7 @@ with pytest.raises(ValueError, match="is not a supported parallelism combination
     ...
 ```
 
-For trainer-init rejections (`_supports_cp=False`), a pure class-attribute check can live in
+For trainer-init rejections (`SUPPORTS_CP = False`), a pure class-attribute check can live in
 a CPU test (see `tests/cpu/parallelism/test_cp_support_declared.py` for the existing
 attribute-inspection pattern, and `tests/cpu/parallelism/test_parallelism_config.py` for
 config-level rejections).

@@ -250,7 +250,6 @@ def run_qwen3_tp_rejected(rank: int, local_rank: int, base_output_dir: str) -> b
             max_length=MAX_SEQ_LENGTH,
             save_strategy="no",
             dataloader_num_workers=0,
-            fsdp="",
         )
 
         # The guard fires in _setup_distributed_modes (after super().__init__), deterministically
@@ -360,8 +359,6 @@ def run_gptoss_ep_save_load(rank: int, local_rank: int, base_output_dir: str) ->
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            ddp_find_unused_parameters=True,
-            fsdp="",
         )
 
         trainer = DistributedSFTTrainer(
@@ -493,7 +490,6 @@ def run_qwen3_fsdp_save_load(rank: int, local_rank: int, base_output_dir: str) -
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            fsdp="",
         )
 
         trainer = DistributedSFTTrainer(

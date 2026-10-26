@@ -135,7 +135,6 @@ def _training_args(kind: str, output_dir: str, *, save_at: int | None, kto_loss:
         precompute_ref_log_probs=True,
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,  # EP leaves inactive experts gradient-free
-        fsdp="",  # the mixin owns FSDP wrapping
         max_length=MAX_LENGTH,
         **loss,
     )

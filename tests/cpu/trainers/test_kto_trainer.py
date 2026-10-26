@@ -23,8 +23,8 @@ def test_kto_trainer_mro_and_flags():
     assert issubclass(DistributedKTOTrainer, KTOTrainer)
     # KTO mirrors DPO: CP no (full-sequence log-prob pooling + KL ref),
     # PP yes (apo_zero_unpaired only, precompute-only — gated in _validate_pp_mode).
-    assert DistributedKTOTrainer._supports_cp is False
-    assert DistributedKTOTrainer._supports_pp is True
+    assert DistributedKTOTrainer.SUPPORTS_CP is False
+    assert DistributedKTOTrainer.PP_REFUSAL is None
     assert "kto" in DistributedKTOTrainer._tag_names
 
 

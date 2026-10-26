@@ -53,7 +53,7 @@ A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qw
 
 `optim: flash_adamw` routes through `create_optimizer` in `src/trainers/mixins/base.py` for every distributed trainer, the same path as Muon and AdamWBF16, and composes with gradient checkpointing and FSDP2. `flashoptim` steps per parameter and unwraps DTensors to their local shard before the kernel runs, so a weight-decay group mixing FSDP2/TP DTensors with the plain rank-local tensors EP and `fp32_non_ep_params` produce is handled, not rejected — `examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` ships this combination at `expert_parallel_size: 4`.
 
-Nothing gates `flash_adamw` on a parallelism mode. The only guard is the shared one in `_configure_mixed_precision`: `bf16_optimizer: true` together with a named `optim` raises rather than silently discarding one of them. Correctness coverage is single-GPU (`tests/gpu/manifest.py` registers `test_flash_adamw.py` at `nproc=1`).
+Pipeline parallelism refuses it at trainer construction (`reject_pp_named_optimizer`, `src/trainers/parallelism/trainer_rules.py`): no PP run validates it. The other guard is the shared one in `_configure_mixed_precision`: `bf16_optimizer: true` together with a named `optim` raises rather than silently discarding one of them. Correctness coverage is single-GPU (`tests/gpu/manifest.py` registers `test_flash_adamw.py` at `nproc=1`).
 
 The wrapper registers a step post-hook that advances each stepped param's version counter — `flashoptim`'s fused Triton update stores through raw pointers ATen never sees, and the low-precision weight-quant cache keys on that counter (see [Low-Precision MoE](low-precision-moe-kernels.md)).
 

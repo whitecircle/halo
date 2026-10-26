@@ -1,10 +1,8 @@
 """Keep structural (special) tokens inside the policy-gradient set under ``top_entropy_quantile``.
 
-``top_entropy_quantile < 1.0`` trains only the highest-entropy completion tokens, but structural
-tokens (role/channel markers, tool delimiters, BOS/EOS) are the lowest-entropy ones and would never
-be reinforced, degrading the template over a long run. This unions the special-token positions back
-into the entropy mask. The token set is read from the tokenizer (``all_special_ids`` plus added
-tokens), so it is model-agnostic.
+Training only the highest-entropy completion tokens never reinforces the lowest-entropy ones — role and
+channel markers, tool delimiters, BOS/EOS — degrading the template; this unions the tokenizer's special
+and added token positions back into the entropy mask.
 """
 
 import torch

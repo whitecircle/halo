@@ -30,7 +30,6 @@ from src.entrypoints.data_setup import load_script_datasets
 from src.entrypoints.model_setup import load_model_and_tokenizer
 from src.entrypoints.script import (
     ScriptContext,
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -313,8 +312,6 @@ def main():
         logger.info(f"Embedding dimension: {model.get_sentence_embedding_dimension()}")
 
     inject_lora(model, model_config, args)
-
-    apply_distributed_trainer_config(embedding_config, parallelism_config)
 
     barrier()
 

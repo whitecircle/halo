@@ -28,7 +28,6 @@ import json
 import logging
 import os
 import re
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -340,8 +339,8 @@ class _TrainerBase:
 
 
 class _CheckpointingHost(CheckpointingMixin, _TrainerBase):
-    def __init__(self, args):
-        self.args = args
+    def __init__(self, allow_optimizer_warm_restart):
+        self.allow_optimizer_warm_restart = allow_optimizer_warm_restart
         self.model = nn.Linear(2, 2)
         self.optimizer = None
         self.lr_scheduler = None
@@ -354,19 +353,11 @@ class _CheckpointingHost(CheckpointingMixin, _TrainerBase):
         return 0
 
 
-@pytest.mark.parametrize(
-    ("args", "expected"),
-    [
-        (SimpleNamespace(allow_optimizer_warm_restart=True), True),
-        (SimpleNamespace(allow_optimizer_warm_restart=False), False),
-        (SimpleNamespace(), False),
-    ],
-    ids=["opted-in", "default", "config-built-outside-the-entry-scripts"],
-)
-def test_the_trainer_hands_the_opt_in_to_the_optimizer_store(args, expected):
-    """The entry scripts forward the knob onto the training config; the store reads it only off the
-    context the trainer builds, so a context that drops it makes the opt-in a silent no-op."""
-    assert _CheckpointingHost(args)._optimizer_store().ctx.allow_optimizer_warm_restart is expected
+@pytest.mark.parametrize("opted_in", [True, False], ids=["opted-in", "default"])
+def test_the_trainer_hands_the_opt_in_to_the_optimizer_store(opted_in):
+    """The trainer takes the knob as a constructor kwarg; the store reads it only off the context the
+    trainer builds, so a context that drops it makes the opt-in a silent no-op."""
+    assert _CheckpointingHost(opted_in)._optimizer_store().ctx.allow_optimizer_warm_restart is opted_in
 
 
 if __name__ == "__main__":

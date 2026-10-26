@@ -99,7 +99,6 @@ def run(ctx) -> dict:
         logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
     log("\n--- Creating DistributedSFTTrainer ---")

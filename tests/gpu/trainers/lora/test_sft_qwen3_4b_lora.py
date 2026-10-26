@@ -252,7 +252,6 @@ def run(ctx) -> dict:
         "max_length": MAX_SEQ_LENGTH,
         "packing": True,
         "dataloader_drop_last": True,
-        "fsdp": "",
     }
 
     # Shared LoRA ModelConfig kwargs

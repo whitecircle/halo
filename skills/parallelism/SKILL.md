@@ -31,7 +31,7 @@ Read it before giving a verdict on any non-trivial combo.
   `_resolve_and_validate`, which applies the refusals in `src/distributed/parallelism_rules.py`
   (`reject_unsupported_axes`, then `reject_invalid_composition`). Every config-time `raise` lives there or in
   `parallelism_config_from_args` (`src/configs/parallelism_arguments.py`): `lowp_*` knobs or
-  `init_from_scratch` outside SFT, a trainer's `_supports_cp` / `_supports_pp`.
+  `init_from_scratch` outside SFT, a trainer's `SUPPORTS_CP` / `PP_REFUSAL`.
 - `CLAUDE.md` "## Parallelism" table + DeepEP / trainer-support notes.
 - User docs to cross-link: `agent-docs/parallelism/{expert,context,tensor,expert-tensor}-parallelism.md`,
   `agent-docs/parallelism/{data-parallelism,multi-node,data-loading}.md`.
@@ -151,7 +151,7 @@ Read it before giving a verdict on any non-trivial combo.
 - **CP with a trainer that doesn't support it** (DPO, KTO, GRPO online/env/SDPG,
   reward, classification, distillation, embedding) — see matrix.md trainer table.
 - **PP with a trainer that doesn't support it** (online/env GRPO, SDPG, both distillation
-  trainers, embedding) — `_supports_pp`, refused at config time with
+  trainers, embedding) — a non-`None` `PP_REFUSAL`, refused at config time with
   `<Trainer> does not support Pipeline Parallelism (PP)`.
 
 When rejecting, cite the exact reason and offer the nearest valid alternative

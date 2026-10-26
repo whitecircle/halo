@@ -1,14 +1,8 @@
-"""Offline privileged-context self-distillation SFT trainer (offline SDPG approximation).
+"""Offline privileged-context self-distillation SFT trainer, the offline approximation of SDPG.
 
-Offline SFT approximation of SDPG (arXiv:2606.04036): no generation, scores the fixed dataset
-response tokens with static confidence weights. The on-policy variant is
-:class:`DistributedSDPGTrainer`. A single model is student ``p = pi(. | x, y_<t)`` and privileged
-teacher ``q = pi(. | c, x, y_<t)`` (``c`` = gold-answer hint). Per optimizer step::
-
-    L = L_sft  +  beta(k) * L_OPD  +  alpha * L_ref
-
-Teacher forward reuses the same model under ``torch.no_grad()`` (no second model). EP and TP; not CP
-(the privileged teacher uses a second, differently-lengthed sequence).
+No generation: the fixed dataset response is scored by one model as student ``pi(. | x, y_<t)`` and,
+under ``torch.no_grad()``, as privileged teacher ``pi(. | c, x, y_<t)`` (``c`` = gold-answer hint), with
+``L = L_sft + beta(k) * L_OPD + alpha * L_ref``. The on-policy variant is :class:`DistributedSDPGTrainer`.
 """
 
 import torch
@@ -24,6 +18,8 @@ from src.model_loading.parallel.frozen_models import (
     warn_unparallelized_reference,
 )
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.models.config_access import model_type_matches
+from src.models.unwrapping import unwrap_framework_wrappers
 from src.trainers.distillation.losses import (
     get_divergence,
     logits_forward_inputs,
@@ -41,14 +37,14 @@ logger = get_logger(__name__, log_level="info")
 
 
 # Opt-in per family: replay is only sound when both passes call get_image_features once, identically.
-_VISION_REUSE_MODEL_TYPES = {"lfm2_vl"}
+_VISION_REUSE_MODEL_TYPES = ("lfm2_vl",)
 
 
 class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, DistributedSFTTrainer):
     """SFT trainer with an SDPG-style privileged-context self-distillation auxiliary loss."""
 
-    _supports_cp = False  # privileged teacher uses a separate, longer sequence
-    _supports_pp = False
+    SUPPORTS_CP = False  # privileged teacher uses a separate, longer sequence
+    SUPPORTS_LOWP_PRECISION = False
     # Unconditional, unlike the SFT parent's CP-only property: the SDPG objective is its own mean
     # on every axis, so HF must not rescale it by num_items_in_batch.
     _loss_is_own_mean = True
@@ -56,7 +52,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
     _consumes_router_aux_loss = False
     # Same reason: compute_loss reads outputs.logits, so eval must not take the base's skip_logits path.
     _loss_reads_logits = True
-    _pp_unsupported_reason = (
+    PP_REFUSAL = (
         "the privileged-teacher term needs a second, no-grad forward of the WHOLE model per batch on "
         "the hint-carrying sequence (and a third through the frozen reference when reference_kl_coef "
         "> 0), whose logits the student's loss then consumes; under PP no rank holds the whole model, "
@@ -130,12 +126,10 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
             return self._vision_reuse_active
         self._vision_reuse_setup = True
 
-        inner = model
-        while hasattr(inner, "module"):
-            inner = inner.module
+        inner = unwrap_framework_wrappers(model)
         mm = getattr(inner, "model", None)
-        model_type = getattr(getattr(inner, "config", None), "model_type", None)
-        if model_type not in _VISION_REUSE_MODEL_TYPES or mm is None or not hasattr(mm, "get_image_features"):
+        config = getattr(inner, "config", None)
+        if not (model_type_matches(config, *_VISION_REUSE_MODEL_TYPES) and hasattr(mm, "get_image_features")):
             return False
 
         original = mm.get_image_features
@@ -150,7 +144,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
 
         mm.get_image_features = cached_get_image_features
         self._vision_reuse_active = True
-        logger.info(f"Vision-feature reuse enabled for OPD teacher forward (model_type={model_type})")
+        logger.info(f"Vision-feature reuse enabled for OPD teacher forward (model_type={config.model_type})")
         return True
 
     def _setup_reference_model(self):

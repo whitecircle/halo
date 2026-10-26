@@ -144,8 +144,8 @@ traced to the code that raises. This table is the index into them, not a second 
 | [PP](pipeline-parallelism.md) | SFT, SMPO, reward, classification, DPO/KTO (precompute-only), offline GRPO | text families without tied embeddings, live MTP layers, or per-layer embeddings; image-bearing runs are rejected | PEFT, `torch_compile`, `lowp_precision`, `use_hsdp`, `fsdp_reshard_after_forward`, reentrant GC, `save_sharded_ep`, padding-free, `compute_metrics` on DPO/KTO/offline GRPO |
 | [DP](data-parallelism.md#limitations) | all | all | MoE grouped GEMM under `accelerate launch`, multi-device `device_map` |
 
-EP, ETP and TP run under every trainer. CP and PP support is declared per class (`_supports_cp` /
-`_supports_pp`) and enforced in `ParallelismValidationMixin`. Full matrix:
+EP, ETP and TP run under every trainer. CP and PP support is declared per class (`SUPPORTS_CP` /
+`PP_REFUSAL`) and enforced in `ParallelismValidationMixin`. Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). CP's `False`
 rows are per-trainer declarations — `logits_to_keep`, global log-probability sums, full-sequence
 pooling and dual models are the reasons behind them, not properties CP itself detects.

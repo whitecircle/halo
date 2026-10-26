@@ -120,7 +120,6 @@ def run_sft(reshard_after_backward, tokenizer, train_dataset, output_dir):
         dataloader_num_workers=0,
         seed=SEED,
         data_seed=SEED,
-        fsdp="",
     )
     trainer = DistributedSFTTrainer(
         model=model,

@@ -89,8 +89,6 @@ def run(ctx):
         dataloader_drop_last=True,
         dataloader_num_workers=0,
         max_grad_norm=1.0,  # exercises the ep_clip_grad_norm_ sync path
-        ddp_find_unused_parameters=True,
-        fsdp="",
     )
     trainer = DistributedSFTTrainer(
         model=model,

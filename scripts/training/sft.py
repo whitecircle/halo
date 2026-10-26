@@ -50,7 +50,6 @@ from src.entrypoints.model_setup import (
     log_model_info,
 )
 from src.entrypoints.script import (
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -266,7 +265,6 @@ def main():
         dist_args,
         script_prefix=f"sft{'-vlm' if is_vlm_checkpoint and not args.text_only_model else ''}",
         trainer_cls=DistributedSFTTrainer,
-        allow_low_precision=True,
         supports_init_from_scratch=True,
     )
     parallelism_config = context.parallelism_config
@@ -326,7 +324,6 @@ def main():
     )
 
     disable_trl_dataset_prep(sft_config)
-    apply_distributed_trainer_config(sft_config, parallelism_config)
 
     barrier()
 

@@ -199,10 +199,8 @@ def run(ctx):
             bf16=True,
             gradient_checkpointing=False,
             dataloader_num_workers=0,
-            ddp_find_unused_parameters=True,
             # TRL's SFT column pruning would drop attention_mask from the pre-tokenized rows.
             remove_unused_columns=False,
-            fsdp="",
         ),
         train_dataset=build_dataset(),
         processing_class=tokenizer,

@@ -1,11 +1,8 @@
 """Bounded, filesystem-aware storage of offline GRPO's ragged frozen-reference scores.
 
-Every cache and staged checkpoint file of a launch lives under ``output_dir/_reference_cache/<launch>/``
-for the whole launch, mapped by every rank. Nothing is unlinked while mapped: on NFS only the unlinking
-host keeps a removed file readable (its ``.nfs*`` rename), so a reader on another node would fault on a
-stale handle as soon as that host closed its own mappings. A launch's writer therefore holds an
-exclusive lock on ``<launch>.lock`` beside its directory until it exits, and every cache directory a
-launch creates first removes the other launches' directories whose lock it can take.
+Every file of a launch lives under ``output_dir/_reference_cache/<launch>/``, mapped by every rank, and
+nothing is unlinked while mapped (on NFS a removed file stays readable only on the unlinking host). A launch
+holds an exclusive lock on ``<launch>.lock`` until it exits; a new cache removes launches whose lock it takes.
 """
 
 from __future__ import annotations

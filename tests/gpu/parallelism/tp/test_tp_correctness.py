@@ -221,7 +221,6 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
         dataloader_drop_last=True,
         dataloader_num_workers=0,
         max_grad_norm=1.0,
-        fsdp="",
     )
     trainer = DistributedSFTTrainer(
         model=model,

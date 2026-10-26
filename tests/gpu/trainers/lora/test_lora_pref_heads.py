@@ -196,7 +196,6 @@ def _build_trainer(trainer, model, tokenizer, peft_config, output_dir, paralleli
         "dataloader_drop_last": True,
         "gradient_checkpointing": False,
         "use_liger_kernel": False,
-        "fsdp": "",
     }
     if trainer == "dpo":
         cfg = DPOConfig(beta=0.1, max_length=MAXLEN, **common)

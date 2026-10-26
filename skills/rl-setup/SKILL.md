@@ -122,7 +122,7 @@ Online and environment GRPO trainers support **EP** (experts distributed), **TP*
 DTensor-sharded) and **ETP**; generation is external, so parallelism only affects the
 training forward/backward and the weight-sync gather. **CP is unsupported** for
 these trainers: environment GRPO uses `logits_to_keep`, and online GRPO runs a separate-length
-rollout sequence. Both inherit `_supports_cp = False` and declare `_supports_pp = False`. Offline GRPO
+rollout sequence. Both inherit `SUPPORTS_CP = False` and declare their own `PP_REFUSAL`. Offline GRPO
 supports CP for full fine-tuning, without a rollout server. Use `torchrun` (not
 `accelerate`) for EP/TP.
 

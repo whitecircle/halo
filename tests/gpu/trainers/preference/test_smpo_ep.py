@@ -124,8 +124,6 @@ def run(ctx) -> dict:
         dataloader_drop_last=True,
         remove_unused_columns=False,
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=True,  # Required for EP (inactive experts)
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
     log(f"Config: beta={config.beta}, target_margin={config.target_margin}, loss_type={config.loss_type}")

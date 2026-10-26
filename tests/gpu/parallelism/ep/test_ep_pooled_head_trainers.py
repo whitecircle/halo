@@ -139,8 +139,6 @@ def build_trainer(kind: str, model, dataset, tokenizer, config, output_dir):
         "gradient_checkpointing": False,
         "max_length": SEQ_LEN,
         "dataloader_num_workers": 0,
-        "ddp_find_unused_parameters": True,  # EP leaves inactive experts gradient-free
-        "fsdp": "",  # the mixin owns FSDP wrapping
     }
     if kind == "reward":
         return DistributedRewardTrainer(

@@ -73,7 +73,7 @@ from src.checkpoint.reading import load_full_state_dict
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints.script import ScriptContext, apply_distributed_trainer_config
+from src.entrypoints.script import ScriptContext
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
@@ -257,7 +257,6 @@ def _build(ctx, model_config: ModelConfig, config: EmbeddingConfig, parallelism_
     context = ScriptContext(parallelism_config, ctx.local_rank, None, source, EmbeddingTrainer)
     model = build_sentence_transformer(context, config, model_config, args)
     inject_lora(model, model_config, args)
-    apply_distributed_trainer_config(config, parallelism_config)
     return model
 
 

@@ -1,13 +1,8 @@
-"""Per-batch token accounting: loss-contributing tokens (the ``num_unmasked_output_tokens_seen`` series)
-and the attention-score work each batch's documents cost.
+"""Per-batch token accounting: loss-contributing tokens and the attention-score work each batch costs.
 
-Two phases so nothing syncs the host on the per-micro-batch path: each step folds this rank's counts
-into on-device accumulators; the token total is gathered once per log step, the attention work read
-once per optimizer step. The attention work is only accumulated once a callback has bound itself as
-its sink (``bind_attention_work_source``) and handed over the layout to cost it with.
-
-Mixed into :class:`~src.trainers.mixins.base.DistributedTrainerMixin`; the token drain reads the
-trainer's accelerator and ``parallelism_config``.
+Nothing syncs the host per micro-batch: counts fold into on-device accumulators, the token total gathers
+once per log step and the attention work is read once per optimizer step, accumulated only once a callback
+binds itself as its sink (``bind_attention_work_source``).
 """
 
 from __future__ import annotations

@@ -9,24 +9,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Distributed KTO (Kahneman-Tversky Optimization) trainer: EP, TP, and PP.
+"""Distributed KTO trainer (unpaired desirable/undesirable completions): EP, TP and PP; CP unsupported.
 
-KTO learns from *unpaired* preference data — each example is a single
-(prompt, completion, label) triple where ``label`` marks the completion as
-desirable or not — instead of DPO's chosen/rejected pairs.
-
-CP is unsupported: like DPO, KTO needs global per-sequence log-prob sums over
-full sequences (and a KL reference term), incompatible with sequence splitting.
-
-Under EP/TP the reference model is not parallelized — use PEFT/LoRA
-(ref_model=None) or precompute_ref_log_probs=True (then free the ref model).
-
-Under PP the trainer is precompute-only and restricted to ``loss_type:
-apo_zero_unpaired``: that loss has no KL term, so with ``ref_logps`` already a
-dataset column (in the eval dataset too, when evaluation is configured) the
-objective is a per-row function of the last stage's logits and no reference model
-ever runs. See ``_validate_pp_mode`` for each rejection and its mechanism.
+CP would split the full-sequence log-prob sums and KL reference term KTO needs. Under EP/TP the reference is
+not parallelized: use PEFT/LoRA or ``precompute_ref_log_probs``. Under PP the trainer is precompute-only and
+``apo_zero_unpaired``-only (no KL term), so the objective is a per-row function of the last stage's logits.
 """
 
 import torch
@@ -36,15 +23,15 @@ from src.data.collators.fixed_shape import pad_to_fixed_length
 from src.data.spans import completion_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.pp_gates import (
+from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
+from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
+from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, row_count_normalizer, rows_with_labels
+from src.trainers.parallelism.trainer_rules import (
     reject_pp_compute_metrics,
     reject_pp_ref_model,
     require_model_and_args_kwargs,
     require_precomputed_reference,
 )
-from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
-from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
-from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, row_count_normalizer, rows_with_labels
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 
@@ -77,7 +64,7 @@ class DistributedKTOTrainer(
     _tag_names = ["trl", "kto"]
     _reference_token_settings = "per_device_train_batch_size or dataset_num_proc, which pair the KL completions"
 
-    _supports_pp = True
+    PP_REFUSAL = None
     # TRL's KTO loss adds the aux term itself and this class does not override it, so aux_loss
     # balancing reaches the graph here (unlike the other preference objectives).
     _consumes_router_aux_loss = True

@@ -1,12 +1,8 @@
 """Parallelism + LoRA compatibility validation for distributed trainers.
 
-Read-only checks run once during setup: inspect ``self.parallelism_config`` / ``self.model`` and
-raise with an actionable message, or return. :func:`ctor_positions` / :func:`ctor_value` /
-:func:`ctor_config` / :func:`ctor_model_and_config` read the argument a gate validates out of a
-trainer ``__init__``'s ``*args``, before the checks below run, :func:`disable_trl_liger` clears
-the TRL flag a gate rejects, :func:`evaluation_runs` says whether an eval-side gate applies, and
-``warn_unparallelized_reference`` (``src.model_loading.parallel.frozen_models``) reports the cost of a
-dense frozen reference under EP/TP.
+Read-only checks run once during setup, raising with an actionable message; the ``ctor_*`` readers pull
+the argument a gate validates out of a trainer ``__init__``'s ``*args``, :func:`disable_trl_liger` clears
+the TRL flag a gate rejects and :func:`evaluation_runs` says whether an eval-side gate applies.
 """
 
 from __future__ import annotations
@@ -35,6 +31,7 @@ from src.models.moe_balancing import (
 )
 from src.models.peft_adapters import tuner_adapter_param_ids
 from src.models.unwrapping import find_peft_model
+from src.trainers.parallelism.trainer_rules import reject_pp_named_optimizer
 
 logger = get_logger(__name__)
 
@@ -174,24 +171,22 @@ class ParallelismValidationMixin:
     # A trainer's way around holding a frozen reference, named by every reference warning and refusal.
     _reference_alternatives: ReferenceAlternatives = PREFERENCE_REFERENCE_ALTERNATIVES
 
-    def _validate_parallelism_modes(self):
-        """Validate that the requested parallelism modes are supported by this trainer.
+    def _validate_parallelism_modes(self, training_args=None):
+        """Validate that the requested parallelism modes are supported by this trainer and, under PP,
+        by its optimizer.
 
         CP and PP are declare-to-enable per trainer; EP, ETP and TP run under every trainer.
         """
         config = self.parallelism_config
 
-        if config.is_cp_mode and not self._supports_cp:
+        if config.is_cp_mode and not self.SUPPORTS_CP:
             raise ValueError(f"{self.__class__.__name__} does not support Context Parallelism (CP)")
-        if config.is_pp_mode and not self._supports_pp:
-            reason = self._pp_unsupported_reason or (
-                "a pipeline stage holds only a contiguous subset of the layers, so this trainer's "
-                "loss cannot be expressed as a last-stage function of logits and labels"
-            )
+        if config.is_pp_mode and self.PP_REFUSAL is not None:
             raise ValueError(
-                f"{self.__class__.__name__} does not support Pipeline Parallelism (PP): {reason}. "
+                f"{self.__class__.__name__} does not support Pipeline Parallelism (PP): {self.PP_REFUSAL}. "
                 f"See agent-docs/parallelism/pipeline-parallelism.md for the supported trainers."
             )
+        reject_pp_named_optimizer(training_args, config)
 
         reject_accelerate_launch(config)
 

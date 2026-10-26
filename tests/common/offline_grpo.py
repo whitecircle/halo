@@ -159,7 +159,6 @@ def offline_grpo_config(
         "dataloader_num_workers": 0,
         "seed": seed,
         "data_seed": seed,
-        "fsdp": "",
     }
     return OfflineGRPOConfig(**(fields | overrides))
 

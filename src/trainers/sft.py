@@ -38,9 +38,10 @@ _CP_METRIC_DTYPE = torch.float64
 class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
     """Distributed SFT trainer supporting EP, CP, and/or TP."""
 
-    _supports_cp = True
+    SUPPORTS_CP = True
     # Canonical last-stage loss; the PP-incompatible knobs are rejected in _maybe_prepare_pipeline_model.
-    _supports_pp = True
+    PP_REFUSAL = None
+    SUPPORTS_LOWP_PRECISION = True
     # Forwards with ``labels``, so ``*ForCausalLM.forward`` folds the router aux loss into outputs.loss.
     _consumes_router_aux_loss = True
     # False lets loss-only eval take Liger's fused-CE ``skip_logits`` path; a subclass whose loss reads

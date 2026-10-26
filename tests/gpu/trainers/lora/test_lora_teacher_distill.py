@@ -107,8 +107,6 @@ def run(ctx) -> dict:
         dataloader_drop_last=True,
         dataset_num_proc=1,
         dataloader_num_workers=0,
-        fsdp="",
-        ddp_find_unused_parameters=parallelism_config.has_ep_group,
         distill_loss="kl_divergence",
         distill_temperature=1.0,
         distill_alpha=0.5,

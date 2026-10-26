@@ -282,10 +282,9 @@ def _vision_reuse_probe(model_type):
     def original_get_image_features(*args, **kwargs):
         return "features"
 
-    inner = types.SimpleNamespace(
-        config=types.SimpleNamespace(model_type=model_type),
-        model=types.SimpleNamespace(get_image_features=original_get_image_features),
-    )
+    inner = nn.Module()
+    inner.config = types.SimpleNamespace(model_type=model_type)
+    inner.model = types.SimpleNamespace(get_image_features=original_get_image_features)
     me = types.SimpleNamespace(
         _vision_reuse_setup=False,
         _vision_reuse_active=False,

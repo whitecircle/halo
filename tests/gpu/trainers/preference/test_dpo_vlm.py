@@ -61,7 +61,6 @@ def run(ctx) -> dict:
         max_length=1024,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
 
     # PEFT reference so no second full model copy is needed for the smoke.

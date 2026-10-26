@@ -179,7 +179,6 @@ def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, 
         max_completion_length=MAX_COMPLETION_LENGTH,
         beta=spec.beta,
         generation_kwargs={"temperature": 0.7},
-        fsdp="",
         remove_unused_columns=False,
     )
 

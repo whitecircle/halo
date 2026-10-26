@@ -144,7 +144,7 @@ def main() -> int:
                 attn_implementation=args.attn_implementation,
                 use_liger_kernel=use_liger,
             )
-            sft_config = SFTConfig(**common, use_liger_kernel=False, fsdp="", ddp_find_unused_parameters=True)
+            sft_config = SFTConfig(**common, use_liger_kernel=False, ddp_find_unused_parameters=True)
             trainer = DistributedSFTTrainer(
                 model=model,
                 args=sft_config,

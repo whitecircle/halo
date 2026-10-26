@@ -157,7 +157,6 @@ def run(ctx) -> dict:
         max_length=256,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
     # The seam the dpo/kto scripts build the reference through; its gate sees the peeled targets.
     ref_model = load_reference_model_for_preference(

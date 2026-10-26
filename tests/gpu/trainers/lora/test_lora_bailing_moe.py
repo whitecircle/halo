@@ -120,8 +120,6 @@ def run_lora_ep(
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            ddp_find_unused_parameters=True,
-            fsdp="",
         )
 
         trainer = DistributedSFTTrainer(
@@ -245,8 +243,6 @@ def run_lora_etp(
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            ddp_find_unused_parameters=True,
-            fsdp="",
         )
 
         trainer = DistributedSFTTrainer(

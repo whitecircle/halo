@@ -118,8 +118,6 @@ def train_and_save(
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            ddp_find_unused_parameters=True,  # Required for EP (inactive experts)
-            fsdp="",  # Mixin handles FSDP wrapping
         )
 
         trainer = DistributedSFTTrainer(

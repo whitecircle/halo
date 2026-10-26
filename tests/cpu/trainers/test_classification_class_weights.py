@@ -44,14 +44,6 @@ class _FakeDist:
             for labels in other_ranks_labels
         ]
 
-    @staticmethod
-    def is_available() -> bool:
-        return True
-
-    @staticmethod
-    def is_initialized() -> bool:
-        return True
-
     def all_reduce(self, tensor: torch.Tensor, op) -> None:
         if op == self.ReduceOp.MAX:
             for counts in self._other_counts:
@@ -70,6 +62,7 @@ def _weights_on_rank(rank_labels: list[int], other_ranks_labels: list[list[int]]
     with (
         patch(f"{_MODULE}.dist", _FakeDist(other_ranks_labels)),
         patch(f"{_MODULE}.current_device", return_value=torch.device("cpu")),
+        patch(f"{_MODULE}.has_process_group", return_value=True),
     ):
         return ClassificationTrainer._balanced_class_weights({"labels": rank_labels}, model)
 
@@ -110,6 +103,7 @@ def test_build_loss_fn_uses_global_counts():
     with (
         patch(f"{_MODULE}.dist", _FakeDist([RANK1_LABELS])),
         patch(f"{_MODULE}.current_device", return_value=torch.device("cpu")),
+        patch(f"{_MODULE}.has_process_group", return_value=True),
     ):
         loss_fn = trainer._build_loss_fn(
             args, {"labels": RANK0_LABELS}, SimpleNamespace(config=SimpleNamespace(num_labels=3))

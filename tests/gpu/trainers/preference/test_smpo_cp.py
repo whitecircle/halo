@@ -89,7 +89,6 @@ def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
         max_length=MAX_LENGTH,
         max_prompt_length=MAX_PROMPT_LENGTH,
         dataloader_drop_last=True,
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
 

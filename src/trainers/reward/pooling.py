@@ -1,9 +1,7 @@
 """Pooled sequence-classification seams shared by the reward and classification trainers.
 
-Transformers scores a sequence-classification head at each row's rightmost non-pad token. Under
-pipeline parallelism the last stage emits per-token head outputs, so that pooling moves out of the
-model and into the trainer: the batch transform applies the rule and encodes the result into the
-labels plane the runner already ships, and the last stage's loss decodes it back.
+Under PP the last stage emits per-token head outputs, so the rightmost-non-pad pooling moves into the trainer:
+the batch transform encodes it into the labels plane the runner ships, and the last stage's loss decodes it.
 """
 
 import torch

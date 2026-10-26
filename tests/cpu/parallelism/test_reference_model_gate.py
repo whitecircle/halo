@@ -281,7 +281,6 @@ def test_the_dpo_script_hands_the_loaded_reference_to_the_trainer(tmp_path):
         "log_model_info": mock.Mock(),
         "apply_text_path_padding_side": mock.Mock(),
         "prepare_script_preference_data": mock.Mock(return_value=(None, None, None)),
-        "apply_distributed_trainer_config": mock.Mock(),
         "configure_balancing_and_build_callbacks": mock.Mock(return_value=[]),
         "barrier": mock.Mock(),
         "DistributedDPOTrainer": trainer,

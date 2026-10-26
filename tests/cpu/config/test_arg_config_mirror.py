@@ -49,6 +49,12 @@ _LOWP_ARG_FIELDS = {f"lowp_{f.name}": f.name for f in fields(LowpSpec)}
 _CONFIG_FIELDS_NOT_FROM_ARGS = {"world_size", "gpus_per_node"}
 
 
+class _LowpTrainer(DistributedTrainerMixin):
+    """The mixin's gates with the ``lowp_*`` knobs admitted, as on the SFT path."""
+
+    SUPPORTS_LOWP_PRECISION = True
+
+
 def _defaults(cls) -> dict:
     return {f.name: f.default for f in fields(cls)}
 
@@ -100,7 +106,7 @@ def test_every_lowp_knob_lands_on_the_built_spec(arg_field, spec_field):
     # Under an enabled mode, so a shape knob is not the bf16 no-op.
     dist_args = ParallelismArguments(**{"lowp_precision": "fp8", arg_field: requested})
 
-    config = parallelism_config_from_args(dist_args, trainer_cls=DistributedTrainerMixin, allow_low_precision=True)
+    config = parallelism_config_from_args(dist_args, trainer_cls=_LowpTrainer)
 
     assert getattr(config.lowp, spec_field) == requested
 
@@ -162,8 +168,7 @@ def test_every_same_name_knob_lands_on_the_built_config(arg_field):
 
     config = parallelism_config_from_args(
         ParallelismArguments(**{arg_field: requested}),
-        trainer_cls=DistributedTrainerMixin,
-        allow_low_precision=True,
+        trainer_cls=_LowpTrainer,
     )
 
     assert getattr(config, arg_field) == requested, (

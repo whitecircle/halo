@@ -38,7 +38,6 @@ from src.entrypoints.model_setup import (
     log_model_info,
 )
 from src.entrypoints.script import (
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -118,8 +117,6 @@ def main():
         is_vlm_data=is_vlm_data,
         generation_max_prompt_length=args.generation_max_prompt_length,
     )
-
-    apply_distributed_trainer_config(dpo_config, parallelism_config)
 
     callbacks = configure_balancing_and_build_callbacks(
         args, dpo_config, model, context, generate_callback=generate_callback

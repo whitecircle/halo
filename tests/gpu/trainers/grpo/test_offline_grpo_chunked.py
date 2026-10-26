@@ -135,7 +135,6 @@ def run(ctx) -> dict:
         max_prompt_length=2048,
         max_completion_length=2048,
         dataloader_drop_last=True,
-        fsdp="",  # Mixin handles FSDP wrapping
         use_chunked_grpo_logprobs=True,
         kl_beta=0.04,  # reference logps take the chunked path too
     )

@@ -394,7 +394,16 @@ def test_script_main_refuses_the_knob_before_any_load(script, config_body, knob,
 
 # The helper the scripts splat their distributed knobs through, and the knobs it owes them.
 _BUNDLE_HELPER = "distributed_trainer_kwargs"
-_BUNDLED_KNOBS = frozenset({"parallelism_config", "moe_balancing", "save_sharded_ep", "dataset_presharded"})
+_BUNDLED_KNOBS = frozenset(
+    {
+        "parallelism_config",
+        "moe_balancing",
+        "save_sharded_ep",
+        "save_max_shard_size",
+        "allow_optimizer_warm_restart",
+        "dataset_presharded",
+    }
+)
 
 
 def _splats_the_bundle(call: ast.Call) -> bool:
@@ -499,7 +508,9 @@ def test_the_shared_bundle_carries_every_distributed_knob():
     parallelism args (where the field does not live) would hand every trainer ``None`` and restore
     the same silent downgrade.
     """
-    args = SimpleNamespace(moe_balancing="aux_loss", save_sharded_ep=True)
+    args = SimpleNamespace(
+        moe_balancing="aux_loss", save_sharded_ep=True, save_max_shard_size="1GB", allow_optimizer_warm_restart=True
+    )
     parallelism_config = object()
 
     bundle = distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=True)
@@ -508,6 +519,8 @@ def test_the_shared_bundle_carries_every_distributed_knob():
     assert bundle["parallelism_config"] is parallelism_config
     assert bundle["moe_balancing"] == "aux_loss"
     assert bundle["save_sharded_ep"] is True
+    assert bundle["save_max_shard_size"] == "1GB"
+    assert bundle["allow_optimizer_warm_restart"] is True
     assert bundle["dataset_presharded"] is True
 
 

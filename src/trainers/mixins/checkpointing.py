@@ -72,8 +72,7 @@ class CheckpointingMixin:
             fsdp_wrapped=self._fsdp_wrapped,
             tp_rank=self._get_tp_rank(),
             super_load_optimizer_and_scheduler=super()._load_optimizer_and_scheduler,
-            # Forwarded onto the training config by the entry scripts; a config built elsewhere keeps the raise.
-            allow_optimizer_warm_restart=getattr(self.args, "allow_optimizer_warm_restart", False),
+            allow_optimizer_warm_restart=self.allow_optimizer_warm_restart,
             base_owns_whole_weight_load=self._accelerate_manages_fsdp,
         )
 

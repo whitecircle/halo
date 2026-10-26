@@ -122,7 +122,6 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
         dataloader_drop_last=True,
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,
-        fsdp="",  # the mixin handles FSDP wrapping
     )
     # A tiny dataset is required to construct the trainer; the backward below uses a
     # fixed broadcast batch instead so both modes see identical input.

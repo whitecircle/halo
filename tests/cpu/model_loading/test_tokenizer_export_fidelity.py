@@ -134,11 +134,12 @@ class _Fsdp2SaveTrainer:
     _pp_wrapper_state = None
     _writing_training_checkpoint = False
     save_sharded_ep = False
+    save_max_shard_size = None
 
     def __init__(self, tokenizer, output_dir: str):
         self.model = nn.Linear(4, 4)
         self.processing_class = tokenizer
-        self.args = types.SimpleNamespace(output_dir=output_dir, save_max_shard_size=None)
+        self.args = types.SimpleNamespace(output_dir=output_dir)
         self.parallelism_config = types.SimpleNamespace(
             is_pp_mode=False,
             is_cp_mode=False,

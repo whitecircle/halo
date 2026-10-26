@@ -1,14 +1,8 @@
 """Gradient synchronization and global-norm clipping for the distributed trainers.
 
-The collectives that make a step's gradients correct before the optimizer sees them: the FSDP2 wrap
-each parallel mode needs, the QLoRA / deferred-EP / TP-replicated post-backward sweeps, the
-``accelerator.clip_grad_norm_`` replacements that compute a true global norm across EP/TP/FSDP
-shards, and the step-pre-hooks that run the sweeps on steps where clipping is disabled.
-
-Mixed into :class:`~src.trainers.mixins.base.DistributedTrainerMixin` as a mixin class rather than a
-function module, because every method here reads the trainer's live parallelism state
-(``parallelism_config``, ``_ep_config``, ``_device_mesh``, ``_fsdp_wrapped``, the PP groups). The
-topology-independent pieces shared by every clip path live in :mod:`src.trainers.mixins.grad_clip`.
+The FSDP2 wrap each parallel mode needs, the QLoRA / deferred-EP / TP-replicated post-backward sweeps, the
+``clip_grad_norm_`` replacements that reduce a true global norm across EP/TP/FSDP shards, and the
+step-pre-hooks that run the sweeps on steps where clipping is off.
 """
 
 from collections.abc import Callable

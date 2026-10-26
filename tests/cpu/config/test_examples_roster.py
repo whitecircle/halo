@@ -114,7 +114,7 @@ def declared_nccl_timeout_minutes(config: Path) -> str | None:
 def script_call_kwargs(script: str, func: str, names: tuple[str, ...]) -> dict:
     """Constant keyword arguments the entry script passes to ``func``.
 
-    The capability flags (``allow_low_precision``, ``syncs_to_external_generator``, ...) live in the
+    The capability flags a script passes (``supports_init_from_scratch``) live in the
     script's own call, so reading them there keeps this test honest when a script gains
     or loses a mode — a hand-kept table here would keep asserting the retired one.
     """
@@ -132,7 +132,7 @@ def script_call_kwargs(script: str, func: str, names: tuple[str, ...]) -> dict:
 def script_trainer_classes(script: str) -> tuple[type, ...]:
     """Every trainer class the entry script can hand ``init_training_script``: the classes named in
     its ``trainer_cls=`` argument, or in the assignment that argument reads (``--use_sdpg`` picks one
-    of two). The CP/PP gates are those classes' own ``_supports_cp`` / ``_supports_pp``."""
+    of two). The CP/PP gates are those classes' own ``SUPPORTS_CP`` / ``PP_REFUSAL``."""
     module = _script_module(script)
     tree = ast.parse((TRAINING_ROOT / script).read_text(encoding="utf-8"))
     call = next(
@@ -168,7 +168,7 @@ def build_parallelism_config(config: Path):
     parsed = parser_for(script).parse_yaml_file(str(config))
     dist_args = next(obj for obj in parsed if type(obj).__name__ == "ParallelismArguments")
     model_config = next(obj for obj in parsed if type(obj).__name__ == "ModelConfig")
-    flags = script_call_kwargs(script, "init_training_script", ("allow_low_precision", "supports_init_from_scratch"))
+    flags = script_call_kwargs(script, "init_training_script", ("supports_init_from_scratch",))
     # The peel reads the model's own config; where that is unreachable the expert-LoRA rejections
     # (PP and Expert-TP both refuse it) go unchecked, exactly like the model-dependent cases below.
     expert_lora = (

@@ -148,8 +148,6 @@ def _config(
         dataloader_drop_last=True,
         dataloader_num_workers=0,
         seed=SEED,
-        fsdp="",
-        ddp_find_unused_parameters=pc.has_ep_group,
     )
 
 

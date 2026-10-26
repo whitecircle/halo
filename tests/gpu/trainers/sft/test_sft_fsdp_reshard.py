@@ -90,7 +90,6 @@ def run_sft(mode_name, parallelism_kwargs, reshard, tokenizer, output_dir):
         dataloader_num_workers=0,
         seed=SEED,
         data_seed=SEED,
-        fsdp="",
     )
     train_dataset = create_sft_dataset(64, tokenizer, seed=SEED)
     trainer = DistributedSFTTrainer(

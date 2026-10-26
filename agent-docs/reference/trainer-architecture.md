@@ -62,11 +62,11 @@ Offline GRPO's `reference_cache.py` streams current-batch scores to filesystem-a
 maps the ordered ragged token values; its reference mixin attaches those buffers without repacking
 them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 
-Three modules are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
-`scale_shards_to_max_norm_`, the shared clip coefficient, below),
+Two mixin modules are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
+`scale_shards_to_max_norm_`, the shared clip coefficient, below) and
 `loss_masks.py::effective_loss_mask` (`completion_mask ∧ tool_mask`
-where a `tool_mask` exists, else `completion_mask`), and `pp_gates.py` (the shared PP rejection
-vocabulary, below).
+where a `tool_mask` exists, else `completion_mask`); `src/trainers/parallelism/trainer_rules.py`
+holds the shared parallelism refusals (below).
 
 ## Trainer compatibility
 
@@ -90,14 +90,23 @@ EP, ETP and TP run under every trainer. A **No** PP trainer is refused at config
 (`<Trainer> does not support Pipeline Parallelism (PP)`); see
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 
-CP and PP support is declared per class as `_supports_cp` /
-`_supports_pp` and enforced in `ParallelismValidationMixin`; `_pp_unsupported_reason` carries the
-rejection text. `DistributedTrainerMixin` defaults both off, so a trainer states only what it flips.
-Its PP verdict is written out even when it matches the default, because `_pp_unsupported_reason` is
-meaningless without it.
+A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`, read
+off the class at config time (`parallelism_config_from_args`) and enforced at construction
+(`ParallelismValidationMixin`):
 
-**CP** works only where the loss is computable from a sequence chunk. The rest inherit the default
-`_supports_cp = False`.
+| ClassVar | Default | Meaning |
+|---|---|---|
+| `SUPPORTS_CP` | `False` | CP admitted |
+| `PP_REFUSAL` | a generic refusal | the mechanism the PP refusal names; `None` where PP is supported |
+| `FORWARD_ROWS_PER_EXAMPLE` | `1` | rows one model call carries per example (`2` for the chosen ⧺ rejected concat of DPO, SMPO and the BT reward trainer); the EP dispatch-ceiling gate multiplies by it |
+| `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT) |
+| `POLICY_GRADIENT_LOSS` | `False` | the loss never adds the router aux loss (the GRPO family) |
+| `SYNCS_TO_EXTERNAL_GENERATOR` | `False` | on-policy RL that syncs weights to a rollout engine (online and async GRPO, SDPG) |
+
+Every PP-refusing trainer declares its own `PP_REFUSAL` text.
+
+**CP** works only where the loss is computable from a sequence chunk. The rest keep the default
+`SUPPORTS_CP = False`.
 
 The reasons: the trainer uses `logits_to_keep` (Async GRPO with Environments), needs global
 log-probability sums (DPO, KTO), needs full-sequence pooling (classification, reward, embedding),
@@ -120,7 +129,7 @@ an unset `max_length`, `save_sharded_ep`, reentrant gradient checkpointing, `pef
 from train. Padding-free collation is rejected at the collator wrap (its flattened width varies
 every step); packing passes the gates, at one packed row per microbatch.
 
-`src/trainers/mixins/pp_gates.py` holds the shared vocabulary the preference and offline-GRPO
+`src/trainers/parallelism/trainer_rules.py` holds the shared vocabulary the preference and offline-GRPO
 wrappers add on top — a live `ref_model`, missing precomputed reference columns, and
 `compute_metrics` (no PP reduction reproduces their non-PP prediction convention). A tied-embedding
 checkpoint, live MTP tail layers, an unsupported model family, and aux-loss MoE balancing are
@@ -165,8 +174,8 @@ _CTOR_POSITIONS = ctor_positions(SomeBaseTrainer, "model", "args")
 
 
 class MyDistributedTrainer(DistributedTrainerMixin, SomeBaseTrainer):
-    _supports_cp = True   # only the flips; CP/PP default off
-    _supports_pp = False
+    SUPPORTS_CP = True  # declare only what differs from the mixin's defaults
+    PP_REFUSAL = "the loss couples the whole batch, which no pipeline microbatch sees"
 
     def __init__(self, *args, **kwargs):
         # Extract the parallelism kwargs; a positional model/config is read through the table.
@@ -177,10 +186,13 @@ class MyDistributedTrainer(DistributedTrainerMixin, SomeBaseTrainer):
 
 **`_init_distributed_config(kwargs, training_args=None, ctor_args=(), ctor_positions=None, **explicit)`** pops the toolkit-only kwargs
 before the base trainer sees them: `parallelism_config` (a `ParallelismConfig`; passing `None`
-raises `ValueError`), the save flag `save_sharded_ep` (default `False`), `moe_balancing`,
-`dataset_presharded`, and `bf16_optimizer`. It also reconciles
-`save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested mode and the model
-(every MoE, EP or CP run goes reentrant).
+raises `ValueError`), the checkpoint knobs `save_sharded_ep` (default `False`), `save_max_shard_size`
+and `allow_optimizer_warm_restart`, `moe_balancing`, `dataset_presharded`, and `bf16_optimizer`.
+`_init_distributed_config` also sets `fsdp = ""` on the training args (the mixin owns sharding) and, under EP,
+`ddp_find_unused_parameters = True`, and reconciles `save_on_each_node`, the Liger config and the GC
+`use_reentrant` kwarg with the requested mode and the model (every MoE, EP or CP run goes reentrant).
+`distributed_trainer_kwargs` (`src/entrypoints/script.py`) is the bundle every entry script
+passes.
 
 A trainer that forwards `**kwargs` calls it as above. One whose `__init__` names those parameters
 passes them through `**explicit` instead (SMPO, Classification, offline GRPO, teacher distillation);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""The shared PP rejection vocabulary (``src/trainers/mixins/pp_gates.py``) and its call sites.
+"""The shared PP rejection vocabulary (``src.trainers.parallelism.trainer_rules``) and its call sites.
 
-``test_pp_trainer_gates.py`` covers *which trainers* may run PP (``_supports_pp``). This file covers
+``test_pp_trainer_gates.py`` covers *which trainers* may run PP (``PP_REFUSAL``). This file covers
 what happens once a supported trainer is under PP and carries an option the pipeline cannot honor.
 Every helper here guards a **silent** failure — PEFT injection resolving module names against a tree
 no stage holds, a full reference model resident beside one stage, TRL's ``activation_offloading``
@@ -26,7 +26,7 @@ import pytest
 
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.mixins.pipeline import PipelineTrainerMixin
-from src.trainers.mixins.pp_gates import (
+from src.trainers.parallelism.trainer_rules import (
     reject_pp_activation_offloading,
     reject_pp_compute_metrics,
     reject_pp_peft,
@@ -53,7 +53,7 @@ class _Dataset:
 def _training_args(**overrides):
     """A PP-legal training-args namespace; overrides inject the one option under test.
 
-    Every field is one a validator on the path to a ``pp_gates`` call reads, set to the value that
+    Every field is one a validator on the path to a ``trainer_rules`` call reads, set to the value that
     lets the walk reach it — so a failure here is always the gate under test, never a neighbour.
     """
     base = {

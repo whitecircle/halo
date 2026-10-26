@@ -104,16 +104,15 @@ def init_training_script(
     script_prefix: str,
     trainer_cls: type,
     split_expert_lora: bool = True,
-    **parallelism_kwargs,
+    supports_init_from_scratch: bool = False,
 ) -> ScriptContext:
     """The pre-model phase of a training script, in the order every script depends on: the process
     group and device bind, the ``ParallelismConfig``, the run setup (named ``{script_prefix}-{mode}``)
     and the resume resolution.
 
-    ``trainer_cls`` supplies the CP/PP gates, so a mode the trainer refuses fails before any model,
-    reference or rollout probe loads. ``split_expert_lora`` peels MoE expert targets out of
-    ``lora_target_modules`` into native EP grouped LoRA; ``parallelism_kwargs`` are the extra
-    :func:`parallelism_config_from_args` knobs (SFT's ``allow_low_precision``, ``supports_init_from_scratch``).
+    ``trainer_cls`` supplies the CP/PP/low-precision gates, so a mode the trainer refuses fails before any
+    model, reference or rollout probe loads. ``split_expert_lora`` peels MoE expert targets out of
+    ``lora_target_modules`` into native EP grouped LoRA; only SFT passes ``supports_init_from_scratch``.
     """
     init_distributed()
     PartialState()
@@ -134,12 +133,8 @@ def init_training_script(
         training_config=training_config,
         trainer_cls=trainer_cls,
         expert_lora=split_expert_lora_targets(model_config) if split_expert_lora else None,
-        **parallelism_kwargs,
+        supports_init_from_scratch=supports_init_from_scratch,
     )
-
-    # Declared on CheckpointArguments but read off the training config, which the parser never routes them to.
-    for field_name in ("save_max_shard_size", "allow_optimizer_warm_restart"):
-        setattr(training_config, field_name, getattr(args, field_name))
 
     # Before the resume resolves, the run reads its weights from the base.
     context = ScriptContext(parallelism_config, local_rank, None, model_config.model_name_or_path, trainer_cls)
@@ -160,12 +155,15 @@ def init_training_script(
 
 
 def distributed_trainer_kwargs(args, parallelism_config: ParallelismConfig, *, dataset_presharded: bool):
-    """The constructor kwargs every ``DistributedTrainerMixin`` trainer takes, all four together: a
-    call site missing one gathers a save the config asked to shard, or re-shards a per-rank dataset."""
+    """The constructor kwargs every ``DistributedTrainerMixin`` trainer takes, all together: a call site
+    missing one gathers a save the config asked to shard, re-shards a per-rank dataset, or drops the
+    checkpoint knobs."""
     return {
         "parallelism_config": parallelism_config,
         "moe_balancing": args.moe_balancing,
         "save_sharded_ep": args.save_sharded_ep,
+        "save_max_shard_size": args.save_max_shard_size,
+        "allow_optimizer_warm_restart": args.allow_optimizer_warm_restart,
         "dataset_presharded": dataset_presharded,
     }
 
@@ -177,17 +175,16 @@ def configure_balancing_and_build_callbacks(
     context: ScriptContext,
     *,
     generate_callback=None,
-    policy_gradient_loss: bool = False,
-    syncs_to_external_generator: bool = False,
     max_seq_len: int | None = None,
 ) -> list:
-    """COLLECTIVE. Configure the run's MoE balancing on ``model``, then build its callback roster for that mode."""
+    """COLLECTIVE. Configure the run's MoE balancing on ``model`` for ``context.trainer_cls``'s loss and
+    weight-sync capabilities, then build its callback roster for that mode."""
     balancing_mode = configure_moe_balancing(
         args,
         model,
         context.parallelism_config,
-        policy_gradient_loss=policy_gradient_loss,
-        syncs_to_external_generator=syncs_to_external_generator,
+        policy_gradient_loss=context.trainer_cls.POLICY_GRADIENT_LOSS,
+        syncs_to_external_generator=context.trainer_cls.SYNCS_TO_EXTERNAL_GENERATOR,
     )
     return build_run_callbacks(
         args,
@@ -198,14 +195,6 @@ def configure_balancing_and_build_callbacks(
         generate_callback=generate_callback,
         max_seq_len=max_seq_len,
     )
-
-
-def apply_distributed_trainer_config(training_config, parallelism_config: ParallelismConfig) -> None:
-    """Trainer-config knobs every distributed trainer requires: disable HF's own FSDP wiring (the
-    mixin handles sharding) and let DDP tolerate the EP layers' externally-synced parameters."""
-    training_config.fsdp = ""
-    if parallelism_config.has_ep_group:
-        training_config.ddp_find_unused_parameters = True
 
 
 def run_trainer(

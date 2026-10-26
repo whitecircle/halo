@@ -1,13 +1,8 @@
 """DPO/KTO reference sweep on the DP axis, with shared frozen-reference persistence.
 
-TRL's reference cache uses rank-sharded parameter hashes and per-process dataset fingerprints,
-which diverge under EP/TP. Its rank-0 Arrow file is also inaccessible on other nodes' local storage.
-Each rank therefore attaches gathered columns in memory instead of reading another rank's file.
-
-The loader and output gather both run on the DP axis: model-parallel siblings must forward the same
-rows, or TP/ETP collectives see mismatched tokens. A Path-B resume builds the policy from trained
-checkpoint weights before this sweep, so with no separate reference it must restore the run-start
-scores from ReferenceLogpsCheckpointMixin's sidecar instead of scoring that policy again.
+TRL's reference cache keys off rank-sharded parameter hashes and a rank-0 Arrow file, both wrong under EP/TP
+or per-node storage, so each rank attaches gathered columns in memory. A Path-B resume restores the run-start
+scores from ReferenceLogpsCheckpointMixin's sidecar instead of scoring the trained policy.
 """
 
 from __future__ import annotations

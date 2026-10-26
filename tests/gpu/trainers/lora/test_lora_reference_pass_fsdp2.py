@@ -80,7 +80,6 @@ def run(ctx) -> dict:
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
     callback = _ReferencePassAfterStep(dict(tokenizer(REFERENCE_PROMPT, return_tensors="pt").to(ctx.device)))
     trainer = DistributedSFTTrainer(

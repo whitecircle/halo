@@ -159,6 +159,7 @@ class _SaveRoutingTrainer(_StubTrainer):
     _has_ep_layers = True
     _fsdp_wrapped = True
     save_sharded_ep = False
+    save_max_shard_size = None
     processing_class = None
     _pp_wrapper_state = None
     _writing_training_checkpoint = False
@@ -170,7 +171,7 @@ class _SaveRoutingTrainer(_StubTrainer):
         self.parallelism_config.is_tp_mode = False
         self.parallelism_config.has_ep_group = False
         self.parallelism_config.tp_size = 1
-        self.args = SimpleNamespace(output_dir=output_dir, save_max_shard_size=None)
+        self.args = SimpleNamespace(output_dir=output_dir)
         self.parallel_dims = SimpleNamespace(tp_local_rank=lambda: 0)
 
     save_model = DistributedTrainerMixin.save_model

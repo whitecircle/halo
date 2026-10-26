@@ -68,10 +68,9 @@ class DistributedGRPOTrainer(
     DistributedTrainerMixin,
     GRPOTrainer,
 ):
-    """Online GRPO over server-mode vLLM rollouts. No CP (``_supports_cp`` stays off) and no PP (below)."""
+    """Online GRPO over server-mode vLLM rollouts. No CP (``SUPPORTS_CP`` stays off) and no PP (below)."""
 
-    _supports_pp = False
-    _pp_unsupported_reason = (
+    PP_REFUSAL = (
         "the vLLM weight sync gathers and sends the model's full named_parameters() from one "
         "rank-set in a fixed collective order, but under PP no rank holds all the layers, so the "
         "sync needs per-stage gathers assembled across stages; the rollout phase also forwards the "

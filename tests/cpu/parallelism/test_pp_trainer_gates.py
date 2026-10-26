@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Per-trainer pipeline-parallelism gate: only trainers that declare ``_supports_pp`` may run PP.
+"""Per-trainer pipeline-parallelism gate: only trainers that declare ``PP_REFUSAL = None`` may run PP.
 
 PP's failure modes are silent — a trainer whose loss needs a second forward, couples the whole
 batch, or normalizes by a whole-batch denominator produces a WRONG NUMBER under a pipeline split,
-not a crash. So the gate defaults to off (declare-to-enable, mirroring ``_supports_cp``) and every
-rejection must name the mechanism so it is actionable.
+not a crash. So the gate defaults to a refusal (declare-to-enable, mirroring ``SUPPORTS_CP``) and
+every rejection must name the mechanism so it is actionable.
 
 These tests drive the REAL ``_validate_parallelism_modes``; a re-implementation of the predicate
 could not catch a regression in the production guard.
@@ -20,10 +20,12 @@ import torch.nn as nn
 from accelerate import PartialState
 from datasets import Dataset
 from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
+from transformers.training_args import OptimizerNames
 
 from src.checkpoint.writing import save_dtype_caster
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
 from src.model_loading.parallel.freeze_patterns import _reject_layer_indexed_patterns_under_pp as guard
+from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.pipeline import PipelineTrainerMixin, wrapper_state_outside_stages
 from src.trainers.mixins.validation import ParallelismValidationMixin
@@ -68,28 +70,26 @@ def _pipeline_stub(**attrs):
 class _Validating(ParallelismValidationMixin):
     """Minimal stub carrying exactly what the real validator reads."""
 
-    def __init__(self, pc, supports_pp, reason=""):
+    SUPPORTS_CP = True
+
+    def __init__(self, pc, pp_refusal):
         self.parallelism_config = pc
-        self._supports_cp = True
-        self._supports_pp = supports_pp
-        self._pp_unsupported_reason = reason
+        self.PP_REFUSAL = pp_refusal
 
 
 def test_base_default_is_off():
     """Declare-to-enable: a trainer that never considered PP must not silently get it."""
-    assert DistributedTrainerMixin._supports_pp is False
-    assert DistributedTrainerMixin._pp_unsupported_reason == ""
+    assert DistributedTrainerMixin.PP_REFUSAL is not None
 
 
 def test_every_trainer_declares_a_pp_stance():
-    """The PP-enabled trainers are exactly the audited set, and every rejection names a mechanism."""
-    enabled = {cls.__name__ for cls in _TRAINERS if cls._supports_pp}
-    assert enabled == _PP_ENABLED, f"_supports_pp is set on {sorted(enabled)}, expected {sorted(_PP_ENABLED)}"
+    """The PP-enabled trainers are exactly the audited set, and every rejection names its own mechanism."""
+    enabled = {cls.__name__ for cls in _TRAINERS if cls.PP_REFUSAL is None}
+    assert enabled == _PP_ENABLED, f"PP_REFUSAL is None on {sorted(enabled)}, expected {sorted(_PP_ENABLED)}"
     for cls in _TRAINERS:
-        if not cls._supports_pp:
-            reason = cls._pp_unsupported_reason
-            assert reason and len(reason) > 40, (
-                f"{cls.__name__} rejects PP without an actionable reason (got {reason!r})"
+        if cls.PP_REFUSAL is not None:
+            assert cls.PP_REFUSAL != DistributedTrainerMixin.PP_REFUSAL and len(cls.PP_REFUSAL) > 40, (
+                f"{cls.__name__} rejects PP without a reason of its own (got {cls.PP_REFUSAL!r})"
             )
 
 
@@ -104,7 +104,7 @@ def test_only_sft_rides_the_base_causal_lm_contract():
     on_base_contract = {
         cls.__name__
         for cls in _TRAINERS
-        if cls._supports_pp and cls._pp_loss_adapter is DistributedTrainerMixin._pp_loss_adapter
+        if cls.PP_REFUSAL is None and cls._pp_loss_adapter is DistributedTrainerMixin._pp_loss_adapter
     }
     assert on_base_contract == {"DistributedSFTTrainer"}, on_base_contract
 
@@ -112,7 +112,7 @@ def test_only_sft_rides_the_base_causal_lm_contract():
 def test_validator_rejects_unsupported_trainer_under_pp():
     """The REAL guard raises, and the message carries the trainer's own reason."""
     pc = _pc(pp_size=2)
-    stub = _Validating(pc, supports_pp=False, reason="the loss couples the whole batch")
+    stub = _Validating(pc, pp_refusal="the loss couples the whole batch")
     with pytest.raises(ValueError, match="does not support Pipeline Parallelism"):
         stub._validate_parallelism_modes()
     with pytest.raises(ValueError, match="couples the whole batch"):
@@ -121,19 +121,39 @@ def test_validator_rejects_unsupported_trainer_under_pp():
 
 def test_validator_accepts_supported_trainer_under_pp():
     """A validator that rejects everything would also pass the rejection test — pin the accept."""
-    _Validating(_pc(pp_size=2), supports_pp=True)._validate_parallelism_modes()
+    _Validating(_pc(pp_size=2), pp_refusal=None)._validate_parallelism_modes()
 
 
 def test_gate_is_inert_without_pp():
     """pp_size=1 must not reject a trainer that does not support PP."""
-    _Validating(_pc(pp_size=1), supports_pp=False, reason="irrelevant")._validate_parallelism_modes()
+    _Validating(_pc(pp_size=1), pp_refusal="irrelevant")._validate_parallelism_modes()
 
 
 def test_rejection_falls_back_to_a_generic_reason():
-    """A trainer that declares no reason still gets a message explaining the constraint."""
-    stub = _Validating(_pc(pp_size=2), supports_pp=False, reason="")
-    with pytest.raises(ValueError, match="contiguous subset of the layers"):
+    """A trainer that declares no refusal of its own still gets a message explaining the constraint."""
+
+    class _Undeclared(DistributedTrainerMixin):
+        pass
+
+    stub = object.__new__(_Undeclared)
+    stub.parallelism_config = _pc(pp_size=2)
+    with pytest.raises(ValueError, match="_Undeclared does not support Pipeline Parallelism.*contiguous subset"):
         stub._validate_parallelism_modes()
+
+
+@pytest.mark.parametrize("optim", sorted(NAMED_OPTIMIZER_BUILDERS))
+def test_named_optimizers_are_refused_under_pp(optim):
+    """No pipeline run validates a toolkit-named optimizer, so each is refused at construction, read off
+    the registry so a new one joins the refusal; post-init ``args.optim`` is an ``OptimizerNames`` member."""
+    stub = _Validating(_pc(pp_size=2), pp_refusal=None)
+    with pytest.raises(ValueError, match=rf"optim='{optim}' is not supported under pipeline parallelism"):
+        stub._validate_parallelism_modes(SimpleNamespace(optim=OptimizerNames(optim)))
+
+
+def test_the_optimizer_refusal_spares_adamw_under_pp_and_named_optimizers_off_pp():
+    """The converse: stock AdamW still runs under PP, and Muon still runs without it."""
+    _Validating(_pc(pp_size=2), pp_refusal=None)._validate_parallelism_modes(SimpleNamespace(optim="adamw_torch"))
+    _Validating(_pc(pp_size=1), pp_refusal=None)._validate_parallelism_modes(SimpleNamespace(optim="muon"))
 
 
 def test_layer_indexed_freeze_patterns_rejected_on_a_stage():

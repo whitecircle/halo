@@ -1,10 +1,8 @@
-"""sentence-transformers adapters used by embedding training.
+"""sentence-transformers adapters for embedding training.
 
-:class:`PreloadedTransformer` wraps an already-loaded HF backbone in the ST ``Transformer``
-interface; ST's own module reloads from a path string and would discard the EP/TP patches. Importing
-this module also replaces ST's ``gradient_checkpointing_*`` methods on ``BaseModel``: transformers'
-trainer calls them with ``every_n_layers`` and calls ``disable``, neither of which ST implements, so
-an embedding run with checkpointing enabled fails at the call.
+:class:`PreloadedTransformer` wraps an already-loaded backbone in ST's ``Transformer`` interface (ST's own
+reloads from a path, discarding the EP/TP patches). Importing the module replaces ST's
+``gradient_checkpointing_*`` methods, which lack the ``every_n_layers`` / ``disable`` transformers calls.
 """
 
 import inspect

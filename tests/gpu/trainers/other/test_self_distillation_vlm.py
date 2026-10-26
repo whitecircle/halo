@@ -117,7 +117,6 @@ def run(ctx) -> dict:
         dataloader_num_workers=0,
         remove_unused_columns=False,
         dataset_kwargs={"skip_prepare_dataset": True},
-        fsdp="",
     )
 
     trainer = DistributedSelfDistillationTrainer(

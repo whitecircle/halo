@@ -160,7 +160,6 @@ def run_lora_cp_test(rank: int, base_output_dir: str) -> bool:
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            fsdp="",  # Mixin handles FSDP wrapping
         )
 
         trainer = DistributedSFTTrainer(
@@ -288,7 +287,6 @@ def run_lora_tp_test(rank: int, base_output_dir: str) -> bool:
             max_length=MAX_SEQ_LENGTH,
             save_strategy="no",
             dataloader_num_workers=0,
-            fsdp="",
         )
         raised, err = False, ""
         try:

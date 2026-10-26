@@ -53,8 +53,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
     # compute_loss returns the batch's own token mean over the distillation + CLM terms.
     _loss_is_own_mean = True
 
-    _supports_pp = False
-    _pp_unsupported_reason = (
+    PP_REFUSAL = (
         "each microbatch needs a second forward through a distinct frozen teacher network whose "
         "FULL-vocabulary logits every distillation loss consumes (KL, JSD, MSE, cosine, SLIM and "
         "soft CE all read the whole [tokens, vocab] plane), and no single pipeline "

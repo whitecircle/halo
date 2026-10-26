@@ -182,8 +182,6 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
             dataloader_drop_last=True,
             dataloader_num_workers=0,
             dataset_num_proc=1,
-            fsdp="",  # Mixin handles wrapping
-            ddp_find_unused_parameters=pc.has_ep_group,
             distill_loss="kl_divergence",
             distill_temperature=1.0,
             distill_alpha=0.5,

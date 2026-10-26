@@ -58,7 +58,6 @@ from src.entrypoints.model_setup import (
     log_model_info,
 )
 from src.entrypoints.script import (
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -370,7 +369,6 @@ def main():
     )
 
     disable_trl_dataset_prep(sft_config)
-    apply_distributed_trainer_config(sft_config, parallelism_config)
 
     callbacks = configure_balancing_and_build_callbacks(args, sft_config, model, context)
 

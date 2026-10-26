@@ -134,7 +134,6 @@ def run(ctx):
         dataloader_num_workers=0,
         dataloader_drop_last=True,
         remove_unused_columns=False,
-        fsdp="",  # Mixin handles FSDP wrapping
         ddp_find_unused_parameters=True,  # Vision encoder unused with text-only data
     )
 

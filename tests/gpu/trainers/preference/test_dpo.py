@@ -195,7 +195,6 @@ def run(ctx) -> dict:
         dataloader_drop_last=True,
         dataset_num_proc=1,
         dataloader_num_workers=0,
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
     # ── Create trainer ──────────────────────────────────────────

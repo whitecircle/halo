@@ -239,7 +239,6 @@ def run(ctx):
         dataloader_drop_last=True,
         dataset_num_proc=1,
         dataloader_num_workers=0,
-        fsdp="",  # the mixin owns FSDP wrapping
     )
 
     trainer = DistributedRewardTrainer(

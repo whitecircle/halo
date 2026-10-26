@@ -134,8 +134,6 @@ def run_collator_mode(
         max_length=None if mode == "padding_free" else args.seq,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=ep_size > 1,
-        fsdp="" if ep_size > 1 else None,
         # Count REAL tokens (attention_mask.sum), not the padded tensor's numel.
         # A bare True counts inputs[input_ids].numel() (pads included), which credits
         # `standard` padding-as-throughput while `padding_free` counts only real tokens —

@@ -228,7 +228,6 @@ def test_online_grpo_e2e():
             max_completion_length=256,
             beta=0.0,
             generation_kwargs={"temperature": 0.7},
-            fsdp="",
         )
 
         dataset = create_grpo_dataset(NUM_TRAIN_SAMPLES, seed=SEED)
@@ -307,7 +306,6 @@ def test_online_sdpg_e2e():
             max_completion_length=256,
             beta=0.0,
             generation_kwargs={"temperature": 0.7},
-            fsdp="",
         )
 
         dataset = create_grpo_dataset(NUM_TRAIN_SAMPLES, seed=SEED)
@@ -385,7 +383,6 @@ def test_environmental_grpo_e2e():
             num_generations=2,
             max_completion_length=256,
             beta=0.01,
-            fsdp="",
             reward_weights=[1.0],
         )
 
@@ -510,7 +507,6 @@ def test_online_grpo_lora_e2e():
             max_completion_length=256,
             beta=0.0,
             generation_kwargs={"temperature": 0.7},
-            fsdp="",
         )
         trainer = DistributedGRPOTrainer(
             model=model,
@@ -562,7 +558,6 @@ def test_environmental_grpo_lora_e2e():
             num_generations=2,
             max_completion_length=256,
             beta=0.01,
-            fsdp="",
             reward_weights=[1.0],
         )
         async_config = AsyncTrainingConfig(

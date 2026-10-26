@@ -197,7 +197,6 @@ def run(ctx):
         desirable_weight=DESIRABLE_WEIGHT,
         undesirable_weight=UNDESIRABLE_WEIGHT,
         dataloader_num_workers=0,
-        fsdp="",  # the mixin owns FSDP wrapping
     )
 
     trainer = DistributedKTOTrainer(

@@ -8,7 +8,7 @@ bandwidth argument: [GPU Training Theory §9](../reference/gpu-training-theory.m
 
 ## Launching
 
-Set `pipeline_parallel_size` on a script whose trainer declares `_supports_pp`: SFT, SMPO, DPO,
+Set `pipeline_parallel_size` on a script whose trainer declares `PP_REFUSAL = None`: SFT, SMPO, DPO,
 KTO, offline GRPO, Bradley-Terry reward and classification. Any other script refuses it at config
 time with `<Trainer> does not support Pipeline Parallelism (PP)`, before a model loads. Every stage
 must be a whole number of NVLink domains holding at least two ranks, so a run spans at least two
@@ -32,9 +32,12 @@ microbatch.
   every other axis combination (PP+TP, PP+CP, PP+EP+ETP, …) is refused with the breaking mechanism
   named in the error. `_reject_pipeline_parallel` separately refuses the PP-incompatible knobs
   (HSDP, expert LoRA, ZeRO-3, non-`bf16` low precision).
-- **Trainer gates.** `_supports_pp` is declare-to-enable per trainer (like `_supports_cp`), and
-  `src/trainers/mixins/pp_gates.py` is the shared rejection vocabulary (PEFT, live reference
-  models, `compute_metrics`, activation offloading, precomputed-reference-column requirements);
+- **Trainer gates.** PP is declare-to-enable per trainer (like `SUPPORTS_CP`): `PP_REFUSAL` is the
+  mechanism a refusing trainer's error names, `None` where PP is supported.
+  `src/trainers/parallelism/trainer_rules.py` is the shared rejection vocabulary (PEFT, live reference
+  models, `compute_metrics`, activation offloading, precomputed-reference-column requirements, and
+  the toolkit-named optimizers — `optim: muon` / `flash_adamw`, read off `NAMED_OPTIMIZER_BUILDERS` —
+  which no PP run validates);
   `PipelineTrainerMixin` (`src/trainers/mixins/pipeline.py`) is the trainer-side seam and stays
   inert at `pp_size == 1`.
 - **Stage, split, and loss seams.** `src/distributed/pipeline_parallel/` holds one module per

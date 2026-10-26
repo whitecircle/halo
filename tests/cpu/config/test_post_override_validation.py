@@ -13,12 +13,9 @@ Run: pytest tests/cpu/config/test_post_override_validation.py
 import ast
 import inspect
 import textwrap
-from dataclasses import fields
-from pathlib import Path
 from typing import get_type_hints
 
 import pytest
-from transformers import TrainingArguments
 
 from src.config_validation import ValidatedConfig
 from src.configs.classification import ClassificationConfig
@@ -35,7 +32,6 @@ from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.parser import HaloArgumentParser, _literal_choices
 from src.configs.preference import SmoothMarginPOConfig
-from src.configs.script_arguments import CheckpointArguments
 from src.entrypoints.script import init_training_script
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from src.subclass_registry import iter_subclasses
@@ -188,21 +184,6 @@ def test_dead_knobs_are_rejected_not_ignored():
     ):
         with pytest.raises(ValueError, match=key):
             parser.parse_dict({key: 2})
-
-
-@pytest.mark.parametrize("field_name", ["save_max_shard_size", "allow_optimizer_warm_restart"])
-def test_checkpoint_knob_is_forwarded_to_the_training_config(field_name):
-    """These knobs are declared ONLY on CheckpointArguments, but every consumer reads them off the
-    HF/TRL training config (``self.args`` / ``training_config``). The parser routes a YAML key only
-    to the dataclass declaring it, so without ``init_training_script``'s forward the reads always
-    take their ``getattr(..., default)`` fallback and the knobs are unsettable in practice."""
-    declared = {f.name for f in fields(CheckpointArguments)}
-    assert field_name in declared
-    assert field_name not in {f.name for f in fields(TrainingArguments)}, (
-        f"{field_name} is now native to TrainingArguments — the forward is redundant, drop one"
-    )
-    forwarder = Path(inspect.getfile(init_training_script)).read_text()
-    assert field_name in forwarder, f"init_training_script no longer forwards {field_name} onto training_config"
 
 
 def test_overwrite_output_dir_reaches_both_output_dir_guards():

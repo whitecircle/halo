@@ -742,9 +742,9 @@ def test_parallelism_config_from_args_basic():
 
 
 def test_parallelism_config_from_args_builds_pp_only_for_trainers_that_support_it():
-    """The builder admits ``pipeline_parallel_size > 1`` exactly where the trainer declares ``_supports_pp``.
+    """The builder admits ``pipeline_parallel_size > 1`` exactly where the trainer declares ``PP_REFUSAL = None``.
 
-    A trainer without the flag is refused at config time, before the model (or a teacher, reference
+    A trainer keeping a refusal is refused at config time, before the model (or a teacher, reference
     or vLLM probe) loads; SFT gets a two-stage config on a two-node world, one NVLink domain per
     stage. PP+TP stays refused by the axis allowlist, so the acceptance is not the builder passing
     every shape through.
@@ -767,7 +767,7 @@ def test_parallelism_config_from_args_builds_pp_only_for_trainers_that_support_i
 
 
 def test_parallelism_config_from_args_rejects_cp_when_unsupported():
-    """A trainer class declaring ``_supports_cp = False`` rejects a requested context_parallel_size>1
+    """A trainer class declaring ``SUPPORTS_CP = False`` rejects a requested context_parallel_size>1
     at config time, before any model loads; a trainer declaring it builds the CP config."""
     args = ParallelismArguments(context_parallel_size=2)
     with simulated_world(world_size=8, gpus_per_node=8):
@@ -777,23 +777,23 @@ def test_parallelism_config_from_args_rejects_cp_when_unsupported():
 
 
 def test_parallelism_config_from_args_rejects_lowp_when_disallowed():
-    """A non-bf16 lowp_precision is rejected when allow_low_precision=False (non-SFT trainers)."""
+    """A non-bf16 lowp_precision is rejected on a trainer without SUPPORTS_LOWP_PRECISION (non-SFT trainers)."""
     args = _DistArgs()
     args.lowp_precision = "fp8"
     with simulated_world(world_size=8, gpus_per_node=8):
         try:
-            parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=False)
+            parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin)
             raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "lowp_precision" in str(e)
 
 
 def test_parallelism_config_from_args_lowp_allowed_for_sft():
-    """allow_low_precision=True forwards the lowp_* knobs (SFT path)."""
+    """SFT's SUPPORTS_LOWP_PRECISION forwards the lowp_* knobs."""
     args = _DistArgs()
     args.lowp_precision = "fp8"
     with simulated_world(world_size=8, gpus_per_node=8):
-        cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, allow_low_precision=True)
+        cfg = parallelism_config_from_args(args, trainer_cls=DistributedSFTTrainer)
         assert cfg.lowp.precision == "fp8"
 
 

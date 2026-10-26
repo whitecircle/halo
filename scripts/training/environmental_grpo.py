@@ -59,7 +59,6 @@ from src.entrypoints.model_setup import (
     log_model_info,
 )
 from src.entrypoints.script import (
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -371,7 +370,6 @@ def main():
     )
 
     grpo_config.reward_weights = [1.0]
-    apply_distributed_trainer_config(grpo_config, parallelism_config)
 
     barrier()
 
@@ -380,8 +378,6 @@ def main():
         grpo_config,
         model,
         context,
-        policy_gradient_loss=True,
-        syncs_to_external_generator=True,
         # A trajectory accumulates every turn, so the declared prompt + per-turn budgets are not its
         # bound — throughput/MFU would be reported against a length the batches routinely exceed.
         max_seq_len=full_trajectory_tokens,

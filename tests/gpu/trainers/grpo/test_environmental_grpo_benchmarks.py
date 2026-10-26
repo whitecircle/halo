@@ -268,7 +268,6 @@ def run_env_grpo_training(
             "num_generations": num_generations,
             "max_completion_length": max_completion_length,
             "beta": 0.01,
-            "fsdp": "",
             "reward_weights": [1.0],
             "gradient_checkpointing": True,
             "gradient_checkpointing_kwargs": {"use_reentrant": False},

@@ -31,12 +31,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.configs.parallelism_arguments import (
-    FORWARD_ROWS_PER_EXAMPLE_ATTR,
-    ParallelismArguments,
-    forward_rows_per_example,
-    parallelism_config_from_args,
-)
+from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.load_rules import reject_unsupported_model
@@ -269,8 +264,7 @@ def test_the_paired_row_count_multiplies_the_resolved_window_too():
 class _PairedTrainer(DistributedTrainerMixin):
     """Stands in for SMPO / DPO / the BT reward trainer: one concatenated chosen+rejected forward."""
 
-
-setattr(_PairedTrainer, FORWARD_ROWS_PER_EXAMPLE_ATTR, 2)
+    FORWARD_ROWS_PER_EXAMPLE = 2
 
 
 class _TrainingConfig:
@@ -337,7 +331,7 @@ def test_the_prologue_separates_a_null_max_length_from_an_absent_one():
 
 # Rows one model call carries per dataset example. Not derivable — it is a fact about each trainer's
 # own forward — so every trainer on the derived roster states its count here, and one that states
-# nothing fails rather than silently inheriting the 1 that ``forward_rows_per_example`` defaults to.
+# nothing fails rather than silently inheriting the base's ``FORWARD_ROWS_PER_EXAMPLE = 1``.
 _ROWS_PER_EXAMPLE: dict[str, int] = {
     # One concatenated forward over the chosen|rejected pair: twice the rows in one model call.
     "SmoothMarginPOTrainer": 2,
@@ -381,10 +375,10 @@ def test_every_trainer_states_the_rows_its_forward_carries(trainer):
     assert expected is not None, (
         f"{trainer.__name__} is on the trainer roster with no row count stated here. Read its forward: "
         f"one that scores two sequences in a single model call (torch.cat(..., dim=0)) must declare "
-        f"{FORWARD_ROWS_PER_EXAMPLE_ATTR} = 2 on the class, or the config-time EP dispatch gate judges "
+        f"FORWARD_ROWS_PER_EXAMPLE = 2 on the class, or the config-time EP dispatch gate judges "
         f"it on half its tokens. Record the value either way."
     )
-    assert forward_rows_per_example(trainer) == expected
+    assert expected == trainer.FORWARD_ROWS_PER_EXAMPLE
 
 
 def test_a_config_that_declares_no_router_width_is_not_guessed_at():

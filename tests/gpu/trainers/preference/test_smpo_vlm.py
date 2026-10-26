@@ -62,7 +62,6 @@ def run(ctx):
         max_prompt_length=512,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
 
     trainer = SmoothMarginPOTrainer(

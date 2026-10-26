@@ -9,15 +9,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Smooth Margin Preference Optimization (SMPO): reference-model-free preference optimization via a
-margin-based loss plus an optional SFT term. Supports EP/CP/TP (log-prob sums/counts aggregate across
-CP ranks) and PP (the chosen|rejected concat re-laid out as interleaved pairs; see
-``_pp_loss_adapter``).
+"""Smooth Margin Preference Optimization (SMPO): reference-free margin loss plus an optional SFT term.
 
-``is_vlm`` selects the data path: VLM mode takes raw message-list rows plus an ``images`` column,
-image processing in the collator, vision tensors riding the chosen|rejected concat row-major. Image
-tokens live only in the prompt region (labels ``-100``), so the loss math is untouched. VLM mode
-excludes ``padding_free``, CP and PP; a text run on a multimodal checkpoint keeps all three.
+EP/CP/TP (log-prob sums and counts aggregate across CP ranks) and PP (the chosen|rejected concat interleaved
+into pairs). ``is_vlm`` takes raw message rows plus an ``images`` column, processed in the collator; image
+tokens sit in the prompt (labels ``-100``). VLM mode excludes ``padding_free``, CP and PP.
 """
 
 from collections.abc import Callable
@@ -74,7 +70,6 @@ from src.models.segment_markers import (
 )
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.dataloader import split_rows_head, split_rows_mean
-from src.trainers.mixins.pp_gates import reject_pp_peft
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 from src.trainers.parallelism.pipeline_loss_adapter import (
     PipelineLossAdapter,
@@ -82,6 +77,7 @@ from src.trainers.parallelism.pipeline_loss_adapter import (
     rows_with_labels,
     split_pairs,
 )
+from src.trainers.parallelism.trainer_rules import reject_pp_peft
 
 logger = get_logger(__name__, log_level="info")
 
@@ -140,13 +136,13 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
     _tag_names = ["trl", "smpo", "smooth-margin-po"]
 
-    _supports_cp = True
+    SUPPORTS_CP = True
     # Reference-free single forward; correct once the concat is interleaved so no pair splits.
-    _supports_pp = True
+    PP_REFUSAL = None
     # The objective is already its own mean, so HF's num_items_in_batch rescaling must stay off.
     _loss_is_own_mean = True
     # chosen ⧺ rejected ride one forward, so every MoE layer sees twice the collator's rows.
-    _forward_rows_per_example = 2
+    FORWARD_ROWS_PER_EXAMPLE = 2
 
     def __init__(
         self,

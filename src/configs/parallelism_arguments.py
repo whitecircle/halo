@@ -13,10 +13,6 @@ from src.models.context_window import is_bounded_length
 if TYPE_CHECKING:
     from src.models.moe.expert_lora_spec import ExpertLoraSpec
 
-# Rows one model call carries per dataset example, declared on the trainer class. Absent means 1,
-# the multiplier for a trainer that does not concatenate.
-FORWARD_ROWS_PER_EXAMPLE_ATTR = "_forward_rows_per_example"
-
 
 @dataclass
 class ParallelismArguments(ValidatedConfig):
@@ -325,30 +321,18 @@ def same_name_arg_forwards(dist_args) -> tuple[str, ...]:
     return tuple(f.name for f in fields(ParallelismConfig) if f.init and hasattr(dist_args, f.name))
 
 
-def forward_rows_per_example(trainer_cls) -> int:
-    """Sequence rows one model call carries per dataset example, per ``trainer_cls``.
-
-    The preference and Bradley-Terry reward trainers score chosen and rejected in one concatenated
-    forward (``torch.cat([chosen, rejected], dim=0)``), so their MoE layers present twice the rows
-    ``per_device_train_batch_size`` names, and the DeepEP dispatch ceiling is judged against that.
-    A trainer that declares nothing runs one row per example.
-    """
-    return max(1, int(getattr(trainer_cls, FORWARD_ROWS_PER_EXAMPLE_ATTR, 1) or 1))
-
-
 def parallelism_config_from_args(
     dist_args,
     *,
     trainer_cls,
     training_config=None,
-    allow_low_precision: bool = False,
     supports_init_from_scratch: bool = False,
     expert_lora: "ExpertLoraSpec | None" = None,
 ) -> ParallelismConfig:
     """The :class:`ParallelismConfig` parsed ``ParallelismArguments`` describe, for ``trainer_cls``'s script.
 
     Refuses here, before any model loads, what the trainer would refuse only after: a CP/PP size its
-    ``_supports_cp`` / ``_supports_pp`` gate rejects, ``lowp_*`` knobs without ``allow_low_precision`` (SFT only),
+    ``SUPPORTS_CP`` / ``PP_REFUSAL`` gate rejects, ``lowp_*`` knobs without ``SUPPORTS_LOWP_PRECISION`` (SFT only),
     ``init_from_scratch`` without ``supports_init_from_scratch``, and ``training_config.full_determinism`` on an
     EP group spanning NVLink domains. ``training_config`` also declares the per-rank token budget the DeepEP
     dispatch-ceiling gate judges (no ``max_length`` field leaves it off). ``expert_lora`` must be passed here, not
@@ -356,7 +340,7 @@ def parallelism_config_from_args(
     caches the ``EPConfig`` it builds.
     """
     lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
-    if not allow_low_precision:
+    if not trainer_cls.SUPPORTS_LOWP_PRECISION:
         if lowp.precision != "bf16":
             raise ValueError(
                 f"lowp_precision={lowp.precision!r} is only validated for SFT training; this "
@@ -377,13 +361,13 @@ def parallelism_config_from_args(
             "this script would silently ignore it and train pretrained weights."
         )
 
-    if not trainer_cls._supports_cp and dist_args.context_parallel_size > 1:
+    if not trainer_cls.SUPPORTS_CP and dist_args.context_parallel_size > 1:
         raise ValueError(
             f"{trainer_cls.__name__} does not support Context Parallelism (CP). Use Expert Parallelism "
             "(EP) and/or Tensor Parallelism (TP) instead, or remove --context_parallel_size."
         )
 
-    if not trainer_cls._supports_pp and dist_args.pipeline_parallel_size > 1:
+    if trainer_cls.PP_REFUSAL is not None and dist_args.pipeline_parallel_size > 1:
         raise ValueError(
             f"{trainer_cls.__name__} does not support Pipeline Parallelism (PP). Use Expert Parallelism "
             "(EP) and/or Tensor Parallelism (TP) instead, or remove --pipeline_parallel_size."
@@ -406,8 +390,7 @@ def parallelism_config_from_args(
         # ``max_length: null`` declares its rows and leaves the length to the gate's context-window
         # resolution unless a bounded prompt + completion budget caps each row.
         ep_rows_per_device=(
-            forward_rows_per_example(trainer_cls)
-            * int(getattr(training_config, "per_device_train_batch_size", 0) or 0)
+            trainer_cls.FORWARD_ROWS_PER_EXAMPLE * int(getattr(training_config, "per_device_train_batch_size", 0) or 0)
             if hasattr(training_config, "max_length")
             else 0
         ),

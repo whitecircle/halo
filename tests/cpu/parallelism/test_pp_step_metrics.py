@@ -56,6 +56,8 @@ class _FakeChain:
 class _Stage(PipelineTrainerMixin):
     """One pipeline rank: the mixin's metric plumbing over a fake adapter and a metric store."""
 
+    FORWARD_ROWS_PER_EXAMPLE = 1
+
     def __init__(self, metrics_fn, is_last: bool):
         self._pp_adapter = PipelineLossAdapter(token_loss_fn=causal_lm_token_loss, metrics_fn=metrics_fn)
         self._is_last = is_last
@@ -169,7 +171,7 @@ class _Runtime:
 
 
 class _PairedStage(_Stage):
-    _forward_rows_per_example = 2
+    FORWARD_ROWS_PER_EXAMPLE = 2
 
 
 def _eval_stage(real_examples: int, compute_metrics=None, pairs: int = 2) -> _Stage:

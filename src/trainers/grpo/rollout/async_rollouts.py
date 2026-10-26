@@ -1,10 +1,8 @@
 """Async rollout plumbing for environmental GRPO: Ray actors, the prefetch thread, and weight sync.
 
-Rollouts are collected by Ray actors against the rollout servers while the trainer steps; a
-background prefetch thread overlaps the next round's collection with this round's update, and the
-trained weights are pushed back to the engines over NCCL between steps. The prefetch trains each
-round's prompts one round late, so a checkpoint carries the rounds submitted but not yet trained and
-a resume submits them again first.
+A background prefetch thread collects the next round from the rollout servers while this round trains, and
+weights go back to the engines over NCCL between steps. Each round trains one round late, so a checkpoint
+carries the submitted-but-untrained rounds and a resume submits them again first.
 """
 
 import asyncio

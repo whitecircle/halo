@@ -126,7 +126,6 @@ def phase1_train_and_save(
             max_prompt_length=MAX_PROMPT_LENGTH,
             max_completion_length=MAX_COMPLETION_LENGTH,
             dataloader_drop_last=True,
-            fsdp="",
         )
 
         trainer = OfflineGRPOTrainer(
@@ -242,7 +241,6 @@ def phase2_resume_and_train(
             max_prompt_length=MAX_PROMPT_LENGTH,
             max_completion_length=MAX_COMPLETION_LENGTH,
             dataloader_drop_last=True,
-            fsdp="",
         )
 
         trainer = OfflineGRPOTrainer(

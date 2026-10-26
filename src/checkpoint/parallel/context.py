@@ -61,7 +61,7 @@ class CheckpointContext:
             toolkit_fsdp2=trainer._fsdp_wrapped and not trainer._accelerate_manages_fsdp,
             accelerate_manages_fsdp=trainer._accelerate_manages_fsdp,
             is_save_rank=is_fs_save_rank(),
-            max_shard_size=getattr(trainer.args, "save_max_shard_size", None) or DEFAULT_MAX_SHARD_SIZE,
+            max_shard_size=trainer.save_max_shard_size or DEFAULT_MAX_SHARD_SIZE,
             save_sharded_ep=trainer.save_sharded_ep,
             has_expert_lora=has_ep_lora(model),
             cp_wrapper=trainer._find_cp_wrapper(),

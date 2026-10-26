@@ -171,7 +171,6 @@ def main() -> int:
             dataloader_drop_last=True,
             dataloader_num_workers=0,
             ddp_find_unused_parameters=False,
-            fsdp="",
             include_num_input_tokens_seen=True,
         )
 

@@ -87,12 +87,6 @@ _NOT_REFERENCES = {
     # A page the release check plants in its scratch copy of the docs.
     "tests/cpu/config/test_release_version_in_sync.py": {"human-docs/planted.md"},
 }
-# Imports through a re-export in a sensitive path (.github/sensitive-paths), which changes only under its own
-# approval, by file.
-_SENSITIVE_REEXPORT_IMPORTS = {
-    "src/trainers/grpo/environmental.py": {"src.environments.engine_wire.SGLANG_BACKEND"},
-    "src/trainers/grpo/rollout/trajectory_tokenize.py": {"src.environments.engine_wire.VLLM_BACKEND"},
-}
 
 _FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 _INDEX = RepoIndex(REPO_ROOT)
@@ -358,18 +352,17 @@ def test_the_sweep_sees_every_kind_of_reference():
 @pytest.mark.parametrize("path", _FILES, ids=lambda path: str(path.relative_to(REPO_ROOT)))
 def test_every_reference_resolves(path):
     file = str(path.relative_to(REPO_ROOT))
-    exempt = _NOT_REFERENCES.get(file, set()) | _SENSITIVE_REEXPORT_IMPORTS.get(file, set())
+    exempt = _NOT_REFERENCES.get(file, set())
     unresolved = [finding for finding in _findings(path) if finding.why and finding.text not in exempt]
     assert not unresolved, "\n".join(
         f"{file}:{finding.line}: {finding.kind} {finding.text} — {finding.why}" for finding in unresolved
     )
 
 
-@pytest.mark.parametrize("exemptions", [_NOT_REFERENCES, _SENSITIVE_REEXPORT_IMPORTS], ids=["named", "re-export"])
-def test_every_exemption_is_still_needed(exemptions):
+def test_every_exemption_is_still_needed():
     removable = [
         f"{file}: {text}"
-        for file, texts in exemptions.items()
+        for file, texts in _NOT_REFERENCES.items()
         for text in sorted(texts - {finding.text for finding in _findings(REPO_ROOT / file) if finding.why})
     ]
     assert not removable, f"exempted text that no longer fails; drop it from the exemptions: {removable}"

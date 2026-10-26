@@ -160,8 +160,6 @@ class EPSftRoundTrip:
             dataloader_num_workers=0,
             dataloader_drop_last=True,
             remove_unused_columns=False,
-            fsdp="",
-            ddp_find_unused_parameters=True,
         )
         # A trainer built bare never enables balancing; the scripts' ``configure_balancing_and_build_callbacks`` does.
         context = ScriptContext(pc, ctx.local_rank, None, base_dir, DistributedSFTTrainer)

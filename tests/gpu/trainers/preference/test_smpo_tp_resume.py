@@ -122,7 +122,6 @@ def phase1_train_and_save(
             max_length=MAX_LENGTH,
             max_prompt_length=MAX_PROMPT_LENGTH,
             dataloader_drop_last=True,
-            fsdp="",
         )
 
         trainer = SmoothMarginPOTrainer(
@@ -234,7 +233,6 @@ def phase2_resume_and_train(
             max_length=MAX_LENGTH,
             max_prompt_length=MAX_PROMPT_LENGTH,
             dataloader_drop_last=True,
-            fsdp="",
         )
 
         trainer = SmoothMarginPOTrainer(

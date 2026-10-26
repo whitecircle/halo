@@ -1,9 +1,8 @@
 """Early stop for a GRPO run whose policy has left its healthy regime (:class:`EarlyStopConfig`).
 
-A KL-free policy drifts slowly before it fails: entropy leaves its band, the trainer-vs-sampler log-prob
-gap widens with it, and the trust-region breaker ends up skipping every update. Each condition counts
-its breaching readings in a row; once one reaches ``patience`` training ends there, without saving or
-evaluating that step, so the run keeps only the periodic checkpoints taken before it.
+Each condition (entropy band, trainer-vs-sampler log-prob gap, trust-region skips) counts its breaching
+readings in a row; once one reaches ``patience`` training ends there, without saving or evaluating that
+step, so the run keeps only the periodic checkpoints taken before it.
 """
 
 from accelerate.logging import get_logger

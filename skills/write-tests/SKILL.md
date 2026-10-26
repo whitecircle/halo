@@ -127,7 +127,7 @@ Open `matrix.md` and tick off the trainer × parallelism cells the change touche
 `ep_vs_fsdp` baseline for any new MoE family, and **every required rejection test**. The allowlist
 is `SUPPORTED_AXIS_SETS` — plain DP, each axis alone (EP/ETP/TP/CP/PP), EP+TP, EP+CP, EP+ETP, PP+EP,
 PP+ETP; everything else must raise, including TP+CP, TP+ETP, EP+TP+ETP, ETP+CP, and every PP pairing
-outside the expert axes (PP+TP, PP+CP, PP+EP+TP, PP+EP+CP, PP+EP+ETP). Also: QLoRA+EP/TP, LoRA+TP, and `_supports_cp=False` / `_supports_pp=False` trainers
+outside the expert axes (PP+TP, PP+CP, PP+EP+TP, PP+EP+CP, PP+EP+ETP). Also: QLoRA+EP/TP, LoRA+TP, and `SUPPORTS_CP = False` / PP-refusing (`PP_REFUSAL` set) trainers
 rejecting `cp_size>1` / `pp_size>1` at init. A support-matrix change isn't done until its rejection
 counterpart exists.
 

@@ -9,19 +9,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Distributed Reward Trainer with EP/TP/PP support (CP excluded).
+"""Distributed Bradley-Terry reward trainer: EP, TP and PP; CP unsupported (pooling needs the whole sequence).
 
-CP is incompatible: reward models pool over the complete sequence, which CP's
-per-rank sequence split cannot provide without a full gather. PP is compatible:
-the whole sequence lives on the last stage, so the pooled Bradley-Terry loss is
-a valid last-stage function once the chosen/rejected pairs are interleaved so no
-microbatch split can separate them.
-
-A VLM run (the processor is the ``processing_class``) swaps TRL's text tokenize map and preference
-collator for the vision pair — the map in :mod:`src.data.pipeline.preferences`, the collator in
-:mod:`src.data.collators.vlm_preference`. Everything downstream of the batch is modality-blind:
-image placeholder ids are ordinary content tokens to the pad-keyed pooling rule.
+Under PP the whole sequence lives on the last stage, so the pooled loss is a last-stage function once the
+pairs are interleaved. A VLM run swaps TRL's tokenize map and collator for the vision pair
+(:mod:`src.data.pipeline.preferences`, :mod:`src.data.collators.vlm_preference`).
 """
 
 import torch
@@ -90,9 +82,9 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
 
     _tag_names = ["trl", "reward"]
 
-    _supports_pp = True
+    PP_REFUSAL = None
     # The BT pair scores in one forward that is chunked in two, so a MoE layer sees twice the rows.
-    _forward_rows_per_example = 2
+    FORWARD_ROWS_PER_EXAMPLE = 2
 
     _pp_pool_pad_id: int | None = None
     _pp_use_margins: bool = False

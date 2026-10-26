@@ -121,7 +121,6 @@ def run(ctx) -> dict:
         dataloader_drop_last=True,
         remove_unused_columns=False,
         dataloader_num_workers=0,
-        fsdp="",
     )
     trainer = DistributedSFTTrainer(
         model=model,

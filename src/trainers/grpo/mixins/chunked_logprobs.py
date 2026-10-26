@@ -1,13 +1,8 @@
 """Chunked per-token log-probs for GRPO, without materializing the full ``[B, T, vocab]`` logits.
 
-TRL computes log-probs from full logits, which is the binding memory peak for large-vocab models.
-This computes the same log-probs from the backbone's ``last_hidden_state`` via a dual-chunked
-(sequence × vocab) matmul and online softmax with a recompute backward, bounding peak memory by the
-tile size, applying the family's verified head transform (:mod:`src.models.head_transform`) on the
-way. TRL's ``_compute_loss`` runs unchanged on the resulting ``(B, T)`` log-probs. Works under
-FSDP2 (``lm_head`` gathered differentiably with ``full_tensor``), ep1/EP (``lm_head`` dense), and TP
-(a replicated head; a gathered-output TP plan takes the full-logits path with the head's output
-cloned — ``_writable_logits``).
+The log-probs come from the backbone's ``last_hidden_state`` through a dual-chunked (sequence × vocab)
+matmul with online softmax and a recompute backward, applying the family's verified head transform
+(:mod:`src.models.head_transform`); TRL's ``_compute_loss`` runs unchanged on the ``(B, T)`` result.
 """
 
 import inspect

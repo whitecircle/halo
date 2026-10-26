@@ -22,7 +22,6 @@ from trl import SFTConfig
 from src.data.collators.factory import select_data_collator
 from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints.script import apply_distributed_trainer_config
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
 from src.trainers.sft import DistributedSFTTrainer
@@ -114,7 +113,6 @@ def run_sft_mode(ctx, suite: SFTSuite, key: str, mode: SFTMode, tokenizer) -> di
     if suite.evaluate:
         sft_args |= {"eval_strategy": "steps", "eval_steps": max_steps}
     config = SFTConfig(output_dir=os.path.join(ctx.output_dir, key), **sft_args)
-    apply_distributed_trainer_config(config, parallelism_config)
     # CP splits every batch across ranks, so each has to pad to a multiple of cp_size; the production
     # script builds the same collator through this factory.
     data_collator = (

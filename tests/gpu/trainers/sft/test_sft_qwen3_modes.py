@@ -211,7 +211,6 @@ def run(ctx) -> dict:
         "max_length": MAX_SEQ_LENGTH,
         "packing": True,
         "dataloader_drop_last": True,
-        "fsdp": "",  # Mixin handles FSDP wrapping
     }
 
     # ── Test 1: Full Fine-Tune ──────────────────────────────────────────

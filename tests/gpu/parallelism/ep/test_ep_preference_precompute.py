@@ -151,8 +151,6 @@ def build_args(kind: str, output_dir: str):
         "gradient_checkpointing": False,
         "precompute_ref_log_probs": True,
         "dataloader_num_workers": 0,
-        "ddp_find_unused_parameters": True,  # EP leaves inactive experts gradient-free
-        "fsdp": "",  # the mixin owns FSDP wrapping
     }
     _, config_cls = TRAINERS[kind]
     return config_cls(max_length=MAX_LENGTH, **common)

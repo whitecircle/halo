@@ -137,7 +137,6 @@ def run_lora_cp(
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            fsdp="",
         )
 
         trainer = DistributedSFTTrainer(
@@ -264,7 +263,6 @@ def run_qlora_cp(
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            fsdp="",
         )
 
         trainer = DistributedSFTTrainer(
@@ -376,7 +374,6 @@ def run_lora_cp_resume(
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            fsdp="",
         )
         trainer = DistributedSFTTrainer(
             model=model,

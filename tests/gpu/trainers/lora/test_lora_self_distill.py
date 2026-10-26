@@ -116,8 +116,6 @@ def run(ctx) -> dict:
         dataloader_num_workers=0,
         remove_unused_columns=False,
         dataset_kwargs={"skip_prepare_dataset": True},
-        fsdp="",
-        ddp_find_unused_parameters=parallelism_config.has_ep_group,
     )
     trainer = DistributedSelfDistillationTrainer(
         model,

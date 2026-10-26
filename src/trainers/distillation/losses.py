@@ -1,16 +1,8 @@
-"""The distillation objectives of all three trainers (teacher, self-distillation, SDPG) and the primitives
-they build on: one divergence registry, the token reductions, and the SDPG beta schedule (arXiv:2606.04036).
+"""The distillation objectives of the teacher, self-distillation and SDPG trainers (arXiv:2606.04036).
 
-A divergence takes ``(student_logits, teacher_logits)`` plus whichever of ``temperature`` /
-``hard_labels`` its signature declares (:func:`call_divergence` dispatches on it) and returns an
-un-reduced per-(token, vocab) or per-token tensor, reduced by :func:`masked_token_mean` (per-sample
-means, the OPD arms) or :func:`global_token_mean` (one batch mean, the teacher arm). Each arm's
-config ``Literal`` admits its own names from :data:`DIVERGENCES`; the OPD arms default to the reverse
-KL ``D_KL(p || SG[q])``, the teacher arm to the forward KL under its own name, ``kl_divergence``.
-
-Every divergence evaluates in fp32: the logits arrive bf16 and these objectives subtract nearly equal
-quantities (``log p - log q``, ``1 - cos``), where bf16 cancellation can flip the sign of a
-non-negative divergence.
+One divergence registry (:data:`DIVERGENCES`, dispatched by :func:`call_divergence` on the signature),
+the token reductions (:func:`masked_token_mean`, :func:`global_token_mean`) and the SDPG beta schedule.
+Every divergence evaluates in fp32: bf16 cancellation in ``log p - log q`` can flip a divergence's sign.
 """
 
 import inspect

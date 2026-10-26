@@ -13,6 +13,7 @@ Run: pytest tests/cpu/trainers/test_embedding_save_routing.py
 """
 
 import contextlib
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -60,13 +61,14 @@ def _host(*, has_lora: bool = False, is_save_rank: bool = True, max_shard_size: 
     host = object.__new__(EmbeddingTrainer)
     host.parallelism_config = _ParallelismStub()
     host.model = top
-    host.args = _ArgsStub(max_shard_size)
+    host.args = SimpleNamespace()
+    host.save_max_shard_size = max_shard_size
     host.processing_class = _TokenizerStub()
     host._fsdp_wrapped = True
     host._accelerate_manages_fsdp = False
     host.save_sharded_ep = False
     host._top_level_model = lambda: top
-    host._get_unwrapped_model = lambda: backbone
+    host._backbone_model = lambda: backbone
     host._get_tp_rank = lambda: 0
     host._find_cp_wrapper = lambda: None
     host._is_save_rank = is_save_rank
@@ -80,11 +82,6 @@ class _ParallelismStub:
     has_ep_group = False
     tp_size = 1
     merge_expert_lora_on_save = False
-
-
-class _ArgsStub:
-    def __init__(self, max_shard_size):
-        self.save_max_shard_size = max_shard_size
 
 
 class _TokenizerStub:

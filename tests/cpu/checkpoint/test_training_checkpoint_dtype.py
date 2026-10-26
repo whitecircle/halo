@@ -207,6 +207,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
         self._fsdp_wrapped = False
         self._accelerate_manages_fsdp = False
         self.save_sharded_ep = False
+        self.save_max_shard_size = None
         self.lr_scheduler = None
         self.saves: list[bool] = []
 

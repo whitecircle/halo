@@ -125,7 +125,6 @@ def gather_is_full(reshard, tokenizer, local_rank, output_dir):
         max_length=SEQ_LEN,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
     ds = create_sft_dataset(num_samples=8, tokenizer=tokenizer, seed=SEED)
     trainer = DistributedSFTTrainer(

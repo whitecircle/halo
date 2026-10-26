@@ -1,9 +1,8 @@
 """The pieces every distributed gradient-clip path shares: argument normalization, the L2 gate, the
 enable predicate, and the clip coefficient.
 
-Imports nothing from the trainer package, so both the mixin's EP/TP clips and the pipeline mixin's
-whole-chain clip can use it. Each path reduces its own global norm (the collectives differ per
-topology); the local accumulation under them is shared.
+Free of trainer imports so the EP/TP clips and the pipeline's whole-chain clip both use it; each path
+reduces its own global norm.
 """
 
 from __future__ import annotations

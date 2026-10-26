@@ -4,7 +4,7 @@
 ``agent-docs/parallelism/*`` and ``agent-docs/reference/trainer-architecture.md`` publish three matrices a
 reader configures a run from: which axis combinations may run, which trainer supports which axis,
 and which MoE family restricts an EP capability. All three are *derived* in the code — from
-:data:`SUPPORTED_AXIS_SETS`, from the per-class ``_supports_cp`` / ``_supports_pp``, and from the EP layer
+:data:`SUPPORTED_AXIS_SETS`, from the per-class ``SUPPORTS_CP`` / ``PP_REFUSAL``, and from the EP layer
 classes' capability flags — so a published table is a second copy, free to drift from the gate it
 describes. Drift here is expensive: a wrong row sends a reader into a config-time raise, or promises
 a mode the trainer refuses, after the GPUs are allocated.
@@ -32,9 +32,9 @@ _PARALLELISM_INDEX = REPO_ROOT / "agent-docs" / "parallelism" / "README.md"
 _EXPERT_PARALLELISM = REPO_ROOT / "agent-docs" / "parallelism" / "expert-parallelism.md"
 _TRAINER_ARCHITECTURE = REPO_ROOT / "agent-docs" / "reference" / "trainer-architecture.md"
 
-# Doc column header -> the class attribute that decides it. EP, ETP and TP run under every trainer,
-# so the matrix carries the two axes a trainer declares.
-_TRAINER_AXIS_ATTRS = {"CP": "_supports_cp", "PP": "_supports_pp"}
+# Doc column header -> whether the class declaration admits that axis. EP, ETP and TP run under every
+# trainer, so the matrix carries the two axes a trainer declares.
+_TRAINER_AXIS_SUPPORT = {"CP": lambda cls: cls.SUPPORTS_CP, "PP": lambda cls: cls.PP_REFUSAL is None}
 
 # EP capability flags that default True on EPMoELayerBase, so a False IS the documented restriction.
 # DERIVED from the base class, never listed: a flag restated here is a second copy of the class's own
@@ -169,10 +169,10 @@ def test_supported_combinations_table_matches_the_allowlist():
 def test_trainer_compatibility_table_matches_the_support_flags():
     """Every cell of the trainer × axis matrix must equal the class attribute the mixin reads.
 
-    ``ParallelismValidationMixin`` raises off ``_supports_cp`` / ``_supports_pp``; a doc cell that
+    ``ParallelismValidationMixin`` raises off ``SUPPORTS_CP`` / ``PP_REFUSAL``; a doc cell that
     disagrees promises (or denies) a mode the trainer will refuse (or accept) at construction.
     """
-    rows = _table_with_headers(_TRAINER_ARCHITECTURE, "Trainer", *_TRAINER_AXIS_ATTRS)
+    rows = _table_with_headers(_TRAINER_ARCHITECTURE, "Trainer", *_TRAINER_AXIS_SUPPORT)
     classes = {cls.__name__: cls for cls in distributed_trainer_classes()}
 
     documented = {_plain(row["Trainer"]) for row in rows}
@@ -184,10 +184,11 @@ def test_trainer_compatibility_table_matches_the_support_flags():
     for row in rows:
         name = _plain(row["Trainer"])
         cls = classes[name]
-        for column, attr in _TRAINER_AXIS_ATTRS.items():
+        for column, supports in _TRAINER_AXIS_SUPPORT.items():
             documented_support = _plain(row[column]).lower().startswith("yes")
-            assert documented_support == getattr(cls, attr), (
-                f"{name} row, {column} column: docs say {row[column]!r} but {attr}={getattr(cls, attr)!r}"
+            assert documented_support == supports(cls), (
+                f"{name} row, {column} column: docs say {row[column]!r} but the class "
+                f"{'admits' if supports(cls) else 'refuses'} {column}"
             )
 
 

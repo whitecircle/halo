@@ -2,7 +2,7 @@
 """Context Parallelism is declare-to-enable per trainer, and the declaration is the whole gate.
 
 Nothing inspects a trainer's loss for CP-safety: ``_validate_parallelism_modes`` reads only the
-``_supports_cp`` class attribute (off on ``DistributedTrainerMixin``) before a ``cp_size > 1`` run
+``SUPPORTS_CP`` class attribute (off on ``DistributedTrainerMixin``) before a ``cp_size > 1`` run
 starts. A flag switched on for a trainer whose objective has not been verified under sequence
 chunking trains silently wrong (a sequence log-prob pooled over one chunk, say), so the CP set is
 pinned here, and each trainer's own resolved validator is driven with a CP config: every other
@@ -45,14 +45,14 @@ def test_the_derived_roster_covers_every_trainer():
 
 def test_the_mixin_default_is_off():
     """Declare-to-enable: a trainer that never considered CP must not inherit it."""
-    assert DistributedTrainerMixin._supports_cp is False
+    assert DistributedTrainerMixin.SUPPORTS_CP is False
 
 
 @pytest.mark.parametrize("trainer_cls", TRAINERS, ids=lambda cls: cls.__name__)
 def test_cp_support_is_exactly_the_verified_set(trainer_cls):
     expected = trainer_cls.__name__ in CP_TRAINERS
-    assert trainer_cls._supports_cp is expected, (
-        f"{trainer_cls.__name__}._supports_cp is {trainer_cls._supports_cp!r}, expected {expected}: enabling CP "
+    assert trainer_cls.SUPPORTS_CP is expected, (
+        f"{trainer_cls.__name__}.SUPPORTS_CP is {trainer_cls.SUPPORTS_CP!r}, expected {expected}: enabling CP "
         f"needs the objective verified under sequence chunking and this pin updated with it"
     )
 

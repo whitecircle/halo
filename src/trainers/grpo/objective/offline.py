@@ -1,14 +1,8 @@
 """The offline-GRPO objective, shared by the non-PP loss, its pipeline counterpart and CP scoring.
 
-Pure tensor math over the completion log-probs of one batch or pipeline microbatch, as complete rows
-or as one rank's CP token shard of them: the negative-advantage ``min_log_prob`` floor applied to the
-policy and the reference, the policy term, the capped k3 KL against the reference, the per-token
-quantities buffered as diagnostics, and the loss type's reduction. The reduction comes in two halves
-because the pipeline divides once per step: :func:`offline_loss_numerator` is row-local, so
-microbatch numerators sum to the batch's, and :func:`offline_loss_normalizer` reads batch metadata
-alone. Under CP the numerator sums its partials across the shards first, and each row's complete
-token count comes from the replicated full-row labels rather than a collective. :func:`offline_loss`
-is their quotient.
+Pure tensor math over one batch, pipeline microbatch or CP token shard. The reduction splits because the
+pipeline divides once per step: :func:`offline_loss_numerator` is row-local (microbatch numerators sum to
+the batch's), :func:`offline_loss_normalizer` reads batch metadata alone, :func:`offline_loss` divides.
 """
 
 from __future__ import annotations

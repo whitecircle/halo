@@ -104,8 +104,6 @@ def run_full_ft(parallelism_config, tokenizer, train_dataset, eval_dataset, outp
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=True,  # Required for EP (inactive experts)
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
     trainer = DistributedSFTTrainer(
@@ -173,8 +171,6 @@ def run_lora(parallelism_config, tokenizer, train_dataset, eval_dataset, output_
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=True,
-        fsdp="",
     )
 
     trainer = DistributedSFTTrainer(

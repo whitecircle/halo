@@ -71,7 +71,6 @@ def run(ctx):
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",  # Mixin handles FSDP wrapping
     )
     parallelism_config = ParallelismConfig()
 

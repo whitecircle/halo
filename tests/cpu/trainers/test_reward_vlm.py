@@ -367,7 +367,7 @@ def test_the_checkpoint_context_hands_the_processor_to_the_save():
     trainer._fsdp_wrapped = False
     trainer._accelerate_manages_fsdp = False
     trainer.save_sharded_ep = False
-    trainer.args = SimpleNamespace(save_max_shard_size=None)
+    trainer.save_max_shard_size = None
 
     with (
         mock.patch.object(DistributedRewardTrainer, "_has_ep_layers", False),
@@ -473,7 +473,7 @@ def test_pipeline_parallelism_refuses_a_multimodal_reward_run_fed_images():
 
 def test_reward_trainer_declares_no_context_parallel_support():
     """CP would split the sequence the score head pools; the declaration IS the gate."""
-    assert DistributedRewardTrainer._supports_cp is False
+    assert DistributedRewardTrainer.SUPPORTS_CP is False
 
 
 if __name__ == "__main__":

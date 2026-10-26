@@ -1,16 +1,8 @@
 """fp32 sequence log-probs on TRL's DPO and KTO loss and reference paths.
 
-Outside Liger, TRL scores every sequence through ``selective_log_softmax``, whose bf16 branch returns
-bf16 per-token log-probs that TRL then sums into a bf16 sequence log-prob: at ``|logp|`` in [8192,
-16384) the bf16 grid is 64 nats, so a DPO margin carries tens of nats of rounding. That path runs
-wherever TRL's fused Liger loss does not: every KTO run, and every DPO run except an unsharded one
-whose model was loaded with Liger's fused linear cross-entropy. :class:`FP32LogprobsMixin` rebinds
-that name, for the duration of TRL's call, to the fp32 chunked
-:func:`~src.kernels.logprobs.selective_logprobs`, so TRL's own code downstream — the
-``[chosen ⧺ rejected]`` split, the completion masks, ``ld_alpha``'s shared/tail sums, the WPO
-weights' log-prob term, KTO's KL term and the ``logps/*`` / ``rewards/*`` metrics — reads fp32
-values. What TRL computes from the logits directly (the ``sft`` loss type's cross-entropy, WPO's
-normalizer, the entropy and logit metrics) keeps TRL's precision.
+Outside Liger, TRL sums bf16 per-token log-probs into a bf16 sequence log-prob (64-nat grid at |logp| ≥ 8192).
+:class:`FP32LogprobsMixin` rebinds ``selective_log_softmax`` for the duration of TRL's call to the fp32 chunked
+:func:`~src.kernels.logprobs.selective_logprobs`; what TRL computes from the logits directly keeps its precision.
 """
 
 from collections.abc import Callable, Iterator

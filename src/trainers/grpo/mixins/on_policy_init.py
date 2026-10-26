@@ -1,10 +1,8 @@
 """Construction spine shared by the on-policy GRPO trainers (online RLVR and environmental).
 
-Both constructors open the same way (resolve a config that may have arrived positionally, disable
-TRL's Liger GRPO loss, extract the distributed kwargs), run TRL's constructor with the frozen KL
-reference handed in, and close the same way: realize the parallel modes, gate the reference model and
-the chunked sweep's head path, gate and wire weight sync, then disable dropout. The closing order is
-load-bearing, so it is defined here rather than in each constructor.
+Both constructors open the same way (resolve the config, disable TRL's Liger GRPO loss, extract the
+distributed kwargs) and close the same way (parallel modes, reference and head-path gates, weight-sync
+wiring, then dropout off); the closing order is load-bearing, so it lives here.
 """
 
 import contextlib
@@ -54,6 +52,8 @@ def _unread_reference(beta: float) -> ValueError:
 class OnPolicyGRPOInitMixin:
     """Open/close halves of an on-policy GRPO constructor. Mixed into the trainer."""
 
+    POLICY_GRADIENT_LOSS = True
+    SYNCS_TO_EXTERNAL_GENERATOR = True
     _reference_alternatives = ON_POLICY_GRPO_REFERENCE_ALTERNATIVES
 
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:

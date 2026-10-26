@@ -91,7 +91,7 @@ def _pc(**kwargs) -> ParallelismConfig:
 
 
 class _Validating(ParallelismValidationMixin):
-    _supports_cp = True
+    SUPPORTS_CP = True
 
     def __init__(self, pc: ParallelismConfig):
         self.parallelism_config = pc

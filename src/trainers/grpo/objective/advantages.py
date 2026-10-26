@@ -1,10 +1,8 @@
 """Group-relative advantages for GRPO: baseline, scaling, and the degenerate-group mask.
 
-Pure functions over a rank-local reward tensor: ``RepeatSampler`` keeps each prompt's completions
-together on one rank, so the baseline needs no cross-rank gather (except ``scale_rewards="batch"``,
-whose divisor must be identical on every rank, and the non-finite check, which every rank must agree
-on before any of them raises). Offline GRPO's stored groups take their advantages at tokenization
-instead, one group at a time (:func:`compute_group_advantages`).
+Pure functions over a rank-local reward tensor (``RepeatSampler`` keeps a prompt's completions on one
+rank); only ``scale_rewards="batch"`` and the non-finite check agree across ranks. Offline GRPO's stored
+groups take theirs at tokenization, one group at a time (:func:`compute_group_advantages`).
 """
 
 from collections.abc import Callable

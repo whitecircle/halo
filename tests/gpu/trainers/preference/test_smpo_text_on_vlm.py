@@ -73,7 +73,6 @@ def run(ctx) -> dict:
         max_prompt_length=256,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
 
     # The text branch consumes what the script's prepare_preference_datasets emits: rendered

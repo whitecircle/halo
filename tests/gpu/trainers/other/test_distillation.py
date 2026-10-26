@@ -225,7 +225,6 @@ def run(ctx):
         train_sampling_strategy="sequential",
         dataset_num_proc=1,
         dataloader_num_workers=0,
-        fsdp="",  # the mixin owns FSDP wrapping
         distill_loss="kl_divergence",
         distill_temperature=TEMPERATURE,
         distill_alpha=ALPHA,

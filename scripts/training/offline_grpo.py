@@ -29,7 +29,6 @@ from src.entrypoints.model_setup import (
 )
 from src.entrypoints.script import (
     ScriptContext,
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -221,10 +220,7 @@ def main():
         model,
         context,
         generate_callback=GenerateExamplesCallback.from_config(args, offline_grpo_config, generate_dataset, tokenizer),
-        policy_gradient_loss=True,
     )
-
-    apply_distributed_trainer_config(offline_grpo_config, parallelism_config)
 
     barrier()
 

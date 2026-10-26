@@ -31,7 +31,6 @@ from src.entrypoints.model_setup import (
     log_model_info,
 )
 from src.entrypoints.script import (
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -231,18 +230,10 @@ def main():
     )
 
     grpo_config.reward_weights = reward_weights
-    apply_distributed_trainer_config(grpo_config, parallelism_config)
 
     barrier()
 
-    callbacks = configure_balancing_and_build_callbacks(
-        args,
-        grpo_config,
-        model,
-        context,
-        policy_gradient_loss=True,
-        syncs_to_external_generator=True,
-    )
+    callbacks = configure_balancing_and_build_callbacks(args, grpo_config, model, context)
     trainer = trainer_cls(
         model=model,
         reward_funcs=reward_funcs,

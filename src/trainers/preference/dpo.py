@@ -9,19 +9,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Distributed DPO (Direct Preference Optimization) trainer: EP, TP, and PP.
+"""Distributed DPO trainer: EP, TP and PP; CP unsupported (the Bradley-Terry loss needs full-sequence sums).
 
-CP is unsupported: the chosen/rejected forward needs global log-prob sums over full
-sequences for the Bradley-Terry model, incompatible with sequence splitting.
-
-Under EP/TP the reference model is not parallelized — use PEFT/LoRA (ref_model=None)
-or precompute_ref_log_probs=True (then free the ref model).
-
-Under PP the trainer is precompute-only: ``ref_chosen_logps`` / ``ref_rejected_logps`` must already
-be dataset columns, since no pipeline rank holds a full model. The ``[chosen ⧺ rejected]`` concat is
-re-laid out as interleaved pairs so no microbatch split separates a pair, and only the per-pair loss
-types the PP last-stage loss re-implements are allowed (see ``_validate_pp_mode``).
+Under EP/TP the reference model is not parallelized: use PEFT/LoRA or ``precompute_ref_log_probs``. Under PP
+the trainer is precompute-only (``ref_chosen_logps`` / ``ref_rejected_logps`` as dataset columns), the
+``[chosen ⧺ rejected]`` concat is interleaved into pairs, and only the re-implemented loss types run.
 """
 
 from collections.abc import Callable
@@ -33,12 +25,6 @@ from trl import DPOTrainer
 from src.data.spans import completion_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
 from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.pp_gates import (
-    reject_pp_compute_metrics,
-    reject_pp_ref_model,
-    require_model_and_args_kwargs,
-    require_precomputed_reference,
-)
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
 from src.trainers.parallelism.pipeline_loss_adapter import (
@@ -47,6 +33,12 @@ from src.trainers.parallelism.pipeline_loss_adapter import (
     pair_count_normalizer,
     rows_with_labels,
     split_pairs,
+)
+from src.trainers.parallelism.trainer_rules import (
+    reject_pp_compute_metrics,
+    reject_pp_ref_model,
+    require_model_and_args_kwargs,
+    require_precomputed_reference,
 )
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
@@ -121,9 +113,9 @@ class DistributedDPOTrainer(
 
     _tag_names = ["trl", "dpo"]
 
-    _supports_pp = True
+    PP_REFUSAL = None
     # TRL concatenates chosen ⧺ rejected into one forward, so every MoE layer sees twice the rows.
-    _forward_rows_per_example = 2
+    FORWARD_ROWS_PER_EXAMPLE = 2
 
     def __init__(self, *args, **kwargs):
         config = kwargs.get("parallelism_config")

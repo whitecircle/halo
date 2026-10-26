@@ -16,8 +16,9 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/trainers/mixins/base.py` (DistributedTrainerMixin) | `agent-docs/reference/trainer-architecture.md` + every parallelism page under `agent-docs/parallelism/` |
-| `src/trainers/mixins/` (sub-mixins: checkpointing (save/resume orchestration), dataloader, EP introspection, grad sync/clip, validation, pipeline, reference_logps, stored_metrics; the pp_gates and loss_masks helpers) | `agent-docs/reference/trainer-architecture.md`; `agent-docs/reference/checkpoints.md` (checkpointing, the `reference_logps.pt` sidecar), `agent-docs/parallelism/pipeline-parallelism.md` (pipeline, pp_gates) |
+| `src/trainers/mixins/` (sub-mixins: checkpointing (save/resume orchestration), dataloader, EP introspection, grad sync/clip, validation, pipeline, reference_logps, stored_metrics; the loss_masks helpers) | `agent-docs/reference/trainer-architecture.md`; `agent-docs/reference/checkpoints.md` (checkpointing, the `reference_logps.pt` sidecar), `agent-docs/parallelism/pipeline-parallelism.md` (pipeline) |
 | `src/trainers/parallelism/pipeline_loss_adapter.py` (`PipelineLossAdapter`, the trainer's pipeline-loss contract, and the pair layout) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/trainer-architecture.md` |
+| `src/trainers/parallelism/trainer_rules.py` (the trainer-construction PP and CP refusals, incl. the named-optimizer one) | `agent-docs/parallelism/pipeline-parallelism.md`; `agent-docs/parallelism/context-parallelism.md`; `agent-docs/reference/trainer-architecture.md` |
 | `src/trainers/mixins/trl_dataset_prep.py` (CoordinatedTRLDatasetPrepMixin) | `agent-docs/data/filesystem-handling.md` (the coordination contract); `agent-docs/reference/trainer-architecture.md` (one line + link) |
 | `src/trainers/mixins/token_metrics.py` (loss-token accumulation, per-document attention work behind `bind_attention_work_source`) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/trainers/sft.py` | `agent-docs/training-methods/sft.md`, `agent-docs/training-methods/pretraining.md` |

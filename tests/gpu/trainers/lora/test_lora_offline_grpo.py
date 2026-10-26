@@ -80,8 +80,6 @@ def run(ctx) -> dict:
         max_prompt_length=512,
         max_completion_length=512,
         dataloader_drop_last=True,
-        fsdp="",
-        ddp_find_unused_parameters=parallelism_config.has_ep_group,
     )
     trainer = OfflineGRPOTrainer(
         model=model,

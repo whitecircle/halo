@@ -95,10 +95,10 @@ from src.trainers.grpo.reference_cache import MappedReferenceScores, ReferenceSc
 from src.trainers.grpo.reference_policy import reference_policy
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.dataloader import run_data_seed
-from src.trainers.mixins.pp_gates import reject_pp_compute_metrics, reject_pp_peft
 from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
 from src.trainers.mixins.validation import keep_all_dataset_columns
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, rows_with_labels
+from src.trainers.parallelism.trainer_rules import reject_pp_compute_metrics, reject_pp_peft
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -326,8 +326,9 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
 
     # Single-forward objective whose denominators come from batch metadata alone; the KL reference
     # is scored by the shared reference sweep before training.
-    _supports_pp = True
-    _supports_cp = True
+    PP_REFUSAL = None
+    SUPPORTS_CP = True
+    POLICY_GRADIENT_LOSS = True
     # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
     _loss_outside_model_forward = True
     # The objective divides by its own loss-type denominator, so the parent's grad-accum scaling stands.

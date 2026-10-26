@@ -9,15 +9,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""
-Distributed Classification Trainer (binary/multi-label) with EP/TP/PP support.
+"""Distributed binary/multi-label classification trainer: EP, TP and PP; CP unsupported (pooling).
 
-CP is incompatible: the classification head needs the full pooled representation
-from the complete sequence, which CP's per-rank sequence split cannot provide
-without a full gather. PP is compatible: the whole sequence lives on the last
-stage, so pooling and every per-example loss variant are valid last-stage
-functions; evaluation even keeps compute_metrics — the pooled ``[B, num_labels]``
-logits are small enough to broadcast down the pipeline chain.
+Under PP the whole sequence lives on the last stage, so pooling and every loss variant are last-stage functions,
+and evaluation keeps ``compute_metrics``: the pooled ``[B, num_labels]`` logits broadcast down the chain.
 """
 
 import logging
@@ -64,6 +59,7 @@ from src.data.pipeline.processing import (
 from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import current_device
 from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
+from src.runtime.ranks import has_process_group
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from src.trainers.reward.pooling import (
@@ -178,7 +174,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
 
     _tag_names = ["trl", "classification"]
 
-    _supports_pp = True
+    PP_REFUSAL = None
     # compute_loss returns the batch's own mean (per-replica; DP averages gradients).
     _loss_is_own_mean = True
 
@@ -446,7 +442,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         labels_array = np.asarray(train_dataset[label_column])
         counts = torch.from_numpy(np.bincount(labels_array)).to(torch.float64)
 
-        if dist.is_available() and dist.is_initialized():
+        if has_process_group():
             counts = counts.to(current_device())
             # Ranks can disagree on the local max label, so pad to a rank-uniform length first.
             length = torch.tensor(counts.numel(), dtype=torch.int64, device=counts.device)

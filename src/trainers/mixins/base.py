@@ -1,9 +1,7 @@
 """Distributed trainer mixin: the EP/CP/TP lifecycle spine of every distributed trainer.
 
-Subclass alongside a Trainer. The mixin creates the accelerator and sets up FSDP, so subclasses
-must not override ``create_accelerator_and_postprocess()``. The sibling sub-mixins (gradient sync
-and clipping, checkpointing, dataloaders, EP introspection, validation, pipeline) compose into the
-class below.
+Subclass alongside a Trainer; the mixin creates the accelerator and sets up FSDP, so subclasses must not
+override ``create_accelerator_and_postprocess()``. The sibling sub-mixins compose into the class below.
 """
 
 import logging
@@ -11,7 +9,7 @@ import os
 import time
 from collections.abc import Iterable
 from dataclasses import fields
-from typing import Any, NamedTuple
+from typing import Any, ClassVar, NamedTuple
 
 import torch
 import torch.distributed as dist
@@ -68,7 +66,13 @@ from src.optimizers.registry import (
 from src.runtime.collectives import barrier, collective_device, nccl_safe_broadcast
 from src.runtime.consensus import rank_consensus, reject_across_ranks
 from src.runtime.filesystem import is_output_shared_filesystem, verify_output_filesystem_sharing
-from src.runtime.ranks import get_global_rank, get_global_world_size, get_num_nodes, is_global_main_process
+from src.runtime.ranks import (
+    get_global_rank,
+    get_global_world_size,
+    get_num_nodes,
+    has_process_group,
+    is_global_main_process,
+)
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 from src.trainers.mixins.ep_introspection import (
@@ -220,21 +224,26 @@ class DistributedTrainerMixin(
 
     Lifecycle: subclasses call ``_init_distributed_config()`` to extract parallelism
     kwargs before ``super().__init__()``, then ``_setup_distributed_modes()`` after it,
-    and override ``_supports_cp`` / ``_supports_pp`` to enable those axes (EP, ETP and TP run under
-    every trainer).
+    and declare ``SUPPORTS_CP = True`` / ``PP_REFUSAL = None`` to enable those axes (EP, ETP and TP
+    run under every trainer).
 
     ``parallelism_config`` holds the resolved configuration; ``cp_config`` is set only when CP is
     enabled, ``_ep_config`` whenever the model carries EP layers.
     """
 
-    # CP/PP default off: both fail without an error — CP mis-pools log-probs, a PP stage holds only
-    # some layers.
-    _supports_cp: bool = False
-    # A subclass restates a flag only where it changes the default, except ``_supports_pp = False``,
-    # which every PP-refusing trainer keeps beside its paired ``_pp_unsupported_reason`` (the gate
-    # quotes that reason, so the two belong together).
-    _supports_pp: bool = False
-    _pp_unsupported_reason: str = ""
+    # Capabilities, also read off the class at config time. CP and PP stay off until declared because
+    # both fail silently (CP mis-pools log-probs, a PP stage holds some layers); None admits PP.
+    SUPPORTS_CP: ClassVar[bool] = False
+    PP_REFUSAL: ClassVar[str | None] = (
+        "a pipeline stage holds only a contiguous subset of the layers, so this trainer's "
+        "loss cannot be expressed as a last-stage function of logits and labels"
+    )
+    SUPPORTS_LOWP_PRECISION: ClassVar[bool] = False
+    # Sequence rows one model call carries per dataset example; the EP dispatch gate multiplies by it.
+    FORWARD_ROWS_PER_EXAMPLE: ClassVar[int] = 1
+    # The loss never adds the router aux loss (the GRPO family).
+    POLICY_GRADIENT_LOSS: ClassVar[bool] = False
+    SYNCS_TO_EXTERNAL_GENERATOR: ClassVar[bool] = False
     # True only where ``labels`` go through ``*ForCausalLM.forward`` and the aux term lands in ``outputs.loss``.
     _consumes_router_aux_loss: bool = False
     # True where the loss runs outside the model's forward with no labels passed (the GRPO family):
@@ -248,8 +257,8 @@ class DistributedTrainerMixin(
         """This trainer's pipeline-loss contract; overridden by trainers that enable PP.
 
         The default is the causal-LM contract (summed shifted CE, token-count normalizer), which is
-        what SFT needs. A trainer enabling ``_supports_pp`` with a different objective overrides
-        this to declare its loss, pair layout, batch transform, normalizer and per-example side
+        what SFT needs. A trainer supporting PP (``PP_REFUSAL = None``) with a different objective
+        overrides this to declare its loss, pair layout, batch transform, normalizer and per-example side
         tensors (see :class:`~src.trainers.parallelism.pipeline_loss_adapter.PipelineLossAdapter`).
         """
         return PipelineLossAdapter(token_loss_fn=causal_lm_token_loss)
@@ -285,6 +294,8 @@ class DistributedTrainerMixin(
         self.parallelism_config = parallelism_config
 
         self.save_sharded_ep = kwargs.pop("save_sharded_ep", False)
+        self.save_max_shard_size = kwargs.pop("save_max_shard_size", None)
+        self.allow_optimizer_warm_restart = kwargs.pop("allow_optimizer_warm_restart", False)
 
         # The PP split gate and _validate_router_aux_loss_consumable key raise-vs-warn off this value.
         self._moe_balancing = kwargs.pop("moe_balancing", "auto")
@@ -306,6 +317,10 @@ class DistributedTrainerMixin(
             # Every entry point, the Python API included; free after an entry script's own probe.
             verify_output_filesystem_sharing(training_args.output_dir)
             align_save_on_each_node(training_args)
+            # The mixin owns the sharding, and DDP must tolerate the EP layers' externally synced params.
+            training_args.fsdp = ""
+            if parallelism_config.has_ep_group:
+                training_args.ddp_find_unused_parameters = True
 
         # HF re-applies Liger at train() on the wrapped model, bypassing the load-time filtering and
         # running upstream's applier alone.
@@ -340,7 +355,7 @@ class DistributedTrainerMixin(
         self._accelerate_manages_fsdp = self._should_accelerate_manage_fsdp()
         self._accelerate_manages_ddp = self._should_accelerate_manage_ddp()
 
-        self._validate_parallelism_modes()
+        self._validate_parallelism_modes(training_args)
         full_determinism = getattr(training_args, "full_determinism", False)
         # Here, before HF's Trainer.__init__ turns on the deterministic mode the warmed graphs were compiled without.
         reject_full_determinism_after_warmup(full_determinism)
@@ -1104,7 +1119,7 @@ class DistributedTrainerMixin(
         FSDP2 creates dynamic subclasses not in transformers' _CAN_RECORD_REGISTRY; capture_outputs
         keys on str(self.__class__), so without this the wrapped class captures no outputs.
         """
-        model = self._get_unwrapped_model()
+        model = self._backbone_model()
         for sub in model.modules():
             cls_str = str(sub.__class__)
             if cls_str not in _CAN_RECORD_REGISTRY:
@@ -1218,7 +1233,7 @@ class DistributedTrainerMixin(
 
         model.to(device)
 
-    def _get_unwrapped_model(self) -> nn.Module:
+    def _backbone_model(self) -> nn.Module:
         """The transformer backbone (``model.model``, without ``lm_head``), through HF wrappers.
 
         Use only for backbone-specific work (EP-layer / router introspection, output-capture
@@ -1558,7 +1573,7 @@ class DistributedTrainerMixin(
         """
         if (
             self._needs_custom_accelerator()
-            and dist.is_initialized()
+            and has_process_group()
             and self._eval_ranks_have_unequal_batches(args, kwargs)
         ):
             if getattr(self.args, "top_entropy_quantile", 1.0) < 1.0:

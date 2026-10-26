@@ -179,7 +179,6 @@ def run_single_loss_type(
         max_completion_length=MAX_COMPLETION_LENGTH,
         dataloader_drop_last=True,
         loss_type=loss_type,
-        fsdp="",
     )
 
     trainer = OfflineGRPOTrainer(

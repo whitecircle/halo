@@ -121,7 +121,6 @@ def run(ctx):
         max_length=SEQ,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
         seed=42,
     )
     trainer = DistributedSFTTrainer(

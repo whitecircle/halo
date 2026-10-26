@@ -1,19 +1,9 @@
-"""Truncated log-ratio terms of the GRPO objectives.
+"""Truncated log-ratio terms of the GRPO objectives. Pure functions: no trainer state.
 
-Two loss terms are log-prob ratios with an unbounded tail one token can dominate, each truncated:
-:func:`clamp_ref_logps` caps the k3 KL estimator at :data:`KL_LOGRATIO_CLAMP` in all three GRPO
-trainers, and :func:`compute_is_ratio` clamps the environmental trainer's sampling-to-trainer importance
-ratio at ``vllm_importance_sampling_clip_max``. Everything else here serves that ratio: its exemptions
-(sampler-certain tokens, engine-forced reasoning closes), the engine re-score's log-ratio and the mask
-stages.
-
-:func:`apply_is_masks` and :func:`apply_opsm` add masking-over-reweighting stages for MoE-scale
-mismatch (trajectory geometric-mean band, catastrophic-token veto, OPSM), all default off.
-A masked token/trajectory gets ratio 0 (policy-gradient term vanishes, DAPO normalizer unchanged); the
-β·k3 KL term is added after the ratio multiply, so masked tokens stay anchored to the reference.
-
-Trajectory aggregation pools all of an episode's turn rows via ``traj_ids``, since the drift compounds
-over the episode. Pure functions: no trainer state.
+:func:`clamp_ref_logps` caps the k3 KL estimator at :data:`KL_LOGRATIO_CLAMP` in all three GRPO trainers;
+:func:`compute_is_ratio` clamps the environmental trainer's sampler-to-trainer importance ratio. The
+masking stages (:func:`apply_is_masks`, :func:`apply_opsm`, default off) give a masked token ratio 0,
+leaving the DAPO normalizer and the β·k3 KL anchor in place; trajectories pool turn rows by ``traj_ids``.
 """
 
 from __future__ import annotations

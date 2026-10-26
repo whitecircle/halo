@@ -233,8 +233,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     _loss_is_own_mean = True
     # no_duplicates defers a row that repeats a batch's value to a later batch, never drops it.
     _dataset_drawing_batch_samplers = (NoDuplicatesBatchSampler,)
-    _supports_pp = False
-    _pp_unsupported_reason = (
+    PP_REFUSAL = (
         "the default and most registered losses (MNRL, CoSENT/AnglE, online-contrastive, the "
         "batch-* triplet losses) are in-batch similarity matrices over the whole batch (optionally "
         "gathered across devices with gradient), so microbatching changes the negative set and "
@@ -261,6 +260,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         save_sharded_ep: bool = False,
         dataset_presharded: bool = False,
         moe_balancing: str = "auto",
+        save_max_shard_size: str | None = None,
+        allow_optimizer_warm_restart: bool = False,
     ):
         # The SentenceTransformer's ``config`` is its backbone's, so the seam sees a MoE's experts.
         self._init_distributed_config(
@@ -269,6 +270,8 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             save_sharded_ep=save_sharded_ep,
             dataset_presharded=dataset_presharded,
             moe_balancing=moe_balancing,
+            save_max_shard_size=save_max_shard_size,
+            allow_optimizer_warm_restart=allow_optimizer_warm_restart,
         )
         self._reject_batch_sampler_on_toolkit_loader(args)
         reject_uneven_sentence_transformers_batches(
@@ -353,7 +356,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         every rank raises alike.
         """
         model = self._top_level_model()
-        backbone = self._get_unwrapped_model()
+        backbone = self._backbone_model()
         backbone_modules = {id(module) for module in backbone.modules()}
         tuners = [
             name
@@ -390,9 +393,9 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         raises here on every rank rather than on the save rank alone at the first checkpoint, where its
         peers would block in the save's next collective.
         """
-        lora_fold_targets(self._get_unwrapped_model())
+        lora_fold_targets(self._backbone_model())
 
-    def _get_unwrapped_model(self) -> nn.Module:
+    def _backbone_model(self) -> nn.Module:
         """The SentenceTransformer's transformer backbone (``auto_model``), for the backbone-specific
         introspection the base contract limits this to; whole-model work uses ``_top_level_model``.
 
@@ -407,13 +410,13 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                 return first_module.auto_model
             return first_module
 
-        return super()._get_unwrapped_model()
+        return super()._backbone_model()
 
     def _has_injected_lora(self, backbone: nn.Module | None = None) -> bool:
         """True if ``inject_adapter_in_model`` added tuner layers to the backbone (in place, so not a
         PeftModel). Structural: a remote-code backbone's own ``lora_``-named parameters (jina's LoRA
         parametrizations) are base weights, not injected adapters."""
-        backbone = backbone if backbone is not None else self._get_unwrapped_model()
+        backbone = backbone if backbone is not None else self._backbone_model()
         return any(isinstance(module, BaseTunerLayer) for module in backbone.modules())
 
     def _injected_lora_config(self) -> LoraConfig:
@@ -664,7 +667,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             # reload stays with sentence-transformers' own, which rebuilds the whole pipeline. The
             # optimizer store keeps the SentenceTransformer, whose parameters the optimizer steps.
             ctx = dataclasses.replace(
-                self._checkpoint_load_context(), model=self._get_unwrapped_model(), base_owns_whole_weight_load=True
+                self._checkpoint_load_context(), model=self._backbone_model(), base_owns_whole_weight_load=True
             )
             if not load_resume_weights(ctx, resume_from_checkpoint, model, for_best_model=for_best_model):
                 # Called on the class: super() would re-enter the mixin's load.
@@ -687,7 +690,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         ``distribute_tensor``, a mesh collective issued in sorted key order on every rank.
         """
         adapter_dir = os.path.join(checkpoint, RESUME_ADAPTER_DIR)
-        if built_from_checkpoint_across_ranks(self._get_unwrapped_model(), checkpoint):
+        if built_from_checkpoint_across_ranks(self._backbone_model(), checkpoint):
             raise ValueError(resume_adapter_on_own_weights_reason(checkpoint))
         saved, path = read_adapter_across_ranks(
             adapter_dir, checkpoint=checkpoint, what="Resume adapter", attention=self._injected_lora_config().to_dict()
@@ -716,7 +719,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         model = self._top_level_model()
         return dataclasses.replace(
             super()._checkpoint_context(),
-            model=self._get_unwrapped_model(),
+            model=self._backbone_model(),
             tokenizer=self._resolve_tokenizer(model),
         )
 

@@ -1,14 +1,8 @@
-"""On-policy SDPG trainer (Self-Distilled Policy Gradient, arXiv:2606.04036).
+"""On-policy SDPG trainer (Self-Distilled Policy Gradient, arXiv:2606.04036): ``L = L_GRPO + beta(k) * L_OPD``.
 
-Online GRPO plus a privileged self-distillation term: the same model is run as a privileged teacher
-seeing a hint revealing the gold answer, and the student is distilled toward the teacher's full-vocab
-next-token distribution via reverse KL ``D_KL(p ‖ SG[q])``, gated to positive-advantage rollouts::
-
-    L = L_GRPO  +  beta(k) * L_OPD
-
-The teacher is the same policy under ``torch.no_grad`` (no second model). Dataset rows carry the
-``prompt`` (the RLVR script's ``process_for_rlvr`` renders it to text) and the gold ``answer`` the
-hint reveals. Text-only (the hint is tokenizer-built).
+The same policy, run under ``torch.no_grad`` on a hint revealing the gold ``answer``, is the privileged
+teacher; the student is distilled toward its full-vocab distribution by reverse KL ``D_KL(p ‖ SG[q])``,
+gated to positive-advantage rollouts. Text-only (the hint is tokenizer-built).
 """
 
 import logging
@@ -57,8 +51,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTr
 
     _tag_names = ["trl", "grpo", "sdpg"]
 
-    _supports_pp = False
-    _pp_unsupported_reason = (
+    PP_REFUSAL = (
         "it inherits online GRPO's cross-stage weight-sync and rollout-phase blockers, and adds a "
         "second no-grad forward of the whole model per batch on the [teacher_prompt ⧺ completion] "
         "sequence — a differently-shaped pass whose last-stage logits the student's loss consumes, "

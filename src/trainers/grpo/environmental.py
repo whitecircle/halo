@@ -34,7 +34,6 @@ from src.environments.base import (
     stable_reasoning_effort,
     task_prompt,
 )
-from src.environments.engine_wire import SGLANG_BACKEND
 from src.environments.episode import (
     EpisodeEffort,
     RolloutResult,
@@ -42,7 +41,7 @@ from src.environments.episode import (
     resolve_reasoning_end_ids,
     resolve_rollout_stop_token_ids,
 )
-from src.environments.rollout_config import IDENTITY_SAMPLER
+from src.environments.rollout_config import IDENTITY_SAMPLER, SGLANG_BACKEND
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from src.runtime.ranks import get_global_rank, is_multi_rank_run
@@ -274,8 +273,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     setup via ``parallelism_config`` consumed by ``DistributedTrainerMixin``; rest flow to ``GRPOTrainer``.
     """
 
-    _supports_pp = False
-    _pp_unsupported_reason = (
+    PP_REFUSAL = (
         "inherits online GRPO's cross-stage engine weight-sync and rollout-phase forward blockers, and "
         "adds Ray-driven multi-turn async rollouts whose generation lengths vary per turn — the "
         "pipeline freezes its boundary activation shape on the first step"

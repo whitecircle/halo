@@ -1,27 +1,8 @@
 """Locate the policy-generated token spans of a multi-turn trajectory inside one full render.
 
-Chat templates are not prefix-monotone: the render of the first N messages is generally not a prefix
-of the render of the first N+1 (harmony rewrites an assistant turn's terminator and drops its
-reasoning once a final message exists; Qwen3 keeps a turn's reasoning only until a later user message
-arrives). Concatenating independently rendered per-turn deltas therefore produces token sequences no
-serving-time render emits, such as the terminal stop token mid-episode.
-
-Every span here is an index range into a single full-conversation render. Block boundaries come from
-two mechanisms, in order:
-
-* an anchor: a prefix render verified to be an exact prefix of the authoritative render, which pins
-  the boundary by construction;
-* the message's own block length, measured by re-rendering with that message duplicated and diffing
-  against the nearest anchor above it. Every other block renders identically, so the length delta is
-  that block. This covers the boundary after a non-final assistant turn, which no prefix render can
-  pin (such a render would make that turn the last message, the case templates rewrite).
-
-Within an assistant block the trained span starts where the engine's generation prompt stops agreeing
-with the authoritative render; matching rather than requiring a prefix keeps templates that rewrite
-their thinking scaffolding once a turn is archived decomposable. Boundaries are never carried over
-from another turn (a role header's token length is not turn-invariant, since BPE merges its last
-token with the turn's first content token differently per turn), so a turn whose own context does not
-anchor raises instead.
+Chat templates are not prefix-monotone, so every span indexes one full-conversation render: a block boundary is an
+anchor (a prefix render verified to be an exact prefix) or the block's own length (re-render with the message
+duplicated, diff against the nearest anchor); no boundary carries across turns, so an unanchored turn raises.
 """
 
 from collections.abc import Callable, Sequence

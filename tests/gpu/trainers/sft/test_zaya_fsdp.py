@@ -99,7 +99,6 @@ def run(ctx):
         max_length=SEQ,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",  # mixin handles FSDP2 wrapping
         seed=42,
     )
     trainer = DistributedSFTTrainer(

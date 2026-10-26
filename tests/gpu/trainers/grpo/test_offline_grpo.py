@@ -177,7 +177,6 @@ def run(ctx) -> dict:
         policy_gradient_formulation=PG_FORMULATION,
         min_log_prob=MIN_LOG_PROB,
         dataloader_drop_last=True,
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
     parallelism_config = ParallelismConfig()

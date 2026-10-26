@@ -84,8 +84,6 @@ def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
         dataloader_drop_last=True,
         remove_unused_columns=False,
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=True,  # Required for EP (inactive experts)
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
 

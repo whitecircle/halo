@@ -195,7 +195,6 @@ def make_config(output_dir: str, **overrides) -> ClassificationConfig:
         "logging_nan_inf_filter": False,
         "dataloader_drop_last": True,
         "remove_unused_columns": False,
-        "fsdp": "",  # the mixin owns FSDP wrapping
     }
     base.update(overrides)
     return ClassificationConfig(**base)
@@ -251,7 +250,7 @@ def run(ctx):
         isinstance(trainer._loss_fn, torch.nn.CrossEntropyLoss) and trainer._loss_fn.weight is None
     )
     # Constructing with cp_size=1 and then asserting is_cp_mode is False only restates the test's own
-    # input. What matters is that the trainer REJECTS CP (_supports_cp is False), so ask it to.
+    # input. What matters is that the trainer REJECTS CP (SUPPORTS_CP is False), so ask it to.
     try:
         ClassificationTrainer(
             model=build_model(tokenizer),

@@ -2,8 +2,8 @@
 
 Every row traces to `src/distributed/parallelism_rules.py` (the `reject_*` refusals),
 `src/distributed/parallelism_config.py` (`_resolve_and_validate`), `src/model_loading/parallel/load_rules.py` (`reject_unsupported_model`), `parallelism_config_from_args` (`src/configs/parallelism_arguments.py`),
-the trainer mixins under `src/trainers/mixins/` (`base.py`, `validation.py`, `pp_gates.py`, `pipeline.py`,
-`ep_introspection.py`, `grad_sync.py`), the helpers those call (`tensor_parallel/parallelize_attention.py`,
+the trainer mixins under `src/trainers/mixins/` (`base.py`, `validation.py`, `pipeline.py`,
+`ep_introspection.py`, `grad_sync.py`) and `src/trainers/parallelism/trainer_rules.py`, the helpers those call (`tensor_parallel/parallelize_attention.py`,
 `expert_parallel/config.py`, `pipeline_parallel/model_rules.py`, `partition.py` and `runner.py`), or a `CLAUDE.md`
 "## Parallelism" note. The owning validator is named inline; line numbers drift, so grep the
 method name. `domain` = `nvlink_domain_size` (auto = `NVLINK_DOMAIN_SIZE`, else `gpus_per_node`;
@@ -62,7 +62,7 @@ Notes:
 | **PP + EP + TP** | all three >1 | the deferred cross-replica expert sweep needs FSDP to shard non-expert params over the EP group, while EP+TP shards them over the `(dp, tp)` mesh | `reject_unsupported_axes` + `AXIS_SET_MECHANISMS[{pp,ep,tp}]` |
 | **PP + EP + ETP** | all three >1 | `ReduceFromExpertTP.backward` is model math, so it cannot be deferred like the DP sweep — at `ep_size>1` its strided all-reduce interleaves with the DeepEP combine the same backward is inside. `ep_size==1` (PP+ETP) is supported: no combine to interleave with | `reject_unsupported_axes` + `AXIS_SET_MECHANISMS[{pp,ep,etp}]` |
 | **PP config-time raises** | `pp_split` len ≠ `pp_size` (its **sum** ≠ layer count raises at model-split time — `partition.py` — since config never sees the model); a stage that is not a whole NVLink domain; 1-rank stages; `fsdp_shard_ep1_experts=False`; `use_hsdp=True`; `fsdp_reshard_after_forward=True`; `lowp_precision != "bf16"`; expert LoRA; a PP-only knob (`pp_split`/`pp_microbatches`/`pp_schedule`) set at `pp_size=1`, where nothing reads it | each raises with its own mechanism | `_reject_pipeline_parallel` (`fsdp_reshard_after_backward=False` / `fsdp_defer_grad_sync=True` under PP: `_reject_fsdp_settings`) |
-| **PP trainer-construction raises** | PEFT/LoRA; a live `ref_model`; missing precomputed ref-logprob columns; `compute_metrics`; `activation_offloading`; reentrant gradient checkpointing; `torch_compile`; `save_sharded_ep`; a missing `max_length`; an image-bearing VLM run; `per_device_eval_batch_size != per_device_train_batch_size`; positional `model`/`args` | the adapter save/resume path is not stage-aware (stage-local layer indices from one rank, no adapter restore on PP resume), and TRL's `training_step` wrap never engages under the PP schedule | `src/trainers/mixins/pp_gates.py` (PEFT, offloading) + `src/trainers/mixins/pipeline.py` (reentrant GC, torch_compile, VLM, collator contracts) |
+| **PP trainer-construction raises** | PEFT/LoRA; a live `ref_model`; missing precomputed ref-logprob columns; `compute_metrics`; `activation_offloading`; reentrant gradient checkpointing; `torch_compile`; `save_sharded_ep`; a missing `max_length`; an image-bearing VLM run; `per_device_eval_batch_size != per_device_train_batch_size`; positional `model`/`args`; a toolkit-named `optim` (Muon, FlashAdamW) | the adapter save/resume path is not stage-aware (stage-local layer indices from one rank, no adapter restore on PP resume), and TRL's `training_step` wrap never engages under the PP schedule | `src/trainers/parallelism/trainer_rules.py` (PEFT, offloading, named optimizers) + `src/trainers/mixins/pipeline.py` (reentrant GC, torch_compile, VLM, collator contracts) |
 | **Multi-group >2-rank EP on one NVLink domain** | `num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size` (e.g. ep4 on an 8-GPU domain) | concurrent DeepEP intra-node combine barriers race FSDP2's DP-wide NCCL, GC on or off; CDMC=1 doesn't fix it. Measured on 8xB300 against a clean `ep8` control: the `legacy` (V1) buffer deadlocks around step 2, the `elastic` default faults with `Invalid access of peer GPU memory over nvlink`. **Rejected at config time**, hand-built configs included. `ep4 + tp2` lands here too (TP leaves `ep_group_size` untouched). `ep4 + etp2` **passes** the predicate — `ep_group_size = 4*2 = 8` fills the domain — and is the one way to get 4-way expert distribution across 8 GPUs; it is not in the GPU test matrix, whose 8-GPU EP+ETP rows run `ep2 + etp4`. Use `ep_size=2`, `ep_size = nvlink_domain_size`, or `ep4 + etp2`. (Multi-DOMAIN multi-group EP is supported — see the deferred-sync row above.) | `is_racy_single_domain_multigroup_ep`; `_reject_single_domain_multigroup_ep` (raises) |
 | **EP+CP, cross-domain EP** | `ep_group_size>1 and cp_size>1 and ep_scope=="global"` | cross-NVLink-domain EP interleaves members across domains → not orthogonal to node-local CP groups (NCCL hang / corrupt routing) | `_reject_ep_cp` (raises) |
 | **EP+CP, EP not full domain** | `ep_scope=="node" and ep_group_size != domain` (with cp>1) | node-local EP+CP requires `ep_group_size == nvlink_domain_size` | `_reject_ep_cp` (raises) |
@@ -103,7 +103,7 @@ From `CLAUDE.md` "Distributed Trainers" table. All extend `DistributedTrainerMix
 | `EmbeddingTrainer` | Yes | No | Yes | Yes | No |
 
 EP, ETP and TP run under every trainer. **SFT, SMPO and offline GRPO full fine-tuning support CP**.
-The authoritative gate is the per-class `_supports_cp` / `_supports_pp` attribute
+The authoritative gate is the per-class `SUPPORTS_CP` / `PP_REFUSAL` declaration
 (`src/trainers/mixins/base.py`, checked in
 `src/trainers/mixins/validation.py`), so a hand-built config is rejected too. Each training
 script additionally passes its trainer class to `parallelism_config_from_args(..., trainer_cls=...)`
@@ -112,7 +112,7 @@ error — passing CP there is a config error, not a silent no-op.
 
 ### CP incompatibility list
 
-The reasons behind each `_supports_cp = False` (`agent-docs/reference/trainer-architecture.md`,
+The reasons behind each `SUPPORTS_CP = False` (`agent-docs/reference/trainer-architecture.md`,
 *Trainer compatibility*):
 
 - `logits_to_keep` (environment GRPO)

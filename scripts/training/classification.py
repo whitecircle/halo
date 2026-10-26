@@ -39,7 +39,6 @@ from src.entrypoints.model_setup import (
     require_multimodal_sequence_classification_head,
 )
 from src.entrypoints.script import (
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -316,8 +315,6 @@ def main():
     eval_dataset = ds.get("test")
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, classification_config)
-
-    apply_distributed_trainer_config(classification_config, parallelism_config)
 
     barrier()
 

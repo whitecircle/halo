@@ -224,7 +224,7 @@ Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
 
 ## Limitations
 
-**Trainers.** CP is declare-to-enable (`_supports_cp`, default `False`): only
+**Trainers.** CP is declare-to-enable (`SUPPORTS_CP`, default `False`): only
 `DistributedSFTTrainer`, `SmoothMarginPOTrainer` and `OfflineGRPOTrainer` declare it. Offline GRPO
 under CP requires full fine-tuning: it rejects PEFT and native expert LoRA at any `kl_beta`, and an
 explicit `ref_model`, since it scores the run-start reference through the distributed policy

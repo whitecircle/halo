@@ -1,15 +1,8 @@
-"""Relative-reward shaping for group-based RL (RLRR).
+"""Relative-reward shaping for group-based RL (RLRR, Niu et al., arXiv:2601.23058).
 
-Implements Niu et al., arXiv:2601.23058: replaces absolute group-mean/std advantage with relative
-intra-group rankings, fixing GRPO signal sparsity (all-correct/all-wrong groups) and scale
-instability (drifting RM scores).
-
-Two shaping modes: ``hrr`` (Hybrid, Eq. 3) adds a bounded rank correction to the binary rule reward;
-``prr`` (Pure, Eq. 4) maps rank linearly to ``[0, 1]``, discarding the absolute score. Ranks come
-from hierarchical re-ranking (Eq. 6) on ``(correctness, length-bin, raw-reward)``; advantages use
-the group-relative estimator (Eq. 1) then correctness-aware clipping (Eq. 5). Framework-agnostic
-numpy, operating on a single group of ``G`` responses. Hyperparameters live in
-:class:`~src.configs.grpo.RLRRConfig`, which the RLVR script args build.
+Intra-group rankings replace the group-mean/std advantage: ``hrr`` (Eq. 3) adds a bounded rank correction
+to the binary rule reward, ``prr`` (Eq. 4) maps rank to ``[0, 1]``. Ranks re-rank hierarchically on
+``(correctness, length-bin, raw-reward)`` (Eq. 6); numpy over one group, configured by ``RLRRConfig``.
 """
 
 from __future__ import annotations

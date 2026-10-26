@@ -8,7 +8,6 @@ user's accumulation becomes the microbatch count. Composes with FSDP2 and EP ins
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import ClassVar
 
 import torch
 import torch.distributed as dist
@@ -56,13 +55,13 @@ from src.trainers.mixins.grad_clip import (
     require_l2,
     scale_shards_to_max_norm_,
 )
-from src.trainers.mixins.pp_gates import (
+from src.trainers.mixins.validation import evaluation_runs
+from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
+from src.trainers.parallelism.trainer_rules import (
     reject_pp_activation_offloading,
     reject_pp_compute_metrics,
     reject_pp_peft,
 )
-from src.trainers.mixins.validation import evaluation_runs
-from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 
 logger = get_logger(__name__, log_level="info")
 
@@ -164,9 +163,6 @@ def pp_ep_coverage_reason(config: ParallelismConfig, ep_modules) -> str | None:
 class PipelineTrainerMixin:
     """PP hooks for :class:`DistributedTrainerMixin`; inert unless ``pp_size > 1``."""
 
-    # Sequence rows one example becomes in the forward (2 for a chosen/rejected pair): the pipeline's
-    # frozen row count is per_device_train_batch_size times this.
-    _forward_rows_per_example: ClassVar[int] = 1
     _pp_runner: PipelineRunner | None = None
     _pp_adapter: PipelineLossAdapter | None = None
     _pp_n_microbatches: int = 0
@@ -330,7 +326,7 @@ class PipelineTrainerMixin:
             torch.device("cuda", torch.cuda.current_device()),
             self._pp_n_microbatches,
             adapter.stage_loss(fuse_head=env_flag("HALO_PP_FUSED_HEAD_LOSS", True)),
-            rows_per_example=type(self)._forward_rows_per_example,
+            rows_per_example=type(self).FORWARD_ROWS_PER_EXAMPLE,
         )
         # Plain-tensor expert shards need the EP-aware clip (deferred sweep + dispatch-group norm
         # aggregation); dense and ep1-FSDP-sharded stages are all DTensors → direct PP clip.
@@ -553,7 +549,7 @@ class PipelineTrainerMixin:
         if adapter.batch_transform is not None:
             inputs = adapter.batch_transform(inputs)
 
-        rows_per_example = type(self)._forward_rows_per_example
+        rows_per_example = type(self).FORWARD_ROWS_PER_EXAMPLE
         rows = inputs["input_ids"].size(0)
         frozen_rows = self.args.per_device_train_batch_size * rows_per_example
         pad_values = self._pp_frozen_row_pads()

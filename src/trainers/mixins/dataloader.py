@@ -1,10 +1,8 @@
 """Data-parallel-aware train/eval dataloaders for TP/CP/ETP and pre-sharded datasets.
 
-Base ``Trainer`` shards by world size, wrong when DP < world_size (TP/CP/ETP siblings need identical
-slices) or the dataset is pre-sharded per DP rank. Passes parallelism-aware DP size/rank to
-``accelerate.prepare_data_loader`` and equalizes pre-sharded lengths; defers to ``super()`` otherwise.
-The epoch loop is intercepted here too, to stamp the epoch onto whichever loader the trainer runs,
-and so is the evaluation gather, which reads the final round's padding off the loader's geometry.
+The base ``Trainer`` shards by world size, wrong when model-parallel siblings need identical slices or the
+dataset is pre-sharded per DP rank; this passes the DP size/rank to ``prepare_data_loader``, equalizes
+pre-sharded lengths, stamps the epoch on the running loader and reads the eval gather's final-round padding.
 """
 
 from __future__ import annotations
@@ -27,7 +25,7 @@ from trl.trainer.utils import RepeatSampler
 
 from src.hardware import current_device
 from src.runtime.consensus import rank_consensus
-from src.runtime.ranks import get_global_world_size, is_multi_rank_run
+from src.runtime.ranks import get_global_world_size, has_process_group, is_multi_rank_run
 
 logger = get_logger(__name__, log_level="info")
 
@@ -778,7 +776,7 @@ class DataParallelDataLoaderMixin:
     def _data_parallel_rank_by_global_rank(self) -> list[int]:
         """DP rank of every global rank, indexed by global rank. Collective: every rank must call it."""
         dp_rank = self.get_data_parallel_rank()
-        if not (dist.is_available() and dist.is_initialized()):
+        if not has_process_group():
             return [dp_rank]
         local = torch.tensor([dp_rank], dtype=torch.long, device=current_device())
         gathered = [torch.empty_like(local) for _ in range(dist.get_world_size())]

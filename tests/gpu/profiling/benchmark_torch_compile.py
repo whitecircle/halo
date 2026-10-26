@@ -219,7 +219,6 @@ def run_benchmark(
         dataloader_drop_last=True,
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,
-        fsdp="",
         # HF turns torch_compile on whenever a backend or mode is set, so an eager mode passes neither;
         # DistributedTrainerMixin applies the compile after FSDP wrapping.
         **(

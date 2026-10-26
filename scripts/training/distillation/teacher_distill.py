@@ -38,7 +38,6 @@ from src.entrypoints.model_setup import (
     log_model_info,
 )
 from src.entrypoints.script import (
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -231,8 +230,6 @@ def main():
         )
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, training_config)
-
-    apply_distributed_trainer_config(training_config, parallelism_config)
 
     callbacks = configure_balancing_and_build_callbacks(args, training_config, student_model, context)
 

@@ -1,9 +1,7 @@
 """TRL's own dataset preparation, run once per filesystem scope and shared with every other rank.
 
-TRL's DPO, KTO and reward trainers tokenize in ``_prepare_dataset`` under
-``PartialState().main_process_first()``: global rank 0 maps the whole corpus while every other rank
-sits in an NCCL barrier bounded by the watchdog, whatever the filesystem layout, and the maps then key
-HF's fingerprint of a closure over the trainer — unhashable, so random — so each rank writes its own
+TRL's DPO, KTO and reward trainers tokenize under ``main_process_first()`` — every other rank waits in a
+watchdog-bounded barrier — and key HF's fingerprint off an unhashable closure, so each rank writes its own
 full tokenized copy into ``HF_DATASETS_CACHE`` on every run.
 """
 

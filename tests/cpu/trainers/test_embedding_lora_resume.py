@@ -694,7 +694,7 @@ def test_an_adapter_the_save_cannot_fold_is_refused_at_construction():
     block in the save's collectives."""
     backbone = inject_adapter_in_model(LoraConfig(r=2, target_modules=["attn"]), _AttentionBackbone())
     host = _host(backbone)
-    host._get_unwrapped_model = lambda: backbone
+    host._backbone_model = lambda: backbone
 
     with pytest.raises(ValueError, match="cannot be folded out of place"):
         EmbeddingTrainer._validate_injected_lora_foldable(host)

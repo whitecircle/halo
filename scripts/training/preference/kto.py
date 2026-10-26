@@ -38,7 +38,6 @@ from src.entrypoints.model_setup import (
     log_model_info,
 )
 from src.entrypoints.script import (
-    apply_distributed_trainer_config,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -168,8 +167,6 @@ def main():
     eval_dataset = _rename_kto_columns(ds["test"], args) if "test" in ds else None
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, kto_config)
-
-    apply_distributed_trainer_config(kto_config, parallelism_config)
 
     callbacks = configure_balancing_and_build_callbacks(args, kto_config, model, context)
 

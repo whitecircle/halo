@@ -1,11 +1,8 @@
 """Applying advantages and drops to the loss inputs of the online and environmental GRPO trainers.
 
-Once rewards exist, both trainers mask the rows of degenerate (all-equal-reward) groups out of the
-loss, recompute the gathered-global DAPO normalizer from the post-drop loss mask, and balance the
-round's token-weighted advantage mass: the online trainer on TRL's result dict, the environmental
-trainer on the tensors it builds itself. The mask, normalizer and token-mass helpers serve both, so
-their numerics match; :func:`expand_traj_to_rows` is the environmental trainer's layout of
-per-trajectory values over its per-turn rows.
+Both mask degenerate (all-equal-reward) groups out of the loss, recompute the gathered-global DAPO
+normalizer from the post-drop mask and balance the round's token-weighted advantage mass with the same
+helpers, so their numerics match; :func:`expand_traj_to_rows` lays per-trajectory values over turn rows.
 """
 
 import math
