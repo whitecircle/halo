@@ -1,8 +1,8 @@
 """CPU tests for EPSpanTimer: timing stats and the torch.profiler range bridge.
 
-The EP layers label their dispatch / expert-compute / combine spans through
-``time_operation`` (diagnostic mode) or ``torch.profiler.record_function`` directly
-(default mode) — these tests pin the contract both paths rely on: the operation name
+The EP layers label their dispatch / expert-compute / combine spans with
+``torch.profiler.record_function``, and the EP benchmark's ``--comm_profile`` swaps in
+``time_operation`` — these tests pin the contract both rely on: the operation name
 must show up as a profiler event, and the monitor must aggregate timings.
 
 Run: python tests/cpu/diagnostics/test_ep_span_timing.py

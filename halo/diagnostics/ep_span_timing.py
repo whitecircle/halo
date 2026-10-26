@@ -1,5 +1,5 @@
-"""Opt-in timing of the EP layers' dispatch, expert-compute and combine spans (``HALO_EP_PERF_PROFILE``;
-unset, the spans are plain ``torch.profiler.record_function`` ranges)."""
+"""Timing of named spans on CUDA events, such as the EP layers' dispatch, expert-compute and combine phases
+(``benchmark_sft_ep.py --comm_profile`` swaps it in for their ``torch.profiler.record_function`` labels)."""
 
 from __future__ import annotations
 

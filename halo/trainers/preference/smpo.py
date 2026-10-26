@@ -23,8 +23,6 @@ from typing import Any, Literal
 import torch
 import torch.nn as nn
 from datasets import Dataset, IterableDataset
-from datasets import Image as ImageFeature
-from datasets import Sequence as SequenceFeature
 from transformers import (
     DataCollator,
     PreTrainedModel,
@@ -39,7 +37,7 @@ from halo.callbacks.variable_scheduler import VariableSchedulerCallback
 from halo.configs.preference import SmoothMarginPOConfig
 from halo.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
-from halo.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
+from halo.data.pipeline.preferences import VLM_SMPO_FEATURES, tokenize_preference_row, tokenize_vlm_preference_row
 from halo.data.turn_markers import resolve_eos_token_ids
 from halo.distributed.context_parallel.sequence_chunks import cp_chunk_bounds
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -79,9 +77,11 @@ from halo.trainers.stored_metrics import StoredMetricsMixin
 
 logger = logging.getLogger(__name__)
 
-# The tokenized columns each data path's rows carry; present, the dataset is already prepared.
+# The columns each data path's prepared rows carry; present, the dataset is already prepared.
 _TEXT_COLUMNS = ("prompt_input_ids", "chosen_input_ids", "rejected_input_ids")
-_VLM_COLUMNS = ("prompt_text", "chosen_input_ids", "rejected_input_ids")
+_VLM_COLUMNS = tuple(VLM_SMPO_FEATURES)
+# The raw columns both tokenize maps read; a dataset without them cannot be tokenized again.
+_RAW_PAIR_COLUMNS = ("chosen", "rejected")
 
 
 def resolve_vlm_mode(processing_class, is_vlm: bool | None) -> bool:
@@ -438,19 +438,30 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
                 tokenize_vlm_preference_row,
                 processing_class,
             )
+            # The pinned schema also keeps the Image feature, so rows hand back PIL images.
+            map_kwargs = {"features": VLM_SMPO_FEATURES}
         else:
-            prepared_columns, tokenize_fn = _TEXT_COLUMNS, tokenize_preference_row
+            prepared_columns, tokenize_fn, map_kwargs = _TEXT_COLUMNS, tokenize_preference_row, {}
             # The text row fn calls ``processing_class(text, add_special_tokens=False)`` — a processor reads
             # that second slot as images — and reads bos/eos ids a ProcessorMixin does not carry.
             row_processing_class = resolve_tokenizer(processing_class)
-        if isinstance(dataset, Dataset) and set(prepared_columns).issubset(dataset.column_names):
-            if is_global_main_process():
-                logger.info(f"Dataset '{dataset_name}' already prepared, skipping _prepare_dataset")
-            return dataset
+        if isinstance(dataset, Dataset):
+            missing = [column for column in prepared_columns if column not in dataset.column_names]
+            if not missing:
+                if is_global_main_process():
+                    logger.info(f"Dataset '{dataset_name}' already prepared, skipping _prepare_dataset")
+                return dataset
+            missing_raw = [column for column in _RAW_PAIR_COLUMNS if column not in dataset.column_names]
+            if missing_raw:
+                raise ValueError(
+                    f"Dataset '{dataset_name}' can be neither used nor tokenized: it lacks the prepared columns "
+                    f"{missing} and the raw columns {missing_raw} the tokenize map reads. Pass the raw "
+                    "(prompt, chosen, rejected[, images]) rows."
+                )
 
         # Coordinated, not local_main_process_first + raw map: one rank tokenizes to a deterministic
         # cache file and the rest load it. Wrapping this in a main-first block would desync it.
-        dataset = coordinated_map(
+        return coordinated_map(
             dataset,
             tokenize_fn,
             num_proc=resolve_map_num_proc(args.dataset_num_proc),
@@ -464,15 +475,12 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
                 "truncation_mode": args.truncation_mode,
                 "eos_token_ids": self._eos_token_ids,
             },
+            **map_kwargs,
         )
-        if self.is_vlm:
-            # dataset.map drops the Image decoding feature — recast so rows hand back PIL images.
-            dataset = dataset.cast_column("images", SequenceFeature(ImageFeature()))
-        return dataset
 
     def _set_signature_columns_if_needed(self):
         if self._signature_columns is None:
-            self._signature_columns = [*_VLM_COLUMNS, "images"] if self.is_vlm else list(_TEXT_COLUMNS)
+            self._signature_columns = list(_VLM_COLUMNS if self.is_vlm else _TEXT_COLUMNS)
         # The dataloader mixin's union of the collator's required_dataset_columns sits below this
         # override in the MRO — chain to it, or a collator input would be pruned here alone.
         super()._set_signature_columns_if_needed()

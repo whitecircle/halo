@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import distributed_c10d as c10d
 
-from halo.env import env_flag, store_timeout
+from halo.env import store_timeout
 from halo.log import KEY_PREVIEW_COUNT
 from halo.runtime.collectives import broadcast_from_rank0, collective_device
 from halo.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process, is_multi_rank_run
@@ -379,21 +379,17 @@ def _value_digest(value: Any) -> str:
     return hasher.hexdigest()
 
 
-def assert_rank_uniform(
-    value: Any, *, group: dist.ProcessGroup | None, label: str, strict: bool | None = None
-) -> None:
+def assert_rank_uniform(value: Any, *, group: dist.ProcessGroup | None, label: str, strict: bool = False) -> None:
     """COLLECTIVE (one :func:`agree_across_ranks` all-reduce, the digests gathered only to name a
-    divergence): warn, or raise under ``strict`` (default ``HALO_TP_CONSISTENCY_CHECK``), when ``value``
-    differs across the ranks of ``group``; a no-op for ``group=None`` or one rank. Pass ``tuple(t.shape)``
-    to compare a shape, the usual first sign of a TP/EP deadlock.
+    divergence): warn, or raise under ``strict``, when ``value`` differs across the ranks of ``group``; a
+    no-op for ``group=None`` or one rank. Pass ``tuple(t.shape)`` to compare a shape, the usual first sign
+    of a TP/EP deadlock.
     """
     if group is None:
         return
     world = dist.get_world_size(group=group)
     if world <= 1:
         return
-    if strict is None:
-        strict = env_flag("HALO_TP_CONSISTENCY_CHECK")
 
     digest = _value_digest(value)
     if agree_across_ranks(digest, group=group).agreed:

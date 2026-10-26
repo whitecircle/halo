@@ -3,7 +3,7 @@
 Prompts are left-padded so the completion boundary aligns across a batch; completions are right-padded."""
 
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -61,9 +61,6 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
     processor: ProcessorMixin | None = None
     max_prompt_length: int | None = None
 
-    # Unioned into HF's signature columns, which the trainer derives without it.
-    required_dataset_columns: ClassVar[tuple[str, ...]] = (PROMPT_OVERLAP_COLUMN,)
-
     def __post_init__(self):
         if self.processor is None:
             raise ValueError("DataCollatorForVLMSMPO requires a processor.")
@@ -76,7 +73,7 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
         for example in examples:
             images = example.get("images") or []
             encoded = run_vlm_processor(self.processor, example["prompt_text"], images)
-            prompt_length = encoded["input_ids"].size(1) - example.get(PROMPT_OVERLAP_COLUMN, 0)
+            prompt_length = encoded["input_ids"].size(1) - example[PROMPT_OVERLAP_COLUMN]
 
             # run_vlm_processor tokenizes with add_special_tokens=False, so the BOS the tokenizer's
             # own post-processor emits is restored here, as on the text path.

@@ -311,16 +311,13 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def _destroy_remote_group(self):
         """Drop the engine's registration of this client's group name; best-effort, never masks a failure."""
         try:
-            resp = self.request(
+            self.request(
                 "POST",
                 "/destroy_weights_update_group",
                 retry=False,
                 timeout=CLEANUP_TIMEOUT_S,
-                check=False,
                 json={"group_name": self.group_name},
             )
-            if resp.status_code != 404:  # a server without the route has no registration to drop
-                resp.raise_for_status()
         except Exception as e:  # advisory cleanup; never mask the caller's failure
             logger.debug(f"Could not clear weight-update group {self.group_name!r} on {self.base_url}: {e}")
 

@@ -58,7 +58,8 @@ entry, or an `answer_field` renamed away from `answer`, that names no column rai
 
 Point the template's `dataset:` at your data, start a server on a GPU the trainer will not use, wait for `/health`,
 launch. The template runs a ReAct environment, which is served without a tool-call parser
-(`VLLM_TOOL_CALLING_FLAGS=`):
+(`VLLM_TOOL_CALLING_FLAGS=`). The vLLM compose file needs `HALO_SCRATCH`, a large host volume, exported or set in the
+repo-root `.env`:
 
 ```bash
 make build-vllm   # or set VLLM_IMAGE to the public image

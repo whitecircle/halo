@@ -54,7 +54,7 @@ first open**, or Docker refuses to start the container.
 The host scratch volume mounts at `/scratch`, from `$HALO_SCRATCH`, which the container refuses to
 start without: export it in your local shell after confirming with `findmnt` / `df -h` that the target
 really is a large device. `make` (which resolves it when unset) and the `training` service of
-`docker-compose.vllm.yml` (which falls back to `/mnt`) read the same knob, so one export points them at
+`docker-compose.vllm.yml` (which refuses to start without it) read the same knob, so one export points them at
 that volume too.
 
 `containerEnv` then pins `HF_HOME`, `HF_DATASETS_CACHE`, `TMPDIR` and `HALO_DATA_ROOT` under it, so HF

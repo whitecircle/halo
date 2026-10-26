@@ -1,9 +1,9 @@
 """``assert_rank_uniform`` on a real 2-rank gloo group, and the digest its ranks gather.
 
-Agreeing ranks pass. A divergent value raises on every rank under ``strict`` or, by default,
-``HALO_TP_CONSISTENCY_CHECK``, and otherwise only warns; either names the probe's label. The digest
-must be dtype-agnostic: a ``TypeError`` on one rank (``.numpy()`` on bf16/fp8) inside the
-``all_gather_object`` would hang its peers.
+Agreeing ranks pass. A divergent value raises on every rank under ``strict``, and otherwise (the
+default) only warns; either names the probe's label. The digest must be dtype-agnostic: a
+``TypeError`` on one rank (``.numpy()`` on bf16/fp8) inside the ``all_gather_object`` would hang
+its peers.
 
 Run: python tests/cpu/runtime/test_assert_rank_uniform.py
 """
@@ -49,7 +49,6 @@ def _worker(rank: int, tmp_dir: str) -> None:
     recorder = _Recorder()
     logging.getLogger("halo.runtime.consensus").addHandler(recorder)
     divergent_shape = tuple(torch.zeros(2, 4 + rank).shape)
-    os.environ.pop("HALO_TP_CONSISTENCY_CHECK", None)
     outcomes = {
         label: _outcome(recorder, value, label, **kwargs)
         for label, value, kwargs in (
@@ -57,11 +56,9 @@ def _worker(rank: int, tmp_dir: str) -> None:
             ("same_shape", tuple(torch.zeros(2, 4).shape), {"strict": True}),
             ("strict", divergent_shape, {"strict": True}),
             ("warned", divergent_shape, {"strict": False}),
-            ("env_unset", divergent_shape, {}),
+            ("default", divergent_shape, {}),
         )
     }
-    os.environ["HALO_TP_CONSISTENCY_CHECK"] = "1"
-    outcomes["env_set"] = _outcome(recorder, divergent_shape, "env_set")
     with open(os.path.join(tmp_dir, f"rank{rank}.json"), "w") as handle:
         json.dump(outcomes, handle)
 
@@ -72,10 +69,9 @@ def test_divergence_raises_or_warns_on_every_rank_and_agreement_passes(tmp_path)
         outcomes = json.loads((tmp_path / f"rank{rank}.json").read_text())
         for label in ("agree", "same_shape"):
             assert outcomes[label] == {"error": None, "warnings": []}, f"rank {rank} {label}: {outcomes[label]}"
-        for label in ("strict", "env_set"):
-            expected = f"[assert_rank_uniform:{label}] {_DIVERGENCE}"
-            assert expected in (outcomes[label]["error"] or ""), f"rank {rank} {label}: {outcomes[label]}"
-        for label in ("warned", "env_unset"):
+        expected = f"[assert_rank_uniform:strict] {_DIVERGENCE}"
+        assert expected in (outcomes["strict"]["error"] or ""), f"rank {rank} strict: {outcomes['strict']}"
+        for label in ("warned", "default"):
             expected = f"[assert_rank_uniform:{label}] {_DIVERGENCE}"
             warnings = outcomes[label]["warnings"]
             assert outcomes[label]["error"] is None, f"rank {rank} {label}: {outcomes[label]}"

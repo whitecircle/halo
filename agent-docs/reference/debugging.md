@@ -10,15 +10,15 @@ Every helper here is opt-in and costs nothing when disabled.
 | CPU-side stalls (dataloader, tokenization) | py-spy flame graph | `scripts/profiling/py_spy_diag.py record` |
 | Step time, tokens/s, peak memory, MFU/S-MFU | `EfficiencyCallback` | `enable_efficiency_metrics` YAML flag; MFU/S-MFU also need `report_mfu_diagnostics` |
 | Rank skew on a collective | TraceLens collective report | `profiler_ranks: "all"`, then `scripts/profiling/trace_report.py` |
-| Cross-rank value divergence | `assert_rank_uniform` | add the call, then `HALO_TP_CONSISTENCY_CHECK=1` |
+| Cross-rank value divergence | `assert_rank_uniform` | add the call; `strict=True` raises instead of warning |
 | Hang stack dump (every rank on the node) | `scripts/profiling/py_spy_diag.py dump` | run standalone; needs ptrace access ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)) |
 | NVLink lane health (hard errors: Rx, symbol, link recovery, link integrity) | `scripts/profiling/nvlink_health.py` | run standalone; exit 1 = hard lane errors, while a failed `nvidia-smi` or an unrecognized counter layout raises |
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
 | Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
 
 The consistency check is `assert_rank_uniform` in `halo/runtime/consensus.py`. It is **manual
-instrumentation** — the toolkit ships no call sites for it, so the env flag does nothing until you
-add the call to the code you are investigating. The profiler session and CUDA-memory helpers live in
+instrumentation** — the toolkit ships no call sites for it, so add the call to the code you are
+investigating. The profiler session and CUDA-memory helpers live in
 `halo/diagnostics/profiling.py`, the py-spy captures behind `py_spy_diag.py` in
 `halo/diagnostics/py_spy.py`, and the in-loop callbacks in `halo/callbacks/`.
 
@@ -158,11 +158,10 @@ per rank without a code change.
 wall clock, and accumulates it into the timer's `.stats` map: one `TimingStats` (`count`,
 `total_time`, `.avg_time`) per operation name.
 
-`HALO_EP_PERF_PROFILE=1` is a benchmark switch: the EP layers then wrap their
-dispatch/expert-compute/combine phases with it, and only `tests/gpu/profiling/benchmark_sft_ep.py
---comm_profile` (which sets the variable itself) reads those stats, printing the split. A training run
-with it set pays two syncs per phase and reports nothing; `enable_torch_profiler` shows the same `ep.*`
-spans at no cost.
+`tests/gpu/profiling/benchmark_sft_ep.py --comm_profile` swaps it in for the EP layers'
+dispatch/expert-compute/combine labels and prints the split from those stats; it syncs twice per
+phase, so it measures the communication fraction, not throughput. `enable_torch_profiler` shows the
+same `ep.*` spans at no cost.
 
 ## 3. GPU memory profiling
 
@@ -240,17 +239,12 @@ In-script, `dump_distributed_stacks` (`halo/diagnostics/py_spy.py`) takes the sa
 `assert_rank_uniform` compares a value's digest across a process group, so a divergence surfaces as
 a warning, or a clear error, instead of a downstream NCCL hang. Pass `tuple(t.shape)` to compare only
 a shape, the usual first sign of a TP/EP collective deadlock. Add the call at the suspect point —
-nothing in the toolkit calls it for you:
-
-```bash
-export HALO_TP_CONSISTENCY_CHECK=1   # make assert_rank_uniform raise instead of warn (1/true/yes/on)
-```
-
-`strict=True`/`False` overrides the variable per call, and `group=None` or a one-rank group is a no-op.
+nothing in the toolkit calls it for you. It warns by default, `strict=True` raises on every rank of
+the group, and `group=None` or a one-rank group is a no-op.
 
 ```python
 from halo.runtime.consensus import assert_rank_uniform
-assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in")
+assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in", strict=True)
 ```
 
 ### NCCL flight recorder + watchdog timeout

@@ -21,6 +21,7 @@ placeholders, ``__call__`` expands each placeholder to a fixed patch span and em
 Run: python tests/cpu/trainers/test_smpo_vlm.py
 """
 
+import inspect
 import re
 import tempfile
 from pathlib import Path
@@ -432,6 +433,16 @@ def test_prompt_overlap_column_survives_signature_pruning():
     assert PROMPT_OVERLAP_COLUMN in trainer._signature_columns
 
 
+def test_collator_refuses_a_row_without_prompt_overlap():
+    """A row without the overlap would collate with the boundary token's text repeated, not raise."""
+    processor = StubProcessor(JoinedTurnsTokenizer())
+    row = prep_row(make_trainer(), make_features(), processor)
+    del row[PROMPT_OVERLAP_COLUMN]
+
+    with pytest.raises(KeyError, match=PROMPT_OVERLAP_COLUMN):
+        make_collator(processor)([row])
+
+
 def test_collator_requires_processor():
     with pytest.raises(ValueError, match="requires a processor"):
         DataCollatorForVLMSMPO(pad_token_id=0)
@@ -532,7 +543,15 @@ def test_vlm_mode_guards():
 
 
 def test_prepare_dataset_skips_prepared_rows():
-    vlm_ds = Dataset.from_dict({"prompt_text": ["p"], "chosen_input_ids": [[1, 2]], "rejected_input_ids": [[3, 2]]})
+    vlm_ds = Dataset.from_dict(
+        {
+            "prompt_text": ["p"],
+            PROMPT_OVERLAP_COLUMN: [0],
+            "images": [[]],
+            "chosen_input_ids": [[1, 2]],
+            "rejected_input_ids": [[3, 2]],
+        }
+    )
     trainer = make_trainer()
     assert trainer._prepare_dataset(vlm_ds, None, trainer.args, "train") is vlm_ds
 
@@ -544,6 +563,59 @@ def test_prepare_dataset_skips_prepared_rows():
 
     # A prepared TEXT dataset must not satisfy the VLM check, else a pixel-less run passes silently.
     assert not {"prompt_text"}.issubset(text_ds.column_names)
+
+
+@pytest.mark.parametrize(
+    ("is_vlm", "columns", "missing"),
+    [
+        (
+            True,
+            {"prompt_text": ["p"], "images": [[]], "chosen_input_ids": [[1, 2]], "rejected_input_ids": [[3]]},
+            PROMPT_OVERLAP_COLUMN,
+        ),
+        (False, {"prompt_input_ids": [[1]], "chosen_input_ids": [[1, 2]]}, "rejected_input_ids"),
+    ],
+    ids=["vlm-without-prompt-overlap", "text-without-rejected"],
+)
+def test_prepare_dataset_refuses_partially_prepared_rows(is_vlm, columns, missing):
+    """Rows short of a prepared column are not trusted, and with the raw pair gone they cannot be tokenized
+    again: the refusal names the missing column instead of the map failing on a raw key."""
+    trainer = make_trainer(is_vlm=is_vlm)
+
+    with pytest.raises(ValueError, match=rf"lacks the prepared columns \['{missing}'\]"):
+        trainer._prepare_dataset(Dataset.from_dict(columns), None, trainer.args, "train")
+
+
+# HF's ``Dataset.map`` writes this many rows per Arrow batch, and the first batch fixes an unpinned schema.
+_MAP_WRITER_BATCH = inspect.signature(Dataset.map).parameters["writer_batch_size"].default
+
+
+@pytest.mark.parametrize(
+    ("text_rows", "num_proc"), [(_MAP_WRITER_BATCH, 1), (1, 2)], ids=["writer-batch", "map-shard"]
+)
+def test_dataset_map_types_images_before_the_first_image_row(text_rows, num_proc):
+    """A first writer batch, or a map shard, of text-only rows must not type ``images`` as ``List(null)``: the
+    image row after it would then fail the Arrow cast, or the shards fail to align."""
+    processor = StubProcessor(StubTokenizer())
+    trainer = make_trainer(dataset_num_proc=num_proc)
+    text_row = {
+        "prompt": [{"role": "user", "content": "Just words"}],
+        "chosen": [{"role": "assistant", "content": "Yes"}],
+        "rejected": [{"role": "assistant", "content": "No"}],
+        "images": [],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        image_path = str(Path(tmp) / "img.png")
+        Image.new("RGB", (7, 5)).save(image_path)
+        ds = Dataset.from_list([text_row] * text_rows + [{**text_row, "images": [image_path]}])
+
+        mapped = trainer._prepare_dataset(ds, processor, trainer.args, "train")
+
+        assert mapped[0]["images"] == []
+        assert isinstance(mapped[-1]["images"][0], Image.Image)
+        batch = make_collator(processor)([mapped[0], mapped[-1]])
+        assert batch["pixel_values"].shape == (PATCHES_PER_IMAGE, PATCH_DIM)
 
 
 def test_dataset_map_arrow_roundtrip():

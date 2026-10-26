@@ -78,13 +78,14 @@ _SERVER_TIERS = {
         "VLLM_SERVER_URL",
         "http://localhost:8000",
         "make build-vllm (or set VLLM_IMAGE), then "
-        "VLLM_CUDA_DEVICES=7 docker compose -f docker-compose.vllm.yml up -d vllm-server",
+        "HALO_SCRATCH=<large volume> VLLM_CUDA_DEVICES=7 docker compose -f docker-compose.vllm.yml up -d vllm-server",
     ),
     "sglang_server": (
         "SGLANG_SERVER_URL",
         "http://localhost:30000",
         "make build-sglang (or set SGLANG_IMAGE), then "
-        "SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=<hub id> docker compose -f docker-compose.sglang.yml up -d",
+        "SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=<hub id> SGLANG_MODEL_DIR=<any dir> "
+        "docker compose -f docker-compose.sglang.yml up -d",
     ),
 }
 # One probe per URL per session: N nodes asking the same server is N chances to be told something

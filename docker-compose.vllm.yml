@@ -109,9 +109,10 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - HF_DATASETS_CACHE=/root/.cache/huggingface/datasets
       # Toolkit scratch on the volume the Makefile targets use, so the S3 dataset cache and profiler
-      # traces are shared with `make test-gpu-*`.
-      - HALO_DATA_ROOT=${HALO_SCRATCH:-/mnt}
-      - TMPDIR=${HALO_SCRATCH:-/mnt}/tmp
+      # traces are shared with `make test-gpu-*`. No fallback: compose interpolates the whole file, so
+      # even `up vllm-server` refuses to start until it is set (in the shell or the repo-root .env).
+      - HALO_DATA_ROOT=${HALO_SCRATCH:?set HALO_SCRATCH to a large host volume (findmnt / df -h)}
+      - TMPDIR=${HALO_SCRATCH:?set HALO_SCRATCH to a large host volume (findmnt / df -h)}/tmp
     deploy:
       resources:
         reservations:
@@ -126,7 +127,7 @@ services:
       - .:/workspace
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
       # Same path inside and out, so HALO_DATA_ROOT resolves either side of the boundary.
-      - ${HALO_SCRATCH:-/mnt}:${HALO_SCRATCH:-/mnt}
+      - ${HALO_SCRATCH:?set HALO_SCRATCH to a large host volume (findmnt / df -h)}:${HALO_SCRATCH}
       # Optional S3 dataset sources — bring your own credentials (read-write so refreshes persist).
       - ~/.aws:/root/.aws
     working_dir: /workspace

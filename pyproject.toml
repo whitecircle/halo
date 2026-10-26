@@ -184,11 +184,9 @@ known-first-party = ["halo", "tests"]
 known-third-party = ["wandb", "accelerate"]
 
 [tool.pyright]
-# ruff's complement: type-aware checks (call args, None access, attribute typos, bad returns).
-# Single source of truth shared with Pylance (.vscode/settings.json). BASIC mode + non-blocking to
-# start (53k LOC of dynamic torch/DTensor code); tighten over time like the ruff lint-clean milestone.
-# Full checks need the deps installed, so run pyright IN the image (the host has no torch); a bare-host
-# run only checks our-code-to-our-code with third-party imports relaxed.
+# ruff's complement: type-aware checks (call args, None access, attribute typos, bad returns), in basic
+# mode and non-blocking. Full checks need the deps installed, so run pyright IN the image (the host has no
+# torch); a bare-host run only checks our-code-to-our-code with third-party imports relaxed.
 typeCheckingMode = "basic"
 pythonVersion = "3.12"
 exclude = ["**/__pycache__", ".venv"]

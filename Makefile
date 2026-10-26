@@ -159,7 +159,7 @@ test-gpu-vllm: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
 test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense or a MoE pass, see above; EFA=1 on an EFA host)
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No vLLM server at $(VLLM_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: make build-vllm (or set VLLM_IMAGE), then \
-	  VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 docker compose -f docker-compose.vllm.yml up -d vllm-server \
+	  HALO_SCRATCH=$(HALO_SCRATCH) VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 docker compose -f docker-compose.vllm.yml up -d vllm-server \
 	  (the benchmarks need the reasoning parser: their per-effort CoT budget draws a 400 without one; \
 	  EFA=1: add -f docker-compose.vllm.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
@@ -170,7 +170,7 @@ test-gpu-sglang: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
 test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense or a MoE pass, see above; EFA=1 on an EFA host)
 	@curl -sf $(SGLANG_SERVER_URL)/health >/dev/null || { echo "No SGLang server at $(SGLANG_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: make build-sglang (or set SGLANG_IMAGE), then \
-	  SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d \
+	  SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=$(HALO_SCRATCH) docker compose -f docker-compose.sglang.yml up -d \
 	  (EFA=1: add -f docker-compose.sglang.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and sglang_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 

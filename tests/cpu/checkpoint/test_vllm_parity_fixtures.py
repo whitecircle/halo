@@ -27,9 +27,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 
 import pytest
 
+from halo.checkpoint.config_export import drop_unshipped_auto_map
 from tests.common.repo import REPO_ROOT
 
 _PARITY_ROOT = os.path.join(REPO_ROOT, "docker", "vllm", "parity")
@@ -129,14 +131,30 @@ def test_every_hub_fixture_declares_the_family_it_ships(generate):
 
 def test_the_step3p7_control_is_the_native_schema_its_carry_replaces(generate):
     """The build gate is load-bearing only while the control differs from its fixture where the carry
-    acts: unrewritten, the export is transformers' own spellings — which the pinned server has no
-    class for — and the carried one is the release's."""
+    acts: unrewritten, the export is transformers' own spellings — which the pinned vLLM refuses to
+    read — and the carried one is the release's."""
     (native,) = (fixture for fixture in generate.UNPARSEABLE if fixture.model_type == "step3p7")
     unrewritten = _on_disk(generate.fixture_path("unparseable", native))["text_config"]
     carried = _on_disk(generate.fixture_path("fixtures", native))["text_config"]
     assert {"n_routed_experts", "num_experts_per_tok", "per_layer_config"} <= set(unrewritten)
     assert not {"n_routed_experts", "num_experts_per_tok", "per_layer_config"} & set(carried)
     assert {"moe_num_experts", "moe_top_k", "moe_layers_enum", "attention_other_setting"} <= set(carried)
+
+
+def test_a_control_names_no_remote_code_it_does_not_ship(generate, tmp_path):
+    """A control is the export without the rewrite, which ships no remote code, so the writer's last
+    step leaves it naming none. One still naming a module is refused for the missing file alone,
+    whether or not the server reads the native schema, and the gate then proves nothing."""
+    assert generate.UNPARSEABLE, "premise: at least one family's export is rewritten, so it has a control"
+    for fixture in generate.UNPARSEABLE:
+        path = generate.fixture_path("unparseable", fixture)
+        staged = tmp_path / fixture.name
+        shutil.copytree(os.path.dirname(path), staged)
+        drop_unshipped_auto_map(str(staged))
+        assert _on_disk(staged / "config.json") == _on_disk(path), (
+            f"unparseable/{fixture.name} names remote code it does not ship, which the export without the "
+            f"rewrite never does — regenerate it"
+        )
 
 
 def test_a_remote_code_fixture_ships_the_config_module_its_auto_map_names(generate):

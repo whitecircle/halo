@@ -28,8 +28,20 @@ VLM_PREFERENCE_COLUMNS = ("chosen_text", "rejected_text", "images")
 MARGIN_COLUMN = "margin"
 
 # How many of a VLM SMPO row's last prompt tokens its completions start with (:func:`tokenize_completions_jointly`):
-# the collator drops them from the prompt it tokenizes. An int, so an all-zero writer batch still types the column.
+# the collator drops them from the prompt it tokenizes.
 PROMPT_OVERLAP_COLUMN = "prompt_overlap"
+
+# The Arrow schema of :func:`tokenize_vlm_preference_row` rows, pinned like :func:`vlm_preference_features`: a writer
+# batch or map shard of text-only rows would infer ``images`` as ``List(null)`` and refuse a later image row.
+VLM_SMPO_FEATURES = Features(
+    {
+        "prompt_text": Value("string"),
+        PROMPT_OVERLAP_COLUMN: Value("int64"),
+        "images": Sequence(ImageFeature()),
+        "chosen_input_ids": Sequence(Value("int64")),
+        "rejected_input_ids": Sequence(Value("int64")),
+    }
+)
 
 
 def _shared_message_prefix_len(a: list[dict[str, Any]], b: list[dict[str, Any]]) -> int:

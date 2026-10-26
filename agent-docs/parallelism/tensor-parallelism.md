@@ -158,9 +158,8 @@ all-reduce (visible in py-spy as ranks stuck at different sub-modules of one for
 This affects trainers pulling per-rank data from an external service. `DistributedGRPOTrainer`
 overrides `_generate_single_turn` to broadcast the vLLM rollout tuple from the TP-group leader. For
 custom trainers, add an `assert_rank_uniform` call (`halo.runtime.consensus`; pass
-`tuple(t.shape)` to compare a shape) at the suspect tensor — the toolkit ships no call sites, so
-`HALO_TP_CONSISTENCY_CHECK=1` on its own produces nothing; it only turns the check's warning into a
-raise.
+`tuple(t.shape)` to compare a shape, `strict=True` to raise instead of warn) at the suspect tensor —
+the toolkit ships no call sites.
 
 ## Quick start
 

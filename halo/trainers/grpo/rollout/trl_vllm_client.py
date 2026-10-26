@@ -114,7 +114,8 @@ class TrlVLLMClient(VLLMWeightSyncClient):
                     f"vLLM server {self.base_url} returned a completion without `token_ids` even though "
                     f"the request set `return_token_ids`. Recovering the ids by re-tokenizing the text "
                     f"would silently desync the GRPO importance-sampling ratio, so the rollout is "
-                    f"refused — serve this model on vLLM >= 0.10.2, which honors the flag."
+                    f"refused — serve from the toolkit's vLLM image (make build-vllm, {self.ENGINE_RELEASE}), "
+                    f"which honors the flag."
                 )
             completion_ids = list(completion_ids)
             all_completion_ids.append(completion_ids)

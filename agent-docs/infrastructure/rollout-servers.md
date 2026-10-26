@@ -433,11 +433,14 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 TRAINER_CUDA_DEVIC
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
-`TRAINER_CUDA_DEVICES` defaults to `0,1,2,3,4,5,6`, so a two-GPU server on 6,7 needs it narrowed. The
-flag-valued variables (`VLLM_ATTENTION_BACKEND`, `VLLM_ENABLE_R3`, `VLLM_SPECULATIVE_CONFIG`, the
-tool-parser-plugin, reasoning-parser and chat-template ones) are `${VAR:+--flag ${VAR}}` slots, so leaving
-one unset omits its flag. They are compose interpolations vLLM never reads as env vars;
-`VLLM_ENFORCE_STRICT_TOOL_CALLING` and `VLLM_TUNED_CONFIG_FOLDER` are env vars the server reads.
+`TRAINER_CUDA_DEVICES` defaults to `0,1,2,3,4,5,6`, so a two-GPU server on 6,7 needs it narrowed.
+`HALO_SCRATCH`, the training service's scratch volume, has no default, and compose interpolates the
+whole file, so `up vllm-server` alone refuses to start without it; set it once in the repo-root `.env`,
+which compose reads for interpolation. The flag-valued variables (`VLLM_ATTENTION_BACKEND`,
+`VLLM_ENABLE_R3`, `VLLM_SPECULATIVE_CONFIG`, the tool-parser-plugin, reasoning-parser and chat-template
+ones) are `${VAR:+--flag ${VAR}}` slots, so leaving one unset omits its flag. They are compose
+interpolations vLLM never reads as env vars; `VLLM_ENFORCE_STRICT_TOOL_CALLING` and
+`VLLM_TUNED_CONFIG_FOLDER` are env vars the server reads.
 
 Without compose, the ENTRYPOINT is `vllm serve` and any args replace the compose `CMD` wholesale, so
 restate every load-bearing flag, or the server silently loses NCCL weight transfer and falls back to the
@@ -584,14 +587,14 @@ Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22`, then set
 
 ```bash
 make build-sglang                      # or the pull above
-SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up
+SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compose -f docker-compose.sglang.yml up
 ```
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `SGLANG_MODEL` | *(required)* | Hub id or local checkpoint directory |
 | `SGLANG_IMAGE` | `halo:sglang-0.5.22` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:sglang-0.5.22`, or to `lmsysorg/sglang:v0.5.22` for serving-only use |
-| `SGLANG_MODEL_DIR` | `/mnt/models` | Host dir mounted read-only, at the same path inside — point it at wherever your checkpoints live when `SGLANG_MODEL` is a path |
+| `SGLANG_MODEL_DIR` | *(required)* | Host dir mounted read-only, at the same path inside: the one holding `SGLANG_MODEL` when that is a path, any existing directory for a hub id |
 | `SGLANG_PORT` | `30000` | Bound on the host (`network_mode: host`) |
 | `SGLANG_TP` | `1` | Tensor-parallel size; pair with `SGLANG_CUDA_DEVICES` |
 | `SGLANG_CUDA_DEVICES` | `7` | Server GPUs; must exclude the trainer's |
@@ -710,7 +713,7 @@ Server side, layer the EFA overlay after the base compose file:
 
 ```bash
 docker compose -f docker-compose.vllm.yml -f docker-compose.vllm.efa.yml up -d vllm-server
-SGLANG_MODEL=... docker compose -f docker-compose.sglang.yml -f docker-compose.sglang.efa.yml up -d
+SGLANG_MODEL=... SGLANG_MODEL_DIR=... docker compose -f docker-compose.sglang.yml -f docker-compose.sglang.efa.yml up -d
 ```
 
 Each overlay adds `devices: /dev/infiniband` (a `-v` bind mount does not grant access), `ulimits:

@@ -51,8 +51,7 @@ def _capture_map(trainer, dataset, processing_class):
     def _fake_map(mapped_dataset, map_fn, **kwargs):
         captured["fn"] = map_fn
         captured["fn_kwargs"] = kwargs["fn_kwargs"]
-        # A column the VLM branch's cast_column can re-type; the text branch passes it through.
-        return Dataset.from_dict({"images": [[]]})
+        return mapped_dataset
 
     with mock.patch("halo.trainers.preference.smpo.coordinated_map", _fake_map):
         trainer._prepare_dataset(dataset, processing_class, trainer.args, "train")

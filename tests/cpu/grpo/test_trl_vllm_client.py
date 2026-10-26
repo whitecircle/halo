@@ -202,8 +202,9 @@ def test_generate_raises_when_the_server_omits_token_ids():
         ]
     )
 
-    with pytest.raises(RuntimeError, match="token_ids"):
+    with pytest.raises(RuntimeError, match="token_ids") as refusal:
         client.generate(["prompt"])
+    assert f"make build-vllm, {client.ENGINE_RELEASE}" in str(refusal.value), "the remedy must name the pinned image"
 
 
 def test_a_prompt_with_an_image_is_refused_before_any_request():

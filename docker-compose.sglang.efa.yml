@@ -1,6 +1,7 @@
 # EFA overlay for docker-compose.sglang.yml — the weight-sync group rides the fabric. Layer it after
 # the base:
-#   SGLANG_MODEL=... docker compose -f docker-compose.sglang.yml -f docker-compose.sglang.efa.yml up -d
+#   SGLANG_MODEL=... SGLANG_MODEL_DIR=... docker compose -f docker-compose.sglang.yml \
+#     -f docker-compose.sglang.efa.yml up -d
 # The host supplies the EFA driver and /dev/infiniband, the trainer container the same devices and
 # net (`make ... EFA=1`), plus SGLANG_GROUP_HOST when the default-route NIC is not reachable.
 

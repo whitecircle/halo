@@ -41,6 +41,10 @@ SGLANG_MODEL=<hub-id-or-path> SGLANG_CUDA_DEVICES=7 \
     docker compose -f docker-compose.sglang.yml up -d sglang-server
 ```
 
+Compose refuses to start either file without its host path: `HALO_SCRATCH` (vLLM, the training service's scratch
+volume) and `SGLANG_MODEL_DIR` (SGLang, the directory it mounts read-only). Export them, or set them once in the
+repo-root `.env`, which compose reads.
+
 Confirm `/health` (`:8000` vLLM, `:30000` SGLang) first, or client init hangs up to `rollout_connection_timeout`
 (default 120 s). Parsers, `--moe-backend triton` and the rest:
 [Rollout Servers](../../infrastructure/rollout-servers.md#vllm).

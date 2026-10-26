@@ -133,19 +133,6 @@ def write_merged_index(output_dir: str, weight_map: dict[str, str], metadata: Ma
         json.dump(index, f, indent=2, sort_keys=True)
 
 
-def publish_streamed_parts(
-    output_dir: str, final_names: dict[str, str], weight_map: dict[str, str], metadata: Mapping[str, Any]
-) -> None:
-    """Rename every streamed part (``{part name: final HF name}``) into place once all are on disk, then
-    index a sharded result or sweep the leftovers beside a single ``model.safetensors``."""
-    for part, final in final_names.items():
-        os.replace(os.path.join(output_dir, part), os.path.join(output_dir, final))
-    if len(final_names) > 1:
-        write_merged_index(output_dir, weight_map, metadata)
-    else:
-        remove_stale_checkpoint_files(output_dir, set(final_names.values()))
-
-
 def _unique_key_by_suffix(state_dict: dict, suffix: str) -> str | None:
     """The one key equal to ``suffix`` or ending in ``.{suffix}``; ``None`` when absent or ambiguous."""
     matches = [k for k in state_dict if k == suffix or k.endswith(f".{suffix}")]
@@ -230,8 +217,9 @@ class StreamingShardWriter:
         return self._weight_map, self._total_bytes
 
     def close_as_hf_checkpoint(self) -> int:
-        """Flush, rename the parts to HF's names and write the index; return the bytes written. Valid only
-        when this writer owns every ``model*.safetensors`` in the directory: it deletes the rest."""
+        """Flush, rename the parts to HF's names once all are on disk, then index a sharded result or sweep the
+        leftovers beside a single ``model.safetensors``; return the bytes written. Valid only when this writer
+        owns every ``model*.safetensors`` in the directory: it deletes the rest."""
         if not self.enabled:
             return 0
         self._flush()
@@ -244,8 +232,13 @@ class StreamingShardWriter:
         renamed = {
             part_name: hf_shard_filename(i, self._part) for i, part_name in enumerate(self._part_names, start=1)
         }
-        weight_map = {key: renamed[part_name] for key, part_name in self._weight_map.items()}
-        publish_streamed_parts(self.output_dir, renamed, weight_map, {"total_size": self._total_bytes})
+        for part_name, final in renamed.items():
+            os.replace(os.path.join(self.output_dir, part_name), os.path.join(self.output_dir, final))
+        if self._part > 1:
+            weight_map = {key: renamed[part_name] for key, part_name in self._weight_map.items()}
+            write_merged_index(self.output_dir, weight_map, {"total_size": self._total_bytes})
+        else:
+            remove_stale_checkpoint_files(self.output_dir, set(renamed.values()))
         return self._total_bytes
 
     def _flush(self) -> None:

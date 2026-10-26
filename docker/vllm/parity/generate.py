@@ -31,7 +31,7 @@ from transformers import CONFIG_MAPPING, AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import CONFIG_NAME
 
-from halo.checkpoint.config_export import export_source_config_schema, restore_model_type
+from halo.checkpoint.config_export import drop_unshipped_auto_map, export_source_config_schema, restore_model_type
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, find_moe_family_spec
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.models import (
@@ -183,13 +183,16 @@ def uncovered_families() -> list[str]:
 
 def render(fixture, *, rewrite: bool) -> dict:
     """The ``config.json`` payload the toolkit writes for ``fixture``: through the export rewrite by
-    default, or the plain transformers serialization for the negative control."""
+    default, or as an export without it for the negative control. That export ships no remote code, so
+    the writer drops the ``auto_map`` entries naming it, and the server must parse the native schema."""
     with tempfile.TemporaryDirectory() as tmp:
         config = fixture.build()
         config.save_pretrained(tmp)
         restore_model_type(config, tmp)
         if rewrite:
             export_source_config_schema(config, tmp, source=fixture.source)
+        else:
+            drop_unshipped_auto_map(tmp)
         with open(os.path.join(tmp, CONFIG_NAME)) as f:
             payload = json.load(f)
     # Stable across patch releases of the writer; the pin decision lives in Dockerfile.vllm.
@@ -250,9 +253,7 @@ def write_all() -> None:
                 json.dump(payload, f, indent=2, sort_keys=True)
                 f.write("\n")
             print(f"wrote {os.path.relpath(path, PARITY_ROOT)}")
-            # Only the served fixtures get the module: the control is refused as the unrewritten
-            # export is, and that export ships no remote-code modules either.
-            module = ship_config_module(fixture, directory, payload) if role == "fixtures" else None
+            module = ship_config_module(fixture, directory, payload)
             if module is not None:
                 print(f"shipped {role}/{fixture.name}/{module}")
 

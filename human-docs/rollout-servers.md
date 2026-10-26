@@ -28,6 +28,8 @@ curl -s localhost:8000/health
 
 This server takes GPUs 6 and 7, so start the trainer with
 `TRAINER_CUDA_DEVICES=0,1,2,3,4,5`; its default `0,1,2,3,4,5,6` overlaps GPU 6.
+The compose file also needs `HALO_SCRATCH`, the trainer's large scratch volume,
+even to start the server alone; set it once in the repo-root `.env`.
 
 `docker-compose.vllm.yml` already passes the flags RL depends on. You normally
 set `VLLM_MODEL`, `VLLM_CUDA_DEVICES` (never overlapping `TRAINER_CUDA_DEVICES`),
@@ -69,13 +71,14 @@ vLLM-only.
 
 ```bash
 make build-sglang      # or pull public.ecr.aws/whitecircle/halo:sglang-0.5.22 and set SGLANG_IMAGE to it
-SGLANG_MODEL=Qwen/Qwen3-30B-A3B SGLANG_CUDA_DEVICES=7 \
+SGLANG_MODEL=Qwen/Qwen3-30B-A3B SGLANG_MODEL_DIR=/path/to/checkpoints SGLANG_CUDA_DEVICES=7 \
     docker compose -f docker-compose.sglang.yml up -d
 ```
 
 The variables mirror vLLM's (`SGLANG_MODEL`, `SGLANG_PORT`, `SGLANG_CUDA_DEVICES`,
 `SGLANG_TP`, `SGLANG_GPU_MEM`), except that `SGLANG_TOOL_PARSER` reads the parser
-off the chat template by default. The compose file also sets
+off the chat template by default, and `SGLANG_MODEL_DIR` is required: the host
+directory holding a local `SGLANG_MODEL`, any existing one for a hub id. The compose file also sets
 `NCCL_CUMEM_ENABLE=1`; a container you start by hand needs it too
 ([Rollout Servers → SGLang](../agent-docs/infrastructure/rollout-servers.md#sglang) ↗).
 

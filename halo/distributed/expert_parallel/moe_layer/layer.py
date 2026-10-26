@@ -16,7 +16,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from halo.diagnostics.ep_span_timing import get_ep_span_timer
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
 from halo.distributed.expert_parallel.moe_layer.balancing_bias import EPBalancingBiasMixin
@@ -232,12 +231,9 @@ class EPMoELayerBase(
         # [flipped, forced] token counts, device-side; the reader syncs once per logging step.
         self._replay_flip_counts: torch.Tensor | None = None
 
-        # HALO_EP_PERF_PROFILE=1 → CUDA-event phase timers (per-phase syncs, diagnostic runs only); off → label.
-        self._perf: Callable[[str], contextlib.AbstractContextManager]
-        if env_flag("HALO_EP_PERF_PROFILE"):
-            self._perf = get_ep_span_timer().time_operation
-        else:
-            self._perf = torch.profiler.record_function
+        # Labels the dispatch / expert-compute / combine spans at no device cost; benchmark_sft_ep.py
+        # --comm_profile swaps in EPSpanTimer.time_operation, which syncs per span to time it.
+        self._perf: Callable[[str], contextlib.AbstractContextManager] = torch.profiler.record_function
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Read the routing knobs the forward consumes; default ``top_k``. An override calls ``super()``

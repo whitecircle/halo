@@ -266,11 +266,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    # Must be set BEFORE the EP layers are constructed (in load_distributed_model), which read
-    # it at __init__ to decide whether to wrap dispatch/compute/combine with CUDA-event timers.
-    if args.comm_profile:
-        os.environ["HALO_EP_PERF_PROFILE"] = "1"
-
     # --- Distributed setup ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
@@ -415,6 +410,11 @@ def main() -> int:
             for _, layer in named_ep_layers(model):
                 layer.register_forward_pre_hook(_stall_before_forward)
             log(f"  Negative control: every EP layer holds the GPU idle {EP_FORWARD_DELAY_MS} ms before its forward")
+        if args.comm_profile:
+            # In place of each layer's profiler label: the timer syncs around every phase it times.
+            time_phase = get_ep_span_timer().time_operation
+            for _, layer in named_ep_layers(model):
+                layer._perf = time_phase
 
         # --- Adapter run: freeze base, then restore the trainable adapters ---
         # Expert adapters are plain grouped parameters built at load; PEFT (attention) is applied

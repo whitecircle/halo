@@ -69,7 +69,7 @@ The model class follows the **checkpoint**: a multimodal config loads through `A
 
 A dataset carrying images inside its messages alone reads as text, and the renderer refuses it rather than training on pixel-less placeholders.
 
-A VLM run hands its rows to the trainer untouched: it chat-templates them and selects `DataCollatorForVLMSMPO`, which processes images at collation, keeping pixels out of the Arrow cache. Completions split off the prompt jointly, as on the text path; when a token merges across the boundary, the row's `prompt_overlap` counts the prompt tokens the completions start with, and the collator ends the prompt before them. Completions must be text-only, and prompts are never truncated — one expanding past `max_prompt_length` raises, since cutting expanded placeholders desyncs them from `pixel_values`.
+A VLM run hands its rows to the trainer untouched: it chat-templates them and selects `DataCollatorForVLMSMPO`, which processes images at collation, keeping pixels out of the Arrow cache. The row map pins its Arrow schema, so text-only and image rows mix in one dataset, and a dataset counts as already prepared only with every column the map writes, `prompt_overlap` included; one missing a column that no longer carries the raw `chosen`/`rejected` to re-tokenize is refused with the missing columns named. Completions split off the prompt jointly, as on the text path; when a token merges across the boundary, the row's `prompt_overlap` counts the prompt tokens the completions start with, and the collator ends the prompt before them. Completions must be text-only, and prompts are never truncated — one expanding past `max_prompt_length` raises, since cutting expanded placeholders desyncs them from `pixel_values`.
 
 ## Testing a setup
 

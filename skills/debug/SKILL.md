@@ -42,7 +42,7 @@ the others never reach.
    per rank under `$TMPDIR/halo_diag_stacks`. Attaching needs `--cap-add=SYS_PTRACE` unless the
    host's `kernel.yama.ptrace_scope` is 0, else py-spy fails with `Permission denied`.
 2. Suspect a shape/value divergence upstream of the stuck collective →
-   `HALO_TP_CONSISTENCY_CHECK=1` + `assert_rank_uniform(tuple(t.shape), group=..., label=...)`.
+   `assert_rank_uniform(tuple(t.shape), group=..., label=..., strict=True)`.
 3. An EP job that stops at startup naming `concurrent >2-rank DeepEP dispatch groups` is a rejected
    topology, not a hang — see the **DeepEP fault** branch.
 4. Recipes: [Debugging §4](../../agent-docs/reference/debugging.md#4-diagnosing-multi-node-hangs).
@@ -70,7 +70,7 @@ the others never reach.
    check `fp32_grad_reduce` / `fp32_non_ep_params`.
 3. `assert_rank_uniform` does not find a NaN: it compares a hash across ranks, so a NaN every rank
    computes identically passes. It helps only where ranks that must agree (TP-replicated
-   activations) diverge — add the call there, then `HALO_TP_CONSISTENCY_CHECK=1`.
+   activations) diverge — add the call there, with `strict=True` to raise.
 
 ### DeepEP fault (EP crash, combine-barrier deadlock)
 

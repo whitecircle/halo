@@ -29,9 +29,10 @@ which is usually too small for real runs:
 On the host, the `make` targets mount the volume named by `HALO_SCRATCH` and
 put all four on it; unset, they pick the local mount other than `/` with the
 most free space.
-The compose `training` service uses it for `TMPDIR` and `HALO_DATA_ROOT`
-(falling back to `/mnt`); its HF cache follows the host's `HF_HOME`. Export
-`HALO_SCRATCH` once to choose the volume yourself.
+The compose `training` service uses it for `TMPDIR` and `HALO_DATA_ROOT`,
+and the vLLM compose file refuses to start without it, even for the server
+alone; its HF cache follows the host's `HF_HOME`. Export `HALO_SCRATCH` once,
+or set it in the repo-root `.env`, to choose the volume yourself.
 
 ## Secrets
 

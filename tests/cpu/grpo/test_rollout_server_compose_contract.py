@@ -175,6 +175,21 @@ def test_every_server_and_trainer_service_passes_nccl_proto_through_bare():
             assert "NCCL_PROTO" in service.get("environment", []), (compose, name, "no bare NCCL_PROTO pass-through")
 
 
+@pytest.mark.parametrize(
+    ("compose_path", "variable"), [(VLLM_COMPOSE, "HALO_SCRATCH"), (SGLANG_COMPOSE, "SGLANG_MODEL_DIR")]
+)
+def test_a_host_path_the_compose_file_mounts_has_no_fallback(compose_path, variable):
+    """Unset, the host path must stop compose with a message, not fall back to a guessed directory: a
+    path's name does not prove its capacity (``/mnt`` shares the small root disk on some hosts), and a
+    bind mount of a missing host path creates it."""
+    operators = re.findall(rf"\$\{{{variable}([^}}]*)\}}", compose_path.read_text(encoding="utf-8"))
+    assert operators, f"{compose_path.name} no longer reads {variable}"
+    assert all(op == "" or op.startswith(":?") for op in operators), (
+        f"{compose_path.name} defaults {variable}: {operators}"
+    )
+    assert any(op.startswith(":?") for op in operators), f"{compose_path.name} never requires {variable}"
+
+
 def test_the_compose_command_carries_no_yaml_comment_lines():
     """A ``#`` inside a folded block scalar is text, not a comment — it becomes an argv entry.
 

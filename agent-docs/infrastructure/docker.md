@@ -69,9 +69,9 @@ The Makefile puts them under `HALO_SCRATCH`, the same variable the devcontainer 
 compose file reads, so exporting it once points the whole toolchain at the host's large volume. Unset,
 the Makefile resolves it with the recipe above and stops a target that needs it when no mount
 qualifies; export it on a host with more than one large volume, since the recipe picks by free space,
-and on a CI runner whose seeded HF cache must stay put. The compose file falls back to `/mnt`, which is
-**not a guaranteed large volume**: on some hosts it shares the small root device. Confirm with
-`findmnt` / `df -h` before any multi-GB write.
+and on a CI runner whose seeded HF cache must stay put. The compose file has no fallback: unset, it
+refuses every service, `vllm-server` included, so set it once in the repo-root `.env`, which compose
+reads for interpolation. Confirm the volume with `findmnt` / `df -h` before any multi-GB write.
 
 On a host whose docker default runtime rejects `--gpus` (sysbox-runc, for one), set
 `DOCKER_RUNTIME=nvidia` on any `make` target; empty — the default — leaves the host default in place.

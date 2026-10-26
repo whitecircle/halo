@@ -2,8 +2,8 @@
 # is the NCCL-aligned Dockerfile.sglang build (`make build-sglang`, or SGLANG_IMAGE set to the prebuilt
 # public.ecr.aws/whitecircle/halo:sglang-0.5.22): upstream's NCCL does not match uv.lock's pin, and a
 # skew hangs the sync group. Host networking; SGLANG_CUDA_DEVICES must not overlap the trainer's.
-#   SGLANG_MODEL=<hub id|local dir> docker compose -f docker-compose.sglang.yml up   # `down` needs it too
-#   (add -f docker-compose.sglang.efa.yml on an EFA host)
+#   SGLANG_MODEL=<hub id|local dir> SGLANG_MODEL_DIR=<dir> docker compose -f docker-compose.sglang.yml up
+#   (`down` needs both too; add -f docker-compose.sglang.efa.yml on an EFA host)
 
 services:
   sglang-server:
@@ -39,8 +39,9 @@ services:
     volumes:
       # Mounted at the same path inside the container, so HF_HOME resolves either side.
       - ${HF_HOME:-~/.cache/huggingface}:${HF_HOME:-/root/.cache/huggingface}
-      # Only needed when SGLANG_MODEL is a local path rather than a hub id; must contain it.
-      - ${SGLANG_MODEL_DIR:-/mnt/models}:${SGLANG_MODEL_DIR:-/mnt/models}:ro
+      # The host directory holding SGLANG_MODEL when that is a local path. No fallback; with a hub id
+      # any existing directory serves.
+      - ${SGLANG_MODEL_DIR:?set SGLANG_MODEL_DIR to the host directory holding a local SGLANG_MODEL (any existing directory for a hub id)}:${SGLANG_MODEL_DIR}:ro
     # Two flags are required and silent when wrong: --tool-call-parser (tool-using environments need
     # the calls parsed; `auto` reads the parser off the chat template) and --moe-runner-backend
     # triton (auto-selection picks a fused runner for most MoE shapes: triton_kernel and flashinfer
