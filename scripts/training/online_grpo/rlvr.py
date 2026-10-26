@@ -44,8 +44,8 @@ from src.environments.base import resolve_reasoning_effort
 from src.environments.rollout_config import VLLM_BACKEND
 from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.rewards.functions import ScorerRewardFunction, reward_functions
 from src.rewards.graders.verifiable import RLVR_GRADERS
+from src.rewards.trl_reward_functions import ScorerRewardFunction, build_trl_reward_functions
 from src.runtime.collectives import barrier
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -183,7 +183,7 @@ def main():
 
     # One TRL reward function per configured term, weighted by the term; process_for_rlvr keeps the
     # conversation a scorer reads and renders the ground truth into "answer", a judge's reference.
-    reward_funcs, reward_weights = reward_functions(
+    reward_funcs, reward_weights = build_trl_reward_functions(
         args.reward_terms, RLVR_GRADERS, prompt_column="conversation", reference_column="answer"
     )
     # A judge or reward-model term is probed before the trainer exists: a bad URL, key or model would

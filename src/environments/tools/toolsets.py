@@ -1,24 +1,18 @@
-"""Pre-built tool-set factories (math, code, search, file).
-
-``create_native_*`` are stateless (Python defaults to the in-process sandbox; pass a ``sandbox`` or
-non-Python ``language`` for a real interpreter). ``create_session_*`` bind a :class:`SandboxSession`
-whose working dir persists across turns, resolved per call so concurrent episodes stay isolated.
-"""
+"""The tool sets an environment registers (math, code, search, files). The plain builders are stateless (Python runs
+in the in-process sandbox unless a ``sandbox`` or another ``language`` asks for a real interpreter); the
+``build_session_*`` ones bind the active episode's :class:`SandboxSession`, resolved per call, whose working dir
+persists across turns."""
 
 import functools
 from collections.abc import Callable
 from contextvars import ContextVar
 
-from src.environments.sandbox.base import (
-    SANDBOX_DEFAULT_TIMEOUT,
-    SandboxExecutor,
-    SandboxInfraError,
-    SandboxSession,
-    require_language,
-)
-from src.environments.sandbox.inprocess import run_python_sandboxed, safe_calculate
+from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
+from src.environments.sandbox.factory import build_sandbox
+from src.environments.sandbox.inprocess import calculate_sandboxed, run_python_sandboxed
+from src.environments.sandbox.languages import require_language
 from src.environments.sandbox.repl import run_code_via_sandbox
-from src.environments.sandbox.resolve import resolve_sandbox
+from src.environments.sandbox.results import SandboxInfraError
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolRegistry,
@@ -31,12 +25,28 @@ from src.environments.tools.web_search import (
     web_search,
 )
 
+# What the file tools tell the model over each store: a simulated absolute-path filesystem, a persistent workspace.
+_SIMULATED_FILE_TEXTS = {
+    "read": "Read the contents of a file.",
+    "write": "Write content to a file.",
+    "list": "List files in a directory.",
+    "read_path": "Path to the file to read",
+    "write_path": "Path to the file to write",
+    "list_dir": "Directory path to list files from",
+}
+_WORKSPACE_FILE_TEXTS = {
+    "read": "Read the contents of a workspace file.",
+    "write": "Write content to a file in the workspace (persists across turns).",
+    "list": "List files in the workspace (optionally filtered by a path prefix).",
+    "read_path": "Relative path of the file to read",
+    "write_path": "Relative path of the file to write",
+    "list_dir": "Path prefix to filter by",
+}
 
-def create_native_math_tools(timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> NativeToolRegistry:
-    """Create a safe-calculator tool (arithmetic and common math functions).
 
-    ``timeout`` bounds one evaluation, the same wall-clock cap the code tools take: an expression the
-    AST guard admits can still run indefinitely, and sync tool execution occupies a Ray actor's loop.
+def build_math_tools(timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> NativeToolRegistry:
+    """A safe-calculator tool, ``timeout`` bounding one evaluation: an expression the AST guard admits can still run
+    indefinitely, and sync tool execution occupies a Ray actor's loop.
     """
     registry = NativeToolRegistry()
     registry.register(
@@ -50,27 +60,22 @@ def create_native_math_tools(timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> Native
                     description="The mathematical expression to evaluate, e.g., '2 + 3 * 4', 'sqrt(16)', 'log(100, 10)'",
                 ),
             ],
-            handler=functools.partial(safe_calculate, timeout=timeout),
+            handler=functools.partial(calculate_sandboxed, timeout=timeout),
         )
     )
     return registry
 
 
-def create_native_code_tools(
+def build_code_tools(
     language: str = "python",
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
     sandbox: SandboxExecutor | None = None,
     tool_name: str | None = None,
 ) -> NativeToolRegistry:
-    """Create a single-language code-execution tool.
-
-    Args:
-        language: any name or alias in the sandbox language registry (``LANGUAGES``).
-        timeout: wall-clock cap (seconds) per execution.
-        sandbox: run on this :class:`SandboxExecutor`, a subprocess with imports and the stdlib (confined
-            on ``bubblewrap`` / ``remote``, rlimits only on ``local``). ``None`` keeps the in-process
-            Python REPL; a non-Python language resolves a default backend.
-        tool_name: name exposed to the model (defaults to canonical language name).
+    """A single-language code-execution tool named ``tool_name`` (default: the language's canonical name) for any
+    ``language`` the sandbox registry holds, ``timeout`` seconds per run. ``sandbox`` runs it as a subprocess with
+    imports and the stdlib (confined on ``bubblewrap`` / ``remote``); ``None`` keeps the in-process Python REPL, and a
+    non-Python language takes the default backend.
     """
     spec = require_language(language)
 
@@ -85,7 +90,7 @@ def create_native_code_tools(
         )
     else:
         handler = functools.partial(
-            run_code_via_sandbox, runner=sandbox or resolve_sandbox(), timeout=timeout, language=spec.name
+            run_code_via_sandbox, runner=sandbox or build_sandbox(), timeout=timeout, language=spec.name
         )
         if spec.is_compiled:
             description = (
@@ -113,23 +118,17 @@ def create_native_code_tools(
     return registry
 
 
-def create_native_python_tools(
+def build_python_tools(
     timeout: float = SANDBOX_DEFAULT_TIMEOUT, sandbox: SandboxExecutor | None = None
 ) -> NativeToolRegistry:
-    """Create a sandboxed Python REPL tool (named ``python``). See :func:`create_native_code_tools`."""
-    return create_native_code_tools(language="python", timeout=timeout, sandbox=sandbox, tool_name="python")
+    """A sandboxed Python REPL tool (named ``python``). See :func:`build_code_tools`."""
+    return build_code_tools(language="python", timeout=timeout, sandbox=sandbox, tool_name="python")
 
 
-def create_native_search_tools(backend: str | None = None) -> NativeToolRegistry:
-    """Create a web_search tool with pluggable backends.
-
-    ``backend=None`` auto-selects by available API-key env var, in order: Serper (SERPER_API_KEY),
-    Brave (BRAVE_API_KEY), Tavily (TAVILY_API_KEY), then keyless DuckDuckGo. Pass a name
-    ("serper"/"brave"/"tavily"/"duckduckgo") to force one; "mock" additionally needs
-    ``HALO_ALLOW_MOCK_SEARCH=1`` (its fabricated snippets would score as a successful search).
-
-    The name is validated at construction rather than at the first search, so an environment built
-    with an unselectable backend is rejected instead of running every episode on tool errors.
+def build_search_tools(backend: str | None = None) -> NativeToolRegistry:
+    """A web_search tool; ``backend=None`` auto-selects by available API key (Serper, Brave, Tavily, then keyless
+    DuckDuckGo), and ``mock`` also needs ``HALO_ALLOW_MOCK_SEARCH=1`` (its fabricated snippets score as a success). The
+    name is validated here, so an environment never runs every episode on a backend it cannot select.
     """
     validate_search_backend(backend)
     registry = NativeToolRegistry()
@@ -157,47 +156,29 @@ def create_native_search_tools(backend: str | None = None) -> NativeToolRegistry
     return registry
 
 
-def _seed_simulated_files() -> dict[str, str]:
-    """Fresh copy of the demo filesystem's initial contents (one per episode)."""
-    return {
-        "/home/user/notes.txt": "My notes...",
-        "/home/user/data.csv": "name,value\na,1\nb,2",
-    }
-
-
 def _file_tools(
     read_file: Callable[..., str],
     write_file: Callable[..., str],
     list_files: Callable[..., str],
-    *,
-    read_desc: str,
-    write_desc: str,
-    list_desc: str,
-    read_path_desc: str,
-    write_path_desc: str,
-    list_dir_desc: str,
+    texts: dict[str, str],
 ) -> NativeToolRegistry:
-    """Build the read/write/list file trio over any store, given its three handlers.
-
-    The schema is fixed: the model calls the same three tools with the same parameter names whichever
-    store backs them. Descriptions differ per store (a simulated absolute-path filesystem versus a
-    persistent relative-path workspace), so each caller supplies its own wording.
-    """
+    """The read/write/list file trio over any store, given its three handlers and its wording (``texts``): the
+    model calls the same three tools with the same parameters whichever store backs them."""
     registry = NativeToolRegistry()
     registry.register(
         NativeTool(
             name="read_file",
-            description=read_desc,
-            parameters=[ToolParameter("path", "string", read_path_desc)],
+            description=texts["read"],
+            parameters=[ToolParameter("path", "string", texts["read_path"])],
             handler=read_file,
         )
     )
     registry.register(
         NativeTool(
             name="write_file",
-            description=write_desc,
+            description=texts["write"],
             parameters=[
-                ToolParameter("path", "string", write_path_desc),
+                ToolParameter("path", "string", texts["write_path"]),
                 ToolParameter("content", "string", "Content to write to the file"),
             ],
             handler=write_file,
@@ -206,20 +187,17 @@ def _file_tools(
     registry.register(
         NativeTool(
             name="list_files",
-            description=list_desc,
-            parameters=[ToolParameter("directory", "string", list_dir_desc, required=False)],
+            description=texts["list"],
+            parameters=[ToolParameter("directory", "string", texts["list_dir"], required=False)],
             handler=list_files,
         )
     )
     return registry
 
 
-def create_native_file_tools() -> NativeToolRegistry:
-    """Create simulated in-memory filesystem tools (tests / closed-world demos).
-
-    The store is a per-call :class:`ContextVar`, so episodes do not share process-wide state. Writes
-    carry across turns whenever the driver keeps one context per episode (:class:`EpisodeDispatcher`).
-    For a real workspace shared with executed code, use :func:`create_session_file_tools`.
+def build_simulated_file_tools() -> NativeToolRegistry:
+    """Simulated in-memory filesystem tools (tests, closed-world demos) over a per-context store, so episodes share no
+    process-wide state; writes carry across turns while the driver keeps one context per episode.
     """
     # None default so each context lazily seeds its own dict (a shared mutable default breaks isolation).
     files_var: ContextVar[dict[str, str] | None] = ContextVar("native_file_tools_store", default=None)
@@ -227,7 +205,7 @@ def create_native_file_tools() -> NativeToolRegistry:
     def _files() -> dict[str, str]:
         store = files_var.get()
         if store is None:
-            store = _seed_simulated_files()
+            store = {"/home/user/notes.txt": "My notes...", "/home/user/data.csv": "name,value\na,1\nb,2"}
             files_var.set(store)
         return store
 
@@ -242,31 +220,21 @@ def create_native_file_tools() -> NativeToolRegistry:
         _files()[path] = content
         return f"Successfully wrote {len(content)} bytes to {path}"
 
-    return _file_tools(
-        read_file,
-        write_file,
-        list_files,
-        read_desc="Read the contents of a file.",
-        write_desc="Write content to a file.",
-        list_desc="List files in a directory.",
-        read_path_desc="Path to the file to read",
-        write_path_desc="Path to the file to write",
-        list_dir_desc="Directory path to list files from",
-    )
+    return _file_tools(read_file, write_file, list_files, _SIMULATED_FILE_TEXTS)
 
 
-def create_all_native_tools(
+def build_combined_tools(
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
     sandbox: SandboxExecutor | None = None,
     search_backend: str | None = None,
 ) -> NativeToolRegistry:
     """Registry with all native tools: math, python, search (on ``search_backend``, see
-    :func:`create_native_search_tools`), and (simulated) file."""
+    :func:`build_search_tools`), and (simulated) file."""
     return NativeToolRegistry.combine(
-        create_native_math_tools(timeout=timeout),
-        create_native_python_tools(timeout=timeout, sandbox=sandbox),
-        create_native_search_tools(backend=search_backend),
-        create_native_file_tools(),
+        build_math_tools(timeout=timeout),
+        build_python_tools(timeout=timeout, sandbox=sandbox),
+        build_search_tools(backend=search_backend),
+        build_simulated_file_tools(),
     )
 
 
@@ -282,17 +250,15 @@ def _require_session(session_getter: Callable[[], SandboxSession]) -> SandboxSes
     return session
 
 
-def create_session_code_tools(
+def build_session_code_tools(
     session_getter: Callable[[], SandboxSession],
     language: str = "python",
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
     tool_name: str | None = None,
 ) -> NativeToolRegistry:
-    """Create a code-execution tool bound to the current episode's persistent session.
-
-    ``session_getter`` is invoked every call and returns the active episode's :class:`SandboxSession`,
-    so earlier turns' files are in scope and concurrent episodes do not share a working dir.
-    ``tool_name`` defaults to ``run_<language>``.
+    """A code-execution tool on the active episode's :class:`SandboxSession`, which ``session_getter`` resolves per
+    call, so earlier turns' files are in scope and concurrent episodes keep their own working dirs; ``tool_name``
+    defaults to ``run_<language>``.
     """
     spec = require_language(language)
 
@@ -314,16 +280,12 @@ def create_session_code_tools(
     return registry
 
 
-def create_session_bash_tools(
+def build_session_bash_tools(
     session_getter: Callable[[], SandboxSession],
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
 ) -> NativeToolRegistry:
-    """Create a shell tool (``run_bash_command``) bound to the current episode's persistent session.
-
-    The command runs through the same backend, working directory and limits as
-    :func:`create_session_code_tools`, so it sees the files earlier turns wrote. A non-zero exit is an
-    ordinary observation; a backend failure and a working directory the command replaced raise their
-    sandbox fault, which the protocol books by class.
+    """A shell tool (``run_bash_command``) on the active episode's session, the backend, working directory and limits
+    of :func:`build_session_code_tools`; a non-zero exit is an ordinary observation, a sandbox fault raises by class.
     """
 
     def _run(command: str) -> str:
@@ -346,17 +308,12 @@ def create_session_bash_tools(
     return registry
 
 
-def create_session_file_tools(
+def build_session_file_tools(
     session_getter: Callable[[], SandboxSession],
 ) -> NativeToolRegistry:
-    """Create real read/write/list file tools backed by the current episode's persistent session.
-
-    Files live in the session working dir, so code run via :func:`create_session_code_tools` shares them
-    across turns. ``session_getter`` resolves the active episode's session per call.
-
-    A rejected path (one that leaves the workspace, or that UTF-8 cannot encode) raises ``ValueError``,
-    a failed call; a missing session and a replaced working directory raise their sandbox fault, which
-    the protocol books by class. An absent file is a valid result and stays a string.
+    """Real read/write/list file tools on the active episode's session, sharing its working dir with the code it runs.
+    A path that leaves the workspace or that UTF-8 cannot encode raises ``ValueError`` (a failed call); a missing
+    session or a replaced working directory raises its sandbox fault; an absent file is a valid string result.
     """
 
     def write_file(path: str, content: str) -> str:
@@ -371,14 +328,4 @@ def create_session_file_tools(
         names = [f for f in _require_session(session_getter).list_files() if f.startswith(directory)]
         return "\n".join(names) if names else "No files found"
 
-    return _file_tools(
-        read_file,
-        write_file,
-        list_files,
-        read_desc="Read the contents of a workspace file.",
-        write_desc="Write content to a file in the workspace (persists across turns).",
-        list_desc="List files in the workspace (optionally filtered by a path prefix).",
-        read_path_desc="Relative path of the file to read",
-        write_path_desc="Relative path of the file to write",
-        list_dir_desc="Path prefix to filter by",
-    )
+    return _file_tools(read_file, write_file, list_files, _WORKSPACE_FILE_TEXTS)

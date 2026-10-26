@@ -353,7 +353,10 @@ def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path)
     plain_mapping, _ = family_key_mapping(model, list(stored))
     assert plain_mapping[disk_vision_key] not in state, "the declared lazy family cannot do this nested rename"
     master_loading.restore_fp32_master_parameters(
-        model, str(tmp_path), EPConfig(ep_size=1, experts_fsdp_managed=True), keep_non_ep=True
+        model,
+        str(tmp_path),
+        EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True),
+        keep_non_ep=True,
     )
     restored = model.state_dict(keep_vars=True)
     for key, disk_key in ((vision_key, disk_vision_key), (text_key, text_key)):

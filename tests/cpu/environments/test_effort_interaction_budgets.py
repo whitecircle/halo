@@ -26,17 +26,6 @@ from src.environments.base import (
     REWARD_COMPONENTS_KEY,
     TOOL_CALL_COUNTS_KEY,
 )
-from src.environments.envs.tasks.coding.code_contests import (
-    SCRATCHPAD_BUDGET_SPENT_REPLY,
-    SUBMISSION_BUDGET_SPENT_REPLY,
-    SUBMIT_TOOL,
-    CodeContestsEnvironment,
-)
-from src.environments.envs.tasks.coding.grading import (
-    _MAX_FAILURE_DETAILS,
-    VERDICT_DETAIL_FULL,
-    run_solution_against_tests,
-)
 from src.environments.episode import (
     TurnGeneration,
     bind_episode_effort,
@@ -44,6 +33,14 @@ from src.environments.episode import (
     sampled_reasoning_tokens,
     step_context_from_generation,
 )
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.code_contests_prompts import (
+    SCRATCHPAD_BUDGET_SPENT_REPLY,
+    SUBMISSION_BUDGET_SPENT_REPLY,
+    SUBMIT_TOOL,
+)
+from src.environments.tasks.coding.grading import _MAX_FAILURE_DETAILS, run_solution_against_tests
+from src.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
 from src.environments.tools.definitions import NativeToolCall
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,

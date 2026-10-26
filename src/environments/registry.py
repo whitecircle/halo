@@ -8,15 +8,15 @@ from typing import Any
 from src.environments.envs.protocols.mcp import create_native_mcp_environment
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.protocols.react import create_react_math_environment, create_react_search_environment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.envs.tasks.qa import ExamQAEnvironment, create_qa_search_environment
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.swe import SweEnvironment
+from src.environments.tasks.qa import ExamQAEnvironment, build_qa_search_environment
 from src.environments.tools.definitions import NativeToolRegistry
-from src.environments.tools.factories import (
-    create_all_native_tools,
-    create_native_code_tools,
-    create_native_math_tools,
-    create_native_python_tools,
+from src.environments.tools.toolsets import (
+    build_code_tools,
+    build_combined_tools,
+    build_math_tools,
+    build_python_tools,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,19 +101,19 @@ def _register_builtins():
     register_environment(
         "native_math",
         lambda c: NativeToolUseEnvironment(
-            tool_registry=NativeToolRegistry.combine(create_native_math_tools(), create_native_python_tools()), **c
+            tool_registry=NativeToolRegistry.combine(build_math_tools(), build_python_tools()), **c
         ),
     )
     register_environment(
         "native_coding",
         lambda c: NativeToolUseEnvironment(
-            tool_registry=create_native_code_tools(language="python", tool_name="python_repl"), **c
+            tool_registry=build_code_tools(language="python", tool_name="python_repl"), **c
         ),
     )
     register_environment(
         "native_combined",
         lambda c: NativeToolUseEnvironment(
-            tool_registry=create_all_native_tools(search_backend=c.get("search_backend")),
+            tool_registry=build_combined_tools(search_backend=c.get("search_backend")),
             **_without(c, "search_backend"),
         ),
     )
@@ -125,7 +125,7 @@ def _register_builtins():
     )
     register_environment("swe", lambda c: SweEnvironment(**c))
 
-    register_environment("qa_search", lambda c: create_qa_search_environment(**c))
+    register_environment("qa_search", lambda c: build_qa_search_environment(**c))
     # code_contests / codeforces are one environment; only the default output_comparison differs.
     # code_contests takes the class default ("exact"), so only codeforces carries a preset.
     register_environment("code_contests", lambda c: CodeContestsEnvironment(**c))

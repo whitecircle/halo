@@ -55,14 +55,6 @@ from scripts.environments._common import (
     write_eval_outputs,
 )
 from src.environments.base import ANSWER_KEY
-from src.environments.envs.tasks.coding.code_contests import (
-    DEFAULT_EVAL_PROTOCOL,
-    DEFAULT_REASONING_EFFORT,
-    EVAL_PROTOCOLS,
-    CodeContestsEnvironment,
-    without_eval_protocol_pins,
-)
-from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 from src.environments.eval_runner import (
     collect_results,
     load_hf_split,
@@ -70,6 +62,14 @@ from src.environments.eval_runner import (
 )
 from src.environments.registry import resolve_environment
 from src.environments.rollout_config import RolloutConfig
+from src.environments.tasks.coding.code_contests import (
+    DEFAULT_EVAL_PROTOCOL,
+    DEFAULT_REASONING_EFFORT,
+    EVAL_PROTOCOLS,
+    CodeContestsEnvironment,
+    without_eval_protocol_pins,
+)
+from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 from src.inference.openai_client import build_openai_client
 from src.log import configure_cli_logging
 
@@ -125,7 +125,7 @@ def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> 
     platforms = parse_list_flag("platform", args.platform) if args.platform is not None else ()
     try:
         selection = ContestSelection.parse(args.start_date, args.end_date, platforms, args.include_examples_only)
-        adapter.require_selectable(selection)
+        adapter.reject_unselectable(selection)
     except ValueError as exc:
         raise SystemExit(f"--start_date/--end_date/--platform on --adapter {args.adapter}: {exc}") from exc
     return selection

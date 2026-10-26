@@ -32,13 +32,9 @@ from src.environments.tools.definitions import (
     NativeToolRegistry,
     parse_python_expression,
 )
-from src.environments.tools.factories import (
-    create_native_math_tools,
-    create_native_python_tools,
-    create_native_search_tools,
-)
+from src.environments.tools.toolsets import build_math_tools, build_python_tools, build_search_tools
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
-from src.rewards.graders.matching import validate_answer
+from src.rewards.graders.matching import is_correct_answer
 
 logger = logging.getLogger(__name__)
 
@@ -369,14 +365,14 @@ Always think before acting, and provide a Final Answer when you're done."""
             # keeps an answer-graded run off this path rather than paying it the full objective.
             return EpisodeGrade(1.0)
 
-        return EpisodeGrade(1.0 if validate_answer(final_answer, expected) else 0.0)
+        return EpisodeGrade(1.0 if is_correct_answer(final_answer, expected) else 0.0)
 
 
 def create_react_math_environment(**kwargs) -> ReActEnvironment:
     """Create a ReAct environment for math problems (calculator + Python REPL tools)."""
     registry = NativeToolRegistry.combine(
-        create_native_math_tools(),
-        create_native_python_tools(),
+        build_math_tools(),
+        build_python_tools(),
     )
 
     system_prompt = """You are a math problem solver. Think step by step and use tools to calculate.
@@ -401,8 +397,8 @@ Always show your reasoning in the Thought section."""
 
 def create_react_search_environment(search_backend: str | None = None, **kwargs) -> ReActEnvironment:
     """Create a ReAct environment for search/QA tasks (web search + basic tools). ``search_backend``
-    names the search backend (:func:`create_native_search_tools`; ``None`` auto-selects)."""
-    registry = create_native_search_tools(backend=search_backend)
+    names the search backend (:func:`build_search_tools`; ``None`` auto-selects)."""
+    registry = build_search_tools(backend=search_backend)
 
     system_prompt = """You are a research assistant that finds information to answer questions.
 

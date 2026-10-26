@@ -24,7 +24,7 @@ environment_kwargs:
   sandbox_url: http://sandbox-host:8080   # remote only
 ```
 
-Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then `local` (`resolve_sandbox()` in `resolve.py`). `remote` with no URL raises, and so does a URL with `local` or `bubblewrap`.
+Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then `local` (`build_sandbox()` in `factory.py`). `remote` with no URL raises, and so does a URL with `local` or `bubblewrap`.
 
 ### Confinement
 
@@ -36,7 +36,7 @@ A confined program cannot write the host filesystem or reach the network, but ca
 
 Use `bubblewrap` without network, or `remote`, for RL on untrusted code and whenever the trainer's environment carries secrets.
 
-Only `bubblewrap` lets a compile error show under code contests' `verdict_detail: outcome` (`compiles_without_test_input`): its build runs before any test and its program cannot force a rebuild ([Grading rules](tasks/code-contests/grading.md#grading-rules)).
+Only `bubblewrap` lets a compile error show under code contests' `verdict_detail: outcome` (`COMPILES_WITHOUT_TEST_INPUT`): its build runs before any test and its program cannot force a rebuild ([Grading rules](tasks/code-contests/grading.md#grading-rules)).
 
 ### Bubblewrap setup
 
@@ -67,9 +67,9 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 ## Using it from Python
 
 ```python
-from src.environments.sandbox.resolve import resolve_sandbox
+from src.environments.sandbox.factory import build_sandbox
 
-sandbox = resolve_sandbox(backend="bubblewrap")   # args beat HALO_SANDBOX_*
+sandbox = build_sandbox(backend="bubblewrap")   # args beat HALO_SANDBOX_*
 result = sandbox.run("print(input())", stdin="hi\n", language="python", timeout=15.0)
 ```
 
@@ -88,18 +88,18 @@ with sandbox.open_session() as session:
 `environment_kwargs` carries only `sandbox_backend` and `sandbox_url`. The executor's constructor arguments (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`, bubblewrap's `allow_network` / `extra_ro_binds`) go through `sandbox=`:
 
 ```python
-env = SweEnvironment(sandbox=resolve_sandbox("bubblewrap", memory_limit_mb=2048, allow_network=True))
+env = SweEnvironment(sandbox=build_sandbox("bubblewrap", memory_limit_mb=2048, allow_network=True))
 ```
 
 ### Session paths
 
-- A path that leaves the working directory by name (empty, `..`, absolute) or that UTF-8 cannot encode is refused as a bad argument (`ValueError`). One that is a link, resolves outside through one, or names a FIFO or device is refused on write (`SessionPathError`); `read_file` returns `None` for anything but a regular file.
-- A program that swaps a staged file for a link gets its own runtime error (`working directory tampered`). A removed working directory is recreated empty.
+- A path that leaves the working directory by name (empty, `..`, absolute) or that UTF-8 cannot encode is refused as a bad argument (`ValueError`, `SandboxSession.reject_unsafe_path`). One that is a link, resolves outside through one, or names a FIFO or device is refused on write (`SessionPathError`); `read_file` returns `None` for anything but a regular file.
+- A program that swaps a prepared file for a link gets its own runtime error (`working directory tampered`). A removed working directory is recreated empty.
 - A working directory replaced with a link or a file breaks the session: later runs report `agent_fault` ([Reading a result](#reading-a-result)), file operations raise `SandboxAgentFault`. On `local` another episode's program can cause this.
 
 ### Reading a result
 
-Read the result in this order:
+`SandboxResult` and the faults live in `results.py`. Read the result in this order:
 
 - `error` — a backend or transport fault (missing compiler, HTTP failure, remote timeout, SandboxFusion `SandboxError`). Never a verdict on the code.
 - `agent_fault` — the program replaced its working directory; grading reads it as a runtime error.
@@ -142,7 +142,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 
 ## Languages
 
-`LANGUAGES` (`src/environments/sandbox/base.py`) is the registry `local` and `bubblewrap` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
+`LANGUAGES` (`src/environments/sandbox/languages.py`) is the registry `local` and `bubblewrap` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
 
 | Language | Aliases | Compile | Run |
 |---|---|---|---|
@@ -176,7 +176,7 @@ Rlimits bound each `local` / `bubblewrap` run; `remote` enforces its own.
 
 ## Concurrency and sizing
 
-- Every `local` / `bubblewrap` execution takes a slot of a process-global `ExecutionGate` before its timeout starts. `HALO_SANDBOX_MAX_CONCURRENCY` sets the slot count (default: the CPUs in the process's affinity set); the rest queue.
+- Every `local` / `bubblewrap` execution takes a slot of a process-global `ExecutionGate` (`sandbox_execution_gate`) before its timeout starts. `HALO_SANDBOX_MAX_CONCURRENCY` sets the slot count (default: the CPUs in the process's affinity set); the rest queue.
 - Oversubscribed cores make a correct solution time out from starvation, and `swe` episodes hit `episode_timeout`.
 - The gate is **per process**, fixed at import: set the variable before the process starts. When several processes share a host, size the slots to **sum** to the core count.
 - Each execution writes a working directory plus stdout and stderr files of up to 64 MiB each under `TMPDIR`. Point `TMPDIR` at a large volume; a `swe` session's whole tree lives there for the episode.

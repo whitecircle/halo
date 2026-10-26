@@ -19,22 +19,22 @@ from unittest import mock
 
 import pytest
 
-import src.environments.envs.tasks.coding.grading as grading_module
+import src.environments.tasks.coding.grading as grading_module
 from src.environments.base import EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.grading import (
+from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.grading import (
     _MAX_FAILURE_DETAILS,
     _STDERR_EXCERPT_CHARS,
     OUTPUT_CAP_EXPECTED_MULTIPLE,
-    CheckerInfraError,
-    CheckerVerdict,
     GradeResult,
     GradingSpec,
     grade_solution,
     run_solution_against_tests,
-    select_verdict,
 )
-from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxResult
+from src.environments.tasks.coding.program_source import python_syntax_error
+from src.environments.tasks.coding.verdicts import CheckerInfraError, CheckerVerdict, build_verdict
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox
 
@@ -88,7 +88,7 @@ def test_timed_out_checker_rejects():
 def test_backend_error_raises_infra_error():
     """A sandbox backend failure is NOT a wrong answer: a plain False verdict would score a grading
     outage as a zero grade for the whole group (fake signal) and hide it from the
-    ``_grading_infra_outage`` guard. It must raise for the grader to bucket into ``infra_errors``."""
+    ``is_grading_infra_outage`` guard. It must raise for the grader to bucket into ``infra_errors``."""
     with pytest.raises(CheckerInfraError, match="backend down"):
         _verdict(SandboxResult(stdout="1", returncode=None, error="backend down"))
 
@@ -481,14 +481,14 @@ def test_a_backend_running_its_own_python_runs_the_source_the_host_would_not_com
 @pytest.mark.parametrize(
     ("code", "error"),
     [
-        ("﻿print(1)", None),  # a byte-order mark, which the interpreter of a staged file skips
+        ("﻿print(1)", None),  # a byte-order mark, which the interpreter of a written source skips
         ("x = " + "-" * 200_000 + "1", None),  # nesting past the host's recursion limit: the sandbox's call
         ("x = " + "+".join(["1"] * 200_000), None),
         ("# coding: nonsense\nprint(1)", "SyntaxError: unknown encoding: nonsense"),
     ],
 )
 def test_the_host_compiles_the_bytes_a_run_stages(code, error):
-    assert grading_module.python_syntax_error(code) == error
+    assert python_syntax_error(code) == error
 
 
 def test_a_backend_outage_logs_one_warning_per_grade(caplog):
@@ -592,15 +592,15 @@ def test_the_grading_contract_refuses_a_bad_value_wherever_it_is_built(field, en
         CodeContestsEnvironment(language="python", sandbox=StubSandbox(), **{env_knob: value})
 
 
-def test_select_verdict_prefers_checker():
+def test_build_verdict_prefers_checker():
     """A non-empty checker always wins over the comparison mode."""
-    v = select_verdict("# checker", "tokens", StubSandbox(SandboxResult(stdout="1", returncode=0)))
+    v = build_verdict("# checker", "tokens", StubSandbox(SandboxResult(stdout="1", returncode=0)))
     assert isinstance(v, CheckerVerdict)
 
 
-def test_select_verdict_unknown_comparison_raises():
+def test_build_verdict_unknown_comparison_raises():
     with pytest.raises(ValueError):
-        select_verdict(None, "bogus", StubSandbox(SandboxResult()))
+        build_verdict(None, "bogus", StubSandbox(SandboxResult()))
 
 
 def test_a_runtime_error_excerpt_ends_with_the_exception_line():

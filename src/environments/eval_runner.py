@@ -29,7 +29,6 @@ from openai import NOT_GIVEN, APIStatusError, APITimeoutError, AsyncOpenAI
 from src.data.sources.paths import parse_dataset_source
 from src.environments.base import (
     ANSWER_KEY,
-    CUT_TOOL_CALLS_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_REASON_KEY,
     RANDOM_REASONING_EFFORT,
@@ -56,6 +55,7 @@ from src.environments.episode import (
 from src.environments.rollout_config import RolloutConfig
 from src.inference.openai_client import generate_openai_response
 from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason
+from src.rewards.samples import CUT_TOOL_CALLS_KEY
 
 logger = logging.getLogger(__name__)
 

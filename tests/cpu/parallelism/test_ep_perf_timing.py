@@ -59,7 +59,7 @@ def _ep_layer(monkeypatch: pytest.MonkeyPatch) -> EPMoELayerBase:
         expert_tp_group=None,
         fp32_router=False,
         fp32_experts=False,
-        use_grouped_gemm=False,
+        grouped_gemm_enabled=False,
     )
     return _PerfProbeLayer(ep_config, hidden_dim=8)
 

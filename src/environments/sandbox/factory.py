@@ -14,21 +14,17 @@ from src.log import warn_once
 logger = logging.getLogger(__name__)
 
 # ``warn_once`` scope for the unisolated-backend warning: one line per backend class per process.
-_UNISOLATED_WARNED: set[Hashable] = set()
+_unisolated_warned: set[Hashable] = set()
 
 
-def resolve_sandbox(
+def build_sandbox(
     backend: str | None = None,
     url: str | None = None,
     **kwargs,
 ) -> SandboxExecutor:
-    """Build a :class:`SandboxExecutor` from explicit args, falling back to env vars.
-
-    Args:
-        backend: ``"local"``, ``"bubblewrap"``, or ``"remote"``
-            (default ``HALO_SANDBOX_BACKEND`` then ``"local"``).
-        url: remote endpoint (default ``HALO_SANDBOX_URL``); required for ``"remote"``.
-        **kwargs: forwarded to the backend constructor.
+    """A :class:`SandboxExecutor` for ``backend`` (``local``, ``bubblewrap`` or ``remote``; default
+    ``HALO_SANDBOX_BACKEND``, then ``local``), ``url`` the remote endpoint (default ``HALO_SANDBOX_URL``), ``kwargs``
+    forwarded to the backend.
     """
     backend = (backend or env_str("HALO_SANDBOX_BACKEND") or "local").lower()
     url = url or env_str("HALO_SANDBOX_URL")
@@ -53,17 +49,15 @@ def resolve_sandbox(
 
 
 def warn_if_unisolated(sandbox: SandboxExecutor, consumer: str) -> None:
-    """Warn once per process when ``consumer`` runs model-written code on a backend that does not
-    confine it (:attr:`SandboxExecutor.isolated` is False: ``local``, ``bubblewrap`` with
-    ``allow_network``, an executor that declares nothing): the program reaches the host's filesystem or
-    network, where a policy can read or rewrite what grades it and fetch a solution off the network.
-    On ``local`` it also reads the grader's launch environment through ``/proc``, whatever secrets the
-    trainer was started with included."""
+    """Warn once per process when ``consumer`` runs model-written code on a backend that does not confine it
+    (:attr:`SandboxExecutor.isolated` False): the program reaches the host's filesystem or network, where a policy can
+    rewrite what grades it, and on ``local`` the grader's launch environment, secrets included.
+    """
     if sandbox.isolated:
         return
     warn_once(
         logger,
-        _UNISOLATED_WARNED,
+        _unisolated_warned,
         type(sandbox),
         "%s runs model-written code on a sandbox that does not confine it (%s): the program can reach "
         "the host's filesystem or network, and on 'local' read the grader's launch environment "

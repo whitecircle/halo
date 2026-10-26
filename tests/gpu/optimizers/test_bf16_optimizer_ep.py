@@ -38,6 +38,7 @@ from src.model_loading.parallel.ep import load_ep_model
 from src.model_loading.parallel.model_source import resolve_model_source
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.optimizers.adamw_bf16 import AdamWBF16
+from src.runtime.ranks import get_global_world_size, get_local_world_size
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
@@ -56,7 +57,12 @@ BATCH_SIZE = 2
 
 def _load_ep_policy() -> nn.Module:
     """GPT-OSS with its experts distributed over ``EP_SIZE`` ranks, at bf16."""
-    ep_config = EPConfig(ep_size=EP_SIZE, experts_fsdp_managed=False)
+    ep_config = EPConfig(
+        ep_size=EP_SIZE,
+        stage_world_size=get_global_world_size(),
+        nvlink_domain_size=get_local_world_size(),
+        experts_fsdp_managed=False,
+    )
     pc = SimpleNamespace(
         ep_config=lambda: ep_config, ep_lazy_loading=True, fp32_non_ep_params=False, max_concurrent_loading=None
     )

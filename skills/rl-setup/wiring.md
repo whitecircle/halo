@@ -203,7 +203,7 @@ server, `make ... EFA=1` on the trainer, `scripts/profiling/weight_sync_transpor
 | `native_combined` | `NativeToolUseEnvironment` | All native tools | OpenAI function calling |
 | `swe` | `SweEnvironment` | Workspace file ops + `run_code` + `run_bash_command` | OpenAI function calling |
 | `mcp` | `NativeMCPClientEnvironment` | MCP server tools (`mcp_server`) | MCP protocol |
-| `qa_search` | `NativeToolUseEnvironment` (via `create_qa_search_environment`) | Web search (+ optional Python) | OpenAI function calling |
+| `qa_search` | `NativeToolUseEnvironment` (via `build_qa_search_environment`) | Web search (+ optional Python) | OpenAI function calling |
 | `code_contests` | `CodeContestsEnvironment` | Scratchpad (`python_repl`, or `run_code` off Python-only) + `submit_solution` hidden-test grader (`timeout_per_test`, `output_comparison`) | OpenAI function calling |
 | `codeforces` | `CodeContestsEnvironment` (tokens preset) | Same, token compare + special-judge checkers | OpenAI function calling |
 | `exam_qa` | `ExamQAEnvironment` | Optional search (`open_book`) | OpenAI function calling |

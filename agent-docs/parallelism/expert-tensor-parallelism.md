@@ -126,7 +126,7 @@ ETP `etp8` → DP 1.
 
 ## Process groups (EP+ETP combo)
 
-`EPConfig._create_expert_tp_groups` builds one of two layouts by EP scope, both keeping the ETP
+`EPConfig._build_expert_tp_groups` builds one of two layouts by EP scope, both keeping the ETP
 all-reduce on NVLink.
 
 **Node-local EP (`ep_scope=node`)** — the whole EP group is in one domain, so the DeepEP dispatch

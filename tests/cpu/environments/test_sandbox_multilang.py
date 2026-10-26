@@ -15,7 +15,7 @@ python/remote/grading basics):
 - Missing-compiler handling (a backend error) via a sandbox pointed at a bogus toolchain.
 - Sessions: state persists across runs (write a file, read it next run; cross-language sharing),
   two sessions are isolated, concurrent sessions on one shared instance don't cross-contaminate, and
-  the host never follows a link the program planted (staging, ``read_file``, ``reset_to_staged``).
+  the host never follows a link the program planted (writing sources, ``read_file``, ``reset_to_prepared``).
 - Session build reuse: a compiled source is built once across runs with different stdin (the grader's
   one-session-per-submission pattern), rebuilt when the source, an auxiliary header, a session-written
   file or an interpreted run changes the working dir, and a rejected compile is cached as
@@ -39,15 +39,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.environments.sandbox import base as _base
 from src.environments.sandbox import bubblewrap as _bubblewrap
+from src.environments.sandbox import languages as _languages
 from src.environments.sandbox import local as local_sandbox
-from src.environments.sandbox.base import LANGUAGES, SandboxInfraError, resolve_language
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
+from src.environments.sandbox.factory import build_sandbox
+from src.environments.sandbox.languages import LANGUAGES, find_language
 from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
-from src.environments.sandbox.resolve import resolve_sandbox
-from src.environments.tools.factories import create_session_bash_tools
+from src.environments.sandbox.results import SandboxInfraError
+from src.environments.tools.toolsets import build_session_bash_tools
 from tests.common.code_contests import RecordingSandboxSession
 from tests.common.repo import probe_findings
 
@@ -91,22 +92,22 @@ def _skip(reason: str):
 
 
 def test_language_registry_resolves_aliases():
-    assert resolve_language("python").name == "python"
-    assert resolve_language("py").name == "python"
-    assert resolve_language("c++").name == "cpp"
-    assert resolve_language("CXX").name == "cpp"  # case-insensitive
-    assert resolve_language("c").name == "c"
-    assert resolve_language("sh").name == "bash"
-    assert resolve_language("SHELL").name == "bash"  # case-insensitive
-    assert resolve_language("ruby") is None
+    assert find_language("python").name == "python"
+    assert find_language("py").name == "python"
+    assert find_language("c++").name == "cpp"
+    assert find_language("CXX").name == "cpp"  # case-insensitive
+    assert find_language("c").name == "c"
+    assert find_language("sh").name == "bash"
+    assert find_language("SHELL").name == "bash"  # case-insensitive
+    assert find_language("ruby") is None
     assert set(LANGUAGES) == {"python", "bash", "cpp", "c"}
 
 
 def test_language_compiled_flag():
-    assert resolve_language("python").is_compiled is False
-    assert resolve_language("bash").is_compiled is False
-    assert resolve_language("cpp").is_compiled is True
-    assert resolve_language("c").is_compiled is True
+    assert find_language("python").is_compiled is False
+    assert find_language("bash").is_compiled is False
+    assert find_language("cpp").is_compiled is True
+    assert find_language("c").is_compiled is True
 
 
 def test_bash_runs_in_the_session_working_directory():
@@ -277,8 +278,8 @@ def test_missing_compiler_is_backend_error():
     """Pointing the spec at a non-existent compiler surfaces a backend error, not a crash."""
     sb = LocalSubprocessSandbox()
 
-    original = _base.LANGUAGES["cpp"]
-    _base.LANGUAGES["cpp"] = _base.LanguageSpec(
+    original = _languages.LANGUAGES["cpp"]
+    _languages.LANGUAGES["cpp"] = _languages.LanguageSpec(
         name="cpp",
         source_name="main.cpp",
         compile_argv=("g++_does_not_exist_xyz", "-o", "main", "main.cpp"),
@@ -291,7 +292,7 @@ def test_missing_compiler_is_backend_error():
         assert "compiler not found" in res.error.lower()
         assert not res.compile_failed, "a missing compiler is a backend failure, not the source's fault"
     finally:
-        _base.LANGUAGES["cpp"] = original
+        _languages.LANGUAGES["cpp"] = original
 
 
 def test_cpp_auxiliary_header_file():
@@ -409,9 +410,9 @@ def _plant_link(workdir: str, name: str, target: str) -> None:
     os.symlink(target, path)
 
 
-def test_staging_never_writes_through_a_link_the_program_planted(tmp_path):
-    """Under bubblewrap the working directory is a plain rw bind: a program can replace the staged
-    ``main.py`` with a symlink to a host file, and the next run's staging — the host process, as
+def test_writing_sources_never_writes_through_a_link_the_program_planted(tmp_path):
+    """Under bubblewrap the working directory is a plain rw bind: a program can replace the written
+    ``main.py`` with a symlink to a host file, and the next run's source write — the host process, as
     root — would write the new source through it. The program is judged for it (a runtime error of
     its own), never handed an infra error it could void its episode with."""
     host_file = tmp_path / "credentials"
@@ -427,14 +428,14 @@ def test_staging_never_writes_through_a_link_the_program_planted(tmp_path):
         assert result.error is None, "tampering must not read as an infra fault"
         assert result.returncode == TAMPERED_WORKDIR_RETURNCODE and not result.ok
         assert "main.py" in result.stderr
-        # A verdict the model can recover from (a link at a staged name may be a benign in-workspace
+        # A verdict the model can recover from (a link at a prepared name may be a benign in-workspace
         # one), not an agent fault that ends the episode.
         assert result.agent_fault is None
 
 
-def test_reset_to_staged_drops_a_staged_entry_whose_type_changed(tmp_path):
-    """The grader resets the session between hidden tests, so a link planted over a staged entry by
-    test 1 must be gone before test 2 is staged — a name-only diff keeps it."""
+def test_reset_to_prepared_drops_a_prepared_entry_whose_type_changed(tmp_path):
+    """The grader resets the session between hidden tests, so a link planted over a prepared entry by
+    test 1 must be gone before test 2 is prepared — a name-only diff keeps it."""
     host_file = tmp_path / "credentials"
     host_file.write_text("SECRET")
     sb = LocalSubprocessSandbox()
@@ -442,7 +443,7 @@ def test_reset_to_staged_drops_a_staged_entry_whose_type_changed(tmp_path):
         assert session.run("print(1)").ok
         _plant_link(session.workdir, "main.py", str(host_file))
 
-        session.reset_to_staged()
+        session.reset_to_prepared()
 
         assert not os.path.lexists(os.path.join(session.workdir, "main.py"))
         second = session.run("print(2)")
@@ -627,7 +628,7 @@ def test_remote_shell_tool_sends_the_command_as_a_bash_program():
     runner and every call comes back a syntax error."""
     sess = RecordingSandboxSession()
     remote_session = RemoteSandbox("http://sandbox:8080", session=sess).open_session()
-    create_session_bash_tools(lambda: remote_session).get("run_bash_command").execute(command="echo hi")
+    build_session_bash_tools(lambda: remote_session).get("run_bash_command").execute(command="echo hi")
     assert sess.posts[0].payload["language"] == "bash"
     assert sess.posts[0].payload["code"] == "echo hi"
 
@@ -657,7 +658,7 @@ def test_bubblewrap_probe_fails_fast_when_cannot_sandbox(monkeypatch, tmp_path):
 def test_bubblewrap_resolve_backend_when_present():
     if _BWRAP is None:
         return _skip("bubblewrap not usable here (binary absent or namespaces blocked)")
-    sb = resolve_sandbox(backend="bubblewrap")
+    sb = build_sandbox(backend="bubblewrap")
     assert isinstance(sb, BubblewrapSandbox)
 
 
@@ -1002,7 +1003,7 @@ def test_bubblewrap_refuses_a_host_that_cannot_map_the_jail_root(monkeypatch, tm
 
 def test_bubblewrap_hands_the_working_directory_and_host_writes_to_the_jail_ids(monkeypatch, tmp_path):
     """The jail's root is a subordinate uid, so the working directory and every entry the host writes
-    there are made its own; the program can then change what the host staged (an edited source)."""
+    there are made its own; the program can then change what the host wrote (an edited source)."""
     if os.geteuid() != 0:
         return _skip("handing entries to another uid needs root")
     _use_stand_in_jail(monkeypatch, tmp_path)
@@ -1044,8 +1045,8 @@ def test_bubblewrap_unshares_the_network_unless_the_executor_allows_it(monkeypat
     assert set(log.read_text().split()) == {str(not allow_network)}
 
 
-def test_session_reset_to_staged_drops_run_output_and_keeps_the_build():
-    """``reset_to_staged`` removes what a run produced (files, directories) and leaves the staged source
+def test_session_reset_to_prepared_drops_run_output_and_keeps_the_build():
+    """``reset_to_prepared`` removes what a run produced (files, directories) and leaves the written source
     and the built binary, so the next run of the same program starts clean without recompiling."""
     if not _HAS_GPP:
         return _skip("g++ not installed")
@@ -1064,7 +1065,7 @@ def test_session_reset_to_staged_drops_run_output_and_keeps_the_build():
     with _Counting().open_session() as session:
         assert session.run(src, language="cpp").stdout.strip() == "fresh"
         assert "marker" in session.list_files() and os.path.isdir(os.path.join(session.workdir, "out"))
-        session.reset_to_staged()
+        session.reset_to_prepared()
         assert "marker" not in session.list_files() and not os.path.exists(os.path.join(session.workdir, "out"))
         assert session.read_file("main.cpp") == src
         assert session.run(src, language="cpp").stdout.strip() == "fresh"

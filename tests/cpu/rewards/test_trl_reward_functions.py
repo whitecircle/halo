@@ -2,7 +2,7 @@
 """CPU tests: reward terms as TRL reward functions, the scorer catalog, and the composer that scores
 the external terms and settles their verdicts into one reward.
 
-Run: python tests/cpu/rewards/test_reward_functions.py  (or pytest)
+Run: python tests/cpu/rewards/test_trl_reward_functions.py  (or pytest)
 """
 
 import asyncio
@@ -12,13 +12,11 @@ from typing import ClassVar
 
 import pytest
 
-from src.rewards.composer import RewardComposer, Settlement
-from src.rewards.functions import ScorerRewardFunction, TermRewardFunction, reward_functions
+from src.rewards import composer as composer_module
+from src.rewards.composer import SCORERS, RewardComposer, Settlement, build_scorer
 from src.rewards.graders.verifiable import RLVR_GRADERS, AccuracyTerm, FormatTerm
 from src.rewards.samples import ScoringSample
-from src.rewards.scorers import catalog as catalog_module
-from src.rewards.scorers.base import Scorer, ScoreResult, scored_metric_key
-from src.rewards.scorers.catalog import SCORERS, build_scorer
+from src.rewards.scorers.base import Scorer, ScoreResult
 from src.rewards.scorers.judge import GenerativeJudge
 from src.rewards.scorers.reward_model import ServedRewardModel
 from src.rewards.terms import (
@@ -28,7 +26,9 @@ from src.rewards.terms import (
     Requirement,
     RewardModelTerm,
     RewardTerm,
+    scored_metric_key,
 )
+from src.rewards.trl_reward_functions import ScorerRewardFunction, TermRewardFunction, build_trl_reward_functions
 
 JUDGE = JudgeTerm(name="quality", weight=0.3, exponent=2.0, requirements=(Requirement(name="r", description="d"),))
 LENIENT = JudgeTerm(name="lenient", on_error="neutral", requirements=(Requirement(name="r", description="d"),))
@@ -77,12 +77,12 @@ class _FakeScorer(Scorer):
 
 @pytest.fixture
 def fake_scorers(monkeypatch):
-    monkeypatch.setitem(catalog_module.SCORERS, JudgeTerm, _FakeScorer)
+    monkeypatch.setitem(composer_module.SCORERS, JudgeTerm, _FakeScorer)
 
 
 def test_reward_functions_are_named_after_their_terms_with_their_weights(fake_scorers):
     terms = (AccuracyTerm(weight=1.0), FormatTerm(weight=0.5, pattern="ok"), JUDGE)
-    functions, weights = reward_functions(terms, RLVR_GRADERS, reference_column="answer")
+    functions, weights = build_trl_reward_functions(terms, RLVR_GRADERS, reference_column="answer")
     assert [f.__name__ for f in functions] == ["accuracy", "format", "quality"]
     assert weights == [1.0, 0.5, 0.3]
     assert [inspect.iscoroutinefunction(f) for f in functions] == [False, False, True]
@@ -90,7 +90,7 @@ def test_reward_functions_are_named_after_their_terms_with_their_weights(fake_sc
 
 
 def test_graders_run_through_the_term_shape():
-    accuracy, fmt = reward_functions(
+    accuracy, fmt = build_trl_reward_functions(
         (AccuracyTerm(exponent=2.0), FormatTerm(pattern=r"<answer>.*</answer>")),
         RLVR_GRADERS,
         reference_column="answer",
@@ -103,7 +103,7 @@ def test_graders_run_through_the_term_shape():
 
 
 def test_scorer_function_forwards_reference_shapes_scores_and_logs_metrics(fake_scorers):
-    (function,), _ = reward_functions((JUDGE,), {}, reference_column="answer")
+    (function,), _ = build_trl_reward_functions((JUDGE,), {}, reference_column="answer")
     logged = {}
     prompts = [[{"role": "user", "content": "q"}], "plain prompt", "p3"]
     completions = [[{"role": "assistant", "content": "12345"}], "fail", "1234567890"]
@@ -139,8 +139,8 @@ def test_scorer_function_forwards_reference_shapes_scores_and_logs_metrics(fake_
 
 def test_a_neutral_term_returns_zero_for_a_missing_verdict(fake_scorers):
     """TRL leaves a ``None`` out of the row's reward; a neutral term instead prices the failure at 0."""
-    (strict,), _ = reward_functions((JUDGE,), {}, reference_column=None)
-    (lenient,), _ = reward_functions((LENIENT,), {}, reference_column=None)
+    (strict,), _ = build_trl_reward_functions((JUDGE,), {}, reference_column=None)
+    (lenient,), _ = build_trl_reward_functions((LENIENT,), {}, reference_column=None)
     logged = {}
     assert asyncio.run(strict(prompts=["p", "q"], completions=["fail", "12345"])) == [None, pytest.approx(0.25)]
     assert asyncio.run(
@@ -157,13 +157,13 @@ def test_scored_metric_key_names_the_source_and_the_term():
 
 def test_reward_functions_refuse_a_veto_judge():
     with pytest.raises(ValueError, match="list 'requirements' instead"):
-        reward_functions((AccuracyTerm(), GATE), RLVR_GRADERS, reference_column=None)
+        build_trl_reward_functions((AccuracyTerm(), GATE), RLVR_GRADERS, reference_column=None)
 
 
 def test_scorer_function_reads_the_conversation_column_over_the_rendered_prompt(fake_scorers):
     """TRL hands the rendered template text as the prompt; the scorers must read the conversation it
     was rendered from, which the online script keeps in its own column."""
-    (function,), _ = reward_functions((JUDGE,), {}, prompt_column="conversation", reference_column="answer")
+    (function,), _ = build_trl_reward_functions((JUDGE,), {}, prompt_column="conversation", reference_column="answer")
     conversation = [{"role": "system", "content": "Be terse."}, {"role": "user", "content": "q"}]
     asyncio.run(
         function(
@@ -184,7 +184,7 @@ def test_scorer_function_reads_the_conversation_column_over_the_rendered_prompt(
 def test_a_declared_column_trl_did_not_forward_is_refused(fake_scorers, missing, forwarded):
     """``remove_unused_columns: true`` keeps both columns from TRL's reward kwargs. The scorer must refuse,
     not read the rendered template as the conversation or score without the reference."""
-    (function,), _ = reward_functions((JUDGE,), {}, prompt_column="conversation", reference_column="answer")
+    (function,), _ = build_trl_reward_functions((JUDGE,), {}, prompt_column="conversation", reference_column="answer")
     with pytest.raises(ValueError, match=rf"column '{missing}'.*remove_unused_columns"):
         asyncio.run(function(prompts=["<|im_start|>user\nq<|im_end|>..."], completions=["12345"], **forwarded))
     assert function.scorer.seen == [], "a sample was scored off the fallback"
@@ -192,9 +192,9 @@ def test_a_declared_column_trl_did_not_forward_is_refused(fake_scorers, missing,
 
 def test_unknown_term_type_is_refused():
     with pytest.raises(TypeError, match="neither a scorer nor a grader"):
-        reward_functions((EnvironmentTerm(),), RLVR_GRADERS, reference_column=None)
+        build_trl_reward_functions((EnvironmentTerm(),), RLVR_GRADERS, reference_column=None)
     with pytest.raises(TypeError, match="'local' has neither a scorer nor a grader"):
-        reward_functions((_LocalTerm(name="local"),), RLVR_GRADERS, reference_column=None)
+        build_trl_reward_functions((_LocalTerm(name="local"),), RLVR_GRADERS, reference_column=None)
 
 
 def test_the_catalog_is_derived_from_each_scorers_term_type():

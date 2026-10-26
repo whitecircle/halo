@@ -22,7 +22,6 @@ import pytest
 
 import src.environments.envs
 from src.environments.base import (
-    CUT_TOOL_CALLS_KEY,
     REWARD_COMPONENTS_KEY,
     TOOL_CALL_COUNTS_KEY,
     BaseEnvironment,
@@ -32,10 +31,11 @@ from src.environments.base import (
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.qa import ExamQAEnvironment
 from src.environments.episode import TurnGeneration, step_context_from_generation
+from src.environments.tasks.qa import ExamQAEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
+from src.rewards.samples import CUT_TOOL_CALLS_KEY
 from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
 
 

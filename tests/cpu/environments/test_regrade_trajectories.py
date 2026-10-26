@@ -18,9 +18,10 @@ import pytest
 
 from scripts.environments.inference import regrade_trajectories
 from scripts.environments.inference.run_code_contests import contest_meta
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.datasets import ContestSelection
-from src.environments.envs.tasks.coding.grading import FloatTolerance, GradingSpec
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.contest_datasets import ContestSelection
+from src.environments.tasks.coding.grading import GradingSpec
+from src.environments.tasks.coding.verdicts import FloatTolerance
 
 # What run_code_contests.py stamps (generic eval meta + its meta_extra).
 _FULL_META = {

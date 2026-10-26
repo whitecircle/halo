@@ -12,8 +12,9 @@ against. A real pass/fail verdict must NOT carry it.
 import pytest
 
 from src.environments.base import EPISODE_INVALID_REASON_KEY, Trajectory
-from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
+from src.environments.sandbox.base import SandboxExecutor
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.swe import SweEnvironment
 
 
 class _StubSandbox(SandboxExecutor):

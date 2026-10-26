@@ -34,7 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from scripts.environments.preparation._common import parquet_parts
-from src.environments.envs.tasks.coding.datasets import decode_test_payload
+from src.environments.tasks.coding.contest_datasets import decode_test_payload
 from src.log import configure_cli_logging
 
 configure_cli_logging()

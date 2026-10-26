@@ -11,7 +11,7 @@ import pytest
 
 from scripts.environments._common import DEFAULT_SPLIT
 from scripts.environments.inference import run_code_contests, run_env
-from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS
+from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS
 
 
 @pytest.mark.parametrize(("adapter", "shipped"), [("livecodebench", "test"), ("hlce", "train")])

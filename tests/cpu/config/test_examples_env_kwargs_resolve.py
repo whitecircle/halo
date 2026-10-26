@@ -21,6 +21,7 @@ import yaml
 
 from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments.registry import resolve_environment
+from src.rewards.terms import JudgeTerm
 from tests.common.repo import REPO_ROOT
 
 ENV_EXAMPLES_ROOT = REPO_ROOT / "examples" / "grpo" / "environmental"
@@ -58,15 +59,26 @@ def offered_tools(config: Path) -> frozenset[str]:
         env.close()
 
 
-def judge_text(config: Path) -> str:
-    """What the example's judge terms tell the judge in their own words: each context and each check's or
-    requirement's description."""
+def runs_judge(config: Path) -> bool:
+    """Whether the example's reward lists a judge term."""
     raw = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
-    texts = []
-    for term in raw.get("rewards") or []:
-        if term.get("source") == "judge":
-            items = (*(term.get("checks") or ()), *(term.get("requirements") or ()))
-            texts += [term.get("context") or "", *(item.get("description", "") for item in items)]
+    return any(term.get("source") == "judge" for term in raw.get("rewards") or [])
+
+
+def judge_text(config: Path) -> str:
+    """What the example's judge terms tell the judge, as its environment resolves them (a rubric the environment
+    declares included): each context and each check's or requirement's description."""
+    cfg = environment_config(config)
+    env = resolve_environment(cfg.environment_type, cfg.to_env_config())
+    try:
+        judges = [term for term in env.reward_terms if isinstance(term, JudgeTerm)]
+    finally:
+        env.close()
+    texts = [
+        text
+        for judge in judges
+        for text in (judge.context or "", *(item.description for item in (*judge.requirements, *judge.checks)))
+    ]
     return "\n".join(text for text in texts if text)
 
 
@@ -76,7 +88,7 @@ def foreign_tools(text: str, offered: frozenset[str]) -> set[str]:
     return {name for name in shipped - offered if re.search(rf"\b{re.escape(name)}\b", text)}
 
 
-_JUDGED_EXAMPLES = [config for config in _EXAMPLES if judge_text(config)]
+_JUDGED_EXAMPLES = [config for config in _EXAMPLES if runs_judge(config)]
 
 
 @pytest.fixture(autouse=True)

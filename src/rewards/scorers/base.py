@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar
 
 from src.rewards.samples import ScoringSample
-from src.rewards.terms import SCORED_METRIC_LEAF, RewardTerm, ScoredTerm, metric_key
+from src.rewards.terms import ScoredTerm, metric_key
 
 logger = logging.getLogger(__name__)
 
@@ -18,12 +18,6 @@ PROBE_SAMPLE = ScoringSample(
     completion=[{"role": "assistant", "content": "ready"}],
     final_answer="ready",
 )
-
-
-def scored_metric_key(term: RewardTerm) -> str:
-    """The per-sample 1/0 of whether the term reached a verdict, ``<source>/<name>/scored``: the metric
-    that says a scorer is failing, logged by both arms."""
-    return metric_key(term, SCORED_METRIC_LEAF)
 
 
 @dataclass(frozen=True)
@@ -41,14 +35,10 @@ class ScoreResult:
 
 
 class Scorer(ABC):
-    """Scores samples for one reward term through an external backend.
-
-    A subclass declares the term type it scores (:attr:`term_type`), which the scorer catalog
-    (:mod:`src.rewards.scorers.catalog`) reads. :meth:`score` never raises for a sample: a failed
-    request is a :class:`ScoreResult` carrying its ``error``, so one bad call cannot take a rollout
-    batch down with it. Construction is offline — the client is built on first use, on the loop that
-    uses it, and :meth:`aclose` releases it — and :meth:`verify` makes one real request in the run's
-    exact shape so a bad endpoint fails the launch, not every episode.
+    """Scores samples for one reward term through an external backend; a subclass declares the term type it scores
+    (:attr:`term_type`). :meth:`score` never raises for a sample: a failed request is a :class:`ScoreResult` carrying
+    its ``error``. The client is built on first use, on the loop that uses it, and :meth:`verify` makes one real
+    request in the run's exact shape, so a bad endpoint fails the launch, not every episode.
     """
 
     term_type: ClassVar[type[ScoredTerm]]

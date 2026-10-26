@@ -1,37 +1,62 @@
-"""REPL-facing helpers: render a :class:`SandboxResult` as a string and run code through a backend.
+"""The scratchpad reply a model reads for a :class:`SandboxResult`, and a REPL tool handler that runs code through a
+backend: a structured result adapted to the string-in/string-out shape a tool returns."""
 
-Adapts the structured result to the string-in/string-out shape a tool handler returns to the model.
-"""
+import signal
 
-from src.environments.sandbox.base import (
-    REPL_NO_OUTPUT_MESSAGE,
-    SANDBOX_DEFAULT_TIMEOUT,
-    SandboxAgentFault,
-    SandboxExecutor,
-    SandboxInfraError,
-    SandboxResult,
-    SandboxSession,
-    repl_timeout_message,
-    signal_description,
-    stderr_head,
-    stderr_tail,
-)
+from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
+from src.environments.sandbox.results import SandboxAgentFault, SandboxInfraError, SandboxResult
 
+# Shared REPL observation for a run that produced no output, so every backend uses the same wording.
+REPL_NO_OUTPUT_MESSAGE = "Code executed successfully (no output)"
+# What the usual fatal signals mean for a contest program, so a crash reads as its cause, not a number.
+SIGNAL_CAUSES: dict[int, str] = {
+    signal.SIGSEGV: "invalid memory access or stack overflow",
+    signal.SIGABRT: "aborted: a failed assert, an uncaught exception, or an allocation past the memory limit",
+    signal.SIGFPE: "arithmetic error, e.g. integer division by zero",
+    signal.SIGBUS: "misaligned or out-of-range memory access",
+    signal.SIGKILL: "killed from outside, e.g. by the out-of-memory killer",
+}
 # Characters of compiler diagnostics / runtime stderr a REPL reply carries: enough for the first
 # errors of a compile or the frames of a traceback, bounded so the reply leaves room for stdout.
 REPL_STDERR_EXCERPT_CHARS = 2000
 
 
-def format_sandbox_repl_output(result: SandboxResult, timeout: float) -> str:
-    """Render a :class:`SandboxResult` as the scratchpad reply the model reads.
+def repl_timeout_message(timeout: float) -> str:
+    """The REPL observation for a run killed by its wall-clock ``timeout``."""
+    return f"Error: execution exceeded {timeout:g}s timeout"
 
-    Program-level outcomes (timeout, non-zero exit, compile error) are verdicts on the submitted code
-    and render as strings. A failure leads with its error — a compile error with the compiler's first
-    diagnostics, a crash with the signal and the tail of stderr — and the program's stdout follows,
-    so an observation cut from the end keeps the error. A backend/transport failure (``result.error``)
-    is NOT a verdict: it raises :class:`SandboxInfraError`, and a sandbox the program broke
-    (``result.agent_fault``) raises :class:`SandboxAgentFault`; the tool layer tells the two apart by
-    type, never by the text.
+
+def signal_description(returncode: int | None) -> str | None:
+    """``killed by SIGSEGV (<cause>)`` for a return code that reports a signal death (negative, as
+    ``subprocess`` reports it); None for a normal exit."""
+    if returncode is None or returncode >= 0:
+        return None
+    try:
+        name = signal.Signals(-returncode).name
+    except ValueError:
+        name = f"signal {-returncode}"
+    cause = SIGNAL_CAUSES.get(-returncode)
+    return f"killed by {name} ({cause})" if cause else f"killed by {name}"
+
+
+def stderr_head(text: str, limit: int) -> str:
+    """The start of a stream, at most ``limit`` characters: a compiler names its first error first."""
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def stderr_tail(text: str, limit: int) -> str:
+    """The end of a stream, at most ``limit`` characters: a traceback names the exception on its last
+    line, so a head excerpt of a long one shows the frames and drops the error."""
+    text = text.strip()
+    return text if len(text) <= limit else "…" + text[-limit:]
+
+
+def format_sandbox_repl_output(result: SandboxResult, timeout: float) -> str:
+    """The scratchpad reply the model reads for ``result``: a verdict on the program (timeout, non-zero exit, compile
+    error) leads with its error and then the stdout, so a reply cut from the end keeps the error. A backend failure
+    raises :class:`SandboxInfraError` and a sandbox the program broke :class:`SandboxAgentFault`: the tool layer tells
+    them apart by type, never by text.
     """
     if result.agent_fault:
         raise SandboxAgentFault(result.agent_fault)
@@ -62,15 +87,9 @@ def run_code_via_sandbox(
     timeout: float = SANDBOX_DEFAULT_TIMEOUT,
     language: str = "python",
 ) -> str:
-    """REPL handler that executes ``code`` on ``runner``: a :class:`SandboxExecutor` for a one-shot run,
-    or a live :class:`SandboxSession` for a persistent working dir.
-
-    Runs in a real interpreter / compiled binary (imports + stdlib), so only appropriate when the
-    sandbox provides isolation. Raises :class:`SandboxInfraError` when the backend itself failed and :class:`SandboxAgentFault`
-    when the program broke its own sandbox (see :func:`format_sandbox_repl_output`).
-
-    The program gets an empty stdin, since the tools running through here declare none: one reading
-    input sees end-of-file instead of blocking on input nothing can supply.
+    """REPL handler running ``code`` on ``runner`` (an executor one-shot, or a live session) in a real interpreter or
+    binary, so only for a sandbox that isolates it; faults raise as in :func:`format_sandbox_repl_output`. The program
+    gets an empty stdin, since the tools here declare none: one reading input sees end-of-file instead of blocking.
     """
     result = runner.run(code, timeout=timeout, language=language)
     return format_sandbox_repl_output(result, timeout)

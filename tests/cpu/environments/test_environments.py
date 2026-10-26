@@ -44,15 +44,6 @@ from src.environments.envs.protocols.react import (
     create_react_search_environment,
     parse_react_output,
 )
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.grading import run_solution_against_tests
-from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.envs.tasks.qa import (
-    ExamQAEnvironment,
-    create_qa_search_environment,
-    multiple_choice_match,
-    render_choices,
-)
 from src.environments.ray_actors import RolloutManager
 from src.environments.registry import (
     create_environment,
@@ -61,19 +52,28 @@ from src.environments.registry import (
     resolve_environment,
 )
 from src.environments.rollout_config import RolloutConfig
-from src.environments.sandbox.base import SandboxResult
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.grading import run_solution_against_tests
+from src.environments.tasks.coding.swe import SweEnvironment
+from src.environments.tasks.qa import (
+    ExamQAEnvironment,
+    build_qa_search_environment,
+    multiple_choice_match,
+    render_choices,
+)
 from src.environments.tools import web_search as ws
 from src.environments.tools.definitions import NativeTool, NativeToolCall, NativeToolRegistry, ToolParameter
-from src.environments.tools.factories import (
-    create_all_native_tools,
-    create_native_code_tools,
-    create_native_file_tools,
-    create_native_math_tools,
-    create_native_python_tools,
-    create_native_search_tools,
+from src.environments.tools.toolsets import (
+    build_code_tools,
+    build_combined_tools,
+    build_math_tools,
+    build_python_tools,
+    build_search_tools,
+    build_simulated_file_tools,
 )
 from src.environments.tools.web_search import _format_results, async_web_search, web_search, web_search_raw
-from src.rewards.graders.matching import exact_match, normalize_text, numeric_match, validate_answer
+from src.rewards.graders.matching import exact_match, is_correct_answer, normalize_text, numeric_match
 from src.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm
 from tests.common.code_contests import StubSandbox
 
@@ -82,7 +82,7 @@ from tests.common.code_contests import StubSandbox
 def allow_mock_search(monkeypatch):
     """Opt into the fabricated-results search backend for a test that BUILDS a mock-search tool.
 
-    ``create_native_search_tools`` refuses an unselectable backend at construction, so every env
+    ``build_search_tools`` refuses an unselectable backend at construction, so every env
     named with ``search_backend="mock"`` needs the flag; the tests that exercise the per-call flag
     read itself set it inline instead.
     """
@@ -336,10 +336,10 @@ def test_native_tool_registry():
     assert len(tools) == 2
 
 
-def test_create_native_math_tools():
-    """Test math tools factory."""
+def test_build_math_tools():
+    """Test the math tools builder."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
 
     assert "calculate" in registry.names()
 
@@ -355,10 +355,10 @@ def test_create_native_math_tools():
     assert "Error" in result
 
 
-def test_create_native_python_tools():
+def test_build_python_tools():
     """Test Python REPL tool."""
 
-    registry = create_native_python_tools()
+    registry = build_python_tools()
     python_tool = registry.get("python")
 
     result = python_tool.execute(code="2 ** 10")
@@ -368,10 +368,10 @@ def test_create_native_python_tools():
     assert "0" in result and "1" in result and "2" in result
 
 
-def test_create_native_search_tools(allow_mock_search):
-    """Test search tools factory."""
+def test_build_search_tools(allow_mock_search):
+    """Test the search tools builder."""
 
-    registry = create_native_search_tools(backend="mock")
+    registry = build_search_tools(backend="mock")
 
     assert "web_search" in registry.names()
     assert len(registry) == 1
@@ -381,10 +381,10 @@ def test_create_native_search_tools(allow_mock_search):
     assert "Python programming" in result
 
 
-def test_create_native_file_tools():
-    """Test file system tools factory."""
+def test_build_simulated_file_tools():
+    """Test the simulated file system tools builder."""
 
-    registry = create_native_file_tools()
+    registry = build_simulated_file_tools()
 
     assert "list_files" in registry.names()
     assert "read_file" in registry.names()
@@ -404,10 +404,10 @@ def test_create_native_file_tools():
     assert "Successfully" in result or "wrote" in result.lower()
 
 
-def test_create_native_code_tools_named_repl():
-    """Test the generic code-tool factory with a custom tool name (what a 'coding' preset covers)."""
+def test_build_code_tools_named_repl():
+    """Test the generic code-tool builder with a custom tool name (what a 'coding' preset covers)."""
 
-    registry = create_native_code_tools(language="python", tool_name="python_repl")
+    registry = build_code_tools(language="python", tool_name="python_repl")
 
     # tool_name overrides the canonical language name.
     assert "python_repl" in registry.names()
@@ -426,10 +426,10 @@ def test_create_native_code_tools_named_repl():
     assert "12" in result
 
 
-def test_create_all_native_tools():
-    """Test all native tools factory (math + python + search + file)."""
+def test_build_combined_tools():
+    """Test the combined tools builder (math + python + search + file)."""
 
-    registry = create_all_native_tools()
+    registry = build_combined_tools()
 
     assert "calculate" in registry.names()
     assert "python" in registry.names()
@@ -444,7 +444,7 @@ def test_create_all_native_tools():
 def test_native_tool_use_environment():
     """Test NativeToolUseEnvironment."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
 
     episode_ids, steps = env.reset(["Calculate 2 + 2"], [{"answer": "4"}])
@@ -614,7 +614,7 @@ Action: multiply(a=5, b=3.14)"""
 def test_react_environment_basic():
     """Test ReActEnvironment basic flow."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = ReActEnvironment(tool_registry=registry, max_turns=5)
 
     episode_ids, steps = env.reset(["What is 25 * 4?"], [{"answer": "100"}])
@@ -645,7 +645,7 @@ def test_react_environment_reward():
     """A correct Final Answer earns the thought credit plus the objective at weight 1; ReAct has no
     protocol shaping component of its own."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = ReActEnvironment(tool_registry=registry, max_turns=5, thought_reward=0.02)
 
     episode_ids, _ = env.reset(["Test"], [{"answer": "42"}])
@@ -668,7 +668,7 @@ def test_react_environment_unknown_tool():
     order instead of the sorted prose the native protocol sends.
     """
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = ReActEnvironment(
         tool_registry=registry,
         max_turns=5,
@@ -798,7 +798,7 @@ def test_rollout_manager_round_robin():
 def test_create_environment_class_tuple():
     """Test create_environment with (class, kwargs) tuple."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = create_environment(
         (ReActEnvironment, {"tool_registry": registry, "max_turns": 5}),
         {},
@@ -1091,7 +1091,7 @@ def test_native_mcp_client_environment_init():
 def test_multi_tool_environment_with_all_tools():
     """Test NativeToolUseEnvironment with all tools."""
 
-    registry = create_all_native_tools()
+    registry = build_combined_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=10)
 
     tools_schema = env.get_tools_schema()
@@ -1127,7 +1127,7 @@ def test_multi_tool_environment_with_all_tools():
 def test_multi_tool_parallel_calls():
     """Test environment with multiple parallel tool calls in one step."""
 
-    registry = create_all_native_tools()
+    registry = build_combined_tools()
     env = NativeToolUseEnvironment(
         tool_registry=registry,
         max_turns=10,
@@ -1193,7 +1193,7 @@ def test_tool_error_handling():
 def test_unknown_tool_handling():
     """Test handling of calls to unknown tools."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = NativeToolUseEnvironment(
         tool_registry=registry,
         max_turns=5,
@@ -1480,7 +1480,7 @@ def test_a_failing_search_backend_is_logged_once_by_the_protocol(monkeypatch, ca
         raise RuntimeError("network down")
 
     monkeypatch.setitem(ws._BACKENDS, "serper", dataclasses.replace(ws._BACKENDS["serper"], sync=_boom))
-    env = NativeToolUseEnvironment(tool_registry=create_native_search_tools(backend="serper"), max_turns=3)
+    env = NativeToolUseEnvironment(tool_registry=build_search_tools(backend="serper"), max_turns=3)
     ids, _ = env.reset(["task"])
     call = {"id": "c1", "function": {"name": "web_search", "arguments": '{"query": "q"}'}}
     with caplog.at_level(logging.DEBUG, logger="src.environments"):
@@ -1547,9 +1547,9 @@ def test_an_unselectable_search_backend_is_refused_when_the_ENV_IS_BUILT(monkeyp
 
     monkeypatch.delenv("HALO_ALLOW_MOCK_SEARCH", raising=False)
     with pytest.raises(ValueError, match="HALO_ALLOW_MOCK_SEARCH"):
-        create_native_search_tools(backend="mock")
+        build_search_tools(backend="mock")
     with pytest.raises(ValueError, match="Unknown search backend: nonexistent"):
-        create_qa_search_environment(max_turns=3, search_backend="nonexistent")
+        build_qa_search_environment(max_turns=3, search_backend="nonexistent")
 
 
 # Shared Reward Utilities
@@ -1621,27 +1621,27 @@ def test_multiple_choice_match():
     assert not multiple_choice_match("Based on the above, several options apply", "B")
 
 
-def test_validate_answer():
+def test_is_correct_answer():
     """Test composite validation."""
 
-    assert validate_answer("42", "42")
-    assert not validate_answer("wrong", "42")
+    assert is_correct_answer("42", "42")
+    assert not is_correct_answer("wrong", "42")
 
     # Numeric match
-    assert validate_answer("The result is 110", "110")
+    assert is_correct_answer("The result is 110", "110")
 
     # Substring containment is no match: it must not inflate the score
     # (an expected "7" inside "17" would otherwise score a full match).
-    assert not validate_answer("17", "7")
+    assert not is_correct_answer("17", "7")
 
 
 def test_answer_grading_is_all_or_nothing():
     """A near-miss validates as wrong, and the environment prices the verdict at the objective term's
     full weight or at 0 — never a similarity-scaled credit in between."""
 
-    assert validate_answer("42", "42")
-    assert not validate_answer("wrong", "42")
-    assert not validate_answer("Leonardo da Vinchi", "Leonardo da Vinci")
+    assert is_correct_answer("42", "42")
+    assert not is_correct_answer("wrong", "42")
+    assert not is_correct_answer("Leonardo da Vinchi", "Leonardo da Vinci")
 
     env = NativeToolUseEnvironment(tool_registry=NativeToolRegistry(), max_turns=2)
     episode_ids, _ = env.reset(["Who painted the Mona Lisa?"] * 3, [{"answer": "Leonardo da Vinci"}] * 3)
@@ -1656,7 +1656,7 @@ def test_answer_grading_is_all_or_nothing():
 def test_native_tool_use_reward_with_answer():
     """A final answer that validates against ``context["answer"]`` grades 1, priced at the term's weight."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
 
     episode_ids, steps = env.reset(["What is 2 + 2?"], [{"answer": "4"}])
@@ -1678,7 +1678,7 @@ def test_native_tool_use_reward_with_answer():
 def test_native_tool_use_reward_wrong_answer():
     """A final answer that fails validation grades 0."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
 
     episode_ids, steps = env.reset(["What is 2 + 2?"], [{"answer": "4"}])
@@ -1696,7 +1696,7 @@ def test_native_tool_use_reward_wrong_answer():
 def test_native_tool_use_reward_no_answer():
     """With no ``answer`` in the context, completing IS the objective: the episode grades 1."""
 
-    registry = create_native_math_tools()
+    registry = build_math_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=5)
 
     episode_ids, steps = env.reset(["Do something"], [{}])
@@ -1712,7 +1712,7 @@ def test_native_tool_use_null_answer_is_invalid_not_a_free_success():
     fallback above: that pays the full objective to any episode that merely finished, and every
     sibling in its GRPO group finishes just as easily, so the whole group learns nothing but "stop"."""
 
-    env = NativeToolUseEnvironment(tool_registry=create_native_math_tools(), max_turns=5)
+    env = NativeToolUseEnvironment(tool_registry=build_math_tools(), max_turns=5)
 
     episode_ids, _ = env.reset(["What is 2 + 2?"], [{"answer": None}])
     env.step(episode_ids, ["Done!"])
@@ -1778,13 +1778,13 @@ def test_react_grades_off_the_context_and_keeps_no_copy_of_the_answer(step_conte
         assert answer not in repr({key: value for key, value in traj.info.items() if key != "final_answer"})
 
 
-# qa_search preset (create_qa_search_environment)
+# qa_search preset (build_qa_search_environment)
 
 
 def test_qa_search_environment_init(allow_mock_search):
-    """Test the create_qa_search_environment factory (preset over NativeToolUseEnvironment)."""
+    """Test the build_qa_search_environment factory (preset over NativeToolUseEnvironment)."""
 
-    env = create_qa_search_environment(max_turns=10, search_backend="mock")
+    env = build_qa_search_environment(max_turns=10, search_backend="mock")
     tools = env.get_tools_schema()
     tool_names = [t["function"]["name"] for t in tools]
     assert "web_search" in tool_names
@@ -1793,7 +1793,7 @@ def test_qa_search_environment_init(allow_mock_search):
 def test_qa_search_environment_correct_answer(allow_mock_search):
     """Test SearchQA rewards correct answer."""
 
-    env = create_qa_search_environment(max_turns=5, search_backend="mock")
+    env = build_qa_search_environment(max_turns=5, search_backend="mock")
 
     episode_ids, _ = env.reset(
         ["What year was the Eiffel Tower completed?"],
@@ -1815,7 +1815,7 @@ def test_no_tool_use_is_charged_once_by_the_dedicated_knob(allow_mock_search):
     """The zero-tool-call giveup costs exactly ``no_tool_use_penalty``, once, under ``reward/tool_shaping``:
     the terminal step must not add a second (per-call) charge on top of the episode-level one."""
 
-    env = create_qa_search_environment(max_turns=5, search_backend="mock", no_tool_use_penalty=0.3)
+    env = build_qa_search_environment(max_turns=5, search_backend="mock", no_tool_use_penalty=0.3)
     episode_ids, _ = env.reset(["Q?"], [{"answer": "A"}])
     env.step(episode_ids, ["A"])
     traj = env.get_trajectories(episode_ids)[0]
@@ -1831,7 +1831,7 @@ def test_no_tool_use_is_charged_once_by_the_dedicated_knob(allow_mock_search):
 def test_qa_search_environment_wrong_answer(allow_mock_search):
     """Test SearchQA grades a wrong answer 0."""
 
-    env = create_qa_search_environment(max_turns=5, search_backend="mock")
+    env = build_qa_search_environment(max_turns=5, search_backend="mock")
 
     episode_ids, _ = env.reset(
         ["What year was the Eiffel Tower completed?"],

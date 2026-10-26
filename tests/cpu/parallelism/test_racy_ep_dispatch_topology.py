@@ -2,7 +2,7 @@
 
 DeepEP builds its buffer on the dispatch group — ``ep_size`` ranks. Under expert-TP an
 ``ep_group_size``-wide EP group is split into ``expert_tp_size`` dispatch groups of ``ep_size``
-(``EPConfig._create_expert_tp_groups``), so ``ep4 + etp2`` on one 8-GPU domain is the same
+(``EPConfig._build_expert_tp_groups``), so ``ep4 + etp2`` on one 8-GPU domain is the same
 two-concurrent-4-rank-group topology as bare ``ep4`` — whose combine barriers race FSDP2's
 domain-wide NCCL and hang intermittently. Keying the predicate on ``ep_group_size`` lets exactly that
 shape through: ``ep_group_size == 8 == domain``.
@@ -38,7 +38,7 @@ def test_two_large_dispatch_groups_in_one_domain_are_rejected():
 def test_ep_etp_forms_the_same_dispatch_topology_the_gate_rejects_for_bare_ep():
     """The ETP exemption is measured, not arithmetic luck — pinned so it cannot drift silently.
 
-    ``EPConfig._create_expert_tp_groups`` splits the 8-rank EP group into dispatch groups of
+    ``EPConfig._build_expert_tp_groups`` splits the 8-rank EP group into dispatch groups of
     ``ep_size`` — for ep4+etp2 that is ``[0-3]`` and ``[4-7]``, byte-for-byte the two-4-rank-group
     topology this gate rejects for bare ep4. Both halves of the mechanism the rejection NAMES appear
     to hold for it too: ``EPConfig.is_deferred_dp`` needs more than one NVLink domain (and

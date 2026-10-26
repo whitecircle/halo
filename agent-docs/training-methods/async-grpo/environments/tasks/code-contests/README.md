@@ -1,6 +1,6 @@
 # Code Contests Environment
 
-`CodeContestsEnvironment` (`src/environments/envs/tasks/coding/code_contests.py`) trains competitive
+`CodeContestsEnvironment` (`src/environments/tasks/coding/code_contests.py`) trains competitive
 programming. The model tries a solution in a scratchpad tool and submits it with `submit_solution`, which runs it
 against the hidden tests in a [sandbox](../../sandbox.md). The reward's `environment` term pays 1 when the
 submission passes every hidden test, else 0.
@@ -30,7 +30,7 @@ rewards:
   - source: environment
   - source: judge            # the audit veto
     name: audit
-    checks: [...]            # Reward → Audit judge
+    checks: environment      # the environment's rubric: Reward → Audit judge
 ```
 
 | Knob | Default | Effect |

@@ -13,12 +13,10 @@ import json
 import pytest
 
 from src.environments.base import REWARD_COMPONENTS_KEY
-from src.environments.envs.tasks.coding.code_contests import (
-    CodeContestsEnvironment,
-    normalized_program,
-    sheds_only_output,
-)
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
+from src.environments.sandbox.base import SandboxExecutor
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.program_source import is_output_only_change, normalized_program
 from src.environments.tools.definitions import NativeToolCall
 
 PRICE = 0.1
@@ -171,8 +169,8 @@ def test_a_failure_submitted_with_the_runs_spent_is_not_priced():
     ],
     ids=["python-debug-print", "cpp-cerr", "dropped-logic", "added-line", "repeated-blocks"],
 )
-def test_sheds_only_output_allows_dropped_output_statements_and_nothing_else(ran, submitted, language, same):
-    assert sheds_only_output(normalized_program(ran, language), normalized_program(submitted, language)) is same
+def test_is_output_only_change_allows_dropped_output_statements_and_nothing_else(ran, submitted, language, same):
+    assert is_output_only_change(normalized_program(ran, language), normalized_program(submitted, language)) is same
 
 
 if __name__ == "__main__":

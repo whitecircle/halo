@@ -10,7 +10,7 @@ is applied where the observation is built, so the rollout and the trainer's reco
 import pytest
 
 from src.environments.base import Trajectory
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolCall
 
 

@@ -45,11 +45,8 @@ async def _async_search_duckduckgo(query: str, max_results: int) -> list[dict[st
 
 @dataclass(frozen=True)
 class HttpSearchSpec:
-    """A keyed JSON search API, shared by the sync and async transports.
-
-    ``build(query, max_results, key)`` returns the httpx request kwargs (``json``/``params``/
-    ``headers``) for the key read from ``env_key``; ``parse(data)`` maps the decoded response to
-    ``{"title", "url", "snippet"}`` dicts (the caller applies ``max_results``).
+    """A keyed JSON search API, shared by the sync and async transports: ``build(query, max_results, key)`` gives the
+    httpx request kwargs for the key read from ``env_key``, ``parse(data)`` the ``{"title", "url", "snippet"}`` dicts.
     """
 
     method: str
@@ -76,46 +73,6 @@ async def _async_call(spec: HttpSearchSpec, query: str, max_results: int) -> lis
         resp.raise_for_status()
         data = resp.json()
     return spec.parse(data)[:max_results]
-
-
-_SERPER = HttpSearchSpec(
-    method="POST",
-    url="https://google.serper.dev/search",
-    env_key="SERPER_API_KEY",
-    build=lambda query, max_results, key: {
-        "json": {"q": query, "num": max_results},
-        "headers": {"X-API-KEY": key, "Content-Type": "application/json"},
-    },
-    parse=lambda data: [
-        {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", "")}
-        for r in data.get("organic", [])
-    ],
-)
-
-_BRAVE = HttpSearchSpec(
-    method="GET",
-    url="https://api.search.brave.com/res/v1/web/search",
-    env_key="BRAVE_API_KEY",
-    build=lambda query, max_results, key: {
-        "params": {"q": query, "count": max_results},
-        "headers": {"X-Subscription-Token": key, "Accept": "application/json"},
-    },
-    parse=lambda data: [
-        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("description", "")}
-        for r in data.get("web", {}).get("results", [])
-    ],
-)
-
-_TAVILY = HttpSearchSpec(
-    method="POST",
-    url="https://api.tavily.com/search",
-    env_key="TAVILY_API_KEY",
-    build=lambda query, max_results, key: {"json": {"query": query, "max_results": max_results, "api_key": key}},
-    parse=lambda data: [
-        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
-        for r in data.get("results", [])
-    ],
-)
 
 
 def _search_mock(query: str, max_results: int) -> list[dict[str, Any]]:
@@ -158,9 +115,50 @@ def _http_backend(spec: HttpSearchSpec) -> SearchBackend:
 
 # Insertion order is the auto-select priority; the keyless last entry always qualifies.
 _BACKENDS: dict[str, SearchBackend] = {
-    "serper": _http_backend(_SERPER),
-    "brave": _http_backend(_BRAVE),
-    "tavily": _http_backend(_TAVILY),
+    "serper": _http_backend(
+        HttpSearchSpec(
+            method="POST",
+            url="https://google.serper.dev/search",
+            env_key="SERPER_API_KEY",
+            build=lambda query, max_results, key: {
+                "json": {"q": query, "num": max_results},
+                "headers": {"X-API-KEY": key, "Content-Type": "application/json"},
+            },
+            parse=lambda data: [
+                {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", "")}
+                for r in data.get("organic", [])
+            ],
+        )
+    ),
+    "brave": _http_backend(
+        HttpSearchSpec(
+            method="GET",
+            url="https://api.search.brave.com/res/v1/web/search",
+            env_key="BRAVE_API_KEY",
+            build=lambda query, max_results, key: {
+                "params": {"q": query, "count": max_results},
+                "headers": {"X-Subscription-Token": key, "Accept": "application/json"},
+            },
+            parse=lambda data: [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("description", "")}
+                for r in data.get("web", {}).get("results", [])
+            ],
+        )
+    ),
+    "tavily": _http_backend(
+        HttpSearchSpec(
+            method="POST",
+            url="https://api.tavily.com/search",
+            env_key="TAVILY_API_KEY",
+            build=lambda query, max_results, key: {
+                "json": {"query": query, "max_results": max_results, "api_key": key}
+            },
+            parse=lambda data: [
+                {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+                for r in data.get("results", [])
+            ],
+        )
+    ),
     "duckduckgo": SearchBackend(sync=_search_duckduckgo, async_=_async_search_duckduckgo),
 }
 
@@ -178,17 +176,9 @@ def _selectable_backends() -> dict[str, SearchBackend]:
     return _BACKENDS
 
 
-def _auto_select_backend() -> str:
-    """The first backend in :data:`_BACKENDS` order this environment can reach (keyless, or key present)."""
-    return next(name for name, spec in _BACKENDS.items() if spec.env_key is None or env_str(spec.env_key))
-
-
 def validate_search_backend(backend: str | None) -> None:
-    """Raise on a backend name this process cannot select (``None`` = auto-select, always valid).
-
-    Called at tool construction as well as per search: every protocol turns a tool exception into an
-    observation plus ``tool_error_penalty``, so a per-call raise alone would let a whole training run
-    proceed against a ``web_search`` that never returns a result.
+    """Raise on a backend name this process cannot select (``None`` auto-selects). Checked at tool construction too,
+    since every protocol turns a per-search raise into a priced observation and a run would train on a dead tool.
     """
     if backend is None:
         return
@@ -204,8 +194,11 @@ def validate_search_backend(backend: str | None) -> None:
 
 
 def _resolve_backend(backend: str | None) -> tuple[str, SearchBackend]:
-    """The backend a search runs on, by name: the named one, else the first this process can reach."""
-    backend = backend or _auto_select_backend()
+    """The backend a search runs on, by name: the named one, else the first in :data:`_BACKENDS` order this process
+    can reach (keyless, or its key present)."""
+    backend = backend or next(
+        name for name, spec in _BACKENDS.items() if spec.env_key is None or env_str(spec.env_key)
+    )
     validate_search_backend(backend)
     return backend, _selectable_backends()[backend]
 

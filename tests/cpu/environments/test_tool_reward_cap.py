@@ -15,8 +15,8 @@ from src.environments.base import TOOL_REWARD_PAID_KEY
 from src.environments.envs.protocols.mcp import NativeMCPClientEnvironment
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.registry import resolve_environment
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 

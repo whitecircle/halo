@@ -85,6 +85,7 @@ class _StubEPLayer(StubEPLayerBase):
             ep_group_size=1 if managed else 2,
             experts_fsdp_managed=managed,
             defer_grad_sync=False,
+            uses_backward_grad_hooks=not managed,
         )
         self.gate = nn.Linear(H, E, bias=False)  # the base's default _ROUTER_ATTR
         self.gate_proj = nn.Parameter(torch.randn(E, H, M))

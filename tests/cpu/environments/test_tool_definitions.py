@@ -16,13 +16,13 @@ import time
 
 import pytest
 
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.registry import (
     get_registered_environments,
     register_environment,
     resolve_environment,
 )
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,
@@ -31,16 +31,16 @@ from src.environments.tools.definitions import (
     ToolArgumentError,
     ToolParameter,
 )
-from src.environments.tools.factories import (
-    create_all_native_tools,
-    create_native_code_tools,
-    create_native_file_tools,
-    create_native_math_tools,
-    create_native_python_tools,
-    create_native_search_tools,
-    create_session_bash_tools,
-    create_session_code_tools,
-    create_session_file_tools,
+from src.environments.tools.toolsets import (
+    build_code_tools,
+    build_combined_tools,
+    build_math_tools,
+    build_python_tools,
+    build_search_tools,
+    build_session_bash_tools,
+    build_session_code_tools,
+    build_session_file_tools,
+    build_simulated_file_tools,
 )
 
 # NativeTool.to_openai_schema
@@ -287,7 +287,7 @@ def test_an_async_only_tool_is_refused_by_the_sync_path_at_binding():
 
 def test_python_tool_cannot_have_its_timeout_raised_by_the_model():
     """End-to-end on the shipped in-process Python tool: the configured wall-clock cap must hold."""
-    tool = create_native_python_tools(timeout=0.3).get("python")
+    tool = build_python_tools(timeout=0.3).get("python")
     with pytest.raises(ToolArgumentError, match="unknown argument 'timeout'"):
         tool.execute(code="while True:\n    pass", timeout=30)
     started = time.monotonic()
@@ -400,7 +400,7 @@ def test_registry_to_openai_tools():
 
 
 def test_factory_file_tools_execute_round_trip():
-    reg = create_native_file_tools()
+    reg = build_simulated_file_tools()
     reg.get("write_file").execute(path="/home/user/x.txt", content="hello")
     assert reg.get("read_file").execute(path="/home/user/x.txt") == "hello"
     assert "not found" in reg.get("read_file").execute(path="/missing").lower()
@@ -410,8 +410,8 @@ def test_file_tool_wording_is_per_store_while_the_schema_is_shared():
     """The two stores share one builder but not one set of instructions: a simulated absolute-path
     filesystem and a persistent relative-path workspace need different wording for the same three
     tools, so a fold that shared one description set would mis-instruct one of them."""
-    simulated = create_native_file_tools()
-    session = create_session_file_tools(lambda: None)
+    simulated = build_simulated_file_tools()
+    session = build_session_file_tools(lambda: None)
     for name in ("read_file", "write_file", "list_files"):
         assert simulated.get(name).description != session.get(name).description
         assert [p.name for p in simulated.get(name).parameters] == [p.name for p in session.get(name).parameters]
@@ -466,15 +466,15 @@ def _registries_under_test() -> dict[str, NativeToolRegistry]:
         return None
 
     return {
-        "math": create_native_math_tools(),
-        "code": create_native_code_tools(),
-        "python": create_native_python_tools(),
-        "search": create_native_search_tools(backend="duckduckgo"),
-        "file": create_native_file_tools(),
-        "session_bash": create_session_bash_tools(no_session),
-        "session_code": create_session_code_tools(no_session),
-        "session_file": create_session_file_tools(no_session),
-        "all": create_all_native_tools(),
+        "math": build_math_tools(),
+        "code": build_code_tools(),
+        "python": build_python_tools(),
+        "search": build_search_tools(backend="duckduckgo"),
+        "file": build_simulated_file_tools(),
+        "session_bash": build_session_bash_tools(no_session),
+        "session_code": build_session_code_tools(no_session),
+        "session_file": build_session_file_tools(no_session),
+        "all": build_combined_tools(),
         "code_contests": CodeContestsEnvironment(language="python", sandbox_backend="local").registry,
     }
 
@@ -549,15 +549,15 @@ def test_code_tool_advertises_no_input_channel_it_cannot_bind():
 
 
 def test_calculator_timeout_is_plumbed_from_the_factory():
-    """``create_all_native_tools(timeout=...)`` must reach the calculator, not just the code tool.
+    """``build_combined_tools(timeout=...)`` must reach the calculator, not just the code tool.
 
     The bound value has to be a pre-bound handler keyword: a call-time one is refused at binding
     (deliberately — a model must not raise its own execution cap).
     """
-    assert create_all_native_tools(timeout=0.25).get("calculate").handler.keywords["timeout"] == 0.25
-    assert create_native_math_tools().get("calculate").handler.keywords["timeout"] == SANDBOX_DEFAULT_TIMEOUT
+    assert build_combined_tools(timeout=0.25).get("calculate").handler.keywords["timeout"] == 0.25
+    assert build_math_tools().get("calculate").handler.keywords["timeout"] == SANDBOX_DEFAULT_TIMEOUT
     # And the model cannot raise it back: an undeclared call-time keyword refuses the call.
-    tight = create_native_math_tools(timeout=0.25).get("calculate")
+    tight = build_math_tools(timeout=0.25).get("calculate")
     with pytest.raises(ToolArgumentError, match="unknown argument 'timeout'; its arguments are expression"):
         tight.bind({"expression": "1+1", "timeout": 600})
 

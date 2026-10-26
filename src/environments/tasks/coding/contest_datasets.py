@@ -1,11 +1,7 @@
-"""Dataset adapters for the coding task environments.
-
-Stateless row transforms into the env's ``{prompt, answer}`` shape, plus a ``keep`` predicate dropping
-rows the stdin/stdout env cannot grade. Each dataset registers a :class:`CodeDatasetAdapter` in
-:data:`CODE_DATASET_ADAPTERS` via a ``format_*`` / ``pack_*`` / ``keep_*`` trio (+ optional ``load_*``).
-A benchmark that stamps its rows' contest date and platform also declares them, so a run can score a
-:class:`ContestSelection` of it.
-"""
+"""Contest dataset adapters: stateless row transforms into the code-contests env's ``{prompt, answer}`` shape plus a
+``keep`` predicate dropping rows a stdin/stdout grader cannot grade, registered per dataset in
+:data:`CODE_DATASET_ADAPTERS` as a ``format_*`` / ``pack_*`` / ``keep_*`` trio (+ optional ``load_*``). A benchmark
+that stamps its rows' contest date and platform declares them, so a run can score a :class:`ContestSelection`."""
 
 import base64
 import io
@@ -32,8 +28,7 @@ _LCB_GRADABLE_PLATFORMS = ("atcoder", "codeforces")
 # its checker source.
 JOINED_TESTS_FIELD = "joined_tests"
 JOINED_CHECKER_FIELD = "joined_checker"
-# The one split each single-split benchmark ships; its loader reads it whatever split it is passed.
-_LCB_SPLIT = "test"
+# The one split HLCE ships; its loader reads it whatever split it is passed.
 _HLCE_SPLIT = "train"
 
 # HardTests difficulty on the Codeforces rating scale. A Codeforces rating is used as is; Luogu's
@@ -91,10 +86,8 @@ def _format_problem_statement(
     examples: Iterable[tuple[int, str, str]] = (),
     note: str | None = None,
 ) -> str:
-    """Render a contest problem statement, including only the sections the row provides.
-
-    ``examples`` carries pre-numbered ``(index, input, output)`` triples so a dataset that skips a
-    malformed example keeps the surviving ones' original numbering.
+    """A contest problem statement with only the sections the row provides; ``examples`` are pre-numbered
+    ``(index, input, output)`` triples, so a skipped malformed example keeps the others' numbering.
     """
     heading = (
         f"# {label}. {title}" if (label and title) else (f"# {label or title}" if (label or title) else "# Problem")
@@ -290,14 +283,10 @@ def keep_livecodebench(row: dict[str, Any]) -> bool:
 
 
 def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
-    """Yield raw LiveCodeBench rows from a release's ``test*.jsonl`` files: the newest file first, each
-    file in its stored row order, which is not newest-first (``test6.jsonl`` opens on its 2025-01-04
-    contests). The eval's example indices, and the re-grader's, are this order.
-
-    ``config`` is the release tag (default ``release_v6``); ``split`` is ignored, a release's files being
-    its one ``test`` split. Bypasses ``load_dataset``, whose loading script datasets 4.x does not execute.
-    A release is cumulative, so a contamination-clean subset is a :class:`ContestSelection` window over
-    it, not a release tag.
+    """Raw LiveCodeBench rows from release ``config``'s ``test*.jsonl`` files (default ``release_v6``; ``split`` is
+    ignored): the newest file first, each in stored order, the order the eval and the re-grader index. Bypasses
+    ``load_dataset``, whose loading script datasets 4.x does not run; a contamination-clean subset is a
+    :class:`ContestSelection` window over the cumulative release.
     """
     files = _LCB_RELEASE_FILES.get(config or "release_v6")
     if files is None:
@@ -557,12 +546,9 @@ class ContestSelection:
 
 @dataclass(frozen=True)
 class CodeDatasetAdapter:
-    """How to turn a contest dataset's rows into the env's ``{prompt, answer}`` shape.
-
-    ``format_prompt`` builds the prompt, ``pack_verification`` the grading payload, ``keep`` drops
-    ungradable rows. ``group_field``/``group_label`` name the raw-row field the eval report buckets by,
-    ``id_field`` the one naming a problem in the eval's results and trajectories. ``load`` is an
-    optional custom row iterator; ``None`` => standard HF load.
+    """How a contest dataset's rows become the env's ``{prompt, answer}`` shape: ``format_prompt`` builds the prompt,
+    ``pack_verification`` the grading payload, ``keep`` drops ungradable rows; ``group_field``/``group_label`` name the
+    field the eval report buckets by, ``id_field`` the one naming a problem; ``load`` replaces the standard HF load.
     """
 
     format_prompt: Callable[[dict[str, Any]], str]
@@ -609,7 +595,7 @@ class CodeDatasetAdapter:
             raise ValueError(f"this dataset ships only the {self.split!r} split, not {requested!r}")
         return self.split
 
-    def require_selectable(self, selection: ContestSelection) -> None:
+    def reject_unselectable(self, selection: ContestSelection) -> None:
         """Raise unless this source can apply ``selection``: a date window needs a stamped contest date,
         a platform filter a platform this adapter grades, spelled as the source spells it."""
         if selection.dated and self.contest_date is None:
@@ -629,12 +615,11 @@ class CodeDatasetAdapter:
     def scored_rows(
         self, rows: Iterable[dict[str, Any]], selection: ContestSelection, left_out: list[Any] | None = None
     ) -> Iterator[dict[str, Any]]:
-        """The rows a run scores, in source order: inside ``selection`` and gradable (``keep``), an
-        examples-only row (:meth:`is_examples_only`) only where the selection includes them; the ids of
-        those it leaves out are appended to ``left_out`` when given. The eval builds its examples and the
-        offline re-grader rebuilds their payloads by index from this one sequence. The selection is
-        validated here, before a row is read."""
-        self.require_selectable(selection)
+        """The rows a run scores, in source order: inside ``selection``, gradable, and examples-only only where the
+        selection includes them (the ids left out appended to ``left_out``). The eval and the offline re-grader both
+        index this one sequence; the selection is validated before a row is read.
+        """
+        self.reject_unselectable(selection)
         return self._scored(rows, selection, left_out)
 
     def _scored(
@@ -682,7 +667,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         group_label="difficulty",
         id_field="question_id",
         load=load_livecodebench,
-        split=_LCB_SPLIT,
+        split="test",
         contest_date=livecodebench_contest_date,
         platform_field="platform",
         platforms=_LCB_GRADABLE_PLATFORMS,

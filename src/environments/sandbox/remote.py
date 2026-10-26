@@ -1,25 +1,19 @@
-"""Remote SandboxFusion-compatible backend: HTTP client for the stateless ``/run_code`` API.
-
-The endpoint is stateless, so :class:`RemoteSession` carries the working set client-side: written
-files are accumulated and resent each :meth:`run`, and a compiled language is rebuilt by the service
-on every request. Files *produced* on the service aren't read back.
-See https://github.com/bytedance/SandboxFusion.
-"""
+"""Remote SandboxFusion-compatible backend (https://github.com/bytedance/SandboxFusion): an HTTP client for the
+stateless ``/run_code`` API. :class:`RemoteSession` carries the working set client-side: written files are resent
+with each run and the service rebuilds a compiled language every request; files the service produces are not read
+back."""
 
 import math
 
 import requests
 
-from src.environments.sandbox.base import (
+from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
+from src.environments.sandbox.languages import utf8_encodable
+from src.environments.sandbox.results import (
     COMMAND_NOT_FOUND_RETURNCODE,
-    SANDBOX_DEFAULT_TIMEOUT,
-    SandboxExecutor,
     SandboxResult,
-    SandboxSession,
     compile_failure_verdict,
     compile_limit_verdict,
-    require_session_path,
-    utf8_encodable,
 )
 
 # HTTP budget on top of the program's own timeout: the service still has to queue, provision and
@@ -109,12 +103,9 @@ class RemoteSandbox(SandboxExecutor):
 
     @staticmethod
     def _parse(data: dict[str, object]) -> SandboxResult:
-        """Map a SandboxFusion response into a :class:`SandboxResult` (tolerant of partial bodies).
-
-        A ``compile_result`` the compiler rejected or that hit the compile time limit is the program's
-        verdict (``compile_failed``), and a ``Failed`` response whose run step exited non-zero or timed
-        out is its runtime verdict — the local backend's split. Only the service's own failure sets
-        ``error``.
+        """A SandboxFusion response as a :class:`SandboxResult`, tolerant of partial bodies, split as the local backend
+        splits: a compile rejection or compile timeout is ``compile_failed``, a ``Failed`` run that exited non-zero or
+        timed out is the program's verdict, and only the service's own failure sets ``error``.
         """
         compile_step = _command_result(data.get("compile_result"))
         compile_status = str(compile_step.get("status", "")).lower()
@@ -180,11 +171,11 @@ class RemoteSession(SandboxSession):
         return self._executor.run(code, stdin=stdin, timeout=timeout, language=language, files=merged)
 
     def write_file(self, path: str, content: str) -> None:
-        require_session_path(path)
+        self.reject_unsafe_path(path)
         self._files[path] = content
 
     def read_file(self, path: str) -> str | None:
-        require_session_path(path)
+        self.reject_unsafe_path(path)
         return self._files.get(path)
 
     def list_files(self) -> list[str]:

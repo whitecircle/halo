@@ -22,13 +22,13 @@ import pytest
 from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
 from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments.base import REWARD_COMPONENTS_KEY
-from src.environments.envs.tasks.coding.code_contests import (
-    DEFAULT_REASONING_EFFORT,
-    NO_STDIN_NOTE,
-    SCRATCHPAD_BUDGET_SPENT_REPLY,
-    CodeContestsEnvironment,
-)
-from src.environments.envs.tasks.coding.datasets import (
+from src.environments.registry import get_registered_environments, resolve_environment
+from src.environments.sandbox.base import SandboxExecutor
+from src.environments.sandbox.factory import build_sandbox
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT, CodeContestsEnvironment
+from src.environments.tasks.coding.code_contests_prompts import NO_STDIN_NOTE, SCRATCHPAD_BUDGET_SPENT_REPLY
+from src.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,
     format_codeforces_prompt,
     format_icpc_prompt,
@@ -41,20 +41,15 @@ from src.environments.envs.tasks.coding.datasets import (
     pack_icpc_verification,
     pack_livecodebench_verification,
 )
-from src.environments.envs.tasks.coding.grading import (
+from src.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
+from src.environments.tasks.coding.verdicts import (
     DEFAULT_FLOAT_TOLERANCE,
     FloatTolerance,
-    GradingSpec,
+    build_verdict,
     compare_tokens,
+    find_stated_float_tolerance,
     float_tolerance,
-    grade_solution,
-    run_solution_against_tests,
-    select_verdict,
-    stated_float_tolerance,
 )
-from src.environments.registry import get_registered_environments, resolve_environment
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
-from src.environments.sandbox.resolve import resolve_sandbox
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox
 
@@ -127,8 +122,8 @@ def test_compare_tokens_float_tolerance():
         ("Each value lies in [-10^{-3}, 10^3]. Print the number of pairs.", None),
     ],
 )
-def test_stated_float_tolerance_reads_the_spellings_statements_carry(statement, stated):
-    assert stated_float_tolerance(statement) == stated
+def test_find_stated_float_tolerance_reads_the_spellings_statements_carry(statement, stated):
+    assert find_stated_float_tolerance(statement) == stated
 
 
 def test_a_stated_tolerance_loosens_the_float_comparison_but_never_tightens_it():
@@ -138,20 +133,20 @@ def test_a_stated_tolerance_loosens_the_float_comparison_but_never_tightens_it()
     assert compare_tokens("0.1235", "0.12345678", tolerance=float_tolerance(both))
     tight = FloatTolerance(absolute=1e-9, relative=None)
     assert float_tolerance(tight) == float_tolerance(None) == DEFAULT_FLOAT_TOLERANCE
-    verdict = select_verdict(None, "tokens", StubSandbox(), stated_tolerance=both)
+    verdict = build_verdict(None, "tokens", StubSandbox(), stated_tolerance=both)
     assert verdict("", "0.1235", "0.12345678") and not verdict("", "0.1235", "0.1245")
-    assert not select_verdict(None, "tokens", StubSandbox())("", "0.1235", "0.12345678")
+    assert not build_verdict(None, "tokens", StubSandbox())("", "0.1235", "0.12345678")
 
 
 def test_each_stated_bound_holds_in_its_own_kind():
     """An absolute and a relative bound accept an error within either, each in its own kind: "absolute 10^-2 or
     relative 10^-6" allows 1 on an answer of 10^6, not 10^4, and 10^-2 on an answer below 1."""
-    stated = stated_float_tolerance("An absolute error of 10^{-2} or a relative error of 10^{-6} is accepted.")
-    verdict = select_verdict(None, "tokens", StubSandbox(), stated_tolerance=stated)
+    stated = find_stated_float_tolerance("An absolute error of 10^{-2} or a relative error of 10^{-6} is accepted.")
+    verdict = build_verdict(None, "tokens", StubSandbox(), stated_tolerance=stated)
     assert verdict("", "1000000.0", "1000000.9") and not verdict("", "1000000.0", "1000001.5")
     assert verdict("", "0.5", "0.509") and not verdict("", "0.5", "0.52")
     # A single kind keeps it: an absolute bound never widens with the answer's magnitude.
-    absolute = select_verdict(None, "tokens", StubSandbox(), stated_tolerance=FloatTolerance(1e-3, None))
+    absolute = build_verdict(None, "tokens", StubSandbox(), stated_tolerance=FloatTolerance(1e-3, None))
     assert absolute("", "2.5", "2.5009") and not absolute("", "2500.0", "2500.5")
 
 
@@ -160,7 +155,7 @@ def test_each_stated_bound_holds_in_its_own_kind():
 
 def _token_spec() -> GradingSpec:
     """The Codeforces grading contract these cases share: a real sandbox, token comparison."""
-    return GradingSpec(sandbox=resolve_sandbox(), comparison="tokens")
+    return GradingSpec(sandbox=build_sandbox(), comparison="tokens")
 
 
 def test_grade_correct_solution_passes_all():

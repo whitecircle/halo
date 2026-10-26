@@ -27,13 +27,11 @@ Run: python tests/cpu/parallelism/test_ep_zero_token_grad_sync.py
 
 from __future__ import annotations
 
-import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
@@ -57,8 +55,8 @@ def _make_ep(
 
 
 def _expert_hook_from(**ep_attrs):
-    """Build the expert grad hook off a stub carrying every attribute a real ``EPConfig`` sets, with
-    ``dist`` reporting peers so the hook is the distributed one rather than the single-process no-op."""
+    """Build the expert grad hook off a stub carrying every attribute a real ``EPConfig`` sets, with a
+    process group reported up so the hook is the distributed one rather than the single-process no-op."""
     defaults = {
         "stage_world_size": 8,
         "expert_tp_size": 1,
@@ -67,8 +65,7 @@ def _expert_hook_from(**ep_attrs):
         "dp_scope_group": None,
     }
     ep = SimpleNamespace(**{**defaults, **ep_attrs})
-    fake_dist = types.SimpleNamespace(is_available=lambda: True, is_initialized=lambda: True, ReduceOp=dist.ReduceOp)
-    with patch(f"{_GS_MOD}.dist", fake_dist):
+    with patch(f"{_GS_MOD}.has_process_group", return_value=True):
         return build_expert_grad_hook(ep)
 
 

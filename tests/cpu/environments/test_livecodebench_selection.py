@@ -20,9 +20,9 @@ import pytest
 
 from scripts.environments.inference import regrade_trajectories
 from scripts.environments.inference.run_code_contests import build_examples, contest_meta, resolve_selection
-from src.environments.envs.tasks.coding import datasets as coding_datasets
-from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 from src.environments.registry import resolve_environment
+from src.environments.tasks.coding import contest_datasets as coding_datasets
+from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 
 _DATASET = "livecodebench/code_generation_lite"
 _LCB = CODE_DATASET_ADAPTERS["livecodebench"]
@@ -173,7 +173,7 @@ def test_a_selection_the_dataset_cannot_apply_is_refused_before_any_row_is_read(
     with pytest.raises(ValueError, match="records no platform"):
         codeforces.scored_rows(unreadable(), ContestSelection.parse(platforms=["codeforces"]))
     # An empty selection applies to any dataset.
-    codeforces.require_selectable(ContestSelection())
+    codeforces.reject_unselectable(ContestSelection())
 
 
 def test_a_row_without_a_contest_date_is_refused_under_a_window_only():

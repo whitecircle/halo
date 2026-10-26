@@ -8,11 +8,9 @@ from __future__ import annotations
 
 import logging
 
-import torch.distributed as dist
-
 from src.distributed.group_layout import NodeLocalLayout
 from src.runtime.collectives import build_groups
-from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
+from src.runtime.ranks import get_global_rank, get_global_world_size, has_process_group, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -30,18 +28,10 @@ class CPConfig:
     """
 
     def __init__(self, cp_size: int, *, stage_world_size: int, stage_base_rank: int, nvlink_domain_size: int):
-        if cp_size > nvlink_domain_size:
-            raise ValueError(
-                f"context_parallel_size ({cp_size}) cannot exceed the NVLink-domain size ({nvlink_domain_size})"
-            )
-        if nvlink_domain_size % cp_size != 0:
-            raise ValueError(
-                f"context_parallel_size ({cp_size}) must divide the NVLink-domain size ({nvlink_domain_size})"
-            )
         self.cp_size = cp_size
         self.stage_base_rank = stage_base_rank
 
-        if not dist.is_initialized():
+        if not has_process_group():
             if cp_size > 1:
                 raise RuntimeError(
                     f"context_parallel_size={cp_size} needs an initialized torch.distributed "

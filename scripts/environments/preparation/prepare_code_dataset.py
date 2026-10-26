@@ -9,7 +9,7 @@ Environmental-GRPO training script consumes it with ``prompt_field: prompt`` / `
 answer``. Rows the stdin/stdout environment cannot grade are filtered out.
 
 Prompt building, payload packing, and filtering come from the dataset adapters in
-``src/environments/envs/tasks/coding/datasets.py`` (``CODE_DATASET_ADAPTERS``), so preparation,
+``src/environments/tasks/coding/contest_datasets.py`` (``CODE_DATASET_ADAPTERS``), so preparation,
 evaluation, and training share one definition per dataset. Add an adapter there to support a new one.
 
 Usage (inside the training image):
@@ -52,13 +52,13 @@ from datasets import Dataset, DatasetDict, disable_caching, load_dataset
 from scripts.environments.preparation._common import parquet_parts
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from src.data.pipeline.processing import report_rejected_rows, resolve_map_num_proc
-from src.environments.envs.tasks.coding.datasets import (
+from src.environments.sandbox.factory import build_sandbox
+from src.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,
     JOINED_CHECKER_FIELD,
     JOINED_TESTS_FIELD,
 )
-from src.environments.envs.tasks.coding.grading import select_verdict
-from src.environments.sandbox.resolve import resolve_sandbox
+from src.environments.tasks.coding.verdicts import build_verdict
 from src.log import configure_cli_logging
 
 configure_cli_logging()
@@ -174,7 +174,7 @@ def join_tests(row: dict, table: Dataset, index: dict[str, int]) -> dict:
 
 @functools.cache
 def _sandbox():
-    return resolve_sandbox()
+    return build_sandbox()
 
 
 def checker_is_sound(row: dict) -> bool:
@@ -186,7 +186,7 @@ def checker_is_sound(row: dict) -> bool:
     checker, tests = payload.get("checker"), payload.get("tests") or []
     if not checker or not tests:
         return True
-    verdict = select_verdict(checker, "tokens", _sandbox())
+    verdict = build_verdict(checker, "tokens", _sandbox())
     if verdict(tests[0].get("input", ""), tests[0].get("output", ""), _GARBAGE_OUTPUT):
         return False
     return all(verdict(test.get("input", ""), test.get("output", ""), test.get("output", "")) for test in tests)
@@ -200,7 +200,7 @@ def suite_rejects_constants(row: dict) -> bool:
     checker, tests = payload.get("checker"), payload.get("tests") or []
     if not tests:
         return True
-    verdict = select_verdict(checker, "tokens", _sandbox() if checker else None)
+    verdict = build_verdict(checker, "tokens", _sandbox() if checker else None)
     return not any(
         all(verdict(test.get("input", ""), test.get("output", ""), answer + "\n") for test in tests)
         for answer in CONSTANT_ANSWERS

@@ -19,7 +19,6 @@ src/kernels/moe_permute.py
 src/kernels/fused_glu.py
 src/kernels/lowp/spec.py
 src/models/gradient_checkpointing.py
-src/models/moe/expert_lora_spec.py
 src/models/moe/**
 src/model_loading/parallel/**
 src/callbacks/balancing.py

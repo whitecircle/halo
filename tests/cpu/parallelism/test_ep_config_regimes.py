@@ -12,7 +12,6 @@ property that drifts from its reader syncs experts twice or not at all, or sizes
 
 import pytest
 
-import src.distributed.expert_parallel.moe_layer.layer as layer_module
 from src.distributed.expert_parallel import config as ep_config_mod
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
@@ -66,7 +65,6 @@ def test_fp32_experts_are_kept_only_outside_fsdp_management(fp32_experts, manage
 @pytest.mark.parametrize("requested", [True, False])
 def test_grouped_gemm_runs_where_requested_and_supported(monkeypatch, requested, hardware):
     monkeypatch.setattr(ep_config_mod, "supports_grouped_mm", lambda: hardware)
-    monkeypatch.setattr(layer_module, "supports_grouped_mm", lambda: hardware)
     config = single_process_ep_config(use_grouped_gemm=requested)
     model = tiny_family_model(TINY_MOE_FAMILIES[_FAMILY])
     apply_ep_layers(model, config)

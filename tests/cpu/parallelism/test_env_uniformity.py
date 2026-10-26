@@ -98,7 +98,7 @@ def test_the_check_runs_at_most_once_per_process(monkeypatch):
     """The entry scripts run it in distributed setup; the loader's backstop must then cost nothing,
     or the post-load world join is simply back."""
     calls = _count_joins(monkeypatch)
-    monkeypatch.setattr(rank_uniform_env.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(rank_uniform_env, "has_process_group", lambda: True)
 
     rank_uniform_env.agree_rank_uniform_env()
     rank_uniform_env.agree_rank_uniform_env()
@@ -115,11 +115,11 @@ def test_a_pre_init_call_does_not_disarm_the_backstop(monkeypatch):
     script's ordered setup, which is the same caller likeliest to have called this early.
     """
     calls = _count_joins(monkeypatch)
-    monkeypatch.setattr(rank_uniform_env.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(rank_uniform_env, "has_process_group", lambda: False)
     rank_uniform_env.agree_rank_uniform_env()
     assert not rank_uniform_env._env_uniformity_verified, "a no-op call must not latch"
 
-    monkeypatch.setattr(rank_uniform_env.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(rank_uniform_env, "has_process_group", lambda: True)
     rank_uniform_env.agree_rank_uniform_env()
     assert len(calls) == 2, "the real join must still run once the group exists"
     assert rank_uniform_env._env_uniformity_verified

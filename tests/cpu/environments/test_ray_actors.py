@@ -25,9 +25,8 @@ import ray
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments import ray_actors
-from src.environments.base import CUT_TOOL_CALLS_KEY, Trajectory
+from src.environments.base import Trajectory
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
 from src.environments.ray_actors import (
     EnvironmentActor,
@@ -39,9 +38,11 @@ from src.environments.ray_actors import (
 )
 from src.environments.registry import create_environment
 from src.environments.rollout_config import RolloutConfig
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-from src.environments.tools.factories import create_native_math_tools
+from src.environments.tools.toolsets import build_math_tools
 from src.inference.response import FINISH_REASON_LENGTH
+from src.rewards.samples import CUT_TOOL_CALLS_KEY
 from tests.common.repo import REPO_ROOT
 
 # Test: Environment Actor (Direct - Without Ray)
@@ -71,7 +72,7 @@ async def test_env_batch_calls_refuse_contexts_that_do_not_pair():
     with pytest.raises(ValueError, match="shorter"):
         env.step(episode_ids, ["Final Answer: 4"], [])
 
-    async_env = AsyncNativeToolUseEnvironment(tool_registry=create_native_math_tools())
+    async_env = AsyncNativeToolUseEnvironment(tool_registry=build_math_tools())
     with pytest.raises(ValueError, match="shorter"):
         await async_env.reset_async(["2+2?", "3+3?"], [{}])
     episode_ids, _ = await async_env.reset_async(["2+2?"], [{}])

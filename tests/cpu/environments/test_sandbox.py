@@ -9,7 +9,7 @@ Covers:
 - RemoteSandbox: SandboxFusion response parsing (incl. a rejected compile as ``compile_failed`` and a
   compile time limit as a backend error), endpoint normalization, timeout/transport errors
   (via an injected fake session — no network).
-- resolve_sandbox: env-var backend selection and the remote-url requirement.
+- build_sandbox: env-var backend selection and the remote-url requirement.
 - format_sandbox_repl_output / run_code_via_sandbox: REPL-style rendering — a compile error as the
   compiler's first diagnostics, a crash as its signal and stderr tail ahead of the program's stdout.
 - run_solution_against_tests: pass/fail/timeout grading on the local backend.
@@ -24,19 +24,20 @@ import time
 import pytest
 import requests
 
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.grading import run_solution_against_tests
-from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.sandbox.base import SANDBOX_DEFAULT_MEMORY_MB, SandboxInfraError, SandboxResult
+from src.environments.sandbox.factory import build_sandbox
 from src.environments.sandbox.local import (
     LOCAL_NPROC_LIMIT,
+    SANDBOX_DEFAULT_MEMORY_MB,
     ExecutionGate,
     LocalSubprocessSandbox,
     _resolve_execution_slots,
 )
 from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.repl import format_sandbox_repl_output, run_code_via_sandbox
-from src.environments.sandbox.resolve import resolve_sandbox
+from src.environments.sandbox.results import SandboxInfraError, SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.grading import run_solution_against_tests
+from src.environments.tasks.coding.swe import SweEnvironment
 from tests.common.code_contests import RecordingSandboxSession
 
 _NUMPY_MATMUL = "import numpy as np\na = np.arange(64.0).reshape(8, 8)\nprint(int((a @ a).trace()))"
@@ -469,13 +470,13 @@ def test_remote_client_timeout_is_an_infra_error_not_the_programs_tle():
         format_sandbox_repl_output(res, timeout=5.0)
 
 
-# resolve_sandbox
+# build_sandbox
 
 
 def test_resolve_defaults_to_local():
     saved = os.environ.pop("HALO_SANDBOX_BACKEND", None)
     try:
-        sb = resolve_sandbox()
+        sb = build_sandbox()
         assert isinstance(sb, LocalSubprocessSandbox)
     finally:
         if saved is not None:
@@ -488,7 +489,7 @@ def test_resolve_remote_requires_url():
     try:
         raised = False
         try:
-            resolve_sandbox(backend="remote")
+            build_sandbox(backend="remote")
         except ValueError:
             raised = True
         assert raised, "remote backend without a url must raise"
@@ -505,7 +506,7 @@ def test_resolve_remote_from_env():
     os.environ["HALO_SANDBOX_BACKEND"] = "remote"
     os.environ["HALO_SANDBOX_URL"] = "http://sandbox.example:8080"
     try:
-        sb = resolve_sandbox()
+        sb = build_sandbox()
         assert isinstance(sb, RemoteSandbox)
         assert sb.endpoint == "http://sandbox.example:8080/run_code"
     finally:
@@ -519,7 +520,7 @@ def test_resolve_remote_from_env():
 def test_resolve_rejects_unknown_backend():
     raised = False
     try:
-        resolve_sandbox(backend="banana")
+        build_sandbox(backend="banana")
     except ValueError:
         raised = True
     assert raised
@@ -529,7 +530,7 @@ def test_resolve_explicit_backend_overrides_env():
     saved = os.environ.get("HALO_SANDBOX_BACKEND")
     os.environ["HALO_SANDBOX_BACKEND"] = "remote"  # would require a url if it won
     try:
-        sb = resolve_sandbox(backend="local")
+        sb = build_sandbox(backend="local")
         assert isinstance(sb, LocalSubprocessSandbox)
     finally:
         if saved is None:

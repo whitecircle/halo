@@ -1,10 +1,7 @@
-"""SWE-agent style environment for software engineering tasks.
-
-Multi-turn and stateful: each episode gets its own persistent :class:`SandboxSession`, so files written
-on one turn are visible on the next. Tools bind to the active episode's session via a ``ContextVar``, so
-one env instance safely serves concurrent rollouts. Every priced grade needs a grader — a
-``test_function``, or the row's ``answer`` / ``validator``: completing the episode earns nothing.
-"""
+"""SWE-agent style environment for software engineering tasks: each episode gets its own persistent
+:class:`SandboxSession`, so files written on one turn are visible on the next, and tools bind to the active episode's
+session through a ``ContextVar``, so one env instance serves concurrent rollouts. Every priced grade needs a grader —
+a ``test_function``, or the row's ``answer`` / ``validator``: completing the episode earns nothing."""
 
 import logging
 from collections.abc import Callable, Iterator
@@ -15,12 +12,12 @@ from typing import Any
 from src.environments.base import ANSWER_KEY, EpisodeGrade, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
-from src.environments.sandbox.resolve import resolve_sandbox, warn_if_unisolated
+from src.environments.sandbox.factory import build_sandbox, warn_if_unisolated
 from src.environments.tools.definitions import NativeToolRegistry
-from src.environments.tools.factories import (
-    create_session_bash_tools,
-    create_session_code_tools,
-    create_session_file_tools,
+from src.environments.tools.toolsets import (
+    build_session_bash_tools,
+    build_session_code_tools,
+    build_session_file_tools,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,15 +27,10 @@ _ACTIVE_SESSION: ContextVar = ContextVar("swe_env_active_session", default=None)
 
 
 class SweEnvironment(NativeToolUseEnvironment):
-    """Code-execution / software-engineering environment.
-
-    Persistent workspace tools (read/write/list files), a code-execution tool and a shell tool, all
-    backed by a per-episode :class:`SandboxSession` so state carries across turns.
-
-    Graded by ``test_function`` when one is passed, else against the row's ``validator`` or ``answer``
-    (``requires_answer`` then defaults on, so the trainer refuses a dataset without the column).
-    Construction refuses ``requires_answer=False`` without a ``test_function`` while the reward prices
-    the environment's grade, since nothing would be graded.
+    """Software-engineering environment: workspace file tools, a code-execution tool and a shell tool over a
+    per-episode :class:`SandboxSession`, so state carries across turns. Graded by ``test_function`` when given, else
+    against the row's ``validator`` or ``answer`` (``requires_answer`` then defaults on); ``requires_answer=False``
+    without a ``test_function`` is refused while the reward prices the environment's grade.
     """
 
     # An agentic edit-run-test loop needs more turns than the protocol's generic budget.
@@ -65,17 +57,17 @@ Tips:
         sandbox_url: str | None = None,
         **kwargs,
     ):
-        self.sandbox = sandbox or resolve_sandbox(backend=sandbox_backend, url=sandbox_url)
+        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url)
         warn_if_unisolated(self.sandbox, type(self).__name__)
         self._sessions: dict[int, SandboxSession] = {}
 
         # Session tools resolve the active episode's session per call, hence the getter not a session.
         registry = NativeToolRegistry.combine(
-            create_session_file_tools(_ACTIVE_SESSION.get),
-            create_session_code_tools(
+            build_session_file_tools(_ACTIVE_SESSION.get),
+            build_session_code_tools(
                 _ACTIVE_SESSION.get, language=language, timeout=code_timeout, tool_name="run_code"
             ),
-            create_session_bash_tools(_ACTIVE_SESSION.get, timeout=code_timeout),
+            build_session_bash_tools(_ACTIVE_SESSION.get, timeout=code_timeout),
         )
         if extra_tools:
             registry.merge(extra_tools)
@@ -100,15 +92,6 @@ Tips:
         """Whether the reward prices this environment's own grade (its ``environment`` term)."""
         return self._rewards.environment_term is not None
 
-    def _session_for(self, trajectory: Trajectory) -> SandboxSession:
-        """Return (creating on first use) the persistent session for this episode."""
-        episode_id = trajectory.info["episode_id"]
-        session = self._sessions.get(episode_id)
-        if session is None:
-            session = self.sandbox.open_session()
-            self._sessions[episode_id] = session
-        return session
-
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
         """Bind the episode's persistent session so file/code tools operate on ITS workspace, inside
@@ -119,6 +102,15 @@ Tips:
                 yield
             finally:
                 _ACTIVE_SESSION.reset(token)
+
+    def _session_for(self, trajectory: Trajectory) -> SandboxSession:
+        """Return (creating on first use) the persistent session for this episode."""
+        episode_id = trajectory.info["episode_id"]
+        session = self._sessions.get(episode_id)
+        if session is None:
+            session = self.sandbox.open_session()
+            self._sessions[episode_id] = session
+        return session
 
     def _release_episode(self, episode_id: int) -> None:
         """Close the episode's persistent session, freeing its temp dir."""
@@ -134,11 +126,10 @@ Tips:
         super().close()
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
-        """Grade by the test function when one is configured, else by the protocol's answer path against
-        the row's ``validator`` or ``answer``. A row carrying neither raises: there is no completion
-        fallback, since running a command proves nothing. A reward without an ``environment`` term
-        prices no grade, so none is taken: a grader could only void the episode for a verdict no term
-        reads (a null ``answer``, a raising test function)."""
+        """Grade by the test function, else by the protocol's answer path against the row's ``validator`` or
+        ``answer``; a row with neither raises, since running a command proves nothing. A reward without an
+        ``environment`` term takes no grade, which could only void the episode for a verdict no term reads.
+        """
         if not self._grades_objective or not trajectory.info.get("completed"):
             return EpisodeGrade(0.0)
 

@@ -45,7 +45,9 @@ in brief ahead of that answer ([What a scorer reads](../../../../grpo/rewards/RE
 
 Every recipe runs a [veto judge](../../../../grpo/rewards/judge.md#veto-judge) named `audit` on what no counter
 can judge. It reads the whole episode, reasoning included, beside a `context` that explains the environment and
-its caps. The term's `weight` (−0.7) prices the weighted checks by their check weights, each fired one adding its own price.
+its caps. Its checks are the environment's own: `checks: environment` takes the rubric `CodeContestsEnvironment`
+declares (`JUDGE_CHECKS`, built from `AUDIT_CHECKS` in `code_contests_prompts.py`), the run's scratchpad (`python_repl` or `run_code`) named
+in it, so a recipe states only the judge's model, view, price and `context`. The term's `weight` (−0.7) prices the weighted checks by their check weights, each fired one adding its own price.
 
 The judge is served through OpenRouter and reads `OPENROUTER_API_KEY`: pass it with `--env-file`, or drop the term
 to run without a judge.

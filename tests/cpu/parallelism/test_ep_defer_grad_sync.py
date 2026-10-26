@@ -20,13 +20,11 @@ Run: python tests/cpu/parallelism/test_ep_defer_grad_sync.py
 
 from __future__ import annotations
 
-import types
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
@@ -215,8 +213,7 @@ def _router_hook_from(**ep_attrs):
         "dp_scope_group": None,
     }
     ep = SimpleNamespace(**{**defaults, **ep_attrs})
-    fake_dist = types.SimpleNamespace(is_available=lambda: True, is_initialized=lambda: True, ReduceOp=dist.ReduceOp)
-    with patch(f"{_GS_MOD}.dist", fake_dist):
+    with patch(f"{_GS_MOD}.has_process_group", return_value=True):
         return build_router_grad_hook(ep)
 
 

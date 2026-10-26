@@ -42,7 +42,7 @@ from scripts.environments.preparation.prepare_code_dataset import (
     suite_rejects_constants,
 )
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
-from src.environments.envs.tasks.coding.datasets import (
+from src.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,
     CodeDatasetAdapter,
     ContestSelection,

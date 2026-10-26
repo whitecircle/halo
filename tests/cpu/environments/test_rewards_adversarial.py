@@ -4,7 +4,7 @@
 Covers three modules:
   * src/rewards/graders/matching.py — numeric and exact matching against crafted distractor inputs, and
     the empty-answer floor of the validation chain.
-  * src/environments/envs/tasks/qa.py — multiple-choice letter extraction, which lives with the
+  * src/environments/tasks/qa.py — multiple-choice letter extraction, which lives with the
     only environment that grades by letter.
   * src/trainers/grpo/objective/relative_rewards.py — RLRR degenerate-group handling
     (all-tied, single-element, empty) must produce finite, sane advantages.
@@ -19,17 +19,13 @@ import numpy as np
 import pytest
 
 from src.configs.grpo import RLRRConfig
-from src.environments.envs.tasks.qa import (
-    MULTIPLE_CHOICE_LETTERS,
-    ExamQAEnvironment,
-    multiple_choice_match,
-)
+from src.environments.tasks.qa import MULTIPLE_CHOICE_LETTERS, ExamQAEnvironment, multiple_choice_match
 from src.rewards.graders.matching import (
     exact_match,
     extract_last_boxed,
+    is_correct_answer,
     normalize_text,
     numeric_match,
-    validate_answer,
 )
 from src.trainers.grpo.objective.relative_rewards import relative_advantages
 
@@ -360,16 +356,16 @@ def test_exam_prompt_states_the_full_graded_letter_range():
     assert named <= set(MULTIPLE_CHOICE_LETTERS), sorted(named - set(MULTIPLE_CHOICE_LETTERS))
 
 
-# validate_answer — an empty answer must not grade as a match
+# is_correct_answer — an empty answer must not grade as a match
 
 
 def test_empty_prediction_does_not_validate():
     """An empty prediction is neither an exact nor a numeric match, so the objective grades 0."""
-    assert validate_answer("", "the expected answer") is False
+    assert is_correct_answer("", "the expected answer") is False
 
 
 def test_exact_match_validates():
-    assert validate_answer("42", "42") is True
+    assert is_correct_answer("42", "42") is True
 
 
 # RLRR — degenerate groups must yield finite, sensible advantages

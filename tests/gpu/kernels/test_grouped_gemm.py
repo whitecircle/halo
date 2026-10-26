@@ -78,11 +78,11 @@ def test_simulated_lowprecision_matches_format_error():
         ref = _reference(x.detach(), w.detach(), offs).float()
         rel = fro_rel_err(out.detach(), ref)
         assert lo < rel < hi, (
-            f"{prec.value}: rel {rel:.4f} outside band {lo}-{hi} "
+            f"{prec}: rel {rel:.4f} outside band {lo}-{hi} "
             f"(rel≈0 ⇒ silent bf16 fallback; rel>{hi} ⇒ broken quantization)"
         )
         assert torch.isfinite(x.grad).all() and torch.isfinite(w.grad).all()
-        print(f"  simulated {prec.value}: rel {rel:.3f} (band {lo}-{hi}) grads finite PASS")
+        print(f"  simulated {prec}: rel {rel:.3f} (band {lo}-{hi}) grads finite PASS")
 
 
 def test_dispatch_contract():
@@ -97,7 +97,7 @@ def test_dispatch_contract():
     assert expert_gemm(x, w, offs=offs).shape == (E * M, N)
     for prec in ("mxfp8", "nvfp4"):
         out = expert_gemm(x, w, offs=offs, quant_format=prec)
-        assert out.shape == (E * M, N), f"{prec.value} wrong shape"
+        assert out.shape == (E * M, N), f"{prec} wrong shape"
     print(f"  dispatch contract PASS (lowp=simulated at this shape; deepgemm_available={deepgemm_available()})")
 
 

@@ -1,9 +1,7 @@
-"""Local subprocess sandbox: runs code in a child process under POSIX resource limits.
-
-Bounds CPU time, address space, and file size, runs Python with the parent environment stripped, and
-compiles C/C++ before running. It does **not** namespace-isolate the network or wider filesystem; for
-that use :class:`~src.environments.sandbox.bubblewrap.BubblewrapSandbox` or the remote backend.
-"""
+"""Local subprocess sandbox: code runs in a child process under POSIX resource limits (CPU time, address space,
+file size), Python with the parent environment stripped, C/C++ compiled first. It does **not** namespace-isolate the
+network or the wider filesystem; :class:`~src.environments.sandbox.bubblewrap.BubblewrapSandbox` and the remote
+backend do."""
 
 import contextlib
 import errno
@@ -22,25 +20,15 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from src.env import env_int
-from src.environments.sandbox.base import (
+from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
+from src.environments.sandbox.languages import INTERPRETER_PLACEHOLDER, LanguageSpec, require_language, utf8_encodable
+from src.environments.sandbox.results import (
     COMMAND_NOT_FOUND_RETURNCODE,
-    INTERPRETER_PLACEHOLDER,
-    SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
-    SANDBOX_DEFAULT_COMPILE_TIMEOUT,
-    SANDBOX_DEFAULT_MEMORY_MB,
-    SANDBOX_DEFAULT_TIMEOUT,
-    LanguageSpec,
     SandboxAgentFault,
-    SandboxExecutor,
     SandboxInfraError,
     SandboxResult,
-    SandboxSession,
     compile_failure_verdict,
     compile_limit_verdict,
-    require_language,
-    require_session_path,
-    safe_member_name,
-    utf8_encodable,
 )
 
 # The interpreter :data:`INTERPRETER_PLACEHOLDER` resolves to: this process's own, so a sandboxed
@@ -49,6 +37,10 @@ PYTHON_INTERPRETER = sys.executable or "python"
 # That interpreter as a tool description names it (``CPython 3.12``).
 PYTHON_RUNTIME = f"{platform.python_implementation()} {sys.version_info.major}.{sys.version_info.minor}"
 
+SANDBOX_DEFAULT_MEMORY_MB = 1024
+# Build-step wall-clock cap (seconds); bounds an #include bomb in untrusted source.
+SANDBOX_DEFAULT_COMPILE_TIMEOUT = 30.0
+SANDBOX_DEFAULT_COMPILE_MEMORY_MB = 2048
 # Largest file a local-backend child may write (bytes); bounds FS disk-fill and binary size.
 LOCAL_FSIZE_LIMIT = 64 * 1024 * 1024
 # RLIMIT_NPROC for the run step. The kernel exempts uid 0: it binds every bubblewrap run (the jail's root
@@ -66,7 +58,7 @@ LAUNCH_TIMEOUT_SECONDS = 30.0
 # the run's address-space limit refuses: numpy's OpenBLAS then aborts a correct program at import.
 SINGLE_THREADED_MATH_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
 
-# The exit code a run is booked with when the program tampered with its working directory (a staged
+# The exit code a run is booked with when the program tampered with its working directory (a prepared
 # entry or the directory itself replaced): its own runtime error, never an infra fault that would void
 # the episode it belongs to.
 TAMPERED_WORKDIR_RETURNCODE = 1
@@ -74,26 +66,20 @@ TAMPERED_WORKDIR_RETURNCODE = 1
 # How the tree walks open a directory: never through a link, never anything but a directory.
 _DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
-# What a session's staged build was made from: language, source text, auxiliary file contents.
+# What a session's prepared build was made from: language, source text, auxiliary file contents.
 _BuildKey = tuple[str, str, tuple[tuple[str, str], ...]]
 # Directory entries by name and file type (``lstat``, so a link is a link, not its target).
 _EntryKinds = set[tuple[str, int]]
 
 
-def _usable_cpus() -> int:
-    """CPUs this process may run on: its affinity set (a container cpuset), else the host count."""
-    if hasattr(os, "sched_getaffinity"):
-        return len(os.sched_getaffinity(0))
-    return os.cpu_count() or 1
-
-
 def _resolve_execution_slots() -> int:
-    """Max concurrent sandboxed executions; the usable CPU count by default, ``HALO_SANDBOX_MAX_CONCURRENCY``
-    overrides (parsed via :func:`env_int` — a malformed value warns and falls back to the default)."""
+    """Max concurrent sandboxed executions: the CPUs this process may run on (its affinity set, a container
+    cpuset, else the host count) by default, ``HALO_SANDBOX_MAX_CONCURRENCY`` overriding (parsed via
+    :func:`env_int` — a malformed value warns and falls back to the default)."""
     override = env_int("HALO_SANDBOX_MAX_CONCURRENCY", None)
     if override is not None:
         return max(1, override)
-    return max(1, _usable_cpus())
+    return max(1, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1)
 
 
 class ExecutionGate:
@@ -115,7 +101,7 @@ class ExecutionGate:
 
 
 # One gate per process, shared by every env instance in it; processes sharing a host each hold their own.
-SANDBOX_EXECUTION_GATE = ExecutionGate(_resolve_execution_slots())
+sandbox_execution_gate = ExecutionGate(_resolve_execution_slots())
 
 
 class SessionPathError(ValueError):
@@ -123,11 +109,11 @@ class SessionPathError(ValueError):
     non-regular file, or one whose resolution leaves the working directory."""
 
 
-def _make_dirs(path: str, owner: tuple[int, int] | None) -> None:
+def _create_owned_dirs(path: str, owner: tuple[int, int] | None) -> None:
     """``os.makedirs(path, exist_ok=True)``, handing each directory it creates to ``owner``."""
     if os.path.isdir(path):
         return
-    _make_dirs(os.path.dirname(path), owner)
+    _create_owned_dirs(os.path.dirname(path), owner)
     with contextlib.suppress(FileExistsError):
         os.mkdir(path)
         if owner is not None:
@@ -135,22 +121,20 @@ def _make_dirs(path: str, owner: tuple[int, int] | None) -> None:
 
 
 def _open_member(workdir: str, name: str, flags: int, owner: tuple[int, int] | None = None) -> int:
-    """Open ``<workdir>/<name>`` for the host process without following a link at any component; a
-    file it creates, and the directories on its way, go to ``owner``.
+    """Open ``<workdir>/<name>`` for the host process without following a link at any component; a file it creates,
+    and the directories on its way, go to ``owner``.
 
     The program owns the working directory between runs and can replace any entry with a symlink
-    (``main.py -> /root/.aws/credentials``); the host — staging the next run's source, reading a file
-    for the model — would otherwise write or read through it. Refused (:class:`SessionPathError`) when
-    the path does not resolve to itself under the real working directory; ``O_NOFOLLOW`` closes the
-    window on the final component between that check and the open. A FIFO or device in its place is
-    refused too: ``O_NONBLOCK`` keeps the open from blocking the host on it, and only a regular file
-    passes the ``fstat``.
+    (``main.py -> /root/.aws/credentials``) the host would write or read through. Refused (:class:`SessionPathError`)
+    when the path does not resolve to itself under the real working directory; ``O_NOFOLLOW`` closes the window on
+    the final component between that check and the open. A FIFO or device is refused too: ``O_NONBLOCK`` keeps the
+    open from blocking the host on it, and only a regular file passes the ``fstat``.
     """
     dest = os.path.normpath(os.path.join(os.path.realpath(workdir), name))
     if os.path.realpath(dest) != dest:
         raise SessionPathError(f"session path {name!r} is a link or resolves outside the working directory")
     if flags & os.O_CREAT:
-        _make_dirs(os.path.dirname(dest), owner)
+        _create_owned_dirs(os.path.dirname(dest), owner)
     try:
         fd = os.open(dest, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
     except OSError as exc:
@@ -174,20 +158,6 @@ def _captured_text(capture) -> str:
     return capture.read(LOCAL_FSIZE_LIMIT).decode("utf-8", errors="replace")
 
 
-def _require_pidfd() -> None:
-    """Raise unless this process may open a pidfd: every run waits on its program through one
-    (:func:`_exited_within`), and a refused ``pidfd_open`` (Linux before 5.3, a seccomp profile that
-    blocks it) would otherwise fail each run as a backend error and void every graded episode."""
-    try:
-        os.close(os.pidfd_open(os.getpid()))
-    except OSError as exc:
-        raise RuntimeError(
-            f"the local sandbox waits on its programs through pidfd_open, which this environment refuses "
-            f"({exc}); it needs Linux 5.3+ and a seccomp profile that allows pidfd_open. Otherwise use the "
-            "'remote' sandbox backend."
-        ) from exc
-
-
 def _readable_within(fds: tuple[int, ...], timeout: float) -> bool:
     """Whether any of ``fds`` polls readable within ``timeout`` seconds."""
     # poll, not select: a busy host hands out descriptors past select's FD_SETSIZE.
@@ -198,13 +168,11 @@ def _readable_within(fds: tuple[int, ...], timeout: float) -> bool:
 
 
 def _exited_within(pid: int, timeout: float, marker_fd: int | None = None) -> bool:
-    """Whether process ``pid`` exits within ``timeout`` seconds, without reaping it: its pidfd polls
-    readable once it has exited, and until it is reaped its zombie keeps the pid, and so the id of the
-    process group it leads, taken.
-
-    With ``marker_fd``, the read end of the run's start marker (:func:`_start_marked`), ``timeout`` runs
-    from the marker's byte, or from the exit of a launch that never reached the program; a launch still
-    short of the program after :data:`LAUNCH_TIMEOUT_SECONDS` raises :class:`SandboxInfraError`."""
+    """Whether process ``pid`` exits within ``timeout`` seconds, without reaping it, so its zombie keeps the pid and
+    the id of the group it leads. With ``marker_fd``, the start marker's read end (:func:`_start_marked`),
+    ``timeout`` runs from the program's start; a launch still short of the program after
+    :data:`LAUNCH_TIMEOUT_SECONDS` raises :class:`SandboxInfraError`.
+    """
     pidfd = os.pidfd_open(pid)
     try:
         if marker_fd is not None and not _readable_within((marker_fd, pidfd), LAUNCH_TIMEOUT_SECONDS):
@@ -287,15 +255,13 @@ def _sweep_entries(dir_fd: int, *, remove: bool) -> list[str]:
 
 
 def _walk_tree(top: str, *, remove: bool) -> None:
-    """Give the owner back read, write and search on the directory ``top`` and every directory under
-    it and read and write on every regular file, or with ``remove`` delete them all, ``top`` included.
+    """Give the owner back read, write and search on ``top`` and every directory under it and read and write on every
+    regular file, or with ``remove`` delete them all, ``top`` included; an entry that fails is skipped, and the walk
+    never raises.
 
-    A program can take those bits away from what it owns, the host's files on ``local`` and its own on
-    ``bubblewrap`` (the next staging, reset, removal or run would then fail on them), and it can nest
-    directories past any recursion limit or descriptor budget. So the walk holds one descriptor at a time: it descends by name without
-    following a link and climbs back through ``..``, stopping where ``..`` is not the directory it
-    came down from (a child that escaped the run moved the tree). Top-down, so a directory is
-    searchable before it is opened. An entry that fails is skipped; the walk never raises.
+    A program can take those bits away and nest directories past any recursion or descriptor budget, so the walk holds
+    one descriptor at a time, top-down: it descends by name without following a link and climbs back through ``..``,
+    stopping where ``..`` is not the directory it came down from (an escaped child moved the tree).
     """
     _grant_owner(top, stat.S_IRWXU)
     try:
@@ -349,30 +315,21 @@ def _stack_limit_kib(stack_mb: int) -> int:
     return kib if hard == resource.RLIM_INFINITY else min(kib, hard // 1024)
 
 
-def _build_key(spec: LanguageSpec, code: str, files: dict[str, str] | None) -> _BuildKey:
-    """Identity of a compiled program's inputs; runs with equal keys share one build."""
-    return (spec.name, code, tuple(sorted((files or {}).items())))
-
-
 class LocalSubprocessSandbox(SandboxExecutor):
     """Run code in a child process under POSIX resource limits, in a managed working directory.
 
-    Python runs with ``-s -E``; C/C++ compile with ``g++``/``gcc``. An execution is three steps —
-    :meth:`_stage_sources`, :meth:`_compile` (compiled languages), :meth:`_run_program` — which
-    :class:`LocalSession` sequences so a session can reuse a build. The run step is bounded by CPU
-    time, address space, and file size; the compile step gets a larger time/memory budget.
-
-    Stateless aside from config, with a per-execution working dir and per-call limits, so one instance
-    is safe across threads / Ray actors. Limits use a ``ulimit`` shell wrapper (:meth:`_limit_wrap`)
-    not a ``preexec_fn``, so launches use ``vfork``/``exec`` and stay fast under a large parent. The
-    :meth:`_wrap_command` and :meth:`_reap_adopted` hooks let subclasses interpose an isolation wrapper
-    and reap what it leaves to this process.
+    An execution is three steps — :meth:`_write_sources`, :meth:`_compile` (compiled languages),
+    :meth:`_run_program` — which :class:`LocalSession` sequences so a session can reuse a build; the compile step
+    gets a larger time/memory budget than the run. Stateless aside from config, so one instance is safe across
+    threads and Ray actors. Limits go through a ``ulimit`` shell wrapper (:meth:`_limit_wrap`), not a
+    ``preexec_fn``, so launches stay ``vfork``/``exec`` fast under a large parent. The :meth:`_wrap_command` and
+    :meth:`_reap_adopted` hooks let a subclass interpose an isolation wrapper and reap what it leaves behind.
     """
 
     # A session builds once, on an empty stdin, but an unconfined program that read a test's input can
     # write it to a host file, remove its working directory to force a rebuild, and have the rebuilt
     # source include that file into the compiler's message.
-    compiles_without_test_input = False
+    COMPILES_WITHOUT_TEST_INPUT = False
 
     # The (uid, gid) the program runs as, which owns its working directory and what the host writes
     # there; None: this process's own.
@@ -387,7 +344,16 @@ class LocalSubprocessSandbox(SandboxExecutor):
         self.memory_limit_mb = memory_limit_mb
         self.compile_timeout = compile_timeout
         self.compile_memory_limit_mb = compile_memory_limit_mb
-        _require_pidfd()
+        # Every run waits on its program through a pidfd; refused (Linux before 5.3, a seccomp profile blocking it),
+        # each run would fail as a backend error and void every graded episode.
+        try:
+            os.close(os.pidfd_open(os.getpid()))
+        except OSError as exc:
+            raise RuntimeError(
+                f"the local sandbox waits on its programs through pidfd_open, which this environment refuses "
+                f"({exc}); it needs Linux 5.3+ and a seccomp profile that allows pidfd_open. Otherwise use the "
+                "'remote' sandbox backend."
+            ) from exc
 
     def open_session(self) -> "LocalSession":
         """Open a persistent session backed by a fresh temp working directory."""
@@ -429,15 +395,11 @@ class LocalSubprocessSandbox(SandboxExecutor):
     def _limit_wrap(
         argv: list[str], cpu_seconds: int, memory_mb: int, nproc: int | None = None, stack_mb: int | None = None
     ) -> list[str]:
-        """Wrap ``argv`` in a shell that applies per-run RLIMITs via ``ulimit`` then ``exec``s it.
+        """``argv`` behind a shell that applies the run's RLIMITs through ``ulimit``, then ``exec``s it.
 
-        Used instead of a ``preexec_fn``, which forces CPython down the ``fork`` path and copies the
-        parent's page tables on every execution. ``vfork`` + ``exec`` keeps launch cost flat as
-        resident memory grows; the kernel carries the RLIMITs across ``exec`` and into a bwrap jail.
-        Bounds are per-call, so concurrent executions do not share them. ``nproc`` (run step only)
-        caps process/thread count where the kernel applies it (:data:`LOCAL_NPROC_LIMIT`); the compile
-        step omits it, since the compiler's fork tree is trusted. ``stack_mb`` raises the stack
-        limit, clamped to this process's hard limit (which an unprivileged shell cannot raise).
+        A ``preexec_fn`` would force CPython's ``fork`` path, copying the parent's page tables per run; ``vfork`` +
+        ``exec`` keeps launches flat, and the kernel carries the limits into a bwrap jail. ``nproc`` (run step only)
+        caps processes where the kernel applies it; ``stack_mb`` is clamped to this process's hard limit.
         """
         # bash ulimit units (outside POSIX mode): -t seconds (CPU), -f, -v and -s KiB, -u processes. -c 0: a
         # crashing program writes no core, which the host's crash handler would otherwise store at its full size.
@@ -463,17 +425,12 @@ class LocalSubprocessSandbox(SandboxExecutor):
     ) -> tuple[str, str, int | None, bool]:
         """Run ``argv`` in its own session; returns ``(stdout, stderr, returncode, timed_out)``.
 
-        ``start_new_session`` puts the child in a fresh process group, which is SIGKILLed whenever the
-        run ends: on a timeout, and also after the leader exits, since a child left in the group would
-        outlive the run (the run is judged on the leader's exit and output). The kill lands before the
-        leader is reaped, while its zombie still holds the group's id; what the run left to this process
-        is reaped after it (:meth:`_reap_adopted`). Stdin, stdout and stderr are temp files rather than
-        pipes: nothing the child leaves running can hold the run open, and the child's ``RLIMIT_FSIZE``
-        bounds its output, so a flood ends as the program's own failure at the file-size limit, never as
-        host memory the grader runs out of.
-
-        ``started`` is the start marker's pipe whose write end ``argv`` names (:func:`_start_marked`):
-        ``timeout`` then runs from the program's start instead of the launch's (:func:`_exited_within`).
+        The child's fresh process group is SIGKILLed whenever the run ends, after the leader exits too (a child
+        left in it would outlive the run), and before the leader is reaped, while its zombie holds the group's id;
+        what the run left to this process is reaped after it (:meth:`_reap_adopted`). Stdin, stdout and stderr are
+        temp files, not pipes: nothing left running holds the run open, and ``RLIMIT_FSIZE`` ends an output flood as
+        the program's own failure, never as host memory. ``started`` is the start marker's pipe whose write end
+        ``argv`` names (:func:`_start_marked`): ``timeout`` then runs from the program's start.
         """
         # poll() reads a negative timeout as none: the host would wait as long as the program runs.
         if not (math.isfinite(timeout) and timeout > 0):
@@ -513,17 +470,17 @@ class LocalSubprocessSandbox(SandboxExecutor):
             **SINGLE_THREADED_MATH_ENV,
         }
 
-    def _stage_sources(
+    def _write_sources(
         self, workdir: str, spec: LanguageSpec, code: str, files: dict[str, str] | None
     ) -> SandboxResult | None:
         """Write ``files`` and the source into ``workdir``. Returns None, an error result for an unsafe
-        path (the caller's fault), or a runtime-error verdict when the program replaced a staged entry
+        path (the caller's fault), or a runtime-error verdict when the program replaced a prepared entry
         with a link or locked one (its own fault, so never an infra error it could void its episode
         with). A write refused just after :func:`_restore_owner_access` gave the owner its access back
         can only come from a child that escaped the program's process group taking it again."""
         files = files or {}
         for name in files:
-            if not safe_member_name(name):
+            if not SandboxSession.is_safe_member_name(name):
                 return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
         try:
             for name, content in files.items():
@@ -534,11 +491,8 @@ class LocalSubprocessSandbox(SandboxExecutor):
         return None
 
     def _compile(self, workdir: str, spec: LanguageSpec) -> SandboxResult | None:
-        """Build a compiled language's staged source. Returns None on success, a failure result otherwise.
-
-        A non-zero compiler exit or a build past ``compile_timeout`` is the source's fault
-        (``compile_failed``, ``returncode``/``stderr``, ``error`` unset); a missing compiler is a
-        backend failure (``error`` set).
+        """Build a compiled language's written source: None on success, else the failure. A compiler rejection or a
+        build past ``compile_timeout`` is the source's verdict (``compile_failed``); a missing compiler sets ``error``.
         """
         compile_argv = self._wrap_command(list(spec.compile_argv), workdir)
         compile_argv = self._limit_wrap(
@@ -546,7 +500,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
             int(math.ceil(self.compile_timeout + RLIMIT_CPU_SLACK_SECONDS)),
             self.compile_memory_limit_mb,
         )
-        with SANDBOX_EXECUTION_GATE.slot():
+        with sandbox_execution_gate.slot():
             stdout, stderr, returncode, timed_out = self._run_in_new_session(
                 compile_argv, stdin="", timeout=self.compile_timeout, cwd=workdir, env=self._child_env(workdir)
             )
@@ -561,13 +515,13 @@ class LocalSubprocessSandbox(SandboxExecutor):
         return None
 
     def _run_program(self, workdir: str, spec: LanguageSpec, *, stdin: str, timeout: float) -> SandboxResult:
-        """Run the staged (and built) program in ``workdir`` under the run-step limits, ``timeout`` measured
+        """Run the prepared (and built) program in ``workdir`` under the run-step limits, ``timeout`` measured
         from the program's start: the launch before it (on bubblewrap, a jail setup that queues on a
         host-wide kernel lock while other runs build theirs) is the host's cost, not the program's."""
         run_argv = [PYTHON_INTERPRETER if tok == INTERPRETER_PLACEHOLDER else tok for tok in spec.run_argv]
         # The slot is held for the whole run, so ``timeout`` measures near-dedicated-core time; the marker's pipe
         # opens inside it, so waiting runs hold no descriptors.
-        with SANDBOX_EXECUTION_GATE.slot(), _start_marker() as started:
+        with sandbox_execution_gate.slot(), _start_marker() as started:
             run_argv = self._wrap_command(_start_marked(run_argv, started[1]), workdir)
             # RLIMIT_CPU backstop: SIGXCPU still kills a busy loop if timeout delivery lags. A compiled
             # program's stack gets the whole memory limit, as on a contest judge; an interpreter's does not,
@@ -597,24 +551,20 @@ class LocalSubprocessSandbox(SandboxExecutor):
 
 
 class LocalSession(SandboxSession):
-    """Persistent working directory for a local backend, reused across :meth:`run` calls.
-
-    Source and compiled artifacts written into ``workdir`` survive between turns. A compiled program
-    is built once and rerun from its binary while language, source and ``files`` stay the same.
-
-    A removed ``workdir`` is recreated empty on the next use. One the program replaced with a link or
-    a file has broken the session (:class:`SandboxAgentFault`): every later run reports it instead of
-    staging and the file operations raise it, since any path under it could resolve to a host file.
+    """Persistent working directory for a local backend: source and build survive between turns, and a compiled program
+    reruns from its binary while language, source and ``files`` stay the same. A removed ``workdir`` is recreated
+    empty; one the program replaced with a link or a file has broken the session (:class:`SandboxAgentFault`), since
+    any path under it could resolve to a host file.
     """
 
     def __init__(self, workdir: str, executor: LocalSubprocessSandbox):
         self.workdir = workdir
         self._executor = executor
-        # The compiled program staged in ``workdir`` and its compile verdict (None = built, runnable).
+        # The compiled program prepared in ``workdir`` and its compile verdict (None = built, runnable).
         self._build: tuple[_BuildKey, SandboxResult | None] | None = None
-        # Directory entries (name and file type) present once the program was staged and built: what
-        # :meth:`reset_to_staged` keeps. Typed so an entry the program swapped for a link is dropped.
-        self._staged_entries: _EntryKinds | None = None
+        # Directory entries (name and file type) present once the program was prepared and built: what
+        # :meth:`reset_to_prepared` keeps. Typed so an entry the program swapped for a link is dropped.
+        self._prepared_entries: _EntryKinds | None = None
 
     def run(
         self,
@@ -639,7 +589,7 @@ class LocalSession(SandboxSession):
         return self._ensure_workspace() or result
 
     def _ensure_workspace(self) -> SandboxResult | None:
-        """None once the working directory is usable — recreated empty, with nothing staged, when the
+        """None once the working directory is usable — recreated empty, with nothing prepared, when the
         program removed it — or the agent fault when the program put a link or file at its path."""
         try:
             mode = os.lstat(self.workdir).st_mode
@@ -647,7 +597,7 @@ class LocalSession(SandboxSession):
             os.makedirs(self.workdir, mode=0o700, exist_ok=True)
             self._executor._hand_over(self.workdir)
             self._build = None
-            self._staged_entries = None
+            self._prepared_entries = None
             return None
         if stat.S_ISDIR(mode):
             return None
@@ -661,36 +611,34 @@ class LocalSession(SandboxSession):
             raise SandboxAgentFault(broken.agent_fault)
 
     def _prepare(self, spec: LanguageSpec, code: str, files: dict[str, str] | None) -> SandboxResult | None:
-        """Stage ``code`` + ``files`` and build them when ``spec`` compiles; None once the program is runnable.
+        """Write ``code`` + ``files`` and build them when ``spec`` compiles; None once the program is runnable.
 
-        One build slot per session (every registered compile writes ``./main``): a compiled program is
-        rebuilt only when language, source or ``files`` differ from the staged build, and its compile
-        verdict — built, or the failure result — is reused until then. Any other write through the
-        session (an interpreted run, :meth:`write_file`) drops the slot, since it may have changed an
-        included header.
+        Every registered compile writes ``./main``, so a session keeps one build and its verdict, reused until
+        language, source or ``files`` change; any other write through the session drops it, since it may have changed a
+        header.
         """
-        key = _build_key(spec, code, files)
+        key = (spec.name, code, tuple(sorted((files or {}).items())))
         if spec.is_compiled and self._build is not None and self._build[0] == key:
             return self._build[1]
         self._build = None
         _restore_owner_access(self.workdir)
-        staged = self._executor._stage_sources(self.workdir, spec, code, files)
-        if staged is not None:
-            return staged
+        refused = self._executor._write_sources(self.workdir, spec, code, files)
+        if refused is not None:
+            return refused
         if spec.is_compiled:
             failure = self._executor._compile(self.workdir, spec)
             self._build = (key, failure)
         else:
             failure = None
-        self._staged_entries = _entry_kinds(self.workdir)
+        self._prepared_entries = _entry_kinds(self.workdir)
         return failure
 
-    def reset_to_staged(self) -> None:
+    def reset_to_prepared(self) -> None:
         # A replaced working directory lists whatever it now points at; the next run reports the fault.
-        if self._ensure_workspace() is not None or self._staged_entries is None:
+        if self._ensure_workspace() is not None or self._prepared_entries is None:
             return
         _restore_owner_access(self.workdir)
-        for name, kind in _entry_kinds(self.workdir) - self._staged_entries:
+        for name, kind in _entry_kinds(self.workdir) - self._prepared_entries:
             path = os.path.join(self.workdir, name)
             if kind == stat.S_IFDIR:
                 _walk_tree(path, remove=True)
@@ -701,10 +649,10 @@ class LocalSession(SandboxSession):
                     os.remove(path)
 
     def write_file(self, path: str, content: str) -> None:
-        require_session_path(path)
+        self.reject_unsafe_path(path)
         self._require_intact()
         self._build = None
-        self._staged_entries = None
+        self._prepared_entries = None
         self._executor._write_member(self.workdir, path, content)
 
     def read_file(self, path: str) -> str | None:
@@ -712,7 +660,7 @@ class LocalSession(SandboxSession):
         planted included, so a host file never reaches the trajectory through it. Decoded as UTF-8 with
         replacement, the encoding the write side uses: bytes a program wrote that are not UTF-8 are read
         as replaced text, never lost to a decode error."""
-        require_session_path(path)
+        self.reject_unsafe_path(path)
         self._require_intact()
         try:
             fd = _open_member(self.workdir, path, os.O_RDONLY)

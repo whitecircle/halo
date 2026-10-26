@@ -54,9 +54,9 @@ from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfi
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.qa import ExamQAEnvironment
-from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.qa import ExamQAEnvironment
+from src.environments.tools.toolsets import build_math_tools, build_python_tools
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
@@ -407,8 +407,8 @@ def test_react_math():
 
     dataset = prepare_gsm8k_dataset(num_samples=200)
 
-    registry = create_native_math_tools()
-    for tool in create_native_python_tools().list_tools():
+    registry = build_math_tools()
+    for tool in build_python_tools().list_tools():
         registry.register(tool)
 
     return run_env_grpo_training(

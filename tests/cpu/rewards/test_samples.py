@@ -13,8 +13,8 @@ import pytest
 
 from src.rewards.samples import (
     CUT_CALL_NOTE,
-    CUT_CALLS_KEY,
     CUT_MARKER,
+    CUT_TOOL_CALLS_KEY,
     DIGEST_CHARS,
     DIGEST_INLINE_CHARS,
     NO_FINAL_ANSWER,
@@ -154,11 +154,11 @@ CUT_TURN = {
     "role": "assistant",
     "content": "Let me run it.",
     "truncated": True,
-    CUT_CALLS_KEY: [
+    CUT_TOOL_CALLS_KEY: [
         {"id": "c9", "function": {"name": "run_code", "arguments": json.dumps({"code": CUT_CODE, "language": "py"})}}
     ],
 }
-UNCUT_TURN = {key: value for key, value in CUT_TURN.items() if key != CUT_CALLS_KEY}
+UNCUT_TURN = {key: value for key, value in CUT_TURN.items() if key != CUT_TOOL_CALLS_KEY}
 
 
 def test_a_cut_turns_calls_render_under_it_marked_as_never_run():
@@ -177,7 +177,7 @@ def test_a_cut_turns_calls_render_under_it_marked_as_never_run():
         f"[1] assistant  — {TURN_FLAG_NOTES['truncated']}\nLet me run it."
     )
     # Beside a call that ran, the cut call follows it, and only it carries the note.
-    both = {**TURNS[0], CUT_CALLS_KEY: CUT_TURN[CUT_CALLS_KEY]}
+    both = {**TURNS[0], CUT_TOOL_CALLS_KEY: CUT_TURN[CUT_TOOL_CALLS_KEY]}
     rendered = render_transcript([both], include_reasoning=False)
     assert rendered.index("→ run (call call_1)\n") < rendered.index(head) and rendered.count(CUT_CALL_NOTE) == 1
 
@@ -204,7 +204,11 @@ def test_the_digest_cuts_a_cut_calls_arguments_like_every_other_argument():
     # A call the engine cut mid-JSON keeps its raw arguments, cut to the same head in the digest, whole in full.
     raw = '{"code": "' + "x" * 500
     torn = [
-        {"role": "assistant", "content": "", CUT_CALLS_KEY: [{"function": {"name": "run_code", "arguments": raw}}]}
+        {
+            "role": "assistant",
+            "content": "",
+            CUT_TOOL_CALLS_KEY: [{"function": {"name": "run_code", "arguments": raw}}],
+        }
     ]
     torn_digest = render_digest(ScoringSample(prompt=PROMPT, completion=torn), include_reasoning=False)
     assert (

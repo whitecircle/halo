@@ -8,14 +8,14 @@ import json
 import pytest
 
 from scripts.environments.inference.regrade_trajectories import submitted_solutions
-from src.environments.envs.tasks.coding.code_contests import (
+from src.environments.sandbox.base import SandboxExecutor
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.code_contests_prompts import (
     IDENTICAL_RESUBMISSION_REPLY,
     SUBMISSION_AFTER_ACCEPT_REPLY,
-    CodeContestsEnvironment,
-    normalized_program,
 )
-from src.environments.envs.tasks.coding.comments import strip_comments
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
+from src.environments.tasks.coding.program_source import normalized_program, strip_comments
 from src.rewards.samples import REFUSED_CALL_IDS_KEY
 from tests.common.code_contests import SINGLE_TEST_ANSWER
 

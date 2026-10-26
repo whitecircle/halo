@@ -7,8 +7,8 @@ from typing import Any
 from src.environments.base import ANSWER_KEY, EpisodeGrade, Trajectory
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
 from src.environments.tools.definitions import NativeToolRegistry
-from src.environments.tools.factories import create_native_python_tools, create_native_search_tools
-from src.rewards.graders.matching import validate_answer
+from src.environments.tools.toolsets import build_python_tools, build_search_tools
+from src.rewards.graders.matching import is_correct_answer
 
 # The choice letters :func:`multiple_choice_match` scores (MMLU-Pro tops out at 10 options).
 # ``ExamQAEnvironment``'s system prompt is built from this same range, so the instruction the model
@@ -36,10 +36,8 @@ _MULTIPLE_CHOICE_PATTERNS = [
 
 
 def render_choices(choices: list[Any]) -> str:
-    """One line per choice, each led by the letter :func:`multiple_choice_match` scores it as.
-
-    MMLU-style rows carry the bare option texts with an index answer, so without the letters the model
-    could not name the choice the grader expects; a choice already labelled with its letter is kept.
+    """One line per choice, each led by the letter :func:`multiple_choice_match` scores it as (an already-labelled
+    choice is kept): MMLU-style rows carry bare option texts, so without letters the model could not name a choice.
     """
     if len(choices) > len(MULTIPLE_CHOICE_LETTERS):
         raise ValueError(
@@ -55,12 +53,8 @@ def render_choices(choices: list[Any]) -> str:
 
 
 def multiple_choice_match(predicted: str, expected: str) -> bool:
-    """Extract a choice letter (:data:`MULTIPLE_CHOICE_LETTERS`) and compare to expected.
-
-    Handles "A", "(A)", "A.", "A)", "The answer is A", "Option A", "Choice A", etc. ``expected`` must
-    already be a letter; an index (MMLU's ``answer`` column is an int) always returns False, since the
-    choice ordering needed to convert it lives in ``context["choices"]``, which this matcher does not
-    see. That conversion is done by :meth:`ExamQAEnvironment._expected_choice_letter`.
+    """Whether ``predicted`` names the choice letter ``expected`` ("A", "(A)", "The answer is A", "Option A", ...).
+    ``expected`` must already be a letter (:meth:`ExamQAEnvironment._expected_choice_letter` converts an index).
     """
     pred = str(predicted).strip()
     exp = str(expected).strip().upper()
@@ -85,19 +79,19 @@ QA_SEARCH_SYSTEM_PROMPT = (
 )
 
 
-def create_qa_search_environment(
+def build_qa_search_environment(
     search_backend: str | None = None,
     include_python_tools: bool = False,
     system_prompt: str | None = None,
     **kwargs,
 ) -> NativeToolUseEnvironment:
-    """Create a factual-QA-with-search environment (SimpleQA/GAIA/TriviaQA/PopQA).
+    """A factual-QA-with-search environment (SimpleQA/GAIA/TriviaQA/PopQA).
 
     The final answer is validated against ``context["answer"]`` by the parent reward.
     """
-    registry = create_native_search_tools(backend=search_backend)
+    registry = build_search_tools(backend=search_backend)
     if include_python_tools:
-        registry.merge(create_native_python_tools())
+        registry.merge(build_python_tools())
 
     # Defaulted into kwargs, not passed as a keyword: the registry forwards the whole env_config, so
     # a keyword here makes an explicit ``requires_answer`` in environment_kwargs a duplicate-keyword
@@ -145,7 +139,7 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
         **kwargs,
     ):
         if open_book:
-            registry = create_native_search_tools(backend=search_backend)
+            registry = build_search_tools(backend=search_backend)
             instruction = " using the available tools to search for information"
         else:
             if search_backend is not None:
@@ -167,15 +161,34 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
             **kwargs,
         )
 
+    def _reset_single(
+        self,
+        prompt: str | list[dict[str, str]],
+        context: dict[str, Any] | None = None,
+    ) -> Trajectory:
+        """Store expected answer and append choices to prompt."""
+        traj = super()._reset_single(prompt, context)
+        context = context or {}
+
+        traj.info["expected_answer"] = context.get(ANSWER_KEY)
+        traj.info["choices"] = context.get("choices")
+        traj.info["is_multiple_choice"] = context.get("choices") is not None
+
+        if traj.info["is_multiple_choice"] and traj.info["expected_answer"] is not None:
+            traj.info["expected_answer"] = self._expected_choice_letter(
+                traj.info["expected_answer"], traj.info["choices"]
+            )
+
+        if traj.info["choices"]:
+            traj.append_to_last_user(f"\n\nChoices:\n{render_choices(traj.info['choices'])}")
+
+        return traj
+
     @staticmethod
     def _expected_choice_letter(expected: Any, choices: Any) -> str:
-        """Normalize a multiple-choice row's expected answer to a letter :func:`multiple_choice_match`
-        scores: a letter passes through, a 0-based integer index into ``choices`` becomes its letter.
-
-        MMLU ships ``answer`` as an int, and the matcher rejects anything that is not a single letter, so
-        an unconverted row grades 0 on every completion and leaves its GRPO group with zero variance. A
-        digit string is refused, not read as an index: ARC's ``answerKey`` labels some rows ``"1"``-``"5"``,
-        1-based, so no one reading of it is safe. Any other shape raises here, at episode start.
+        """A multiple-choice row's expected answer as the letter :func:`multiple_choice_match` scores: a letter passes,
+        a 0-based integer index into ``choices`` becomes its letter, and any other shape raises at episode start — a
+        digit string too, since ARC labels some rows ``"1"``-``"5"``, 1-based, so no one reading of it is safe.
         """
         # bool is an int subclass, so True would otherwise index choice "B".
         if not isinstance(expected, bool):
@@ -203,29 +216,6 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
             f"'choices'; convert the answer column in dataset preparation."
         )
 
-    def _reset_single(
-        self,
-        prompt: str | list[dict[str, str]],
-        context: dict[str, Any] | None = None,
-    ) -> Trajectory:
-        """Store expected answer and append choices to prompt."""
-        traj = super()._reset_single(prompt, context)
-        context = context or {}
-
-        traj.info["expected_answer"] = context.get(ANSWER_KEY)
-        traj.info["choices"] = context.get("choices")
-        traj.info["is_multiple_choice"] = context.get("choices") is not None
-
-        if traj.info["is_multiple_choice"] and traj.info["expected_answer"] is not None:
-            traj.info["expected_answer"] = self._expected_choice_letter(
-                traj.info["expected_answer"], traj.info["choices"]
-            )
-
-        if traj.info["choices"]:
-            traj.append_to_last_user(f"\n\nChoices:\n{render_choices(traj.info['choices'])}")
-
-        return traj
-
     def _scoring_reference(self, trajectory: Trajectory) -> Any:
         """The answer as the grader compares it: a multiple-choice row's letter, not its index."""
         return trajectory.info.get("expected_answer")
@@ -245,4 +235,4 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
         if trajectory.info.get("is_multiple_choice"):
             return EpisodeGrade(1.0 if multiple_choice_match(final_response, str(expected)) else 0.0)
 
-        return EpisodeGrade(1.0 if validate_answer(final_response, expected) else 0.0)
+        return EpisodeGrade(1.0 if is_correct_answer(final_response, expected) else 0.0)

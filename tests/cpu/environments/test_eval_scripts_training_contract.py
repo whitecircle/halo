@@ -28,9 +28,9 @@ from scripts.environments._common import (
 )
 from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, resolve_env_config
 from src.env import nccl_timeout
-from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from src.environments.registry import resolve_environment
 from src.environments.rollout_config import RolloutConfig
+from src.environments.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from tests.common.code_contests import StubSandbox
 from tests.common.repo import REPO_ROOT
 

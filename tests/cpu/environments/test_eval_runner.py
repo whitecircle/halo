@@ -58,7 +58,7 @@ from src.environments.eval_runner import (
 )
 from src.environments.rollout_config import RolloutConfig
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry
-from src.environments.tools.factories import create_native_file_tools
+from src.environments.tools.toolsets import build_simulated_file_tools
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 
 
@@ -658,7 +658,7 @@ async def test_eval_driver_keeps_contextvar_writes_across_turns(monkeypatch):
     file tools every turn: a file written on turn 1 would be gone on turn 2, and an offline eval would
     miss a capability the online rollout (one context per episode) has.
     """
-    registry = create_native_file_tools()
+    registry = build_simulated_file_tools()
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=3)
 
     def _call(name, **arguments):

@@ -19,17 +19,18 @@ import shutil
 import pytest
 
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.tasks.coding.code_contests import (
+from src.environments.sandbox.base import SandboxExecutor
+from src.environments.sandbox.local import LocalSubprocessSandbox
+from src.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE, run_code_via_sandbox
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.code_contests_prompts import (
     NO_STDIN_NOTE,
     SCRATCHPAD_BUDGET_SPENT_REPLY,
     SCRATCHPAD_TIME_LIMIT_NOTE,
     SUBMIT_TOOL,
-    CodeContestsEnvironment,
 )
-from src.environments.envs.tasks.coding.grading import run_solution_against_tests
-from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
-from src.environments.sandbox.local import LocalSubprocessSandbox
-from src.environments.sandbox.repl import run_code_via_sandbox
+from src.environments.tasks.coding.grading import run_solution_against_tests
 from src.environments.tools.definitions import NativeToolCall
 from tests.common.code_contests import counts_beside_budget_words, retired_budget_phrases
 
@@ -261,7 +262,7 @@ def test_output_that_fits_beside_its_notes_is_not_cut(past_the_fit):
 
 
 def test_a_list_program_is_refused_unspent_on_both_tools():
-    """A list ``code`` has no string reading, and staged into the sandbox it fails there as the
+    """A list ``code`` has no string reading, and written into the sandbox it fails there as the
     backend's fault, voiding a graded episode: refused at binding, it spends neither budget and grades
     nothing."""
     env = _env(language="python")

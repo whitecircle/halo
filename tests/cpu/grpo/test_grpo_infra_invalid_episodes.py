@@ -26,8 +26,8 @@ from src.environments.base import (
     REWARD_COMPONENTS_KEY,
     Trajectory,
 )
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import RolloutResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from src.trainers.grpo.environmental import (
     EMPTY_ROLLOUT_STEP_LIMIT,

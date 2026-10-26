@@ -28,13 +28,14 @@ from src.environments.base import (
     Trajectory,
 )
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.episode import EpisodeDispatcher, TurnGeneration, step_context_from_generation
 from src.environments.registry import resolve_environment
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
 from src.environments.tools.definitions import NativeToolRegistry
 from src.inference.response import FINISH_REASON_LENGTH
-from src.rewards.samples import CUT_CALL_NOTE, CUT_CALLS_KEY, render_transcript
-from src.rewards.scorers import catalog as scorers_module
+from src.rewards import composer as scorers_module
+from src.rewards.samples import CUT_CALL_NOTE, CUT_TOOL_CALLS_KEY, render_transcript
 from src.rewards.scorers.base import Scorer, ScoreResult
 from src.rewards.scorers.judge import action_text, grading_prompt
 from src.rewards.terms import OBJECTIVE_REWARD_KEY, JudgeTerm, OnError
@@ -380,8 +381,8 @@ def test_the_judge_reads_the_call_a_cut_turn_was_writing_and_no_other_turn_carri
     sample = env._scoring_sample(env.get_trajectories(ids)[0])
 
     cut, nudge, final = sample.completion
-    assert cut[CUT_CALLS_KEY] == partial and "tool_calls" not in cut
-    assert CUT_CALLS_KEY not in nudge and CUT_CALLS_KEY not in final
+    assert cut[CUT_TOOL_CALLS_KEY] == partial and "tool_calls" not in cut
+    assert CUT_TOOL_CALLS_KEY not in nudge and CUT_TOOL_CALLS_KEY not in final
     head = f"→ calculate (call c1; {CUT_CALL_NOTE}): "
     veto = {key: value for key, value in CHECKS.items() if key != "source"}
     for view in ("full", "digest"):
@@ -474,6 +475,24 @@ def test_environment_config_round_trips_a_veto_judge():
     assert term.is_veto and term.weight == 0.0 and term.on_error is OnError.NEUTRAL
     env = resolve_environment(config.environment_type, config.to_env_config())
     assert env.reward_terms[1] == term
+
+
+@pytest.mark.parametrize(("language", "test_tool"), [("python", "python_repl"), (["python", "cpp"], "run_code")])
+def test_a_veto_judge_listing_environment_checks_audits_with_the_declared_rubric(language, test_tool):
+    """``checks: environment`` reaches the code-contests environment from a config and resolves to the rubric it
+    declares, the run's own scratchpad named where the rubric names it."""
+    audit = {"source": "judge", "name": "audit", "checks": "environment"}
+    config = EnvironmentConfig(
+        environment_type="codeforces",
+        rewards=[{"source": "environment"}, audit],
+        environment_kwargs={"language": language, "sandbox_backend": "local"},
+    )
+    term = resolve_environment(config.environment_type, config.to_env_config()).reward_terms[1]
+    assert [check.name for check in term.checks] == [check.name for check in AUDIT_CHECKS]
+    described = " ".join(check.description for check in term.checks)
+    assert test_tool in described and "{test_tool}" not in described
+    with pytest.raises(ValueError, match="declares none"):
+        resolve_environment("native_math", {"reward_terms": [{"source": "environment"}, audit]})
 
 
 def test_a_term_cannot_take_a_declared_shaping_name():

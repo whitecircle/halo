@@ -15,19 +15,21 @@ from dataclasses import dataclass, field, replace
 from typing import Any, get_args
 
 from src.environments.rollout_config import ReasoningEffortChoice
-from src.environments.sandbox.base import SandboxFault, SandboxInfraError
+from src.environments.sandbox.results import SandboxFault, SandboxInfraError
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.composer import RewardComposer
-from src.rewards.samples import CUT_CALLS_KEY, REFUSED_CALL_IDS_KEY, TURN_FLAG_NOTES, ScoringSample
+from src.rewards.samples import CUT_TOOL_CALLS_KEY, REFUSED_CALL_IDS_KEY, TURN_FLAG_NOTES, ScoringSample
 from src.rewards.scorers.base import ScoreResult
 from src.rewards.terms import (
     ENVIRONMENT_REWARD_SOURCES,
     OBJECTIVE_TERM_NAME,
+    Check,
     EnvironmentTerm,
     JudgeTerm,
     RewardTerm,
     component_key,
     parse_reward_terms,
+    resolve_environment_checks,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,11 +57,6 @@ EPISODE_ERROR_KEY = "error"
 # Stamped by the rollout driver under an episode output budget: whether the budget no longer held a
 # turn's answer room, so the episode ended there (truncated) or could not have run another turn.
 OUTPUT_BUDGET_EXHAUSTED_KEY = "output_budget_exhausted"
-# Set in a turn's step context by the rollout driver when the engine cut the turn at its token cap while it held
-# tool calls: the calls the parser salvaged, or the text the policy wrote where the driver decodes it, never run. The
-# recovery says the call ran past the turn's length limit (``LENGTH_CUTOFF_IN_CALL_NUDGE``), and the turn keeps them
-# for the judge (``Message.cut_tool_calls``).
-CUT_TOOL_CALLS_KEY = "cut_tool_calls"
 # Step-context key the driver sets on the last turn the episode's output budget affords: a turn that
 # produced nothing cannot be retried after it, so it ends the episode like a max_turns overflow.
 LAST_TURN_KEY = "last_turn"
@@ -474,6 +471,8 @@ class BaseEnvironment(ABC):
     # Names of the episode facts this class establishes itself (:meth:`_episode_facts`), the union over the
     # MRO being what a judge check may name to stand exempt under (``unless``).
     EPISODE_FACTS: tuple[str, ...] = ()
+    # The checks a veto judge listing ``checks: environment`` audits with; none refuses such a judge.
+    JUDGE_CHECKS: tuple[Check, ...] = ()
 
     # Effort level -> profile defaults. The base binds no budget to any level (the global rollout caps
     # stand); an env that prices effort declares its own table. ``reasoning_effort_profiles`` merges
@@ -577,7 +576,9 @@ class BaseEnvironment(ABC):
         terms = (
             (EnvironmentTerm(),)
             if reward_terms is None
-            else parse_reward_terms(reward_terms, ENVIRONMENT_REWARD_SOURCES)
+            else resolve_environment_checks(
+                parse_reward_terms(reward_terms, ENVIRONMENT_REWARD_SOURCES), self.JUDGE_CHECKS
+            )
         )
         self._rewards = RewardComposer(terms)
         reserved = {TURN_SHAPING_COMPONENT, *self.shaping_components()}
@@ -1182,12 +1183,12 @@ class BaseEnvironment(ABC):
     def _sample_message(message: Message) -> dict[str, Any]:
         """A message as a scorer reads it: the wire fields with the reasoning, the turn flags
         (:data:`~src.rewards.samples.TURN_FLAG_NOTES`) a judge should see named, and the calls a cut turn
-        never ran under :data:`~src.rewards.samples.CUT_CALLS_KEY`, apart from the calls that ran, and the ids of the
-        calls refused unrun under :data:`~src.rewards.samples.REFUSED_CALL_IDS_KEY`."""
+        never ran under :data:`~src.rewards.samples.CUT_TOOL_CALLS_KEY`, apart from the calls that ran, and the ids
+        of the calls refused unrun under :data:`~src.rewards.samples.REFUSED_CALL_IDS_KEY`."""
         rendered = message.to_dict(include_thinking=True)
         rendered.update({flag: True for flag in TURN_FLAG_NOTES if getattr(message, flag)})
         if message.cut_tool_calls:
-            rendered[CUT_CALLS_KEY] = message.cut_tool_calls
+            rendered[CUT_TOOL_CALLS_KEY] = message.cut_tool_calls
         if message.refused_call_ids:
             rendered[REFUSED_CALL_IDS_KEY] = list(message.refused_call_ids)
         return rendered

@@ -267,7 +267,7 @@ def test_ep_cross_node_scope_under_pp():
 def test_ep_etp_groups_stage_confined_under_pp():
     """ep_size=4 + expert_tp_size=2 (one EP group of 8 per stage): ETP and dispatch groups too.
 
-    ``_create_expert_tp_groups`` enumerates the same all-block EP group list, so its groups must be
+    ``_build_expert_tp_groups`` enumerates the same all-block EP group list, so its groups must be
     stage-local, contain their rank, and be created in an identical order on every rank.
     """
     built = _ep_over_world(
@@ -304,6 +304,27 @@ def test_pp1_ep_construction_is_unchanged():
     assert calls == [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2, 4, 6), (1, 3, 5, 7)], calls
     assert cfg._my_ep_group_ranks == [2, 3]
     assert cfg.expert_replica_ranks == [1, 3, 5, 7]
+
+
+def test_misaligned_stage_base_rank_raises_before_any_group():
+    """A stage base off a rank-block boundary raises on every rank before the first ``new_group``, so no
+    rank is left waiting in a collective its peers skipped."""
+    calls: list = []
+    with (
+        stubbed_process_groups(16, 3, calls),
+        pytest.raises(ValueError, match=r"stage_base_rank \(3\) must be a multiple of stage_world_size \(8\)"),
+    ):
+        EPConfig(ep_size=8, stage_world_size=8, stage_base_rank=3, nvlink_domain_size=8, experts_fsdp_managed=False)
+    assert calls == []
+
+
+@pytest.mark.parametrize("missing", ["stage_world_size", "nvlink_domain_size"])
+def test_stage_width_and_domain_are_required(missing):
+    """EPConfig never guesses its stage width or locality unit from the launcher's environment."""
+    sizes = {"stage_world_size": 8, "nvlink_domain_size": 8}
+    del sizes[missing]
+    with pytest.raises(TypeError, match=missing):
+        EPConfig(ep_size=1, experts_fsdp_managed=True, **sizes)
 
 
 def test_pp1_cp_construction_is_unchanged():

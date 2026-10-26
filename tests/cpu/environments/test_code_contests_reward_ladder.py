@@ -25,10 +25,10 @@ from src.environments.base import (
     Message,
     Trajectory,
 )
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.envs.tasks.qa import ExamQAEnvironment
-from src.environments.sandbox.base import SandboxInfraError
+from src.environments.sandbox.results import SandboxInfraError
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.swe import SweEnvironment
+from src.environments.tasks.qa import ExamQAEnvironment
 from src.environments.tools.definitions import NativeToolResult
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 

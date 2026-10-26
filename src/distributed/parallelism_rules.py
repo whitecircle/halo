@@ -181,7 +181,7 @@ def _reject_pipeline_parallel(pc: ParallelismConfig) -> None:
     if pc.expert_lora is not None:
         raise ValueError(
             "Expert LoRA (native grouped adapters) is not supported under pipeline parallelism: "
-            "the adapter save/merge paths (save_ep_lora_adapters, merge_expert_lora_on_save) "
+            "the adapter save/merge paths (save_expert_lora_adapters, merge_expert_lora_on_save) "
             "write flat global expert names with no stage→global remap, so a PP save would "
             "silently record stage-local layer indices. Train expert LoRA without PP."
         )

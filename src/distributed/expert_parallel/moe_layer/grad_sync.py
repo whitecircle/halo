@@ -15,6 +15,7 @@ from accelerate.state import GradientState
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.grad_reduce import reduce_grad
+from src.runtime.ranks import has_process_group
 
 
 def should_sync_gradients() -> bool:
@@ -25,7 +26,7 @@ def should_sync_gradients() -> bool:
 def has_grad_sync_peers(ep_config: EPConfig) -> bool:
     """Whether this process has peer ranks to sync gradients with, read live: the default process group is
     initialized independently of the config."""
-    return dist.is_available() and dist.is_initialized() and ep_config.stage_world_size > 1
+    return has_process_group() and ep_config.stage_world_size > 1
 
 
 def build_router_grad_hook(ep_config: EPConfig) -> Callable[[torch.Tensor], None]:
@@ -82,7 +83,7 @@ class EPGradSyncMixin:
         """Hook the trainable router/replicated params again for PEFT ``modules_to_save``, which trains a copy
         the construction hooks never saw; returns how many. Only on the in-backward hook path.
         """
-        if self.ep_config.defer_grad_sync or self.ep_config.experts_fsdp_managed:
+        if not self.ep_config.uses_backward_grad_hooks:
             return 0
         if not has_grad_sync_peers(self.ep_config):
             return 0
@@ -93,7 +94,7 @@ class EPGradSyncMixin:
         or deferred sweep, else the experts and their adapters, the router and replicated submodules.
         """
         trainable = {id(p) for p in self.parameters() if p.requires_grad}
-        if self.ep_config.experts_fsdp_managed or self.ep_config.defer_grad_sync:
+        if not self.ep_config.uses_backward_grad_hooks:
             return trainable
         ids = {id(p) for _n, p in self.expert_named_params() if p.requires_grad}
         ids |= {id(p) for _n, p in self._dp_averaged_named_params() if p.requires_grad}
@@ -104,7 +105,7 @@ class EPGradSyncMixin:
         the router and replicated submodules, the expert hook on the expert weights."""
         # FSDP reduce-scatters fully replicated experts (ep_group_size==1, not pure ETP), and the deferred
         # sweep owns every cross-replica topology and PP rank block: a hook would double-sync or race it.
-        if self.ep_config.experts_fsdp_managed or self.ep_config.defer_grad_sync:
+        if not self.ep_config.uses_backward_grad_hooks:
             return
 
         peers = has_grad_sync_peers(self.ep_config)

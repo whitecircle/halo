@@ -14,7 +14,7 @@ from src.configs.grpo import (
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from src.environments.rollout_config import ReasoningEffortChoice
 from src.rewards.graders.verifiable import RLVR_REWARD_SOURCES
-from src.rewards.terms import RewardTerm, parse_reward_terms, refuse_veto_judges
+from src.rewards.terms import RewardTerm, parse_reward_terms, reject_veto_judges
 
 
 @dataclass
@@ -100,7 +100,7 @@ class RLVROnlineGRPOScriptArguments(
         judge (one listing ``checks``) gates an environment objective, which this arm's independent
         TRL reward functions have none of, so it is refused."""
         terms = parse_reward_terms(self.rewards, RLVR_REWARD_SOURCES)
-        refuse_veto_judges(terms, where="the online arm")
+        reject_veto_judges(terms, where="the online arm")
         return terms
 
     def _validate_hint_template(self) -> None:

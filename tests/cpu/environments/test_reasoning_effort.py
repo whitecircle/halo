@@ -21,7 +21,7 @@ from src.environments.base import (
     resolve_reasoning_effort,
     stable_reasoning_effort,
 )
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from tests.common.repo import REPO_ROOT
 
 _DRAWN_PROBLEMS = [f"problem {i}" for i in range(24)]

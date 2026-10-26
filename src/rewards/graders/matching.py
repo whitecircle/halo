@@ -1,4 +1,4 @@
-"""Rule-based answer normalization and matching; :func:`validate_answer` is the check every environment
+"""Rule-based answer normalization and matching; :func:`is_correct_answer` is the check every environment
 grades an answer through."""
 
 import re
@@ -77,15 +77,11 @@ _VARIABLE_OPERAND_RE = re.compile(
 def extract_last_boxed(text: str) -> str | None:
     """Content of the last balanced ``\\boxed{...}`` in ``text``, or ``None`` when none closes.
 
-    Braces are matched by depth so nested groups survive: a first-``}`` match truncates
-    ``\\boxed{\\frac{1}{2}}`` to ``\\frac{1`` and silently scores a correct LaTeX answer as wrong. A
-    backslash escapes the next character, so ``\\{``/``\\}`` never shift the depth, while a doubled
-    backslash still introduces the token (models emit escaped LaTeX). Neither an unterminated
-    ``\\boxed{`` nor an empty ``\\boxed{}`` is a candidate — one would yield a truncated answer, the
-    other no answer at all.
-
-    One left-to-right pass: degenerate rollouts repeat ``\\boxed{`` thousands of times, and rescanning
-    per candidate would be quadratic in the completion length.
+    Braces are matched by depth so nested groups survive (a first-``}`` match truncates ``\\boxed{\\frac{1}{2}}``
+    to ``\\frac{1`` and scores a correct answer wrong). A backslash escapes the next character, so ``\\{``/``\\}``
+    never shift the depth, while a doubled backslash still introduces the token (models emit escaped LaTeX). An
+    unterminated ``\\boxed{`` and an empty ``\\boxed{}`` are no candidates. One left-to-right pass: degenerate
+    rollouts repeat ``\\boxed{`` thousands of times, and rescanning per candidate would be quadratic.
     """
     open_braces: list[int | None] = []  # content start per open brace; None for a brace that opens no box
     best_start = -1
@@ -152,12 +148,6 @@ def exact_match(predicted: str, expected: str) -> bool:
     return normalize_text(predicted) == normalize_text(expected)
 
 
-def _number_value(match: re.Match[str]) -> float:
-    """The value a ``_NUMBER_RE`` match spells: grouping commas dropped, a ``%`` value divided by 100."""
-    value = float(match["sign"] + match["value"].replace(",", ""))
-    return value / 100.0 if match["percent"] else value
-
-
 def _stated_values(text: str) -> list[float]:
     """Every number a normalized answer states, or none when it is an expression or a bound."""
     text = _LATEX_GROUPING_RE.sub(",", text)
@@ -172,7 +162,9 @@ def _stated_values(text: str) -> list[float]:
         # The gap runs up to the digits, so a sign right after an operand reads as the operator it is.
         if previous_end is not None and _OPERATOR_GAP_RE.fullmatch(text, previous_end, match.start("value")):
             return []
-        values.append(_number_value(match))
+        # Grouping commas dropped, a ``%`` value divided by 100.
+        value = float(match["sign"] + match["value"].replace(",", ""))
+        values.append(value / 100.0 if match["percent"] else value)
         previous_end = match.end()
     return values
 
@@ -183,15 +175,12 @@ def numeric_match(
     rtol: float = 0.01,
     atol: float = 1e-6,
 ) -> bool:
-    """True when the prediction states one value and it equals the expected number within tolerance.
+    """Whether the prediction states one value and it equals the expected number within tolerance.
 
-    Every number in the prediction must match, so a hedge (``7 or 8``) and working restated with other
-    numbers (``7, since 3 + 4 = 7``) grade as wrong, and so do an operand of arithmetic, a power, root,
-    constant or function (``1/2``, ``2024-01-01``, ``10²``, ``\\sqrt{2}``, ``2\\pi``, ``log 2``) and a
-    stated bound (``x < 3``). ``,`` thousands grouping reads as one number, a ``%`` value is divided by
-    100, a power after a letter is a unit exponent (``9.8 m/s^2``), and a number glued to a letter is part
-    of a token (``h2o``). The expected answer is read the same way and must state exactly one value
-    (``18``, ``$18``, ``18 dollars``); an expression or a hedge there gets no numeric match.
+    Every number in the prediction must match, so a hedge (``7 or 8``), restated working, an operand of arithmetic or
+    an expression (``1/2``, ``10²``, ``\\sqrt{2}``, ``log 2``) and a bound (``x < 3``) grade wrong. ``,`` grouping
+    reads as one number, a ``%`` value is divided by 100, a power after a letter is a unit exponent and a number glued
+    to a letter part of a token. The expected answer is read the same way and must state exactly one value.
     """
     expected_values = _stated_values(normalize_text(expected))
     if len(expected_values) != 1:
@@ -204,12 +193,10 @@ def numeric_match(
     )
 
 
-def validate_answer(predicted: Any, expected: Any) -> bool:
-    """Whether ``predicted`` answers ``expected``: an :func:`exact_match`, else a :func:`numeric_match`.
-
-    Grading is all-or-nothing: a near-miss scores zero rather than partial credit, because a
-    similarity threshold rewards a wrong answer that merely reads like the right one
-    ("Washington" vs "Washington DC"). Substring containment is no match either: it inflates rewards
-    ("7" would match "17")."""
+def is_correct_answer(predicted: Any, expected: Any) -> bool:
+    """Whether ``predicted`` answers ``expected``: an :func:`exact_match`, else a :func:`numeric_match`. All or
+    nothing: a similarity threshold or substring containment rewards a wrong answer that reads like the right one ("7"
+    in "17").
+    """
     predicted_str, expected_str = str(predicted), str(expected)
     return exact_match(predicted_str, expected_str) or numeric_match(predicted_str, expected_str)

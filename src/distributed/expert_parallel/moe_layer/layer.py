@@ -27,7 +27,7 @@ from src.distributed.expert_parallel.moe_layer.grad_sync import EPGradSyncMixin
 from src.distributed.expert_parallel.moe_layer.routing import EPRoutingMixin
 from src.distributed.grad_reduce import SumGradAcrossGroup
 from src.env import env_flag
-from src.hardware import current_device, supports_grouped_mm
+from src.hardware import current_device
 from src.models.moe.family_specs import MoEFamilySpec
 from src.runtime.ranks import is_global_main_process
 
@@ -204,7 +204,7 @@ class EPMoELayerBase(
         self._grad_sync_hooks = []
         self._hook_synced_expert_params: list = []  # populated only in the in-backward hook regime
 
-        self._use_grouped_mm = ep_config.use_grouped_gemm and supports_grouped_mm()
+        self._use_grouped_mm = ep_config.grouped_gemm_enabled
 
         # Latched on the first forward: at init the eager loader may still hold this layer on CPU.
         self._activation_warmed = False

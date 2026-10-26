@@ -34,17 +34,18 @@ from functools import cache
 from typing import Any
 
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY
-from src.environments.envs.tasks.coding.code_contests import (
-    DEFAULT_EVAL_PROTOCOL,
-    DEFAULT_REASONING_EFFORT,
-    SUBMIT_TOOL,
-    CodeContestsEnvironment,
-    normalized_program,
-)
-from src.environments.envs.tasks.coding.datasets import CODE_DATASET_ADAPTERS, ContestSelection
-from src.environments.envs.tasks.coding.grading import FloatTolerance, grade_solution, stated_float_tolerance
 from src.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
 from src.environments.registry import resolve_environment
+from src.environments.tasks.coding.code_contests import (
+    DEFAULT_EVAL_PROTOCOL,
+    DEFAULT_REASONING_EFFORT,
+    CodeContestsEnvironment,
+)
+from src.environments.tasks.coding.code_contests_prompts import SUBMIT_TOOL
+from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, ContestSelection
+from src.environments.tasks.coding.grading import grade_solution
+from src.environments.tasks.coding.program_source import normalized_program
+from src.environments.tasks.coding.verdicts import FloatTolerance, find_stated_float_tolerance
 from src.environments.tools.definitions import NativeToolCall, ToolArgumentError
 
 # Meta keys a re-grade needs: env_type/adapter/dataset/split select the environment and rebuild the
@@ -150,7 +151,7 @@ def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -
     Arguments are read the way the environment read them (:meth:`NativeToolCall.from_openai_format`,
     Python literals included). A recorded call the tool refuses to bind (no code, a missing or foreign
     language, an argument the tool does not declare, unparseable arguments), or one whose code the
-    environment refused as written in another language (:meth:`CodeContestsEnvironment.mislabelled_as`)
+    environment refused as written in another language (:meth:`CodeContestsEnvironment.find_mislabel`)
     or as identical, comments aside, to one already graded (:func:`normalized_program`), was never graded and
     spent no budget, so it takes no slot here either."""
     tool = env.registry.get(SUBMIT_TOOL)
@@ -167,16 +168,16 @@ def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -
                 continue
             language = bound.get("language")
             program = normalized_program(bound["code"], language or env.language)
-            if env.mislabelled_as(bound["code"], language) is None and program not in graded:
+            if env.find_mislabel(bound["code"], language) is None and program not in graded:
                 graded.add(program)
                 solutions.append((bound["code"], language))
     return solutions
 
 
 def episode_stated_tolerance(episode: dict[str, Any]) -> FloatTolerance | None:
-    """The float tolerance an episode's own statement states (:func:`stated_float_tolerance`), read from its user
+    """The float tolerance an episode's own statement states (:func:`find_stated_float_tolerance`), read from its user
     turns as the environment read it from the prompt."""
-    return stated_float_tolerance(
+    return find_stated_float_tolerance(
         "\n".join(
             str(message.get("content") or "")
             for message in episode.get("messages", [])

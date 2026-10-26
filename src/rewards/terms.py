@@ -1,14 +1,11 @@
-"""Reward terms: the typed, config-parsed statement of how a completion's scores add up to its reward.
-
-A reward is a sum of terms. Each term names a SOURCE of a score in ``[0, 1]`` — the environment's
-own grade, a generative judge, a served reward model, a trainer-local grader — and prices it as
-``weight * score ** exponent``. Parsing happens at config time, in the argument dataclasses, so this
-module stays free of anything heavier than the endpoint defaults it names.
-"""
+"""Reward terms: the typed, config-parsed statement of how a completion's scores add up to its reward. A reward is
+a sum of terms, each naming a SOURCE of a score in ``[0, 1]`` (the environment's own grade, a generative judge, a
+served reward model, a trainer-local grader) priced as ``weight * score ** exponent``. Parsed at config time, so
+this module imports nothing heavier than the endpoint defaults it names."""
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from enum import StrEnum
 from typing import Any, ClassVar, Self
 
@@ -21,6 +18,8 @@ REWARD_COMPONENT_PREFIX = "reward/"
 SCORED_METRIC_LEAF = "scored"
 # The environment's own grade always logs under this name.
 OBJECTIVE_TERM_NAME = "objective"
+# The ``checks`` of a veto judge that audits with the checks its environment declares.
+ENVIRONMENT_CHECKS = "environment"
 
 
 class View(StrEnum):
@@ -50,7 +49,7 @@ class OnError(StrEnum):
     NEUTRAL = "neutral"
 
 
-class ReasoningEffort(StrEnum):
+class JudgeReasoningEffort(StrEnum):
     """The OpenAI reasoning-effort vocabulary, which OpenRouter forwards to the model it routes to."""
 
     NONE = "none"
@@ -76,6 +75,12 @@ def component_key(name: str) -> str:
 def metric_key(term: "RewardTerm", leaf: str) -> str:
     """A per-sample diagnostic key of ``term``, ``<source>/<name>/<leaf>``."""
     return f"{term.source}/{term.name}/{leaf}"
+
+
+def scored_metric_key(term: "RewardTerm") -> str:
+    """The per-sample 1/0 of whether the term reached a verdict, ``<source>/<name>/scored``: the metric
+    that says a scorer is failing, logged by both arms."""
+    return metric_key(term, SCORED_METRIC_LEAF)
 
 
 # The environment's own grade, priced by the reward's environment term, in ``reward_components``.
@@ -113,12 +118,12 @@ def _require_name(what: str, name: Any) -> None:
         raise ValueError(f"{what} name must be a non-blank string without '/', got {name!r}")
 
 
-def require_unique_names(what: str, names: list[str]) -> None:
+def validate_unique_names(what: str, names: list[str]) -> None:
     if len(set(names)) != len(names):
         raise ValueError(f"{what} names must be unique, got {names}")
 
 
-def refuse_veto_judges(terms: Sequence["RewardTerm"], *, where: str) -> None:
+def reject_veto_judges(terms: Sequence["RewardTerm"], *, where: str) -> None:
     """Refuse a veto judge (one listing ``checks``) where there is no environment objective to gate."""
     vetoes = [term.name for term in terms if isinstance(term, JudgeTerm) and term.is_veto]
     if vetoes:
@@ -154,11 +159,9 @@ def _items_from_config(cls: type, raw: Any, what: str) -> tuple:
 
 @dataclass(frozen=True, kw_only=True)
 class RewardTerm:
-    """One additive term of a reward: ``weight * score ** exponent`` over a score in ``[0, 1]``.
-
-    ``name`` is the term's component key (``reward/<name>``); :attr:`source` is the spelling a config
-    selects the term type by. A negative ``weight`` makes the term a penalty. An ``exponent`` above 1
-    makes credit convex (half a score earns under half the weight), below 1 concave.
+    """One additive term of a reward, ``weight * score ** exponent`` over a score in ``[0, 1]``: ``name`` is its
+    component key (``reward/<name>``), :attr:`source` the spelling a config selects it by; a negative ``weight`` makes
+    a penalty, an ``exponent`` above 1 convex credit.
     """
 
     source: ClassVar[str]
@@ -253,14 +256,12 @@ class Requirement:
 
 @dataclass(frozen=True, kw_only=True)
 class Check:
-    """One binary flag a veto judge raises on an observable action: a short name (its diagnostic key)
-    and what firing means. A ``veto`` check gates the episode's credit — the objective and every other
-    positive component go to 0, the penalties stand; every other check is a process flag, counted into
-    the term's score with its ``weight`` (default 1; 0 logs the flag without counting it). A veto check
-    counts only when given a weight (default 0): a penalty on top of the gate, which takes little from an
-    episode that had little credit. ``unless`` names an episode fact the environment establishes itself
-    (:attr:`~src.rewards.samples.ScoringSample.facts`); where it holds, the check does not fire, whatever
-    the judge answered: an exemption the environment can decide exactly is not left to the judge."""
+    """One binary flag a veto judge raises on an observable action: a short name (its diagnostic key) and what
+    firing means. A ``veto`` check gates the episode's credit (the objective and every other positive component go
+    to 0, the penalties stand) and counts in the term's score only when given a ``weight`` (default 0); every other
+    check is a process flag counted with its ``weight`` (default 1; 0 logs it uncounted). ``unless`` names an
+    episode fact the environment establishes itself (:attr:`~src.rewards.samples.ScoringSample.facts`); where it
+    holds the check does not fire, whatever the judge answered."""
 
     name: str
     description: str
@@ -290,40 +291,25 @@ class Check:
 
 @dataclass(frozen=True, kw_only=True)
 class JudgeTerm(ScoredTerm):
-    """A generative judge: an OpenAI-compatible chat model reads the task and the episode and answers
-    with one JSON verdict. The term runs in one of two modes, decided by what it lists:
-
-    - ``requirements`` (score mode): each is scored from 0 to ``scale``; the term's score is their
-      weight-averaged fraction of the scale, priced as every term is.
-    - ``checks`` (veto mode): each either fires, with a verbatim quote of the span that shows it, or
-      does not. A fired ``veto`` check zeroes the objective and every other positive component, the
-      penalties standing; the term's own score is the weighted fired fraction of the checks that carry
-      weight (the process flags, and a veto check given one), so its ``weight`` (0 by default when parsed
-      from a config, never positive) prices them without ever adding reward. A verdict the judge never
-      reached defaults, from a config, to ``on_error: neutral``: no flag, and the exact grade stands.
-
-    ``view`` selects what the judge reads: the final answer (``final``), every turn with its
-    reasoning, tool calls and results (``full``, its reasoning cut first when over the limit), or a compact
-    digest of every turn (``digest``), each cut to ``max_view_chars`` with the end kept. ``context`` is what the
-    judge should know of the setting that the episode itself does not show (how the environment and its
-    limits work), read before the policy's own instructions and task. ``include_reference`` shows the row's
-    reference answer when the sample carries one; ``include_reasoning`` shows the policy's reasoning in the
-    ``full`` and ``digest`` views. The API key comes from the ``api_key_env`` variable, then the hosted chain
-    (``OPENROUTER_API_KEY``, ``OPENAI_API_KEY``). ``reasoning_effort`` ``None`` sends no such field;
-    ``temperature`` ``None`` keeps the served default, which reasoning models require.
-    ``structured_output`` asks for the reply through a strict JSON schema; off, the reply is parsed as
-    the first JSON object it contains.
+    """A generative judge: an OpenAI-compatible chat model reads the task and one ``view`` of the episode and
+    answers with one JSON verdict. ``requirements`` make a scoring judge: each is scored 0 to ``scale``, and the
+    term's score is their weight-averaged fraction of it. ``checks`` make a veto judge: each fires, quoting the span
+    that shows it, or does not; a fired ``veto`` check zeroes the objective and every other positive component, the
+    penalties standing, and the term's score is the weighted fired fraction of the checks that carry weight, which
+    its ``weight`` (never positive; from a config 0 by default, with ``on_error: neutral``) prices without ever
+    adding reward; ``checks: environment`` takes the checks the environment declares. ``context`` is what the
+    judge should know of the setting that the episode does not show.
     """
 
     source: ClassVar[str] = "judge"
 
     requirements: tuple[Requirement, ...] = ()
-    checks: tuple[Check, ...] = ()
+    checks: tuple[Check, ...] | str = ()
     scale: int = 10
     model: str = "openai/gpt-5.6-luna"
     base_url: str = DEFAULT_OPENROUTER_BASE_URL
     api_key_env: str = "OPENROUTER_API_KEY"
-    reasoning_effort: ReasoningEffort | None = ReasoningEffort.MEDIUM
+    reasoning_effort: JudgeReasoningEffort | None = JudgeReasoningEffort.MEDIUM
     temperature: float | None = None
     max_tokens: int = 8192
     context: str | None = None
@@ -339,8 +325,9 @@ class JudgeTerm(ScoredTerm):
         owner = self.owner
         if bool(self.requirements) == bool(self.checks):
             raise ValueError(f"{owner}: list either 'requirements' (a scoring judge) or 'checks' (a veto judge)")
-        names = [item.name for item in (*self.requirements, *self.checks)]
-        require_unique_names(f"{owner}: requirement or check", names)
+        checks = () if self.checks == ENVIRONMENT_CHECKS else self.checks
+        names = [item.name for item in (*self.requirements, *checks)]
+        validate_unique_names(f"{owner}: requirement or check", names)
         reserved = sorted(set(names) & {SCORED_METRIC_LEAF, *JudgeMetric})
         if reserved:
             raise ValueError(
@@ -356,7 +343,7 @@ class JudgeTerm(ScoredTerm):
             _require_text(owner, context=self.context)
         require_int(owner, ge=1, scale=self.scale, max_tokens=self.max_tokens, max_view_chars=self.max_view_chars)
         if self.reasoning_effort is not None:
-            _coerce_enum(self, "reasoning_effort", ReasoningEffort)
+            _coerce_enum(self, "reasoning_effort", JudgeReasoningEffort)
         require_finite(owner, ge=0, **present(temperature=self.temperature))
         _require_bool(
             owner,
@@ -376,7 +363,7 @@ class JudgeTerm(ScoredTerm):
         what = f"{cls.source} reward term"
         if spec.get("requirements") is not None:
             spec["requirements"] = _items_from_config(Requirement, spec["requirements"], f"{what}: requirements")
-        if spec.get("checks") is not None:
+        if spec.get("checks") not in (None, ENVIRONMENT_CHECKS):
             spec["checks"] = _items_from_config(Check, spec["checks"], f"{what}: checks")
         if spec.get("checks"):
             # A veto judge prices nothing unless asked, and an outage of one leaves the exact grade standing.
@@ -407,15 +394,12 @@ class JudgeTerm(ScoredTerm):
 
 @dataclass(frozen=True, kw_only=True)
 class RewardModelTerm(ScoredTerm):
-    """A Bradley-Terry or sequence-classification reward model served by vLLM (``--runner pooling``)
-    or SGLang (``--is-embedding``), scored over its ``/classify`` route at ``url`` (the server root).
-
-    The scorer renders the conversation with the model's own chat template (``tokenizer``, default
-    ``model``) — the prompt plus the final answer (``view: final``) or every turn (``full``) — reads
-    output ``label_index`` of the head and maps the logit through
-    ``sigmoid((logit - logit_shift) / logit_scale)`` into ``[0, 1]``. Samples travel in batches of
-    ``batch_size``, ``max_concurrency`` batches in flight.
-    """
+    """A Bradley-Terry or sequence-classification reward model served by vLLM (``--runner pooling``) or SGLang
+    (``--is-embedding``), scored over its ``/classify`` route at ``url`` (the server root): the conversation rendered
+    with the model's own chat template (``tokenizer``, default ``model``), the prompt plus the final answer
+    (``view: final``) or every turn (``full``), and output ``label_index`` of the head mapped through
+    ``sigmoid((logit - logit_shift) / logit_scale)``; ``batch_size`` samples a batch, ``max_concurrency`` batches
+    in flight."""
 
     source: ClassVar[str] = "reward_model"
     views: ClassVar[tuple[View, ...]] = (View.FINAL, View.FULL)
@@ -493,5 +477,16 @@ def parse_reward_terms(
         except (TypeError, ValueError) as e:
             # A missing required field surfaces as the dataclass constructor's TypeError.
             raise ValueError(f"{where} ({source}): {e}") from e
-    require_unique_names("reward term", [term.name for term in terms])
+    validate_unique_names("reward term", [term.name for term in terms])
     return tuple(terms)
+
+
+def resolve_environment_checks(terms: Sequence[RewardTerm], checks: Sequence[Check]) -> tuple[RewardTerm, ...]:
+    """``terms`` with ``checks`` given to every veto judge listing ``checks: environment``. With no ``checks`` such
+    a judge stays unbound, for the composer to refuse."""
+    return tuple(
+        replace(term, checks=tuple(checks))
+        if checks and isinstance(term, JudgeTerm) and term.checks == ENVIRONMENT_CHECKS
+        else term
+        for term in terms
+    )

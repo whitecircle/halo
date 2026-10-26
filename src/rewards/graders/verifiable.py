@@ -51,13 +51,12 @@ def accuracy_reward(completions: Sequence[Any], answer: Sequence[Any], **kwargs:
     """1.0 where the completion's last ``\\boxed{}`` equals the ground truth, else 0.0.
 
     **Strict boxed exact-match**, deliberately not the environments' validated-answer chain
-    (:func:`src.rewards.graders.matching.validate_answer`, exact + numeric, which every environment grader
+    (:func:`src.rewards.graders.matching.is_correct_answer`, exact + numeric, which every environment grader
     uses). The two differ on purpose: this one strips a GSM8K ``####`` rationale prefix and ``,``/``$``
     from both sides and then requires string equality, so it grades only what the policy put in the
     box; the environment chain normalizes case, re-extracts a box from the *ground truth* as well,
     and accepts a numeric match within ``rtol=0.01``. Swapping in the chain would silently re-grade
-    every shipped RLVR recipe (``0.5`` vs ``.5`` and ``7 \\boxed{42}`` vs ``42`` flip verdicts) —
-    ``tests/cpu/grpo/test_rlvr_accuracy_reward.py`` pins the divergence.
+    every shipped RLVR recipe (``0.5`` vs ``.5`` and ``7 \\boxed{42}`` vs ``42`` flip verdicts).
     """
     # strict: a short answer column would otherwise truncate silently and return fewer rewards than
     # completions, scoring a different set of rows than was generated.

@@ -9,6 +9,8 @@ from __future__ import annotations
 import torch.distributed as dist
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 
+from src.runtime.ranks import has_process_group
+
 
 class MeshDim:
     """Canonical ``mesh_dim_names``. Row-major DeviceMesh shards on the last dim, so HSDP is
@@ -23,7 +25,7 @@ class MeshDim:
 def _require_whole_world(dp_size: int, mesh_kind: str, remedy: str) -> None:
     """Raise unless ``dp_size`` is the world: ``init_device_mesh`` numbers a mesh ``0..dp_size-1``
     unchecked, so the ranks left out raise a bare ``IndexError`` while the rest block on collectives."""
-    world_size = dist.get_world_size() if dist.is_initialized() else dp_size
+    world_size = dist.get_world_size() if has_process_group() else dp_size
     if dp_size != world_size:
         raise ValueError(
             f"build_dp_mesh: a {mesh_kind} must span the whole world; got dp_size={dp_size} with "

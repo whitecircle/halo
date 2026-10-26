@@ -1,22 +1,30 @@
-"""The composition of a reward from its terms: the external scoring the terms need, and the settlement
-of their verdicts into the reward's components."""
+"""The composition of a reward from its terms: the scorer behind each external term, the scoring the terms need,
+and the settlement of their verdicts into the reward's components."""
 
 import asyncio
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from src.rewards.samples import ScoringSample
-from src.rewards.scorers.base import Scorer, ScoreResult, scored_metric_key
-from src.rewards.scorers.catalog import build_scorer
+from src.rewards.scorers.base import Scorer, ScoreResult
+from src.rewards.scorers.judge import GenerativeJudge
+from src.rewards.scorers.reward_model import ServedRewardModel
 from src.rewards.terms import (
+    ENVIRONMENT_CHECKS,
     EnvironmentTerm,
     JudgeTerm,
     OnError,
     RewardTerm,
     ScoredTerm,
     component_key,
-    require_unique_names,
+    scored_metric_key,
+    validate_unique_names,
 )
+
+# The scorer behind each externally scored term type, from the term type each scorer class declares.
+SCORERS: dict[type[ScoredTerm], type[Scorer]] = {
+    scorer.term_type: scorer for scorer in (GenerativeJudge, ServedRewardModel)
+}
 
 
 @dataclass(frozen=True)
@@ -38,12 +46,9 @@ class Settlement:
 
 
 class RewardComposer:
-    """The terms of one reward: scores the external ones and settles their verdicts into components.
-
-    A reward carries at least one term and at most one environment grade; every other term is scored
-    through :func:`build_scorer`, built on first use so construction stays offline. A veto judge
-    strips the episode's credits, the environment term's objective first, so a reward with one needs
-    that term.
+    """The terms of one reward (at least one, at most one environment grade): scores the external ones through
+    :func:`build_scorer`, built on first use so construction stays offline, and settles their verdicts. A veto judge
+    strips the episode's credits, so a reward with one needs the environment term it gates.
     """
 
     def __init__(self, terms: Sequence[RewardTerm]):
@@ -55,7 +60,7 @@ class RewardComposer:
         environment_terms = [term for term in self.terms if isinstance(term, EnvironmentTerm)]
         if len(environment_terms) > 1:
             raise ValueError("a reward carries at most one environment term")
-        require_unique_names("reward term", [term.name for term in self.terms])
+        validate_unique_names("reward term", [term.name for term in self.terms])
         self.environment_term: EnvironmentTerm | None = environment_terms[0] if environment_terms else None
         self.external_terms = tuple(term for term in self.terms if isinstance(term, ScoredTerm))
         unscored = [
@@ -68,6 +73,16 @@ class RewardComposer:
             raise ValueError(
                 f"veto judge term(s) {vetoes} gate the objective, which only an environment term prices: add "
                 f"{{source: environment}} to the reward"
+            )
+        unbound = [
+            term.name
+            for term in self.external_terms
+            if isinstance(term, JudgeTerm) and term.checks == ENVIRONMENT_CHECKS
+        ]
+        if unbound:
+            raise ValueError(
+                f"judge term(s) {unbound} list 'checks: {ENVIRONMENT_CHECKS}', the checks the environment declares; "
+                "this environment declares none, so list the checks"
             )
         self._scorers: dict[str, Scorer] | None = None
 
@@ -131,3 +146,11 @@ class RewardComposer:
         scorers, self._scorers = self._scorers, None
         for scorer in (scorers or {}).values():
             await scorer.aclose()
+
+
+def build_scorer(term: RewardTerm) -> Scorer:
+    """The scorer for an externally scored term; a term without one (the environment's) raises."""
+    scorer_type = SCORERS.get(type(term))
+    if scorer_type is None:
+        raise TypeError(f"reward source {term.source!r} has no external scorer")
+    return scorer_type(term)

@@ -36,7 +36,7 @@ from src.distributed.expert_parallel.deepep.settings import (
 )
 from src.log import warn_once
 from src.runtime.consensus import rank_consensus
-from src.runtime.ranks import get_local_world_size, is_global_main_process
+from src.runtime.ranks import get_local_world_size, has_process_group, is_global_main_process
 
 if TYPE_CHECKING:
     from src.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
@@ -151,7 +151,7 @@ class _ElasticArena(_Arena):
         if self.buffer is not None:
             self._retired.append(self.buffer)
             # Logged per EP group: each group grows its own capacity.
-            if not (dist.is_available() and dist.is_initialized()) or dist.get_rank(group=self.group) == 0:
+            if not has_process_group() or dist.get_rank(group=self.group) == 0:
                 logger.info(
                     f"DeepEP arena grew {self.capacity} -> {needed} tokens/rank; the previous arena is "
                     f"retired rather than freed (handles from in-flight microbatches may still name it) "

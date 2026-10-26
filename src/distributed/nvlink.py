@@ -15,7 +15,7 @@ import torch.distributed as dist
 from src.env import env_int
 from src.log import warn_once
 from src.runtime.consensus import reject_across_ranks
-from src.runtime.ranks import is_global_main_process, is_multi_rank_run
+from src.runtime.ranks import has_process_group, is_global_main_process, is_multi_rank_run
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +190,7 @@ def validate_nvlink_domain_against_fabric(nvlink_domain_size: int, world_size: i
     list, so it never raises on a subset of ranks; a ``None`` clique anywhere no-ops the fabric legs.
     ``gpus_per_node=0`` skips the fabric-less width leg.
     """
-    if not (dist.is_available() and dist.is_initialized()):
+    if not has_process_group():
         return
     # all_gather_object fills exactly get_world_size() slots; an oversized list would keep pre-fill Nones.
     group_world = dist.get_world_size()

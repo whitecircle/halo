@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from src.environments.base import Message
-from src.environments.sandbox.base import SandboxFault
+from src.environments.sandbox.results import SandboxFault
 
 # What reading model-authored arguments as JSON or a Python literal raises on malformed text, past a
 # syntax error: an unhashable dict key or set member (``{[1]: 2}``) is a TypeError, deep nesting a
@@ -21,30 +21,23 @@ MALFORMED_LITERAL_ERRORS = (SyntaxError, ValueError, TypeError, MemoryError, Rec
 
 
 class ToolBudgetExhausted(Exception):
-    """A tool refusing a call because the episode spent its per-episode budget for that tool.
-
-    Expected control flow, not a fault: the protocol still books it as a tool ERROR (so an over-cap
-    call never earns ``tool_success_reward``) but logs it without a traceback, which is reserved for
-    a tool that actually broke.
+    """A tool refusing a call because the episode spent its per-episode budget for that tool: booked as a tool ERROR
+    (an over-cap call never earns ``tool_success_reward``) but logged without a traceback, being expected control flow.
     """
 
 
 class ToolDisabled(ToolBudgetExhausted):
     """A call to a tool whose episode budget is zero: the run disabled it (the ``leaderboard`` evaluation
     protocol's scratchpad, a ``tool_budgets`` cap of 0). Answered and booked like a spent budget, but no refusal
-    (:func:`refused_unrun`): where the run offers no such tool the call is an ordinary failed one, so its turn
+    (:func:`is_refused_unrun`): where the run offers no such tool the call is an ordinary failed one, so its turn
     stays trainable."""
 
 
 class ToolArgumentError(TypeError):
-    """A call whose model-authored arguments the tool refuses: a required parameter missing
-    (``submit_solution`` with no ``code``), a name its schema does not declare, a value outside its enum,
-    a list or an object for a ``string`` parameter, or a name its handler has no keyword for.
-
-    Raised before the handler runs, so the model reads ``Error: <tool>: missing a required argument:
-    'code'`` instead of a Python signature, or by a handler refusing an admitted call
-    (:class:`ToolCallRefused`). Expected control flow like :class:`ToolBudgetExhausted`: booked as a
-    tool ERROR, logged without a traceback.
+    """A call whose model-authored arguments the tool refuses (a required parameter missing, a name its schema does not
+    declare, a value outside its enum, a list or object for a ``string``), raised before the handler runs so the model
+    reads ``Error: <tool>: missing a required argument: 'code'`` instead of a Python signature, or by a handler
+    refusing an admitted call (:class:`ToolCallRefused`). Booked and logged like :class:`ToolBudgetExhausted`.
     """
 
 
@@ -59,7 +52,7 @@ class ToolCallRefused(ToolArgumentError):
 TOOL_CALL_REFUSALS = (ToolBudgetExhausted, ToolArgumentError)
 
 
-def refused_unrun(outcome: object) -> bool:
+def is_refused_unrun(outcome: object) -> bool:
     """Whether a call's ``outcome`` refused it unrun (:data:`TOOL_CALL_REFUSALS`), a disabled tool's
     (:class:`ToolDisabled`) aside. Under the native protocol a turn whose every call was refused or named no
     existing tool is flagged ``calls_rejected``, so an episode that recovers never reinforces it."""
@@ -72,18 +65,6 @@ def parse_python_expression(source: str) -> ast.expr:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", SyntaxWarning)
         return ast.parse(source.lstrip(" \t"), mode="eval").body
-
-
-def _parse_tool_arguments(raw: str) -> dict[str, Any]:
-    """Parse a tool-call ``arguments`` string; ``ast.literal_eval`` repairs Python-dict literals (single
-    quotes, trailing commas, ``True``/``None``). Unrecoverable / non-dict input falls back to ``{}``."""
-    with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError:
-            parsed = ast.literal_eval(parse_python_expression(raw))
-        return parsed if isinstance(parsed, dict) else {}
-    return {}
 
 
 @dataclass
@@ -140,15 +121,21 @@ class NativeTool:
             },
         }
 
-    def _bind_for_call(self, handler: Callable[..., Any], arguments: dict[str, Any]) -> dict[str, Any]:
-        """The call's arguments checked against the declared schema and ``handler``'s signature.
+    def bind(self, arguments: dict[str, Any], *, for_async: bool = False) -> dict[str, Any]:
+        """Admit a call's model-authored arguments: the schema-checked set the handler can bind, or
+        :class:`ToolArgumentError`. The protocols call it before spending the episode's budget, so a call the handler
+        could never run is refused uncounted; ``for_async`` binds the handler :meth:`execute_async` will run.
+        """
+        handler = (self.async_handler or self.handler) if for_async else self.handler
+        if handler is None:
+            raise NotImplementedError(f"Tool '{self.name}' has no handler")
+        return self._bind_for_call(handler, arguments)
 
-        The schema is what :meth:`to_openai_schema` showed the model, so a name outside it is refused,
-        naming the declared ones: dropped unread, a garbled name loses its value, and a keyword shadowing
-        a handler's pre-bound safety one (the sandbox ``timeout``) would lift that cap. A tool declaring no
-        parameters (an MCP tool without ``properties``) takes its arguments as given. Binding up front
-        turns the call's own ``TypeError`` into :class:`ToolArgumentError`; a handler without an
-        introspectable signature is called unchecked.
+    def _bind_for_call(self, handler: Callable[..., Any], arguments: dict[str, Any]) -> dict[str, Any]:
+        """The call's arguments checked against the declared schema and ``handler``'s signature: a name outside the
+        schema is refused, since dropped unread a garbled name loses its value and a keyword shadowing a pre-bound
+        safety one (the sandbox ``timeout``) would lift its cap. A tool declaring no parameters takes its arguments as
+        given, and a handler without an introspectable signature is called unchecked.
         """
         declared = [parameter.name for parameter in self.parameters]
         unknown = [name for name in arguments if name not in declared] if declared else []
@@ -190,28 +177,12 @@ class NativeTool:
             raise ToolArgumentError(f"{self.name}: {e}") from None
         return bound
 
-    def bind(self, arguments: dict[str, Any], *, for_async: bool = False) -> dict[str, Any]:
-        """Admit a call's model-authored arguments: the schema-checked set the handler can bind, or
-        :class:`ToolArgumentError`. The protocols call it before spending the episode's budget on the
-        call, so a call the handler could never run is refused without being counted. ``for_async``
-        binds against the handler :meth:`execute_async` will run, which may differ from the sync one; a sync
-        call binds only the sync handler, so an async-only tool is refused before it is counted."""
-        handler = (self.async_handler or self.handler) if for_async else self.handler
-        if handler is None:
-            raise NotImplementedError(f"Tool '{self.name}' has no handler")
-        return self._bind_for_call(handler, arguments)
-
     def budget_exhausted_message(self) -> str:
         """The observation for a call refused because the episode spent its budget for this tool: the
         tool's own ``budget_message``, else a generic one. It states the refusal, never the budget's
         size — what an episode may do is the chat template's and the engine's to control, not a number
         the model reads."""
         return self.budget_message or f"Not executed: this task's budget for {self.name} is spent."
-
-    @staticmethod
-    def _as_text(result: Any) -> str:
-        """Render a handler's return value as the string a tool observation must be."""
-        return result if isinstance(result, str) else str(result)
 
     def execute(self, **kwargs) -> str:
         """Execute the tool synchronously."""
@@ -226,6 +197,11 @@ class NativeTool:
         if self.handler:
             return self._as_text(await asyncio.to_thread(self.handler, **self._bind_for_call(self.handler, kwargs)))
         raise NotImplementedError(f"Tool '{self.name}' has no handler")
+
+    @staticmethod
+    def _as_text(result: Any) -> str:
+        """Render a handler's return value as the string a tool observation must be."""
+        return result if isinstance(result, str) else str(result)
 
 
 class NativeToolRegistry:
@@ -252,13 +228,9 @@ class NativeToolRegistry:
         return list(self._tools.keys())
 
     def unknown_tool_message(self, name: str) -> str:
-        """The observation for a call naming a tool that is not registered — one wording for every
-        protocol.
-
-        Names the real tools: a policy that has drifted off the tool syntax late in training invents
-        plausible names (``test``, ``test_tool``, ``repl``) and then burns turns probing for a
-        listing, so the correction has to be in the observation it already gets. Rendered as sorted
-        prose — a bare ``list`` repr is not text a model reads.
+        """The observation for a call naming an unregistered tool, one wording for every protocol, naming the real
+        tools as sorted prose: a policy drifting off the tool syntax invents plausible names and burns turns probing
+        for a listing.
         """
         return f"Error: Unknown tool '{name}'. Available tools: {', '.join(sorted(self.names()))}"
 
@@ -294,11 +266,8 @@ class NativeToolCall:
 
     @classmethod
     def from_openai_format(cls, tool_call: dict[str, Any]) -> "NativeToolCall":
-        """Create from one OpenAI tool-call object (``{"id", "function": {"name", "arguments"}}``).
-
-        Tolerant of a malformed payload (explicit ``"function": null`` or a non-dict): it degrades to
-        an empty-name call the registry rejects as unknown-tool, instead of an AttributeError killing
-        the whole episode.
+        """The call one OpenAI tool-call object (``{"id", "function": {"name", "arguments"}}``) describes; a malformed
+        payload degrades to an empty-name call the registry rejects as unknown, never an exception ending the episode.
         """
         function = tool_call.get("function")
         if not isinstance(function, dict):
@@ -307,7 +276,14 @@ class NativeToolCall:
         args = function.get("arguments") or "{}"
 
         if isinstance(args, str):
-            args = _parse_tool_arguments(args)
+            # ``ast.literal_eval`` repairs Python-dict literals (single quotes, trailing commas, ``True``/``None``);
+            # text neither reads as falls back to no arguments.
+            raw, args = args, {}
+            with contextlib.suppress(*MALFORMED_LITERAL_ERRORS):
+                try:
+                    args = json.loads(raw)
+                except json.JSONDecodeError:
+                    args = ast.literal_eval(parse_python_expression(raw))
 
         return cls(
             id=tool_call.get("id") or "",
@@ -329,7 +305,7 @@ class NativeToolResult:
     # can reproduce any wording of it (an MCP server answering "Tool not found: x" is a real failure of
     # a real tool), and the protocol drops a turn from training on this flag alone.
     unknown_tool: bool = False
-    # The call was refused and nothing ran (:func:`refused_unrun`): at admission, or by its handler
+    # The call was refused and nothing ran (:func:`is_refused_unrun`): at admission, or by its handler
     # (:class:`ToolCallRefused`). Structural like ``unknown_tool``, and read the same way.
     refused: bool = False
     # The sandbox fault the call ended on, booked by type (infra or agent-caused) rather than as an

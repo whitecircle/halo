@@ -23,9 +23,9 @@ import unittest
 import pytest
 
 from src.environments.base import EPISODE_INVALID_REASON_KEY
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.sandbox.base import SandboxResult
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.swe import SweEnvironment
 
 _HAS_GPP = shutil.which("g++") is not None
 

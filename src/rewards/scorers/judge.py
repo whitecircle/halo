@@ -74,6 +74,10 @@ def scorer_api_key(term: JudgeTerm) -> str:
     return key
 
 
+def _object_of(properties: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+
+
 def response_schema(term: JudgeTerm) -> dict[str, Any]:
     """The strict JSON schema of a verdict: one integer per requirement, or one ``{fired, evidence}``
     per check (the evidence a list of quoted lines), plus a rationale."""
@@ -95,8 +99,8 @@ def response_schema(term: JudgeTerm) -> dict[str, Any]:
     }
 
 
-def _object_of(properties: dict[str, Any]) -> dict[str, Any]:
-    return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
+def _tagged(tag: str, text: str) -> str:
+    return f"<{tag}>\n{text}\n</{tag}>"
 
 
 def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
@@ -157,15 +161,11 @@ def grading_prompt(term: JudgeTerm, sample: ScoringSample) -> str:
     return "\n\n".join(parts)
 
 
-def _tagged(tag: str, text: str) -> str:
-    return f"<{tag}>\n{text}\n</{tag}>"
-
-
 def action_text(term: JudgeTerm, sample: ScoringSample) -> str:
-    """What a quoted piece of evidence must come from (:func:`~src.rewards.samples.render_actions`): what the policy
-    wrote as its actions (a call the engine cut while it was being written included) and the results it received,
-    never its reasoning, which the view shows so the judge understands the episode — a check raised on a thought
-    teaches the policy to hide its reasoning rather than to act well — nor the environment's own notes."""
+    """What a quoted piece of evidence must come from (:func:`~src.rewards.samples.render_actions`): the policy's
+    actions and the results it received, never its reasoning — a check raised on a thought teaches the policy to hide
+    its reasoning rather than act well.
+    """
     return render_actions(sample, term.view, max_chars=term.max_view_chars)
 
 
@@ -226,11 +226,10 @@ def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
 
 
 def evidence_supported(evidence: str, text: str) -> bool:
-    """Whether ``evidence`` is a span of ``text`` — both read as the prompt shows them
-    (:func:`~src.rewards.samples.escape_tags`), so a quote of a prompt tag the policy spelled matches whether it copies
-    the escape or undoes it; whitespace folded, since a model reflows what it quotes, and case aside with a slipped word
-    or so (:data:`EVIDENCE_SLIP_SHARE`), since it slips one copying a long program — and short enough to be a span
-    rather than a copy of the text."""
+    """Whether ``evidence`` is a span of ``text``, both read as the prompt shows them (:func:`escape_tags`), whitespace
+    folded since a model reflows what it quotes, case aside with a slipped word or so (:data:`EVIDENCE_SLIP_SHARE`),
+    and short enough to be a span rather than a copy of the text.
+    """
     quote = _WHITESPACE.sub(" ", escape_tags(evidence)).strip()
     if not 0 < len(quote) <= MAX_EVIDENCE_CHARS:
         return False

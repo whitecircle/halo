@@ -1,24 +1,7 @@
-"""Bubblewrap-isolated sandbox: the local backend's compile/run core under a namespace jail.
-
-:class:`BubblewrapSandbox` subclasses :class:`LocalSubprocessSandbox`, overriding its command-wrapping,
-run and reaping hooks. Each child runs through ``bwrap`` in fresh user/mount/PID/IPC/UTS namespaces with
-no network (unless ``allow_network``), a read-only system, and only the per-execution working dir
-writable, atop the inherited rlimits.
-
-The jail's root is the first subordinate uid and gid of this process's user (``/etc/subuid``,
-``/etc/subgid``, mapped by ``newuidmap``/``newgidmap`` from the ``uidmap`` package), so a jailed
-program owns no host file and ``RLIMIT_NPROC``, which the kernel never applies to uid 0, binds it:
-each run is counted alone, in its own user namespace.
-
-The jail needs namespaces, which a container runtime may block (Docker's default seccomp denies their
-creation). Run the container ``--privileged``, or with ``--cap-add SYS_ADMIN --security-opt
-seccomp=unconfined --security-opt apparmor=unconfined`` and a clean proc mounted beside the
-container's masked ``/proc`` (``mount -t proc proc /run/fullproc``), without which the kernel refuses
-the jail its own. The constructor probes once and raises if it can't sandbox.
-
-``bwrap`` exits without reaping the jail's init, so a process is a child subreaper while one of its
-jailed runs is in flight, and each run reaps its init itself.
-"""
+"""The local backend's compile/run core under a bubblewrap namespace jail: fresh user/mount/PID/IPC/UTS namespaces,
+no network unless ``allow_network``, a read-only system and only the working directory writable, the jail's root a
+subordinate uid of this process's user, so a program owns no host file and ``RLIMIT_NPROC`` binds it. The container
+must let the jail create namespaces and mount its own proc; construction probes once and names the fix."""
 
 import contextlib
 import ctypes
@@ -42,8 +25,7 @@ _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
 _LIBC = ctypes.CDLL(None, use_errno=True)
 
-# How long a run waits for its jail's init after the group kill, holding its slot. The init exits only
-# once every task left in the jail has (a fork bomb's thousands, one stuck in uninterruptible sleep).
+# How long a run waits for its jail's init after the group kill, holding its slot (a fork bomb leaves thousands).
 _JAIL_TEARDOWN_SECONDS = 5.0
 _JAIL_TEARDOWN_POLL_SECONDS = 0.002
 
@@ -105,13 +87,15 @@ def _reap_group(pgid: int) -> bool:
 
 
 class _JailReaper:
-    """This process's part in reaping the inits ``bwrap`` leaves behind.
+    """This process's part in reaping the init (the jail's PID 1) ``bwrap`` exits without reaping on every run.
 
-    It holds ``PR_SET_CHILD_SUBREAPER`` while any jailed run is in flight. The flag belongs to a process
-    and no fork or unpickled sandbox carries it, so it is taken where a run starts; released between
-    runs, it leaves the orphans of whatever else the process started (a trainer rank's Ray daemons) to
-    the container's init. A flag the process held already is left set. A group whose init outlives a
-    run's bounded wait is reaped at a later run.
+    It holds ``PR_SET_CHILD_SUBREAPER`` while any jailed run is in flight, so the orphaned init is reparented
+    here. The flag belongs to a process and no fork or unpickled sandbox carries it, so it is taken where a run
+    starts; released between runs, it leaves the orphans of whatever else the process started (a trainer rank's
+    Ray daemons) to the container's init. A flag held already is left set. The init stays in the run's process
+    group, whose id no new process can take while a member is unreaped, so a wait on the group reaps it and no
+    other child; it exits only once every task left in the jail has, so the wait is bounded and a later run
+    finishes a group that outlived it.
     """
 
     def __init__(self) -> None:
@@ -160,15 +144,13 @@ class _JailReaper:
             self._unreaped = {group for group in self._unreaped if not _reap_group(group)}
 
 
-_JAIL_REAPER = _JailReaper()
+_jail_reaper = _JailReaper()
 
 
 class BubblewrapSandbox(LocalSubprocessSandbox):
-    """Local backend hardened with bubblewrap namespace isolation (network + filesystem).
-
-    While a jailed run is in flight its process is a child subreaper: an orphan of anything that process
-    started meanwhile is reparented to it, and only a jail's init is reaped (:meth:`_reap_adopted`). The
-    jail's root runs as :attr:`program_owner`, this process's user's first subordinate uid and gid.
+    """Local backend hardened with bubblewrap namespace isolation (network + filesystem). The jail's root runs as
+    :attr:`program_owner`, this process's user's first subordinate uid and gid; each run's jail init is reaped
+    through :class:`_JailReaper`.
 
     Args:
         allow_network: keep network reachable inside the jail (default False).
@@ -179,7 +161,7 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
 
     # A session builds once, on an empty stdin, and the jailed program can neither remove its working
     # directory (a mount point) to force a rebuild nor write outside it for one to include.
-    compiles_without_test_input = True
+    COMPILES_WITHOUT_TEST_INPUT = True
 
     def __init__(
         self,
@@ -231,12 +213,8 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         return not self.allow_network
 
     def _verify_can_sandbox(self) -> None:
-        """Raise at construction if bwrap cannot create a sandbox in this environment.
-
-        A blocked user/mount namespace makes ``bwrap`` exit non-zero before the child runs; without
-        this probe that is indistinguishable from a program exit and grading reads it as a failed
-        solution.
-        """
+        """Raise at construction if bwrap cannot create a sandbox here: a blocked namespace makes ``bwrap`` exit
+        before the child runs, which grading would read as a failed solution."""
         try:
             probe = self.run("pass")  # exercises the real wrapped python run path once
         except PermissionError as exc:
@@ -286,7 +264,7 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         read back: its init cannot die of its program's signal, so ``bwrap`` exits ``128 + n`` for a
         program killed by signal ``n``, which is returned as ``subprocess`` reports it, ``-n``. A program
         that exits with such a code itself reads as that signal."""
-        with _JAIL_REAPER.held():
+        with _jail_reaper.held():
             stdout, stderr, returncode, timed_out = super()._run_in_new_session(
                 argv, stdin=stdin, timeout=timeout, cwd=cwd, env=env, started=started
             )
@@ -300,15 +278,8 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         return LocalSubprocessSandbox._child_env(_JAIL_WORKDIR)
 
     def _reap_adopted(self, leader: int) -> None:
-        """Reap the jail's init, which ``bwrap`` leaves behind on every run.
-
-        ``bwrap`` exits on its program's status without reaping its own child, the jail's init (PID 1 of
-        the jail's namespace), and this process, a subreaper for the run, adopts it then. The init stays
-        in the run's process group, whose id no new process can take while a member is unreaped, so a
-        wait on the group reaps it and no other child. Its exit tears the jail down once every task left
-        there has exited (thousands, after a fork bomb), so the wait is bounded and a later run finishes it.
-        """
-        _JAIL_REAPER.reap(leader)
+        """Reap the jail's init, which ``bwrap`` leaves behind on every run (:class:`_JailReaper`)."""
+        _jail_reaper.reap(leader)
 
     def _wrap_command(self, argv: list[str], workdir: str) -> list[str]:
         """Prepend the bubblewrap launcher that jails ``argv`` with only ``workdir`` writable."""

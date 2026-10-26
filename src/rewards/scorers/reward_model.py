@@ -14,15 +14,10 @@ from src.rewards.terms import RewardModelBackend, RewardModelTerm
 
 
 class ServedRewardModel(Scorer):
-    """The scorer behind a :class:`RewardModelTerm`.
-
-    Every sample is rendered with the reward model's own chat template and tokenized without added
-    special tokens — the conversation itself, never a rendered prompt re-templated — so both engines
-    score the same sequence and a template that spells its own BOS is not given a second one. vLLM's
-    ``/classify`` takes the rendered text with ``add_special_tokens`` off and returns the head's outputs
-    per input (``use_activation`` off keeps them raw logits); SGLang's ``/classify`` takes the token
-    ids and returns the outputs as an ``embedding`` vector. The logit at ``label_index`` goes through
-    the term's logistic map.
+    """The scorer behind a :class:`RewardModelTerm`: every sample is the conversation rendered with the reward model's
+    own chat template and tokenized without added special tokens (never a rendered prompt re-templated), so both
+    engines score the same sequence and a template spelling its own BOS gets no second one. vLLM's ``/classify`` takes
+    the text and returns raw logits; SGLang's takes token ids and returns an ``embedding`` vector.
     """
 
     term_type = RewardModelTerm

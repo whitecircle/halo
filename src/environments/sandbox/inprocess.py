@@ -1,9 +1,6 @@
-"""In-process restricted-builtins evaluation: the lightest sandbox tier.
-
-Runs math expressions and Python snippets in-process under restricted builtins with an AST
-escape-guard and a wall-clock timeout — no OS isolation, no imports. For complete untrusted programs
-use the subprocess / bubblewrap / remote backends.
-"""
+"""In-process restricted-builtins evaluation, the lightest sandbox tier: math expressions and Python snippets under
+restricted builtins, an AST escape guard and a wall-clock timeout — no OS isolation, no imports. Complete untrusted
+programs belong to the subprocess, bubblewrap and remote backends."""
 
 import ast
 import math
@@ -11,7 +8,8 @@ import re
 import threading
 from collections.abc import Callable
 
-from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SANDBOX_DEFAULT_TIMEOUT, repl_timeout_message
+from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT
+from src.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE, repl_timeout_message
 
 # Builtins that defeat the sandbox even without imports (introspection/exec/IO); blocked by name.
 _FORBIDDEN_SANDBOX_NAMES = frozenset(
@@ -216,12 +214,8 @@ SAFE_PYTHON_BUILTINS = {
 
 
 def _run_with_timeout(fn: Callable[[], str], timeout: float) -> str:
-    """Run ``fn`` on a daemon thread bounded by a wall-clock timeout, returning its result string.
-
-    The thread is a daemon joined with a timeout, so it is abandoned at interpreter exit and a runaway
-    ``while True:`` cannot block process shutdown (``ThreadPoolExecutor.shutdown(wait=True)`` would).
-    ``fn`` maps its own exceptions to an ``Error: ...`` string; one escaping the thread surfaces as
-    the produced-no-result error.
+    """``fn()`` on a daemon thread joined with ``timeout``: abandoned at interpreter exit, a runaway loop cannot block
+    shutdown. ``fn`` renders its own exceptions; one escaping the thread reads as the produced-no-result error.
     """
     result: dict[str, str] = {}
 
@@ -237,13 +231,9 @@ def _run_with_timeout(fn: Callable[[], str], timeout: float) -> str:
 
 
 def _validate_sandbox_ast(code: str) -> None:
-    """Reject sandbox-escape constructs before execution. Raises ValueError on a violation.
-
-    Overriding ``__builtins__`` does not contain ``eval``/``exec``: ``().__class__.__bases__[0].
-    __subclasses__()`` walks the dunder graph to arbitrary classes (file IO, subprocess). Dunder
-    attribute/name access, frame/generator introspection attrs, dunder subscripts, ``import``, and
-    introspection/IO builtins are therefore all forbidden. This is defense in depth, not a hard
-    boundary (see the module docstring).
+    """Refuse sandbox-escape constructs before execution with ``ValueError``: dunder attributes, names and subscripts,
+    frame/generator introspection, ``import`` and the introspection/IO builtins, since an overridden ``__builtins__``
+    does not stop ``().__class__.__bases__[0].__subclasses__()``. Defense in depth, not a hard boundary.
     """
     try:
         tree = ast.parse(code)
@@ -287,13 +277,9 @@ def _printed_output(printed: list[str]) -> str:
 
 
 def _run_python_sandboxed_inner(code: str) -> str:
-    """Run validated code under restricted builtins (no timeout — see run_python_sandboxed).
-
-    Every exception the submitted code raises is part of its result and is rendered as ``Error: ...``
-    so the model gets an actionable observation. Catching only an enumerated subset would let common
-    failures (a ``SyntaxError`` from the exec compile, an ``AssertionError``) escape the worker thread
-    and surface as "produced no result" plus a traceback in the actor log. ``BaseException``
-    (``SystemExit``, ``KeyboardInterrupt``) still propagates.
+    """Run validated code under restricted builtins (the timeout is :func:`run_python_sandboxed`'s). Every exception it
+    raises renders as ``Error: ...``, an observation the model can act on, never a "produced no result" escape;
+    ``BaseException`` still propagates.
     """
     printed: list[str] = []
 
@@ -326,13 +312,9 @@ def _run_python_sandboxed_inner(code: str) -> str:
     return str(defined[-1]) if defined else REPL_NO_OUTPUT_MESSAGE
 
 
-def safe_calculate(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> str:
-    """Evaluate a math expression under restricted builtins, bounded by a wall-clock timeout.
-
-    An empty ``__builtins__`` does not block attribute access, so the AST escape-guard runs before
-    ``eval``. The timeout bounds an expression the guard admits but that runs indefinitely (a large
-    comprehension), which would otherwise block the caller: sync tool execution runs on a Ray actor's
-    event loop.
+def calculate_sandboxed(expression: str, timeout: float = SANDBOX_DEFAULT_TIMEOUT) -> str:
+    """Evaluate a math expression under restricted builtins, the AST escape guard first (an empty ``__builtins__`` does
+    not block attribute access), bounded by ``timeout``: sync tool execution runs on a Ray actor's event loop.
     """
     try:
         expr = expression.strip().replace("^", "**").replace("\u00d7", "*").replace("\u00f7", "/")

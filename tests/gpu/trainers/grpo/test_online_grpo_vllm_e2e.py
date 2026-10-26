@@ -55,7 +55,7 @@ from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
+from src.environments.tools.toolsets import build_math_tools, build_python_tools
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.rewards.graders.matching import extract_last_boxed
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
@@ -398,8 +398,8 @@ def test_environmental_grpo_e2e():
             model_name=MODEL_NAME,
         )
 
-        registry = create_native_math_tools()
-        for tool in create_native_python_tools().list_tools():
+        registry = build_math_tools()
+        for tool in build_python_tools().list_tools():
             registry.register(tool)
 
         environment_kwargs = {"tool_registry": registry, "max_turns": 3}
@@ -571,8 +571,8 @@ def test_environmental_grpo_lora_e2e():
             sync_weights_every_n_steps=1,
             model_name=MODEL_NAME,
         )
-        registry = create_native_math_tools()
-        for tool in create_native_python_tools().list_tools():
+        registry = build_math_tools()
+        for tool in build_python_tools().list_tools():
             registry.register(tool)
         dataset = Dataset.from_list(
             [

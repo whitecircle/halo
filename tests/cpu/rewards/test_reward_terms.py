@@ -16,14 +16,15 @@ from src.rewards.graders.verifiable import AccuracyTerm, FormatTerm
 from src.rewards.terms import (
     Check,
     EnvironmentTerm,
+    JudgeReasoningEffort,
     JudgeTerm,
     OnError,
-    ReasoningEffort,
     Requirement,
     RewardModelBackend,
     RewardModelTerm,
     View,
     parse_reward_terms,
+    resolve_environment_checks,
     sources_of,
 )
 
@@ -53,7 +54,7 @@ def test_terms_parse_with_their_defaults():
     assert isinstance(environment, EnvironmentTerm) and environment.name == "objective"
     assert isinstance(judge, JudgeTerm) and not judge.is_veto
     assert (judge.model, judge.base_url) == ("openai/gpt-5.6-luna", DEFAULT_OPENROUTER_BASE_URL)
-    assert judge.reasoning_effort is ReasoningEffort.MEDIUM
+    assert judge.reasoning_effort is JudgeReasoningEffort.MEDIUM
     assert judge.view is View.FINAL and judge.on_error is OnError.INVALID
     assert judge.temperature is None and judge.scale == 10 and judge.max_view_chars == 60_000
     assert judge.requirements == (Requirement(name="correctness", description="The answer is right."),)
@@ -72,7 +73,7 @@ def test_enum_fields_are_coerced_from_config_strings():
         SOURCES,
     )
     assert judge.view is View.DIGEST and judge.on_error is OnError.NEUTRAL
-    assert judge.reasoning_effort is ReasoningEffort.HIGH
+    assert judge.reasoning_effort is JudgeReasoningEffort.HIGH
     assert reward_model.backend is RewardModelBackend.SGLANG and reward_model.view is View.FULL
     # Direct construction coerces too: the renderers dispatch on the view by identity.
     assert JudgeTerm(name="q", requirements=judge.requirements, view="full").view is View.FULL
@@ -365,6 +366,25 @@ def test_the_rlvr_arm_admits_its_graders_and_the_external_scorers_only():
     assert [type(term) for term in args.reward_terms] == [AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm]
     with pytest.raises(ValueError, match="unknown reward source 'environment'"):
         RLVROnlineGRPOScriptArguments(rewards=[{"source": "environment"}])
+
+
+def test_environment_checks_defer_a_veto_judge_s_checks_to_its_environment():
+    """``checks: environment`` parses as a veto judge with a veto judge's config defaults, binds to the checks given
+    and leaves other terms alone, stays unbound when given none, and is refused where no environment's objective
+    gates it or it stays unbound."""
+    spec = {"source": "judge", "name": "audit", "checks": "environment"}
+    term, judge = parse_reward_terms([spec, JUDGE_SPEC], SOURCES)
+    assert term.is_veto and term.checks == "environment"
+    assert (term.weight, term.on_error) == (0.0, OnError.NEUTRAL)
+    checks = tuple(Check(**check) for check in CHECKS)
+    bound, kept = resolve_environment_checks([term, judge], checks)
+    assert bound.checks == checks and bound.name == "audit" and bound.weight == 0.0
+    assert kept is judge
+    assert resolve_environment_checks([term], ()) == (term,)
+    with pytest.raises(ValueError, match=r"\['audit'\] list 'checks'"):
+        RLVROnlineGRPOScriptArguments(rewards=[spec])
+    with pytest.raises(ValueError, match="declares none"):
+        RewardComposer([EnvironmentTerm(), term])
 
 
 if __name__ == "__main__":

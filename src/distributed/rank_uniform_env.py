@@ -3,8 +3,6 @@
 import os
 from datetime import timedelta
 
-import torch.distributed as dist
-
 from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
 from src.distributed.expert_parallel.deepep.settings import (
     DEEPEP_GPU_TIMEOUT_S,
@@ -15,6 +13,7 @@ from src.distributed.expert_parallel.deepep.settings import (
 from src.distributed.grad_reduce import GRAD_BUCKET_MB
 from src.env import nccl_timeout, store_timeout
 from src.runtime.consensus import reject_divergent_settings
+from src.runtime.ranks import has_process_group
 
 # The settings are fixed at import, so one join per process is enough.
 _env_uniformity_verified = False
@@ -61,4 +60,4 @@ def agree_rank_uniform_env() -> None:
         "DIST_NCCL_TIMEOUT_MINUTES / DIST_STORE_TIMEOUT_HOURS decide which rank gives up on a join "
         "first, and the rest are wire parameters shared by both ends of the all-to-all.",
     )
-    _env_uniformity_verified = dist.is_available() and dist.is_initialized()
+    _env_uniformity_verified = has_process_group()

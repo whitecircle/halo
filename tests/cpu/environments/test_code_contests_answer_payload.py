@@ -6,8 +6,8 @@ solution, so a malformed or empty payload fails the episode instead of training 
 
 import pytest
 
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.sandbox.base import SandboxResult
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from tests.common.code_contests import StubSandbox, reset_episode
 
 _TEST = {"input": "1", "output": "1"}

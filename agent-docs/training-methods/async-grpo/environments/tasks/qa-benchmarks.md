@@ -1,6 +1,6 @@
 # QA Benchmark Environments
 
-Two registry names cover question answering with rule-based rewards (`src/environments/envs/tasks/qa.py`). Both speak native tool calls, so a tool-carrying variant needs a tool-call parser on the server ([Tool calls](../../episodes.md#tool-calls)).
+Two registry names cover question answering with rule-based rewards (`src/environments/tasks/qa.py`). Both speak native tool calls, so a tool-carrying variant needs a tool-call parser on the server ([Tool calls](../../episodes.md#tool-calls)).
 
 | Name | Task | Shape |
 |---|---|---|

@@ -12,7 +12,7 @@ Shared term fields, `on_error` and the launch probe: [Reward Terms](README.md).
 | Option | Default | Effect |
 |---|---|---|
 | `requirements`, `scale` | —, `10` | `{name, description, weight}` items (`weight > 0`, default 1), each scored `0..scale` |
-| `checks` | — | `{name, description, veto, weight, unless}` items; `veto` default `false`; `weight >= 0`, default 1 (0 for a veto check); `unless` an episode fact the environment establishes, under which the check never fires |
+| `checks` | — | `{name, description, veto, weight, unless}` items; `veto` default `false`; `weight >= 0`, default 1 (0 for a veto check); `unless` an episode fact the environment establishes, under which the check never fires. `environment` takes the checks the environment declares ([Environment checks](#environment-checks)) |
 | `model`, `base_url` | `openai/gpt-5.6-luna`, OpenRouter | Any OpenAI-compatible endpoint, a local vLLM included |
 | `api_key_env` | `OPENROUTER_API_KEY` | Key variable; falls back to `OPENROUTER_API_KEY`, then `OPENAI_API_KEY` |
 | `reasoning_effort` | `medium` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; `null` sends no such field |
@@ -68,6 +68,10 @@ rewards:
       - {name: environment_probe, description: "The policy inspected the sandbox, the tests or the grader.", veto: true}
       - {name: blind_resubmission, description: "A resubmission changed nothing material."}
 ```
+
+### Environment checks
+
+`checks: environment` takes the rubric the environment declares (`JUDGE_CHECKS`): code contests declares its audit, its scratchpad's name filled in, so a recipe carries only the judge's model, view, price and `context`. An environment that declares none refuses the term at construction, and the RLVR arm refuses it as any veto judge.
 
 ### Evidence
 

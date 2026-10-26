@@ -34,7 +34,7 @@ The [common knobs](../README.md#common-knobs) apply too.
 - `web_search` — `query` and optional `max_results` (default 5).
 - `read_file`, `write_file`, `list_files` — a simulated per-episode file store.
 
-The factories in `src/environments/tools/factories.py` build registries: `create_native_*` stateless, `create_session_*` bound to the episode's persistent [sandbox session](../sandbox.md). `NativeToolRegistry.combine(a, b)` composes two. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports ([Choosing a backend](../sandbox.md#choosing-a-backend)).
+The builders in `src/environments/tools/toolsets.py` return registries: `build_math_tools`, `build_code_tools`, `build_python_tools`, `build_search_tools`, `build_simulated_file_tools` and `build_combined_tools` stateless, `build_session_{code,bash,file}_tools` bound to the episode's persistent [sandbox session](../sandbox.md). `NativeToolRegistry.combine(a, b)` composes two. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports ([Choosing a backend](../sandbox.md#choosing-a-backend)).
 
 ## Reward
 
@@ -100,9 +100,9 @@ A custom tool set goes through the constructor ([A custom tool](../custom.md#a-c
 
 ```python
 from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.tools.factories import create_all_native_tools
+from src.environments.tools.toolsets import build_combined_tools
 
-env = NativeToolUseEnvironment(tool_registry=create_all_native_tools(), max_turns=10)
+env = NativeToolUseEnvironment(tool_registry=build_combined_tools(), max_turns=10)
 ```
 
 `AsyncNativeToolUseEnvironment` runs a turn's tool calls concurrently; use it for I/O-bound tools.

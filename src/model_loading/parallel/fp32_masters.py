@@ -52,7 +52,7 @@ def fp32_master_param_keys(
                 masters.add(id(router))
             elif router is not None:
                 masters.update(id(param) for param in router.parameters())
-        if ep_config.fp32_experts and not ep_config.experts_fsdp_managed:
+        if ep_config.keeps_fp32_experts:
             masters.update(id(param) for param in layer_cls._find_experts_container(block).parameters())
     return frozenset(
         name

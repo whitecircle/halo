@@ -25,22 +25,18 @@ from datasets import Dataset
 
 from scripts.environments.inference import run_env
 from src.environments.base import REWARD_COMPONENTS_KEY
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.grading import (
-    VERDICT_DETAIL_FULL,
-    VERDICT_DETAIL_OUTCOME,
-    GradingSpec,
-    grade_solution,
-    run_solution_against_tests,
-)
-from src.environments.envs.tasks.coding.swe import SweEnvironment
 from src.environments.eval_runner import require_answers
 from src.environments.registry import resolve_environment
-from src.environments.sandbox import resolve as resolve_module
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
+from src.environments.sandbox import factory as factory_module
+from src.environments.sandbox.base import SandboxExecutor
 from src.environments.sandbox.bubblewrap import BubblewrapSandbox
 from src.environments.sandbox.local import LocalSubprocessSandbox
 from src.environments.sandbox.remote import RemoteSandbox
+from src.environments.sandbox.results import SandboxResult
+from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from src.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
+from src.environments.tasks.coding.swe import SweEnvironment
+from src.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
 
@@ -293,7 +289,7 @@ class _CheckerOutage(SandboxExecutor):
 
     def run(self, code, *, stdin="", timeout=15.0, language="python", files=None):
         if files and "checker.py" in files:
-            return SandboxResult(error=f"could not stage {files['correct_output.txt']!r}")
+            return SandboxResult(error=f"could not write {files['correct_output.txt']!r}")
         return SandboxResult(stdout="7\n", returncode=0)
 
 
@@ -328,7 +324,7 @@ def test_a_remote_compile_message_shows_under_full_only():
 
 
 class _BuildsApart(StubSandbox):
-    compiles_without_test_input = True
+    COMPILES_WITHOUT_TEST_INPUT = True
 
 
 def test_a_compile_message_shows_under_outcome_only_where_the_backend_builds_apart():
@@ -337,8 +333,8 @@ def test_a_compile_message_shows_under_outcome_only_where_the_backend_builds_apa
     shown = run_solution_against_tests("code", tests, sandbox=_BuildsApart(rejected), language="cpp")
     hidden = run_solution_against_tests("code", tests, sandbox=StubSandbox(rejected), language="cpp")
     assert "undeclared_name" in shown.details and "undeclared_name" not in hidden.details, hidden.details
-    assert BubblewrapSandbox.compiles_without_test_input
-    assert not LocalSubprocessSandbox.compiles_without_test_input and not RemoteSandbox.compiles_without_test_input
+    assert BubblewrapSandbox.COMPILES_WITHOUT_TEST_INPUT
+    assert not LocalSubprocessSandbox.COMPILES_WITHOUT_TEST_INPUT and not RemoteSandbox.COMPILES_WITHOUT_TEST_INPUT
 
 
 def _plant_input_and_force_a_rebuild(header: pathlib.Path) -> str:
@@ -394,8 +390,8 @@ def _unconfined_warnings(caplog) -> list[str]:
 
 @pytest.fixture
 def fresh_warnings(monkeypatch, caplog):
-    monkeypatch.setattr(resolve_module, "_UNISOLATED_WARNED", set())
-    caplog.set_level(logging.WARNING, logger=resolve_module.__name__)
+    monkeypatch.setattr(factory_module, "_unisolated_warned", set())
+    caplog.set_level(logging.WARNING, logger=factory_module.__name__)
     return caplog
 
 

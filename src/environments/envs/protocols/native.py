@@ -9,7 +9,6 @@ from typing import Any
 
 from src.environments.base import (
     ANSWER_KEY,
-    CUT_TOOL_CALLS_KEY,
     EPISODE_ERROR_KEY,
     EPISODE_TOOL_BUDGETS_KEY,
     LAST_TURN_KEY,
@@ -21,7 +20,7 @@ from src.environments.base import (
     require_count,
     require_magnitudes,
 )
-from src.environments.sandbox.base import SandboxFault
+from src.environments.sandbox.results import SandboxFault
 from src.environments.tools.definitions import (
     TOOL_CALL_REFUSALS,
     NativeTool,
@@ -30,10 +29,11 @@ from src.environments.tools.definitions import (
     NativeToolResult,
     ToolBudgetExhausted,
     ToolDisabled,
-    refused_unrun,
+    is_refused_unrun,
 )
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
-from src.rewards.graders.matching import validate_answer
+from src.rewards.graders.matching import is_correct_answer
+from src.rewards.samples import CUT_TOOL_CALLS_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
     def _result_from_call(self, tc: NativeToolCall, outcome: str | Exception) -> NativeToolResult:
         """Build a NativeToolResult from a success payload or caught exception (:func:`tool_call_outcome`,
         observation truncated). A refusal, at admission or by the handler, is marked ``refused`` (a disabled
-        tool's error is not one, :func:`refused_unrun`); a sandbox fault rides on the result, so the accounting
+        tool's error is not one, :func:`is_refused_unrun`); a sandbox fault rides on the result, so the accounting
         books it by type."""
         content, success, fault = tool_call_outcome(tc.name, outcome)
         return NativeToolResult(
@@ -240,7 +240,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
             name=tc.name,
             content=self._truncate_observation(content),
             success=success,
-            refused=refused_unrun(outcome),
+            refused=is_refused_unrun(outcome),
             sandbox_fault=fault,
         )
 
@@ -383,7 +383,7 @@ class NativeToolUseEnvironment(BaseEnvironment):
 
         expected = ctx.get(ANSWER_KEY)
         if expected is not None:
-            return EpisodeGrade(1.0 if validate_answer(trajectory.info.get("final_response", ""), expected) else 0.0)
+            return EpisodeGrade(1.0 if is_correct_answer(trajectory.info.get("final_response", ""), expected) else 0.0)
 
         if ANSWER_KEY in ctx:
             return self._null_answer_grade(trajectory)

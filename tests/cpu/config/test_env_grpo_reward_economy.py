@@ -32,7 +32,14 @@ from ruamel.yaml import YAML
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.base import VALID_REASONING_EFFORTS
-from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, JudgeTerm, OnError, parse_reward_terms
+from src.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
+from src.rewards.terms import (
+    ENVIRONMENT_REWARD_SOURCES,
+    JudgeTerm,
+    OnError,
+    parse_reward_terms,
+    resolve_environment_checks,
+)
 from src.trainers.grpo.reasoning_terms import REASONING_TARGET_SHARE, reasoning_floor_term, reasoning_price_term
 from tests.common.repo import REPO_ROOT
 
@@ -63,6 +70,12 @@ _PER_TURN_BUDGETS = {"low": 8192, "medium": 12288, "high": 16384}
 # The knobs every code-contests recipe states explicitly, so a recipe never rides on a default it does
 # not spell. The price is not among them: a recipe that runs none omits it and its cap.
 _REQUIRED_KEYS = ("reasoning_floor", "rollout_max_episode_tokens")
+
+
+def _parsed_terms(terms: list) -> tuple:
+    """A recipe's reward terms as the environment resolves them: a veto judge listing ``checks: environment``
+    audits with the code-contests rubric."""
+    return resolve_environment_checks(parse_reward_terms(terms, ENVIRONMENT_REWARD_SOURCES), AUDIT_CHECKS)
 
 
 def _economy(path: Path) -> dict:
@@ -99,7 +112,7 @@ def _economy(path: Path) -> dict:
         # What each fired process check of a veto judge costs; a veto check's own price is left out, its gate costs more.
         "process_prices": {
             check.name: -judge.price(judge.flag_fraction({check.name: True}))
-            for judge in parse_reward_terms(terms, ENVIRONMENT_REWARD_SOURCES)
+            for judge in _parsed_terms(terms)
             if isinstance(judge, JudgeTerm) and judge.is_veto
             for check in judge.checks
             if not check.veto
@@ -179,8 +192,7 @@ def _prices_fall_with_level(economy: dict) -> bool:
 
 def _audit(path: Path) -> JudgeTerm:
     """The recipe's veto judge, parsed as the trainer parses it."""
-    terms = parse_reward_terms(_yaml.load(path)["rewards"], ENVIRONMENT_REWARD_SOURCES)
-    (judge,) = (term for term in terms if isinstance(term, JudgeTerm))
+    (judge,) = (term for term in _parsed_terms(_yaml.load(path)["rewards"]) if isinstance(term, JudgeTerm))
     return judge
 
 
@@ -351,11 +363,7 @@ def test_running_out_costs_more_than_one_more_failed_submission(path):
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_the_failure_only_process_checks_are_defined_on_failed_episodes(path):
     """The worst solve leaves these out of what it pays, which holds only while the check text says so."""
-    checks = {
-        check["name"]: check["description"]
-        for term in _economy(path)["raw"].get("rewards", [])
-        for check in term.get("checks", [])
-    }
+    checks = {check.name: check.description for check in _audit(path).checks}
     for name in _FAILURE_ONLY_CHECKS:
         if name in checks:
             assert "an episode that never passed every test" in checks[name], f"{name} no longer excludes solves"

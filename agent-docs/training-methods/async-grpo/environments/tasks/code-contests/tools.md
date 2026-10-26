@@ -82,7 +82,7 @@ Error: Not run: this looks like cpp code sent with language "python"; send it ag
 
 `submit_solution` says `Not graded` instead. The call is [refused](#refused-calls): it pays `tool_error_penalty`,
 spends no budget, grades nothing and leaves the `language` slice unchanged, and a turn of such calls alone is
-untrainable, so no solve reinforces the wasted turn. The check (`evident_language` in `code_contests.py`) acts
+untrainable, so no solve reinforces the wasted turn. The check (`find_evident_language` in `program_source.py`) acts
 only when a Python parse and the program's textual marks point the same way; a program it misses runs as labeled.
 A submission after an accept takes the post-accept reply whatever its label.
 

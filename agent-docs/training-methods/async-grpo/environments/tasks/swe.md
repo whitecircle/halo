@@ -1,6 +1,6 @@
 # SWE Environment
 
-`SweEnvironment` (`src/environments/envs/tasks/coding/swe.py`, registry name `swe`) trains an edit-run-test loop over a workspace that persists across turns. It speaks native tool calls, so the server needs the family's tool-call parser ([Tool calls](../../episodes.md#tool-calls)).
+`SweEnvironment` (`src/environments/tasks/coding/swe.py`, registry name `swe`) trains an edit-run-test loop over a workspace that persists across turns. It speaks native tool calls, so the server needs the family's tool-call parser ([Tool calls](../../episodes.md#tool-calls)).
 
 - No third-party agent scaffold (SWE-agent, mini-SWE-agent, OpenHands, opencode) is wired in: the model gets the tools below and nothing else.
 - Each episode gets its own sandbox session, so one instance serves concurrent rollouts.

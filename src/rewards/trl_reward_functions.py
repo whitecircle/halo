@@ -6,10 +6,10 @@ from collections.abc import Callable, Mapping, Sequence
 from statistics import fmean
 from typing import Any
 
+from src.rewards.composer import build_scorer
 from src.rewards.samples import samples_from_completions
-from src.rewards.scorers.base import Scorer, scored_metric_key
-from src.rewards.scorers.catalog import build_scorer
-from src.rewards.terms import OnError, RewardTerm, ScoredTerm, refuse_veto_judges
+from src.rewards.scorers.base import Scorer
+from src.rewards.terms import OnError, RewardTerm, ScoredTerm, reject_veto_judges, scored_metric_key
 
 Grader = Callable[..., Sequence[float | None]]
 
@@ -29,18 +29,15 @@ class TermRewardFunction:
 
 
 class ScorerRewardFunction:
-    """An asynchronous TRL reward function over an external scorer. TRL runs coroutine reward functions
-    together on its own loop, so a judge's requests overlap with every other async reward's.
+    """An asynchronous TRL reward function over an external scorer; TRL runs coroutine reward functions together on
+    its own loop, so a judge's requests overlap with every other async reward's.
 
-    ``prompt_column`` names the dataset column holding the conversation the policy was prompted with,
-    read in place of TRL's ``prompts`` (the rendered template text), and ``reference_column`` the one
-    TRL forwards as the sample's reference. A declared column TRL did not forward raises rather than
-    scoring the rendered template or without the reference. A sample the scorer reached no verdict on returns
-    ``None``, which TRL sums as 0 beside the row's other terms (the row leaves the baseline only when
-    every term returned ``None``), or ``0`` under ``on_error: neutral``. The scorer's fixed diagnostic keys and the term's
-    ``<source>/<name>/scored`` rate are averaged into TRL's metrics through the ``log_metric``
-    callback it passes — every key on every call, since TRL gathers each key across ranks and a rank
-    whose samples all failed must not log a different set (0 stands in for a key no sample carried).
+    ``prompt_column`` names the dataset column holding the conversation the policy was prompted with, read in place
+    of TRL's rendered ``prompts``, and ``reference_column`` the sample's reference; a declared column TRL did not
+    forward raises. A sample without a verdict returns ``None`` (TRL sums it as 0; the row leaves the baseline only
+    when every term returned ``None``), or ``0`` under ``on_error: neutral``. The scorer's diagnostic keys and the
+    term's ``<source>/<name>/scored`` rate reach TRL's metrics through its ``log_metric`` callback, every key on
+    every call: TRL gathers each key across ranks (0 stands in for a key no sample carried).
     """
 
     def __init__(self, term: ScoredTerm, scorer: Scorer, *, prompt_column: str | None, reference_column: str | None):
@@ -76,7 +73,7 @@ class ScorerRewardFunction:
         return kwargs[column]
 
 
-def reward_functions(
+def build_trl_reward_functions(
     terms: Sequence[RewardTerm],
     graders: Mapping[type[RewardTerm], Callable[[RewardTerm], Grader]],
     *,
@@ -87,7 +84,7 @@ def reward_functions(
     :class:`ScorerRewardFunction`, any other a :class:`TermRewardFunction` over the grader its type
     maps to in ``graders``. A veto judge gates an environment objective, which TRL's independent
     reward functions have no way to express, so it is refused here."""
-    refuse_veto_judges(terms, where="the online arm's independent reward functions")
+    reject_veto_judges(terms, where="the online arm's independent reward functions")
     functions: list[Callable] = []
     weights: list[float] = []
     for term in terms:

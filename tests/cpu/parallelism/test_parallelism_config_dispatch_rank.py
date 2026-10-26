@@ -3,7 +3,7 @@
 
 Under expert TP, an EP group splits into ``expert_tp_size`` dispatch (sub-EP) chunks; ETP partners
 share a ``dispatch_ep_rank`` and therefore a DP batch, so ``ParallelismConfig.get_data_parallel_rank``
-and ``EPConfig._create_expert_tp_groups`` must derive the SAME dispatch rank from ``ep_rank`` —
+and ``EPConfig._build_expert_tp_groups`` must derive the SAME dispatch rank from ``ep_rank`` —
 node-local (contiguous dispatch chunks of ``ep_size``) and cross-node (one ETP group per NVLink
 domain) use different formulas. A divergence would give ETP partners different batches and desync
 the token-space ``ReduceFromExpertTP`` all-reduce.
@@ -134,7 +134,7 @@ def test_ep_config_dispatch_formulas_pinned():
 
 def test_leaf_function_matches_group_construction():
     """``etp_partition`` must agree with the INDEPENDENT indexing the real group construction uses:
-    the ranks ``_create_expert_tp_groups`` put in this rank's expert-TP group (captured via the
+    the ranks ``_build_expert_tp_groups`` put in this rank's expert-TP group (captured via the
     stubbed ``new_group``) are exactly the EP-group members the layout assigns this rank's dispatch
     coordinate. EPConfig assigns its own coords THROUGH the layout, so comparing those would certify
     nothing — the constructed membership is the only independent spelling."""

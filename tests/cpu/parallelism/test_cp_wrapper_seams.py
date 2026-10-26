@@ -15,7 +15,6 @@ Run: ``python tests/cpu/parallelism/test_cp_wrapper_seams.py`` (or ``pytest -m c
 
 from __future__ import annotations
 
-import types
 from unittest.mock import patch
 
 import pytest
@@ -157,15 +156,16 @@ def test_inputs_embeds_only_and_multimodal_calls_report_different_problems(tmp_p
 
 def test_cp_size_above_one_refuses_to_run_without_a_process_group():
     """No group means no all-to-all, so this process would attend over chunk 0 alone."""
-    no_dist = types.SimpleNamespace(is_initialized=lambda: False)
-    with patch(f"{_CP_MOD}.dist", no_dist), pytest.raises(RuntimeError, match="initialized torch.distributed"):
+    with (
+        patch(f"{_CP_MOD}.has_process_group", return_value=False),
+        pytest.raises(RuntimeError, match="initialized torch.distributed"),
+    ):
         CPConfig(2, stage_world_size=8, stage_base_rank=0, nvlink_domain_size=8)
 
 
 def test_cp_size_one_still_builds_without_a_process_group():
     """Anti-vacuity: the single-process path is exactly the one that must survive."""
-    no_dist = types.SimpleNamespace(is_initialized=lambda: False)
-    with patch(f"{_CP_MOD}.dist", no_dist):
+    with patch(f"{_CP_MOD}.has_process_group", return_value=False):
         config = CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1)
     assert config.process_group is None and config.cp_rank == 0
 

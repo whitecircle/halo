@@ -137,10 +137,10 @@ def run(ctx):
         flat = torch.randn(BATCH * SEQ, topk_layer.hidden_dim, device=device, dtype=torch.bfloat16)
         logits = F.linear(flat, topk_layer.gate.weight)
         scores = topk_layer.score_fn(logits.float())
-        natural = topk_layer._select_experts(scores, None)  # zero bias == natural selection
+        natural = topk_layer._select_topk_on_scores(scores)  # zero bias == natural selection
         target = 0
         topk_layer.balancing_biases[target] = 1e3
-        forced = topk_layer._select_experts(scores, None)
+        forced = topk_layer._select_topk_on_scores(scores)
         # The huge bias must pull the target expert into EVERY selection — and the natural
         # selection must not already do that (else the check is vacuous).
         checks["bias_shift_forces_target_expert"] = bool((forced == target).any(-1).all()) and not bool(
