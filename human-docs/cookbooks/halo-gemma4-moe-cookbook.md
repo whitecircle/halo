@@ -93,7 +93,8 @@ file and `SGLANG_REASONING_PARSER=gemma4`.
 
 ## Limits
 
-- No CP or TP: Gemma 4 attention has no wrapper for either.
+- No CP or TP: Gemma 4 attention has no wrapper for either. No pipeline parallelism: a stage cut would
+  break its per-layer embeddings and shared key-value layers.
 - `padding_free` is refused, since no variable-length kernel serves this attention. Use `packing`.
 - No routing replay on either engine. Don't set `VLLM_ENABLE_R3` or `SGLANG_ENABLE_R3`.
 - No router balancing of any kind.

@@ -27,7 +27,7 @@ halo launch <method> <config.yaml> [launcher flags] [field overrides]
 The CLI picks the launcher:
 
 - one process: plain `python`
-- `--nproc` above 1: `torchrun` (required for EP, CP and TP)
+- `--nproc` above 1: `torchrun` (required for EP, CP, TP and ETP)
 - `--accelerate`: `accelerate launch`
 
 Other flags after the config go to the trainer as is, so config overrides ride

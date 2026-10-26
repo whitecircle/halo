@@ -66,7 +66,7 @@ mechanism.
 - [Performance](performance.md): the throughput to expect, the levers that move
   it, and the ones that don't.
 - [Supported matrix](supported-matrix.md): model family × mode, runtime
-  versions and the standing limits.
+  versions, what is validated and the standing limits.
 
 ## Operate
 

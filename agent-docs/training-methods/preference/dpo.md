@@ -2,7 +2,7 @@
 
 DPO fits the policy to pairwise preferences against a frozen reference model, with no reward model. Use it on `prompt` / `chosen` / `rejected` rows when a reference fits the budget; for the same data without one use [SMPO](smpo.md), for unpaired thumbs-up/down rows [KTO](kto.md).
 
-Trainer `DistributedDPOTrainer`, script `scripts/training/preference/dpo.py` (text or VLM). EP, TP and ETP apply; CP does not — TRL's loss path is not CP-aware ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
+Trainer `DistributedDPOTrainer`, script `scripts/training/preference/dpo.py` (text or VLM). EP, TP, ETP and [PP](#pipeline-parallelism) apply; CP does not — TRL's loss path is not CP-aware ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Configuration
 
@@ -76,6 +76,10 @@ torchrun --nproc_per_node=8 scripts/training/preference/dpo.py \
 ```
 
 `halo launch dpo <config> --nproc 8` builds the same line; any field is overridable (`--beta=0.05`). `accelerate launch` serves plain DP only — EP/CP/TP reject it.
+
+## Pipeline parallelism
+
+Under `pipeline_parallel_size > 1` DPO is precompute-only and text-only: no stage holds the whole model, so set `precompute_ref_log_probs: true` with `ref_chosen_logps` / `ref_rejected_logps` already in the train and every eval split, and pass no `ref_model`. The last stage re-implements `sigmoid`, `hinge` and `ipo`, alone or combined; every other `loss_type` is refused (`aot`, `aot_unpaired` and `sft` couple the whole batch), as are an `f_divergence_type` other than `reverse_kl`, `use_weighting`, `ld_alpha` and `compute_metrics`. The refusals every PP trainer shares, PEFT included: [Rejected combinations](../../parallelism/pipeline-parallelism.md#rejected-combinations).
 
 ## Vision-language
 

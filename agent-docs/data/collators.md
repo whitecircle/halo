@@ -208,7 +208,7 @@ they score packed rows under the same masks the student does.
     **warns** (it pays a dense `[L, L]` mask per layer). A family whose dense path leaks documents
     makes packing raise too ([Document isolation](#document-isolation-under-packing)), and
     DeepSeek-V4 (eager-only: head_dim 512 exceeds FA's 256 cap) refuses both. Gemma 4 lands on the
-    warning; use padded batches. See [Padding-Free Collator](../optimization/padding-free-collator.md).
+    warning; its shipped config packs at batch 1. See [Padding-Free Collator](../optimization/padding-free-collator.md).
 
 - **Padding-free is incompatible with Context Parallelism**, and **packing is rejected under CP**.
   Under CP use the padded collator, which sets `pad_to_multiple_of=cp_size`.

@@ -2,7 +2,7 @@
 
 Kahneman-Tversky Optimization trains on **unpaired** binary feedback: each row is one completion labeled desirable or not. Use it for thumbs-up/down labels rather than preference pairs; for chosen/rejected pairs use [DPO](dpo.md) or [SMPO](smpo.md), for several scored completions per prompt [Offline GRPO](../grpo/offline.md).
 
-Trainer `DistributedKTOTrainer`, script `scripts/training/preference/kto.py` (text or VLM). EP, TP and ETP apply; CP does not — TRL's loss path is not CP-aware. TRL's `use_liger_kernel` is turned off at construction: it selects TRL's chunked log-prob path, which refuses the router aux loss. Liger kernels still apply at the model level.
+Trainer `DistributedKTOTrainer`, script `scripts/training/preference/kto.py` (text or VLM). EP, TP, ETP and PP apply; CP does not — TRL's loss path is not CP-aware. TRL's `use_liger_kernel` is turned off at construction: it selects TRL's chunked log-prob path, which refuses the router aux loss. Liger kernels still apply at the model level.
 
 ## Dataset
 
@@ -35,6 +35,8 @@ output_dir: checkpoints/kto-qwen3.5-9b
 The default `kto` loss builds each row's KL completion from its neighbors in a fixed-order batch, so TRL raises at `per_device_train_batch_size: 1` and at any `train_sampling_strategy` other than the default `sequential`. Only `apo_zero_unpaired` is exempt. KTO has no prompt cap, so an over-long prompt eats its own completion.
 
 The reference model follows DPO's rules — PEFT, precompute under EP/TP, or a frozen copy, which under EP/TP is a whole dense replica per rank (warned) ([DPO — Reference model](dpo.md#reference-model)) — and so does a precompute resume ([DPO — Resuming a precompute run](dpo.md#resuming-a-precompute-run)). The policy, reference and KL sequence log-probs the trainer computes are summed in fp32; reference columns a dataset supplies keep their own precision ([DPO — Log-prob precision](dpo.md#log-prob-precision)). Under the default `kto` loss the saved digest covers the KL completions, which are built per `per_device_train_batch_size`, so a resume that changes it raises when the policy was built from the checkpoint and no separate reference exists. Any other resume (an adapter or merge-on-save checkpoint, a frozen reference copy) sweeps instead.
+
+Under pipeline parallelism KTO runs only `loss_type: apo_zero_unpaired` (the default `kto` needs a world-global KL baseline no microbatch can compute), text-only, with `precompute_ref_log_probs: true` and a `ref_logps` column already in the train and every eval split; a live `ref_model` and `compute_metrics` are refused ([Rejected combinations](../../parallelism/pipeline-parallelism.md#rejected-combinations)).
 
 ## Launch
 

@@ -27,7 +27,9 @@ EP expert LoRA cannot be merged afterwards: train it with
 ## Sharded EP saves
 
 `save_sharded_ep: true` skips the gather, which makes checkpointing a very large
-model faster. Run `halo run merge-ep-shards` before the checkpoint can be used.
+model faster. Run `halo run merge-ep-shards` before the checkpoint can be used;
+the merged directory carries every rank's optimizer shard, so it also resumes
+exactly on the topology that wrote it.
 It needs one EP group spanning all ranks, no CP, ETP or expert LoRA, a shared
 filesystem across nodes, and a supported family
 ([full list](../agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp) ↗).
@@ -52,8 +54,8 @@ A save is safe to interrupt: `save_total_limit` never deletes a checkpoint
 before its successor is complete. LoRA runs restore the adapters onto the base,
 and MoE router-balancing state is saved and restored automatically.
 `load_best_model_at_end` is refused at startup where the end-of-run reload
-cannot work: a full fine-tune under CP, an MoE wrapped for expert compute, and
-TP with more than one data-parallel replica
+cannot work: a full fine-tune under CP, an MoE on EP layers, and TP with more
+than one data-parallel replica
 ([full mechanics](../agent-docs/reference/checkpoints.md#resuming-training) ↗).
 
 ## Per-node PP saves
@@ -85,9 +87,10 @@ flags.
 | `reset-sinks` | disable the attention sinks in a GPT-OSS checkpoint |
 | `reattach-vision-tower` | restore the vision tower to a `text_only_model` Qwen3.5/3.6 export, the layout vLLM loads |
 
-The tools write to a new directory (only `reset-sinks` takes `--in_place`),
-reject a sharded EP save until `merge-ep-shards` has run, and keep a converted
-run's resume files except the optimizer shards. Flags and input guards:
+The tools write to a new directory (only `reset-sinks` takes `--in_place`) and
+reject a sharded EP save until `merge-ep-shards` has run. The conversions keep a
+run's resume files except the optimizer shards, which only `merge-ep-shards` and
+`merge-pp-stages` carry. Flags and input guards:
 [Scripts reference](../agent-docs/reference/scripts-reference.md#post-training-scripts) ↗.
 
 ## Serving the result
@@ -95,16 +98,17 @@ run's resume files except the optimizer shards. Flags and input guards:
 A gathered checkpoint loads with `from_pretrained`. vLLM and SGLang serve it
 only where the pinned engine reads that family's layout:
 
-- **No serving path** on either engine: Mistral4, Ling 3.0, Ring, GLM-5 Next
-  and Zaya. DeepSeek-V4 has none on vLLM, whose loader reads only the fp8/fp4
-  release.
-- **Untested:** Inkling exports, and DeepSeek-V4 exports on SGLang after
-  `unfuse-moe-experts`. Both use the hub's names, but no engine has served one.
+- **No serving path:** Mistral4 and Ring on either engine (neither registers
+  their architecture), and Zaya on SGLang, whose loader reads a layout the export
+  does not carry.
+- **Untested:** Zaya on vLLM's generic transformers backend, Ling 3.0, Inkling,
+  and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The exports use the
+  hub's names, but no engine has served one.
 - **Every other family** serves its normal save as is, except a Cohere2 MoE
   (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first.
-- **Fused experts on a per-expert-only loader** are dropped without an error.
-  Rewrite such a checkpoint with `unfuse-moe-experts` first; the result is the
-  hub's own layout
+- **Fused experts on a per-expert-only loader** are refused or dropped without
+  an error. Rewrite such a checkpoint with `unfuse-moe-experts` first; the result
+  is the hub's own layout
   ([per-engine loaders](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
 - **Sharded EP saves** need `merge-ep-shards` first, and per-node PP saves
   `merge-pp-stages`.

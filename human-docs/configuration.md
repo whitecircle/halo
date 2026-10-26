@@ -107,6 +107,9 @@ These fail at startup, not deep into training:
   reads them as truthy strings, which would invert what you wrote. Use `true` or
   `false`.
 - A value outside a field's allowed choices (`advantage_method: banana`).
+- `ddp_timeout` set away from its default. The process group starts before the
+  config is parsed, so its watchdog is `DIST_NCCL_TIMEOUT_MINUTES`
+  ([Environment variables](environment-variables.md#when-to-set-the-others)).
 - An invalid parallelism shape. `ParallelismConfig` rejects it after parsing and
   before any weights load ([Parallelism](parallelism.md)).
 

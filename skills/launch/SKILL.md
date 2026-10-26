@@ -35,7 +35,7 @@ its targets instead of re-typing `docker run`. Run `make help` and use a target 
 
 ```bash
 # Training — CONFIG is required; METHOD defaults to sft (any `halo launch --list` entry, e.g.
-# offline-grpo, environmental-grpo, preference/smpo); NPROC defaults to 8; IMAGE to halo:blackwell;
+# grpo/offline, grpo/environmental, preference/smpo); NPROC defaults to 8; IMAGE to halo:blackwell;
 # EXTRA passes through extra CLI flags.
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 make train CONFIG=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
@@ -56,8 +56,8 @@ serving the same checkpoint on a GPU outside `TRAINER_CUDA_DEVICES`, one pass pe
 What a `make` run differs in from a hand-rolled launch (foreground, `--network host`, no
 `--cap-add=SYS_PTRACE`, conditional `.env`/`~/.aws`) and the one `HALO_SCRATCH` override for the large
 volume: [Docker → Standard training launch](../../agent-docs/infrastructure/docker.md#standard-training-launch).
-Unset, `make` resolves `HALO_SCRATCH` to the local mount other than `/` with the most free space — verify the pick with
-`findmnt`/`df -h` and pass `HALO_SCRATCH=<path>` to choose another.
+Unset, `make` resolves `HALO_SCRATCH` to the local mount other than `/` with the most free space over 20 GB, and
+stops when none qualifies — verify the pick with `findmnt`/`df -h` and pass `HALO_SCRATCH=<path>` to choose another.
 
 ## 2. Raw detached `docker run` (when `make` doesn't fit)
 
@@ -94,9 +94,13 @@ arch with `nvidia-smi`. What each image carries, and pulling a missing tag from 
 ## 4. GPU count and disjoint / concurrent runs
 
 - **GPU count** is the `torchrun --nproc_per_node=<n>` value (and `NPROC=<n>`
-  for `make`). EP/CP/TP parallelism flags (e.g. `--expert_parallel_size`,
+  for `make`). Parallelism flags (e.g. `--expert_parallel_size`,
   `--context_parallel_size`, `--tensor_parallel_size`) pass through `EXTRA=` or
   directly after the config in the raw template.
+- **Multi-node** runs one `torchrun` per node; `halo launch` (which `make train` calls) is single-node
+  and refuses torchrun's rendezvous flags. Pipeline parallelism is multi-node at the default NVLink domain
+  size, since every stage spans whole domains:
+  [Multi-Node Launch Recipes](../../agent-docs/parallelism/launch-recipes.md#torchrun).
 - **Subset of GPUs** — restrict the devices the container sees with
   `--gpus '"device=0,1,2,3"'` (note the nested quoting). Inside, torchrun uses
   `--nproc_per_node` equal to that count.

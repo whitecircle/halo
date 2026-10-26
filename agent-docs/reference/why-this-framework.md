@@ -27,7 +27,7 @@ Versions compared: TRL 1.14.2 and Accelerate 1.11.0 (the pinned releases), Unslo
 | Native HF models (no conversion) | **Yes (all modes)** | Yes (no EP) | Yes (plumbing) | Yes (no EP/CP/TP) | Yes | MCore for EP/CP/TP | MCore for EP/CP/TP | No |
 | Flash Attention (FA4 Blackwell / FA3 Hopper / FA2 fallback) | **Yes** | Inherited (FA2/3) | Inherited | No (FA2) | Yes (FA2/3/4) | Yes | Inherited (FA2) | Via TE |
 | Native `s3://` datasets | **Yes** | No | No | No | Yes | No | No | Via MSC |
-| Multi-node | **Tested** | Via Accelerate | Yes | Paid tiers | Yes | Yes | Yes | Yes |
+| Multi-node | **Tested** ([verified topologies](../parallelism/multi-node.md#verified-topologies)) | Via Accelerate | Yes | Paid tiers | Yes | Yes | Yes | Yes |
 
 Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, this toolkit and Axolotl run DeepEP expert parallelism on the upstream HF MoE modules. Two neighbors sit close: NeMo AutoModel keeps HF checkpoints without a conversion step but ships its own implementation of each supported architecture behind the `transformers` API, and transformers itself shards a model at load (`from_pretrained(distributed_config=DistributedConfig(...))`) with FSDP2, TP and EP: `ep_size` dispatches tokens through a torch all-to-all (`ep_dispatch_experts`, most MoE families' default plan), and a few families keep a router that all-reduces the full MoE output across `ep_size == tp_size` ranks. On the pinned transformers 5.20.2 and Accelerate 1.11.0, the transformers `Trainer` trains such a model only at `tp_size=1` (FSDP2 plus token dispatch) and without resume; it, and TRL's trainers that subclass it, run neither TP, CP nor the all-reduce EP path: a load-time TP model needs a newer Accelerate, and CP needs Accelerate's `ParallelismConfig` (`TrainingArguments.parallelism_config`), on which that `Trainer` fails at construction under this Accelerate release.
 
@@ -63,13 +63,14 @@ Notes on individual frameworks:
 ## Model compatibility
 
 Any HuggingFace `AutoModelForCausalLM` works with standard FSDP, and any model carrying a `tp_plan`
-gets TP. Advanced parallelism (EP, CP, ETP) requires per-family wrappers, not a model
+gets TP. Advanced parallelism (EP, CP, ETP, PP) needs per-family registration, not a model
 reimplementation or a checkpoint conversion.
 
 For EP, that is a frozen `MoEFamilySpec` holding the family's facts plus an EP layer under
-`halo/distributed/expert_parallel/families/` (most under 140 lines) subclassing `EPMoELayerBase`, declaring
+`halo/distributed/expert_parallel/families/` (most under 120 lines) subclassing `EPMoELayerBase`, declaring
 its `HF_MODULE_NAMES` and pointing `FAMILY` at the spec, with `MOE_LAYER_MAP` built from the roster's
-imports. Fifteen MoE families ship one; the per-family × per-mode matrix is
+imports; for PP, a validated `PPFamilySpec` in `PP_FAMILY_SPECS`. Fifteen MoE families ship an EP layer;
+the per-family × per-mode matrix is
 [Supported Models](../models/README.md), and [Adding a New Model](../models/adding-a-model.md) is the
 procedure. Trainer × parallelism support is separate — see
 [Trainer Compatibility](trainer-architecture.md#trainer-compatibility).

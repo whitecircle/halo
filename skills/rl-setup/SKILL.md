@@ -31,8 +31,10 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
 
 ## End-to-end wiring
 
-1. **Bring up the server.** `make build-vllm` (or `build-sglang`), then `docker-compose.vllm.yml` /
-   `docker-compose.sglang.yml`. Server and trainer GPUs must be **disjoint** (`VLLM_CUDA_DEVICES` vs
+1. **Bring up the server.** `make build-vllm` (or `build-sglang`), or pull the public image and point
+   `VLLM_IMAGE` / `SGLANG_IMAGE` at it; then `docker-compose.vllm.yml` / `docker-compose.sglang.yml`, which
+   refuse to start without `HALO_SCRATCH` (vLLM) / `SGLANG_MODEL_DIR` (SGLang): export them or set them in
+   the repo-root `.env`. Server and trainer GPUs must be **disjoint** (`VLLM_CUDA_DEVICES` vs
    `TRAINER_CUDA_DEVICES`: a rank cannot broadcast to itself), both containers run `network_mode: host`,
    and **MoE needs the triton expert backend** (the compose default; the auto backends repack expert
    weights and corrupt synced updates). Use the toolkit images, not upstream: both pin the training

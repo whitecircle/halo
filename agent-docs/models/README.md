@@ -1,6 +1,6 @@
 # Supported Models
 
-**Any HuggingFace `AutoModelForCausalLM` trains with standard FSDP.** The matrix below is about *advanced* parallelism — EP for MoE routing, ETP for expert FFN sharding, CP for long sequences, TP for weight sharding, PP for depth across NVLink domains. It is the one family table; `tests/cpu/parallelism/test_docs_limitation_tables.py` derives every EP/ETP/CP/TP/PP cell from the code, keyed on the row's `model_type`.
+**Any HuggingFace `AutoModelForCausalLM` trains with standard FSDP**, which loads the whole model onto every GPU first, so it must fit one ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)). The matrix below is about *advanced* parallelism — EP for MoE routing, ETP for expert FFN sharding, CP for long sequences, TP for weight sharding, PP for depth across NVLink domains. It is the one family table; `tests/cpu/parallelism/test_docs_limitation_tables.py` derives every EP/ETP/CP/TP/PP cell from the code, keyed on the row's `model_type`.
 
 The **TP column** tracks the Halo-side path: HF-native `tp_plan="auto"` for dense models (Yes when the config ships a `base_model_tp_plan`), and *selective* TP (attention only; embeddings and `lm_head` replicated; experts left to EP) for MoE models. GPT-OSS ships a `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo path.
 
@@ -30,13 +30,13 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [Step-3.7 Flash](step3p7.md) | `step3p7` | Yes | Yes | No | No | Yes ¹⁰ | `examples/sft/step3p7/*` |
 | Any other HF model with a `tp_plan` (Llama, Mistral, Phi, …) | — | — | — | No | Yes | No | — |
 
-The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). Every row trains LoRA adapters under FSDP/DP, EP, CP and pure ETP; TP and EP+TP reject them, and expert adapters are refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). Inkling and Command A+ LoRA is tiny-model verified only. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). Every row trains LoRA adapters under FSDP/DP, EP, CP and pure ETP; TP, EP+TP and PP reject them, and expert adapters are refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). Inkling and Command A+ LoRA is tiny-model verified only. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 ¹ The tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate; 8B and up split.
 
 ² Text-only batches: a batch carrying `pixel_values` raises mid-run.
 
-³ At most `tensor_parallel_size=2` (2 KV heads).
+³ `tensor_parallel_size` must divide the KV heads: at most 2 on 35B-A3B.
 
 ⁴ Text towers (`text_only_model: true` for the multimodal checkpoints), no packing.
 

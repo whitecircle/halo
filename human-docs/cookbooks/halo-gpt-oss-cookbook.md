@@ -43,6 +43,10 @@ Or replace its `--expert_parallel_size=8` with one of these:
 - Pure ETP8, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=8`
 - A 4-way expert split: `--expert_parallel_size=4 --expert_tensor_parallel_size=2`
 
+On two nodes, `examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` runs pipeline parallelism, one
+stage per node with EP8 inside it
+([Clusters](../clusters.md#pipeline-parallelism-across-nodes)).
+
 ### LoRA
 
 ```bash

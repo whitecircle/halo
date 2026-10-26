@@ -73,6 +73,8 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 
 - No gradient checkpointing, in any mode.
 - No CP or TP. CCA's sequence convolution breaks a sequence split, and its attention has no TP plan.
+- No pipeline parallelism: a stage cut would sever the fp32 residual stream and the router state each
+  layer passes to the next.
 - No online RL. vLLM 0.32.0 has no native ZAYA1 class, and SGLang 0.5.22's loader reads only the legacy
   per-expert layout, so Halo refuses weight sync to either engine when it builds the trainer.
 - No routing replay.

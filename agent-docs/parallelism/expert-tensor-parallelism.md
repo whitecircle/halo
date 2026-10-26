@@ -10,6 +10,9 @@ NVLink-local groups, cutting per-rank expert memory without touching attention. 
   The EP group splits into `expert_tp_size` DeepEP dispatch groups coupled by a strided expert-TP
   all-reduce.
 
+Pure ETP also runs inside each pipeline stage ([PP + ETP](pipeline-parallelism.md#pp--etp-moe)); EP+ETP
+does not compose with PP.
+
 Use ETP when expert weights don't fit per rank after EP distribution and attention fits on one GPU.
 Per-rank expert memory drops ~`expert_tp_size`×; ranks in the same ETP group share a batch, reducing
 DP.
@@ -65,6 +68,8 @@ Gradient divisors (`build_expert_grad_hook` / `build_router_grad_hook`, `halo/di
 | Expert weights | `world_size / expert_tp_size` | Each shard sees that many distinct batches |
 | Router weights | `world_size` | Duplicates within expert TP cancel |
 | Non-expert params | `world_size` | FSDP2 `fully_shard`, duplicates cancel |
+
+Under PP every `world_size` here is the stage's rank count.
 
 ## Quick start
 
@@ -196,7 +201,8 @@ would be dropped silently. `reject_unsupported_model` checks it off
 That helper is the one home for "what does ETP actually shard", so the config-time gate and the
 layer that does the split cannot disagree on which config spelling carries the per-expert width.
 
-**Axis combinations.** Pure ETP and EP+ETP only ([allowlist](README.md#supported-combinations)).
+**Axis combinations.** Pure ETP, EP+ETP, and pure ETP inside PP stages
+([allowlist](README.md#supported-combinations)).
 
 **Knobs.** ETP inherits every [EP knob rule](expert-parallelism.md#limitations) (`has_ep_group` is
 `ep_group_size > 1`, which pure ETP satisfies). On top of those:

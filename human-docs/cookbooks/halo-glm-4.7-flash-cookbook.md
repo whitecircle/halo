@@ -80,8 +80,8 @@ the trainer.
 ## Settings that matter
 
 - **Attention.** The recipe pins `flash_attention_2`. FA4's backward produces NaN gradients on GLM's
-  attention shape, so Halo replaces an FA4 pick with SDPA. CP refuses an SDPA label, so keep FA2 under
-  CP.
+  attention shape, so Halo replaces an FA4 pick with SDPA, or with FA2 under CP. CP refuses an explicit
+  `sdpa` label.
 - **Router balancing.** The recipe sets `moe_balancing: bias_update`, which `auto` also picks. It updates
   the router's own `e_score_correction_bias`, so the trained bias ships in every checkpoint and the
   served model routes as it trained. The router has no auxiliary loss to use instead.
@@ -96,8 +96,7 @@ the trainer.
 - On Blackwell, both engines need an MLA attention backend that accepts GLM's head size:
   `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` or `SGLANG_ATTENTION_BACKEND=triton`. With SGLang's default the
   server exits at startup.
-- SGLang weight sync needs this repo's SGLang image. It patches the GLM-4 router, which upstream caches
-  on first use.
+- No pipeline parallelism: GLM-4 MoE Lite is not a registered pipeline family.
 
 ## Export and serve
 

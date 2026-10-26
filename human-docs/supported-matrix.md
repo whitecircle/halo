@@ -5,21 +5,23 @@ truth; where a recipe disagrees with this page, this page wins.
 
 ## Runtime
 
-| Area | Supported |
+| Package | Version in the image |
 | --- | --- |
-| Python | `>=3.12,<3.13`, installed with uv into the image |
-| PyTorch | 2.11.x, `cu130` wheel (CUDA 13.2 toolkit in the image) |
-| Transformers | 5.20.x |
-| TRL | 1.14.x |
-| Accelerate | 1.11.x |
-| PEFT | 0.18.x |
-| vLLM | 0.32.0, separate container: rollouts for both online RL methods |
-| SGLang | 0.5.22, separate container: rollouts for async GRPO with environments |
+| Python | 3.12, installed with uv into the system interpreter |
+| PyTorch | 2.11.0, `cu130` wheel (CUDA 13.2 toolkit) |
+| Transformers | 5.20.2 |
+| TRL | 1.14.2 |
+| Accelerate | 1.11.0 |
+| PEFT | 0.18.1 |
+| sentence-transformers | 6.1.0 |
+| Liger Kernel | 0.8.4 |
+| vLLM | 0.32.0 on Model Runner V2, its own container: rollouts for both online RL methods |
+| SGLang | 0.5.22, its own container: rollouts for async GRPO with environments |
 
 | Hardware | Image | Status |
 | --- | --- | --- |
 | NVIDIA B200 / B300 | `halo:blackwell` | supported, primary target |
-| NVIDIA H100 / H200 | `halo:hopper` | supported |
+| NVIDIA H100 / H200 | `halo:hopper` | supported; no GPU test runs on Hopper ([Validation](#validation)) |
 | NVIDIA GB200 / GB300 NVL72 | none | Grace hosts are aarch64; both images are x86_64-only |
 | NVIDIA A100, RTX 3090 / 4090 | `halo:blackwell` | single-GPU LoRA/QLoRA only (torch, FA2 and bitsandbytes carry sm_80–sm_89 kernels; DeepEP, FA3 and FA4 do not run); not validated |
 | RTX 50-series (SM 12.x) | `halo:blackwell` | set `attn_implementation: flash_attention_2` or `sdpa`, since the auto-selected FA4 does not run on SM 12.x; not validated |
@@ -48,8 +50,7 @@ SDPA or eager where no flash kernel serves the family.
 
 CP picks its own kernel and ignores the configured label: FA3 on Hopper, FA4 on
 Blackwell (FA2 for the families that fall back from FA4), FA2 otherwise. It
-rejects an SDPA label, except for Bailing/Ling, so GLM-4 MoE Lite under CP sets
-`attn_implementation: flash_attention_2` (its shipped EP config already does).
+rejects an explicit SDPA label, except for Bailing/Ling.
 Per-family details:
 [Flash Attention](../agent-docs/optimization/flash-attention.md) ↗.
 
@@ -151,11 +152,30 @@ turns grouped GEMM off under ETP. Online RL per family:
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
 | Muon, FlashAdamW | supported optimizer options, except under PP |
 | HuggingFace, local and `s3://` datasets | supported; offline tokenize, pack and shard with `halo run prepare-dataset` |
+| Tree packing (`tree_packing`) | SFT on GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE), raw text datasets, FA4 or FA2; refused under CP, TP and PP; ETP and EP+ETP are admitted but unverified ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗) |
 | VLM packing / padding-free | unsupported: images cannot be packed, so VLM inputs use standard padding |
 | Streaming an infinite corpus | unsupported: the loaders build a map-style `Dataset`; pre-tokenize and shard offline |
 
 What each mode writes, and which resumes are exact:
 [Checkpoints](checkpoints.md).
+
+## Validation
+
+The GPU tests run on single 8× B300 nodes: the core and pipeline tiers, both
+rollout-server tiers, the EP and CP bit-for-bit equivalence gates and the
+throughput band.
+
+- **Hopper:** the image build, the CPU test tier inside it and an FA3 import
+  check. No GPU test runs on Hopper.
+- **Multi-node:** two nodes simulated on one host (two containers, socket NCCL,
+  per-node storage). A Qwen3-8B `pp2` run trains, resumes, merges with
+  `merge-pp-stages` and resumes exactly from the merged directory. Not run on two
+  machines: cross-node EP and EP+ETP, two-node CP, `pp2` × `ep8`, `pp2` × `etp2`
+  and the EFA weight-sync preflight.
+- **Upgrades:** checkpoints written by Halo 1.1.0 resume with the optimizer
+  restored exactly, and export and merge: FSDP2, LoRA, EP gathered and merged
+  sharded saves, and async GRPO whose prefetched rounds hold plain prompts and
+  answers.
 
 ## Limits
 

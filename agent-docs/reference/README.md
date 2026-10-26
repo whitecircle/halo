@@ -2,8 +2,8 @@
 
 ## Architecture & design
 
-- **[Architecture](architecture.md)** — The layer map — config, trainers, distributed, data, models, callbacks, diagnostics, kernels, checkpoints, optimizers, environments — and how every trainer adds one mixin to a TRL/Transformers base.
-- **[Trainer Architecture](trainer-architecture.md)** — The distributed mixin, EP/TP/CP patching, rollout-engine weight sync, and saving across all trainers.
+- **[Architecture](architecture.md)** — The `halo/` component map, the import layer table, and how every trainer adds one mixin to a TRL, Transformers or SentenceTransformers base.
+- **[Trainer Architecture](trainer-architecture.md)** — The distributed mixin, trainer × CP/PP support, the per-mode wrap, gradient sync and clipping, rollout-engine weight sync, and saving across all trainers.
 - **[Why This Framework](why-this-framework.md)** — How the toolkit compares to HF TRL, Accelerate, Unsloth, Axolotl, MS-SWIFT, veRL, and Megatron-LM, plus model compatibility and key dependencies.
 - **[GPU Training Theory](gpu-training-theory.md)** — The roofline, the four bottlenecks a step can hit, and what every optimization and parallelism lever actually pulls on.
 
@@ -11,8 +11,8 @@
 
 ## Configuration & usage
 
-- **[Configuration Reference](configuration-reference.md)** — Every config class with parameter tables, YAML examples, and CLI overrides.
-- **[Scripts Reference](scripts-reference.md)** — Every script by category — training, inference, post-training, preparation, and profiling — each with a usage example.
+- **[Configuration Reference](configuration-reference.md)** — Every config class field by field, the environment-variable catalog, YAML parsing and CLI overrides.
+- **[Scripts Reference](scripts-reference.md)** — Every script by category — training, inference, post-training, preparation, profiling — with its flags and input guards, and the `halo launch` / `halo run` CLI.
 
 ---
 

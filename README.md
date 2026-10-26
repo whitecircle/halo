@@ -111,7 +111,7 @@ halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8
 halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
     -a launcher-configs/accelerate/fsdp2_gradop_config.yaml -n 8
 
-# all training methods (sft, smpo, dpo, rlvr, environmental-grpo, ...)
+# all training methods (sft, preference/smpo, grpo/online, grpo/environmental, ...)
 halo launch --list
 ```
 
@@ -252,7 +252,7 @@ Each axis has its own flag. EP combines with one of CP, TP, or ETP, and PP with 
 | Mode | Best for                                  |
 |---|-------------------------------------------|
 | EP | Distribute MoE experts across GPUs        |
-| TP | Shard model weights across GPUs           |
+| TP | Shard model weights across GPUs (a dense model past one GPU) |
 | CP | Split long sequences across GPUs          |
 | ETP | Shard individual expert FFNs              |
 | EP+CP | MoE + long-context training               |
@@ -277,7 +277,7 @@ for the per-model matrix, and [Clusters & Multi-Node](human-docs/clusters.md) fo
 
 Enabled by default where supported:
 
-- **Attention and kernels** — Flash Attention 4 on Blackwell, FA2/FA3 on Hopper, Liger fused
+- **Attention and kernels** — Flash Attention 4 on Blackwell, FA3 on Hopper, FA2 elsewhere, Liger fused
   CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 take torch's fused RMSNorm instead),
   fused GLU kernels, and Grouped GEMM for MoE expert compute.
 
@@ -286,7 +286,8 @@ Enabled by default where supported:
   supported. FP8/FP4 MoE training is available through fake-quant QAT and DeepGEMM, with
   mxfp8/mxfp4/nvfp4 export.
 
-- **Memory and PEFT** — padding-free, boundary-aware packing with `cu_seq_lens`, plus LoRA and QLoRA.
+- **Memory and PEFT** — padding-free, boundary-aware packing with `cu_seq_lens`, SFT tree packing that
+  stores a prefix several rows share once, plus LoRA and QLoRA.
   QLoRA fits a 24 GB consumer GPU: the [Qwen3-4B QLoRA example](examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml)
   peaks at 7.9 GiB (batch 1, 4k) and Qwen3-8B at 32k fits in 20.9 GiB with the fused loss. Ampere and Ada
   cards run single-GPU LoRA/QLoRA from `halo:blackwell` (FA2/SDPA), but that path is not validated.

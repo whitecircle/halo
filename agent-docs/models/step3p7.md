@@ -1,6 +1,6 @@
 # Step-3.7 Flash
 
-`Step3p7ForConditionalGeneration` (`stepfun-ai/Step-3.7-Flash`) — 198B total / ~11B active composite VLM (196B language backbone + 1.8B vision encoder), native in transformers 5.16 (`model_type` `step3p7`, text config `step3p5`; no remote code). 45 text layers interleave 12 full-attention and 33 sliding-window layers, every head carries a sigmoid attention gate, and a 288-expert sigmoid-routed MoE carries most of the parameters.
+`Step3p7ForConditionalGeneration` (`stepfun-ai/Step-3.7-Flash`) — 198B total / ~11B active composite VLM (196B language backbone + 1.8B vision encoder), native in transformers since 5.16 (`model_type` `step3p7`, text config `step3p5`; no remote code). 45 text layers interleave 12 full-attention and 33 sliding-window layers, every head carries a sigmoid attention gate, and a 288-expert sigmoid-routed MoE carries most of the parameters.
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism takes the text tower only: a text-only run of the composite is admitted and re-emits the vision tower in every checkpoint, image data is refused, and stage boundaries land on the period-4 `layer_types` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 

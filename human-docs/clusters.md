@@ -38,10 +38,13 @@ parallelism flag.
 - **`0`: per-node local disk** (RunPod pods, ephemeral NVMe). Each node saves its
   own copy. Resume needs no copying as long as every node keeps its
   `--node_rank`, since optimizer shards stay on the node that wrote them. Resume
-  on per-node storage is validated in CPU simulations only.
+  on per-node storage is validated on one host simulating two nodes, not on two
+  machines ([Validation](supported-matrix.md#validation)).
 
-A multi-node run checks the declaration against `output_dir` at startup and
-refuses one that contradicts the mount.
+A multi-node run checks the declarations against `output_dir` and the HF caches
+at startup and refuses one that contradicts the mount. One input declaration
+covers both caches, so `HF_HUB_CACHE` and `HF_DATASETS_CACHE` must sit on the
+same kind of storage.
 
 The umbrella splits into a read side (`DIST_INPUT_SHARED_FILESYSTEM`) and a write
 side (`DIST_OUTPUT_SHARED_FILESYSTEM`). On a flaky NFS/EFS mount, set the input
@@ -69,8 +72,10 @@ Other rules for multi-node storage:
 
 ## Network fabric
 
-InfiniBand and RoCE run on the NCCL defaults in the image. Only EFA is validated
-by real multi-node runs. Three setups need extra environment:
+InfiniBand and RoCE run on the NCCL defaults in the image. Real multi-node runs
+have used EFA only, and none ran on this release
+([Validation](supported-matrix.md#validation)). Three setups need extra
+environment:
 
 - **AWS EFA.** Set `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` and pass `--device
   /dev/infiniband`; cross-node expert parallelism also needs `NCCL_GIN_TYPE=2`
@@ -130,8 +135,8 @@ and reduce-scatter crosses the fabric. `--use_hsdp=true` shards within an NVLink
 domain and replicates across domains, so only the gradient all-reduce leaves the
 NVLink domain.
 
-It covers the plain data-parallel path (pure DP or CP). EP, TP and ETP reject it
-at startup, and on a single-domain job it does nothing.
+It covers the plain data-parallel path (pure DP or CP). EP, TP, ETP and PP
+reject it at startup, and on a single-domain job it does nothing.
 
 ## Rollout servers on other nodes
 
@@ -156,8 +161,10 @@ sky logs oss-120b --follow
 ```
 
 Each YAML ships `resources.image_id` commented out, naming the prebuilt image
-for its GPUs. Uncomment it (or pass `--image-id`) before launching.
-[SkyPilot](../agent-docs/infrastructure/skypilot.md) ↗.
+for its GPUs. Uncomment it (or pass `--image-id`) before launching. A
+multi-node `nodelocal-ep` launch needs `--network-tier best`: on Nebius, without
+it the cross-node gradient sync runs over TCP with no error
+([SkyPilot](../agent-docs/infrastructure/skypilot.md) ↗).
 
 ## RunPod
 

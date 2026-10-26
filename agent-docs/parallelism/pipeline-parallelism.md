@@ -21,22 +21,21 @@ Per-step traffic that crosses RDMA, by mode:
 | TP / CP | **forbidden cross-node** | — |
 | **PP** | **boundary activations, point-to-point** | `B·S·H` per microbatch per stage edge (`× hc_mult` for the hyper-connection families — [cost below](#boundary-cost)) |
 
-Within one NVLink domain PP earns nothing — FSDP2 plus node-local EP/TP/ETP already dominate. Its
-case is a model that cannot live in one domain, or a job wide enough that cross-node DP bandwidth is
-the wall.
+When that trade pays, and when it does not (inside one domain, or on an NVL72 rack):
+[When pipeline parallelism is worth it](README.md#when-pipeline-parallelism-is-worth-it).
 
 ## Launching
 
-Set `pipeline_parallel_size` on a script whose trainer declares `PP_REFUSAL = None`
-([Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility)). Any other script
-refuses it at config time with `<Trainer> does not support Pipeline Parallelism (PP)`, before a model
-loads. The model's backbone must be registered
-([Model support](#model-support)); any other is refused by name on the meta shell, on every rank,
-before a weight is read.
+Set `pipeline_parallel_size` on a script whose trainer declares `PP_REFUSAL = None`: SFT, SMPO, DPO,
+KTO, offline GRPO, Bradley-Terry reward and classification
+([Trainer support](#trainer-support)). Any other script refuses it before a model loads with
+`<Trainer> does not support Pipeline Parallelism (PP): <its PP_REFUSAL>`. The model's backbone must be
+registered ([Model support](#model-support)); any other is refused by name on the meta shell, on every
+rank, before a weight is read.
 
-Launch with `torchrun`, one per node. Every stage is a whole number of NVLink domains holding at
-least two ranks, so a run spans at least two domains — two nodes at the default domain sizing. Two
-recipes ship, both one stage per node on 2 × 8 GPUs:
+Launch one `torchrun` per node (`halo launch` is single-node). Every stage is a whole number of NVLink
+domains holding at least two ranks, so a run spans at least two domains — two nodes at the default
+domain sizing. Two recipes ship, both one stage per node on 2 × 8 GPUs:
 
 | Recipe | Shape |
 |---|---|
@@ -72,51 +71,56 @@ rejected too (the stage FSDP wrap assumes DP ≥ 2).
 The four knobs (`pipeline_parallel_size`, `pipeline_microbatches`, `pipeline_schedule`,
 `pipeline_split`), their defaults and constraints:
 [Configuration reference → ParallelismConfig](../reference/configuration-reference.md#parallelismconfig).
-The microbatches **are** the gradient accumulation (auto = `gradient_accumulation_steps`), and a
-`pipeline_split` sums to the layer count with boundaries on the `layer_types` period.
-`data_parallel_size` is divided by `pipeline_parallel_size`: a whole chain consumes one batch.
+How they interact with the trainer's batch settings:
 
-`max_length` must be set. The pipeline freezes its P2P shapes on the first step and pads every batch
-to it, so an unset value is rejected at construction. Offline GRPO fills an unset `max_length` from
-`max_prompt_length + max_completion_length` (both required) and rejects a smaller explicit one. For
-the same frozen shapes the train dataloader runs with `drop_last=True`, forced and logged when the
-config leaves it off; a short final batch would crash mid-epoch.
+- The microbatches **are** the gradient accumulation: an unset `pipeline_microbatches` takes
+  `gradient_accumulation_steps`, setting both raises, and the trainer then runs with
+  `gradient_accumulation_steps=1`. Under `1f1b` a count below `pp_size` is raised to it, with a warning.
+- `per_device_train_batch_size` is the chain's rows per optimizer step, split into the microbatches,
+  so it must be a multiple of their count (the recipes run 8 rows in 8 microbatches).
+- `data_parallel_size` is divided by `pipeline_parallel_size`: a whole chain consumes one batch.
+- A `pipeline_split` sums to the layer count with boundaries on the `layer_types` period
+  ([Split-offset constraint](#split-offset-constraint)).
+- `max_length` must be set: the pipeline freezes its P2P shapes on the first step and pads every batch
+  to it. Offline GRPO fills an unset one from `max_prompt_length + max_completion_length` (both
+  required) and rejects a smaller explicit one. A `max_length` at the model's context window is
+  warned, since every row then pays full-window compute. The train dataloader runs with
+  `drop_last=True`, forced and logged when the config leaves it off.
 
 **Microbatch count sizes the bubble.** Below `4 × pp_size` microbatches the trainer warns: at
 `2 × pp_size` the 1F1B bubble measured ~22% of the step at `pp_size = 2` (B300, two simulated NVLink
 domains on one host), and the idle share grows with `pp_size`. Plan for `9 × (pp_size − 1)`
 microbatches to hold it at 10%.
 
-**Raising `pp_size` does not shrink the bubble.** With no ETP in the stage, `data_parallel_size ==
-stage_world_size`. With one row per microbatch (what packing requires) the count is
-`m = T × pp_size`, for `T = global_batch_tokens / (world_size × max_length)`, so the 1F1B bubble
-`(pp − 1)/(m + pp − 1)` *rises* with `pp_size`, toward a ceiling of `1/(1 + T)`. What sets the bubble
-is the global batch you accept, not the stage count. At world 512, `max_length` 8192, `pp8`: a
+**Raising `pp_size` does not shrink the bubble.** With one row per microbatch (what packing requires)
+and no ETP, the count is `m = T × pp_size` for `T = global_batch_tokens / (world_size × max_length)`,
+so the 1F1B bubble `(pp − 1)/(m + pp − 1)` *rises* with `pp_size`, toward `1/(1 + T)`. The global
+batch you accept sets the bubble, not the stage count: at world 512, `max_length` 8192, `pp8`, a
 4.2M-token step is `m = 8` and a **47%** bubble; 10% needs `m = 63`, ~33M tokens per step. Only an
-interleaved (virtual-stage) schedule changes this arithmetic, and none is wired.
+interleaved (virtual-stage) schedule changes this, and none is wired.
 
 **Stage partition.** The default split is **head-weighted**: the last stage carries the `lm_head`
-matmul + CE (for Qwen3-8B, ~3 decoder layers' worth of compute), so its layer budget shrinks by the
-head's layer-equivalent cost, snapped to the model's `layer_types` period, and the earlier stages
-absorb the difference. Any partition is gradient-exact; only throughput changes. The chosen partition
-is logged at startup.
+matmul + CE (for Qwen3-8B, ~3 decoder layers' worth of compute), so its layer budget shrinks by that
+cost, snapped to the `layer_types` period, and the earlier stages absorb the difference. Any
+partition is gradient-exact; only throughput changes. The chosen partition is logged at startup.
 
 ## Model support
 
 A stage is the **real backbone** with its layer list sliced, the final norm neutralized on non-last
-stages, and non-first stages driven through `inputs_embeds`, so each family's rotary embeddings, mask
-construction, `layer_types` handling and EP layers are inherited. The input embedding is located
-by identity (`get_input_embeddings`).
+stages, the input embedding (found through `get_input_embeddings`, with any norm it carries) dropped
+off non-first stages, and non-first stages driven through `inputs_embeds`, so each family's rotary
+embeddings, mask construction, `layer_types` handling and EP layers are inherited.
 
 Families are registered in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`), one
 `PPFamilySpec` per family keyed by its backbone class. A spec with `validated=True` is registered: its
-stages reproduce the unsplit model on the pipeline GPU tier, and `tests/cpu/conventions/test_pp_family_roster.py`
-holds every such family to a GPU row that runs it, a MoE one also with its experts distributed. A spec with a `refusal` is refused with
-its reason. A backbone no spec registers is refused by name —
+stages reproduce the unsplit model on the pipeline GPU tier, and
+`tests/cpu/conventions/test_pp_family_roster.py` holds every such family to a GPU row that runs it, a
+MoE one also with its experts distributed. A spec with a `refusal` is refused with its reason, and a
+backbone no spec registers is refused by name —
 `<Backbone> is not registered for pipeline parallelism (PP_FAMILY_SPECS); registered: ...`.
-`reject_unsupported_pp_structure` (`model_rules.py`) runs, in order: the decoder-layer probe, the
-family refusal, the tie gate, the head-transform check, the live-MTP gate, then the registration
-verdict, so a tied or MTP-carrying checkpoint names that reason first.
+`reject_unsupported_pp_structure` (`model_rules.py`) checks, in order, the decoder-layer list, the
+family refusal, the tie gate, the head transform, live MTP layers and the registration, so a tied or
+MTP-carrying checkpoint names that reason first.
 
 | Family (backbone) | Verdict | Constraint |
 |---|---|---|
@@ -128,29 +132,25 @@ verdict, so a tied or MTP-carrying checkpoint names that reason first.
 | GLM-5 Next text tower (`Glm5NextTextModel`) | registered | hyper-connection boundary, any split offset; a stage may not begin on a `shared` DSA indexer layer (`indexer_types`; GLM-5.3-Flash ships all `full`). The composite `Glm5NextForConditionalGeneration` trains text-only, as Step-3.7's does |
 | Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
 | Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
-| Inkling (`InklingTextModel`) | refused | loader-only validation: no schedule, end-to-end or save/resume row. Its embedding module carries `embed_norm`, so the norm leaves later stages with it |
-| Any other backbone | not registered | refused by name |
+| Inkling (`InklingTextModel`) | refused | loader-only validation: no schedule, end-to-end or save/resume row |
+| Any other backbone (Qwen3 MoE, GLM-4 MoE Lite, Bailing, Mistral 4, Laguna, LFM-2, Cohere2 MoE, …) | not registered | refused by name |
 
 Models with **live** MTP tail layers are refused: MTP re-embeds `input_ids` mid-backbone, a second
-cross-stage stream. Live means built — the decoder list is longer than `num_hidden_layers`. All three
-config spellings count (`num_nextn_predict_layers`, `mtp_num_hidden_layers`, `num_mtp_layers`, read
-off `config.get_text_config()`); a field the native families ship as checkpoint metadata
-(transformers drops the MTP weights at load) passes.
+cross-stage stream. Live means built — the decoder list is longer than `num_hidden_layers` — so an MTP
+count the native families ship as checkpoint metadata (`num_nextn_predict_layers`,
+`mtp_num_hidden_layers`, `num_mtp_layers`; transformers drops those weights at load) passes.
 
-**Hyper-connection families** (DeepSeek-V4, GLM-5 Next) carry the `hc_mult`-widened
-`[batch, seq, hc_mult, hidden]` stream between layers, widened from the embedding before layer 0 and
-collapsed by `hc_head` after the last. Their spec declares `hc_head` a tail module (neutralized off
-the last stage like the norm) and binds a mid-chain forward (`deepseek_v4_stream_forward`,
-`glm5_next_stream_forward`) that feeds the received stream to the layer loop instead of re-widening
-it; stage 0 keeps the real forward. Both families select per-layer inputs by the layer's own
-attributes (`layer_types_rebase_safe`), so any split offset is exact.
+**Hyper-connection families** (DeepSeek-V4, GLM-5 Next) carry the `[batch, seq, hc_mult, hidden]`
+stream between layers, widened from the embedding before layer 0 and collapsed by `hc_head` after the
+last. Their spec neutralizes `hc_head` off the last stage like the norm, and binds a mid-chain forward
+that feeds the received stream to the layer loop instead of re-widening it. Both select per-layer
+inputs by the layer's own attributes (`layer_types_rebase_safe`), so any split offset is exact.
 
 ### Boundary cost
 
 One bf16 tensor crosses each stage edge per microbatch per direction (the activation forward, its
 gradient back) and nothing else: masks, `position_ids` and `labels` are re-sliced on every rank from
-the batch it already holds, `use_cache` is off, and shape inference exchanges meta tensors once. The
-received buffer goes straight into the first layer and the last layer's output is sent as-is.
+the batch it already holds, and shape inference exchanges meta tensors once.
 
 | Boundary | bytes/token, one direction | 32k-token microbatch, one crossing | NVLink (400 GB/s) | EFA share (50 GB/s) |
 |---|---:|---:|---:|---:|
@@ -165,10 +165,10 @@ traffic; the cut position does not.
 
 ### Split-offset constraint
 
-GptOss, Qwen3, Qwen3.5, LFM-2, Laguna and Step-3.7 select each layer's attention mask by *position in
-the layer list*. A stage starting off a whole number of `layer_types` periods would give
-sliding-window layers a full causal mask, so `validate_partition` (`partition.py`) raises at split
-time, on every rank; a family whose spec is `layer_types_rebase_safe` is exempt. The period is the
+GptOss, Qwen3, Qwen3.5/3.6 and Step-3.7 select each layer's attention mask by *position in the layer
+list*. A stage starting off a whole number of `layer_types` periods would give sliding-window layers a
+full causal mask, so `validate_partition` (`partition.py`) raises at split time, on every rank; the
+hyper-connection families (`layer_types_rebase_safe`) are exempt. The period is the
 smallest shift `p` with `layer_types[p:] == layer_types[:-p]`, so a ragged list (Step-3.7-Flash: 45
 layers = 11 whole `full,s,s,s` periods plus one) still has period 4.
 
@@ -189,11 +189,11 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
 - The stage FSDP wrap is EP-aware: EP layers are FSDP-ignored (`ep_size>1`) or sharded as
   stage-mesh DTensors (`ep_size==1` + `fsdp_shard_ep1_experts`); `fsdp_shard_ep1_experts: false` is
   rejected under PP.
-- EP gradient sync runs in one deferred post-backward sweep (`EPConfig.defer_grad_sync`): PP forces
-  `gradient_accumulation_steps=1`, so per-backward hooks would re-fire after every microbatch. The
-  sweep is off at `ep_size == 1` with the default `fsdp_shard_ep1_experts`, where FSDP2's own
-  reduce-scatter syncs the experts. Router and replicated averages reduce over the stage's rank
-  block, never the world.
+- EP gradient sync runs in one deferred post-backward sweep (`EPConfig.defer_grad_sync`), since
+  per-backward hooks would fire on every microbatch and re-scale grads already synced. The sweep is
+  off at `ep_size == 1` with the default `fsdp_shard_ep1_experts`, where FSDP2's own reduce-scatter
+  syncs the experts. Router and replicated averages reduce over the stage's rank block, never the
+  world.
 - The gradient norm is exact and rank-uniform: one world all-reduce of each rank's local squared
   norm where every stage parameter is a DTensor; otherwise stage-scoped reduces, then one sum across
   the pipeline chain.
@@ -205,12 +205,10 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
   ([EP checkpoint scope](expert-parallelism.md#gradient-checkpoint-dispatch-replay)). The DeepEP
   capacity generation is registered on `PipelineStageModule`, so every microbatch sizes its own
   dispatch.
-- The equivalence gate (`tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py`, the EP modes of
-  `test_pp_combos_8gpu.py`) compares against a bf16 ep1 twin with both sides on the unfused
-  expert-output sum, since the fused un-permute rounds a rank's local top-k sum once. The other
-  validated pipeline MoE families (Qwen3.5/3.6-MoE, Step-3.7, DeepSeek-V4, GLM-5 Next) are scored
-  against their unsplit ep1 twin through the real trainer at `ep2` in `test_pp_family_vs_reference.py`;
-  `tests/cpu/conventions/test_pp_family_roster.py` requires a PP+EP row of every validated MoE family.
+- Equivalence gates: gpt-oss against a bf16 ep1 twin (`tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py`,
+  both sides on the unfused expert-output sum, since the fused un-permute rounds a rank's local top-k
+  sum once), and every other registered MoE family against its unsplit ep1 twin through the real
+  trainer at `ep2` (`test_pp_family_vs_reference.py`).
 
 ## PP + ETP (MoE)
 
@@ -225,11 +223,9 @@ data-parallel replicas.
   because `ep_size == 1` leaves no DeepEP combine to interleave with. Adding EP on top is rejected.
 - The equivalence gate (`tests/gpu/parallelism/pp/test_pp_etp_vs_unsplit.py`) runs in **fp32**: ETP
   reorders the summation producing each expert's output, which in bf16 flips near-tied top-k picks
-  with no sync bug present.
-- Save, export and exact resume are covered by `test_pp_ep_resume.py --mode etp2` and, on CPU, by the
-  gloo case `test_pp_plus_etp_exports_unsplit_experts_under_global_names`
-  (`tests/cpu/checkpoint/test_pp_sharded_save_roundtrip.py`), which requires the stage's writer to export
-  each expert whole under global layer names.
+  with no sync bug present. Save, export (each expert whole, under global layer names) and exact
+  resume are covered on GPU (`test_pp_ep_resume.py --mode etp2`) and on CPU
+  (`tests/cpu/checkpoint/test_pp_sharded_save_roundtrip.py`).
 
 ## Rejected combinations
 
@@ -263,7 +259,7 @@ before any rank math; the rest by their own gate.
 | PP + layer-indexed `freeze_layers_patterns` / `unfreeze_layers_patterns` | Each stage's layers are re-based to index 0, so a global index selects the wrong layer ([Configuration](../reference/configuration-reference.md#commonscriptarguments)). |
 | PP + a stage that is not a whole number of NVLink domains, or a one-rank stage | Every intra-stage group must stay inside one stage, and the stage FSDP wrap assumes DP ≥ 2 ([Rank layout](#rank-layout)). |
 | PP + `fsdp_defer_grad_sync` or `fsdp_shard_ep1_experts: false` | The schedule already reduces once per step; with ep1 experts unsharded, a MoE stage and a dense stage run different collective programs and deadlock at the gradient norm ([PP + EP](#pp--ep-moe)). |
-| PP-only knobs at `pipeline_parallel_size: 1`; `pipeline_microbatches` with `gradient_accumulation_steps > 1`; an unset `max_length` | Nothing reads the knobs there; the microbatches are the accumulation; the P2P shapes freeze at `max_length` ([Configuration](#configuration)). |
+| PP-only knobs at `pipeline_parallel_size: 1`; `pipeline_microbatches` with `gradient_accumulation_steps > 1`; a `per_device_train_batch_size` the microbatch count does not divide; an unset `max_length` | Nothing reads the knobs there; the microbatches are the accumulation and split the per-device batch; the P2P shapes freeze at `max_length` ([Configuration](#configuration)). |
 | PP + live MTP tail layers, or a head transform the last stage cannot reproduce | MTP re-embeds `input_ids` mid-backbone ([Model support](#model-support)); the last stage applies the family's head path itself ([Fused head](#fused-head-and-loss-on-the-last-stage)). |
 | PP + `aux_loss` with a live `router_aux_loss_coef`, or a stage with no MoE layer at `ep_group_size > 1` | The split severs the aux-loss path; a dense stage runs a different collective program than its MoE peers and deadlocks ([PP + EP](#pp--ep-moe)). |
 | PP + `compute_metrics` on DPO, KTO or offline GRPO, or an eval batch size other than the train one | No pipeline reproduces their prediction convention; the P2P shapes are frozen ([Evaluation](#evaluation)). |
@@ -305,6 +301,10 @@ rank.
   fp32 CE ([Liger](../optimization/liger-kernels.md)).
 - **Gradient checkpointing** (non-reentrant) is grad-exact: the per-microbatch phase holds FSDP's
   reduction off, so recompute cannot trigger a premature reduce-scatter.
+- **The stage holds its unsharded gradient across the microbatch loop.** The schedule reduce-scatters
+  once per step, so each rank keeps a full gradient of its stage's FSDP-managed parameters until
+  then: 2 B/param in bf16, 4 B/param under `fp32_grad_reduce` or `fp32_non_ep_params` (warned at
+  config time).
 - **Turn GC off under dense PP where memory allows.** A microbatch's activations are already `1/m`
   of a step. Measured on Qwen3-8B, seq 8192, one 8×B300 host split into two simulated NVLink
   domains, 524k tokens/step: dp8+GC 151.2k tok/s at 114 GB; pp2×dp4+GC (m=8) 125.3k; **pp2×dp4
@@ -338,13 +338,9 @@ ignored label, so each pad token is its own length-1 segment carrying no gradien
 
 ## Per-step metrics
 
-Only the last stage runs the loss closure, while HF logs from global rank 0 on the *first* stage.
-`PipelineLossAdapter.metrics_fn` closes the gap: the trainer returns this rank's per-step scalars and
-the mixin broadcasts the last stage's values down the chain (one fp32 vector per step) into the
-trainer's metric store. The names come from configuration, since only values cross; the mixin pins
-them at setup and proves every chain rank agrees. SMPO declares it, dividing its metric sums by the
-full-batch constants its `step_state_fn` stashes. Offline GRPO's per-sample diagnostics drain over
-the stage group and are shared down the chain once per log step.
+Only the last stage computes the loss, while HF logs from global rank 0 on the first stage, so the
+trainer broadcasts the last stage's per-step scalars down the chain (one fp32 vector per step,
+`PipelineLossAdapter.metrics_fn`); every chain rank logs the same values.
 
 ## Evaluation
 
@@ -370,15 +366,10 @@ reduction, so evaluation does not reshard the stage per batch.
 - `per_device_eval_batch_size == per_device_train_batch_size` whenever the run evaluates, since the
   P2P shapes are frozen. Partial final batches are row-padded with all-ignore rows contributing 0,
   then trimmed before scoring.
-- `PipelineLossAdapter.predictions_fn` runs on the last stage before the broadcast (classification
-  sends `[B, num_labels]`, not `[B, S, num_labels]`). Without one, the trainer hoists
-  `preprocess_logits_for_metrics` onto the last stage, which must be row-independent (argmax and
-  top-k are); `compute_metrics` with neither is refused.
+- SFT's `preprocess_logits_for_metrics` runs on the last stage before the broadcast, so it must be
+  row-independent (argmax and top-k are); SFT `compute_metrics` without it is refused.
 - The evaluation gather is scoped to the data-parallel replicas, since every chain rank returns the
   same predictions.
-- The denominator is adapter-declared (`PipelineLossAdapter.eval_normalizer`): the replica's
-  loss-token count by default; reward/DPO pair count, KTO row count, SMPO 1, classification its
-  pooled denominator, offline GRPO its per-loss-type denominator.
 - DPO and KTO require their precomputed reference columns in the eval dataset too.
 
 ## Loading
@@ -413,13 +404,11 @@ load runs on every rank at once; `max_concurrent_loading` does not apply
 
 ## Checkpoints and resume
 
-`save_pp_checkpoint` (`halo/checkpoint/parallel/pp.py`) writes one complete-tensor safetensors
-part set per stage under the hub's names plus a merged standard HF index: the directory loads via
-plain `from_pretrained` and serves like an EP-gathered save
-([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)). A stage names its tensors
-stage-locally, so `build_pipeline_stage` snapshots the unsplit model's load conversions and the save
-reverts each decoder layer, EP layer gather and wrapper stash through them. A module applied to the
-token embedding alone (the spec's `input_module_attrs`) stays on stage 0, so no two stages write it.
+`save_pp_checkpoint` (`halo/checkpoint/parallel/pp.py`) writes one complete-tensor part set per stage
+under the unsplit model's hub names plus a merged standard index, so a directory on a shared output
+filesystem loads with plain `from_pretrained` and serves like an EP-gathered save. The layout, the
+name revert and the index exchange: [Checkpoints → What lands on disk](../reference/checkpoints.md#what-lands-on-disk--four-layouts).
+The input embedding, with any norm it carries, lives on stage 0 alone, so no two stages write it.
 
 The **writer set** follows the output filesystem (`DIST_OUTPUT_SHARED_FILESYSTEM`, falling back to
 the `DIST_SHARED_FILESYSTEM` umbrella):
@@ -431,15 +420,12 @@ the `DIST_SHARED_FILESYSTEM` umbrella):
 | `optimizer_meta.pt`, `scheduler.pt`, `trainer_state.json`, `router_balancing_biases.pt`, offline GRPO's `reference_logps.pt` | global rank 0 | one rank per node, whole |
 | `optimizer_shard_<rank>.pt`, `rng_state_<rank>.pth` | every rank | every rank, on its own node |
 
-Resume reads each stage once. A stage the stage-aware loader built from the checkpoint (every
-scripted resume at the default `use_grouped_gemm`, which repoints the load —
-[Resuming training](../reference/checkpoints.md#resuming-training)) skips its reload; otherwise each
-rank maps the checkpoint's names onto its stage's (`ModuleLayoutView`) and streams only those
-tensors. Because the parts carry the unsplit model's names, the **weights are
-topology-independent**: a complete directory resumes onto a different `pp_size`. The **optimizer**
-shards are stage-local: restore is gated on the topology fingerprint and `pp_stage_partition` (both
-in `optimizer_meta.pt`), and any drift raises. PP+EP resumes expert weights at construction, so
-launch through the training scripts ([Resume by parallelism mode](../reference/checkpoints.md#resume-by-parallelism-mode)).
+Because the parts carry the unsplit model's names, the **weights are topology-independent**: a
+complete directory resumes onto a different `pp_size`. The **optimizer** shards are stage-local:
+their restore is gated on the topology fingerprint and `pp_stage_partition` (both in
+`optimizer_meta.pt`), and any drift raises. PP+EP loads its expert weights only at construction, so
+resume through the training scripts, which repoint the load at the checkpoint
+([Resume by parallelism mode](../reference/checkpoints.md#resume-by-parallelism-mode)).
 
 ### Per-node export
 
@@ -456,14 +442,12 @@ python scripts/after_training/merge_pp_stages.py \
     --output_dir /models/merged
 ```
 
-`merge_pp_stage_parts` (`halo/checkpoint/pp_stage_merge.py`) requires identical indexes across the
-inputs and copies each part the index names from the first input that holds it, refusing a size
-mismatch. It copies every input's optimizer shards, RNG and prefetch states and one
-`optimizer_meta.pt`, refusing metas that differ, a per-rank file held at two sizes and a rank whose
-shard no input holds. The config, tokenizer, remote code, trainer state, scheduler and export
-sidecars come from the first input. It writes the index last and finishes with the absent-shard
-check. A part no input holds raises naming it and its stage. The merged directory loads with
-`from_pretrained`, uploads like a shared-filesystem save, and resumes exactly on the save's topology.
+The inputs must carry identical indexes. Each part comes from the first input holding it; every
+input's optimizer shards, RNG and prefetch states come along with one `optimizer_meta.pt`, and the
+config, tokenizer, trainer state and scheduler come from the first input. A part no input holds, metas
+that differ, a per-rank file held at two sizes or a rank whose shard no input holds is refused before
+the first write; the index lands last. The merged directory loads with `from_pretrained`, uploads like
+a shared-filesystem save, and resumes exactly on the save's topology.
 
 ## Constraints inherited from `torch.distributed.pipelining`
 
@@ -487,17 +471,12 @@ pipeline-loss contract as a `PipelineLossAdapter` (`_pp_loss_adapter()`,
 `_pp_loss_adapter()` once, before anything reads the adapter, so an adapter builder may seed the
 per-step state its loss closes over.
 
-The refusals are pure functions in `halo/trainers/parallelism/pipeline_rules.py`.
-`_split_pipeline_stage` runs them before the split, in this order: the trainer's own
-`_reject_unsupported_pp_options` hook (DPO and KTO: positional `model`/`args`, a live `ref_model`, the
-precompute-only reference contract, `compute_metrics`), then `reject_unsupported_pp_training_args`
-(`max_length`, `save_sharded_ep`, per-node `push_to_hub`, reentrant GC, eval batch size,
-`torch_compile`, TRL's `activation_offloading`), `reject_pp_peft`, `require_pp_stage_model` and,
-for a multimodal wrapper, `reject_pp_vlm`. After `super().__init__`, `reject_pp_collator`,
-`require_pad_token_id` and `reject_uncovered_pp_ep_layers` gate the collator wrap and the stage wrap.
-SMPO and offline GRPO call `reject_pp_peft` and `reject_pp_compute_metrics` on their explicit ctor
-parameters themselves. `reject_pp_vlm` and `reject_uncovered_pp_ep_layers` are collective: their
-evidence is rank-local, so the verdict is joined across ranks.
+The refusals are pure functions in `halo/trainers/parallelism/pipeline_rules.py`. The training-argument,
+PEFT and multimodal gates run before the stage split, with each trainer's own
+`_reject_unsupported_pp_options` (DPO and KTO: keyword `model`/`args`, no live `ref_model`, the
+precompute-only reference, `compute_metrics`); the collator, pad-token and EP-coverage gates run after
+`super().__init__`. The rank-local verdicts (image evidence, a stage with no EP layer) are joined
+across ranks.
 
 Which trainers enable PP: [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 The enabled trainers' pipeline-loss contracts:
@@ -519,14 +498,11 @@ distillation (a second forward per microbatch through a distinct frozen teacher)
 
 ## Code map
 
-`halo/distributed/pipeline_parallel/`: `families.py` (`PPFamilySpec`, `PP_FAMILY_SPECS`, the
-hyper-connection stream forwards), `model_rules.py` (`reject_unsupported_pp_structure`, the
-run-settings gate), `partition.py` (the head-weighted split and `validate_partition`), `stage.py`
-(`StageLayout`, `PipelineStageModule`, `build_pipeline_stage` and the stage↔global naming contract),
-`stage_losses.py` (`TokenLoss`, `FusedHeadLoss`), `groups.py` (the chain and stage groups), `runner.py`
-(`PipelineRunner` over torch's `Schedule1F1B` / `ScheduleGPipe`, `resolve_microbatch_count`); the
-stage-aware loader is `halo/model_loading/parallel/pp.py`. Trainer side: `PipelineTrainerMixin`
-(`halo/trainers/parallelism/pipeline_trainer.py`, inert at `pp_size == 1`), the refusals
-(`halo/trainers/parallelism/pipeline_rules.py`), `PipelineLossAdapter` and the stage clip
-`pp_clip_grad_norm` (`halo/trainers/parallelism/grad_clipping.py`); the next-token label math the losses
-share lives in `halo/kernels/logprobs.py`.
+`halo/distributed/pipeline_parallel/`: `families.py` (the family specs and the hyper-connection
+stream forwards), `model_rules.py` (the structure and run-settings gates), `partition.py` (the split
+and `validate_partition`), `stage.py` (`build_pipeline_stage` and the stage↔global naming),
+`stage_losses.py`, `groups.py` (chain and stage groups) and `runner.py` (`PipelineRunner` over torch's
+`Schedule1F1B` / `ScheduleGPipe`). The stage-aware loader is `halo/model_loading/parallel/pp.py`; the
+trainer side is `PipelineTrainerMixin` (`halo/trainers/parallelism/pipeline_trainer.py`, inert at
+`pp_size == 1`), `pipeline_rules.py`, `pipeline_loss_adapter.py` and the stage clip in
+`grad_clipping.py`.

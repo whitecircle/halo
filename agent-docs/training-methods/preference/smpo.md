@@ -2,7 +2,7 @@
 
 SMPO trains on pairwise preferences with no reference model: a scheduled-margin loss plus a built-in SFT anchor, so one model sits in memory instead of two. Its default `smooth_lower_bound` margin term is exactly zero once the mean-token log-prob gap clears the current margin — where [DPO](dpo.md)'s sigmoid keeps pushing, the source of its log-prob collapse — while the SFT anchors keep training both completions.
 
-Trainer `SMPOTrainer`, config `SMPOConfig` (`halo/configs/preference.py`), script `scripts/training/preference/smpo.py`. The objective — margin losses keyed by `loss_type`, the log-prob clip, the CP-global reductions and the metric folds — is `SMPOObjective` (`halo/trainers/preference/smpo_objective.py`); under PP, `SMPOPipelineLoss` (`smpo_pipeline_loss.py`) carries it over interleaved pairs. `ParallelismConfig` accepts EP, CP, TP, pure ETP, EP+CP, EP+TP and EP+ETP for it, and rejects everything else outside its allowlist.
+Trainer `SMPOTrainer`, config `SMPOConfig` (`halo/configs/preference.py`), script `scripts/training/preference/smpo.py`. The objective — margin losses keyed by `loss_type`, the log-prob clip, the CP-global reductions and the metric folds — is `SMPOObjective` (`halo/trainers/preference/smpo_objective.py`); under PP, `SMPOPipelineLoss` (`smpo_pipeline_loss.py`) carries it over interleaved pairs. `ParallelismConfig` accepts EP, CP, TP, pure ETP, PP, EP+CP, EP+TP, EP+ETP, PP+EP and PP+ETP for it, and rejects everything else outside its allowlist.
 
 ```text
 logits  = mean_token log p(chosen) − mean_token log p(rejected) − margin(step)
@@ -49,7 +49,9 @@ output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 
 `max_length` is the total budget and defaults to `1024`; `null` or a non-positive value resolves it to the context window. An unset `max_prompt_length` takes half of it and `max_completion_length` the remainder. Shares summing past `max_length` are rejected at construction — the two truncate independently. Prompts cut per `truncation_mode` (`keep_end`), completions from the end; a completion cut by `max_completion_length` carries no EOS.
 
-`padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` outside CP included. It is also incompatible with CP, [PP](../../parallelism/pipeline-parallelism.md#rejected-combinations) and VLM runs.
+`padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` outside CP included. It is also incompatible with CP, PP and VLM runs.
+
+Under PP the percentile clips are refused, since a quantile over the whole batch half changes with the microbatch split: set `lower_clip_percentile: null` (its default is `0.02`) and leave `upper_clip_percentile` unset; `min_log_prob` stays. VLM runs and PEFT are refused too ([Rejected combinations](../../parallelism/pipeline-parallelism.md#rejected-combinations)).
 
 Attention isolates each row of the flattened batch through `position_ids`; the LFM-2 and GatedDeltaNet (Qwen3.5/3.6, Qwen3-Next) conv / linear-attention mixers get the segment markers the SFT collators emit, and a GatedDeltaNet model is refused without the `causal_conv1d` / `fla` kernels that read them. Zaya's CCA has no per-document boundary parameter and carries state from each row into the next, across the chosen / rejected split too, so keep `padding_free` off for Zaya. See [Document isolation under packing](../../data/collators.md#document-isolation-under-packing).
 

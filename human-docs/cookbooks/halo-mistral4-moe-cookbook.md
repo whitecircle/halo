@@ -39,7 +39,8 @@ halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 
 
 Add one of these to the full fine-tune command:
 
-- EP8 + CP2, for long sequences (`partial`, see above): `--context_parallel_size=2 --packing=false`
+- EP8 + CP2, for long sequences, which passes a tiny-model LoRA test only:
+  `--context_parallel_size=2 --packing=false`
 - EP8 + TP2, when attention memory is the limit: `--tensor_parallel_size=2`. TP shards the MLA
   expansion and output projections and keeps the compression projections whole.
 - Pure ETP8, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=8`
@@ -79,6 +80,7 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
   Mistral-native `params.json` layout, which a Halo export does not have. vLLM's generic transformers
   backend (`--model-impl transformers`) is untested here.
 - LoRA is refused under TP, and attention TP can't combine with ETP.
+- No pipeline parallelism: Mistral 4 is not a registered pipeline family.
 
 ## Export and serve
 

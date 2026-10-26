@@ -2,7 +2,7 @@
 
 RLVR (Reinforcement Learning with Verifiable Rewards) is on-policy GRPO scored by the config's [reward terms](rewards/README.md), `\boxed{}` exact match by default. Trainer `DistributedOnlineGRPOTrainer`, script `scripts/training/grpo/online.py`. A separate vLLM server generates and receives weights over NCCL; the trainer scores rewards.
 
-Parallelism: EP, TP, EP+TP, EP+ETP and pure ETP (`ep_size=1`). CP and PP are rejected at config time.
+Parallelism: EP, TP, EP+TP, EP+ETP and pure ETP (`ep_size=1`). CP and PP are refused before the model loads.
 
 ![Online GRPO cycle: vLLM generates a group per prompt, the reward terms score it, advantages are group-normalized, the loss steps, and weights sync back over NCCL](../../assets/diagrams/online_grpo_pipeline.png)
 
@@ -103,10 +103,12 @@ Under `loss_type: vespo` with `token_mask`, TRL zeroes each ratio outside the cl
 
 TRL sends `top_k`, `min_p` and `repetition_penalty` on every request, so the model's `generation_config.json` defaults never apply ([Rollout Servers](../../infrastructure/rollout-servers.md)).
 
-### Forced settings
+### Forced and refused settings
 
 - **Dropout is off**, EP expert-LoRA dropout included, overriding `disable_dropout: false`; a config-level float only warns.
 - **MoE balancing is off:** `aux_loss` is inert under a policy-gradient loss, and both bias-update modes downgrade to `none` ([Callbacks](../callbacks.md#balancingbiascallback)).
+- **TRL's `use_liger_kernel` is off:** it routes the log-probs through TRL's chunked LM head, past the family's head transform. Model-level Liger kernels still apply.
+- **Refused at construction** (online and async GRPO): `use_adaptive_entropy` (a sharded resume does not restore its coefficient), a non-zero `entropy_coef` with `use_chunked_grpo_logprobs` (the chunked sweep returns a detached entropy), and an `IterableDataset` on the DP-sharded loader that TP, ETP and pre-sharded datasets use.
 
 ## GRPO objective for verifiable rewards
 
@@ -214,7 +216,7 @@ Each row becomes a group of `num_generations` completions. Under TP and ETP ever
 
 Run a 3-step smoke config against a live server first: `examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml` (dense) or `.../gptoss/online-grpo-gptoss-20b-ep-smoke.yaml` (EP).
 
-CPU: `pytest tests/cpu/grpo -m cpu`. GPU: `test_online_grpo_vllm_*_e2e.py` (the PEFT × parallelism × resume matrix, live server).
+CPU: `pytest tests/cpu/grpo -m cpu`. GPU: `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py` (the PEFT × parallelism × resume matrix against a live server, one `--mode` per row).
 
 ## What to watch
 

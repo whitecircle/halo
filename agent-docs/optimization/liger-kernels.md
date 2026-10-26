@@ -141,8 +141,7 @@ knob surface, a withheld flag must name a role the spec fills, and a role naming
 replaced raises at patch time rather than stacking two swaps.
 
 Everything the dispatch derives then follows the applier that actually **runs**: the `rope`/`swiglu`
-defaults read off its signature, and the EP fused-GLU decision below. CE is the toolkit's scoped patch here
-as everywhere; upstream's branch, a process-wide `F.cross_entropy` rebind, is never called.
+defaults read off its signature, and the EP fused-GLU decision below.
 
 **The shared expert is the toolkit's; the routed experts never run Liger's fused MoE kernel.** Upstream's
 `swiglu` would swap the routed-experts class (`Qwen3_5MoeExperts` / `Qwen3NextExperts`) for `LigerExperts`, so
@@ -185,10 +184,8 @@ loses upstream's dense, shared-expert and vision-MLP SwiGLU along with its `Lige
 whose own `swiglu` default is off (GptOss, whose upstream flag patches nothing) is left alone. Under an EP
 layer the upstream swap is inert and the [soft EP gate](#ep--cp--tp--pp-behavior) decides instead.
 
-Both rules hold at both application sites, so a model loaded outside Halo's loaders is covered too. The
-trainer's re-sanitization of `liger_kernel_config` runs the load's sanitizer, then turns off the roles a
-delegating spec takes over from upstream: HF Trainer re-applies upstream's applier alone, which would
-otherwise get the withheld `swiglu` back ([below](#ep--cp--tp--pp-behavior)).
+Both rules hold at both application sites, the trainer's re-application included
+([below](#ep--cp--tp--pp-behavior)).
 
 `tests/gpu/kernels/test_liger_routed_experts.py` checks the unwrapped path against fp32 eager experts.
 
@@ -243,6 +240,8 @@ Two library defaults are overridden: TRL's `use_liger_kernel=False` (toolkit →
 cross_entropy=False` (toolkit → the reverse, because CE preserves logits for metrics and works with every
 trainer).
 
+With `use_liger_kernel: false`, SFT's TRL `chunked_nll` loss type becomes `nll` ([SFT → Configuration](../training-methods/sft.md#configuration)).
+
 ## CrossEntropy vs FusedLinearCrossEntropy
 
 **CrossEntropy** (default) replaces only the loss function; the model still materializes the
@@ -294,10 +293,8 @@ PP's last stage chunks its own fp32 CE ([PP fused head](../parallelism/pipeline-
 Liger's `skip_logits` gate never fires, and FLCE would report as applied while the full logits plane
 materializes anyway.
 
-`cross_entropy` goes with it because upstream Liger's appliers install it by rebinding
-`torch.nn.functional.cross_entropy` **process-wide**, the exact function the external loss calls. The
-toolkit's own CE patch is scoped ([above](#supported-models)) but is force-off here too so both branches
-behave alike.
+`cross_entropy` goes with it: upstream's appliers rebind `torch.nn.functional.cross_entropy` **process-wide**,
+the function the external loss calls, and the toolkit's [scoped patch](#supported-models) follows suit.
 
 **The GRPO trainers get a warning, not a force-off.** Their objectives compute per-token log-probs outside
 the model's forward and never pass `labels`, so an applied FLCE (explicit, or a [per-model default](#configuration)) is
@@ -316,7 +313,8 @@ sanitizer, `sanitize_liger_config`.
 
 The dispatch records the **effective** applied config on `model.config`, and
 `finalize_liger_after_direct_load` (`halo/model_loading/liger/dispatch.py`) reads it after a
-`load_distributed_model` load. With FLCE applied it keeps `use_liger_kernel` on and pins
+`load_distributed_model` load, or after a direct `from_pretrained` whose config went through
+`apply_liger_kernel` (the GPU benchmarks). With FLCE applied it keeps `use_liger_kernel` on and pins
 `liger_kernel_config` to the applied dict, so TRL's re-application is an identical re-patch and its entropy
 guard knows logits are `None`; otherwise it turns the flag off.
 
@@ -328,14 +326,13 @@ llama-cast norm over GptOss's Gemma-cast one, its GeGLU over Gemma 4's toolkit-f
 over the Qwen MoE families' routed experts, or its norm swap and fused head over DeepSeek-V4's. A model loaded
 outside Halo's loaders runs those roles eager.
 
-Code loading via `AutoModelForCausalLM.from_pretrained()` instead — the GPU benchmarks — runs
-`apply_liger_kernel` on the config it passes to `from_pretrained`, then `finalize_liger_after_direct_load`.
-
-Under FSDP2, TRL's fused Liger preference/GRPO loss (`liger_loss_fn`, `liger_grpo_loss`) is
-auto-disabled: it does `input @ weight.t()` against `model.lm_head.weight` outside FSDP2's
-forward hooks, where the weight is a sharded DTensor. A trainer with TRL's `use_liger_kernel` on and none of
-those attributes set raises at construction rather than leave an unknown loss running. Model-level kernels
-stay active.
+DPO and KTO turn TRL's `use_liger_kernel` off at construction in every mode: TRL's chunked log-prob path
+refuses the router aux loss, and DPO's also skips the family's head transform
+([DPO](../training-methods/preference/dpo.md)). The model-level kernels stay; single-process DPO loses that
+loss path's memory saving. Under FSDP2 the other trainers' fused TRL loss (`liger_loss_fn`,
+`liger_grpo_loss`) is disabled too: it does `input @ weight.t()` against `model.lm_head.weight` outside
+FSDP2's forward hooks, where the weight is a sharded DTensor. A trainer with TRL's `use_liger_kernel` on and
+none of those attributes set raises at construction rather than leave an unknown loss running.
 
 ## GptOss
 
@@ -372,6 +369,10 @@ toolkit spec's torch fused norm on `qwen3_moe`'s norms ([above](#upstream-covere
 At this shape FLCE saves only 1.5 GiB more than CE and costs 5% throughput. FLCE's saving is the logits
 plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), ~2.5 GB at 8k. Reach for plain CE when a model's FLCE patch is unavailable.
 
+**Host time per launch.** Liger 0.8.4 adds host time around each RMSNorm and SwiGLU launch: at most ~1.5%
+per step on the most host-bound row measured (dense Qwen3-8B at CP2 on 8× B300, 4,096-token rows), and GPU
+kernel time is unchanged.
+
 **Measure MoE throughput at batch ≥ 4.** At batch 1 EP MoE is communication-bound and its DeepEP time varies run
 to run, so a batch-1 delta is directional (Liger measures +27% there at seq 16384, [torch.compile](torch-compile.md#benchmark-results)).
 Memory numbers are deterministic at any batch.
@@ -392,6 +393,5 @@ The kernels are Triton, so they need a supported GPU (H100/H200, B200/B300).
 ## Related pages
 
 - [PEFT (LoRA)](peft.md) — FLCE benchmarks with QLoRA
-- [Padding-Free Collator](padding-free-collator.md) · [BF16 Optimizer](bf16-optimizer.md)
-- [Throughput Benchmarks](throughput-benchmarks.md)
+- [Padding-Free Collator](padding-free-collator.md) · [BF16 Optimizer](bf16-optimizer.md) · [Throughput Benchmarks](throughput-benchmarks.md)
 - [Configuration Reference](../reference/configuration-reference.md) — `use_liger_kernel`

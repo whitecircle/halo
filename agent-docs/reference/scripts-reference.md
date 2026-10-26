@@ -76,7 +76,7 @@ local file or a Hub dataset id and `--output_path` a local path.
 The three async CLIs — `openai_batched_generation.py`, `rejection_sample.py`, `score.py`
 — run under a shared SIGINT/SIGTERM handler
 (`run_async_cli`) that exits `128 + signo`, the shell's own convention for a signalled process.
-Progress is stored for resume (generation through `parallel_openai_requests` and its JSONL resume store under `$HALO_DATA_ROOT/inference/resume`, `halo/inference/batch_requests.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
+Progress is stored for resume (generation through `parallel_openai_requests` and its JSONL resume store under `$HALO_DATA_ROOT/inference/resume`, `halo/inference/batch_requests.py`; the two reward-model CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
 `&&` chain from consuming a partial output dataset as a finished one.
 
 A run that produced no usable row raises rather than writing an empty result (`reject_empty_results`), so a dead endpoint or a

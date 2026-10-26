@@ -50,7 +50,7 @@ carries the templates and the commands to run.
 4. **Router balancing.** Leave `moe_balancing` at `auto` and make the family resolvable. What `auto`
    picks and what `bias_update` needs to export:
    [Callbacks → MoE balancing modes](../../agent-docs/training-methods/callbacks.md#moe-balancing-modes);
-   the EP layer hooks (`SUPPORTS_BIAS_BALANCING`, the selection helpers, `balancing_slot`): step 3 of
+   the layer's `SUPPORTS_BIAS_BALANCING` and selection helpers and the spec's `balancing_slot`: steps 2–3 of
    [Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support).
 5. **Not in transformers yet → vendor.** Copy `configuration_*.py` + `modeling_*.py` into
    `halo/models/<name>/`, register the `Auto*` classes in a module of that package (never its
@@ -60,7 +60,11 @@ carries the templates and the commands to run.
    the directory goes when upstream ships the family. A `trust_remote_code` model needs no
    vendoring: `apply_remote_code_compat_shims()` (`halo/model_loading/remote_code.py`)
    restores the transformers-v5 APIs those files call.
-6. **Configs + tests.** Add `examples/sft/<family>/` YAMLs and the required tests: an EP=2-vs-stock
+6. **Pipeline parallelism (optional).** PP is an allowlist: the backbone splits only once a
+   `validated=True` `PPFamilySpec` in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`)
+   names it, added after its PP GPU rows pass; until then it is refused by name
+   ([Adding a Model](../../agent-docs/models/adding-a-model.md)).
+7. **Configs + tests.** Add `examples/sft/<family>/` YAMLs and the required tests: an EP=2-vs-stock
    equivalence row, a save-and-reload trainer test, a CPU support test, and the Liger numerics
    case — step 7 of [Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support); the
    commands are in `checklist.md`.

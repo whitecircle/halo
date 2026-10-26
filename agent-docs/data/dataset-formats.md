@@ -213,10 +213,12 @@ column. Rows over `max_length` are filtered by the trainer, not truncated. `tool
 
 **CP not supported** — pooled representations are incompatible with sequence splitting.
 
-`dataset_num_proc` (parallel map processes, default `None`) is a field on the non-SFT method configs
-(SMPO, Classification, Distillation, Offline GRPO); SFT inherits it from TRL's `SFTConfig`. Unset
-means the toolkit default (`DATASET_NUM_PROC`), not one worker, and the count is the same
-under every parallelism mode.
+## Dataset maps
+
+`dataset_num_proc` sets the map/filter worker processes: Halo's field on the SMPO, classification,
+distillation and offline GRPO configs, TRL's own on the configs taken from TRL. Unset, the toolkit's
+maps run the toolkit default, not one worker; how that default is derived and how ranks share it:
+[`HALO_DATASET_NUM_PROC`](../reference/configuration-reference.md#environment-variables).
 
 Trainer-side map/filter callables must be **module-level functions** taking their state through
 `fn_kwargs`, never bound methods. At `num_proc > 1` `datasets` ships the callable to worker

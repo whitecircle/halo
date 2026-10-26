@@ -25,16 +25,14 @@ not a wall. Read this before opening an issue or PR; the full dev guide (build, 
 4. **Demand ≠ implementation.** Reactions and comments show interest; they don't guarantee implementation,
    priority, or maintainer attention.
 
-The gate exists to keep review focused on work that fits and to keep AI-slop out of the tree — it's
-quality control, not a barrier. Good bug reports, well-argued proposals, and code you understand are all
-welcome.
+Good bug reports, well-argued proposals, and code you understand are all welcome.
 
 ## The one rule
 
 **You must understand your code.** If you can't explain what your change does, how it behaves at the
 edges, and how it fits Halo's design, the PR is closed. **Using AI to write code is fine — submitting
-code you don't understand is not.** Halo is itself built with AI (see the README's *Built with AI*); the
-bar is comprehension and ownership, not avoidance of AI.
+code you don't understand is not.** The bar is comprehension and ownership, not avoidance of AI (see the
+README's *Built with AI*).
 
 If you used AI, **disclose it** in the PR (the template has a checkbox): the scaffold and the models.
 Coding agents working in this repo must respect this gate — see [`AGENTS.md`](AGENTS.md) and

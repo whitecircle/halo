@@ -32,18 +32,20 @@ Read the script's `--help` before running it — don't guess the flags.
   leave `model_name_or_path` at the base.** The scripts repoint the policy's weights at the checkpoint
   themselves; the base keeps feeding the DPO/KTO/SDPG reference and the dataset-compat check, so
   repointing it yourself moves the reference onto trained weights. Exact resume needs the saved topology
-  fingerprint; a mismatch warm-restarts. Per-mode table and every restore verdict:
+  fingerprint; a mismatch warm-restarts, and under PP it raises. Per-mode table and every restore verdict:
   `agent-docs/reference/checkpoints.md#resume-by-parallelism-mode` and
   `#warm-restart-vs-exact-resume-torchrun`.
 - **A per-rank sharded checkpoint is NOT directly loadable.** Every loader refuses `metadata.format`
-  `ep_sharded` and names the merge tool. Run the merge first.
+  `ep_sharded` and names the merge tool. Run the merge first. The merged directory (and a
+  `merge_pp_stages.py` output) carries every rank's optimizer shard, so it resumes exactly on the
+  topology that wrote it.
 
 ## "I trained with X → single HF checkpoint" decision table
 
 | Trained with | Gathered save (default) | If you used the sharded option | To get one HF checkpoint |
 |---|---|---|---|
 | Dense FSDP2 / DDP | loadable | — | use directly |
-| LoRA / QLoRA (any mode) | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); it refuses a native EP expert-LoRA adapter — train with `merge_expert_lora_on_save: true` instead |
+| LoRA / QLoRA | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); it refuses a native EP expert-LoRA adapter — train with `merge_expert_lora_on_save: true` instead |
 | Embedding LoRA (in-place injected) | loadable, adapters folded in | — | use directly (`SentenceTransformer(path)`) |
 | TP-only | loadable | — (no per-rank TP save) | use directly |
 | EP — every family (each family's `MoEFamilySpec.model_types` in `halo/models/moe/family_specs.py`; read them there, and `moe_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |

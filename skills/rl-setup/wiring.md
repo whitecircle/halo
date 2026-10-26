@@ -23,7 +23,9 @@ Config: `examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml`
 `format`, plus `judge` / `reward_model` (`halo/rewards/graders/verifiable.py`).
 
 Server and trainer GPUs must be disjoint (a rank cannot NCCL-broadcast to itself), and the server
-must serve the trained model — bare compose serves `Qwen/Qwen3-0.6B` on GPU 7.
+must serve the trained model — bare compose serves `Qwen/Qwen3-0.6B` on GPU 7. The commands below
+assume `HALO_SCRATCH` is exported or set in the repo-root `.env`; compose refuses to start without it
+([Starting a server](../../agent-docs/training-methods/async-grpo/setup.md#starting-a-server)).
 
 ```bash
 # Dense: server on GPU 0, FSDP2 DP on 1-3 (the recipe's own split)

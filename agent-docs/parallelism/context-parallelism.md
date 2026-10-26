@@ -86,11 +86,13 @@ auto-switched to FA4/FA2 by `load_distributed_model` when CP is active. A wrappe
 `REQUIRES_FLASH_ATTN_LABEL = False` waives the check for modeling code that cannot carry a flash
 label at all (Bailing; see [bailing.md](../models/bailing.md#cp-wrapper)).
 
-That check reads the *declared* implementation; the kernel CP actually calls is resolved separately,
-arch-matched with an FA4 veto for the FA4-backward-NaN families
-([Flash Attention → Supported backends](../optimization/flash-attention.md#supported-backends)). Leave
-`attn_implementation` at its auto-detected default. Bailing is the exception — it needs an explicit
-`sdpa`, since transformers refuses the auto-detected FA4 at model build.
+That check reads the *declared* implementation. The kernel CP calls is arch-matched with an FA4 veto
+for the FA4-backward-NaN families
+([Flash Attention → Supported backends](../optimization/flash-attention.md#supported-backends)), and
+under CP the loader labels such a family with that kernel (FA2 on Blackwell, for GLM-4 MoE Lite) where
+it would otherwise fall back to SDPA, so the auto-detected default passes the check. Leave
+`attn_implementation` at it. Bailing is the exception — it needs an explicit `sdpa`, since
+transformers refuses the auto-detected FA4 at model build.
 
 **Head divisibility** — `cp_size` must divide both the Q and the KV head count. GPT-OSS (64 Q, 8 KV):
 CP=8 → 8 Q / 1 KV; CP=4 → 16 Q / 2 KV; CP=3 rejected.

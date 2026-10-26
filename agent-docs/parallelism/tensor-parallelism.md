@@ -1,7 +1,9 @@
 # Tensor Parallelism (TP)
 
-TP shards large weight matrices across GPUs. Use it when a dense model's layers don't fit on one
-GPU. `data_parallel_size = world_size / tp_size`; all ranks participate in gradient sync
+TP shards large weight matrices across GPUs. Use it when a dense model does not fit on one GPU: its
+HF-native load places each rank's shard as it reads, while plain FSDP2 and DDP load the whole model
+onto every GPU first ([Data Parallelism](data-parallelism.md#fsdp2-strategy-by-mode)).
+`data_parallel_size = world_size / tp_size`; all ranks participate in gradient sync
 (`ParallelismConfig`, `halo/distributed/parallelism_config.py`). Why its all-reduce has to stay on
 NVLink: [GPU Training Theory §9](../reference/gpu-training-theory.md#collectives).
 
@@ -59,7 +61,7 @@ Three paths in `load_distributed_model` (`halo/model_loading/parallel/loader.py`
 |---|---|---|
 | `load_tp_model` | Pure TP, dense, `ep_size=1` | `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))` — HF-native |
 | `load_tp_moe_model` | Pure TP, MoE, `ep_size=1` | `apply_tp_to_attention_only()`; experts replicated |
-| `load_ep_tp_model` | EP+TP | `apply_tp_to_attention_only()`; EP owns experts |
+| `load_ep_tp_model` | EP+TP | the EP loader slices each rank's experts, lazy or eager, then `apply_tp_to_attention_only()` |
 
 The HF-native path validates the load's materialization, not just its plan (`finish_hf_tp_load`): a plan
 that shards zero parameters raises (the run would be `tp_size` replicas), and a plan-sharded param that materialized
@@ -291,9 +293,8 @@ torchrun --nnodes=2 --node_rank=0 --nproc_per_node=4 \
     scripts/training/sft.py <config>.yaml --tensor_parallel_size=4
 ```
 
-`DIST_NCCL_TIMEOUT_MINUTES` (default 30) is pinned onto the default group and every EP/CP/TP subgroup
-via `_apply_default_pg_timeout`. DeepEP's dispatch/combine runs behind its own `ElasticBuffer`
-GPU-side barrier, not the PyTorch watchdog, so this does **not** bound it.
+The NCCL watchdog (`DIST_NCCL_TIMEOUT_MINUTES`) covers the TP mesh too:
+[Launch Recipes → Environment variables](launch-recipes.md#environment-variables).
 
 ## Checkpoint saving
 

@@ -125,6 +125,8 @@ router_balancing_rate: 1.0e-3    # gamma; only used when a bias-update mode is a
 | `aux_loss` | The model's own switch-style aux loss | preserved | **True** only where the term reaches the loss | none |
 | `none` | No intervention; a self-balancing model keeps doing so | preserved | preserved | none |
 
+The coefficient is the model config's: a `router_aux_loss_coef` set on a TRL trainer config raises at construction (set it through `model_init_kwargs`), and TRL's own loss receives the mode's coefficient only in DPO and KTO ([Where `aux_loss` is inert](#where-aux_loss-is-inert)).
+
 Both bias modes force `output_router_logits=False`, overriding `model_init_kwargs`: the EP bias path bypasses the HF router module the recorder hooks, so leaving it on returns an empty `router_logits` tuple and `load_balancing_loss_func` raises `IndexError`. These writes are **run-scoped** — every exported `config.json` carries the hub's coefficient and flag.
 
 `aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP layers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, so a forward that reads the flag from `kwargs` only never reaches the aux term. The probe reads the model under a PEFT or CP wrapper, both of which pass the flag through.

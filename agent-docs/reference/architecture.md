@@ -190,6 +190,7 @@ load_distributed_model            halo/model_loading/parallel/loader.py
    │  • resolve_attn_implementation → FA4 (SM100+) / FA3 (SM90) / FA2; per-model SDPA/eager overrides
    │  • apply_ep_layers → EP layers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
    │  • UlyssesModel (when cp_size > 1)
+   │  • load_pp_stage_model: this rank's stage only (when pp_size > 1)
    ▼
 DistributedTrainerMixin._configure_distributed_modes
    │  • FSDP2 fully_shard (EP modules in ignored_params, except at ep_group_size == 1)
@@ -212,7 +213,7 @@ gathered save on [Checkpoints & Resume](checkpoints.md).
 
 ## RL: the rollout engine as a separate container
 
-Online and async GRPO generate on a rollout engine (vLLM 0.32.0, or SGLang under async GRPO's
+Online and async GRPO generate on a rollout engine (vLLM 0.32.0, or SGLang 0.5.22 under async GRPO's
 `rollout_backend: sglang`) that runs in its own container and is never imported into the training
 environment, since it pins its own torch/transformers stack. The trainer talks to it over HTTP for
 generation and through an NCCL weight-sync client (`halo/weight_sync/`) for weights, which it gathers

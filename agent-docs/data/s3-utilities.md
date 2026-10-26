@@ -20,16 +20,17 @@ loader and the scripts classify a path without an S3 stack) sorts a path into
 `('s3' | 'hf_hub' | 'local', bucket, key)`:
 
 - **S3 URI** (recommended): `"s3://my-bucket/datasets/my_dataset/train"`.
-- **HuggingFace Hub**: `"HuggingFaceH4/ultrachat_200k"` — exactly one slash, no prefix. Optional
+- **HuggingFace Hub**: `"HuggingFaceH4/ultrachat_200k"` — exactly one slash, no part starting with a dot. Optional
   suffixes: `:config` picks a dataset config (`"openai/gsm8k:main"`), `@split` picks one split when
   the repo has no plain `train` (`"HuggingFaceH4/ultrachat_200k@train_sft"`). The key is returned
   **verbatim including the suffixes**; they are stripped later, at load.
-- **Local**: everything else — an absolute or relative path, a `file://` URI (prefix stripped), or
-  any path ending in `.jsonl` / `.json` / `.parquet` / `.arrow` / `.csv`.
+- **Local**: everything else — an absolute, `./` or `../` path, a `file://` URI (prefix stripped), any
+  path ending in `.jsonl` / `.json` / `.parquet` / `.arrow` / `.csv`, and a relative path with no slash or
+  more than one.
 
 A Hub-shaped path that also names a local directory (`preprocessed/my_dataset` beside a directory of
-that name) is refused by every reader, training, `prepare_dataset.py --input` and the eval runner alike,
-rather than guessed: write `./preprocessed/my_dataset` or an absolute path for the directory, without a
+that name) is refused by every reader, training, `prepare_dataset.py --input`, the eval runner and the
+deduplication tool alike, rather than guessed: write `./preprocessed/my_dataset` or an absolute path for the directory, without a
 `:config` / `@split` suffix (a saved split is its own subdirectory).
 `reject_ambiguous_hub_source` is the check; on training it runs inside the rank-joined load and probe, so
 a directory present on some nodes only fails every rank with the same cause.

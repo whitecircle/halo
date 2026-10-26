@@ -268,7 +268,7 @@ Unpaired `{prompt, completion, label}` preference optimization.
 
 Async GRPO samples on the rollout server, so `top_p`, `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` reach no sampler and are refused at trainer construction when set away from their TRL defaults — use the `rollout_*` fields on [AsyncRolloutConfig](#asyncrolloutconfig). It refuses `vllm_importance_sampling_clip_min` the same way (its IS correction is token-level and clips from above only), and `vllm_importance_sampling_mode` at any value but TRL's default or `token_truncate`, the one that names that correction ([Objective](../training-methods/async-grpo/objective.md#importance-sampling-correction)). It forces `use_vllm: true` while that correction is on.
 
-Both on-policy trainers force `use_liger_kernel` off at construction: TRL's Liger GRPO loss breaks global token normalization and the chunked log-prob path.
+Both on-policy trainers force `use_liger_kernel` off and refuse the TRL options they cannot honor at construction ([Online GRPO → Forced and refused settings](../training-methods/grpo/online.md#forced-and-refused-settings)).
 
 ### RewardConfig — `DistributedRewardTrainer` ([TRL docs](https://huggingface.co/docs/trl/reward_trainer#trl.RewardConfig))
 
@@ -508,7 +508,7 @@ environment_kwargs:
 | `rollout_backend` | `"vllm" \| "sglang"` | `"vllm"` | Rollout engine for generation and weight sync. `sglang` supports `routing_replay: rollout` (serve with `--enable-return-routed-experts --moe-runner-backend triton`), rejects `rollout_max_thinking_tokens` at config time and the env's `carry_reasoning` at trainer construction, refuses the families 0.5.22's loaders cannot take an online update for (`SGLangWeightSyncClient.UNSERVABLE_MODEL_TYPES`, quoted at trainer construction), and must be served from the NCCL-aligned `Dockerfile.sglang` image with `NCCL_CUMEM_ENABLE=1` (the compose default); see [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves). |
 | `rollout_server_url` | `str` | `"http://localhost:8000"` | Primary rollout-server URL (whichever engine `rollout_backend` selects) for weight sync + generation. |
 | `rollout_connection_timeout` | `float` | `120.0` | Seconds to wait for the rollout server. Refused: non-finite or `<= 0`. |
-| `rollout_server_configs` | `list \| None` | `None` | Multi-server configs (each a dict with `url` and optional `group_port` / `group_host`, the weight-transfer master address the serving node dials back to). Overrides `rollout_server_url`. |
+| `rollout_server_configs` | `list[dict] \| None` | `None` | Multi-server configs (each a dict with `url` and optional `group_port` / `group_host`, the weight-transfer master address the serving node dials back to). Overrides `rollout_server_url`. |
 | `rollout_group_port` | `int` | `51216` | Trainer-side port of the NCCL weight-sync group, on either rollout backend; `0` takes a kernel-assigned port. With several servers it is the **base**: a `rollout_server_configs` entry without its own `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when this is `0`. |
 | `sync_weights_every_n_steps` | `int` | `1` | Sync weights every N training steps. Refused: `< 1`. |
 | `rollout_temperature` | `float` | `0.7` | Rollout generation temperature. Overwrites `GRPOConfig.temperature` (logged) so log-probs are scored at the sampling temperature; the engine's logprobs must carry it too — vLLM `--logprobs-mode processed_logprobs`, SGLang's default (leave `SGLANG_RETURN_ORIGINAL_LOGPROB` unset). The startup probe runs against either engine and refuses raw logprobs. Refused: non-finite or `<= 0`. |
@@ -594,7 +594,7 @@ Base shared by all training scripts, mixing in `TorchProfilerArguments` (`enable
 | `tree_share_markers` | `list[str]` | `[]` | Tree packing: rows whose message before the final turn is identical up to and including one of these strings are examined together for a shared prefix. |
 | `tree_share_requires` | `str \| None` | `None` | Tree packing: a row is shared only if this text occurs before its marker. |
 | `tree_min_shared_tokens` | `int` | `16` | Tree packing: a shared span shorter than this is repeated per row, not split off. |
-| `tree_full_attention` | `Literal["split", "gather"]` | `"split"` | Tree packing, full-attention layers: `split` (FA4) or `gather` (FA4 or FA2). |
+| `tree_full_attention` | `"split" \| "gather"` | `"split"` | Tree packing, full-attention layers: `split` (FA4) or `gather` (FA4 or FA2). |
 | `generate_eval_examples` | `bool` | `False` | Generate text examples during eval. |
 | `assistant_message_template` | `str \| None` | `None` | The rendered assistant-turn prefix of the model's chat template; required when `train_on_completions_only` is on. |
 | `num_eval_examples` | `int` | `50` | Examples to generate during eval. |

@@ -2,7 +2,7 @@
 
 Sequence classification — single-label (multi-class) and multi-label — on `AutoModelForSequenceClassification`. Trainer `ClassificationTrainer` (`halo/trainers/reward/classification.py`), script `scripts/training/classification.py`. Text-only. For a scalar preference score on the same architecture use [Reward Modeling](preference/reward-modeling.md).
 
-EP, TP, ETP, EP+TP and EP+ETP run, as does plain FSDP2 data parallelism. CP does not — the head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)).
+EP, TP, ETP, EP+TP, EP+ETP, PP, PP+EP and PP+ETP run, as does plain FSDP2 data parallelism; under PP `compute_metrics` is served. CP does not — the head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Dataset
 
@@ -50,7 +50,7 @@ torchrun --nproc_per_node=8 scripts/training/classification.py \
 halo launch classification examples/classification/qwen3_5/clf-qwen3.5-9b-mage.yaml --nproc 8
 ```
 
-LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP and EP+TP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
+LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP, EP+TP and PP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
 
 ## Vision-language
 
@@ -73,7 +73,7 @@ Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu` and `tests/g
 |---|---|
 | `accuracy` | Single-label; multi-label reports `exact_match_accuracy` instead |
 | `f1` | Binary averaging at 2 labels, weighted for multi-class, macro for multi-label |
-| `mcc` | Stays honest under class imbalance |
+| `mcc` | Single-label (`compute_mcc`); stays honest under class imbalance |
 
 Failure signatures:
 

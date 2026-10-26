@@ -67,24 +67,15 @@ rewards:
 ```
 
 `judge` and `reward_model` terms take the same options as on the [online arm](online-grpo.md#rewards).
-
-Only this arm accepts a **veto judge**: a `judge` that lists `checks` instead of `requirements`. A fired
-`veto: true` check strips the episode of its credit, `reward/objective` included. The judge reads the
-policy's reasoning for context but fires only on what it did: its visible text, its tool calls and their
-results. Its other checks are process flags: the term's `weight`, which must be ≤ 0, prices the fired
-share of them, each counted by its own `weight` (default 1; `0` logs a flag without pricing it). A veto
-check counts there only when given a `weight`, a price on top of its gate. Its
-`on_error` defaults to `neutral`, so a judge outage leaves the environment's grade standing
+Only this arm also accepts a **veto judge**, a `judge` that lists `checks`: a fired veto check strips the
+episode of its credit, `reward/objective` included, and the other checks price process flags at the
+term's non-positive `weight`
 ([Veto judge](../../agent-docs/training-methods/grpo/rewards/judge.md#veto-judge) ↗).
 
-Every code-contests recipe runs one over the whole episode, with nine checks. Six are vetoes on hacks
-and tool misuse: working-out carried into a submitted program, or into any call the engine cut before it
-ran, is one of them (`reasoning_in_actions`); `hardcoded_output` and `verdict_probe` also cost 0.3 and
-0.2 on top of the veto. `wasted_run` charges 0.1 for a scratchpad run that could test nothing,
-`untested_submission` 0.1 for a failed submission whose logic no earlier run exercised or that ran only
-on the samples, and `reasoning_in_runs` is logged at weight 0. These recipes set `on_error: invalid`: an
-episode the judge could not score leaves training, so an outage trains nothing instead of unjudged
-episodes, and a second step in a row with no valid episode stops the run
+Every code-contests recipe audits the whole episode this way: six checks veto hacks and tool misuse, and
+the rest price wasted or untested runs. These recipes set `on_error: invalid`, so an episode the judge
+could not score leaves training: a judge outage trains nothing, and a second step in a row with no valid
+episode stops the run
 ([Audit judge](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/reward.md#audit-judge) ↗).
 
 Each component logs as `reward/<name>` (`reward/objective` for the environment term), and the components
@@ -118,25 +109,22 @@ SGLang ones are `ep1` only.
 
 - **Sampling** goes through the `rollout_*` fields (`rollout_temperature`, `rollout_top_p`,
   `rollout_top_k`, `rollout_min_p`, `rollout_repetition_penalty`). Every request sends all five, so the
-  model's `generation_config.json` never fills them in. TRL's `top_p`,
-  `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` reach no sampler here, and setting one
-  raises at startup.
-- **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference the way the
-  policy loads (run dtype, revision, attention). Under EP, ETP or TP that is a whole unsharded copy on
-  every rank. A PEFT policy is its own reference with the adapter off. TRL weights the KL term by the
-  importance-sampling ratio unless `use_bias_correction_kl: false`.
-- **The objective** truncates each token's importance-sampling ratio from above. Startup refuses
-  `loss_type: vespo`, a `vllm_importance_sampling_mode` other than the default or `token_truncate`, and
-  `vllm_importance_sampling_clip_min`
+  model's `generation_config.json` never fills them in. TRL's `top_p`, `top_k`, `min_p`,
+  `repetition_penalty` and `generation_kwargs` reach no sampler here, and setting one raises at startup.
+- **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference: under EP,
+  ETP or TP a whole unsharded copy on every rank. A PEFT policy is its own reference with the adapter
+  off.
+- **The objective** truncates each token's importance-sampling ratio from above, and startup refuses the
+  loss types and ratio modes it does not implement
   ([Objective](../../agent-docs/training-methods/async-grpo/objective.md) ↗).
 
 Three decisions matter more than the rest:
 
 - **Turn budget.** `rollout_max_tokens` caps one turn and `max_turns` the number of turns.
-  `rollout_max_episode_tokens` caps what one episode samples across all its turns (off by default,
-  `131072` in the code-contests recipes, `160000` in the Qwen3.6 curriculum stages). The trajectory is never truncated: a row longer than the
-  context window fails the step. If `episode/turns` sits at the cap, raise `max_turns`; if it sits far
-  below, lower it, since turns run one after another
+  `rollout_max_episode_tokens` caps what one episode samples across all its turns (off by default; the
+  code-contests recipes set it). The trajectory is never truncated: a row longer than the context window
+  fails the step. If `episode/turns` sits at the cap, raise `max_turns`; if it sits far below, lower it,
+  since turns run one after another
   ([Trajectory length](../../agent-docs/training-methods/async-grpo/episodes.md#trajectory-length) ↗).
 - **Reasoning effort.** `environment_kwargs.reasoning_effort` (`low` / `medium` / `high` / `random`) sets
   how much the model should think, and `reasoning_effort_profiles` gives each level its own per-turn
@@ -155,23 +143,18 @@ no reward. It trains only as a penalty, when its episode scored below the group'
 
 ### Thinking budgets
 
-A level's `thinking_tokens` is a per-turn budget. By default the engine enforces it: it closes the turn's
-reasoning at the budget, mid-thought if need be. Set `enforce_thinking_cap: false` in the level's profile
-to make the budget soft:
-
-- The Qwen3.6 and Gemma 4 effort templates state a soft budget as a target ("Aim to think for at most N
-  tokens per turn."), and the engine does not cut there.
-- The engine closes the reasoning only at the run's ceiling: `rollout_max_thinking_tokens`, or else
-  `rollout_max_tokens − rollout_max_answer_tokens`. With neither set, only `rollout_max_tokens` ends the
-  turn. A soft budget at or above its ceiling is refused.
-- `reasoning_price_past_budget: true` makes `reasoning_price` count only what each turn reasons past its
-  budget. Every level the run can draw must then be soft.
-
-`reasoning_floor` reads either kind: it charges an episode whose reasoning, summed over its turns, falls
-short of three quarters of the per-turn budget. Neither term is charged in a training group where no episode
-earned the objective. All the code-contests recipes run soft budgets (8,192 / 12,288 / 16,384 tokens for
-low / medium / high), priced past the budget
+A level's `thinking_tokens` is a per-turn budget. By default the engine enforces it, closing the turn's
+reasoning at the budget, mid-thought if need be. `enforce_thinking_cap: false` in the level's profile
+makes it soft: the effort template states it as a target, and the engine closes the reasoning only at the
+run's ceiling, `rollout_max_thinking_tokens` or else `rollout_max_tokens − rollout_max_answer_tokens`
 ([Enforced and soft budgets](../../agent-docs/training-methods/async-grpo/reasoning.md#enforced-and-soft-budgets) ↗).
+
+Two trainer-side terms price reasoning length: `reasoning_price` charges reasoning tokens (with
+`reasoning_price_past_budget: true`, only those past each turn's soft budget), and `reasoning_floor`
+charges an episode that reasons too little. Neither is charged in a training group where no episode
+earned the objective, unless `reasoning_terms_in_failed_groups: true`. The code-contests recipes run soft
+budgets priced past the budget
+([Reasoning length reward](../../agent-docs/training-methods/async-grpo/reasoning.md#reasoning-length-reward) ↗).
 
 ### One server or several
 
@@ -232,7 +215,8 @@ monitor ([Evaluation](../../agent-docs/training-methods/async-grpo/evaluation.md
   names which one. Under `on_error: invalid` those episodes also leave training, and
   `sampling/invalid_episode_frac` rises.
 
-Rollouts land in `<output_dir>/completions/` as parquet, one directory per logged step holding a part per rank. Every metric, including the prefetch hit rate:
+Rollouts land in `<output_dir>/completions/` as parquet, one directory per logged step holding a part
+per rank. Every metric, including the prefetch hit rate:
 [Monitoring](../../agent-docs/training-methods/async-grpo/monitoring.md) ↗. Symptoms and fixes:
 [Troubleshooting](../../agent-docs/training-methods/async-grpo/troubleshooting.md) ↗.
 

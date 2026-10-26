@@ -1,8 +1,11 @@
 # Parallelism
 
 Plain data parallelism needs no flags. `halo launch <method> <config> -n 8` (or
-`torchrun --nproc_per_node=8`) shards the model across 8 GPUs with FSDP2. Add a
-mode below only when the model or the sequence does not fit.
+`torchrun --nproc_per_node=8`) shards the model across 8 GPUs with FSDP2. Each
+GPU loads the whole model before the wrap, so a dense model must fit on one GPU
+at its load dtype; past that, TP shards it as it loads
+([Data Parallelism](../agent-docs/parallelism/data-parallelism.md#fsdp2-strategy-by-mode) ↗).
+Add a mode below only when the model or the sequence does not fit.
 
 | Need | Mode | Flag |
 | --- | --- | --- |
@@ -14,7 +17,8 @@ mode below only when the model or the sequence does not fit.
 | Cut cross-node FSDP traffic (DP or CP) | HSDP | `--use_hsdp=true` |
 
 EP combines with one of TP, CP or ETP (EP+TP for MoE plus attention sharding,
-EP+CP for MoE plus long context). PP combines with EP or ETP inside each stage.
+EP+CP for MoE plus long context). PP combines with EP or pure ETP inside each
+stage.
 
 The data-parallel size is what PP, CP, TP and ETP leave; EP does not reduce it,
 because an EP rank is also a data-parallel rank
@@ -36,9 +40,9 @@ pass. Most of the rules below are about how these groups may be shaped.
 ## Rules that save you a wasted run
 
 Halo validates the layout at startup and rejects an invalid shape with a
-message that names the rule. Most checks run at config time, before the model
-loads; a few (LoRA with TP, CP head counts) fail at model load or trainer
-construction.
+message that names the rule. Most checks run at config time. The CP and TP
+model checks (head counts, attention classes) run on a meta-device copy of the
+model before any weight loads, and LoRA under TP fails at trainer construction.
 
 - **Allowed combinations** are in the
   [Supported matrix](supported-matrix.md#parallelism-modes).

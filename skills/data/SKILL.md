@@ -44,11 +44,13 @@ output layout and the preprocessed-vs-presharded distinction:
 ## 3. Load it and let the collator follow
 
 - Sources (`s3://`, Hub `org/name[:config][@split]`, local) and S3 caching:
-  [S3 Utilities](../../agent-docs/data/s3-utilities.md); shared vs per-node filesystems:
-  [Filesystem Handling](../../agent-docs/data/filesystem-handling.md).
+  [S3 Utilities](../../agent-docs/data/s3-utilities.md#dataset-path-formats); a Hub-shaped path that also
+  names a local directory is refused, so write `./org/name` for the directory. Shared vs per-node
+  filesystems: [Filesystem Handling](../../agent-docs/data/filesystem-handling.md).
 - The collator is picked from the YAML flags (`packing`, `padding_free`, `train_on_completions_only`,
   CP); the selection table and the combinations that raise are in
-  [Collators](../../agent-docs/data/collators.md).
+  [Collators](../../agent-docs/data/collators.md). SFT rows that share a long prefix can store it once
+  with `tree_packing` ([Tree Packing](../../agent-docs/optimization/tree-packing.md)).
 - A data-loading error (wrong schema, embedding OOB at step 0, a re-shard, `num_shards` below DP):
   [Troubleshooting](../../agent-docs/reference/troubleshooting.md).
 

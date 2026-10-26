@@ -86,7 +86,7 @@ MLA on Blackwell needs vLLM `--attention-backend CUTLASS_MLA` or SGLang `--atten
 
 RL weight sync runs on either engine. Two SGLang facts shape it.
 
-The gate caches an fp32 copy of its weight on the first forward and never re-reads the parameter, so a synced router weight would land in the parameter while routing keeps the launch values. `Dockerfile.sglang` patches it (`docker/sglang/patches/`), and weight sync needs that image.
+SGLang 0.5.22's gate holds its weight in fp32 and reads it live, so a synced router weight reaches routing; the image build asserts it (`docker/sglang/patches/patch_sglang.py`), so a release that caches the weight again fails the build ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 SGLang's MLA loader fuses `q_a_proj` with `kv_a_proj_with_mqa` from a cache local to one request, dropping a half that arrives alone. The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps both halves in one chunk ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 

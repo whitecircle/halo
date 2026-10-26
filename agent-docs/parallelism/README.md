@@ -12,7 +12,7 @@ Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and single-GP
 ## Parallelism modes
 
 - **Expert parallelism (EP)** — distributes MoE expert layers across GPUs via DeepEP all-to-all (the router stays replicated on every rank). Each GPU holds a subset of experts and routes tokens to the owning GPU. For MoE models; see [Expert Parallelism Guide](expert-parallelism.md).
-- **Tensor parallelism (TP)** — shards dense attention and MLP weights across GPUs via DTensor with all-reduce. For large dense models (Llama 70B+, Mistral Large) that exceed single-GPU memory; see [Tensor Parallelism Guide](tensor-parallelism.md).
+- **Tensor parallelism (TP)** — shards dense attention and MLP weights across GPUs via DTensor with all-reduce. For large dense models (Llama 70B+, Mistral Large) that exceed single-GPU memory: plain FSDP2 and DDP load the whole model onto every GPU first ([why](data-parallelism.md#fsdp2-strategy-by-mode)), and TP's HF `tp_plan` load, which shards as it reads, is the route past that inside one NVLink domain (PP's stage loader is the one across domains); see [Tensor Parallelism Guide](tensor-parallelism.md).
 - **Context parallelism (CP)** — splits long sequences across GPUs via Ulysses-style attention with all-to-all. For long-context training (32K+ tokens); see [Context Parallelism Guide](context-parallelism.md).
 - **Pipeline parallelism (PP)** — splits decoder layers into stages, one contiguous rank block each, and is the only axis meant to cross NVLink domains. Off by default ([why](#when-pipeline-parallelism-is-worth-it)). See [Pipeline Parallelism](pipeline-parallelism.md).
 
@@ -57,7 +57,7 @@ Inside an allowed set, `reject_invalid_composition` checks the layout against th
   `_reject_cp_locality`, `_reject_expert_tp`). A node-scope `ep_group_size` divides the domain; a
   global one must tile the stage's ranks as equal contiguous per-domain blocks (`_reject_ep_group`,
   [Multi-Node](multi-node.md#node-local-vs-cross-node-ep)). `world_size` is a multiple of both
-  `gpus_per_node` and the domain (`ParallelismConfig._resolve_topology`).
+  `gpus_per_node` and the domain (`ParallelismConfig._resolve_nvlink_domain`).
 - **One domain, one dispatch group.** Within a single domain pure EP runs at `ep_size == 2` or with
   `ep_group_size` filling the domain; `ep4` on 8 GPUs is refused (`_reject_single_domain_multigroup_ep`,
   [mechanism and evidence](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
@@ -96,10 +96,11 @@ Two ways to group ranks, used where each fits:
     `(tp,)` / `(dp, tp)` tensor mesh. The trainer reads the resulting groups through its accessors
     (`tp_group`, `tp_local_rank`, `dp_group`).
 
-- **Hand-built process groups** (`dist.new_group`) for EP and CP, whose communication DTensor cannot
-  express: EP routing is *data-dependent* (the router picks each token's experts at runtime), and
-  both EP and CP run *custom all-to-all kernels* (DeepEP dispatch/combine, Ulysses sequence↔head
-  swap) rather than a layout-inferred redistribution.
+- **Hand-built process groups** (`dist.new_group`) for EP, CP and PP, whose communication DTensor
+  cannot express: EP routing is *data-dependent* (the router picks each token's experts at runtime),
+  EP and CP run *custom all-to-all kernels* (DeepEP dispatch/combine, Ulysses sequence↔head swap)
+  rather than a layout-inferred redistribution, and PP sends point-to-point along a pipeline chain
+  (`halo/distributed/pipeline_parallel/groups.py`).
 
     DeepEP also needs contiguous rank blocks for its intra-node kernel, which a mesh's row-major
     order cannot produce. `EPConfig` (`halo/distributed/expert_parallel/config.py`) builds the EP,
@@ -118,6 +119,7 @@ What crosses the wire:
 | CP | Ulysses all-to-all (sequence ↔ heads) around attention | CP group |
 | EP | DeepEP all-to-all dispatch → local expert GEMM → all-to-all combine | EP dispatch group |
 | EP+ETP | expert-TP all-reduce in token space, outside the dispatch→combine span | expert-TP group |
+| PP | boundary activation forward, its gradient back, point to point | pipeline chain (one rank per stage) |
 
 Backward mirrors the table: every activation all-to-all / all-reduce has an autograd transpose. By
 default FSDP2 reduce-scatters after every accumulation micro-step's backward
@@ -125,14 +127,15 @@ default FSDP2 reduce-scatters after every accumulation micro-step's backward
 it to the last); the EP gradient sync (hooks or the deferred sweep) fires once per optimizer step, on
 the last micro-step.
 
-EP gradients sync outside FSDP2: the replicated router all-reduces over the world group, and expert
-grads all-reduce over the expert-replica group only when a run holds more than one EP group.
+EP gradients sync outside FSDP2: the replicated router all-reduces over the world group (the stage
+under PP), and expert grads all-reduce over the expert-replica group only when a run holds more than
+one EP group.
 `fp32_grad_reduce` runs that reduction in fp32 over bf16 storage.
 
 The global batch is split along the data-parallel axis only: each of `data_parallel_size` ranks takes
 a disjoint slice, sharded by `data_parallel_rank` in `halo/trainers/dataloaders.py`. Ranks
-inside a TP, CP, or ETP group see the **same** batch; they shard weights or the sequence, not the
-data.
+inside a TP, CP or ETP group, and the stages of one pipeline chain, see the **same** batch; they
+shard weights, the sequence or the layers, not the data.
 
 EP is orthogonal: every rank still draws its own batch, and tokens are all-to-all'd to the ranks
 owning their routed experts, then returned in place after combine. CP splits the **sequence**: each
@@ -168,7 +171,7 @@ instead of replicating the DP dimension across domains.
 
 ## torch.compile
 
-On EP MoE (Qwen3-30B-A3B, EP=2, seq 16384) `torch.compile` gains at most 1% and its `reduce-overhead` mode, the trainer's fallback, is slower, so leave `torch_compile` off there: [torch.compile](../optimization/torch-compile.md).
+`torch.compile` does not pay on EP MoE, and PP refuses it; keep `torch_compile` off and Liger on ([torch.compile](../optimization/torch-compile.md)).
 
 ## Per-axis limitation surface
 

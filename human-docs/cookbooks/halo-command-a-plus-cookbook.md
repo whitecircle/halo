@@ -72,6 +72,7 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 
 - No online RL. Weight sync for this family has not been validated on either engine, so Halo refuses
   online and async GRPO when it builds the trainer.
+- No pipeline parallelism: Cohere2 MoE is not a registered pipeline family.
 - Serving an export is not tested end to end. The steps below follow from the engines' loaders.
 
 ## Export and serve

@@ -25,7 +25,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 
 - **[Padding-free collator](padding-free-collator.md)** — Concatenates sequences into Flash-Attention blocks instead of padding, with boundary masking against cross-sample leakage.
 - **[Tree packing](tree-packing.md)** — Rows that share a prefix store it once and branch after it; each example trains as it does packed flat, at fewer tokens.
-- **[Flash attention](flash-attention.md)** — Auto-detected per architecture — FA4 on Blackwell (B200/B300), FA2 + FA3 on Hopper (H100/H200).
+- **[Flash attention](flash-attention.md)** — Auto-detected per architecture — FA4 on Blackwell (B200/B300), FA3 on Hopper (H100/H200), FA2 where neither imports.
 - **[Grouped GEMM](grouped-gemm.md)** — Batched MoE expert matmul via `torch.nn.functional.grouped_mm`, default on SM90+. Home to the atomic-free permute and MoE throughput playbook.
 - **[Liger kernels](liger-kernels.md)** — Triton kernels for fused cross-entropy, RMS normalization, and SwiGLU (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 run their norms on torch's fused `F.rms_norm`). On by default — set `use_liger_kernel: false` to disable.
 - **[torch.compile](torch-compile.md)** — Inductor compilation of the spans between MoE/attention graph breaks (`torch_compile: true`) — at most 1% on EP MoE, and slower in `reduce-overhead` mode.

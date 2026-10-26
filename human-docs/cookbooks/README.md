@@ -107,11 +107,10 @@ server, and the trainer pushes new weights into that server after each step.
   ([Servers on other nodes](../../agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa) ↗).
 - **Code-contests recipes.** Their `dataset` is a placeholder under `your-org/`. Build the problem pool
   first ([Building a pool](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/datasets.md#building-a-pool) ↗).
-  Their `audit` judge vetoes a solved episode's credit on six checks for hacks and tool misuse, and
-  charges 0.1 for a scratchpad run that could test nothing. It calls OpenRouter with `OPENROUTER_API_KEY`
-  from `.env`. The recipes set `on_error: invalid`, so an episode the judge could not score leaves
-  training: a judge outage trains nothing, and a second step in a row with no valid episode stops the
-  run. Remove that reward term to train without a judge.
+  Their `audit` judge vetoes or prices hacks and tool misuse
+  ([Rewards](../training-methods/async-grpo-environments.md#rewards)). It calls OpenRouter with
+  `OPENROUTER_API_KEY` from `.env`, and a judge outage trains nothing. Remove that reward term to train
+  without a judge.
 - **Sandbox.** Code environments run programs the policy writes. The default `local` sandbox lets them
   read the container's environment, `.env` secrets included. Set `sandbox_backend` under
   `environment_kwargs` to `remote`, which also needs a server URL in `sandbox_url` or `HALO_SANDBOX_URL`,

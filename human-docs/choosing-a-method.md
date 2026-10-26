@@ -42,7 +42,7 @@ change. The last column is the name you pass to `halo launch`
 - **Teacher or self-distillation.** `teacher-distill` learns from a separate,
   larger model. Self-distillation uses the same model, given the answer as a
   hint, as its own teacher: offline (`self-distill`) or on-policy
-  (`rlvr --use_sdpg=true`).
+  (`grpo/online --use_sdpg=true`).
 
 Which trainer takes which parallelism mode is in the
 [Supported matrix](supported-matrix.md#training-methods).

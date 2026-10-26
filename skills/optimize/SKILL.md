@@ -48,8 +48,9 @@ Mention these only to confirm, not as new advice:
 - **MoE/EP, any shape →** push **seq × batch as high as memory allows** first: EP at low token counts
   is comm-bound, so batch is the dominant EP lever. Read achieved TFLOPS / tok-s, not plain MFU%
   ([Throughput benchmarks](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-throughput-sequence--batch)).
-- **MoE/EP, fits without GC →** turn **gradient checkpointing off**, the largest single throughput lever,
-  at about twice the activation memory.
+- **MoE/EP, fits without GC →** turn **gradient checkpointing off**, the largest single lever in the EP
+  feature A/B, at a much larger activation footprint
+  ([the A/B](../../agent-docs/optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
 - **MoE, small model fits in FSDP →** prefer **FSDP (ep1) over EP** (no all-to-all); use EP only when
   FSDP OOMs ([Maximizing achieved TFLOPS](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-achieved-tflops)).
 - **Pure EP on 8 GPUs →** **ep2 (throughput) or ep8 (memory)**; ep4 there is rejected at config time
@@ -68,15 +69,19 @@ Mention these only to confirm, not as new advice:
 
 - **Long-seq OOM at the loss →** **FusedLinearCrossEntropy**
   (`liger_kernel_config: {cross_entropy: false, fused_linear_cross_entropy: true}` — sub-keys of that
-  dict, not top-level fields): never materializes the logits plane; SFT-only, no entropy logging, not
-  CP-compatible ([Liger](../../agent-docs/optimization/liger-kernels.md)). GRPO: `use_chunked_grpo_logprobs`
+  dict, not top-level fields): never materializes the logits plane; SFT-only, no entropy logging, forced
+  off under TP, CP and PP ([Liger](../../agent-docs/optimization/liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy)). GRPO: `use_chunked_grpo_logprobs`
   ([the logits wall](../../agent-docs/training-methods/async-grpo/performance.md#the-logits-wall)).
 - **MoE activation OOM →** keep **GC on** and/or **raise the EP degree** (less expert memory per GPU).
+- **Dense model does not fit one GPU at load →** **TP**: plain FSDP2/DDP loads the whole model onto every
+  GPU before sharding ([Data Parallelism](../../agent-docs/parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
+  Past one node, **PP** splits the layers across nodes
+  ([Pipeline Parallelism](../../agent-docs/parallelism/pipeline-parallelism.md)).
 - **Optimizer-state OOM →** AdamWBF16 (auto) already halves fp32 AdamW's state; beyond it
   `optim: flash_adamw` ([FlashAdamW](../../agent-docs/optimization/flash-adamw.md#when-to-use-which-optimizer)).
 - **Exact fp32 on dense params with headroom →** `fp32_non_ep_params: true`
   ([BF16 optimizer](../../agent-docs/optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)).
-- **Fit on a small/consumer GPU →** **QLoRA**, not under EP/TP ([PEFT](../../agent-docs/optimization/peft.md#quantized-training-qlora)).
+- **Fit on a small/consumer GPU →** **QLoRA**, not under EP, TP or PP ([PEFT](../../agent-docs/optimization/peft.md#quantized-training-qlora)).
 - **Grad-accumulation runs with headroom →** `fsdp_defer_grad_sync: true` reduces once per step
   ([Deferred gradient reduce](../../agent-docs/parallelism/data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync)).
 - **Many-rank / multi-node grad precision (not memory) →** `fp32_grad_reduce: true`.

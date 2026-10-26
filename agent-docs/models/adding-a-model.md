@@ -9,7 +9,7 @@
 | Family the auto-detected attention backend cannot run | [Attention backend](#attention-backend) |
 | Forward scales, caps or cuts the logits around `lm_head` | [Declare the head transform](#declare-the-head-transform) |
 
-For plain FSDP, no work is needed — any `AutoModelForCausalLM` works.
+For plain FSDP, no work is needed — any `AutoModelForCausalLM` that fits one GPU works ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
 Pipeline parallelism is an allowlist: a new backbone splits under PP only once its class is in a `validated=True` `PPFamilySpec` in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`; `STOCK_FORWARD_PP` when the upstream forward splits as-is), added after its PP GPU rows pass. Until then `reject_unsupported_pp_structure` refuses it by name.
 
@@ -111,7 +111,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - **Rollout-engine support is not a family declaration.** Both pinned engines read the layout the family's `ExpertLayout` writes, so nothing here is per engine.
 
-    Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `halo/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `reject_unsyncable_model` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+    Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `halo/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `reject_unsyncable_model` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)). An engine that cannot enforce a thinking budget for the family takes an entry in the same client's `UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES` (vLLM's Mistral 4), which the budget refusal quotes.
 
 - `SUPPORTS_BIAS_BALANCING` — `True` when routing *selection* happens in-layer. Select through the shared helpers, not a hand-added `self._balancing_bias(...)`, which is `None` when balancing is off and in native-adoption mode (the adopted slot already sits in the selection): score-routed layers take top-k over `self._selection_scores(scores)` (the group-limited base, DeepSeek-V4, Inkling, LFM-2); logit-routed ones use `self._biased_topk(logits)` (Qwen3, Cohere2 MoE) or `_deepseek_biased_route`, which also returns the unbiased gate (GPT-OSS, Qwen3.5). Gate weights come from the **unbiased** scores, and the caller records the load with `self._record_expert_load(indices)`.
 

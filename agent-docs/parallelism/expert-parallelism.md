@@ -15,16 +15,12 @@ gradients sync via the EP layer's own backward hooks, or a post-backward sweep w
 one EP group ([Gradient synchronization](#gradient-synchronization)). [Expert Tensor
 Parallelism](expert-tensor-parallelism.md) further shards each expert's FFN inside the EP group.
 
-Every family's EP layer subclasses `EPMoELayerBase` (`halo/distributed/expert_parallel/moe_layer/layer.py`):
-construction, the dispatch → expert compute → combine forward and the expert-parameter views. Each other
-concern is one mixin in `moe_layer/` — expert compute (`compute.py`), routing and routing replay
-(`routing.py`), gradient-sync hooks (`grad_sync.py`), native expert LoRA (`expert_lora.py`), the balancing
-bias (`balancing_bias.py`), the collective half of the checkpoint export (`gather.py`);
-`shared_experts_layer.py` holds the routed forward template and the DeepSeek-V3 group-limited router. The
-export's layout half is model-side: each family's `MoEFamilySpec.expert_layout`, applied by
-`to_hub_expert_tensors` (`halo/models/moe/expert_layout.py`) in the gather and in `merge_ep_shards.py` alike.
-`compute`, `routing`, `grad_sync`, `gather` and `balancing_bias` are imported only inside `expert_parallel/`: callers
-reach that behavior through the layers `named_ep_layers(model)` walks.
+Every family's EP layer subclasses `EPMoELayerBase` (`halo/distributed/expert_parallel/moe_layer/layer.py`),
+which owns construction and the dispatch → expert compute → combine forward; expert compute, routing,
+gradient-sync hooks, native expert LoRA, the balancing bias and the collective half of the checkpoint
+export are one mixin each in `moe_layer/`. The export's layout half is model-side: each family's
+`MoEFamilySpec.expert_layout`, applied by `to_hub_expert_tensors` (`halo/models/moe/expert_layout.py`) in
+the gather and in `merge_ep_shards.py` alike. Callers reach the layers through `named_ep_layers(model)`.
 
 ![EP token routing: each rank routes its own batch's tokens by router top-k, DeepEP's dispatch all-to-all sends every token to the rank that owns its expert, a grouped GEMM runs the local experts, and the combine all-to-all returns each token to its origin rank](../assets/diagrams/ep_token_routing.png)
 
@@ -88,7 +84,7 @@ the engine. Each client declares the model types its pinned release cannot take 
 (`UNSERVABLE_MODEL_TYPES` in `halo/weight_sync/clients/`), and `reject_unsyncable_model`
 refuses that model+backend pair at trainer construction, quoting the loader fact.
 
-SGLang 0.5.22's list is the longer of the two: Laguna and Step-3.7 sync on vLLM only. Full roster
+The SGLang client's list is the longer of the two: Laguna and Step-3.7 sync on vLLM only. Full roster
 with each reason:
 [Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves).
 
@@ -106,9 +102,8 @@ division. `reject_unsupported_model` raises off `config.json` at the top of
 `EPConfig.finalize_expert_assignment` re-checks it once the EP groups exist.
 
 `ep_group_size` must divide the NVLink domain (node-local). Under `ep_scope="global"` the bound is
-the world, and divisibility alone is not enough: the group must
-also tile that world as equal contiguous per-domain blocks
-([Multi-Node](multi-node.md#node-local-vs-cross-node-ep)).
+the world (the stage under PP), and divisibility alone is not enough: the group must also tile it as
+equal contiguous per-domain blocks ([Multi-Node](multi-node.md#node-local-vs-cross-node-ep)).
 
 On a single 8-GPU node every pure-EP job is DP=8; what changes is how many DeepEP dispatch groups
 form.
@@ -162,14 +157,12 @@ help** at all: it leaves `ep_group_size` untouched, so `ep4 + tp2` is rejected e
 EP across domains, or a cross-node EP group replicated within a larger cluster. Here the toolkit
 avoids the race instead of blocking: every backward-time collective stays inside the EP group and
 the cross-replica DP average is deferred to one post-backward sweep. Node-local `ep8×2` and
-cross-node `ep8` (two replicas) both converge and match single-group `ep16` on a 2-node, 16-GPU topology.
+cross-node `ep8` (two replicas) match single-group `ep16` on two 8-GPU machines
+([Verified topologies](multi-node.md#verified-topologies)).
 
 That sweep covers every shape holding more than one EP group, the single-node ones (`ep2`,
 `ep2+tp2`) included. Mechanism:
 [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync).
-
-`CUDA_DEVICE_MAX_CONNECTIONS=1`, baked into the images, is the setting the EP suites are validated with, at no
-measurable throughput cost ([DeepEP → Environment variables](../infrastructure/deepep.md#environment-variables)).
 
 ## Quick start
 
@@ -191,9 +184,8 @@ The EP flags (`expert_parallel_size`, `ep_scope`, `nvlink_domain_size`, `use_gro
 `save_sharded_ep`:
 [checkpoint flags](../reference/configuration-reference.md#model-checkpoint-and-from-scratch-flags).
 
-Training args: `bf16=True`, `gradient_checkpointing=True` (recommended).
-`ddp_find_unused_parameters=True` is required for EP and set automatically by the entry scripts —
-do not rely on setting it yourself. With GC the trainer calls
+Training args: `bf16=True`, `gradient_checkpointing=True` (recommended). The trainer sets
+`ddp_find_unused_parameters=True` for every run with an EP group. With GC it calls
 `enable_scoped_gradient_checkpointing()` and sets `args.gradient_checkpointing=False` so HF Trainer does
 not re-enable it.
 
@@ -525,7 +517,8 @@ the save) whenever any of these holds:
 - **no EP layers at all** (dense, or an MoE without EP layers): every save would be an ordinary
   gathered checkpoint while a planned merge waits for shards that never appear.
 
-The merge raises on an incomplete shard set.
+PP refuses `save_sharded_ep` on its own gate: the per-rank format carries no stage layer offset. The
+merge raises on an incomplete shard set.
 
 ```bash
 python scripts/after_training/merge_ep_shards.py --input_dir checkpoint --output_dir merged
@@ -540,7 +533,7 @@ The loader then restores adapters; optimizer, scheduler and balancing
 biases resume from trainer state. A `merge_expert_lora_on_save` checkpoint is the exception to the
 repoint: it resumes from the base plus its `resume_adapter/`
 ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)). An unmerged
-sharded save is refused at resume resolution, and
+sharded save is refused at resume resolution and as a model source, and
 `load_best_model_at_end` is refused under EP full fine-tune (export the best checkpoint instead). See
 [Checkpoints & Resume](../reference/checkpoints.md).
 
@@ -580,11 +573,11 @@ on top of it: [Supported combinations](README.md#supported-combinations).
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `load_rules.py`, `reject_accelerate_launch` |
 | `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `reject_unmergeable_ep_sharded_save` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (non-reentrant under PP). `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_install_ep_gradient_checkpointing` |
-| `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `load_ep_model` (`halo/model_loading/parallel/ep.py`) |
+| `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP); PP+EP always loads stage by stage from safetensors. Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `load_ep_model` (`halo/model_loading/parallel/ep.py`) |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the EP layers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `halo/model_loading/liger/dispatch.py` |
 | `moe_balancing` | `aux_loss` is inert on families whose EP layer severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
 | `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |
-| `ddp_find_unused_parameters` | must be `True`; the entry scripts set it — do not rely on setting it yourself | — |
+| `ddp_find_unused_parameters` | must be `True`; the trainer sets it for every run with an EP group | `DistributedTrainerMixin._apply_training_args_overrides` |
 | `packing`, `padding_free`, `torch_compile`, `lowp_precision`, `dataset_num_proc` | not gated under EP | — |
 
 ## Troubleshooting
@@ -593,7 +586,7 @@ on top of it: [Supported combinations](README.md#supported-combinations).
 |---|---|
 | `No module named 'deep_ep'` | Install DeepEP ([deepep.md](../infrastructure/deepep.md)) |
 | `EP group size (N) must divide world size (M)` / `… the NVLink domain (M)` | Use a size dividing `world_size` (cross-node) or `nvlink_domain_size` (node-local) |
-| `Parameter indices which did not receive grad` | `ddp_find_unused_parameters=True` did not reach the trainer — launch through the entry scripts, which set it for every EP run |
+| `Parameter indices which did not receive grad` | `ddp_find_unused_parameters=True` did not reach the wrap; the trainer sets it for every run with an EP group, so build the trainer through `DistributedTrainerMixin` as the entry scripts do |
 | `DeepEP NVLink barrier timeout` then `cudaErrorLaunchFailure` abort, under GC | `use_reentrant=False` reached the EP path. The trainer forces `True` — this only appears if `enable_scoped_gradient_checkpointing` was called directly. Do not pin `false` |
 | OOM | Enable GC; raise EP size (each doubling roughly halves per-GPU expert memory) |
 

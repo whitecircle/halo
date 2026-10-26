@@ -2,7 +2,7 @@
 
 Runnable launches for multi-node training: torchrun and SLURM commands, EP checkpoint save/load and filesystem setup. For the process-group layout, node-local vs cross-node scope, and the `ParallelismConfig` API, see [Multi-Node Training](multi-node.md). For SkyPilot cluster provisioning, see [SkyPilot](../infrastructure/skypilot.md).
 
-These recipes assume **N × 8-GPU nodes on an RDMA fabric** (InfiniBand/RoCE or AWS EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)). Launch one `torchrun` per node (it forks the 8 per-GPU ranks); EP all-to-all uses NVLink within a node and RDMA only when `ep_scope="global"` makes the EP group span nodes. A ready-to-run example covering cross-node EP, node-local EP + DP, EP+TP, and the NVL72 variant ships at `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`.
+These recipes assume **N × 8-GPU nodes on an RDMA fabric** (InfiniBand/RoCE or AWS EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)). Launch one `torchrun` per node (it forks the 8 per-GPU ranks); EP all-to-all uses NVLink within a node and RDMA only when `ep_scope="global"` makes the EP group span nodes. A ready-to-run example covering cross-node EP, node-local EP + DP, EP+TP, and the NVL72 variant ships at `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`; the two pipeline-parallel recipes, one stage per node, launch the same way ([Pipeline Parallelism → Launching](pipeline-parallelism.md#launching)).
 
 ## torchrun
 
@@ -71,7 +71,7 @@ Managed cloud recipes: [SkyPilot](../infrastructure/skypilot.md) (AWS EFA / Nebi
 ```bash
 export DIST_SHARED_FILESYSTEM=1      # default; "0" for per-node local storage
 export DIST_NCCL_TIMEOUT_MINUTES=60  # NCCL watchdog; toolkit default 30 (PyTorch's own is 10)
-export DIST_STORE_TIMEOUT_HOURS=4    # default; bounds c10d-store waits (main-first download, load gate)
+export DIST_STORE_TIMEOUT_HOURS=4    # default; bounds c10d-store waits (main-first download, load gate, checkpoint write joins)
 export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the ENA iface on AWS
 # The image bakes the IB/RoCE NCCL defaults and CUDA_DEVICE_MAX_CONNECTIONS=1
 # (agent-docs/infrastructure/docker.md#baked-in-environment-variables); InfiniBand/RoCE needs no fabric env.
@@ -82,7 +82,9 @@ export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the 
 The per-fabric launch env — AWS EFA's plugin variables, the proxy GIN cross-node EP needs over EFA, a rollout
 server on another node: [Multi-Node → RDMA fabrics](multi-node.md#rdma-fabrics).
 
-`init_distributed` pins `DIST_NCCL_TIMEOUT_MINUTES` as the default for every later
+`DIST_NCCL_TIMEOUT_MINUTES` is the one NCCL watchdog setting: the process group starts before the
+config is parsed, so a training config that sets `ddp_timeout` away from its default is refused. Set
+it alike on every node. `init_distributed` pins it as the default for every later
 `dist.new_group()`. EP/CP/PP subgroups pass it explicitly; the pin is what carries it onto the
 DTensor meshes, since `init_device_mesh` takes no timeout — that is the DP/HSDP/TP axes. It does
 **not** bound the DeepEP dispatch/combine kernels, which carry the `ElasticBuffer` GPU-side barrier
@@ -108,7 +110,7 @@ The two modes, save-rank memory, and every `save_sharded_ep` rejection live on [
 
 ## File system
 
-The toolkit coordinates file operations (model downloads, dataset loading, directory creation, checkpoint saves) based on whether nodes share a filesystem. Set `DIST_SHARED_FILESYSTEM=1` (default) for shared storage (NFS, Lustre, GPFS) or `0` for per-node local storage; the read and write sides can be split with `DIST_INPUT_SHARED_FILESYSTEM` / `DIST_OUTPUT_SHARED_FILESYSTEM` (e.g. per-node input caches with shared-mount checkpoints on a slow NFS export). Full details: [Filesystem Handling](../data/filesystem-handling.md).
+Set `DIST_SHARED_FILESYSTEM=1` (default) for shared storage (NFS, Lustre, GPFS) or `0` for per-node local storage, and split the read and write sides with `DIST_INPUT_SHARED_FILESYSTEM` / `DIST_OUTPUT_SHARED_FILESYSTEM` where they differ (per-node input caches beside shared-mount checkpoints on a slow NFS export). What per-node output storage changes for a parallel run: [Multi-Node → Shared vs node-local storage](multi-node.md#shared-vs-node-local-storage); the coordination and the startup probes: [Filesystem Handling](../data/filesystem-handling.md).
 
 Weights take ~2 bytes/param in bf16 (7B MoE ≈ 14 GB, 20B ≈ 40 GB, 70B ≈ 140 GB), the size of a `save_model` export; per-rank sharded is roughly `full / ep_size`. A training checkpoint keeps fp32 masters (`fp32_router`, `fp32_experts`, `fp32_non_ep_params`) at 4 bytes per element and adds the optimizer state (4 bytes/param for AdamWBF16) unless `save_only_model: true`.
 

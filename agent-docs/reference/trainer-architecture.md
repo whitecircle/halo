@@ -222,7 +222,8 @@ and `allow_optimizer_warm_restart`, `moe_balancing`, `dataset_presharded`, and `
 Its `_apply_training_args_overrides` step sets `fsdp = ""` on the training args (the mixin owns sharding)
 and, under EP, `ddp_find_unused_parameters = True`, hands TRL its router aux-loss coefficient, and
 reconciles `save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested
-mode and the model (every MoE, EP or CP run goes reentrant). It then runs the construction refusals
+mode and the model (every MoE, EP or CP run goes reentrant, except under PP, which requires
+non-reentrant). It then runs the construction refusals
 (`reject_undeclared_axes`, `reject_pp_named_optimizer`, `reject_accelerate_launch`, the determinism
 gates) and the PP split.
 `distributed_trainer_kwargs` (`halo/entrypoints/script.py`) is the bundle every entry script
@@ -509,7 +510,8 @@ its adapters disabled). Support code lives in `objective/` (pure loss-side funct
 preflights; `trl_vllm_client.py`; and `completions_logging.py`, whose `DecoupledCompletionsLogMixin` both
 on-policy trainers compose to write the completions record under `save_completions` and the console table
 under TRL's `log_completions`). `offline/` holds `trainer.py`, `offline_rules.py` (its construction refusals),
-`tokenization.py`, `group_sampler.py`, `pipeline_loss.py`, `reference.py` (the reference mode, the run-start
+`group_rows.py` (one tokenized row per stored completion, carrying its advantage), `group_sampler.py`,
+`pipeline_loss.py`, `reference.py` (the reference mode, the run-start
 sweep, the checkpoint payload and evaluation reuse) and `reference_cache.py` (the storage of its
 frozen-reference scores).
 

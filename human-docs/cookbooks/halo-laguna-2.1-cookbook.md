@@ -39,8 +39,8 @@ halo launch sft examples/sft/laguna/laguna-xs-2.1-ultrachat.yaml \
 
 ### Other layouts
 
-- Pure ETP2 on Laguna S (`partial`, see above): add `--expert_parallel_size=1 --expert_tensor_parallel_size=2`
-  to the four-GPU command.
+- Pure ETP2 on Laguna S, which passes tiny-model GPU tests only: add
+  `--expert_parallel_size=1 --expert_tensor_parallel_size=2` to the four-GPU command.
 
 ### LoRA
 
@@ -97,7 +97,8 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental laguna-grpo.yaml -n 
 
 ## Limits
 
-- No CP or TP: Laguna attention has no wrapper for either.
+- No CP or TP: Laguna attention has no wrapper for either. No pipeline parallelism: Laguna is not a
+  registered pipeline family.
 - No SGLang weight sync. SGLang 0.5.22's Laguna loader expects every expert weight in every update,
   which a chunked update can't provide. Online RL runs on vLLM.
 - vLLM 0.32.0 drops the exported correction bias. A model trained with `bias_update` never serves on

@@ -38,9 +38,10 @@ the others never reach.
 
 1. Dump every rank's stack — the rank *not* in a collective is the culprit:
    `python scripts/profiling/py_spy_diag.py dump` from a shell in the training container attaches
-   py-spy to every torchrun rank. No launch-time setup, so it works on a job already hung; one file
-   per rank under `$HALO_DATA_ROOT/profiling/py_spy/stacks`. Attaching needs `--cap-add=SYS_PTRACE` unless the
-   host's `kernel.yama.ptrace_scope` is 0, else py-spy fails with `Permission denied`.
+   py-spy to every torchrun rank on that node. No launch-time setup, so it works on a job already hung;
+   one file per rank under `$HALO_DATA_ROOT/profiling/py_spy/stacks`. Attaching needs
+   `--cap-add=SYS_PTRACE` when the host's `kernel.yama.ptrace_scope` is 1 or 2 (0 needs nothing, 3 never
+   attaches), else py-spy fails with `Permission denied`.
 2. Suspect a shape/value divergence upstream of the stuck collective →
    `assert_rank_uniform(tuple(t.shape), group=..., label=..., strict=True)`.
 3. An EP job that stops at startup naming `concurrent >2-rank DeepEP dispatch groups` is a rejected
@@ -55,15 +56,16 @@ the others never reach.
 2. Reduce levers, cheapest first: **gradient checkpointing** on; lower
    `per_device_train_batch_size`; lower `max_length` / seq len; switch to a
    parallelism that lowers DP (CP/TP). GC is refused for Zaya in every mode (cuDNN CCA fault)
-   and forced reentrant under EP/CP/any MoE (the `CheckpointError` row of Troubleshooting).
+   and forced reentrant under EP/CP/any MoE (the `CheckpointError` row of Troubleshooting), except
+   under PP, which runs non-reentrant and refuses `use_reentrant: true`.
    Recipes: [Debugging §3](../../agent-docs/reference/debugging.md#3-gpu-memory-profiling).
 3. Quick textual check: `log_cuda_memory("after forward")` / `EfficiencyCallback` peak mem.
 
 ### NaN / Inf loss
 
 1. **Which model + attention impl?** qwen3.5/3.6/Qwen3-Next and GLM-4 MoE Lite under FA4 NaN the
-   first backward (head_dim-256 + partial rotary) — the fix is the auto FA4→SDPA fallback
-   (`is_fa4_backward_nan_prone`, applied in `resolve_attn_implementation` in
+   first backward (head_dim-256 + partial rotary) — the fix is the automatic fallback from FA4 to SDPA,
+   or to FA2 under CP (`is_fa4_backward_nan_prone`, applied in `resolve_attn_implementation` in
    `halo/models/attention/selection.py`); confirm it engaged, don't force FA4.
 2. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
    makes tiny LRs converge; a NaN right after an optimizer step suggests SR/precision —
@@ -84,8 +86,10 @@ the others never reach.
 
 ### NCCL timeout (watchdog fires after a stall)
 
-1. Raise the window for legit-slow collectives (big all-to-all / gathered save):
-   `DIST_NCCL_TIMEOUT_MINUTES` (default 30; PyTorch's own is 10).
+1. Raise the window for legit-slow collectives (big all-to-all): `DIST_NCCL_TIMEOUT_MINUTES`, the one
+   NCCL watchdog setting (a non-default `ddp_timeout` is refused). Checkpoint-write joins and
+   rank-coordinated dataset work wait on the c10d store instead, bounded by `DIST_STORE_TIMEOUT_HOURS`
+   ([defaults](../../agent-docs/reference/configuration-reference.md#environment-variables)).
 2. Capture *which* collective each rank missed: `TORCH_NCCL_TRACE_BUFFER_SIZE=20000`,
    `TORCH_NCCL_DUMP_ON_TIMEOUT=1`, `TORCH_NCCL_DEBUG_INFO_TEMP_FILE=<path>`.
 3. Subgroup reachability: a timeout in an EP/CP/TP **subgroup** means a rank took a

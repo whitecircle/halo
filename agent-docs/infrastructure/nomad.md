@@ -1,6 +1,6 @@
 # Nomad Deployment
 
-Batch job specs for running Halo training on an existing HashiCorp Nomad cluster. Specs live at `launcher-configs/nomad/*.nomad.hcl` — three jobs, tabled below. Adapt to other models by overriding `config_path` and `model` — and edit the task's `OUTPUT_DIR` / `WANDB_PROJECT` env, which are fixed per spec rather than variables.
+Batch job specs for Halo training on an existing HashiCorp Nomad cluster: three jobs at `launcher-configs/nomad/*.nomad.hcl`, tabled below. Retarget one by overriding `config_path` and `model`, and edit the task's `OUTPUT_DIR` / `WANDB_PROJECT` env, which are fixed per spec rather than variables.
 
 Unlike [SkyPilot](skypilot.md), Nomad provisions nothing: it places containers on clients you already run. The GPU hosts, their drivers, and the scratch disk are yours to supply.
 
@@ -143,7 +143,7 @@ volume_mount {
 }
 ```
 
-On a cluster without a shared filesystem the scratch path is per-client local disk, so the two-node spec sets `DIST_SHARED_FILESYSTEM=0`: each node's local rank 0 fetches the model into its own HF cache and writes its own checkpoint copy, and a resume reads each node's copy. A local `model` path must exist on both clients — the ranks agree on the source before loading and fail together when one node lacks it. Set `shared_filesystem=1` only when that path is one NFS/Lustre mount on both clients; a declaration that contradicts the `output_dir` mount fails at startup ([Filesystem handling](../data/filesystem-handling.md)). Per-node save and resume is covered by CPU simulations, not yet by a multi-node run ([Multi-Node → Verified topologies](../parallelism/multi-node.md#verified-topologies)).
+On a cluster without a shared filesystem the scratch path is per-client local disk, so the two-node spec sets `DIST_SHARED_FILESYSTEM=0`: each node's local rank 0 fetches the model into its own HF cache and writes its own checkpoint copy, and a resume reads each node's copy. A local `model` path must exist on both clients — the ranks agree on the source before loading and fail together when one node lacks it. Set `shared_filesystem=1` only when that path is one NFS/Lustre mount on both clients; a declaration that contradicts the `output_dir` mount or the HF caches fails at startup ([Filesystem handling](../data/filesystem-handling.md)). What validates per-node save and resume: [Multi-Node → Verified topologies](../parallelism/multi-node.md#verified-topologies).
 
 ## Credentials
 

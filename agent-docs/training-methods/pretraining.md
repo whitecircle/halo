@@ -64,9 +64,9 @@ python scripts/before_training/prepare_dataset.py \
     --num_shards 256
 ```
 
-`--mode text` tokenizes `--text_field` and appends an EOS per document (`--append_eos false` when the corpus already delimits them). Whole documents reach the packer, so the strategy decides the overflow: **`bfd_split`** carries it into later packs, `bfd` discards every token past `--max_length`, and `wrapped` concatenates across boundaries, emitting none at all. Flags: [Pre-Processing](../data/dataset-preparation.md#parameters).
+`--mode text` tokenizes `--text_field` and appends an EOS per document (`--append_eos false` when the corpus already delimits them). Whole documents reach the packer, so the strategy decides the overflow: **`bfd_split`** carries it into later packs, `bfd` discards every token past `--max_length`, and `wrapped` chunks the token stream across document boundaries. Flags: [Pre-Processing](../data/dataset-preparation.md#parameters).
 
-`--num_shards` must be at least the data-parallel size, or the train split raises; a non-multiple truncates every rank to the smallest shard. `ShardedDatasetLoader` assigns them by **DP rank**, not global rank ([Data Loading](../parallelism/data-loading.md#pre-processed-sharded-datasets)).
+`--num_shards` must be at least the data-parallel size, or the train split raises. Every rank is truncated to the smallest rank's row count (a warning names the drop), so a shard count that is not a multiple of the data-parallel size drops about a shard from each fuller rank per pass. `ShardedDatasetLoader` assigns them by **DP rank**, not global rank ([Data Loading](../parallelism/data-loading.md#pre-processed-sharded-datasets)).
 
 The SFT trainer auto-detects the artifact and holds the run to it. Text mode bakes `train_on_completions_only: false` while the training-side default is `true`, so the YAML must state it or startup raises. `max_length` must equal the prep `--max_length` exactly; both directions raise.
 

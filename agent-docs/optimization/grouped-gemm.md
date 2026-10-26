@@ -98,7 +98,7 @@ This is the bf16 path, the MoE production default. fp8/fp4 grouped GEMM and the 
 
 ## Requirements and compatibility
 
-SM90+ (Hopper H100/H200, Blackwell B200/B300) and the pinned PyTorch 2.11.x. DeepEP is required only for EP token distribution, not for standalone grouped GEMM at `ep_size=1`. Every available parallelism mode composes — EP, TP, CP, gradient checkpointing and FSDP2 — with one exception: GptOss under ETP falls back to the loop path (see the note below).
+SM90+ (Hopper H100/H200, Blackwell B200/B300) and the pinned PyTorch 2.11.x. DeepEP is required only for EP token distribution, not for standalone grouped GEMM at `ep_size=1`. Every parallelism mode composes — EP, ETP, TP, CP, PP, gradient checkpointing and FSDP2 — with one exception: GptOss under ETP falls back to the loop path (see the note below).
 
 ### Blackwell (SM100+) backward fix
 

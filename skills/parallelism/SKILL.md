@@ -43,20 +43,22 @@ advising.
 
 ## How to pick a mode
 
-1. **Dense (non-MoE) model?** EP/ETP do nothing — use **TP** (memory/large hidden)
-   or **CP** (long seq), else plain FSDP2 DDP (`dp_size = world_size`).
+1. **Dense (non-MoE) model?** EP/ETP do nothing — use **TP** (memory/large hidden),
+   **CP** (long seq) or **PP** across nodes (step 5), else plain FSDP2 DDP (`dp_size = world_size`).
 2. **MoE model?** Start with **EP** (orthogonal to DP, keeps full DP). For finer
    expert sharding add **ETP** (EP+ETP); EP+TP shards attention only, and TP+ETP is rejected.
    For long sequences on MoE use **EP+CP** (node-local EP only).
 3. **Long sequence, OOM on activations?** add **CP** (Ulysses, node-local). CP
    reduces DP by `cp_size`.
-4. **Weights/attention too big for one GPU?** **TP** (node-local DTensor). TP
-   reduces DP by `tp_size`.
-5. **Model too deep for one rank, across nodes?** **PP** — the outermost axis, the
-   only one meant to cross NVLink domains, composing with **EP or pure ETP** only. Every
-   stage is a whole number of NVLink domains, so it needs at least two; only the families
-   with a PP verdict in the compatibility matrix split. A per-node
-   (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) save exports through `scripts/after_training/merge_pp_stages.py`.
+4. **Weights/attention too big for one GPU?** **TP** (node-local DTensor). Plain FSDP2/DDP
+   loads the whole model onto every GPU before sharding, so it cannot take a dense model past
+   one GPU ([Data Parallelism](../../agent-docs/parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
+   TP reduces DP by `tp_size`.
+5. **Model too large for one node?** **PP** — the outermost axis, composing with **EP or pure
+   ETP** only. Every stage is a whole number of NVLink domains of at least two ranks, so a run
+   needs at least two domains; only the families with a PP verdict in the compatibility matrix
+   split. A per-node (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) save exports through
+   `scripts/after_training/merge_pp_stages.py`.
 6. Compute `dp_size` and sanity-check it's >= 1 and the global batch is what you intend.
 
 ## Worked dp_size examples (8 GPUs, 1 node, domain=8)
@@ -79,6 +81,7 @@ advising.
 | tp_size=4 + cp_size=2 | — | — | — | **NO** — TP+CP rejected |
 | tp_size=2 + expert_tp_size=2 | — | — | — | **NO** — TP+ETP rejected (`ep_size=1`, so the axis set is `{tp, etp}`) |
 | expert_tp_size=2 + cp_size=2 | 2 | 2 | — | **NO** — ETP+CP rejected |
+| pp_size=2 | — | — | — | **NO** — a 4-rank stage is not a whole NVLink domain (PP needs 2+ nodes here) |
 
 ## Reject these
 

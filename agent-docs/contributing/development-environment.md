@@ -1,7 +1,7 @@
 # Development Environment
 
-The compiled GPU dependencies (PyTorch 2.11+cu130, FlashAttention, DeepEP/NVSHMEM) live inside the
-prebuilt Docker images. Pick the variant by what you are doing:
+The compiled GPU dependencies (PyTorch 2.11+cu130, Flash Attention, DeepEP/NVSHMEM) live only inside
+the images. Pick the variant by what you are doing:
 
 | Variant | Use it for | How | GPU deps (FA/DeepEP) | Runs GPU code |
 |---|---|---|---|---|
@@ -82,7 +82,7 @@ hard-fails when the cache is missing and the Hub is unreachable; one going throu
 
 Secrets live in the repo-root `.env`; the cache and path redirects onto a verified large volume and
 `DOCKER_RUNTIME` are on [Docker → Standard training launch](../infrastructure/docker.md#standard-training-launch),
-and the toolkit and cache variables are catalogued in
+and the toolkit and cache variables are cataloged in
 [Environment variables](../reference/configuration-reference.md#environment-variables).
 
 | Variable | Purpose | Where set | Owner page |
@@ -91,6 +91,10 @@ and the toolkit and cache variables are catalogued in
 | `HF_TOKEN` | Gated HuggingFace model/dataset access | `.env` | — |
 | `AWS_DEFAULT_REGION` | Region for your S3 bucket / ECR registry | `.env` | [AWS Auth](../infrastructure/aws-auth.md) |
 | `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/async-grpo/environments/protocols/native-tool-use.md) |
+| `VLLM_API_KEY` | The key a local OpenAI-compatible server expects (its `--api-key`), else `OPENAI_API_KEY` | `.env` | [Environment variables](../reference/configuration-reference.md#environment-variables) |
+| `HALO_SCRATCH` | The large host volume the `make` targets, the dev container and `docker-compose.vllm.yml` mount | shell export (compose also reads `.env`; `make` does not) | [Docker](../infrastructure/docker.md#standard-training-launch) |
+| `SGLANG_MODEL_DIR` | The host directory `docker-compose.sglang.yml` mounts (required, no fallback) | shell export or `.env` | [Rollout Servers](../infrastructure/rollout-servers.md#sglang) |
+| `VLLM_GROUP_HOST`, `SGLANG_GROUP_HOST` | The trainer address a rollout server on another host dials back to | `.env` | [Rollout Servers](../infrastructure/rollout-servers.md#group-rendezvous) |
 
 ## Paths
 

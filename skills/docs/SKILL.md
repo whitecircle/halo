@@ -1,14 +1,15 @@
 ---
 name: docs
 description: >-
-  Use when writing, editing, or reviewing any page under agent-docs/, or
-  when a code change in halo/ needs its owning doc page updated (doc actualization).
-  Authors and maintains the Halo agent-docs/ tree and enforces the anti-AI-slop
-  style charter.
+  Use when writing, editing, or reviewing any page under agent-docs/, human-docs/
+  or skills/, or when a code change in halo/ needs its owning doc page updated
+  (doc actualization). Authors and maintains the Halo doc trees and enforces the
+  anti-AI-slop style charter.
 allowed-tools: [Read, Edit, Write, Grep, Glob, Bash]
 paths:
   - agent-docs/**
   - human-docs/**
+  - skills/**
 ---
 
 # docs — author and maintain the Halo docs tree

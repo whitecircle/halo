@@ -13,7 +13,7 @@ accepts LoRA and DoRA, not QLoRA ([Embedding — PEFT / LoRA](../training-method
 
 ## Supported methods
 
-Uses the [PEFT library](https://github.com/huggingface/peft) (v0.18+). LoRA is the only method with tested
+Uses the [PEFT library](https://github.com/huggingface/peft) (pinned 0.18.1). LoRA is the only method with tested
 parallelism support; other PEFT methods (AdaLoRA, Prompt Tuning, (IA)3) reach the trainer through a custom
 `peft_config` but are untested with it. An AdaLoRA or (IA)3 layer is refused at construction wherever an
 out-of-place fold runs (the weight-sync trainers, embedding LoRA, `merge_expert_lora_on_save`): the fold
@@ -128,7 +128,7 @@ equivalents on other families), not `nn.Linear`, so PEFT's `all-linear` cannot r
 resolves to the attention `q/k/v/o_proj` only. Name the expert projections explicitly instead.
 `split_expert_lora_targets` (`halo/model_loading/parallel/peft_setup.py`) peels those entries out of the list and
 routes them to native grouped-LoRA built inside each EP layer (`_init_expert_lora` in
-`halo/distributed/expert_parallel/moe_layer/layer.py`); the remaining attention names stay on stock PEFT.
+`halo/distributed/expert_parallel/moe_layer/expert_lora.py`); the remaining attention names stay on stock PEFT.
 
 | `lora_target_modules` entry | Requests |
 |---|---|
@@ -298,26 +298,19 @@ from the frozen base instead of a second model copy. Under EP the mixin patches 
 (`install_ep_aware_disable_adapter`) so it reverts the native EP expert adapters too, giving a true frozen-base
 reference for both adapter halves; the patch also covers TRL's `use_adapter(None)` for online GRPO / DPO / KTO.
 
-peft clears `requires_grad` on the adapter tensors a module holds at entry and restores it on the ones it
-holds at exit, while FSDP2 copies each sharded param's flag onto its unsharded copy at every unshard. A
-reference pass that is the first forward after a reshard — online GRPO at `beta > 0` with no old-logps
-recompute (`vllm_importance_sampling_correction: false`, aligned accumulation) — enters on the sharded params
-and exits on the unsharded copies the forward leaves registered, which would freeze every sharded adapter:
-each later micro-step that unshards afresh trains without it, silently under gradient checkpointing. The
-mixin therefore also wraps the context for every PEFT model (`install_fsdp2_safe_disable_adapter`): when the
-trainable params registered at exit are not the ones registered at entry, it reshards the FSDP2 modules
-before peft's exit, so the restore lands on the sharded params, and the next forward or backward re-gathers
-them once. A pass behind the policy forward (DPO, KTO, offline GRPO) enters and exits on the same unsharded
-params and reshards nothing. PEFT fixed the freeze upstream in huggingface/peft#3839, after the pinned 0.18.1.
+The pinned PEFT 0.18.1 clears `requires_grad` on the adapters a module holds when `disable_adapter()`
+enters and restores it on the ones it holds at exit. A reference pass that is the first forward after an
+FSDP2 reshard (online GRPO at `beta > 0` with no old-logps recompute) enters on the sharded params and exits
+on the unsharded copies, which would freeze every sharded adapter silently. `install_fsdp2_safe_disable_adapter`
+wraps the context for every PEFT model: when the registered trainable params changed across it, it reshards
+before PEFT's exit, so the restore lands on the sharded params (fixed upstream in huggingface/peft#3839).
 
-An explicit `ref_model` (DPO, KTO) or self-distillation's KL `reference_model` is never parallelized, so
-under EP or TP it is a whole dense replica on every rank. Its log-probs match the policy's up to kernel
-numerics, so it is warned about, not refused: LoRA with `ref_model=None`, or `precompute_ref_log_probs=True`,
-avoids the replica. Under TP, LoRA is rejected, so DPO/KTO there precompute or hold the replica. SMPO is
-reference-free. Offline GRPO full fine-tuning sweeps and checkpoints its run-start reference without a
-second resident model; only native expert-only LoRA retains an explicit frozen base `ref_model`, which
-the script loads
-([Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model)).
+An explicit reference model (DPO, KTO, self-distillation's KL `reference_model`) is never parallelized:
+under EP or TP it is a whole dense replica on every rank, warned about rather than refused. LoRA with the
+adapter disabled, or precomputed reference log-probs, avoids it. An expert-only LoRA run builds no
+`PeftModel`, so nothing switches its adapters off: DPO and KTO need `precompute_ref_log_probs` there, and
+offline GRPO loads a frozen base `ref_model`. Per trainer: [DPO → Reference model](../training-methods/preference/dpo.md#reference-model),
+[Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model). SMPO is reference-free.
 
 On online / async GRPO, where no adapter wraps the model — a full fine-tune, or an expert-only LoRA
 run, which builds no `PeftModel` — `beta != 0` holds a frozen reference: the script loads the base the
@@ -325,10 +318,6 @@ way the policy loads and the trainer hands it to TRL in place of the fp32 copy T
 ([Online GRPO](../training-methods/grpo/online.md#grpo-objective-for-verifiable-rewards)). It is an
 unparallelized replica per rank, warned about under EP and TP. Add an attention LoRA target (it wraps the
 model, and the disabled adapter is the reference) or set `beta: 0` to hold none.
-
-The DPO/KTO scripts never leave the reference to TRL: a full fine-tune gets a frozen copy, or no reference
-under `precompute_ref_log_probs: true` with EP or TP (plain data parallelism still loads the copy); an
-expert-only LoRA run needs precompute in every mode ([DPO → Reference model](../training-methods/preference/dpo.md#reference-model)).
 
 ## Online RL — rollout-server weight sync
 
@@ -449,12 +438,10 @@ discarding them. So does a changed LoRA scaling: resume compares the scaling inp
 half's `lora_alpha` and `use_rslora`) with the live run's, since names and shapes would still match and
 the delta would silently rescale. A missing `adapter_config.json` raises too.
 
-Under CP the saved (normalized) keys are mapped back onto live wrapper spelling by
-`remap_cp_adapter_keys_to_live`, through the shared `strip_peft_adapter_segment`, which drops the
-adapter-name segment in all three spellings PEFT uses (`lora_A.default.weight`,
-`modules_to_save.default.weight`, and the trailing `ParameterDict` form `lora_embedding_A.default`). Both
-adapter loaders drop an unmatched key as unexpected, so a spelling it missed would resume that adapter at
-initialization, silently. See [Checkpoints](../reference/checkpoints.md#resume-by-parallelism-mode).
+Under CP `remap_cp_adapter_keys_to_live` maps the saved, normalized keys back onto the live wrapper
+spelling, matching all three adapter-name spellings PEFT writes (`lora_A.default.weight`,
+`modules_to_save.default.weight`, `lora_embedding_A.default`); a missed spelling would resume that adapter
+at initialization, silently. See [Checkpoints](../reference/checkpoints.md#resume-by-parallelism-mode).
 
 ## Merging adapters
 

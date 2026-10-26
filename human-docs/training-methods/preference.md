@@ -42,7 +42,9 @@ halo launch kto  examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml -n 
 ```
 
 These recipes are dense; the MoE ones under `examples/preference/gptoss/` and
-`examples/preference/gemma4/` run expert parallelism, and SMPO alone also takes context parallelism.
+`examples/preference/gemma4/` run expert parallelism. SMPO alone also takes context parallelism. All
+three take pipeline parallelism, where DPO and KTO need precomputed reference log-probs
+([Supported matrix](../supported-matrix.md#training-methods)).
 
 - **SMPO**: `target_margin` is the log-probability gap a pair should reach, and `chosen_sft_ratio` splits
   the anchor between the chosen and rejected sides.

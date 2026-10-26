@@ -100,6 +100,7 @@ and leave out `--routing_replay=rollout`, because SGLang's routing capture is no
 ## Limits
 
 - No CP: the short-convolution layers can't split the sequence across ranks.
+- No pipeline parallelism: LFM-2 is not a registered pipeline family.
 
 ## Export and serve
 

@@ -53,15 +53,19 @@ warning and falls back to the default.
   output side shared ([Clusters](clusters.md#storage)). Set them identically on
   every rank.
 - **Long waits:** raise `DIST_STORE_TIMEOUT_HOURS` when one rank's download,
-  dataset pack or queued model load outlasts it, and `DIST_NCCL_TIMEOUT_MINUTES`
-  for very large gathered saves or cross-node all-to-alls.
+  dataset pack, queued model load or checkpoint write outlasts it, and
+  `DIST_NCCL_TIMEOUT_MINUTES` for slow cross-node all-to-alls or a gathered-save
+  part that writes slower than it.
+- **Shared NFS with long attribute caching:** raise
+  `DIST_FS_PROBE_TIMEOUT_SECONDS` when the multi-node startup probe refuses a
+  mount you declared shared.
 - **NVL72:** `NVLINK_DOMAIN_SIZE=72`, since the NVLink domain spans the rack.
 - **One W&B run across restarts:** a fixed `WANDB_RUN_ID` on the whole job, with
   `WANDB_RESUME=allow` ([Monitoring](monitoring.md)).
 - **S3 helpers given a bare key:** `HALO_S3_DEFAULT_BUCKET`.
-- **Dataset map workers:** `HALO_DATASET_NUM_PROC` lowers the default (three
-  quarters of the host's CPUs, at most 64; all but two in `prepare_dataset.py`) on
-  a memory-tight host.
+- **Dataset map workers:** `HALO_DATASET_NUM_PROC` overrides the default (three
+  quarters of the CPUs the process may use, at most 64; all but two in
+  `prepare_dataset.py`), for example on a memory-tight host.
 - **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels) or
   `HALO_FLEX_SLIDING=0` (Gemma 4's FlexAttention, also needed for
   `full_determinism` on more than one GPU).

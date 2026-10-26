@@ -33,7 +33,10 @@ Set these per run:
 - **`gradient_checkpointing: false`** when the activations fit, at much higher
   peak memory.
 - **`packing: true`** on a corpus of short rows; `padding_free: true` gains
-  less.
+  less. Where SFT rows share long prefixes (GPT-OSS, Qwen3, Qwen3.5/3.6),
+  `tree_packing: true` stores each prefix once, at some extra step time on
+  full-attention layers
+  ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗).
 - **`liger_kernel_config: {fused_linear_cross_entropy: true}`** past ~16k
   tokens, which trades a little speed for a lot of logits memory.
 - **`fsdp_defer_grad_sync: true` with `fsdp_reshard_after_backward: false`**

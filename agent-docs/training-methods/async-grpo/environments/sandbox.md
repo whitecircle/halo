@@ -170,7 +170,7 @@ Rlimits bound each `local` / `bubblewrap` run; `remote` enforces its own.
 - **Stack.** A compiled program's stack is capped at the process's hard stack limit, which `--ulimit stack=67108864` holds at 64 MiB. An interpreter keeps the inherited stack.
 - **Math threads.** `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` are `1` in the child env; a host-sized pool would pass the address-space limit and abort `import numpy`.
 - **CPU backstop.** The CPU limit is set soft and hard alike, so a program that reaches it before the wall-clock timeout (threads spinning in parallel) is killed with `SIGKILL` and reads as a runtime error, not as `timed_out`.
-- **Run clock.** The run step's wall clock starts when the program is exec'd: the limit shell and, on `bubblewrap`, the jail's namespace and mount setup are not charged to it. A launch that has not reached the program after `LAUNCH_TIMEOUT_SECONDS` (30 s) is an infra fault. The compile step's clock includes its launch.
+- **Run clock.** The run step's wall clock starts when the program is exec'd: the limit shell and, on `bubblewrap`, the jail's namespace and mount setup are not charged to it. A launch that has not reached the program after `LAUNCH_TIMEOUT_SECONDS` (30 s) is an infra fault; one that dies before the program starts (a jail namespace failure) still reads as the program's runtime error. The compile step's clock includes its launch.
 - **Fork bombs.** `RLIMIT_NPROC` does not bind uid 0, so on `local` in a root container no rlimit bounds a fork bomb's process count; the run's end bounds only how long they live.
 - **Process group.** A run is judged on the leader's exit and output; its process group is killed when the leader exits. On `local` a child that `setsid()`s out escapes.
 

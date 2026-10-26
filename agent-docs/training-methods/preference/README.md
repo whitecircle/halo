@@ -23,7 +23,7 @@ The three pairwise methods share one format, all fields `list[dict]` messages:
 
 ## Parallelism
 
-All four run EP, TP, ETP and EP+TP. SMPO alone declares CP support: it CP-aggregates its per-sequence log-prob sums, while DPO and KTO run TRL's CP-unaware loss path and the reward head needs the whole sequence to pool. Full matrix: [Trainer Compatibility](../../reference/trainer-architecture.md#trainer-compatibility).
+All four run EP, TP, ETP, EP+TP and PP (DPO and KTO precompute-only). SMPO alone declares CP support: it CP-aggregates its per-sequence log-prob sums, while DPO and KTO run TRL's CP-unaware loss path and the reward head needs the whole sequence to pool. Full matrix: [Trainer Compatibility](../../reference/trainer-architecture.md#trainer-compatibility).
 
 ## Launch
 

@@ -9,8 +9,7 @@ the reference MoE family.
 Modes: the Qwen3 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
 [Rollout engines](../supported-matrix.md#rollout-engines).
 
-- **Checkpoint:** `Qwen/Qwen3-30B-A3B-Instruct-2507`, pinned below. The larger
-  `Qwen/Qwen3-235B-A22B-Instruct-2507` trains at `--expert_parallel_size=8`.
+- **Checkpoint:** `Qwen/Qwen3-30B-A3B-Instruct-2507`, pinned below.
 - **GPUs:** four at EP4, 32 experts per GPU.
 
 ## Recipes
@@ -123,8 +122,9 @@ Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs.
 
 ## Limits
 
-Qwen3 MoE has no family-specific limits. The general ones apply: LoRA is refused under TP and EP+TP,
-and expert adapters are refused once `expert_tensor_parallel_size > 1`.
+- No pipeline parallelism: Qwen3 MoE is not a registered pipeline family (dense Qwen3 is).
+- The general limits apply: LoRA is refused under TP and EP+TP, and expert adapters are refused once
+  `expert_tensor_parallel_size > 1`.
 
 ## Export and serve
 
@@ -139,6 +139,6 @@ SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-sft" \
 
 ## Reference
 
-- [Qwen3 model notes](../../agent-docs/models/qwen3.md) ↗: the EP, CP and TP wrappers, balancing
+- [Qwen3 model notes](../../agent-docs/models/qwen3.md) ↗: the EP layer, CP and TP, balancing
 - [Async GRPO with Environments](../training-methods/async-grpo-environments.md)
 - [Model card](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)

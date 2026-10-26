@@ -197,7 +197,7 @@ So a block freed on a stream that then stops being used is stranded: nothing all
 
 `reserved` far above `peak_alloc` in a memory reading means stranded pools, not live tensors ([Debugging](debugging.md#3-gpu-memory-profiling)).
 
-**CUDA graphs** record a kernel sequence once and replay it with a single launch, collapsing that host cost — a win for many-small-kernel steps. The catch is rigidity: fixed shapes and addresses fight dynamic control flow, so graphs are awkward for MoE, where per-expert token counts change every step. The toolkit does not capture the EP path.
+**CUDA graphs** record a kernel sequence once and replay it with a single launch, collapsing that host cost — a win for many-small-kernel steps. The cost is rigidity: fixed shapes and addresses fight dynamic control flow, so graphs are awkward for MoE, where per-expert token counts change every step. The toolkit does not capture the EP path.
 
 ---
 
@@ -215,7 +215,7 @@ A naive activation is several such kernels, each a separate HBM round trip. Fusi
 
 The toolkit gets this fusion from two places:
 
-- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP layer replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab or CP computes its own loss. [Liger Kernels](../optimization/liger-kernels.md).
+- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP layer replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab or CP or PP computes the loss outside the forward. [Liger Kernels](../optimization/liger-kernels.md).
 - **torch.compile** (Inductor) auto-fuses pointwise chains. [torch.compile](../optimization/torch-compile.md).
 
 ### Fused-linear-cross-entropy (FLCE)
@@ -224,7 +224,7 @@ An LM's final step multiplies each position's hidden state by `lm_head` to produ
 
 FLCE never materializes it. It fuses the `lm_head` projection and cross-entropy into one kernel that processes the sequence in chunks, computing each block's logits, loss, and gradient and freeing them before the next — often the difference between a long sequence and OOM.
 
-The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (preference and distillation need logits for log-probs), turns off entropy logging, and forces it off under TP and CP. It is default-on for the large-vocab families whose logits plane is the binding limit (`zaya`, `deepseek_v4`, `glm4_moe_lite`), opt-in elsewhere (`liger_kernel_config: {fused_linear_cross_entropy: true}`). Per-model defaults and the measured savings: [Liger Kernels](../optimization/liger-kernels.md).
+The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (preference and distillation need logits for log-probs), turns off entropy logging, and forces it off under TP, CP and PP. It is default-on for the large-vocab families whose logits plane is the binding limit (`zaya`, `deepseek_v4`, `glm4_moe_lite`), opt-in elsewhere (`liger_kernel_config: {fused_linear_cross_entropy: true}`). Per-model defaults and the measured savings: [Liger Kernels](../optimization/liger-kernels.md).
 
 ### What fusion does not buy
 
@@ -399,7 +399,7 @@ Each mode buys memory headroom by spending a specific collective.
 - **FSDP (data parallel)** shards weights, grads, and optimizer state, paying that first identity once per FSDP unit (a decoder layer). Both halves overlap well (prefetch the next layer), so FSDP reaches the highest efficiency when the model fits. [Data Parallelism](../parallelism/data-parallelism.md).
 - **EP (expert parallel)** shards experts and adds a token all-to-all before and after each MoE layer (DeepEP). It is orthogonal to DP and tolerates cross-node links. [Expert Parallelism](../parallelism/expert-parallelism.md).
 
-    The catch is load balance: real routing is lumpy, so the busiest expert and the all-to-all gate the step and skew utilization. The toolkit tracks per-expert load and rebalances the router (aux loss or DeepSeek-V3 bias update).
+    Load balance limits it: real routing is lumpy, so the busiest expert and the all-to-all gate the step and skew utilization. The toolkit tracks per-expert load and rebalances the router (aux loss or DeepSeek-V3 bias update).
 
 - **TP (tensor parallel)** splits each matmul and needs an all-reduce on the forward's critical path that the toolkit does not overlap, so TP must stay NVLink-local. [Tensor Parallelism](../parallelism/tensor-parallelism.md).
 - **CP (context parallel)** splits the sequence; all-to-alls swap sequence-sharding for head-sharding around each attention (Ulysses): one for Q, one for the fused K and V, one for the output. Use it for sequences too long for one GPU. [Context Parallelism](../parallelism/context-parallelism.md).
@@ -408,7 +408,7 @@ Each mode buys memory headroom by spending a specific collective.
 
 FSDP2's `fully_shard` shards all three, and the toolkit's default `reshard_after_forward=False` keeps each unit's gathered parameters resident from its forward to its backward — the ZeRO-2 analog.
 
-`fsdp_reshard_after_forward: true` is the ZeRO-3 analog: it drops the gathered copy after the forward and re-gathers it for the backward, ~1.5× the wire bytes for a lower peak. It is rejected wherever an expert-distribution group exists and under TP with `data_parallel_size > 1`. No DeepSpeed runs here; ZeRO is the naming only ([Data Parallelism](../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)).
+`fsdp_reshard_after_forward: true` is the ZeRO-3 analog: it drops the gathered copy after the forward and re-gathers it for the backward, ~1.5× the wire bytes for a lower peak. It is rejected wherever an expert-distribution group exists, under TP with `data_parallel_size > 1` and under PP. No DeepSpeed runs here; ZeRO is the naming only ([Data Parallelism](../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)).
 
 ### Why N× GPUs is not N× throughput
 
@@ -422,7 +422,7 @@ The runbook is [Pipeline Parallelism](../parallelism/pipeline-parallelism.md); t
 
 PP cuts the layer stack into `p` contiguous **stages**, one rank block each, and streams `m` **microbatches** through them. It carves the world first. Every other mode then runs unchanged inside one stage, on `stage_world_size = world_size / p` ranks.
 
-That is what "outermost" means, and it is why each stage must be a whole number of NVLink domains. Even once it lands PP would stay off by default — its idle time buys nothing inside a domain where FSDP2 and EP already fit.
+That is what "outermost" means, and it is why each stage must be a whole number of NVLink domains. PP stays off by default: its idle time buys nothing inside a domain where FSDP2 and EP already fit.
 
 **The bandwidth argument.** A stage boundary carries one tensor: the hidden state forward, its gradient back. Per step per edge that is `4 · T · H` bytes (bf16, both directions), for `T` tokens per step and hidden size `H` — `× hc_mult` for the hyper-connection families, whose boundary is the widened stream.
 
@@ -442,13 +442,13 @@ The formula assumes equal per-stage cost and no cross-step overlap. What sets it
 
 **The tension with M.** Under PP the microbatches *are* the gradient accumulation. Raising `m` to shrink the bubble therefore splits the per-device batch into thinner slices and slides every GEMM's `M` down §4's ramp.
 
-Fixed shapes push the same way: the P2P buffers freeze on the first step, so every batch pads to a constant width. That is why packing (fixed-width rows) would be the shape to run under PP, and why the padding-free collator, whose width is the summed document length, is refused.
+Fixed shapes push the same way: the P2P buffers freeze on the first step, so every batch pads to a constant width. That is why packing (fixed-width rows) is the shape to run under PP, and why the padding-free collator, whose width is the summed document length, is refused.
 
 Deep pipelines want many microbatches; the roofline wants few and fat.
 
 **Memory.** A stage holds `1/p` of the parameters, and torch's schedule pins them unsharded across the backward and defers FSDP's reduce-scatter to the optimizer step. Per rank that is `2P/p` bytes of resident weights and `2P/p` of accumulating gradient, while optimizer state stays sharded at `4P/world_size` (§8); `fp32_grad_reduce` doubles the gradient term to `4P/p` ([BF16 Optimizer](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)). PP divides the one term FSDP2 leaves whole.
 
-Activations are the sharper win. A **1F1B** (one-forward-one-backward) stage holds at most `p` microbatches over `L/p` layers at `B/m` rows each — `1/m` of what the same rank stores without PP. (GPipe's all-forwards-first schedule holds `B·L/p`, which is why 1F1B is the default.) PP hands a dense stage the headroom GC exists to buy, so a dense PP run would want GC off, and nothing would disable it automatically.
+Activations are the sharper win. A **1F1B** (one-forward-one-backward) stage holds at most `p` microbatches over `L/p` layers at `B/m` rows each — `1/m` of what the same rank stores without PP. (GPipe's all-forwards-first schedule holds `B·L/p`, which is why 1F1B is the default.) PP hands a dense stage the headroom GC exists to buy, so a dense PP run wants GC off, and nothing disables it automatically.
 
 **Composition.** The expert axes are the only other sharding PP admits: EP, whose dispatch stays inside a stage, or pure ETP (`ep_size=1`), never both.
 
@@ -497,7 +497,7 @@ The levers are the same three ideas at step granularity instead of kernel granul
 
 The weight sync itself is a bandwidth question with the same shape as §9's ladder. A full-model broadcast is ~42 GB at 20B and 234 GB for gpt-oss-120b; on one host NCCL moves it GPU to GPU over CUDA IPC (`P2P/CUMEM`).
 
-Across nodes it rides the fabric: 53 GB/s (vLLM client) to 80 GB/s (SGLang) over EFA against 9.7 GB/s on sockets: 4.4 s, 2.9 s and 24 s for gpt-oss-120b (234 GB), and 0.5–0.8 s at 20B by the same EFA rates ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)). Throughput anatomy and the tuning order live in [Async GRPO with Environments](../training-methods/async-grpo/performance.md#throughput-levers).
+Across nodes it rides the fabric: on 8× B300 nodes, 53 GB/s (vLLM client, measured on vLLM 0.26.0) to 80 GB/s (SGLang client, measured on SGLang 0.5.17) over EFA against 9.7 GB/s on sockets: 4.4 s, 2.9 s and 24 s for gpt-oss-120b (234 GB), and 0.5–0.8 s at 20B by the same EFA rates ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)). Throughput anatomy and the tuning order live in [Async GRPO with Environments](../training-methods/async-grpo/performance.md#throughput-levers).
 
 ---
 

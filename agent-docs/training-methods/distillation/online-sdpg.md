@@ -41,7 +41,7 @@ trainer = DistributedSDPGTrainer(
 
 ## Testing a setup
 
-Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_divergences.py -m cpu` and, end to end, by the `--trainer sdpg` rows of the single-process, dense and MoE online-GRPO suites (`tests/gpu/trainers/grpo/test_online_grpo_vllm_*_e2e.py`).
+Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_divergences.py -m cpu` and, end to end, by the dense and MoE `--trainer sdpg` rows of `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py`.
 
 ## What to watch
 

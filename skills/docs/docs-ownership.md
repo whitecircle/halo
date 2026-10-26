@@ -21,7 +21,7 @@ changes.
 | `halo/trainers/reference_logps.py`, `halo/trainers/stored_metrics.py` | `agent-docs/reference/trainer-architecture.md`; `agent-docs/reference/checkpoints.md` |
 | `halo/trainers/checkpointing.py`, `halo/trainers/dataloaders.py`, `halo/trainers/evaluation.py` | `agent-docs/reference/trainer-architecture.md`; `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-loading.md` |
 | `halo/trainers/parallelism/{grad_sync,grad_clipping,ep_layers}.py` | `agent-docs/reference/trainer-architecture.md`; `agent-docs/parallelism/expert-parallelism.md`; `agent-docs/parallelism/tensor-parallelism.md`; `agent-docs/parallelism/data-parallelism.md`; `agent-docs/optimization/bf16-optimizer.md` |
-| `halo/trainers/parallelism/{pipeline_trainer,pipeline_rules}.py`, `halo/trainers/parallelism/pipeline_loss_adapter.py` | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/trainer-architecture.md` |
+| `halo/trainers/parallelism/{pipeline_trainer,pipeline_rules}.py`, `halo/trainers/parallelism/pipeline_loss_adapter.py`, `halo/trainers/preference/smpo_pipeline_loss.py`, `halo/trainers/grpo/offline/pipeline_loss.py` | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/trainer-architecture.md` |
 | `halo/trainers/trainer_rules.py` | `agent-docs/parallelism/context-parallelism.md`; `agent-docs/reference/trainer-architecture.md` |
 | `halo/trainers/trl_dataset_prep.py` | `agent-docs/data/filesystem-handling.md`; `agent-docs/reference/trainer-architecture.md` |
 | `halo/trainers/token_metrics.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
@@ -29,6 +29,7 @@ changes.
 | `halo/trainers/sft.py`, `halo/trainers/sft_rules.py` | `agent-docs/training-methods/sft.md`, `agent-docs/training-methods/pretraining.md` |
 | `halo/trainers/preference/` | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/smpo.md`, `agent-docs/training-methods/preference/kto.md` |
 | `halo/trainers/preference/trl_preference.py` | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/kto.md` |
+| `halo/trainers/preference/preference_rules.py` | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/kto.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `halo/trainers/grpo/` | `agent-docs/training-methods/grpo/{README,online,offline}.md`, `agent-docs/training-methods/async-grpo/*.md` |
 | `halo/trainers/grpo/on_policy.py`, `halo/trainers/grpo/grpo_rules.py` | `agent-docs/training-methods/grpo/online.md`, `agent-docs/parallelism/data-loading.md`, `agent-docs/reference/trainer-architecture.md` |
 | `halo/trainers/grpo/environmental/reasoning.py` | `agent-docs/training-methods/async-grpo/reasoning.md`, `agent-docs/reference/configuration-reference.md` |
@@ -105,7 +106,7 @@ changes.
 
 | `halo/` area | Owning doc page(s) |
 |---|---|
-| `halo/distributed/expert_parallel/families/`, `halo/models/moe/family_specs.py` | the family's `agent-docs/models/` page, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/optimization/grouped-gemm.md` |
+| `halo/distributed/expert_parallel/families/`, `halo/models/moe/family_specs.py` | the family's `agent-docs/models/` page, `agent-docs/models/adding-a-model.md`, `agent-docs/models/README.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`; the attention facts also `agent-docs/optimization/flash-attention.md` |
 | `halo/distributed/expert_parallel/families/zaya.py`, `halo/models/zaya.py` | `agent-docs/models/zaya.md` |
 | `halo/model_loading/parallel/loader.py`, `halo/model_loading/parallel/load_rules.py`, `halo/model_loading/parallel/whole_model.py`, `halo/model_loading/model_preparation.py`, `halo/model_loading/remote_code.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md`, the affected per-family page; `agent-docs/optimization/flash-attention.md` |
 | `halo/models/seq_cls_heads.py` | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/preference/reward-modeling.md` |
@@ -163,6 +164,7 @@ changes.
 |---|---|
 | `halo/callbacks/` | `agent-docs/training-methods/callbacks.md` |
 | `halo/callbacks/factory.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `halo/callbacks/torch_profiler.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/debugging.md` |
 | `halo/models/moe/{balancing,config_fields,router_logits,router_aux_gradient}.py`, `halo/callbacks/balancing.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/models/README.md` |
 | `halo/hardware.py` | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/optimization/grouped-gemm.md` |
 

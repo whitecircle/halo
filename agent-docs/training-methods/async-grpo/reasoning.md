@@ -133,7 +133,8 @@ is charged neither term.
 - Under `reasoning_price_past_budget`, only the engine's ceiling holds a soft budget in such a group.
 - `outcome/reasoning_terms_waived_frac` logs the waived share of training episodes.
 - `reasoning_terms_in_failed_groups: true` charges them there too. A reward that prices no success above zero (no
-  environment term, or one of weight ≤ 0) needs that setting; trainer construction refuses it otherwise.
+  environment term, or one of weight ≤ 0) needs that setting; trainer construction refuses it otherwise. Set while
+  both terms are off, the switch is refused when the config is parsed.
 
 ### Floor
 

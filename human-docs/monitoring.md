@@ -11,9 +11,9 @@ run, that file is your console:
 tail -f checkpoints/sft-qwen3-4b-ultrachat/log/run.log
 ```
 
-The startup banner prints the parallelism layout (EP/CP/TP/DP sizes) and a
-parameter breakdown. With `enable_efficiency_metrics: true` it also prints the
-detected GPU and precision. Check it to confirm the run has the shape you
+The startup banner prints the parallelism mode and its EP/CP/TP/ETP/DP sizes,
+and a parameter breakdown. With `enable_efficiency_metrics: true` it also prints
+the detected GPU and precision. Check it to confirm the run has the shape you
 intended.
 
 ## Weights & Biases and ClearML
@@ -47,7 +47,7 @@ The base trainer logs loss, learning rate and grad norm every `logging_steps`
 | `report_mfu_diagnostics` | MFU and achieved TFLOPS; needs `enable_efficiency_metrics`. MoE runs also get the S-MFU variants, since plain MFU misreads sparse models |
 | `enable_moe_metrics` | expert load balance averaged over MoE layers (`moe/load_max`, `moe/load_cv`, `moe/dead_frac`, …); under `bias_update` the balancing callback logs the `moe/*` keys instead |
 | `generate_eval_examples` (SFT, DPO, SMPO, offline GRPO) | a table of sample generations at each evaluation; skipped under TP, CP and PP |
-| `save_completions` (online and async GRPO) | each step's rollouts in `<output_dir>/completions/` as parquet (prompt, completion, one column per reward function, advantage), and a W&B `completions` table when `report_to` includes `wandb` |
+| `save_completions` (online and async GRPO) | each logged step's rollouts as parquet under `<output_dir>/completions/` (prompt, completion, one column per reward function, advantage; async GRPO writes one part per rank in a directory per step), and a W&B `completions` table when `report_to` includes `wandb` (async GRPO: a sample gathered to rank 0) |
 | `log_completions` (online and async GRPO) | also prints the per-sample table to the console |
 
 Defaults and the exact keys:

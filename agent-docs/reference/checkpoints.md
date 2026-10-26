@@ -34,10 +34,6 @@ skips the ladder (writing the tokenizer through the same `save_tokenizer`), fold
 tensor as it is gathered and streams the result through `stream_gathered_checkpoint`. How it resumes,
 LoRA or full fine-tune: [Embedding — Saving](../training-methods/embedding.md#saving).
 
-**Gathered saves** (the default everywhere) produce HuggingFace checkpoints `from_pretrained()` loads.
-The optional **per-rank sharded EP save** (`save_sharded_ep`) is a write-bandwidth option that must be
-merged before loading.
-
 Every gather is a collective, so **all** ranks run it. Only the save rank copies the result to host memory
 (`materialize_dtensor` on the others; under EP the same `retain` flag skips the layout assembly in
 `EPGatherMixin.gather_layer_state_dict`), so a node pays one writer's copy instead of `gpus_per_node` ×
@@ -68,9 +64,9 @@ safetensors *file* header is the container format, not this marker.
 | **PP per-stage** | `model-pp00000-of-00004-00001.safetensors` — one or more parts per stage + merged index | `pp_size > 1` | none | Yes on a shared output FS; per-node directories `merge_pp_stages.py` first |
 | **EP per-rank sharded** | `model-00000-of-000NN.safetensors` (`.shard_{rank}` keys) + index | `save_sharded_ep: true` | `format: "ep_sharded"` | No — `merge_ep_shards.py` first |
 
-Shard size defaults to 5 GB (`save_max_shard_size`) and bounds the **gathered** writers. A per-rank EP
-shard is one file per rank by design, and the save logs that rather than appearing to honor the cap. The
-after-training tools size their own output from their `--max_shard_size` flag
+`save_max_shard_size` ([default](configuration-reference.md#model-checkpoint-and-from-scratch-flags))
+bounds the **gathered** writers' parts. A per-rank EP save writes one file per rank whatever it says, and
+logs so; the after-training tools size their output with their own `--max_shard_size`
 ([Scripts](scripts-reference.md#post-training-scripts)).
 
 The per-rank EP layout holds **partial** tensors. Every loader detects the marker and refuses it, naming
@@ -599,7 +595,8 @@ only once every other file is on disk and before rotation. Each FS-aware save ra
 copy, and a failure raises on every rank — a save rank with no uncommitted copy to rename included, since
 rotation would otherwise remove the last checkpoint a resume takes. The base save's Hub push (per
 `hub_strategy`) starts only after that commit; on a per-node output filesystem it uploads global rank 0's
-node's copy, holding that node's optimizer shards only. Every strategy but `end` uploads the top level of
+node's copy, holding that node's optimizer shards only (a multi-node PP run there refuses `push_to_hub`:
+[PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)). Every strategy but `end` uploads the top level of
 `output_dir` at each save (minus `_*` and `checkpoint-*`), `log/run.log` and a GRPO run's `completions/`
 parquet (prompts included) among it; `checkpoint` and `all_checkpoints` also upload the checkpoint
 directory, training state included; `end` pushes only from a final `save_model` or `push_to_hub` call,
@@ -627,11 +624,12 @@ off, since every node's local rank 0 would otherwise write and rotate the same f
 forces it on, all nodes must hold equivalent checkpoint dirs at the same path, and each node's local rank 0
 creates the directory before a barrier.
 
+A gathered save holds the non-writers in the next chunk's gather while the writer flushes a part, so
+`DIST_NCCL_TIMEOUT_MINUTES` must cover one part (`save_max_shard_size`) at the filesystem's write speed;
+the last part and the index are joined over the c10d store (`DIST_STORE_TIMEOUT_HOURS`).
+
 **WandB run resumption:** the auto run ID is stamped per launch; export `WANDB_RUN_ID` (and
 `WANDB_RESUME=allow`) to continue ([Environment variables](configuration-reference.md#environment-variables)).
-A gathered save holds non-writers inside its per-layer expert gathers while the writer streams each flush to
-disk, so for 100B+ models size `DIST_NCCL_TIMEOUT_MINUTES` to checkpoint size ÷ filesystem write speed, with
-margin.
 
 A write that fails on any rank — ENOSPC, EIO, a stale NFS handle — stops the whole job at the next collective
 with that rank's real error. `DeferredRankFailure` (`halo/runtime/consensus.py`) records the local failure,

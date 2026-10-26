@@ -39,9 +39,11 @@ output_dir: checkpoints/sft-qwen3-4b
 
 Refused at startup:
 
-- `packing` together with `padding_free`, and `packing` without an explicit `max_length` (the pack size bounds memory).
+- `packing` together with `padding_free`, `packing` without an explicit `max_length` (the pack size bounds memory), and `eval_packing: true` without `packing`.
 - `padding_free` on a non-varlen attention implementation, under CP (which refuses `packing` too) or under PP (use `packing`; [PP packing](../parallelism/pipeline-parallelism.md#packing)).
 - TRL's `completion_only_loss` / `assistant_only_loss`, and a non-default `dataset_text_field` / `dataset_kwargs`: they act inside the dataset prep and collator this script replaces. The script renders `conversation_field` itself; tokenize a raw-text column offline with `prepare_dataset.py --mode text`.
+
+With `use_liger_kernel: false`, TRL 1.14 resolves an unset `loss_type` to `chunked_nll`, which projects `lm_head` outside the model's forward and so skips the family's head transform and the router aux loss; the trainer replaces any `chunked_nll`, set or resolved, with `nll` and warns.
 
 Per-family configs live under `examples/sft/`; every field's type and default is in [SFTConfig](../reference/configuration-reference.md#trl-trainer-configs) and [SFTScriptArguments](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 ([Flash Attention](../optimization/flash-attention.md)).
 
@@ -50,7 +52,7 @@ Per-family configs live under `examples/sft/`; every field's type and default is
 ```bash
 # EP/CP/TP/ETP — axis sizes are CLI flags
 torchrun --nproc_per_node=8 scripts/training/sft.py \
-    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml --expert_parallel_size=8
+    examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml --expert_parallel_size=8
 
 # the same through the CLI
 halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml --nproc 8
@@ -85,7 +87,7 @@ Two verdicts decide a vision-language run. The **model class follows the checkpo
 
 The **data path follows the run** (`is_vlm_run`, `halo/data/vlm_detection.py`): the VLM path only when the checkpoint is multimodal **and** the run declares image data. A natively-multimodal checkpoint (Gemma 4, Qwen3.5/3.6, Inkling) on text-only rows is a text run, so packing, padding-free and `train_on_last_assistant_only` stay available.
 
-The processing class is the checkpoint's processor wherever it ships a processor config (`processor_config.json` / `preprocessor_config.json`), text runs included: the export saves it, and vLLM builds the multimodal class's processor from it at startup. A multimodal checkpoint shipping none ([Step-3.7 Flash](../models/step3p7.md#model-loading)) trains text runs through its tokenizer and refuses an image run at the processor load (`halo/entrypoints/model_setup.py`).
+The processing class is the checkpoint's processor wherever it ships a processor config (`processor_config.json`, `preprocessor_config.json` or `video_preprocessor_config.json`), text runs included: the export saves it, and vLLM builds the multimodal class's processor from it at startup. A multimodal checkpoint shipping none ([Step-3.7 Flash](../models/step3p7.md#model-loading)) trains text runs through its tokenizer and refuses an image run at the processor load (`halo/entrypoints/model_setup.py`).
 
 Images ride embedded in message content, or in a column named by `images_field`, pairing with any image placeholders, else the first user turn — so hub datasets that keep images outside the conversation (FineVision, the_cauldron, Docmatix) need only field mappings. Either shape declares the run VLM, as does an `images` / `image` / `pixel_values` column ([rules](../data/dataset-formats.md#sft-vlm)):
 
@@ -104,7 +106,7 @@ The VLM collator never truncates: a batch whose vision plus text tokens exceed `
 
 ## Parallelism
 
-Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`, `--pipeline_parallel_size`. EP+CP, EP+TP, EP+ETP, PP+EP and PP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md) composes with the expert axes only). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP.
+Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`, `--pipeline_parallel_size`. EP+CP, EP+TP, EP+ETP, PP+EP and PP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md) composes with the expert axes only). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP. Plain FSDP2 and DDP load the whole model onto every GPU before sharding, so a dense model must fit on one GPU; TP is the route past that ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
 Under CP a batch whose length is not a multiple of `cp_size` is right-padded in `compute_loss`, and a tokenizer with no `pad_token_id` raises there rather than padding with vocabulary token 0. The loss normalizes over the CP group's tokens; metrics come off the local chunk. In every mode the metrics are reduced once per log, not per micro-batch ([details](../reference/trainer-architecture.md#sft-loss-and-metrics)).
 
@@ -133,7 +135,7 @@ pytest tests/cpu/config tests/cpu/data -m cpu    # config gates, collators, rend
 torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_gptoss_modes.py --mode ep
 ```
 
-`tests/gpu/trainers/sft/` holds suites per model with one `--mode` per parallel shape (dense, EP, EP+CP, EP+TP, ETP), plus FSDP2 resume, VLM and sinks; the MoE and dense mode suites share one body, `tests/common/sft_modes.py`.
+`tests/gpu/trainers/sft/` holds suites per model with one `--mode` per parallel shape (FSDP2, EP, CP, TP, EP+CP, EP+TP, pure ETP), plus resume, VLM and sinks; the MoE and dense mode suites share one body, `tests/common/sft_modes.py`.
 
 ## Related pages
 

@@ -29,7 +29,9 @@ curl -s localhost:8000/health
 This server takes GPUs 6 and 7, so start the trainer with
 `TRAINER_CUDA_DEVICES=0,1,2,3,4,5`; its default `0,1,2,3,4,5,6` overlaps GPU 6.
 The compose file also needs `HALO_SCRATCH`, the trainer's large scratch volume,
-even to start the server alone; set it once in the repo-root `.env`.
+even to start the server alone; set it once in the repo-root `.env`. Serve from
+the server image of the same Halo release as the trainer, which refuses a vLLM
+server older than 0.32.0.
 
 `docker-compose.vllm.yml` already passes the flags RL depends on. You normally
 set `VLLM_MODEL`, `VLLM_CUDA_DEVICES` (never overlapping `TRAINER_CUDA_DEVICES`),
@@ -138,8 +140,9 @@ Async GRPO names one server with `rollout_server_url`, or several with
 two or more). Online GRPO dials `vllm_server_host` / `vllm_server_port`: the
 address the **trainer dials**, not a bind address. The weight-sync port,
 bound on the **trainer** host, is `rollout_group_port` for async GRPO (a server
-entry without its own `group_port` takes it plus the entry's index) and
-`vllm_group_port` for Online GRPO
+entry without its own `group_port` takes it plus the entry's index; a
+non-default `vllm_group_port` is refused there) and `vllm_group_port` for Online
+GRPO
 ([fields and defaults](../agent-docs/reference/configuration-reference.md#asyncrolloutconfig) ↗).
 
 - **Group ports are unique across servers**, even on different hosts, because

@@ -162,7 +162,8 @@ address differs per server.
 `examples/grpo/environmental/<family>/<backend>/`: `gemma4`, `gptoss` and `qwen3_5`, each with `vllm/` and `sglang/`
 (`sglang/` ships ep1 files only). In a filename, `-lora-` / `-full-` is the adapter and `-ep1` / `-ep4` the expert distribution
 (none, or a 4-rank DeepEP group). Each header carries its launch line and server flags. One template sits at the root:
-`environmental-grpo-template.yaml` (`react_math`).
+`environmental-grpo-template.yaml` (`react_math`). `code-contests-judge/` holds the audit judge's `context_file`s the
+code-contests recipes share ([Reward](environments/tasks/code-contests/reward.md)).
 
 Start from `gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml` for a tool-heavy graded environment, or
 `qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml` for a light two-tool one.

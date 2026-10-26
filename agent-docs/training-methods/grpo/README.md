@@ -12,6 +12,7 @@ Group Relative Policy Optimization scores a prompt's completions against each ot
 | Config | `OfflineGRPOConfig` | TRL `GRPOConfig` | TRL `GRPOConfig` + `EnvironmentConfig` + `AsyncRolloutConfig` |
 | Infrastructure | Training only | Training + one vLLM server | Training + rollout servers + Ray |
 | CP | Full fine-tuning (CP, EP+CP) | No | No |
+| PP | Full fine-tuning (PP, PP+EP, PP+ETP) | No | No |
 | Best for | Large pre-scored datasets, no generation cost | Single-turn verifiable answers: math, structured output | Tool use, code generation, environment feedback |
 
 All three extend `DistributedTrainerMixin` and run under EP, TP, pure ETP, EP+TP and EP+ETP. Online GRPO runs only against a vLLM server ([Server mode only](online.md#server-mode-only)).

@@ -16,6 +16,9 @@ Every helper here is opt-in and costs nothing when disabled.
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
 | Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
 
+Each `scripts/profiling/` tool also runs by name: `halo run trace-report`, `halo run py-spy-diag dump`,
+`halo run nvlink-health`, `halo run weight-sync-transport`.
+
 The consistency check is `assert_rank_uniform` in `halo/runtime/consensus.py`. It is **manual
 instrumentation** — the toolkit ships no call sites for it, so add the call to the code you are
 investigating. The profiler session and CUDA-memory helpers live in
@@ -31,7 +34,7 @@ Use the **torch profiler** for the GPU/operator picture (which kernels dominate,
 
 ```yaml
 enable_torch_profiler: true
-profiler_output_dir: /mnt/profiling/torch   # default: $HALO_DATA_ROOT/profiling/torch
+profiler_output_dir: <large-volume>/profiling/torch   # default: $HALO_DATA_ROOT/profiling/torch
 profiler_wait: 5        # skip the first 5 steps (warm caches, allocator settles)
 profiler_warmup: 1      # 1 warmup step (profiler on, not yet recording)
 profiler_active: 3      # record 3 steps into the trace
@@ -69,7 +72,7 @@ at the cost of host-side op attribution and the TraceLens report (§1b). Profile
 ```python
 from halo.diagnostics.profiling import torch_profiler_session
 
-with torch_profiler_session("/mnt/profiling/gen", label="generate", ranks="0"):
+with torch_profiler_session("<large-volume>/profiling/gen", label="generate", ranks="0"):
     out = model.generate(**inputs)
 ```
 
@@ -82,7 +85,7 @@ per-collective latency, bus bandwidth, and cross-rank skew.
 
 ```bash
 python scripts/profiling/trace_report.py                    # $HALO_DATA_ROOT/profiling/torch
-python scripts/profiling/trace_report.py /mnt/profiling/torch --label trace-cycle1
+python scripts/profiling/trace_report.py <large-volume>/profiling/torch --label trace-cycle1
 ```
 
 Writes `<label>-rankNN.tracelens.xlsx` per rank and, for multi-rank captures dense from 0,

@@ -65,6 +65,7 @@ drops the optimizer shards but not the funnel.
 
 | Limitation | Impact | Workaround / status |
 |------------|--------|--------------------|
+| **Dense load is whole-model per GPU** | Plain FSDP2 and DDP load the whole model onto every GPU before the wrap shards it, so a dense model must fit on one GPU at its load dtype; `fsdp_reshard_after_forward` does not change the load. | Run TP node-local: its HF-native `tp_plan` load shards the model as it loads ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)). A [PP-registered family](../parallelism/pipeline-parallelism.md#model-support) also loads per stage. |
 | **From-scratch with EP/TP/CP/ETP/PP** | Random-init pre-training is dense-only; `init_from_scratch` raises `NotImplementedError` under EP, TP, CP, ETP or PP (no distributed random-init of sharded experts, and no checkpoint for a stage to stream). Only `scripts/training/sft.py` threads the flag through. | Pre-train dense from scratch; or **continued** pre-training (load a small/seed checkpoint) works in every mode. |
 | **Streaming (on-the-fly) datasets** | The data pipeline materializes datasets (full or per-rank shards) rather than streaming an infinite corpus; exact data-position resume across a multi-week run is not supported. | Use **pre-tokenized sharded datasets** (`scripts/before_training/prepare_dataset.py` + `--num_shards`) — each rank loads only its shards, which scales to very large corpora. Set `--num_shards` to a multiple of the data-parallel degree (`>= data_parallel_size`; `k×world_size` is safe); fewer shards than DP ranks hard-errors for the train split. Checkpoint model frequently (`save_steps`) for restart. |
 | **Exact resume requires same world size + layout** | All sharded modes (FSDP2 DP, EP, EP+CP, EP+TP, EP+ETP, CP, PP, pure TP) save per-rank optimizer shards; a topology fingerprint gates the restore, so a different GPU count or parallelism shape cannot remap them (no resharding / elastic). | Resume on the same world size and layout for exact optimizer state. A fingerprint mismatch (or `save_only_model: true`) warm-restarts instead — weights, LR schedule, and trainer step still resume, only the Adam moments reinit. Under PP a mismatch or a different layer split raises instead, since stage-local names would land the moments on the wrong layers. Weights themselves are topology-free — every checkpoint is a standard HF model directory, so export-and-reload across topologies works. |
@@ -81,9 +82,8 @@ drops the optimizer shards but not the funnel.
 
 ## Choosing a large-scale layout
 
-- **Dense model that fits on one GPU**: plain `torchrun` DP, which loads it whole onto every GPU; past
-  one GPU, TP node-local ([load ceiling](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
-  From-scratch via `init_from_scratch`.
+- **Dense model**: plain `torchrun` DP while it fits on one GPU, TP node-local past that (the load limit
+  above). From-scratch via `init_from_scratch`.
 - **MoE model**: EP (node-local or cross-node / NVL72-wide), optionally + TP for
   attention, or + ETP to also shard each expert's FFN (EP+ETP; each ETP group stays in one NVLink domain), or
   pure ETP (`ep_size=1`) when experts stay replicated. Continued pre-training or

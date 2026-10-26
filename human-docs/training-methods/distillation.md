@@ -8,10 +8,10 @@ the teacher comes from and whether the data is fixed or generated live.
 | --- | --- | :--: | :--: | --- |
 | Teacher distillation | a separate frozen model | yes | no | `teacher-distill` |
 | Self-distillation | the student, shown the answer | no | no | `self-distill` |
-| Online SDPG | the student, shown the answer | no | yes (vLLM) | `rlvr --use_sdpg=true` |
+| Online SDPG | the student, shown the answer | no | yes (vLLM) | `grpo/online --use_sdpg=true` |
 
-Expert, tensor and expert-tensor parallelism apply to the student in all three; none takes context
-parallelism. The MoE recipes are under `examples/distillation/gptoss/` and
+Expert, tensor and expert-tensor parallelism apply to the student in all three; none takes context or
+pipeline parallelism. The MoE recipes are under `examples/distillation/gptoss/` and
 `examples/distillation/gemma4/`.
 
 ## Teacher distillation
@@ -60,8 +60,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch grpo/online \
     --use_sdpg=true --sdpg_beta_base=1.0
 ```
 
-SDPG adds two full-vocabulary forwards per micro-batch, so it runs out of memory at batch sizes Online
-GRPO survives.
+SDPG adds a no-grad teacher forward on the longer hinted sequence and keeps the student's and the
+teacher's logits alive until backward, so it runs out of memory at batch sizes Online GRPO survives.
 
 ## What to watch
 

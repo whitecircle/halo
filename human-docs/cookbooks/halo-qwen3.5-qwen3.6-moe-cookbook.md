@@ -110,11 +110,14 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 - **Attention.** The SFT recipe pins `flash_attention_2`. FA4's backward produces NaN gradients on this
   family, so Halo replaces an FA4 pick with SDPA. The GRPO recipes pin `sdpa`.
 - **Packing, not padding-free.** Keep `padding_free: false`. Its variable-length path crashes FA2 on this
-  family's multimodal RoPE.
+  family's multimodal RoPE. Rows that share a long prefix can pack as trees on FA2
+  (`tree_packing: true` with `tree_full_attention: gather`;
+  [Tree Packing](../../agent-docs/optimization/tree-packing.md) ↗).
 - **Router balancing.** The SFT recipes set `moe_balancing: bias_update_transient`, and the GRPO recipes
-  set `none`. The router has no bias slot, so plain `bias_update` raises, and `aux_loss` is refused on
-  the multimodal class. The transient bias balances training only: exported checkpoints serve without
-  it, so near-tied expert picks can differ between trainer and server.
+  set `none`. The router has no bias slot, so plain `bias_update` raises. In SFT, `aux_loss` (what `auto`
+  picks) balances through the loss and exports by construction. The transient bias balances training
+  only: exported checkpoints serve without it, so near-tied expert picks can differ between trainer and
+  server.
 - **Long context.** The SFT recipe sets `fp32_non_ep_params: true` for stable training at 33,000 tokens.
 - **Tool parser and thinking budget.** vLLM needs `VLLM_TOOL_PARSER=qwen3_xml`. The default `hermes`
   leaves the XML tool calls as text, so every episode scores zero. The code-contests recipes run soft
@@ -130,6 +133,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 ## Limits
 
 - No CP: the linear-attention layers can't split the sequence across ranks.
+- Pipeline parallelism takes the text tower only (`text_only_model: true`), without packing and with
+  `moe_balancing: none`
+  ([Qwen3.5 / Qwen3.6 model notes](../../agent-docs/models/qwen3_5.md) ↗).
 - TP stops at 2 because the checkpoints have two KV heads. TP shards only the 10 full-attention layers,
   so per-GPU memory drops much less than `1/tp_size`.
 - Online RL refuses `text_only_model: true`.

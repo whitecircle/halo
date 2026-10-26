@@ -39,11 +39,14 @@ over. What gets sharded varies:
 | EP / ETP / EP+CP / EP+TP | Non-EP params only | EP modules (router + experts) excluded via `ignored_params`; their gradients sync through the EP layer's own post-accumulation grad hooks (`halo/distributed/expert_parallel/moe_layer/grad_sync.py`), or — at `num_ep_groups > 1`, single-node shapes included — through one post-backward sweep instead. **Multi-group EP across nodes** (`is_deferred_dp`) additionally shards non-EP params over the EP group; `ep_size==1` MoE stays on plain world-wide FSDP — see [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync) |
 | TP (DP > 1) | Per-layer, 2D `(dp, tp)` mesh | DTensor-compatible grad sync across the DP dim |
 | TP (DP == 1, pure TP) | None | Nothing to sync across DP |
+| PP (alone, or with EP / pure ETP) | The stage's params, over its rank block | As the rows above, scoped to the stage; the schedule reduces once per optimizer step ([PP + EP](pipeline-parallelism.md#pp--ep-moe)) |
 | Single GPU | None | — |
 
 Plain FSDP2 and DDP load the whole model onto every GPU before the wrap, whatever
-`fsdp_reshard_after_forward` says, so a dense model must fit on one GPU at its load dtype; past one GPU,
-TP's HF-native `tp_plan` load shards it as it loads ([Tensor Parallelism](tensor-parallelism.md)).
+`fsdp_reshard_after_forward` says, so a dense model must fit on one GPU at its load dtype. Past one GPU,
+TP's HF-native `tp_plan` load shards it as it loads ([Tensor Parallelism](tensor-parallelism.md)), and
+across NVLink domains PP's stage loader reads only each stage's layers
+([Pipeline Parallelism → Loading](pipeline-parallelism.md#loading)).
 
 The plain-DP, CP, EP and EP+TP wraps also leave out the frozen parameters whose dtype no trainable
 parameter shares (a base under differently typed adapters), one parameter at a time, so a trainable child
@@ -145,7 +148,8 @@ clipped) while `unshard()` no-ops on it, hiding the optimizer's update from the 
 The cost is one unsharded param copy per GPU (at the FSDP param dtype), held between a window's
 microsteps and freed at its last backward; under ZeRO-2 each forward/backward already holds it, so
 peak memory is unchanged. Plain-DP/CP/EP torchrun path only; rejected with
-`fsdp_reshard_after_forward: true` (contradicts FULL_SHARD's purpose) or TP.
+`fsdp_reshard_after_forward: true` (contradicts FULL_SHARD's purpose), TP or PP (whose schedule already
+pins each stage unsharded).
 
 ### Deferred gradient reduce (`fsdp_defer_grad_sync`)
 
@@ -191,8 +195,8 @@ width, slow inter-node fabric, small microbatches) and the memory is there.
 
 The in-backward EP expert and router hooks gate on the same `sync_gradients`, and the deferred EP
 sweep, the TP replicated-gradient sweep and the gradient clip run after the window's last backward,
-so all of them read the same reduced gradients as with the flag off. Rejected under TP at
-`data_parallel_size==1` (no FSDP2 wrap to defer), QLoRA (no
+so all of them read the same reduced gradients as with the flag off. Rejected under PP (the schedule
+already reduces once per step), TP at `data_parallel_size==1` (no FSDP2 wrap to defer), QLoRA (no
 wrap; its sweep already runs once per step) and `fsdp_reshard_after_forward: true` (the held unsharded
 gradient is the state ZeRO-3 exists to shard; defer under ZeRO-2 instead). Under `accelerate launch`
 it is warned and ignored: accelerate's `no_sync` already skips the reduce on non-final microsteps.
@@ -272,7 +276,7 @@ For standard multi-GPU without EP/CP/TP/ETP/PP. Only the FSDP v2 configs shard; 
 | Config file | Strategy | Use case |
 |-------------|----------|----------|
 | `fsdp2_gradop_config.yaml` | FSDP2, `reshard_after_forward=false` | **Recommended default** — same FSDP2 as the torchrun path; shards optimizer states + gradients |
-| `fsdp2_full_config.yaml` | FSDP2, `reshard_after_forward=true` | Full param sharding for models too large to replicate on one GPU; multi-node |
+| `fsdp2_full_config.yaml` | FSDP2, `reshard_after_forward=true` | Full param sharding (ZeRO-3) for lower steady-state memory, multi-node included; the model must still fit on one GPU at load ([above](#fsdp2-strategy-by-mode)) |
 | `multigpu_dp_config.yaml` | DDP (`MULTI_GPU`) | Standard DDP, full replication, no memory savings. `mixed_precision: 'no'` — the toolkit's `bf16: true` still applies |
 
 ```bash

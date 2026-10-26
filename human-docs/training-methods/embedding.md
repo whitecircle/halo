@@ -37,7 +37,8 @@ runs on plain data parallelism only.
 
 ## What to watch
 
-Metrics come from a small no-grad encoding pass on logging steps.
+The `embed/*` metrics read the sentence embeddings of the loss forward, on logging steps and on every
+eval batch.
 
 - `embed/cos_sim` should rise, and `embed/neg_cos_sim` fall on a dataset with a third text column.
   `embed/recall@1` and `embed/mrr` are the ranking view of the same thing.

@@ -4,12 +4,13 @@ When multiple ranks download a model, load a dataset, or create a directory, one
 
 ## Env vars
 
-| Var | Governs | Default |
-|-----|---------|---------|
-| `DIST_SHARED_FILESYSTEM` | Umbrella both sides fall back to | `1` (shared) |
-| `DIST_INPUT_SHARED_FILESYSTEM` | Read side: model/dataset downloads, dataset map/pack, HF caches | umbrella |
-| `DIST_OUTPUT_SHARED_FILESYSTEM` | Write side: checkpoints, `run.log`, dumped artifacts | umbrella |
+| Var | Governs |
+|-----|---------|
+| `DIST_SHARED_FILESYSTEM` | Umbrella both sides fall back to; shared unless set |
+| `DIST_INPUT_SHARED_FILESYSTEM` | Read side: model/dataset downloads, dataset map/pack, HF caches |
+| `DIST_OUTPUT_SHARED_FILESYSTEM` | Write side: checkpoints, `run.log`, dumped artifacts |
 
+Defaults and the other `DIST_*` knobs: [Environment variables](../reference/configuration-reference.md#environment-variables).
 Each is read through `env_flag`: **true** for `1`/`true`/`yes`/`on` (case-insensitive), **false** for
 any other value — including a typo. Empty counts as unset and yields the default, so a side var set to
 `""` still falls back to the umbrella; any other value wins over it in either direction.
@@ -25,8 +26,8 @@ put participants of one tag under two different scopes where they never see each
 
 The **output** declaration is additionally checked against the filesystem itself at startup, on
 multi-node runs only (`verify_output_filesystem_sharing`): global rank 0 writes a sentinel under
-`output_dir` and every rank looks for it, waiting up to `DIST_FS_PROBE_TIMEOUT_SECONDS` (default 60,
-NFS's default `acdirmax`) when shared is declared, not at all when per-node is. Either contradiction
+`output_dir` and every rank looks for it, waiting up to `DIST_FS_PROBE_TIMEOUT_SECONDS` when shared is
+declared, not at all when per-node is. Either contradiction
 raises and names the var to set; a shared mount whose attribute cache outlasts the budget (a larger
 `actimeo`/`acdirmax`, or `lookupcache` keeping the negative lookup) reads as unshared until the budget
 is raised, and declaring it per-node instead would race every node's writer. The entry scripts probe
@@ -73,7 +74,7 @@ c10d-store phase, the store and collective rejection joins, `barrier_on_exit`) a
     Waiters block on a c10d key-value store key rather than in a collective, because the body is
     unbounded single-rank work (a 100B+ `snapshot_download`) that would trip the
     NCCL watchdog (`DIST_NCCL_TIMEOUT_MINUTES`) on peers held in a collective. The wait is bounded by
-    `DIST_STORE_TIMEOUT_HOURS` (default 4 h) instead.
+    `DIST_STORE_TIMEOUT_HOURS` instead.
 
     The bound covers the **main rank's** work only: there is no trailing join, so the main rank's own
     wait for the peers is whatever collective comes next, the watchdog, minutes not hours. A

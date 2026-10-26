@@ -2,7 +2,7 @@
 
 A reward model scores a (prompt, completion) pair with one scalar, fit to pairwise preferences under the Bradley-Terry loss. Use it for rejection sampling or as an RL reward signal; to train a policy on the same pairs use [DPO](dpo.md) or [SMPO](smpo.md).
 
-Trainer `DistributedRewardTrainer`, script `scripts/training/reward/reward_model.py`, model class `AutoModelForSequenceClassification` with `num_labels=1`. EP, TP, ETP and EP+TP apply; CP does not — the score head pools the whole sequence ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
+Trainer `DistributedRewardTrainer`, script `scripts/training/reward/reward_model.py`, model class `AutoModelForSequenceClassification` with `num_labels=1`. EP, TP, ETP, EP+TP and PP apply; CP does not — the score head pools the whole sequence ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Dataset
 
@@ -62,7 +62,7 @@ lora_task_type: SEQ_CLS         # required for a pooled score head
 lora_modules_to_save: [score]
 ```
 
-LoRA is rejected under TP and EP+TP ([PEFT](../../optimization/peft.md#parallelism-compatibility)).
+LoRA is rejected under TP, EP+TP and PP ([PEFT](../../optimization/peft.md#parallelism-compatibility)).
 
 ## Vision-language
 
