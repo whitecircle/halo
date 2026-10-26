@@ -29,14 +29,14 @@ from typing import Union, get_args, get_origin, get_type_hints
 import pytest
 from transformers import TrainingArguments
 
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from tests.common.repo import REPO_ROOT
 
 # Keeps a TrainingArguments subclass constructible on a GPU-less runner, so a raise can only come from
 # the knob under test.
 _TRAINING_ARGS_BASE = {"output_dir": "/tmp/numeric-knob-sweep", "use_cpu": True, "bf16": False}
 # Fields a config refuses to construct without.
-_REQUIRED = {"DistillScriptArguments": {"teacher_model": "org/teacher"}}
+_REQUIRED = {"TeacherDistillScriptArguments": {"teacher_model": "org/teacher"}}
 # A knob that is refused at its value only beside another one set.
 _COMPANIONS = {
     "isr_geo_band_min": {"isr_geo_band_max": 1.5},

@@ -36,7 +36,6 @@ from openai import (
 )
 
 import src.environments.eval_runner as eval_runner
-from src.configs.rollout_config import RolloutConfig
 from src.environments.base import (
     EPISODE_ERROR_KEY,
     RANDOM_REASONING_EFFORT,
@@ -57,6 +56,7 @@ from src.environments.eval_runner import (
     trajectory_path,
     write_trajectories_jsonl,
 )
+from src.environments.rollout_config import RolloutConfig
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry
 from src.environments.tools.factories import create_native_file_tools
 from src.rewards.terms import OBJECTIVE_REWARD_KEY

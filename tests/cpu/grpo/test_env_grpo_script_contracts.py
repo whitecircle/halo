@@ -27,7 +27,7 @@ from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
 from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from tests.common.repo import REPO_ROOT, load_script_module
 
 PartialState()  # the script logs through accelerate, which refuses to log without it

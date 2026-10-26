@@ -18,7 +18,7 @@ import pytest
 import torch
 
 import src.trainers.grpo.rollout.rollout_metrics as rm
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.base import SOLVE_RATE_KEY, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import BatchRows, DistributedAsyncEnvironmentalGRPOTrainer

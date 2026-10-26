@@ -13,7 +13,7 @@ Run: python tests/cpu/trainers/test_kto_trainer.py
 import pytest
 from trl import KTOTrainer
 
-from src.args.kto_args import KTOScriptArguments
+from src.configs.preference import KTOScriptArguments
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.kto import DistributedKTOTrainer
 

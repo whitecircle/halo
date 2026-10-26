@@ -28,7 +28,7 @@ from datasets import Dataset
 from sklearn.metrics import accuracy_score
 from transformers import AutoTokenizer, Qwen3Config, Qwen3ForSequenceClassification
 
-from src.configs.classification_config import ClassificationConfig
+from src.configs.classification import ClassificationConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.reward.classification import ClassificationTrainer
 from tests.common.harness import gpu_test_main

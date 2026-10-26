@@ -3,8 +3,7 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
-from src.args.common_script_args import CommonScriptArguments
-from src.args.mixins import GenerationEvalArguments
+from src.configs.script_arguments import CommonScriptArguments, GenerationEvalArguments
 
 
 @dataclass

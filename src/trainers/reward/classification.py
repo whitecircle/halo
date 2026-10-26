@@ -53,7 +53,7 @@ from transformers.trainer_pt_utils import nested_detach
 from transformers.trainer_utils import EvalPrediction
 from trl.trainer import disable_dropout_in_model
 
-from src.configs.classification_config import ClassificationConfig
+from src.configs.classification import ClassificationConfig
 from src.data.collators.classification import ClassificationDataCollatorWithPadding
 from src.data.pipeline.processing import (
     coordinated_filter,

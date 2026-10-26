@@ -18,19 +18,21 @@ from typing import get_type_hints
 import pytest
 from transformers import TrainingArguments
 
-from src.args.distill_args import DistillScriptArguments
 from src.args.distributed_args import DistributedArguments
-from src.args.mixins import SDPGArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.args.self_distill_args import SelfDistillationArguments
 from src.config_validation import RangeValidatedConfig
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.classification_config import ClassificationConfig
-from src.configs.distillation_config import DistillationConfig
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.classification import ClassificationConfig
+from src.configs.distillation import (
+    DistillationConfig,
+    SDPGArguments,
+    SelfDistillScriptArguments,
+    TeacherDistillScriptArguments,
+)
+from src.configs.embedding import EmbeddingConfig
 from src.configs.environment_config import EnvironmentConfig
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from src.environments.base import VALID_REASONING_EFFORTS
 from src.subclass_registry import iter_subclasses
@@ -72,18 +74,18 @@ _RANGE_VIOLATIONS = [
     (RLVROnlineGRPOScriptArguments, "scale_rewards_std_floor", "nan"),
     (RLVROnlineGRPOScriptArguments, "sdpg_temperature", "0"),
     (RLVROnlineGRPOScriptArguments, "sdpg_hint_template", "{solution}"),
-    (SelfDistillationArguments, "sdpg_beta_warmup_steps", "-1"),
-    (SelfDistillationArguments, "sdpg_hint_template", "{answr}"),
-    (SelfDistillationArguments, "reference_kl_coef", "-0.1"),
-    (SelfDistillationArguments, "reference_kl_coef", "nan"),
-    (SelfDistillationArguments, "confidence_power", "0"),
-    (SelfDistillationArguments, "train_on_completions_only", "false"),
+    (SelfDistillScriptArguments, "sdpg_beta_warmup_steps", "-1"),
+    (SelfDistillScriptArguments, "sdpg_hint_template", "{answr}"),
+    (SelfDistillScriptArguments, "reference_kl_coef", "-0.1"),
+    (SelfDistillScriptArguments, "reference_kl_coef", "nan"),
+    (SelfDistillScriptArguments, "confidence_power", "0"),
+    (SelfDistillScriptArguments, "train_on_completions_only", "false"),
 ]
 
 # Presence guards rather than ranges. Each needs a VALID yaml baseline so the raise can only come
 # from the override — parsing an empty config would trip the guard on its own.
 _EMPTIED_REQUIRED_FIELDS = [
-    (DistillScriptArguments, "teacher_model", "teacher_model: some-org/teacher\n", ""),
+    (TeacherDistillScriptArguments, "teacher_model", "teacher_model: some-org/teacher\n", ""),
 ]
 
 
@@ -220,7 +222,7 @@ def test_reasoning_effort_literal_matches_its_runtime_table():
 # Each distillation arm admits its own slice of the one divergence registry.
 _DIVERGENCE_FIELDS = (
     (SDPGArguments, "sdpg_loss"),
-    (SelfDistillationArguments, "reference_kl_loss"),
+    (SelfDistillScriptArguments, "reference_kl_loss"),
     (DistillationConfig, "distill_loss"),
 )
 

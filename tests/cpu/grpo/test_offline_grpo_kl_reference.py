@@ -18,7 +18,7 @@ from trl import ModelConfig
 import scripts.training.offline_grpo as offline_grpo_script
 import src.trainers.grpo.mixins.offline_reference as reference_logps_module
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.parallelism_config import ParallelismConfig

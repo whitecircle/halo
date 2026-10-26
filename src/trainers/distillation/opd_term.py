@@ -2,7 +2,7 @@
 
 import torch
 
-from src.args.mixins import SDPGArguments
+from src.configs.distillation import SDPGArguments
 from src.trainers.distillation.losses import beta_warmup_decay, get_divergence
 
 

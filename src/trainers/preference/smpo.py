@@ -44,7 +44,7 @@ from transformers.trainer_utils import EvalLoopOutput
 from trl.trainer.utils import disable_dropout_in_model
 
 from src.callbacks.variable_scheduler import VariableSchedulerCallback
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.data.collators.smpo import PREFERENCE_BATCH_KEYS, DataCollatorForSMPO, DataCollatorForVLMSMPO
 from src.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc

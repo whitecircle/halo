@@ -13,8 +13,8 @@ from types import SimpleNamespace
 import pytest
 
 import src.environments.ray_actors as ray_actors
-from src.configs.rollout_config import RolloutConfig
 from src.environments.ray_actors import EnvironmentActor
+from src.environments.rollout_config import RolloutConfig
 
 
 class _Session:

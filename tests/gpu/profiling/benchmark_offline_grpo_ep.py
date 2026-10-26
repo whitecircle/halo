@@ -37,7 +37,7 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 
 from src.callbacks.efficiency import EfficiencyCallback
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier

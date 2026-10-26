@@ -32,7 +32,7 @@ import torch.distributed as dist
 from datasets import Dataset
 from transformers import AutoTokenizer
 
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.distributed import hf_eval_loss_reference, world_mean

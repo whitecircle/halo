@@ -14,7 +14,7 @@ Run with 1 GPU:
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_vlm_preference_dataset

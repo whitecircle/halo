@@ -22,7 +22,7 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling
 
-from src.configs.distillation_config import DistillationConfig
+from src.configs.distillation import DistillationConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer

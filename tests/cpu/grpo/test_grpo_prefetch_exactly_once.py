@@ -36,7 +36,7 @@ import pytest
 import torch
 
 import src.trainers.grpo.rollout.async_rollouts as async_mod
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin

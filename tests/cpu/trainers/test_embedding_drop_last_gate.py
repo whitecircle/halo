@@ -26,7 +26,7 @@ from datasets import Dataset, DatasetDict
 from sentence_transformers.base.sampler import DefaultBatchSampler
 from torch.utils.data import DataLoader, SequentialSampler
 
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 from src.trainers.embedding import trainer as embedding_module
 from src.trainers.embedding.trainer import EmbeddingTrainer, reject_uneven_sentence_transformers_batches
 from tests.common.repo import REPO_ROOT

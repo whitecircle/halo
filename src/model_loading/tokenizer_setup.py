@@ -20,7 +20,7 @@ from src.models.config_access import set_config_field
 if TYPE_CHECKING:
     # Annotation only: the entry scripts' argument layer sits above this loading leaf, and nothing
     # here reads the dataclass itself.
-    from src.args.common_script_args import CommonScriptArguments
+    from src.configs.script_arguments import CommonScriptArguments
 
 logger = get_logger(__name__)
 

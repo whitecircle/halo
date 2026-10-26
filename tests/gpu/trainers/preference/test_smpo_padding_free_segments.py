@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import torch
 
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.harness import gpu_test_main

@@ -25,7 +25,7 @@ Usage:
 import argparse
 import math
 
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.runtime import barrier
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset

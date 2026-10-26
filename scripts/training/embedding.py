@@ -22,10 +22,9 @@ from transformers import AutoModel
 from trl import ModelConfig, get_quantization_config
 
 from src.args.distributed_args import DistributedArguments
-from src.args.embedding_args import EmbeddingScriptArguments
 from src.checkpoint.model_card import HUB_TAGS
 from src.config_validation import reject_non_default_args, reject_unsupported_args
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.data.sources.loading import reject_image_columns
 from src.distributed.filesystem import joined_node_load
 from src.distributed.loading.model_source import resolve_model_source

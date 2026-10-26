@@ -114,7 +114,7 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 | completion masking only | `DataCollatorForCompletionOnlyLM` |
 | none | `None` (default TRL behavior) |
 
-YAML fields (`packing`, `packing_strategy`, `padding_free`, `eval_packing` come from TRL's `SFTConfig`; `train_on_completions_only` and `assistant_message_template` from `ConversationRenderArguments` in `src/args/mixins.py`; `train_on_last_assistant_only` from `src/args/sft_args.py`):
+YAML fields (`packing`, `packing_strategy`, `padding_free`, `eval_packing` come from TRL's `SFTConfig`; `train_on_completions_only` and `assistant_message_template` from `ConversationRenderArguments`, `train_on_last_assistant_only` from `SFTScriptArguments`, both in `src/configs/sft.py`):
 
 ```yaml
 padding_free: false

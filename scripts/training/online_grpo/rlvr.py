@@ -15,10 +15,9 @@ Usage:
 from trl import GRPOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.mixins import RLRRArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.config_validation import reject_non_default_args, reject_unsupported_args
-from src.configs.rollout_config import VLLM_BACKEND
+from src.configs.grpo import RLRRArguments
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
 from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
 from src.data.pipeline.rendered import render_generation_prompt
@@ -28,6 +27,7 @@ from src.distributed.loading.frozen_models import load_reference_model_for_on_po
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.runtime import barrier
 from src.environments.base import resolve_reasoning_effort
+from src.environments.rollout_config import VLLM_BACKEND
 from src.model_loading.model_preparation import log_model_info
 from src.rewards.functions import ScorerRewardFunction, reward_functions
 from src.rewards.graders.verifiable import RLVR_GRADERS

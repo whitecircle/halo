@@ -8,8 +8,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from src.args.self_distill_args import SelfDistillationArguments
 from src.config_validation import differs_from_default, reject_non_default_args, reject_unsupported_args
+from src.configs.distillation import SelfDistillScriptArguments
 
 
 @dataclass(kw_only=True)
@@ -60,18 +60,18 @@ def test_reject_unsupported_args_names_every_set_field():
 def test_reject_non_default_args_passes_at_the_declared_defaults():
     """The whole point: ``num_eval_examples`` defaults to 50 — truthy — so the truthiness gate could
     never guard it without rejecting every run."""
-    reject_non_default_args("Some script", SelfDistillationArguments(), "generate_eval_examples", "num_eval_examples")
+    reject_non_default_args("Some script", SelfDistillScriptArguments(), "generate_eval_examples", "num_eval_examples")
 
 
 def test_reject_non_default_args_rejects_a_changed_truthy_default():
-    args = SelfDistillationArguments()
+    args = SelfDistillScriptArguments()
     args.num_eval_examples = 8
     with pytest.raises(ValueError, match="num_eval_examples"):
         reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
 
 
 def test_reject_non_default_args_still_rejects_a_flipped_flag():
-    args = SelfDistillationArguments()
+    args = SelfDistillScriptArguments()
     args.generate_eval_examples = True
     with pytest.raises(ValueError, match="generate_eval_examples"):
         reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
@@ -80,7 +80,7 @@ def test_reject_non_default_args_still_rejects_a_flipped_flag():
 def test_reject_non_default_args_refuses_a_field_the_dataclass_does_not_declare():
     """A typo'd name is a guard that can never fire — the silent no-op this family exists to stop."""
     with pytest.raises(ValueError, match="num_gen_exmaples"):
-        reject_non_default_args("Some script", SelfDistillationArguments(), "num_gen_exmaples")
+        reject_non_default_args("Some script", SelfDistillScriptArguments(), "num_gen_exmaples")
 
 
 def test_reject_non_default_args_judges_a_factory_default_by_its_value():

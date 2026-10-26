@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from transformers import Qwen3Config, Qwen3ForSequenceClassification
 
 import src.trainers.mixins.base as mixin_base
-from src.configs.classification_config import ClassificationConfig
+from src.configs.classification import ClassificationConfig
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.trainers.reward.classification import ClassificationTrainer
 from src.trainers.reward.pooling import decode_pooling_plane, pooled_outputs

@@ -19,8 +19,8 @@ from dataclasses import fields
 
 import pytest
 
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import RolloutConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.environments.rollout_config import RolloutConfig
 
 # RolloutConfig field -> the AsyncTrainingConfig field that supplies it, read from the builder's own
 # mapping rather than restated: the map has to exist exactly once to be worth testing.
@@ -68,7 +68,7 @@ def test_forwarded_default_matches_on_both_sides(rollout_field, async_field):
     assert async_default == rollout_default, (
         f"AsyncTrainingConfig.{async_field}={async_default!r} but RolloutConfig.{rollout_field}="
         f"{rollout_default!r}: a directly built RolloutConfig silently runs a different budget from "
-        f"the identical YAML run. Point both at one module constant in src/configs/rollout_config.py."
+        f"the identical YAML run. Point both at one module constant in src/environments/rollout_config.py."
     )
 
 

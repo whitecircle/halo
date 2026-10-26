@@ -75,7 +75,7 @@ from src.checkpoint.format import (
     load_full_state_dict,
     resume_adapter_dir,
 )
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.embedding.trainer import EmbeddingTrainer

@@ -50,7 +50,7 @@ from pathlib import Path
 from datasets import Dataset, DatasetDict, disable_caching, load_dataset
 
 from scripts.environments.preparation._common import parquet_parts
-from src.args.mixins import DEFAULT_ANSWER_FIELD
+from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from src.data.pipeline.processing import report_rejected_rows, resolve_map_num_proc
 from src.environments.envs.tasks.coding.datasets import (
     CODE_DATASET_ADAPTERS,

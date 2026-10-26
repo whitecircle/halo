@@ -36,7 +36,7 @@ routing, interleaved weights), `layers/deepseek_v4.py` (most class attributes in
 ## Router balancing (`moe_balancing`)
 
 The field is `Literal["auto", "none", "aux_loss", "bias_update", "bias_update_transient"]`, default
-`auto` (`src/args/common_script_args.py`); `resolve_balancing_mode`
+`auto` (`src/configs/script_arguments.py`); `resolve_balancing_mode`
 (`src/models/moe_balancing.py`) resolves it against the live model and
 `apply_balancing_strategy` (`src/distributed/expert_parallel/balancing_strategy.py`) applies it.
 Leave the YAML at `auto` and make the family resolvable:

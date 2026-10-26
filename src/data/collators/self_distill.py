@@ -1,18 +1,17 @@
 """Text collator for SDPG self-distillation: the student batch plus a ``teacher_*`` branch whose last
 user turn carries the privileged hint; the response tokens are byte-identical across the two.
 
-The hint rendering, its injection, the response-alignment contract and the confidence weighting live
-here rather than in a shared leaf: the VLM self-distillation collator and the on-policy SDPG trainer
-are their only other callers.
+It also owns the hint template's slot names, the hint's rendering and injection, the response-alignment
+contract and the confidence weighting.
 """
 
 import math
+import string
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
 
-from src.args.mixins import format_field_names
 from src.data.pipeline.rendered import render_conversation, tokenize_rendered
 from src.data.spans import (
     LABEL_IGNORE_INDEX,
@@ -20,6 +19,16 @@ from src.data.spans import (
     require_rendered_response_marker,
     resolve_eos_token_ids,
 )
+
+
+def format_field_names(template: str) -> set[str]:
+    """The replacement-field names ``str.format`` looks up in ``template``, nested format specs
+    included. A lone brace raises ``ValueError``, as ``str.format`` would."""
+    names: set[str] = set()
+    for _, name, spec, _ in string.Formatter().parse(template):
+        if name is not None:
+            names |= {name, *format_field_names(spec or "")}
+    return names
 
 
 def privileged_hint(template: str, **slots: Any) -> str | None:

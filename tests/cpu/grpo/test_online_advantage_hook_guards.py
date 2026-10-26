@@ -25,7 +25,7 @@ import pytest
 import torch
 from trl import GRPOTrainer
 
-from src.args.mixins import RLRRConfig
+from src.configs.grpo import RLRRConfig
 from src.trainers.grpo.objective.advantages import degenerate_group_mask
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.online import DistributedGRPOTrainer

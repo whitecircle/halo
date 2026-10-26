@@ -20,9 +20,8 @@ from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 from trl import ModelConfig
 
-from src.args.distill_args import DistillScriptArguments
 from src.args.distributed_args import DistributedArguments
-from src.configs.distillation_config import DistillationConfig
+from src.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import DataCollatorForCausalLMWithPadding
 from src.data.collators.vlm import VLMDataCollator
@@ -166,7 +165,7 @@ def _prepare_vlm_distill_data(ds, args, training_config, processor, tokenizer, m
 
 
 def main():
-    parser = H4ArgumentParser((DistillScriptArguments, DistillationConfig, ModelConfig, DistributedArguments))
+    parser = H4ArgumentParser((TeacherDistillScriptArguments, DistillationConfig, ModelConfig, DistributedArguments))
     args, training_config, model_config, dist_args = parser.parse()
 
     runtime = init_training_script(

@@ -15,7 +15,7 @@ from unittest import mock
 import pytest
 from trl import GRPOTrainer
 
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 

@@ -24,8 +24,8 @@ Usage:
 from trl import KTOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.kto_args import KTOScriptArguments
 from src.config_validation import reject_unsupported_args
+from src.configs.preference import KTOScriptArguments
 from src.data.pipeline.processing import carry_cache_key, require_render_column
 from src.data.sources.loading import alias_images_column
 from src.data.vlm import dataset_declares_images

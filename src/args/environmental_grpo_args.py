@@ -3,8 +3,8 @@
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from src.args.common_script_args import CommonScriptArguments
-from src.args.mixins import DEFAULT_ANSWER_FIELD, PromptDatasetArguments
+from src.configs.grpo import PromptDatasetArguments
+from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 
 
 @dataclass

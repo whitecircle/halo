@@ -17,7 +17,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.base import Message, Trajectory
 from src.environments.episode import RolloutResult
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer

@@ -1,6 +1,6 @@
 # Embedding Training
 
-Fine-tune embedding models with [sentence-transformers](https://sbert.net/) losses under distributed parallelism. `EmbeddingTrainer` (`src/trainers/embedding/trainer.py`) layers the ST losses onto `DistributedTrainerMixin`; `EmbeddingConfig` (`src/configs/embedding_config.py`) extends `SentenceTransformerTrainingArguments`.
+Fine-tune embedding models with [sentence-transformers](https://sbert.net/) losses under distributed parallelism. `EmbeddingTrainer` (`src/trainers/embedding/trainer.py`) layers the ST losses onto `DistributedTrainerMixin`; `EmbeddingConfig` (`src/configs/embedding.py`) extends `SentenceTransformerTrainingArguments`.
 
 EP, TP, EP+TP, pure ETP and EP+ETP run, as do DDP and FSDP2. CP and PP raise at config time; CP because pooling needs the whole sequence. Text only: image columns are refused at dataset load.
 

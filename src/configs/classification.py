@@ -1,12 +1,25 @@
-"""``ClassificationConfig`` — training config for sequence classification."""
+"""Sequence-classification script arguments and ``ClassificationConfig``."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import ClassVar, Literal
 
 from transformers import TrainingArguments
 
-from src.args.mixins import DatasetNumProcArguments
 from src.config_validation import RangeValidatedConfig, present, require_finite, require_int
+from src.configs.script_arguments import CommonScriptArguments, DatasetNumProcArguments
+
+
+@dataclass
+class ClassificationScriptArguments(CommonScriptArguments):
+    PROJECT_NAME: ClassVar[str] = "classification"
+
+    text_field: str | None = field(
+        default=None,
+        metadata={
+            "help": "Raw-text column to classify (wrapped as a single user turn) when the dataset has "
+            "no pre-built 'prompt' conversation — e.g. text/label datasets like imdb."
+        },
+    )
 
 
 @dataclass

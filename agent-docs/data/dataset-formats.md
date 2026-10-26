@@ -180,7 +180,7 @@ Reference-model shapes for vision rows: [DPO → Vision-language](../training-me
 - Provide one reward per completion. A length mismatch raises `ValueError` naming the offending row, rather than silently truncating to the shorter list.
 - Each group's rewards become group-relative advantages via `advantage_method` (default `quantile_norm`).
 
-Config in `OfflineGRPOConfig` (`src/configs/offline_grpo_config.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline.md#configuration).
+Config in `OfflineGRPOConfig` (`src/configs/grpo_offline.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline.md#configuration).
 
 Full-fine-tune KL runs need a finite, unsharded dataset ([Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model)).
 

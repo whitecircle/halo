@@ -14,11 +14,11 @@ from typing import get_args, get_type_hints
 import pytest
 
 import src.environments.engine_wire as engine_wire
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import RolloutConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.ray_actors import EnvironmentActor
+from src.environments.rollout_config import RolloutConfig
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient

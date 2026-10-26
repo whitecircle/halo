@@ -11,7 +11,7 @@ import json
 import pytest
 
 from scripts.environments._common import write_eval_outputs
-from src.configs.rollout_config import RolloutConfig
+from src.environments.rollout_config import RolloutConfig
 
 
 def _write(output: str, results: list[dict]) -> None:

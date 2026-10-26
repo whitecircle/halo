@@ -156,6 +156,7 @@ changes.
 | `src/environments/sandbox/` (in-process + remote code execution) | `agent-docs/training-methods/async-grpo/environments/sandbox.md` |
 | `src/environments/tools/` | `agent-docs/training-methods/async-grpo/environments/protocols/native-tool-use.md`, `agent-docs/training-methods/async-grpo/environments/tasks/swe.md` |
 | `src/environments/engine_wire.py` (the rollout request wire format: stop tokens, `thinking_token_budget`, reasoning effort) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` |
+| `src/environments/rollout_config.py` (`RolloutConfig`: the rollout defaults, sampler presets and reasoning template variables the actors receive) | `agent-docs/reference/architecture.md` (leaf modules), `agent-docs/reference/configuration-reference.md` (the `AsyncTrainingConfig` fields it mirrors), `agent-docs/training-methods/async-grpo/evaluation.md` |
 | `src/environments/eval_runner.py` (offline episode driver + eval report/trajectory outputs) | `agent-docs/training-methods/async-grpo/evaluation.md`, `agent-docs/reference/scripts-reference.md` |
 | `src/environments/tools/web_search.py` (pluggable search backends) | `agent-docs/training-methods/async-grpo/environments/tasks/qa-benchmarks.md`, `agent-docs/reference/configuration-reference.md` |
 

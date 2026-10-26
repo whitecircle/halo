@@ -15,8 +15,8 @@ import pytest
 import torch
 
 import src.environments.ray_actors as ray_actors
-from src.configs.rollout_config import RolloutConfig
 from src.environments.ray_actors import EnvironmentActor, RolloutManager
+from src.environments.rollout_config import RolloutConfig
 from src.trainers.grpo.environmental import rollout_valid_mask
 
 _CPU = torch.device("cpu")

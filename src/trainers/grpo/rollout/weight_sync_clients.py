@@ -17,8 +17,8 @@ from typing import Any
 import torch
 from urllib3.util.retry import Retry
 
-from src.configs.rollout_config import SAMPLER_FILTERS_OFF
 from src.distributed.runtime import raise_rank0_failure
+from src.environments.rollout_config import SAMPLER_FILTERS_OFF
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
 from src.weight_sync.clients.base import SamplerLogprobSemantics, WeightSyncClientBase

@@ -16,11 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.configs.rollout_config import RolloutConfig
 from src.environments import ray_actors
 from src.environments.base import Trajectory
 from src.environments.episode import RolloutResult
 from src.environments.ray_actors import EnginePauseClock, EnvironmentActor, RolloutManager, _await_with_deadline
+from src.environments.rollout_config import RolloutConfig
 
 # The episode overruns the deadline by half a second, and a credit equal to the timeout clears it by
 # another half: a stalled event loop on a loaded runner must not flip either verdict.

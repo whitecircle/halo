@@ -31,7 +31,6 @@ from scripts.environments.inference.run_code_contests import (
     resolve_eval_protocol,
     run_trajectory_path,
 )
-from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
 from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
@@ -45,6 +44,7 @@ from src.environments.envs.tasks.coding.datasets import ContestSelection
 from src.environments.envs.tasks.coding.grading import VERDICT_DETAIL_FULL
 from src.environments.episode import recovering_turn
 from src.environments.registry import resolve_environment
+from src.environments.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
     StubSandbox,

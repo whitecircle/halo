@@ -16,7 +16,7 @@ import pytest
 from trl import ModelConfig
 
 import scripts.training.embedding as embedding_script
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 
 REPO = "org/model"
 COMMIT_A = "a" * 40

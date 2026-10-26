@@ -33,7 +33,7 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
-from src.args.common_script_args import CommonScriptArguments
+from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.model_loading.tokenizer_setup import pristine_model_max_length, setup_model_and_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin

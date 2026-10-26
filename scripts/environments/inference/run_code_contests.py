@@ -54,7 +54,6 @@ from scripts.environments._common import (
     rollout_config_from_args,
     write_eval_outputs,
 )
-from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
 from src.environments.base import ANSWER_KEY
 from src.environments.envs.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
@@ -70,6 +69,7 @@ from src.environments.eval_runner import (
     report,
 )
 from src.environments.registry import resolve_environment
+from src.environments.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
 from src.inference.openai_client import build_openai_client
 from src.log import configure_cli_logging
 

@@ -53,8 +53,7 @@ from scripts.environments._common import (
     rollout_config_from_args,
     write_eval_outputs,
 )
-from src.args.mixins import DEFAULT_ANSWER_FIELD
-from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS, DEFAULT_ROLLOUT_TEMPERATURE
+from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from src.environments.base import ANSWER_KEY
 from src.environments.eval_runner import (
     collect_results,
@@ -63,6 +62,7 @@ from src.environments.eval_runner import (
     require_answers,
 )
 from src.environments.registry import resolve_environment
+from src.environments.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS, DEFAULT_ROLLOUT_TEMPERATURE
 from src.inference.openai_client import build_openai_client
 from src.log import configure_cli_logging
 

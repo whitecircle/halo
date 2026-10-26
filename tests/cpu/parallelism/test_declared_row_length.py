@@ -3,7 +3,7 @@
 import pytest
 
 from src.args.distributed_args import DistributedArguments
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.parallelism_args import declared_row_length, parallelism_config_from_args
 from tests.common.parallelism import simulated_world

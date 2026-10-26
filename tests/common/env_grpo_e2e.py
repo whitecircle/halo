@@ -37,8 +37,8 @@ import torch
 from transformers import AutoTokenizer
 from trl import GRPOConfig
 
-from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.env import env_int, env_str
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer

@@ -20,7 +20,7 @@ import pytest
 import torch
 from transformers.models.deepseek_v4 import DeepseekV4Config, DeepseekV4ForCausalLM
 
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.models import segment_markers
 from src.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarkers, segment_markers_for
 from src.trainers.preference.smpo import SmoothMarginPOTrainer, reject_padding_free_without_varlen

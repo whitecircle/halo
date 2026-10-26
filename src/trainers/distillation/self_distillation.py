@@ -14,7 +14,7 @@ Teacher forward reuses the same model under ``torch.no_grad()`` (no second model
 import torch
 from accelerate.logging import get_logger
 
-from src.args.self_distill_args import SelfDistillationArguments
+from src.configs.distillation import SelfDistillScriptArguments
 from src.data.spans import LABEL_IGNORE_INDEX, resolve_eos_token_ids
 from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS
 from src.distributed.loading.frozen_models import (
@@ -83,7 +83,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
                 f"reference_kl_coef: 0."
             )
         # The dataset-side fields stay with the script, which bakes the hint into the teacher prompts.
-        self._adopt_sdpg_arguments(kwargs, exclude=SelfDistillationArguments.DATASET_SIDE_SDPG_FIELDS)
+        self._adopt_sdpg_arguments(kwargs, exclude=SelfDistillScriptArguments.DATASET_SIDE_SDPG_FIELDS)
         self.reference_kl_coef = reference_kl_coef
         self.reference_kl_loss_fn = get_divergence(reference_kl_loss) if reference_kl_coef > 0 else None
         self.confidence_weight_opd = confidence_weight_opd

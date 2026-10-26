@@ -21,7 +21,7 @@ import torch.nn as nn
 from accelerate import PartialState
 from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGeneration
 
-from src.args.common_script_args import CommonScriptArguments
+from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.model_loading.tokenizer_setup import setup_model_and_tokenizer

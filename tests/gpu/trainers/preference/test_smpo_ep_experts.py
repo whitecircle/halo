@@ -19,7 +19,7 @@ from accelerate.utils import extract_model_from_parallel
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
 
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
 from src.distributed.loading.model_loading import load_distributed_model

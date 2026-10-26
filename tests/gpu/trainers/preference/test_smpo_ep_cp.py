@@ -35,7 +35,7 @@ Note:
 import torch
 from transformers import AutoTokenizer
 
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.smpo import SmoothMarginPOTrainer

@@ -20,17 +20,16 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.args.mixins import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, format_field_names
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.args.self_distill_args import SelfDistillationArguments
-from src.data.collators.self_distill import inject_privileged_hint, privileged_hint
+from src.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
+from src.data.collators.self_distill import format_field_names, inject_privileged_hint, privileged_hint
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from tests.common.repo import load_script_module
 
 PartialState()  # the RLVR script logs through accelerate, which refuses to log without it
 
 ONLINE_ARMS = (SDPGArguments, RLVROnlineGRPOScriptArguments)
-ALL_ARMS = (*ONLINE_ARMS, SelfDistillationArguments)
+ALL_ARMS = (*ONLINE_ARMS, SelfDistillScriptArguments)
 
 
 def _placeholders(names) -> str:
@@ -71,7 +70,7 @@ def test_each_formatter_fills_every_placeholder_its_arm_admits():
     online = _placeholders(SDPGArguments.HINT_PLACEHOLDERS)
     assert _online_teacher_hint(online, "42") == online.replace("{answer}", "42")
 
-    offline = _placeholders(SelfDistillationArguments.HINT_PLACEHOLDERS)
+    offline = _placeholders(SelfDistillScriptArguments.HINT_PLACEHOLDERS)
     hint = privileged_hint(offline, answer="42", solution="6 * 7")
     history = inject_privileged_hint([{"role": "user", "content": "Q"}], hint)
     assert history[-1]["content"] == "Q" + offline.replace("{answer}", "42").replace("{solution}", "6 * 7")
@@ -87,7 +86,7 @@ def test_the_online_arm_refuses_the_solution_placeholder(arm):
 
 
 def test_self_distillation_admits_the_solution_placeholder():
-    assert SelfDistillationArguments(sdpg_hint_template="{answer} {solution}").sdpg_hint_template
+    assert SelfDistillScriptArguments(sdpg_hint_template="{answer} {solution}").sdpg_hint_template
 
 
 def test_the_online_trainer_refuses_it_at_construction_too():
@@ -124,8 +123,8 @@ def test_a_malformed_template_is_refused(arm, template):
 
 @pytest.mark.parametrize(
     "build",
-    [SDPGArguments, SelfDistillationArguments, lambda **kw: RLVROnlineGRPOScriptArguments(use_sdpg=True, **kw)],
-    ids=["SDPGArguments", "SelfDistillationArguments", "RLVROnlineGRPOScriptArguments-use_sdpg"],
+    [SDPGArguments, SelfDistillScriptArguments, lambda **kw: RLVROnlineGRPOScriptArguments(use_sdpg=True, **kw)],
+    ids=["SDPGArguments", "SelfDistillScriptArguments", "RLVROnlineGRPOScriptArguments-use_sdpg"],
 )
 def test_a_null_template_is_refused_naming_the_field(build):
     """A YAML ``sdpg_hint_template: null`` parses to None, which ``string.Formatter`` meets with a bare
@@ -203,17 +202,19 @@ def test_self_distillation_needs_a_column_for_each_slot_its_hint_names(template,
     """With no column to fill a named slot no row could render the hint; a slot the template does not
     name needs none — a solution-only template takes no answer column."""
     with pytest.raises(ValueError, match=rf"column is unset \(\['{unset}'\]\)"):
-        SelfDistillationArguments(sdpg_hint_template=template, **{unset: None})
-    assert SelfDistillationArguments(sdpg_hint_template=template, sdpg_beta_base=0.0, **{unset: None})
+        SelfDistillScriptArguments(sdpg_hint_template=template, **{unset: None})
+    assert SelfDistillScriptArguments(sdpg_hint_template=template, sdpg_beta_base=0.0, **{unset: None})
     other = {"sdpg_answer_field": "privileged_solution_field", "privileged_solution_field": "sdpg_answer_field"}[unset]
-    assert SelfDistillationArguments(sdpg_hint_template=template, **{other: None})
+    assert SelfDistillScriptArguments(sdpg_hint_template=template, **{other: None})
 
 
 def test_self_distillation_may_supervise_the_prompt_only_with_the_opd_term_off():
     """With the prompt in the labels the hint shifts every OPD pair; SFT alone has no pairs."""
     with pytest.raises(ValueError, match="train_on_completions_only: false while sdpg_beta_base > 0"):
-        SelfDistillationArguments(train_on_completions_only=False)
-    assert not SelfDistillationArguments(train_on_completions_only=False, sdpg_beta_base=0.0).train_on_completions_only
+        SelfDistillScriptArguments(train_on_completions_only=False)
+    assert not SelfDistillScriptArguments(
+        train_on_completions_only=False, sdpg_beta_base=0.0
+    ).train_on_completions_only
 
 
 if __name__ == "__main__":

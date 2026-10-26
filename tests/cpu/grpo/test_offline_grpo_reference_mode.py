@@ -16,7 +16,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import src.trainers.grpo.offline as offline_module
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.trainers.grpo.offline import OfflineGRPOTrainer, ReferenceMode
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset

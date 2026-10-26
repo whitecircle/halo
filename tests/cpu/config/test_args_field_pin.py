@@ -2,10 +2,10 @@
 """Pin the script-arg dataclass field surfaces.
 
 The expectation below is a per-class map of ``dataclasses.fields()`` name → default repr
-(``factory:<value>`` for default_factory fields). Moving fields between a class and the shared
-mixins (ConversationRenderArguments / GenerationEvalArguments / PromptDatasetArguments /
-ChunkedLogprobsArguments) must not add, drop, or re-default a single field on any class —
-any drift fails here. Field ORDER and metadata/type spellings are deliberately not pinned.
+(``factory:<value>`` for default_factory fields). Moving fields or classes between modules, or between a
+class and the field bundles it mixes in (ConversationRenderArguments / GenerationEvalArguments /
+PromptDatasetArguments / ChunkedLogprobsArguments), must not add, drop, or re-default a single field on any
+class — any drift fails here. Field ORDER and metadata/type spellings are deliberately not pinned.
 
 Usage:
     python tests/cpu/config/test_args_field_pin.py
@@ -19,18 +19,25 @@ from unittest import mock
 import pytest
 
 import src.args
+import src.configs
 from src import env
-from src.args.common_script_args import CommonScriptArguments
+from src.configs.script_arguments import CommonScriptArguments
 
 
 def _script_argument_classes() -> dict[str, type]:
-    """Every script-argument dataclass under ``src/args/``, by name — derived, so a new one is pinned or fails."""
-    found = {CommonScriptArguments.__name__: CommonScriptArguments}
-    for module_info in pkgutil.iter_modules(src.args.__path__):
-        module = importlib.import_module(f"src.args.{module_info.name}")
-        for name, obj in vars(module).items():
-            if isinstance(obj, type) and obj.__module__ == module.__name__ and issubclass(obj, CommonScriptArguments):
-                found[name] = obj
+    """Every script-argument dataclass under ``src/args/`` and ``src/configs/``, by name — derived, so a new one
+    is pinned or fails."""
+    found = {}
+    for package in (src.args, src.configs):
+        for module_info in pkgutil.iter_modules(package.__path__):
+            module = importlib.import_module(f"{package.__name__}.{module_info.name}")
+            for name, obj in vars(module).items():
+                if (
+                    isinstance(obj, type)
+                    and obj.__module__ == module.__name__
+                    and issubclass(obj, CommonScriptArguments)
+                ):
+                    found[name] = obj
     return found
 
 
@@ -39,7 +46,7 @@ _CLASSES = _script_argument_classes()
 # Do NOT regenerate casually: an intentional field change must be edited here explicitly, with the
 # diff called out in review.
 _EXPECTED = {
-    "CLFScriptArguments": {
+    "ClassificationScriptArguments": {
         "added_special_tokens": "None",
         "bos_token": "None",
         "chat_template": "None",
@@ -135,46 +142,6 @@ _EXPECTED = {
         "test_size": "None",
         "tokenizer_backend": "'hf'",
         "tools_field": "None",
-        "unfreeze_layers_patterns": "None",
-    },
-    "DistillScriptArguments": {
-        "added_special_tokens": "None",
-        "assistant_message_template": "None",
-        "bos_token": "None",
-        "chat_template": "None",
-        "conversation_field": "'messages'",
-        "dataset": "'/path/to/dataset'",
-        "dataset_ratio": "None",
-        "enable_efficiency_metrics": "False",
-        "enable_moe_metrics": "True",
-        "enable_torch_profiler": "False",
-        "eos_token": "None",
-        "force_chat_template": "False",
-        "freeze_layers_patterns": "None",
-        "images_field": "None",
-        "interleaved_thinking": "False",
-        "log_decoded_samples": "False",
-        "model_supports_system_role": "True",
-        "moe_balancing": "'auto'",
-        "num_full_model_params": "None",
-        "pad_token": "None",
-        "profiler_active": "3",
-        "profiler_output_dir": "factory:'<data_root>/profiling/torch'",
-        "profiler_ranks": "'0'",
-        "profiler_record_memory_snapshot": "False",
-        "profiler_wait": "5",
-        "profiler_warmup": "1",
-        "project_name": "'default-project'",
-        "report_mfu_diagnostics": "False",
-        "router_balancing_rate": "0.001",
-        "save_completions": "True",
-        "system_prompt": "None",
-        "teacher_model": "None",
-        "teacher_model_revision": "None",
-        "test_size": "None",
-        "tokenizer_backend": "'hf'",
-        "tools_field": "None",
-        "train_on_completions_only": "True",
         "unfreeze_layers_patterns": "None",
     },
     "EmbeddingScriptArguments": {
@@ -374,7 +341,7 @@ _EXPECTED = {
         "use_rlrr": "False",
         "use_sdpg": "False",
     },
-    "RMScriptArguments": {
+    "RewardScriptArguments": {
         "added_special_tokens": "None",
         "bos_token": "None",
         "chat_template": "None",
@@ -480,7 +447,7 @@ _EXPECTED = {
         "tools_field": "None",
         "unfreeze_layers_patterns": "None",
     },
-    "SelfDistillationArguments": {
+    "SelfDistillScriptArguments": {
         "added_special_tokens": "None",
         "assistant_message_template": "None",
         "bos_token": "None",
@@ -538,6 +505,46 @@ _EXPECTED = {
         "train_on_last_assistant_only": "False",
         "unfreeze_layers_patterns": "None",
     },
+    "TeacherDistillScriptArguments": {
+        "added_special_tokens": "None",
+        "assistant_message_template": "None",
+        "bos_token": "None",
+        "chat_template": "None",
+        "conversation_field": "'messages'",
+        "dataset": "'/path/to/dataset'",
+        "dataset_ratio": "None",
+        "enable_efficiency_metrics": "False",
+        "enable_moe_metrics": "True",
+        "enable_torch_profiler": "False",
+        "eos_token": "None",
+        "force_chat_template": "False",
+        "freeze_layers_patterns": "None",
+        "images_field": "None",
+        "interleaved_thinking": "False",
+        "log_decoded_samples": "False",
+        "model_supports_system_role": "True",
+        "moe_balancing": "'auto'",
+        "num_full_model_params": "None",
+        "pad_token": "None",
+        "profiler_active": "3",
+        "profiler_output_dir": "factory:'<data_root>/profiling/torch'",
+        "profiler_ranks": "'0'",
+        "profiler_record_memory_snapshot": "False",
+        "profiler_wait": "5",
+        "profiler_warmup": "1",
+        "project_name": "'default-project'",
+        "report_mfu_diagnostics": "False",
+        "router_balancing_rate": "0.001",
+        "save_completions": "True",
+        "system_prompt": "None",
+        "teacher_model": "None",
+        "teacher_model_revision": "None",
+        "test_size": "None",
+        "tokenizer_backend": "'hf'",
+        "tools_field": "None",
+        "train_on_completions_only": "True",
+        "unfreeze_layers_patterns": "None",
+    },
 }
 
 
@@ -560,6 +567,15 @@ def _field_defaults(cls):
             else:
                 out[f.name] = "<required>"
         return out
+
+
+def test_every_script_argument_class_is_pinned():
+    """A script-argument class the sweep finds but _EXPECTED does not pin would pass with any field
+    surface."""
+    assert set(_CLASSES) == set(_EXPECTED), (
+        f"unpinned: {sorted(set(_CLASSES) - set(_EXPECTED))}; pinned but not found: "
+        f"{sorted(set(_EXPECTED) - set(_CLASSES))}"
+    )
 
 
 @pytest.mark.parametrize("cls_name", sorted(_EXPECTED))

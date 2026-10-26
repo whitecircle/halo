@@ -35,7 +35,7 @@ from datasets import Dataset
 from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForSequenceClassification
 from trl import RewardConfig
 
-from src.configs.classification_config import ClassificationConfig
+from src.configs.classification import ClassificationConfig
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig

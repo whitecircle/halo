@@ -112,7 +112,6 @@ _PACKAGE_INTERNAL = {
 # root -> the final one. A move deletes its entry; a module staying in its unit and member needs none.
 _PENDING_MOVES = {
     "args": "configs",
-    "configs.rollout_config": "environments.rollout_config",
     "training": "entrypoints",
     "training.early_stopping": "callbacks.early_stop",
     "training.parallelism_args": "configs.parallelism_arguments",
@@ -160,7 +159,6 @@ _KNOWN_LAYER_BREAKS = frozenset(
     {
         ("layer order", "checkpoint.parallel.loader", "model_loading.parallel.pp"),
         ("layer order", "configs.parser", "entrypoints.run_logging"),
-        ("layer order", "data.collators.self_distill", "configs.mixins"),
         ("layer order", "distributed.expert_parallel.lazy_plan", "model_loading.parallel.fp32_masters"),
         (
             "layer order",

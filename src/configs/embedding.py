@@ -1,11 +1,17 @@
-"""``EmbeddingConfig`` — training config for embedding fine-tuning (sentence-transformers losses)."""
+"""Embedding script arguments and ``EmbeddingConfig`` (sentence-transformers losses)."""
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import ClassVar, Literal
 
 from sentence_transformers import SentenceTransformerTrainingArguments
 
 from src.config_validation import RangeValidatedConfig, present, require_int, require_positive, require_positive_int
+from src.configs.script_arguments import CommonScriptArguments
+
+
+@dataclass
+class EmbeddingScriptArguments(CommonScriptArguments):
+    PROJECT_NAME: ClassVar[str] = "embedding"
 
 
 @dataclass

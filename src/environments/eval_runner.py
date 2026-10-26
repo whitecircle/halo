@@ -26,7 +26,6 @@ from typing import Any
 from datasets import Dataset, load_dataset, load_from_disk
 from openai import NOT_GIVEN, APIStatusError, APITimeoutError, AsyncOpenAI
 
-from src.configs.rollout_config import RolloutConfig
 from src.data.sources.paths import parse_dataset_source
 from src.environments.base import (
     ANSWER_KEY,
@@ -55,6 +54,7 @@ from src.environments.episode import (
     recovering_turn,
     step_context_from_generation,
 )
+from src.environments.rollout_config import RolloutConfig
 from src.inference.openai_client import generate_openai_response
 from src.inference.response import FINISH_REASON_LENGTH, get_finish_reason
 

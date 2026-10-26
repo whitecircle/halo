@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Validation tests for ClassificationConfig, EmbeddingConfig,
-DistillScriptArguments and RLVROnlineGRPOScriptArguments ``__post_init__`` (a CLI override meets
+TeacherDistillScriptArguments and RLVROnlineGRPOScriptArguments ``__post_init__`` (a CLI override meets
 the same guards), plus the NaN refusal on every float those configs and SMPO range-check.
 
 Each boundary the validator rejects is exercised (raise expected) alongside a valid
@@ -15,12 +15,11 @@ Run: pytest tests/cpu/config/test_config_validators.py
 
 import pytest
 
-from src.args.distill_args import DistillScriptArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.configs.classification_config import ClassificationConfig
-from src.configs.distillation_config import DistillationConfig
-from src.configs.embedding_config import EmbeddingConfig
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.classification import ClassificationConfig
+from src.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
+from src.configs.embedding import EmbeddingConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.training.parser import H4ArgumentParser
 
 OUTPUT_DIR = "/tmp/test_config_validators"
@@ -172,7 +171,7 @@ def test_embedding_weights_without_dimensions_raises_on_cli_override(tmp_path):
         H4ArgumentParser((EmbeddingConfig,)).parse_yaml_and_args(str(config), ["--matryoshka_weights=1.0,0.5"])
 
 
-# DistillationConfig / DistillScriptArguments / RLVROnlineGRPOScriptArguments range guards
+# DistillationConfig / TeacherDistillScriptArguments / RLVROnlineGRPOScriptArguments range guards
 
 
 def test_distill_defaults_valid():
@@ -200,7 +199,7 @@ def test_distill_out_of_range_raises(kwargs, match):
 def test_distill_teacher_model_still_required_on_the_script_args():
     """The knobs moved to the training config; the teacher the SCRIPT loads did not."""
     with pytest.raises(ValueError, match="teacher_model"):
-        DistillScriptArguments()
+        TeacherDistillScriptArguments()
 
 
 @pytest.mark.parametrize(

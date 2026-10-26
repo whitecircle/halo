@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import torch
 
-from src.configs.async_training_config import ISMaskConfig
+from src.configs.grpo_environmental import ISMaskConfig
 
 KL_LOGRATIO_CLAMP = 5.0
 """Cap on ``ref − logp`` (nats) in the k3 KL estimator, bounding per-token KL at ``exp(5) ≈ 148``."""

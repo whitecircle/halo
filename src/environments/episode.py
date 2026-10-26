@@ -14,7 +14,6 @@ from typing import Any
 
 import backoff
 
-from src.configs.rollout_config import REASONING_END_TOKEN_EXAMPLES, RolloutConfig
 from src.environments.base import (
     CUT_TOOL_CALLS_KEY,
     LAST_TURN_KEY,
@@ -27,6 +26,7 @@ from src.environments.base import (
     Trajectory,
     resolve_reasoning_effort,
 )
+from src.environments.rollout_config import REASONING_END_TOKEN_EXAMPLES, RolloutConfig
 from src.inference.openai_client import TRANSIENT_CLIENT_ERROR_CODES
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 

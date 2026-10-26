@@ -20,9 +20,9 @@ import pytest
 from accelerate import PartialState
 from transformers import TrainerControl, TrainerState
 
-from src.args.mixins import EarlyStopConfig
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo import EarlyStopConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY

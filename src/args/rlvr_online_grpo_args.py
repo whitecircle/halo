@@ -3,16 +3,15 @@
 from dataclasses import dataclass, field, fields
 from typing import Any, ClassVar, Literal
 
-from src.args.common_script_args import CommonScriptArguments
-from src.args.mixins import (
-    DEFAULT_ANSWER_FIELD,
+from src.configs.distillation import SDPGArguments
+from src.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     GRPOEarlyStopArguments,
     PromptDatasetArguments,
     RLRRArguments,
-    SDPGArguments,
 )
+from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from src.rewards.graders.verifiable import RLVR_REWARD_SOURCES
 from src.rewards.terms import RewardTerm, parse_reward_terms, refuse_veto_judges
 

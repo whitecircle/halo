@@ -3,7 +3,7 @@
 Concrete commands, config fields, and launch examples for online / async-environment
 GRPO. Source of truth: `Dockerfile.vllm`, `docker-compose.vllm.yml`,
 `src/weight_sync/clients/vllm.py`, `src/trainers/grpo/environmental.py`,
-`src/configs/async_training_config.py`, `src/configs/environment_config.py`,
+`src/configs/grpo_environmental.py`, `src/configs/environment_config.py`,
 `src/rewards/terms.py` (the reward terms), `src/environments/registry.py`. Cross-link the docs:
 `agent-docs/infrastructure/rollout-servers.md` (server setup, weight sync, SGLang),
 `agent-docs/training-methods/grpo/rewards/README.md` (the `rewards:` term list),
@@ -104,7 +104,7 @@ docker run --gpus all --network=host --ipc=host \
 
 ## 2. AsyncTrainingConfig fields that matter
 
-(`src/configs/async_training_config.py` — parsed from the async-GRPO YAML)
+(`src/configs/grpo_environmental.py` — parsed from the async-GRPO YAML)
 
 | Field | Default | Purpose |
 |---|---|---|

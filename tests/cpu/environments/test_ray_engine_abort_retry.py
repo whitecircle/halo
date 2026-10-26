@@ -12,9 +12,9 @@ masked row.
 
 import pytest
 
-from src.configs.rollout_config import RolloutConfig
 from src.environments.episode import TurnGeneration
 from src.environments.ray_actors import EnvironmentActor
+from src.environments.rollout_config import RolloutConfig
 from src.inference.response import FINISH_REASON_ABORT
 
 _OBSERVATION = [{"role": "user", "content": "2+2?"}]

@@ -188,10 +188,10 @@ Each trainer combines a **trainer config** (hyperparameters) with **script argum
 | `DistributedGRPOTrainer` (RLVR) | [GRPOConfig](#trl-trainer-configs) (TRL) | [RLVROnlineGRPOScriptArguments](#rlvronlinegrposcriptarguments) | `online_grpo/rlvr.py` |
 | `DistributedSDPGTrainer` (online SDPG) | [GRPOConfig](#trl-trainer-configs) (TRL) | [RLVROnlineGRPOScriptArguments](#rlvronlinegrposcriptarguments) (`--use_sdpg=true`) | `online_grpo/rlvr.py` |
 | `DistributedAsyncEnvironmentalGRPOTrainer` | [GRPOConfig](#trl-trainer-configs) (TRL) + [EnvironmentConfig](#environmentconfig) + [AsyncTrainingConfig](#asynctrainingconfig) | [EnvironmentalGRPOScriptArguments](#environmentalgrposcriptarguments) | `environmental_grpo.py` |
-| `DistributedRewardTrainer` | [RewardConfig](#trl-trainer-configs) (TRL) | [RMScriptArguments](#other-script-arguments) | `preference/rewards.py` |
-| `ClassificationTrainer` | [ClassificationConfig](#classificationconfig) | [CLFScriptArguments](#other-script-arguments) | `classification.py` |
-| `DistributedDistillationTrainer` | [DistillationConfig](#distillationconfig) | [DistillScriptArguments](#distillscriptarguments) | `distillation/teacher_distill.py` |
-| `DistributedSelfDistillationTrainer` (offline SDPG) | [SFTConfig](#trl-trainer-configs) (TRL) | [SelfDistillationArguments](#other-script-arguments) | `distillation/self_distill.py` |
+| `DistributedRewardTrainer` | [RewardConfig](#trl-trainer-configs) (TRL) | [RewardScriptArguments](#other-script-arguments) | `preference/rewards.py` |
+| `ClassificationTrainer` | [ClassificationConfig](#classificationconfig) | [ClassificationScriptArguments](#other-script-arguments) | `classification.py` |
+| `DistributedDistillationTrainer` | [DistillationConfig](#distillationconfig) | [TeacherDistillScriptArguments](#teacherdistillscriptarguments) | `distillation/teacher_distill.py` |
+| `DistributedSelfDistillationTrainer` (offline SDPG) | [SFTConfig](#trl-trainer-configs) (TRL) | [SelfDistillScriptArguments](#other-script-arguments) | `distillation/self_distill.py` |
 | `EmbeddingTrainer` | [EmbeddingConfig](../training-methods/embedding.md) (extends `SentenceTransformerTrainingArguments`) | [EmbeddingScriptArguments](#other-script-arguments) | `embedding.py` |
 
 All distributed trainers also accept the [ParallelismConfig](#parallelismconfig) parameters, in the YAML or on the CLI.
@@ -354,7 +354,7 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
 
 ## OfflineGRPOConfig
 
-`OfflineGRPOTrainer`: group-relative policy optimization on pre-computed rewards. **Source:** `src/configs/offline_grpo_config.py`
+`OfflineGRPOTrainer`: group-relative policy optimization on pre-computed rewards. **Source:** `src/configs/grpo_offline.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -379,7 +379,7 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
 
 ## SmoothMarginPOConfig
 
-`SmoothMarginPOTrainer` (SMPO) — reference-model-free, margin-based preference optimization. **Source:** `src/configs/smpo_config.py`
+`SmoothMarginPOTrainer` (SMPO) — reference-model-free, margin-based preference optimization. **Source:** `src/configs/preference.py`
 
 The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`, `logging_steps=10`, `gradient_checkpointing=True`, and `bf16` (declared `bool | None`, resolved in `__post_init__` to `not fp16`).
 
@@ -407,7 +407,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ## DistillationConfig
 
-`DistributedDistillationTrainer`. **Source:** `src/configs/distillation_config.py`. The teacher and the conversation-rendering fields live in `DistillScriptArguments` below.
+`DistributedDistillationTrainer`. **Source:** `src/configs/distillation.py`. The teacher and the conversation-rendering fields live in `TeacherDistillScriptArguments` below.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -418,9 +418,9 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 | `max_length` | `int \| None` | `2048` | Maximum tokenized sequence length. Over-length conversations are **dropped**, not truncated; `null` → the student's context window. |
 | `dataset_num_proc` | `int \| None` | `None` | Dataset preprocessing worker processes; unset means the toolkit default (`HALO_DATASET_NUM_PROC`), not one worker. |
 
-### DistillScriptArguments
+### TeacherDistillScriptArguments
 
-**Source:** `src/args/distill_args.py`
+**Source:** `src/configs/distillation.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -438,7 +438,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ## ClassificationConfig
 
-`ClassificationTrainer`. **Source:** `src/configs/classification_config.py`
+`ClassificationTrainer`. **Source:** `src/configs/classification.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -501,7 +501,7 @@ environment_kwargs:
 
 ## AsyncTrainingConfig
 
-`DistributedAsyncEnvironmentalGRPOTrainer`: Ray workers, rollout-server connections, weight sync, rollout generation, async prefetch. **Source:** `src/configs/async_training_config.py`. Every numeric field also refuses a bool (`true` would read as 1) and a non-finite value, beside its own range.
+`DistributedAsyncEnvironmentalGRPOTrainer`: Ray workers, rollout-server connections, weight sync, rollout generation, async prefetch. **Source:** `src/configs/grpo_environmental.py`. Every numeric field also refuses a bool (`true` would read as 1) and a non-finite value, beside its own range.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -560,7 +560,7 @@ environment_kwargs:
 
 ### CommonScriptArguments
 
-Base shared by all training scripts. **Source:** `src/args/common_script_args.py`
+Base shared by all training scripts. **Source:** `src/configs/script_arguments.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -582,7 +582,7 @@ Base shared by all training scripts. **Source:** `src/args/common_script_args.py
 
 ### SFTScriptArguments
 
-**Source:** `src/args/sft_args.py`
+**Source:** `src/configs/sft.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -614,9 +614,9 @@ RLVR Online GRPO. **Source:** `src/args/rlvr_online_grpo_args.py`
 | `use_sdpg` | `bool` | `False` | Swap in `DistributedSDPGTrainer`: the GRPO loss plus a privileged-teacher reverse-KL OPD term. Text-only. See [SDPG](../training-methods/distillation/online-sdpg.md). |
 | `opd_positive_advantage_only` | `bool` | `True` | Charge the OPD term on positive-advantage tokens only. `false` with `use_sdpg: false` is refused. |
 
-The tuning fields behind the two toggles — `rlrr_*` (`RLRRArguments`, `src/args/mixins.py`) and the SDPG set (`SDPGArguments` plus `opd_positive_advantage_only`) — are **refused** at a non-default value when their toggle is off rather than ignored; both sets are additionally range-validated whether or not their toggle is on (the SDPG bounds and hint placeholders: [Online SDPG](../training-methods/distillation/online-sdpg.md#configuration)). Per-knob list: [RLVR Online GRPO](../training-methods/grpo/online.md#configuration).
+The tuning fields behind the two toggles — `rlrr_*` (`RLRRArguments`, `src/configs/grpo.py`) and the SDPG set (`SDPGArguments` plus `opd_positive_advantage_only`) — are **refused** at a non-default value when their toggle is off rather than ignored; both sets are additionally range-validated whether or not their toggle is on (the SDPG bounds and hint placeholders: [Online SDPG](../training-methods/distillation/online-sdpg.md#configuration)). Per-knob list: [RLVR Online GRPO](../training-methods/grpo/online.md#configuration).
 
-It also inherits `AdvantageShapingArguments` (`src/args/mixins.py`): `scale_rewards_std_floor`, `drop_degenerate_groups` and `balance_token_mass`, with the same semantics as the [AsyncTrainingConfig](#asynctrainingconfig) rows, except that `drop_degenerate_groups` defaults **`false`** here (it is `true` in async GRPO, whose sparse verifiable reward makes dead groups dominate the batch) and judges a group on the total weighted reward, since this arm's terms carry no shaping.
+It also inherits `AdvantageShapingArguments` (`src/configs/grpo.py`): `scale_rewards_std_floor`, `drop_degenerate_groups` and `balance_token_mass`, with the same semantics as the [AsyncTrainingConfig](#asynctrainingconfig) rows, except that `drop_degenerate_groups` defaults **`false`** here (it is `true` in async GRPO, whose sparse verifiable reward makes dead groups dominate the batch) and judges a group on the total weighted reward, since this arm's terms carry no shaping.
 
 It inherits `GRPOEarlyStopArguments` as well: `early_stop_entropy_band`, `early_stop_logratio_gap` and `early_stop_patience`, as in the AsyncTrainingConfig rows, with the gap read from TRL's `sampling/sampling_logp_difference/mean` (refused without `vllm_importance_sampling_correction`). The skipped-update condition is async-only: this trainer has no trust-region breaker.
 
@@ -639,14 +639,14 @@ These extend `CommonScriptArguments` with minimal additions:
 
 | Class | Source | Extra Fields |
 |-------|--------|-------------|
-| `SMPOScriptArguments` | `src/args/smpo_args.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
-| `DPOScriptArguments` | `src/args/dpo_args.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`), `generation_max_prompt_length` (`512`) — bounds the eval-time generation dataset only; DPO has no training-side prompt cap — and `images_field` (`None`) — VLM only: image column renamed to the `images` spelling TRL's vision probe reads, ahead of the dispatch |
+| `SMPOScriptArguments` | `src/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
+| `DPOScriptArguments` | `src/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`), `generation_max_prompt_length` (`512`) — bounds the eval-time generation dataset only; DPO has no training-side prompt cap — and `images_field` (`None`) — VLM only: image column renamed to the `images` spelling TRL's vision probe reads, ahead of the dispatch |
 | `OfflineGRPOScriptArguments` | `src/args/offline_grpo_args.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
-| `KTOScriptArguments` | `src/args/kto_args.py` | `completion_field` (`"completion"`), `label_field` (`"label"`) — KTO uses an *unpaired* `{prompt, completion, label}` dataset — and `images_field` (`None`) — VLM only: renamed to TRL's `images` spelling; the vision path refuses `precompute_ref_log_probs` and paired columns |
-| `RMScriptArguments` | `src/args/reward_args.py` | `images_field` (`None`) — VLM only: image column, renamed to `images` and merged into the shared prompt conversation; declares the run VLM on a score-headed multimodal checkpoint ([reward VLMs](../training-methods/preference/reward-modeling.md#vision-language)) |
-| `CLFScriptArguments` | `src/args/classification_args.py` | `text_field` (`None`) — raw-text column wrapped as one user turn when the dataset has no `prompt` conversation (e.g. text/label sets like imdb) |
-| `EmbeddingScriptArguments` | `src/args/embedding_args.py` | *None (inherits only)* |
-| `SelfDistillationArguments` | `src/args/self_distill_args.py` | Extends `SFTScriptArguments` with privileged-context + OPD-loss fields — see [Self-Distillation](../training-methods/distillation/self-distillation.md) |
+| `KTOScriptArguments` | `src/configs/preference.py` | `completion_field` (`"completion"`), `label_field` (`"label"`) — KTO uses an *unpaired* `{prompt, completion, label}` dataset — and `images_field` (`None`) — VLM only: renamed to TRL's `images` spelling; the vision path refuses `precompute_ref_log_probs` and paired columns |
+| `RewardScriptArguments` | `src/configs/reward.py` | `images_field` (`None`) — VLM only: image column, renamed to `images` and merged into the shared prompt conversation; declares the run VLM on a score-headed multimodal checkpoint ([reward VLMs](../training-methods/preference/reward-modeling.md#vision-language)) |
+| `ClassificationScriptArguments` | `src/configs/classification.py` | `text_field` (`None`) — raw-text column wrapped as one user turn when the dataset has no `prompt` conversation (e.g. text/label sets like imdb) |
+| `EmbeddingScriptArguments` | `src/configs/embedding.py` | *None (inherits only)* |
+| `SelfDistillScriptArguments` | `src/configs/distillation.py` | Extends `SFTScriptArguments` with privileged-context + OPD-loss fields — see [Self-Distillation](../training-methods/distillation/self-distillation.md) |
 
 ---
 

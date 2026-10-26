@@ -15,7 +15,7 @@ from datasets import DatasetDict
 from trl import ModelConfig
 
 import scripts.training.offline_grpo as offline_script
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.offline_grpo import offline_grpo_dataset
 

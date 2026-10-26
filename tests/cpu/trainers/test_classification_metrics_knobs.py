@@ -21,7 +21,7 @@ from scipy.special import softmax
 from sklearn.metrics import matthews_corrcoef, roc_auc_score
 from transformers.trainer_utils import EvalPrediction
 
-from src.configs.classification_config import ClassificationConfig
+from src.configs.classification import ClassificationConfig
 from src.trainers.reward.classification import ClassificationTrainer, _validate_best_model_metric
 
 # Binary fixture: labels are 4 positives then 6 negatives; argmax gives TP=3 FN=1 FP=2 TN=4, an

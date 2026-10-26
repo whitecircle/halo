@@ -55,7 +55,7 @@ from trl.trainer.utils import (
 )
 
 from src.callbacks.variable_scheduler import VariableSchedulerCallback
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.collators.offline_grpo import (
     REF_PER_TOKEN_LOGPS_COLUMN,
     OfflineGRPOCPDataCollatorWithPadding,

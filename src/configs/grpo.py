@@ -1,14 +1,12 @@
-"""Field bundles shared by the script-argument and trainer-config dataclasses.
+"""Field bundles shared by the GRPO script-argument and trainer-config dataclasses.
 
 Pure dataclass mixins (no ``CommonScriptArguments`` base): each holds fields that several classes
 would otherwise declare identically, so a spelling or help fix lands once. A subclass re-declares a
-field only to change its default (e.g. ``DistillScriptArguments``' ``conversation_field="messages"``,
-``SFTScriptArguments``' ``generate_eval_examples=False``).
+field only to change its default (e.g. ``AsyncTrainingConfig``'s ``drop_degenerate_groups=True``).
 """
 
-import string
 from dataclasses import dataclass, field, fields, make_dataclass
-from typing import Any, ClassVar, Literal, get_args
+from typing import ClassVar, Literal, get_args
 
 from src.config_validation import (
     RangeValidatedConfig,
@@ -25,90 +23,10 @@ RLRRMode = Literal["hrr", "prr"]
 # keyword, so the config field is ``lam`` while the YAML keeps the full word.
 _RLRR_ARG_SPELLINGS = {"lam": "rlrr_lambda"}
 
-# The OPD arms' names in the trainer-side divergence registry (``losses.DIVERGENCES``), pinned to it by a
-# test: the args layer imports no trainer. The annotation gates YAML/CLI and SDPGArguments validates
-# against it.
-SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
-
-# The dataset column a ground-truth answer is read from unless a config renames it.
-DEFAULT_ANSWER_FIELD = "answer"
-
-# The teacher hint both OPD flows default to, through SDPGArguments.
-PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
-
 
 def rlrr_arg_name(config_field: str) -> str:
     """The YAML/CLI spelling of one :class:`RLRRConfig` field."""
     return _RLRR_ARG_SPELLINGS.get(config_field, f"rlrr_{config_field}")
-
-
-def format_field_names(template: str) -> set[str]:
-    """The replacement-field names ``str.format`` looks up in ``template``, nested format specs
-    included. A lone brace raises ``ValueError``, as ``str.format`` would."""
-    names: set[str] = set()
-    for _, name, spec, _ in string.Formatter().parse(template):
-        if name is not None:
-            names |= {name, *format_field_names(spec or "")}
-    return names
-
-
-@dataclass
-class ConversationRenderArguments:
-    """Chat-template rendering knobs shared by conversation-rendering trainers (SFT, distillation)."""
-
-    conversation_field: str | None = field(
-        default="prompt",
-        metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."},
-    )
-    images_field: str | None = field(
-        default=None,
-        metadata={
-            "help": "VLM only: dataset column holding the row's image(s) (HF Image feature, single or list). "
-            "Injected into the first user turn ahead of its text, so hub datasets that store images "
-            "outside the conversation (e.g. FineVision/the_cauldron/Docmatix) train without preprocessing."
-        },
-    )
-    system_prompt: str | None = field(
-        default=None,
-        metadata={"help": "System prompt added to a conversation that has none; unset adds nothing."},
-    )
-    train_on_completions_only: bool = field(
-        default=True, metadata={"help": "Train only on assistant completions, masking the prompt tokens."}
-    )
-    assistant_message_template: str | None = field(
-        default=None,
-        metadata={
-            "help": "The rendered assistant-turn prefix of the model's chat template, like '<|im_start|>assistant\\n'. "
-            "Required when train_on_completions_only is on, since no default fits every template."
-        },
-    )
-    model_supports_system_role: bool = field(
-        default=True,
-        metadata={
-            "help": "Whether the chat template accepts a system role; false prepends the system prompt to the first "
-            "user message."
-        },
-    )
-    interleaved_thinking: bool = field(
-        default=False,
-        metadata={
-            "help": "Pass clear_thinking=False to apply_chat_template so earlier assistant turns keep their "
-            "reasoning; only templates with that switch (the GLM family) read it. Text-only: the VLM path rejects "
-            "it."
-        },
-    )
-
-
-@dataclass
-class GenerationEvalArguments(RangeValidatedConfig):
-    """Eval-time example-generation knobs (SFT, DPO, SMPO, offline GRPO)."""
-
-    generate_eval_examples: bool = field(default=True, metadata={"help": "Generate text examples during evaluation."})
-    num_eval_examples: int = field(default=50, metadata={"help": "Examples to generate per evaluation."})
-
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
-        require_positive_int(type(self).__name__, num_eval_examples=self.num_eval_examples)
 
 
 @dataclass
@@ -367,39 +285,6 @@ class GRPOEarlyStopArguments(RangeValidatedConfig):
 
 
 @dataclass
-class DatasetNumProcArguments(RangeValidatedConfig):
-    """Dataset-preprocessing worker count of the trainer configs that map their own data, read through
-    :func:`~src.data.pipeline.processing.resolve_map_num_proc`."""
-
-    dataset_num_proc: int | None = field(
-        default=None,
-        metadata={
-            "help": "Worker processes for dataset preprocessing (map/filter). Unset means the toolkit "
-            "default (HALO_DATASET_NUM_PROC, else max(1, min(cpu_count // 4, 4))), not one worker."
-        },
-    )
-
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
-        require_positive_int(type(self).__name__, **present(dataset_num_proc=self.dataset_num_proc))
-
-
-@dataclass
-class ModelInitKwargsArguments:
-    """``model_init_kwargs`` of the trainer configs whose trainer also takes the model as a path string."""
-
-    model_init_kwargs: dict[str, Any] | None = field(
-        default=None,
-        metadata={
-            "help": "Model-config overrides on every entry-script path: written onto the loaded "
-            "config's fields before the load, raising on a key that config does not declare and "
-            "on dtype/torch_dtype. Model-loading kwargs only where a trainer is constructed "
-            "programmatically with the model as a path string."
-        },
-    )
-
-
-@dataclass
 class ChunkedLogprobsArguments:
     """Vocab-chunked log-prob computation switch shared by the GRPO trainers (online, environmental, offline)."""
 
@@ -412,102 +297,3 @@ class ChunkedLogprobsArguments:
             "See agent-docs/training-methods/async-grpo/performance.md#chunked-log-probs."
         },
     )
-
-
-@dataclass
-class SDPGArguments(RangeValidatedConfig):
-    """Privileged-teacher OPD term (SDPG, arXiv:2606.04036), shared by the offline self-distillation
-    SFT script and the online RLVR GRPO script.
-
-    The hint field the teacher fills is not declared here: self-distillation reads it from a
-    configurable dataset column, while RLVR's ``process_for_rlvr`` has already normalized it to
-    ``answer``. Validated on construction, so the trainers that build this block from their kwargs
-    hold a direct construction to the bounds a YAML run meets.
-    """
-
-    # The placeholders the arm's hint formatter fills: the on-policy trainer has the gold answer alone;
-    # SelfDistillationArguments widens the set with its reference-solution column.
-    HINT_PLACEHOLDERS: ClassVar[frozenset[str]] = frozenset({"answer"})
-
-    sdpg_hint_template: str = field(
-        default=PRIVILEGED_HINT_TEMPLATE,
-        metadata={
-            "help": "Hint the teacher forward sees after its prompt (the last user turn on self-distillation, the "
-            "rendered generation prompt online), a str.format template. {answer} fills on both arms, {solution} on "
-            "self-distillation only, and any other placeholder is refused at parse time."
-        },
-    )
-    sdpg_loss: SelfDistillationLoss = field(
-        default="reverse_kl",
-        metadata={"help": "OPD loss: 'reverse_kl' (SDPG), 'forward_kl', or 'unnormalized_kl' (k3/UKL)."},
-    )
-    sdpg_temperature: float = field(
-        default=1.0,
-        metadata={"help": "Softmax temperature for the OPD loss (finite, > 0)."},
-    )
-    sdpg_beta_base: float = field(
-        default=1.0,
-        metadata={"help": "Base distillation coefficient beta_base (finite, >= 0; 0 drops the OPD term)."},
-    )
-    sdpg_beta_warmup_steps: int = field(
-        default=0,
-        metadata={"help": "Steps to ramp beta from 0 to sdpg_beta_base (SDPG warmup; 0 = off)."},
-    )
-    sdpg_beta_decay_steps: int = field(
-        default=0,
-        metadata={"help": "Final steps over which beta decays back to 0 (SDPG decay; 0 = off)."},
-    )
-
-    def __post_init__(self) -> None:
-        self._validate_ranges()
-
-    @classmethod
-    def pop_from(cls, kwargs: dict, *, exclude: frozenset[str] = frozenset()) -> dict[str, Any]:
-        """Pop this block's fields but ``exclude`` from trainer ``kwargs``: validated, defaults filled.
-
-        A trainer adopts the result as attributes, so a directly built one runs the OPD schedule the
-        identical YAML run would. A misspelt field stays in ``kwargs``, where the parent's explicit
-        signature rejects it.
-        """
-        names = [f.name for f in fields(cls) if f.name not in exclude]
-        block = cls(**{name: kwargs.pop(name) for name in names if name in kwargs})
-        return {name: getattr(block, name) for name in names}
-
-    def _validate_ranges(self) -> None:
-        super()._validate_ranges()
-        if self.sdpg_loss not in get_args(SelfDistillationLoss):
-            raise ValueError(f"sdpg_loss must be one of {get_args(SelfDistillationLoss)}, got {self.sdpg_loss!r}")
-        # Divides both distributions' logits: zero turns them infinite and NaNs the OPD loss without a
-        # raise, a negative one inverts them.
-        require_positive(type(self).__name__, sdpg_temperature=self.sdpg_temperature)
-        # A NaN coefficient NaNs every loss; a negative one trains the student away from the teacher.
-        require_finite(type(self).__name__, sdpg_beta_base=self.sdpg_beta_base)
-        if self.sdpg_beta_base < 0:
-            raise ValueError(
-                f"sdpg_beta_base must be a finite value >= 0 (0 drops the OPD term), got {self.sdpg_beta_base}"
-            )
-        # The schedule reads a negative length as off, so one is a typo the run would not report.
-        for name in ("sdpg_beta_warmup_steps", "sdpg_beta_decay_steps"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"{name} must be an int >= 0 (0 = off), got {value!r}")
-        self._validate_hint_template()
-
-    def _validate_hint_template(self) -> None:
-        """Refuse a placeholder the arm's formatter does not fill: ``str.format`` would raise it at the
-        first teacher prompt, after the model load (and on the online arm, the rollout server)."""
-        if not isinstance(self.sdpg_hint_template, str):
-            raise ValueError(
-                f"sdpg_hint_template must be a str.format template string, got {self.sdpg_hint_template!r}"
-            )
-        try:
-            names = format_field_names(self.sdpg_hint_template)
-        except ValueError as e:
-            raise ValueError(f"sdpg_hint_template is not a valid str.format template: {e}") from e
-        unknown = sorted(names - self.HINT_PLACEHOLDERS)
-        if unknown:
-            raise ValueError(
-                f"sdpg_hint_template names {[f'{{{name}}}' for name in unknown]}, which "
-                f"{type(self).__name__}'s hint does not fill; it fills "
-                f"{[f'{{{name}}}' for name in sorted(self.HINT_PLACEHOLDERS)]}."
-            )

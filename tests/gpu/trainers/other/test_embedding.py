@@ -26,7 +26,7 @@ from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformer
 
 from src.checkpoint.writing import save_dtype_caster
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 from src.distributed.checkpoint.write import gather_saveable_tensors
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.embedding.trainer import EmbeddingTrainer

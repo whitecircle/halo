@@ -8,7 +8,7 @@ return those facts in different places. Transport and the episode loop belong to
 import logging
 from typing import Any, get_args, get_type_hints
 
-from src.configs.rollout_config import (
+from src.environments.rollout_config import (
     REASONING_BUDGET_SOFT_TEMPLATE_VAR,
     REASONING_BUDGET_TEMPLATE_VAR,
     SGLANG_BACKEND,

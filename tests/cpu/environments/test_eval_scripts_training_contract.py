@@ -26,10 +26,10 @@ from scripts.environments._common import (
     write_eval_outputs,
 )
 from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, resolve_env_config
-from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P
 from src.env import resolve_nccl_timeout_minutes
 from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from src.environments.registry import resolve_environment
+from src.environments.rollout_config import DEFAULT_ROLLOUT_TOP_P
 from tests.common.code_contests import StubSandbox
 from tests.common.repo import REPO_ROOT
 

@@ -25,10 +25,10 @@ import gradio as gr
 
 from scripts._common import add_openai_endpoint_args
 from scripts.inference._common import add_gradio_server_args, launch_gradio
-from src.configs.rollout_config import RolloutConfig
 from src.environments.base import ANSWER_KEY, Trajectory
 from src.environments.eval_runner import EVAL_STATS_KEY, require_answers, run_episode
 from src.environments.registry import get_registered_environments, resolve_environment
+from src.environments.rollout_config import RolloutConfig
 from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from src.inference.openai_client import build_openai_client
 

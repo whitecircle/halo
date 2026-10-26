@@ -56,7 +56,7 @@ from src.checkpoint.format import (
     unmarked_merged_checkpoint_reason,
 )
 from src.checkpoint.writing import write_gathered_checkpoint
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
 from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from

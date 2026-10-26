@@ -38,7 +38,7 @@ from scripts.environments.preparation.prepare_code_dataset import (
     load_exclusions,
     load_tests_table,
 )
-from src.args.mixins import DEFAULT_ANSWER_FIELD
+from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from src.environments.envs.tasks.coding.datasets import (
     CODE_DATASET_ADAPTERS,
     CodeDatasetAdapter,

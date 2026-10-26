@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 from ruamel.yaml import YAML
 
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.base import VALID_REASONING_EFFORTS
 from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, JudgeTerm, OnError, parse_reward_terms
 from src.trainers.grpo.reasoning_terms import REASONING_TARGET_SHARE, reasoning_floor_term, reasoning_price_term

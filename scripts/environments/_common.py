@@ -17,12 +17,12 @@ from transformers import AutoTokenizer
 from trl import ModelConfig
 
 from scripts._common import add_openai_endpoint_args
-from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
-from src.configs.rollout_config import DEFAULT_ROLLOUT_TOP_P, RolloutConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.base import BaseEnvironment
 from src.environments.episode import resolve_rollout_stop_token_ids
 from src.environments.eval_runner import trajectory_path, write_trajectories_jsonl
+from src.environments.rollout_config import DEFAULT_ROLLOUT_TOP_P, RolloutConfig
 from src.training.parser import H4ArgumentParser
 
 logger = logging.getLogger(__name__)

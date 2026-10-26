@@ -32,7 +32,7 @@ from trl import ModelConfig
 import scripts.training.embedding as embedding_script
 import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
 import src.distributed.pipeline_parallel.lazy_loader as pp_lazy_loader
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy

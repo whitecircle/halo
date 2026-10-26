@@ -36,7 +36,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.configs.async_training_config import AsyncTrainingConfig, ISMaskConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
 from src.environments.base import VALID_REASONING_EFFORTS, stable_reasoning_effort
 from src.environments.episode import bind_episode_effort
 from src.trainers.grpo import environmental

@@ -9,7 +9,7 @@ from peft import LoraConfig
 from transformers import LlamaConfig, LlamaForCausalLM
 
 import src.trainers.grpo.offline as offline_mod
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.parallelism_config import ParallelismConfig

@@ -35,9 +35,8 @@ from trl import DPOConfig, KTOConfig, ModelConfig
 import src.checkpoint.atomic as atomic_mod
 import src.trainers.mixins.reference_logps as precompute_mod
 from src.args.distributed_args import DistributedArguments
-from src.args.dpo_args import DPOScriptArguments
-from src.args.kto_args import KTOScriptArguments
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
+from src.configs.preference import DPOScriptArguments, KTOScriptArguments
 from src.distributed import runtime
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.reference_logps import token_digest as _token_digest

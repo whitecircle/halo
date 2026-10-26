@@ -34,7 +34,7 @@ import torch.nn.functional as F
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.configs.distillation_config import DistillationConfig
+from src.configs.distillation import DistillationConfig
 from src.data.collators.packing import DataCollatorForCausalLMWithPadding
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.parallelism_config import ParallelismConfig

@@ -15,7 +15,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo import environmental
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import select_mask_logratio

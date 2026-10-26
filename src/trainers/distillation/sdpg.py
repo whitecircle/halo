@@ -15,8 +15,7 @@ import logging
 
 import torch
 
-from src.args.mixins import format_field_names
-from src.data.collators.self_distill import privileged_hint
+from src.data.collators.self_distill import format_field_names, privileged_hint
 from src.log import warn_once
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.distillation.losses import global_token_mean, privileged_teacher_pass

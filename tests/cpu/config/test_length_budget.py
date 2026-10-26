@@ -28,8 +28,8 @@ import pytest
 from accelerate import PartialState
 from transformers import PretrainedConfig
 
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.models.context_window import get_model_context_window, resolve_length_to_context
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.offline import OfflineGRPOTrainer

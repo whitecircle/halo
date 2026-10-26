@@ -16,8 +16,8 @@ import torch
 from transformers import AutoTokenizer, PreTrainedModel
 from trl import SFTConfig
 
-from src.args.common_script_args import CommonScriptArguments
 from src.callbacks.wiring import build_perf_callbacks
+from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig

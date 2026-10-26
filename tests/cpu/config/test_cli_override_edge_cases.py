@@ -18,7 +18,7 @@ from typing import Literal
 
 import pytest
 
-from src.configs.classification_config import ClassificationConfig
+from src.configs.classification import ClassificationConfig
 from src.training.parser import H4ArgumentParser, _union_permits_str
 
 

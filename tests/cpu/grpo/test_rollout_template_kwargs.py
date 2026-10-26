@@ -13,9 +13,13 @@ from dataclasses import replace
 
 import pytest
 
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import REASONING_BUDGET_SOFT_TEMPLATE_VAR, REASONING_BUDGET_TEMPLATE_VAR, RolloutConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.engine_wire import generation_control_fields
+from src.environments.rollout_config import (
+    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
+    REASONING_BUDGET_TEMPLATE_VAR,
+    RolloutConfig,
+)
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 
 

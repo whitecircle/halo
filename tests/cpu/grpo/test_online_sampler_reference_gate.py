@@ -21,7 +21,7 @@ import pytest
 import torch
 from trl import GRPOTrainer
 
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout import weight_sync_clients
 from src.trainers.grpo.rollout.weight_sync_clients import (

@@ -30,9 +30,9 @@ from transformers import (
 )
 from trl import DPOConfig, KTOConfig, RewardConfig
 
-from src.args.common_script_args import CommonScriptArguments
-from src.configs.classification_config import ClassificationConfig
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.classification import ClassificationConfig
+from src.configs.preference import SmoothMarginPOConfig
+from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded

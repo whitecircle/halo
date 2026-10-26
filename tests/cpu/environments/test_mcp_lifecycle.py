@@ -22,9 +22,9 @@ from datetime import timedelta
 import pytest
 
 import src.environments.envs.protocols.mcp as mcp_module
-from src.configs.rollout_config import DEFAULT_EPISODE_TIMEOUT_SECONDS
 from src.environments.envs.protocols.mcp import NativeMCPClientEnvironment, create_native_mcp_environment
 from src.environments.registry import resolve_environment
+from src.environments.rollout_config import DEFAULT_EPISODE_TIMEOUT_SECONDS
 
 
 class _StubTransport:

@@ -22,10 +22,9 @@ from datasets import DatasetDict
 from transformers import AutoModelForSequenceClassification
 from trl import ModelConfig
 
-from src.args.classification_args import CLFScriptArguments
 from src.args.distributed_args import DistributedArguments
 from src.config_validation import reject_unsupported_args
-from src.configs.classification_config import ClassificationConfig
+from src.configs.classification import ClassificationConfig, ClassificationScriptArguments
 from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_json, reject_image_content
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rendered import tokenize_rendered
@@ -219,7 +218,7 @@ def get_label_list(raw_dataset, split="train") -> list[str]:
 
 
 def main():
-    parser = H4ArgumentParser((CLFScriptArguments, ClassificationConfig, ModelConfig, DistributedArguments))
+    parser = H4ArgumentParser((ClassificationScriptArguments, ClassificationConfig, ModelConfig, DistributedArguments))
     args, classification_config, model_config, dist_args = parser.parse()
 
     # The score head is pinned to AutoModelForSequenceClassification, so the loader would only warn

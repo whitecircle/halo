@@ -51,7 +51,7 @@ from peft import LoraConfig
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig
 
-from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str

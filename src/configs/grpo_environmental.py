@@ -6,9 +6,11 @@ from dataclasses import dataclass, field, fields
 from math import isfinite
 from typing import Any, Literal
 
-from src.args.mixins import AdvantageShapingArguments, ChunkedLogprobsArguments, GRPOEarlyStopArguments
 from src.config_validation import require_finite, require_int, require_positive, require_positive_int
-from src.configs.rollout_config import (
+from src.configs.grpo import AdvantageShapingArguments, ChunkedLogprobsArguments, GRPOEarlyStopArguments
+from src.distributed.runtime import is_global_main_process
+from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
+from src.environments.rollout_config import (
     DEFAULT_EPISODE_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
     DEFAULT_REASONING_END_TOKEN,
@@ -28,8 +30,6 @@ from src.configs.rollout_config import (
     RolloutBackend,
     RolloutConfig,
 )
-from src.distributed.runtime import is_global_main_process
-from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, resolve_nccl_timeout_minutes
 
 logger = logging.getLogger(__name__)
 

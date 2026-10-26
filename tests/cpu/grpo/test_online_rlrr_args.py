@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from src.args.mixins import RLRRArguments, RLRRConfig, rlrr_arg_name
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.config_validation import reject_non_default_args
+from src.configs.grpo import RLRRArguments, RLRRConfig, rlrr_arg_name
 from src.training.parser import H4ArgumentParser
 from tests.common.repo import REPO_ROOT
 

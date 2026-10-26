@@ -19,7 +19,7 @@ import tempfile
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.args.common_script_args import CommonScriptArguments
+from src.configs.script_arguments import CommonScriptArguments
 from src.data.pipeline import processing
 from src.data.pipeline.processing import log_dataset_examples
 

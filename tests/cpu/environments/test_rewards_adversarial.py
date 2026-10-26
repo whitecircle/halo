@@ -18,7 +18,7 @@ import time
 import numpy as np
 import pytest
 
-from src.args.mixins import RLRRConfig
+from src.configs.grpo import RLRRConfig
 from src.environments.envs.tasks.qa import (
     MULTIPLE_CHOICE_LETTERS,
     ExamQAEnvironment,

@@ -8,7 +8,7 @@ evaluating that step, so the run keeps only the periodic checkpoints taken befor
 
 from accelerate.logging import get_logger
 
-from src.args.mixins import EarlyStopConfig
+from src.configs.grpo import EarlyStopConfig
 from src.distributed.runtime import rank_consensus
 from src.trainers.grpo.objective.logratio import UPDATE_SKIPPED_KEY
 from src.training.early_stopping import StopsTrainingEarly

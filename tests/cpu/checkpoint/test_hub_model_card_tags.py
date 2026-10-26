@@ -47,7 +47,7 @@ from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, EXPERT_LORA_PEFT_TYPE
 from src.checkpoint.config_export import finalize_exported_config, save_model_config
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, copy_checkpoint_aux_files
 from src.checkpoint.model_card import MalformedModelCardError, tag_model_card
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.ep_save import save_ep_lora_adapters
 from src.distributed.checkpoint.peft import PeftAdapterSaver

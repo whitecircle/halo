@@ -15,8 +15,8 @@ import numpy as np
 import pytest
 import torch
 
-from src.args.mixins import RLRRConfig
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
+from src.configs.grpo import RLRRConfig
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.online import DistributedGRPOTrainer
 

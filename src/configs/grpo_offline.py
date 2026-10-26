@@ -5,8 +5,9 @@ from typing import Literal
 
 from transformers import TrainingArguments
 
-from src.args.mixins import ChunkedLogprobsArguments, DatasetNumProcArguments, ModelInitKwargsArguments
 from src.config_validation import RangeValidatedConfig, present, require_finite, require_int, require_positive_int
+from src.configs.grpo import ChunkedLogprobsArguments
+from src.configs.script_arguments import DatasetNumProcArguments, ModelInitKwargsArguments
 
 
 @dataclass

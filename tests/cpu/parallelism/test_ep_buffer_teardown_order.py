@@ -14,20 +14,29 @@ reclaimed:
 - destroying the live layers (``cleanup_ep``), or moving one to a buffer of a new determinism mode, frees
   the old buffer only once no rank of the group claims it.
 
+The last test runs real ranks on gloo, two EP groups of two, where only one rank of each group has collected
+a dropped model, and gives each buffer a destroy that is a collective over its group: the ranks must free
+the same buffers in the same order, and a rank that skips a collective its peers enter times its group out.
+
 DeepEP is replaced by a recorder, so the dispatchers run their real sizing and arena logic on a CPU box.
 ``tests/gpu/parallelism/ep/test_ep_buffer_gc_safety.py`` runs the sweep on real DeepEP buffers.
 
 Run: python tests/cpu/parallelism/test_ep_buffer_teardown_order.py
 """
 
+import datetime
 import gc
+import json
 import weakref
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
 
 from src.distributed.expert_parallel import dispatcher as dispatcher_mod
+from tests.common.gloo import new_groups, run_gloo_ranks
 
 # One EP group per model, each serving its own buffer, built in this order on every rank.
 MODELS = ("first", "second")
@@ -35,6 +44,11 @@ LAYERS_PER_MODEL = 2
 NUM_EXPERTS, HIDDEN, TOP_K, TOKENS = 8, 256, 2, 64
 # What a rank's collector may have reclaimed by teardown: nothing, or the layers of one dropped model.
 RECLAIMED = {"none": (), "first": ("first",), "second": ("second",)}
+# The gloo run: two EP groups of two ranks, each model on its own buffer of the group through its hidden size.
+GLOO_WORLD_SIZE = 4
+GLOO_EP_GROUPS = [[0, 1], [2, 3]]
+GLOO_HIDDEN = {"first": 256, "second": 512}
+GLOO_PG_TIMEOUT = datetime.timedelta(seconds=60)
 
 
 class _Group:
@@ -47,7 +61,7 @@ class _Group:
 class _RecordingBuffer:
     """Stands in for DeepEP's ElasticBuffer: logs the group of each buffer it destroys."""
 
-    destroyed: list[str] = []
+    destroyed: list = []
 
     def __init__(self, group: _Group, **kwargs):
         self.group = group
@@ -59,31 +73,50 @@ class _RecordingBuffer:
         _RecordingBuffer.destroyed.append(self.group.name)
 
 
+class _GatheringBuffer(_RecordingBuffer):
+    """A buffer on a real group whose destroy is a collective over it, as DeepEP's is: it logs which buffer
+    every rank of the group was destroying in that collective."""
+
+    def __init__(self, group: dist.ProcessGroup, *, hidden: int, **kwargs):
+        self.group = group
+        self.model = next(name for name, size in GLOO_HIDDEN.items() if size == hidden)
+
+    def destroy(self) -> None:
+        models = [None] * dist.get_world_size(self.group)
+        dist.all_gather_object(models, self.model, group=self.group)
+        _RecordingBuffer.destroyed.append(models)
+
+
+def _record_deep_ep(patcher: pytest.MonkeyPatch, buffer: type = _RecordingBuffer, collectives: bool = False) -> None:
+    """DeepEP replaced by ``buffer`` and registries of the test's own; without ``collectives`` the capacity
+    all-reduce is a no-op too."""
+    _RecordingBuffer.destroyed = []
+    patcher.setattr(dispatcher_mod, "deep_ep", lambda: SimpleNamespace(ElasticBuffer=buffer))
+    patcher.setattr(dispatcher_mod, "deep_ep_available", lambda: True)
+    patcher.setattr(dispatcher_mod._SharedArena, "_REGISTRY", {})
+    # Every test relies on the layers of a group sharing one buffer.
+    patcher.setattr(dispatcher_mod, "_CAPACITY_DEDUP_ENABLED", True)
+    patcher.setattr(dispatcher_mod, "_CAPACITY_CACHE", {})
+    patcher.setattr(dispatcher_mod, "_LIVE_DISPATCHERS", weakref.WeakValueDictionary())
+    real_tensor = torch.tensor
+    patcher.setattr(dispatcher_mod.torch, "tensor", lambda data, **kw: real_tensor(data, **{**kw, "device": "cpu"}))
+    if not collectives:
+        patcher.setattr(dispatcher_mod.dist, "all_reduce", lambda *a, **kw: None)
+    patcher.setenv("EP_DISABLE_GIN", "1")
+
+
 @pytest.fixture(autouse=True)
 def recorded_deep_ep(monkeypatch):
-    """DeepEP and the capacity all-reduce replaced, and registries of the test's own."""
-    _RecordingBuffer.destroyed = []
-    monkeypatch.setattr(dispatcher_mod, "deep_ep", lambda: SimpleNamespace(ElasticBuffer=_RecordingBuffer))
-    monkeypatch.setattr(dispatcher_mod, "deep_ep_available", lambda: True)
-    monkeypatch.setattr(dispatcher_mod._SharedArena, "_REGISTRY", {})
-    # Every test relies on the layers of a group sharing one buffer.
-    monkeypatch.setattr(dispatcher_mod, "_CAPACITY_DEDUP_ENABLED", True)
-    monkeypatch.setattr(dispatcher_mod, "_CAPACITY_CACHE", {})
-    monkeypatch.setattr(dispatcher_mod, "_LIVE_DISPATCHERS", weakref.WeakValueDictionary())
-    real_tensor = torch.tensor
-    monkeypatch.setattr(
-        dispatcher_mod.torch, "tensor", lambda data, **kw: real_tensor(data, **{**kw, "device": "cpu"})
-    )
-    monkeypatch.setattr(dispatcher_mod.dist, "all_reduce", lambda *a, **kw: None)
-    monkeypatch.setenv("EP_DISABLE_GIN", "1")
+    """Every in-process test runs on recorded DeepEP with no collectives."""
+    _record_deep_ep(monkeypatch)
 
 
-def _layer(group: _Group) -> dispatcher_mod.DeepEPDispatcher:
+def _layer(group, hidden: int = HIDDEN) -> dispatcher_mod.DeepEPDispatcher:
     """A layer's dispatcher on ``group`` that has dispatched once, claiming that group's buffer."""
     ep_config = SimpleNamespace(
         expert_tp_size=1, process_group=group, ep_size=2, num_nodes=1, node_local=True, ep_buffer_backend="elastic"
     )
-    dispatcher = dispatcher_mod.DeepEPDispatcher(ep_config, NUM_EXPERTS, HIDDEN)
+    dispatcher = dispatcher_mod.DeepEPDispatcher(ep_config, NUM_EXPERTS, hidden)
     dispatcher._ensure_buffer(TOKENS, TOP_K)
     return dispatcher
 
@@ -186,6 +219,42 @@ def test_a_mode_change_frees_the_old_buffer_only_once_no_rank_claims_it(monkeypa
     dispatcher_mod.destroy_all_dispatchers()
 
     assert _RecordingBuffer.destroyed == ["shared", "shared"]
+
+
+def _teardown_rank(rank: int, out_dir: str) -> None:
+    """Build both models, drop the first, destroy the second's layers, sweep, tear down. Only the second
+    rank of each group collects the dropped model; the first still holds its claims at teardown."""
+    group = new_groups(rank, GLOO_EP_GROUPS, GLOO_PG_TIMEOUT)
+    with pytest.MonkeyPatch.context() as patcher:
+        _record_deep_ep(patcher, buffer=_GatheringBuffer, collectives=True)
+        gc.disable()
+        try:
+            models = {
+                name: [_layer(group, hidden) for _ in range(LAYERS_PER_MODEL)] for name, hidden in GLOO_HIDDEN.items()
+            }
+            dropped = models.pop("first")
+            # A cycle, so the model goes only when this rank's collector runs.
+            dropped.append(dropped)
+            del dropped
+            if dist.get_rank(group) == 1:
+                gc.collect()
+            for layer in models["second"]:
+                layer.destroy()
+            dispatcher_mod.free_unclaimed_ep_buffers()
+            dispatcher_mod.destroy_all_dispatchers()
+        finally:
+            gc.enable()
+        Path(out_dir, f"rank{rank}.json").write_text(json.dumps(_RecordingBuffer.destroyed))
+
+
+def test_ranks_that_collected_differently_free_the_same_buffers_in_the_same_order(tmp_path):
+    run_gloo_ranks(_teardown_rank, GLOO_WORLD_SIZE, str(tmp_path), pg_timeout=GLOO_PG_TIMEOUT)
+
+    # The second model's buffer goes as its last live layer is destroyed; the first's, which one rank of the
+    # group still claims, is left by the sweep to teardown.
+    expected = [["second", "second"], ["first", "first"]]
+    for rank in range(GLOO_WORLD_SIZE):
+        assert json.loads((tmp_path / f"rank{rank}.json").read_text()) == expected, f"rank {rank}"
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from sentence_transformers import SentenceTransformer
 from sentence_transformers.models import Normalize, Pooling
 
 from scripts.training.embedding import align_st_pipeline_to_config
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 
 _CPU_OK = {"output_dir": "/tmp/test_embedding_alignment", "bf16": False}
 

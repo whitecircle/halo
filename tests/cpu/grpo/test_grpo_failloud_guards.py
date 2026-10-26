@@ -25,7 +25,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.environments.episode import resolve_rollout_stop_token_ids
 from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer, batch_reward_std
 from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS

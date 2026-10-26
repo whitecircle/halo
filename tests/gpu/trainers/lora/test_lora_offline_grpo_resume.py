@@ -51,7 +51,7 @@ from transformers import AutoTokenizer, TrainerCallback
 
 import src.distributed.checkpoint.optimizer as optimizer_store_mod
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.checkpoint.peft import find_peft_model
 from src.distributed.expert_parallel.base_layer import disable_expert_adapters
 from src.distributed.fsdp import reshard_fsdp2_modules

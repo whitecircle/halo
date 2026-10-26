@@ -30,8 +30,8 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimi
 from transformers import AutoTokenizer, GptOssConfig, GptOssForCausalLM, default_data_collator
 from trl import SFTConfig
 
-from src.args.common_script_args import CommonScriptArguments
 from src.callbacks.wiring import build_perf_callbacks
+from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig

@@ -29,8 +29,8 @@ from transformers import AutoModelForSequenceClassification
 from trl import ModelConfig, RewardConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.reward_args import RMScriptArguments
 from src.config_validation import reject_unsupported_args
+from src.configs.reward import RewardScriptArguments
 from src.data.sources.loading import alias_images_column, alias_tools_column
 from src.data.vlm import is_vlm_run
 from src.distributed.loading.peft_setup import setup_peft_model
@@ -59,7 +59,7 @@ from src.training.script_runner import (
 
 
 def main():
-    parser = H4ArgumentParser((RMScriptArguments, RewardConfig, ModelConfig, DistributedArguments))
+    parser = H4ArgumentParser((RewardScriptArguments, RewardConfig, ModelConfig, DistributedArguments))
     args, reward_config, model_config, dist_args = parser.parse()
 
     # text_only_model: the score head is pinned to AutoModelForSequenceClassification, so the loader

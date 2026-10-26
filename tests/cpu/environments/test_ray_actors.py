@@ -23,8 +23,7 @@ from types import SimpleNamespace
 import pytest
 import ray
 
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import RolloutConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments import ray_actors
 from src.environments.base import CUT_TOOL_CALLS_KEY, Trajectory
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
@@ -39,6 +38,7 @@ from src.environments.ray_actors import (
     ray_init_kwargs,
 )
 from src.environments.registry import create_environment
+from src.environments.rollout_config import RolloutConfig
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.environments.tools.factories import create_native_math_tools
 from src.inference.response import FINISH_REASON_LENGTH

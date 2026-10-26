@@ -30,7 +30,7 @@ from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 from transformers.trainer_utils import align_special_tokens
 
-from src.args.common_script_args import CommonScriptArguments
+from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.model_loading import model_preparation
 from src.model_loading.tokenizer_setup import setup_model_and_tokenizer, sync_special_token_id

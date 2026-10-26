@@ -42,7 +42,7 @@ from trl import DPOConfig
 from trl.models.utils import disable_gradient_checkpointing
 from trl.trainer.utils import use_adapter
 
-from src.args.dpo_args import DPOScriptArguments
+from src.configs.preference import DPOScriptArguments
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.loading.frozen_models import load_reference_model_for_preference

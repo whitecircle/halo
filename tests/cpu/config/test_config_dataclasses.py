@@ -12,11 +12,11 @@ import os
 
 import pytest
 
-import src.configs.async_training_config as async_training_config
+import src.configs.grpo_environmental as grpo_environmental
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.configs.async_training_config import POSITIVE_ROLLOUT_FIELDS, AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.grpo_environmental import POSITIVE_ROLLOUT_FIELDS, AsyncTrainingConfig
+from src.configs.preference import SmoothMarginPOConfig
 from src.rewards.terms import EnvironmentTerm
 from src.training.parser import H4ArgumentParser
 
@@ -507,8 +507,8 @@ def test_async_config_episode_timeout_equal_watchdog_does_not_raise():
 @pytest.mark.parametrize("main_process", [True, False])
 def test_async_config_watchdog_warnings_are_said_once_not_once_per_rank(monkeypatch, caplog, main_process):
     """Every rank builds its rollout config, and both near-watchdog warnings describe the config alone."""
-    monkeypatch.setattr(async_training_config, "is_global_main_process", lambda: main_process)
-    with _nccl_watchdog_minutes(None), caplog.at_level(logging.WARNING, logger=async_training_config.logger.name):
+    monkeypatch.setattr(grpo_environmental, "is_global_main_process", lambda: main_process)
+    with _nccl_watchdog_minutes(None), caplog.at_level(logging.WARNING, logger=grpo_environmental.logger.name):
         AsyncTrainingConfig(episode_timeout=1800.0, request_timeout=1800.0).get_rollout_config()
     for warning in ("episode_timeout (1800s) is within", "Rollout retry budget"):
         assert (warning in caplog.text) is main_process, warning

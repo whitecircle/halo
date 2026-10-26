@@ -13,7 +13,7 @@ Implementations live in `src/data/collators/packing.py`:
 
 ## Configuration
 
-`padding_free`, `packing`, `packing_strategy`, and `eval_packing` come from TRL's `SFTConfig`; the completion-masking fields (`train_on_completions_only`, `assistant_message_template`) come from `ConversationRenderArguments` in `src/args/mixins.py`:
+`padding_free`, `packing`, `packing_strategy`, and `eval_packing` come from TRL's `SFTConfig`; the completion-masking fields (`train_on_completions_only`, `assistant_message_template`) come from `ConversationRenderArguments` in `src/configs/sft.py`:
 
 ```yaml
 padding_free: true

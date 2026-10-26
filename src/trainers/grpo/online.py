@@ -15,8 +15,8 @@ import trl.generation.vllm_generation as _trl_vllm_generation
 from accelerate.logging import get_logger
 from trl import GRPOTrainer
 
-from src.args.mixins import EarlyStopConfig, RLRRConfig
-from src.configs.rollout_config import VLLM_BACKEND
+from src.configs.grpo import EarlyStopConfig, RLRRConfig
+from src.environments.rollout_config import VLLM_BACKEND
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin

@@ -15,7 +15,7 @@ import textwrap
 
 import pytest
 
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 from src.trainers.embedding.trainer import EmbeddingTrainer
 
 

@@ -9,7 +9,7 @@ class ClassificationDataCollatorWithPadding(DataCollatorWithPadding):
     """Pad only the tokenizer's model inputs plus the label, dropping every other column.
 
     Classification rows keep their source columns after tokenization (raw ``text``, string labels,
-    tool JSON) and :class:`~src.configs.classification_config.ClassificationConfig` defaults
+    tool JSON) and :class:`~src.configs.classification.ClassificationConfig` defaults
     ``remove_unused_columns`` to False, so those columns reach the collator and ``tokenizer.pad``
     fails trying to tensorize a string. The model consumes only ``model_input_names`` and the label;
     the keep-set is derived from the tokenizer rather than hardcoded.

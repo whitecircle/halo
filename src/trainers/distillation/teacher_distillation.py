@@ -18,7 +18,7 @@ from transformers import (
 )
 from transformers.trainer_callback import TrainerCallback
 
-from src.configs.distillation_config import DistillationConfig
+from src.configs.distillation import DistillationConfig
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.loading.frozen_models import place_and_freeze
 from src.distributed.loading.model_loading import load_model_from_pretrained

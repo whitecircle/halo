@@ -1,7 +1,8 @@
-"""``CommonScriptArguments`` — the dataset / logging / callback knobs every training script shares."""
+"""The arguments training scripts share: ``CommonScriptArguments`` (the dataset / logging / callback knobs every
+script parses) and the field bundles several script-argument and trainer-config dataclasses mix in."""
 
 from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from src.config_validation import (
     RangeValidatedConfig,
@@ -17,6 +18,9 @@ from src.models.moe_balancing import BalancingMode
 from src.training.parser import is_null_string
 
 _DEFAULT_PROJECT = "default-project"
+
+# The dataset column a ground-truth answer is read from unless a config renames it.
+DEFAULT_ANSWER_FIELD = "answer"
 
 
 @dataclass
@@ -246,3 +250,48 @@ class CommonScriptArguments(RangeValidatedConfig):
         # torch.profiler.schedule's own bounds.
         require_int(owner, minimum=0, profiler_wait=self.profiler_wait, profiler_warmup=self.profiler_warmup)
         require_positive_int(owner, profiler_active=self.profiler_active)
+
+
+@dataclass
+class GenerationEvalArguments(RangeValidatedConfig):
+    """Eval-time example-generation knobs (SFT, DPO, SMPO, offline GRPO)."""
+
+    generate_eval_examples: bool = field(default=True, metadata={"help": "Generate text examples during evaluation."})
+    num_eval_examples: int = field(default=50, metadata={"help": "Examples to generate per evaluation."})
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        require_positive_int(type(self).__name__, num_eval_examples=self.num_eval_examples)
+
+
+@dataclass
+class DatasetNumProcArguments(RangeValidatedConfig):
+    """Dataset-preprocessing worker count of the trainer configs that map their own data, read through
+    :func:`~src.data.pipeline.processing.resolve_map_num_proc`."""
+
+    dataset_num_proc: int | None = field(
+        default=None,
+        metadata={
+            "help": "Worker processes for dataset preprocessing (map/filter). Unset means the toolkit "
+            "default (HALO_DATASET_NUM_PROC, else max(1, min(cpu_count // 4, 4))), not one worker."
+        },
+    )
+
+    def _validate_ranges(self) -> None:
+        super()._validate_ranges()
+        require_positive_int(type(self).__name__, **present(dataset_num_proc=self.dataset_num_proc))
+
+
+@dataclass
+class ModelInitKwargsArguments:
+    """``model_init_kwargs`` of the trainer configs whose trainer also takes the model as a path string."""
+
+    model_init_kwargs: dict[str, Any] | None = field(
+        default=None,
+        metadata={
+            "help": "Model-config overrides on every entry-script path: written onto the loaded "
+            "config's fields before the load, raising on a key that config does not declare and "
+            "on dtype/torch_dtype. Model-loading kwargs only where a trainer is constructed "
+            "programmatically with the model as a path string."
+        },
+    )

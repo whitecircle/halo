@@ -29,13 +29,13 @@ from transformers import AutoTokenizer, PreTrainedModel
 from trl import ModelConfig, SFTConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.mixins import format_field_names
-from src.args.self_distill_args import SelfDistillationArguments
 from src.config_validation import reject_non_default_args
+from src.configs.distillation import SelfDistillScriptArguments
 from src.data.collators.self_distill import (
     SelfDistillTextCollator,
     audit_self_distill_row,
     confidence_normalizer,
+    format_field_names,
     privileged_hint,
     teacher_history,
 )
@@ -85,7 +85,7 @@ def _require_privileged_columns(ds, args) -> None:
         require_render_column(ds, str(args.dataset), "confidence_field", args.confidence_field)
     if args.sdpg_beta_base == 0.0:
         return
-    fields = SelfDistillationArguments.HINT_SLOT_FIELDS
+    fields = SelfDistillScriptArguments.HINT_SLOT_FIELDS
     named = format_field_names(args.sdpg_hint_template)
     columns = {slot: getattr(args, field) for slot, field in fields.items() if slot in named and getattr(args, field)}
     for slot, column in columns.items():
@@ -255,7 +255,7 @@ def _load_sdpg_reference(
 
 
 def main():
-    parser = H4ArgumentParser((SelfDistillationArguments, SFTConfig, ModelConfig, DistributedArguments))
+    parser = H4ArgumentParser((SelfDistillScriptArguments, SFTConfig, ModelConfig, DistributedArguments))
     args, sft_config, model_config, distributed_args = parser.parse()
 
     # Inherited from SFTScriptArguments but unreachable: GenerateExamplesCallback needs a tokenized

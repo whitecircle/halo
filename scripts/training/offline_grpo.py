@@ -15,7 +15,7 @@ from trl import ModelConfig
 from src.args.distributed_args import DistributedArguments
 from src.args.offline_grpo_args import OfflineGRPOScriptArguments
 from src.callbacks.generate_examples import GenerateExamplesCallback
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content
 from src.data.pipeline.preferences import split_rendered_completion
 from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc

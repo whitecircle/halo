@@ -20,19 +20,16 @@ from typing import get_type_hints
 
 import pytest
 
-from src.args.classification_args import CLFScriptArguments
-from src.args.distill_args import DistillScriptArguments
-from src.args.dpo_args import DPOScriptArguments
-from src.args.embedding_args import EmbeddingScriptArguments
 from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
-from src.args.kto_args import KTOScriptArguments
-from src.args.mixins import GenerationEvalArguments
 from src.args.offline_grpo_args import OfflineGRPOScriptArguments
-from src.args.reward_args import RMScriptArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.args.self_distill_args import SelfDistillationArguments
-from src.args.sft_args import SFTScriptArguments
-from src.args.smpo_args import SMPOScriptArguments
+from src.configs.classification import ClassificationScriptArguments
+from src.configs.distillation import SelfDistillScriptArguments, TeacherDistillScriptArguments
+from src.configs.embedding import EmbeddingScriptArguments
+from src.configs.preference import DPOScriptArguments, KTOScriptArguments, SMPOScriptArguments
+from src.configs.reward import RewardScriptArguments
+from src.configs.script_arguments import GenerationEvalArguments
+from src.configs.sft import SFTScriptArguments
 from src.training.environment import _setup_tracking_env_vars
 from src.training.parser import H4ArgumentParser
 
@@ -40,24 +37,24 @@ from src.training.parser import H4ArgumentParser
 # the placeholder": a class that declares no ``PROJECT_NAME`` of its own inherits a parent's project
 # and silently files its runs under another method's experiments.
 _PROJECT_NAMES = {
-    CLFScriptArguments: "classification",
+    ClassificationScriptArguments: "classification",
     DPOScriptArguments: "dpo-tuning",
-    DistillScriptArguments: "llm_distillation",
+    TeacherDistillScriptArguments: "llm_distillation",
     EmbeddingScriptArguments: "embedding",
     EnvironmentalGRPOScriptArguments: "environmental-grpo",
     KTOScriptArguments: "kto-tuning",
     OfflineGRPOScriptArguments: "offline-grpo-tuning",
     RLVROnlineGRPOScriptArguments: "rlvr-online-grpo",
-    RMScriptArguments: "reward-modeling",
+    RewardScriptArguments: "reward-modeling",
     SFTScriptArguments: "sft-tuning",
     SMPOScriptArguments: "smpo-tuning",
-    SelfDistillationArguments: "self-distillation",
+    SelfDistillScriptArguments: "self-distillation",
 }
 
 # Fields a class refuses to default; supplied so the class can be constructed at all.
-_REQUIRED_KWARGS = {DistillScriptArguments: {"teacher_model": "teacher/model"}}
+_REQUIRED_KWARGS = {TeacherDistillScriptArguments: {"teacher_model": "teacher/model"}}
 
-_SCRIPT_ARG_CLASSES = (SFTScriptArguments, SMPOScriptArguments, SelfDistillationArguments)
+_SCRIPT_ARG_CLASSES = (SFTScriptArguments, SMPOScriptArguments, SelfDistillScriptArguments)
 
 
 # project_name

@@ -17,7 +17,7 @@ from tokenizers.pre_tokenizers import Whitespace
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from src.checkpoint.format import load_full_state_dict
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.loading.model_loading import load_distributed_model

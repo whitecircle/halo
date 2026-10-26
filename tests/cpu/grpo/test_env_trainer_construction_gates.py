@@ -38,9 +38,9 @@ from accelerate import PartialState
 from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
 
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import DEFAULT_REASONING_END_TOKEN, SGLANG_BACKEND, VLLM_BACKEND
+from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.registry import resolve_environment
+from src.environments.rollout_config import DEFAULT_REASONING_END_TOKEN, SGLANG_BACKEND, VLLM_BACKEND
 from src.trainers.grpo.environmental import (
     DistributedAsyncEnvironmentalGRPOTrainer,
     reject_off_policy_mask_threshold,

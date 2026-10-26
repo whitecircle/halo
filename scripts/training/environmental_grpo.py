@@ -40,10 +40,10 @@ from trl import GRPOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
 from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
-from src.args.mixins import DEFAULT_ANSWER_FIELD
 from src.config_validation import reject_unsupported_args
-from src.configs.async_training_config import AsyncTrainingConfig
 from src.configs.environment_config import EnvironmentConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from src.data.pipeline.conversation import as_conversation
 from src.data.pipeline.processing import (
     missing_render_column_splits,

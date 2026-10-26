@@ -19,14 +19,13 @@ from transformers import TrainingArguments
 from trl import DPOConfig, GRPOConfig, ModelConfig, RewardConfig, SFTConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.dpo_args import DPOScriptArguments
 from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
-from src.args.reward_args import RMScriptArguments
-from src.args.self_distill_args import SelfDistillationArguments
-from src.args.sft_args import SFTScriptArguments
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.distillation import SelfDistillScriptArguments
+from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
+from src.configs.preference import DPOScriptArguments, SmoothMarginPOConfig
+from src.configs.reward import RewardScriptArguments
+from src.configs.sft import SFTScriptArguments
 from src.training.parser import (
     _TOOLKIT_DEFAULTS,
     H4ArgumentParser,
@@ -514,9 +513,9 @@ def test_dashed_cli_flag_counts_as_explicit():
     "script_args_cls, trl_config_cls",
     [
         (SFTScriptArguments, SFTConfig),
-        (SelfDistillationArguments, SFTConfig),
+        (SelfDistillScriptArguments, SFTConfig),
         (DPOScriptArguments, DPOConfig),
-        (RMScriptArguments, RewardConfig),
+        (RewardScriptArguments, RewardConfig),
     ],
     ids=["sft", "self_distill", "dpo", "reward"],
 )

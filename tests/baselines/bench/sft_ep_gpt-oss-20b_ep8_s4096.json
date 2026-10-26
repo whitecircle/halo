@@ -1,8 +1,8 @@
 {
   "key": "sft_ep_gpt-oss-20b_ep8_s4096",
   "provenance": {
-    "commit": "46c2c7006da7641824561c4a7381645807f9e86d",
-    "image": "halo-r12:blackwell@sha256:61d64844d08e5e864e443b92c6223783ed1a980cbfeef7d5955161db72e6cbb8",
+    "commit": "b9b8625bc235cc05bba1803a8b5c8c6b4f0f6aff",
+    "image": "halo:blackwell@sha256:61d64844d08e5e864e443b92c6223783ed1a980cbfeef7d5955161db72e6cbb8",
     "measured": "2026-10-19",
     "world_size": 8,
     "command": "tests/gpu/profiling/benchmark_sft_ep.py --model gpt-oss-20b --ep 8 --measure_save --seq 4096 --steps 20 --warmup 3"

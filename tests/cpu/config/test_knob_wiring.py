@@ -22,10 +22,10 @@ from datasets import Dataset, DatasetDict
 from trl import SFTConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.mixins import PRIVILEGED_HINT_TEMPLATE, RLRRConfig, SDPGArguments
 from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.args.self_distill_args import SelfDistillationArguments
-from src.configs.async_training_config import AsyncTrainingConfig, ISMaskConfig
+from src.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
+from src.configs.grpo import RLRRConfig
+from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -708,12 +708,12 @@ def test_self_distill_trainer_adopts_every_forwarded_sdpg_field():
     the trainer under its own name, none leaks to the parent, an omitted one takes the dataclass's
     default, and a dataset-side field handed to the trainer is NOT swallowed — it reaches the parent,
     whose explicit signature rejects it, instead of silently never hinting the teacher."""
-    dataset_side = SelfDistillationArguments.DATASET_SIDE_SDPG_FIELDS
+    dataset_side = SelfDistillScriptArguments.DATASET_SIDE_SDPG_FIELDS
     assert _self_distill_script_splats_the_builder(), (
         "self_distill.py must splat args.build_sdpg_kwargs() into its trainer call — the trainer pops "
         "exactly the complement of DATASET_SIDE_SDPG_FIELDS that it builds"
     )
-    forwarded = SelfDistillationArguments(**_SDPG_TUNABLES).build_sdpg_kwargs()
+    forwarded = SelfDistillScriptArguments(**_SDPG_TUNABLES).build_sdpg_kwargs()
     assert forwarded == {name: value for name, value in _SDPG_TUNABLES.items() if name not in dataset_side}
     assert forwarded and set(_SDPG_TUNABLES) - set(forwarded) == dataset_side
 

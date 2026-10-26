@@ -9,7 +9,7 @@ from peft import LoraConfig, get_peft_model
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.configs.offline_grpo_config import OfflineGRPOConfig
+from src.configs.grpo_offline import OfflineGRPOConfig
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 

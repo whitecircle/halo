@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 
-from src.args.mixins import RLRRConfig
+from src.configs.grpo import RLRRConfig
 from src.trainers.grpo.objective.relative_rewards import (
     dense_ranks,
     hierarchical_ranks,

@@ -24,9 +24,8 @@ Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the sa
 from trl import ModelConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.smpo_args import SMPOScriptArguments
 from src.config_validation import reject_unsupported_args
-from src.configs.smpo_config import SmoothMarginPOConfig
+from src.configs.preference import SmoothMarginPOConfig, SMPOScriptArguments
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier

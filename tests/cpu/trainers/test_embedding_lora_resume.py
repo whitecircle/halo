@@ -87,7 +87,7 @@ from src.checkpoint.format import (
     read_checkpoint_key_set,
     resume_adapter_dir,
 )
-from src.configs.embedding_config import EmbeddingConfig
+from src.configs.embedding import EmbeddingConfig
 from src.distributed import runtime
 from src.distributed.checkpoint.loader import resume_numel_coverage
 from src.distributed.parallelism_config import ParallelismConfig

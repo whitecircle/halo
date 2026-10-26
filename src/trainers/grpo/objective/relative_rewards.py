@@ -9,7 +9,7 @@ Two shaping modes: ``hrr`` (Hybrid, Eq. 3) adds a bounded rank correction to the
 from hierarchical re-ranking (Eq. 6) on ``(correctness, length-bin, raw-reward)``; advantages use
 the group-relative estimator (Eq. 1) then correctness-aware clipping (Eq. 5). Framework-agnostic
 numpy, operating on a single group of ``G`` responses. Hyperparameters live in
-:class:`~src.args.mixins.RLRRConfig`, which the RLVR script args build.
+:class:`~src.configs.grpo.RLRRConfig`, which the RLVR script args build.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from src.args.mixins import RLRRConfig
+from src.configs.grpo import RLRRConfig
 
 ArrayLike = Sequence[float] | np.ndarray
 BoolArrayLike = Sequence[bool] | np.ndarray

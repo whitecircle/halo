@@ -25,8 +25,8 @@ Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the sa
 from trl import DPOConfig, ModelConfig
 
 from src.args.distributed_args import DistributedArguments
-from src.args.dpo_args import DPOScriptArguments
 from src.config_validation import reject_unsupported_args
+from src.configs.preference import DPOScriptArguments
 from src.data.sources.loading import alias_images_column
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.loading.peft_setup import setup_peft_model

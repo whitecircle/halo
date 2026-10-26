@@ -3,11 +3,11 @@
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from src.args.common_script_args import CommonScriptArguments
+from src.configs.script_arguments import CommonScriptArguments
 
 
 @dataclass
-class RMScriptArguments(CommonScriptArguments):
+class RewardScriptArguments(CommonScriptArguments):
     PROJECT_NAME: ClassVar[str] = "reward-modeling"
 
     images_field: str | None = field(

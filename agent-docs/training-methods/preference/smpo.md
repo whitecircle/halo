@@ -2,7 +2,7 @@
 
 SMPO trains on pairwise preferences with no reference model: a scheduled-margin loss plus a built-in SFT anchor, so one model sits in memory instead of two. Its default `smooth_lower_bound` margin term is exactly zero once the mean-token log-prob gap clears the current margin — where [DPO](dpo.md)'s sigmoid keeps pushing, the source of its log-prob collapse — while the SFT anchors keep training both completions.
 
-Trainer `SmoothMarginPOTrainer`, config `SmoothMarginPOConfig` (`src/configs/smpo_config.py`), script `scripts/training/preference/smpo.py`. `ParallelismConfig` accepts EP, CP, TP, pure ETP, EP+CP, EP+TP and EP+ETP for it, and rejects everything else outside its allowlist.
+Trainer `SmoothMarginPOTrainer`, config `SmoothMarginPOConfig` (`src/configs/preference.py`), script `scripts/training/preference/smpo.py`. `ParallelismConfig` accepts EP, CP, TP, pure ETP, EP+CP, EP+TP and EP+ETP for it, and rejects everything else outside its allowlist.
 
 ```text
 logits  = mean_token log p(chosen) − mean_token log p(rejected) − margin(step)
