@@ -50,7 +50,7 @@ changes.
 | `src/distributed/context_parallel/`, `src/model_loading/parallel/cp.py` | `agent-docs/parallelism/context-parallelism.md` |
 | `src/distributed/tensor_parallel/`, `src/model_loading/parallel/tp.py` | `agent-docs/parallelism/tensor-parallelism.md` |
 | `src/distributed/pipeline_parallel/` | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
-| `src/model_loading/lazy_safetensors/` | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
+| `src/model_loading/lazy_safetensors/`, `src/model_loading/checkpoint_keys.py` | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `src/distributed/expert_parallel/lazy_plan.py`, `src/distributed/expert_parallel/expert_fuser.py`, `src/model_loading/parallel/ep.py`, `src/models/gradient_checkpointing.py` | `agent-docs/parallelism/expert-parallelism.md` |
 | `src/model_loading/parallel/pp.py` | `agent-docs/parallelism/pipeline-parallelism.md` |
 | `src/distributed/{group_layout,mesh}.py` | `agent-docs/parallelism/multi-node.md`, `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/architecture.md` |
@@ -217,7 +217,7 @@ changes.
 | `scripts/after_training/convert_to_bf16.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/merge_models.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md` |
 | `Dockerfile*`, `docker-compose*`, `docker/sglang/patches/` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files and server patches also `agent-docs/infrastructure/rollout-servers.md` |
-| `docker/vllm/patches/`, `docker/vllm/parity/`, `docker/vllm/plugins/` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/infrastructure/docker.md`; plugins also `agent-docs/models/gpt-oss.md` |
+| `docker/engine_source_patch.py`, `docker/vllm/patches/`, `docker/vllm/parity/`, `docker/vllm/plugins/` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/infrastructure/docker.md`; plugins also `agent-docs/models/gpt-oss.md` |
 | `docker/nccl_pin.py` | `agent-docs/infrastructure/docker.md` |
 | `docker/efa/install_efa_userspace.sh` | `agent-docs/infrastructure/docker.md`, `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/parallelism/multi-node.md` |
 | AWS / S3 auth, `src/data/sources/s3_client.py` and `src/data/sources/s3_dataset_store.py` paths | `agent-docs/infrastructure/aws-auth.md`, `agent-docs/data/s3-utilities.md` |

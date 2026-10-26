@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The SGLang image patch must rewrite exactly the upstream code it names, and refuse anything else.
+"""The SGLang image's edit table must rewrite exactly the upstream code it names, and refuse anything else.
 
 ``docker/sglang/patches/patch_sglang.py`` runs at image build against the pinned sglang; the
 fixtures below are the verbatim upstream code of that pin, so the build's pre-image assertions are
@@ -7,10 +7,12 @@ exercised here without the image. What is pinned:
 
   * the GLM gate, which upstream now holds in fp32 and reads live, is asserted and never rewritten,
     and a gate that caches its weight again fails the build;
-  * the Gemma 4 router rewrite gives ``scale`` a loader that releases the fold latch;
+  * the Gemma 4 router rewrite gives ``scale`` a loader that releases the fold latch, and the build
+    fails once the loader it calls is no longer imported;
   * the prefill-loop rewrite steps the log-prob offset over a skipped request before ``continue``;
-  * a file without the pre-image, or with it twice, fails the build rather than patching around it;
   * ``--verify`` refuses the unpatched file.
+
+The replace-once and pre/post-image mechanics are pinned in ``test_engine_source_patch.py``.
 
     python tests/cpu/grpo/test_rollout_server_sglang_patches.py
 """
@@ -19,6 +21,8 @@ import pytest
 
 from tests.common.repo import load_script_module
 
+# Registered so the table's own ``from engine_source_patch import ...`` resolves, as in the image.
+load_script_module("docker/engine_source_patch.py", register=True)
 patches = load_script_module("docker/sglang/patches/patch_sglang.py")
 
 # sglang 0.5.22 srt/models/glm4_moe_lite.py, class Glm4MoeLiteGate (the glm4_moe.py gate differs
@@ -124,44 +128,40 @@ PREFILL_LOOP = """                if (
 """
 
 
+def _patched(text, path):
+    for edit in patches.EDITS:
+        if edit.path == path:
+            text = edit.apply(text)
+    return text
+
+
+def _verify(text, path):
+    for edit in patches.EDITS:
+        if edit.path == path:
+            edit.verify(text)
+
+
 def test_the_pinned_glm_gate_reads_its_weight_live():
     patches.verify_glm_gate(GLM_GATE, "glm4_moe_lite.py")
 
 
 def test_gemma4_scale_loader_releases_the_fold_latch():
-    patched = patches.patch_gemma4_router(GEMMA4_ROUTER)
+    patched = _patched(GEMMA4_ROUTER, patches._GEMMA4_ROUTER_FILE)
     assert "self.scale.weight_loader = self._load_scale" in patched
     loader = patched.split("def _load_scale")[1].split("def fuse_scale")[0]
     assert "default_weight_loader(param, loaded_weight)" in loader
     assert "self._scale_fused = False" in loader
-    patches.verify_gemma4_router(patched, "gemma4_causal.py")
+    _verify(patched, patches._GEMMA4_ROUTER_FILE)
 
 
 def test_the_prefill_skip_steps_over_the_skipped_requests_log_probs():
-    patched = patches.patch_prefill_logprob_cursor(PREFILL_LOOP)
+    patched = _patched(PREFILL_LOOP, patches._PREFILL_RESULT_FILE)
     skip_branch = patched.split("or req.is_retracted:")[1].split("continue")[0]
     assert "if batch.return_logprob:" in skip_branch
     assert "logprob_pt += (" in skip_branch
     assert "calculate_num_input_logprobs(" in skip_branch
     assert "extend_input_len_per_req[i]" in skip_branch and "extend_logprob_start_len_per_req[i]" in skip_branch
-    patches.verify_prefill_logprob_cursor(patched, "batch_result_processor.py")
-
-
-@pytest.mark.parametrize("patch", [patches.patch_gemma4_router, patches.patch_prefill_logprob_cursor])
-def test_a_missing_pre_image_fails_the_build(patch):
-    with pytest.raises(SystemExit, match="upstream changed"):
-        patch("class Something(nn.Module):\n    pass\n")
-
-
-def test_a_pre_image_seen_twice_fails_the_build():
-    with pytest.raises(SystemExit, match="found 2"):
-        patches.patch_prefill_logprob_cursor(PREFILL_LOOP + PREFILL_LOOP)
-
-
-def test_an_already_patched_file_is_not_patched_twice():
-    """Also the build's signal that upstream merged a fix this image carries: the pre-image is gone."""
-    with pytest.raises(SystemExit, match="upstream changed"):
-        patches.patch_prefill_logprob_cursor(patches.patch_prefill_logprob_cursor(PREFILL_LOOP))
+    _verify(patched, patches._PREFILL_RESULT_FILE)
 
 
 def test_verify_refuses_a_gate_whose_weight_is_in_the_default_dtype():
@@ -171,18 +171,25 @@ def test_verify_refuses_a_gate_whose_weight_is_in_the_default_dtype():
         patches.verify_glm_gate(default_dtype, "glm4_moe_lite.py")
 
 
-def test_a_gemma4_file_without_the_scale_line_fails_the_build():
-    with pytest.raises(SystemExit, match="upstream changed"):
-        patches.patch_gemma4_router(GEMMA4_ROUTER.replace(patches._GEMMA4_SCALE_BEFORE, ""))
+def test_the_build_fails_once_the_gemma4_loader_is_no_longer_imported(tmp_path):
+    (tmp_path / "srt/models").mkdir(parents=True)
+    for name in patches._GLM_GATE_FILES:
+        (tmp_path / name).write_text(GLM_GATE)
+    gemma4 = tmp_path / patches._GEMMA4_ROUTER_FILE
+    gemma4.write_text(_patched(GEMMA4_ROUTER, patches._GEMMA4_ROUTER_FILE))
+    patches.verify_upstream(tmp_path)
+    gemma4.write_text(gemma4.read_text().replace("import default_weight_loader", "import maybe_remap_kv_scale_name"))
+    with pytest.raises(SystemExit, match="default_weight_loader is no longer imported"):
+        patches.verify_upstream(tmp_path)
 
 
 def test_verify_refuses_the_unpatched_files():
     with pytest.raises(SystemExit, match="still caches"):
         patches.verify_glm_gate(GLM_GATE_CACHING, "glm4_moe.py")
-    with pytest.raises(SystemExit, match="fold latch"):
-        patches.verify_gemma4_router(GEMMA4_ROUTER, "gemma4_causal.py")
-    with pytest.raises(SystemExit, match="without stepping over"):
-        patches.verify_prefill_logprob_cursor(PREFILL_LOOP, "batch_result_processor.py")
+    with pytest.raises(SystemExit, match="Gemma4 router scale: the post-image is not in place"):
+        _verify(GEMMA4_ROUTER, patches._GEMMA4_ROUTER_FILE)
+    with pytest.raises(SystemExit, match="prefill result skip: the post-image is not in place"):
+        _verify(PREFILL_LOOP, patches._PREFILL_RESULT_FILE)
 
 
 if __name__ == "__main__":

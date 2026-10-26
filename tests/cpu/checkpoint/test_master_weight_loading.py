@@ -21,7 +21,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 from transformers import AutoConfig, BitsAndBytesConfig, Qwen3Config, Qwen3ForCausalLM
-from transformers.core_model_loading import Chunk, WeightConverter, WeightRenaming
+from transformers.core_model_loading import WeightRenaming
 from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 
 import src.model_loading.parallel.cp as cp_loading
@@ -32,7 +32,7 @@ import src.model_loading.parallel.whole_model as whole_model
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_fuser import ExpertFuser, FusionTask
-from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping, replay_loaded_conversions
+from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from src.model_loading.parallel.fp32_masters import fp32_master_param_keys
 from src.model_loading.parallel.model_source import ModelSource
 from src.runtime import consensus, load_coordination
@@ -341,7 +341,7 @@ def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path)
     model.base_model_prefix = "model"
     model.config = SimpleNamespace(model_type="qwen3_moe")
     rename = WeightRenaming(source_patterns=r"^wq_du\.", target_patterns="q_proj.")
-    rename.scope_prefix = "vision_model"
+    rename.scope_prefix, rename.base_model_prefix = "vision_model", "model"
     model._weight_conversions = [rename]
     stored = {disk_vision_key: torch.tensor([1.00001]), text_key: torch.tensor([2.00001])}
     assert all(not torch.equal(value, value.bfloat16().float()) for value in stored.values())
@@ -403,11 +403,6 @@ def test_prequantized_float_storage_keeps_codes_and_restores_plain_masters(tmp_p
 
     assert model.quantized.weight is packed and torch.equal(packed.data.view(torch.uint8), codes)
     assert model.norm.weight.dtype == torch.float32 and torch.equal(model.norm.weight, original)
-    model._weight_conversions.append(
-        WeightConverter(source_patterns=["a", "b"], target_patterns="c", operations=[Chunk(dim=0)])
-    )
-    with pytest.raises(ValueError, match="multi-source.*qwen3"):
-        replay_loaded_conversions(model)
 
 
 if __name__ == "__main__":

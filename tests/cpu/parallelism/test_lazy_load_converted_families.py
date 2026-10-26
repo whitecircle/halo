@@ -2,7 +2,7 @@
 """The lazy loaders reproduce ``from_pretrained`` bitwise on every hub-converted family — on CPU.
 
 A family whose hub checkpoint needs transformers' conversion mapping declares its key(s) on the family
-spec (``hub_conversion_keys``) and the lazy loaders replay that mapping per key. This drives
+spec (``hub_conversion_keys``) and the lazy loaders plan their keys on that mapping. This drives
 the REAL :func:`~src.model_loading.parallel.ep.load_ep_model_lazy` (EP patching
 stubbed — it needs DeepEP and process groups) on a tiny checkpoint each family writes through its
 own ``save_pretrained`` (the hub layout: vendor namespaces, split or per-expert projections, the

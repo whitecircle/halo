@@ -64,10 +64,8 @@ def test_lookups_resolve_every_spelling_and_the_text_sub_config():
     assert not wraps_experts(_Composite(), wrappers_requested=False)
 
 
-def test_hub_renames_invert():
-    renamed = LAGUNA.to_hub_key("gate.e_score_correction_bias")
-    assert renamed == "experts.e_score_correction_bias"
-    assert dict(LAGUNA.hub_to_module_renames())[renamed] == "gate.e_score_correction_bias"
+def test_to_hub_key_renames_only_declared_spellings():
+    assert LAGUNA.to_hub_key("gate.e_score_correction_bias") == "experts.e_score_correction_bias"
     assert QWEN3.to_hub_key("gate.weight") == "gate.weight"
 
 

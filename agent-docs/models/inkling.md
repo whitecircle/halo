@@ -30,7 +30,7 @@ The hub checkpoint stores the expert width as `intermediate_size: 2048`, but tra
 
 The checkpoint ships Thinking Machines' original namespace (`model.llm.*`, `attn.wq_du`, interleaved `experts.w13_weight`), which transformers converts inside `from_pretrained` (`transformers/conversion_mapping.py`, keyed `inkling_mm_model`).
 
-The lazy loaders read the same declarative entries through the family spec's `hub_conversion_keys`, scoped and translated by `src/model_loading/lazy_safetensors/conversion_selection.py`: renames plus a closed op vocabulary (de-interleave, chunk) applied at materialization, after the ranged per-expert read. The default lazy path therefore loads the hub checkpoint directly, each rank reading only its expert slice, pinned bitwise against `from_pretrained` by `tests/gpu/parallelism/ep/test_lazy_load_inkling.py`.
+The lazy loaders plan their keys on the same declarative entries, as `from_pretrained` does, and translate the converters into a closed op vocabulary (de-interleave, chunk) applied at materialization, after the ranged per-expert read. A text-only artifact (an `InklingTextConfig` over the composite's weights), for which transformers maps no conversions, takes the composite entries the family spec declares in `hub_conversion_keys`. The default lazy path therefore loads the hub checkpoint directly, each rank reading only its expert slice, pinned bitwise against `from_pretrained` by `tests/gpu/parallelism/ep/test_lazy_load_inkling.py`.
 
 The `from_pretrained` fallback still works but materializes the full checkpoint per concurrently-loading rank: 532 GB for Inkling-Small, so `max_concurrent_loading: 4` ≈ 2.1 TB peak host RAM.
 

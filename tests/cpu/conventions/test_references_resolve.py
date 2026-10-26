@@ -71,8 +71,6 @@ _TEXT_FILES_AT_ROOT = (
 
 # Text that reads as a reference but names nothing on purpose, by file.
 _NOT_REFERENCES = {
-    # The embedded Python's own `src` variable.
-    "docker/vllm/patches/patch_vllm_disable_gptoss.sh": {"src.replace"},
     # The scratch trees the CLI's script and config lookups are tested on.
     "tests/cpu/config/test_cli.py": {
         "examples/sft/example.yaml",

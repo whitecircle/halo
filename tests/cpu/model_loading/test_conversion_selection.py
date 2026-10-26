@@ -1,17 +1,14 @@
 #!/usr/bin/env python
-"""CPU tests for the hub-conversion seam: op math, the key walker, and the planner integration.
+"""CPU tests for the lazy loaders' hub-conversion seam: the op vocabulary, the key plan translated into it,
+the conversions a load plans with, and the planner integration.
 
-The seam translates transformers' declarative conversion entries (renames + Interleave / Chunk /
-PermuteForRope pipelines, multi-source Concatenate fan-ins, sub-model scoping) into per-disk-key
-targets the lazy loaders apply at materialization. These tests drive it with hand-built entries;
-each declaring family's real mapping is pinned bitwise against ``from_pretrained`` by
-``tests/cpu/parallelism/test_lazy_load_converted_families.py`` and
-``tests/gpu/parallelism/ep/test_lazy_load_inkling.py``.
+Hand-built entries drive the seam; each declaring family's real mapping is pinned bitwise against
+``from_pretrained`` by ``tests/cpu/parallelism/test_lazy_load_converted_families.py``, and the lazy plan
+against the resume's by ``tests/cpu/model_loading/test_checkpoint_keys.py``.
 
     python tests/cpu/model_loading/test_conversion_selection.py
 """
 
-import dataclasses
 import json
 from functools import cache
 from types import SimpleNamespace
@@ -25,31 +22,29 @@ from transformers.core_model_loading import (
     Concatenate,
     GroupWeightRename,
     Interleave,
+    MergeModulelist,
     PermuteForRope,
     PrefixChange,
+    Transpose,
     WeightConverter,
     WeightRenaming,
 )
+from transformers.models.inkling.configuration_inkling import InklingTextConfig
+from transformers.models.inkling.modeling_inkling import InklingForCausalLM
 
 import src.model_loading.lazy_safetensors.conversion_selection as conversion_selection
 from src.checkpoint.reading import resolve_checkpoint_weights
 from src.distributed.expert_parallel.lazy_plan import WeightPlanner
+from src.model_loading.checkpoint_keys import build_key_plan
 from src.model_loading.lazy_safetensors.conversion import (
     Concat,
     Deinterleave,
     PermuteRope,
-    RenameStep,
     TakeChunk,
-    build_key_mapping,
-    convert_disk_keys,
+    lazy_key_mapping,
     translate_converter,
-    translate_renaming,
 )
-from src.model_loading.lazy_safetensors.conversion_selection import (
-    family_key_mapping,
-    replay_loaded_conversions,
-    resolve_conversion_steps,
-)
+from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from src.model_loading.lazy_safetensors.materialization import (
     SafetensorsWeightLoader,
     WeightAction,
@@ -57,9 +52,9 @@ from src.model_loading.lazy_safetensors.materialization import (
 )
 from src.model_loading.model_preparation import resolve_auto_model_class
 from src.models.moe.expert_layout import ExpertLayoutKind
-from src.models.moe.family_specs import STEP3P7
+from tests.common.models import TINY_INKLING_CONFIG
 from tests.common.rosters import ep_layer_class_by_model_type
-from tests.common.tiny_models import module_with_weight_keys
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, build_tiny_family_checkpoint, module_with_weight_keys
 
 E, M, H = 4, 6, 8
 
@@ -110,76 +105,6 @@ def test_permute_rope_matches_transformers_op():
     )
 
 
-def _steps(entries, config=None, scope=""):
-    """Translate hand-built entries through the resolver's own translators."""
-    return tuple(
-        translate_renaming(entry, scope)
-        if isinstance(entry, WeightRenaming)
-        else translate_converter(entry, config=config, scope=scope)
-        for entry in entries
-    )
-
-
-_ENTRIES = [
-    WeightRenaming(source_patterns=r"model\.llm\.layers", target_patterns="model.language_model.layers"),
-    WeightConverter(
-        source_patterns="mlp.experts.w13_weight",
-        target_patterns=["mlp.experts.gate_up_proj"],
-        operations=[Chunk(dim=1)],  # stands in for Interleave; ops are per-entry
-    ),
-    WeightConverter(
-        source_patterns="mlp.shared_w13_weight",
-        target_patterns=["mlp.shared.gate_proj.weight", "mlp.shared.up_proj.weight"],
-        operations=[Chunk(dim=0)],
-    ),
-    WeightRenaming(source_patterns=r"attn\.wq_du", target_patterns="self_attn.q_proj"),
-]
-
-
-def test_walker_chains_renames_and_fans_out():
-    entries = [e for e in _ENTRIES if not (isinstance(e, WeightConverter) and len(e.target_patterns) == 1)]
-    steps = _steps(entries)
-    keys = [
-        "model.llm.layers.3.attn.wq_du.weight",
-        "model.llm.layers.3.mlp.shared_w13_weight",
-        "model.norm.weight",
-    ]
-    converted = convert_disk_keys(keys, steps)
-
-    # Two renames compose on one key (namespace + attention spelling).
-    assert converted["model.llm.layers.3.attn.wq_du.weight"] == (
-        ("model.language_model.layers.3.self_attn.q_proj.weight", ()),
-    )
-    # Fan-out: one disk tensor, two targets, each with its chunk op.
-    targets = dict(converted["model.llm.layers.3.mlp.shared_w13_weight"])
-    assert set(targets) == {
-        "model.language_model.layers.3.mlp.shared.gate_proj.weight",
-        "model.language_model.layers.3.mlp.shared.up_proj.weight",
-    }
-    assert targets["model.language_model.layers.3.mlp.shared.gate_proj.weight"] == (TakeChunk(0, 0, 2),)
-    assert targets["model.language_model.layers.3.mlp.shared.up_proj.weight"] == (TakeChunk(0, 1, 2),)
-    # Untouched keys are absent — the walker is a no-op for canonical checkpoints.
-    assert "model.norm.weight" not in converted
-
-
-def test_walker_applies_renames_declared_after_the_converter():
-    steps = _steps(
-        [
-            WeightConverter(
-                source_patterns="mlp.w13.weight",
-                target_patterns=["mlp.gate_proj.weight", "mlp.up_proj.weight"],
-                operations=[Chunk(dim=0)],
-            ),
-            WeightRenaming(source_patterns=r"^decoder\.", target_patterns="model."),
-        ]
-    )
-    converted = convert_disk_keys(["decoder.mlp.w13.weight"], steps)
-    assert {k for k, _ in converted["decoder.mlp.w13.weight"]} == {
-        "model.mlp.gate_proj.weight",
-        "model.mlp.up_proj.weight",
-    }
-
-
 def test_unsupported_ops_are_refused():
     entry = WeightConverter(
         source_patterns="a", target_patterns=["b", "c", "d"], operations=[Chunk(dim=0), Chunk(dim=1)]
@@ -198,10 +123,7 @@ def test_multi_source_entry_translates_to_a_fan_in():
         target_patterns="attn.conv1d.weight",
         operations=[Concatenate(dim=0)],
     )
-    convert = translate_converter(entry)
-    assert [p.pattern for p in convert.patterns] == entry.source_patterns
-    assert convert.concat_dim == 0
-    assert convert.targets == (("attn.conv1d.weight", ()),)
+    assert translate_converter(entry) == (((),), 0)
 
     # Any other op pipeline on a multi-source entry is refused (transformers itself rejects a
     # many-to-many entry at construction, so a second target never reaches the translator).
@@ -224,12 +146,20 @@ def test_chunk_then_permute_for_rope_lands_on_the_named_targets():
         ],
     )
     config = SimpleNamespace(vision_config=SimpleNamespace(num_attention_heads=4))
-    targets = dict(translate_converter(entry, config=config).targets)
-    assert targets["attn.q_proj.weight"] == (TakeChunk(0, 0, 3), PermuteRope(4))
-    assert targets["attn.k_proj.weight"] == (TakeChunk(0, 1, 3), PermuteRope(4))
-    assert targets["attn.v_proj.weight"] == (TakeChunk(0, 2, 3),)
+    pipelines, concat_dim = translate_converter(entry, config=config)
+    assert concat_dim is None
+    assert pipelines == (
+        (TakeChunk(0, 0, 3), PermuteRope(4)),
+        (TakeChunk(0, 1, 3), PermuteRope(4)),
+        (TakeChunk(0, 2, 3),),
+    )
     with pytest.raises(ValueError, match="needs the model config"):
         translate_converter(entry)
+
+
+def _mapping(keys, live, conversions, base_model_prefix=None, config=None):
+    """The lazy loaders' key mapping of ``keys`` onto ``live`` through ``conversions``."""
+    return lazy_key_mapping(build_key_plan(keys, live, conversions, base_model_prefix), config)
 
 
 _FAN_IN = WeightConverter(
@@ -239,69 +169,60 @@ _FAN_IN = WeightConverter(
 )
 
 
-def test_walker_groups_a_fan_in_by_target_in_declared_source_order():
-    """Members of one entry group by the target they produce (per layer); the first source's key
-    carries the group as a leading Concat naming the others in DECLARED order, whatever the index
-    order; the siblings are consumed (absent), and unrelated keys are untouched."""
-    steps = _steps([_FAN_IN, WeightRenaming(source_patterns=r"^decoder\.", target_patterns="model.")])
-    keys = [
-        "decoder.layers.1.self_attn.v_conv1d.weight",
-        "decoder.layers.0.self_attn.k_conv1d.weight",
-        "decoder.layers.0.self_attn.q_conv1d.weight",
-        "decoder.layers.1.self_attn.q_conv1d.weight",
-        "decoder.layers.0.self_attn.v_conv1d.weight",
-        "decoder.layers.1.self_attn.k_conv1d.weight",
-        "decoder.layers.0.self_attn.o_proj.weight",
-    ]
-    converted = convert_disk_keys(keys, steps)
-    for layer in (0, 1):
-        q, k, v = (f"decoder.layers.{layer}.self_attn.{n}_conv1d.weight" for n in "qkv")
-        assert converted[q] == ((f"model.layers.{layer}.self_attn.conv1d.weight", (Concat(0, (k, v)),)),)
-        assert k not in converted and v not in converted
-    assert converted["decoder.layers.0.self_attn.o_proj.weight"] == (("model.layers.0.self_attn.o_proj.weight", ()),)
-
-
-def test_walker_refuses_a_partial_or_doubled_fan_in():
-    steps = _steps([_FAN_IN])
-    with pytest.raises(ValueError, match="truncated tensor"):
-        convert_disk_keys(["l.self_attn.q_conv1d.weight", "l.self_attn.v_conv1d.weight"], steps)
-    doubled = _steps(
-        [WeightConverter(source_patterns=["a.*.x", "b.x"], target_patterns="c.x", operations=[Concatenate(dim=0)])]
-    )
-    with pytest.raises(ValueError, match="both match source"):
-        convert_disk_keys(["a.1.x", "a.2.x", "b.x"], doubled)
-
-
-def test_scoped_steps_see_only_their_sub_model():
-    """transformers scopes a sub-model's entries under its module path (Step-3.7's
-    ``step3p5_vision`` tower): the bare pattern ``\\.attn\\.`` must convert the tower's keys — with
-    the base-model prefix or without it — and leave the text decoder's identical spelling alone."""
-    vision = [
-        WeightRenaming(source_patterns=r"\.attn\.", target_patterns=".self_attn."),
-        WeightConverter(
-            source_patterns=r"attn\.in_proj_weight",
-            target_patterns=[r"attn.q_proj.weight", r"attn.v_proj.weight"],
-            operations=[Chunk(dim=0)],
-        ),
-    ]
-    steps = (
-        *_steps([WeightRenaming(source_patterns=r"^vision_model\.", target_patterns="model.vision_model.")]),
-        *_steps(vision, scope="vision_model"),
-    )
-    keys = [
-        "vision_model.layers.0.attn.in_proj_weight",
-        "model.vision_model.layers.0.attn.out.weight",
-        "model.language_model.layers.0.attn.out.weight",
-    ]
-    converted = convert_disk_keys(keys, steps, base_prefix="model.")
-    assert {k for k, _ in converted["vision_model.layers.0.attn.in_proj_weight"]} == {
-        "model.vision_model.layers.0.self_attn.q_proj.weight",
-        "model.vision_model.layers.0.self_attn.v_proj.weight",
+def test_a_fan_in_groups_by_target_in_declared_source_order():
+    """Each layer's sources group under the target they produce; the first declared source's key carries the
+    group as a leading Concat naming the others in DECLARED order, whatever the key order."""
+    keys = [f"decoder.layers.{layer}.self_attn.{n}_conv1d.weight" for n in "vkq" for layer in (1, 0)]
+    live = [f"model.layers.{layer}.self_attn.conv1d.weight" for layer in (0, 1)]
+    rename = WeightRenaming(source_patterns=r"^decoder\.", target_patterns="model.")
+    _, converted = _mapping(keys, live, [rename, _FAN_IN])
+    assert converted == {
+        f"decoder.layers.{layer}.self_attn.q_conv1d.weight": (
+            (
+                f"model.layers.{layer}.self_attn.conv1d.weight",
+                (Concat(0, tuple(f"decoder.layers.{layer}.self_attn.{n}_conv1d.weight" for n in "kv")),),
+            ),
+        )
+        for layer in (0, 1)
     }
-    assert converted["model.vision_model.layers.0.attn.out.weight"] == (
-        ("model.vision_model.layers.0.self_attn.out.weight", ()),
+
+
+def test_a_partial_or_doubled_fan_in_raises():
+    with pytest.raises(ValueError, match="truncated tensor"):
+        _mapping(
+            ["l.self_attn.q_conv1d.weight", "l.self_attn.v_conv1d.weight"], ["l.self_attn.conv1d.weight"], [_FAN_IN]
+        )
+    doubled = WeightConverter(source_patterns=["a.*.x", "b.x"], target_patterns="c.x", operations=[Concatenate(dim=0)])
+    with pytest.raises(ValueError, match="both match source"):
+        _mapping(["a.1.x", "a.2.x", "b.x"], ["c.x"], [doubled])
+
+
+def test_an_unsupported_converter_raises_only_when_it_claims_a_live_name():
+    bad = WeightConverter(source_patterns=["a.x", "b.x"], target_patterns="c.x", operations=[Chunk(dim=0)])
+    assert _mapping(["a.x", "b.x", "norm.weight"], ["norm.weight"], [bad]) == (
+        {"a.x": "c.x", "b.x": "c.x", "norm.weight": "norm.weight"},
+        {},
     )
-    assert "model.language_model.layers.0.attn.out.weight" not in converted
+    with pytest.raises(ValueError, match="multi-source"):
+        _mapping(["a.x", "b.x"], ["c.x"], [bad])
+
+
+def test_an_expert_bank_merge_keeps_the_renamed_per_expert_spelling():
+    """The ``ExpertFuser`` stacks per-expert keys itself, off the spelling the renames give them; a merge
+    carrying an op it cannot reproduce is refused rather than dropped."""
+    rename = WeightRenaming(source_patterns=r"model\.llm\.", target_patterns="model.")
+    merge = WeightConverter(
+        source_patterns=["mlp.experts.*.gate_proj.weight", "mlp.experts.*.up_proj.weight"],
+        target_patterns="mlp.experts.gate_up_proj",
+        operations=[MergeModulelist(dim=0), Concatenate(dim=1)],
+    )
+    keys = [f"model.llm.layers.0.mlp.experts.{e}.{name}_proj.weight" for e in (0, 1) for name in ("gate", "up")]
+    disk_to_model, converted = _mapping(keys, ["model.layers.0.mlp.experts.gate_up_proj"], [rename, merge])
+    assert disk_to_model == {key: key.replace("model.llm.", "model.") for key in keys}
+    assert not converted
+    merge.operations.append(Transpose(dim0=1, dim1=2))
+    with pytest.raises(ValueError, match="ExpertFuser only reproduces"):
+        _mapping(keys, ["model.layers.0.mlp.experts.gate_up_proj"], [rename, merge])
 
 
 def test_planner_carries_ops_and_rejects_shard_axis_ops():
@@ -398,7 +319,7 @@ def _shell(model_type: str):
     builds the bare backbone ``AutoModel`` builds for embedding training; one that NO Auto mapping
     instantiates (``step3p5``, Step-3.7's text tower) exists only inside its composite, so no
     checkpoint is typed by it — the composite's own model_type drives the same layer class, and
-    thereby the same steps, through this oracle."""
+    thereby the same conversions, through this oracle."""
     config = AutoConfig.for_model(model_type)
     with torch.device("meta"):
         try:
@@ -409,72 +330,6 @@ def _shell(model_type: str):
             return AutoModel.from_config(config)
         except ValueError:
             pytest.skip(f"{model_type} has no standalone model class — a composite-only text sub-config")
-
-
-def test_resolution_is_declaration_gated():
-    """Families that declare no conversion keys resolve to None — the pass cannot perturb them."""
-    assert resolve_conversion_steps(_shell("qwen3_moe"), "qwen3_moe") is None
-    assert resolve_conversion_steps(torch.nn.Module(), "llama") is None
-    assert resolve_conversion_steps(_shell("glm4_moe_lite"), "glm4_moe_lite") is None
-
-
-def test_a_declared_key_that_resolves_to_nothing_raises(monkeypatch):
-    """``None`` is the caller's "checkpoint is already canonical" answer, so a declaring family whose
-    mapping is absent must not collapse into it — the loader would read the vendor namespace
-    unconverted, the planner would skip every unmatched key, and the model would train from its
-    meta-device init values with no error anywhere."""
-    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
-    with pytest.raises(ValueError, match="declares hub-conversion key"):
-        resolve_conversion_steps(_shell("inkling_mm_model"), "inkling_mm_model")
-
-
-def test_a_resolvable_key_still_returns_its_steps(monkeypatch):
-    """Anti-vacuity: the raise is about an EMPTY resolution, not about declaring a key at all."""
-    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: [_ENTRIES[0]])
-    steps = resolve_conversion_steps(_shell("inkling_mm_model"), "inkling_mm_model")
-    # The entry must come back TRANSLATED, not merely counted: a resolution of the right arity that
-    # dropped the rename would load the vendor namespace unconverted just the same.
-    (step,) = steps
-    assert isinstance(step, RenameStep)
-    assert step.pattern.pattern == _ENTRIES[0].source_patterns[0]
-    assert step.replacement == _ENTRIES[0].target_patterns[0]
-
-
-def test_a_non_declaring_family_is_untouched_by_an_absent_mapping(monkeypatch):
-    """Anti-vacuity: the raise keys on the family's declaration, not on the mapping lookup — a family
-    that declares nothing never looks one up."""
-    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
-    assert resolve_conversion_steps(_shell("qwen3_moe"), "qwen3_moe") is None
-
-
-def test_a_sub_model_key_is_scoped_under_its_module_path(monkeypatch):
-    """A declared key naming a SUB-model of the shell (Step-3.7's ``step3p5_vision`` tower) resolves
-    its entries scoped to that module path while the root's stay unscoped — transformers' own
-    scoping, which keeps the tower's bare ``\\.attn\\.`` rename off the text decoder's keys — and a
-    PermuteForRope entry reads its head count off the shell's config."""
-    entries = {
-        "step3p7": [WeightRenaming(source_patterns=r"^vision_model\.", target_patterns="model.vision_model.")],
-        "step3p5_vision": [
-            WeightRenaming(source_patterns=r"\.attn\.", target_patterns=".self_attn."),
-            WeightConverter(
-                source_patterns=r"attn\.in_proj_weight",
-                target_patterns=[r"attn.q_proj.weight", r"attn.k_proj.weight", r"attn.v_proj.weight"],
-                operations=[
-                    Chunk(dim=0),
-                    PermuteForRope(subconfig_key="vision_config", permute_layer_names=["q_proj"]),
-                ],
-            ),
-        ],
-    }
-    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", entries.get)
-    declared = dataclasses.replace(STEP3P7, hub_conversion_keys=tuple(entries))
-    monkeypatch.setattr(conversion_selection, "find_moe_family_spec", lambda _model_type: declared)
-    shell = _shell("step3p7")
-
-    root, attn, in_proj = resolve_conversion_steps(shell, "step3p7")
-    assert (root.scope, attn.scope, in_proj.scope) == ("", "vision_model", "vision_model")
-    heads = shell.config.vision_config.num_attention_heads
-    assert dict(in_proj.targets)["attn.q_proj.weight"] == (TakeChunk(0, 0, 3), PermuteRope(heads))
 
 
 def _declaring_model_types() -> list[str]:
@@ -489,16 +344,47 @@ def _canonical_checkpoint_keys(model_type: str) -> tuple[str, ...]:
     return tuple(sorted(_shell(model_type).state_dict()))
 
 
+def test_a_declared_key_that_resolves_to_nothing_raises(monkeypatch):
+    """A declaring family whose mapping is absent must not plan as canonical — the loader would read the
+    vendor namespace unconverted, the planner would skip every unmatched key, and the model would train
+    from its meta-device init values with no error anywhere."""
+    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
+    with pytest.raises(ValueError, match="declares hub-conversion key"):
+        family_key_mapping(_shell("inkling_mm_model"), [])
+
+
+def test_a_non_declaring_family_is_untouched_by_an_absent_mapping(monkeypatch):
+    """Anti-vacuity: the raise keys on the family's declaration — a family that declares nothing never
+    looks one up."""
+    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
+    keys = list(_canonical_checkpoint_keys("qwen3_moe"))
+    assert family_key_mapping(_shell("qwen3_moe"), keys) == ({key: key for key in keys}, {})
+
+
+def test_a_text_model_reads_its_composites_vendor_checkpoint(tmp_path):
+    """Inkling's text-only artifact: the composite's vendor-namespace checkpoint under a text config.
+    transformers keys the conversions under the composite alone, so the text model takes the declared
+    entries and drops the composite's text level: every text tensor is planned, the experts converted."""
+    build_tiny_family_checkpoint(TINY_MOE_VLM_FAMILIES["inkling_mm_model"], str(tmp_path))
+    weight_map = resolve_checkpoint_weights(str(tmp_path)).weight_map
+    with torch.device("meta"):
+        shell = InklingForCausalLM(InklingTextConfig(**TINY_INKLING_CONFIG))
+    model_keys = set(shell.state_dict())
+    disk_to_model, fanout = family_key_mapping(shell, list(weight_map))
+    plans = WeightPlanner(None).build(weight_map, disk_to_model, model_keys, fanout=fanout)
+    assert {plan.model_key for plan in plans} == model_keys
+    assert any(isinstance(op, Deinterleave) for plan in plans for op in plan.ops)
+
+
 @pytest.mark.parametrize("model_type", _declaring_model_types())
 def test_canonical_checkpoint_keys_resume_untouched(model_type):
     """A canonical checkpoint of a declaring family must map every key to ITSELF, conversion-free.
 
-    The steps are resolved and re-applied on every load of a declaring family, including an EP/PP
-    RESUME from a checkpoint this toolkit itself wrote in the canonical namespace. transformers'
-    conversion sources are not vendor-anchored (5.20's deepseek_v4 maps ``\\.norm\\.`` →
-    ``.kv_norm.``, which also matches the canonical final ``model.norm.weight``), so the identity is
-    enforced by the mapping's model-key fallback — the same validation transformers' own loader
-    applies before accepting a rename — and this test drives the full mapping seam the loaders use.
+    The family's mapping is applied on every lazy load, including an EP/PP RESUME from a checkpoint this
+    toolkit itself wrote in the canonical namespace. transformers' conversion sources are not
+    vendor-anchored (deepseek_v4 maps ``\\.norm\\.`` → ``.kv_norm.``, which also matches the canonical
+    final ``model.norm.weight``), so the identity rests on the planner's live-key retry, the same one
+    transformers' own loader applies before accepting a rename.
     """
     layer_cls = ep_layer_class_by_model_type()[model_type]
     layout = layer_cls.FAMILY.expert_layout
@@ -508,15 +394,13 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
         f"extend the oracle with the family's gathered-save layout."
     )
     model = _shell(model_type)
-    steps = resolve_conversion_steps(model, model_type)
-    assert steps, f"{model_type} declares {layer_cls.FAMILY.hub_conversion_keys} but resolved no steps"
-
     keys = list(_canonical_checkpoint_keys(model_type))
+    assert any(key.endswith("experts.gate_up_proj") for key in keys), "the oracle must reach the expert keys"
+
     disk_to_model, fanout = family_key_mapping(model, keys)
 
     assert not fanout, (
-        f"{model_type}: {len(fanout)} canonical checkpoint key(s) still convert on a resume — the "
-        f"model-key fallback did not catch them. First few: "
+        f"{model_type}: {len(fanout)} canonical checkpoint key(s) still convert on a resume. First few: "
         f"{[(key, [target for target, _ in targets]) for key, targets in list(fanout.items())[:3]]}"
     )
     perturbed = {key: target for key, target in disk_to_model.items() if target != key}
@@ -527,45 +411,16 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
     )
 
 
-def test_unanchored_source_falls_back_to_the_canonical_key():
-    """Pin of the model-key fallback (transformers 5.20 semantics): a rename whose target misses the
-    model's key space while the source key itself resolves is undone, and a genuine vendor key
-    converting onto a real model key is NOT — the fallback must never mask a needed conversion."""
-    model = module_with_weight_keys(["model.norm.weight", "model.layers.0.self_attn.kv_norm.weight"])
-    steps = _steps(
-        [
-            WeightRenaming(source_patterns=r"\.attn\.", target_patterns=".self_attn."),
-            WeightRenaming(source_patterns=r"\.norm\.", target_patterns=".kv_norm."),
-        ]
-    )
-    disk_keys = [
-        "model.norm.weight",  # canonical final norm — caught by the unanchored `\.norm\.`
-        "model.layers.0.self_attn.kv_norm.weight",  # canonical, matches nothing
-        "model.layers.0.attn.norm.weight",  # vendor spelling — must still convert
-    ]
-    disk_to_model, fanout = build_key_mapping(model, disk_keys, steps=steps)
-
-    assert disk_to_model["model.norm.weight"] == "model.norm.weight"
-    assert "model.norm.weight" not in fanout
-    assert disk_to_model["model.layers.0.self_attn.kv_norm.weight"] == "model.layers.0.self_attn.kv_norm.weight"
-    assert disk_to_model["model.layers.0.attn.norm.weight"] == "model.layers.0.self_attn.kv_norm.weight"
-    assert fanout["model.layers.0.attn.norm.weight"] == (("model.layers.0.self_attn.kv_norm.weight", ()),)
-
-
-@pytest.mark.parametrize("model_type", _declaring_model_types())
-def test_the_canonical_key_oracle_reaches_the_walker(model_type):
-    """Anti-vacuity: the test above passes because the patterns are vendor-anchored, not because the
-    key list is empty or never reaches ``convert_disk_keys``."""
-    drifted = _steps([WeightRenaming(source_patterns=r"experts\.gate_up_proj", target_patterns="experts.w13_weight")])
-    assert convert_disk_keys(list(_canonical_checkpoint_keys(model_type)), drifted)
-
-
 @pytest.mark.parametrize("recorded", ("absent", None, ()))
 def test_eager_replay_does_not_invent_conversions_for_a_canonical_load(recorded):
-    model = torch.nn.Module()
+    model = module_with_weight_keys(["model.norm.weight"])
+    model.config = SimpleNamespace(model_type="qwen3")
     if recorded != "absent":
         model._weight_conversions = recorded
-    assert replay_loaded_conversions(model) is None
+    assert family_key_mapping(model, ["model.norm.weight"], replay_loaded=True) == (
+        {"model.norm.weight": "model.norm.weight"},
+        {},
+    )
 
 
 def test_eager_replay_accepts_text_only_prefix_changes():
@@ -574,37 +429,19 @@ def test_eager_replay_accepts_text_only_prefix_changes():
     model.config = SimpleNamespace(model_type="qwen3_moe")
     model._weight_conversions = [PrefixChange(prefix_to_remove="language_model", model_prefix="model")]
     disk_key = "model.language_model.linear.weight"
-    steps = replay_loaded_conversions(model)
-    assert steps and convert_disk_keys([disk_key], steps) == {disk_key: (("model.linear.weight", ()),)}
-    mapping, fanout = family_key_mapping(model, [disk_key], replay_loaded=True)
-    assert mapping == {disk_key: "model.linear.weight"}
-    assert fanout == {disk_key: (("model.linear.weight", ()),)}
+    assert family_key_mapping(model, [disk_key], replay_loaded=True) == ({disk_key: "model.linear.weight"}, {})
 
 
-@pytest.mark.parametrize(
-    "entry",
-    (
-        GroupWeightRename(source_patterns=[r"norm0", r"norm1"], target_patterns=["norm1", "norm2"]),
-        WeightRenaming(source_patterns=[r"old0", r"old1"], target_patterns=["new0", "new1"]),
-    ),
-    ids=("conditional_group_rename", "multi_pattern_rename"),
-)
-def test_eager_replay_refuses_renames_it_cannot_reproduce_without_silent_loss(entry):
-    model = torch.nn.Module()
-    model._weight_conversions = [entry]
-    with pytest.raises(ValueError, match="rename|renaming|Renaming"):
-        replay_loaded_conversions(model)
-
-
-def test_unsupported_declared_conversion_names_its_original_mapping_key(monkeypatch):
-    model = module_with_weight_keys(["norm.weight"])
-    model.config = SimpleNamespace(model_type="step3p7")
-    declared = dataclasses.replace(STEP3P7, hub_conversion_keys=("vendor_bad_entry",))
-    monkeypatch.setattr(conversion_selection, "find_moe_family_spec", lambda _model_type: declared)
-    bad = WeightConverter(source_patterns=["a", "b"], target_patterns="c", operations=[Chunk(dim=0)])
-    monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda _key: [bad])
-    with pytest.raises(ValueError, match="multi-source.*vendor_bad_entry"):
-        resolve_conversion_steps(model, "step3p7")
+def test_eager_replay_reproduces_a_conditional_group_rename_on_a_copy():
+    """A ``GroupWeightRename`` renames its dependents only once its guard key has been seen: the replay plans
+    it as transformers' loader does, on a copy, so the load's record keeps its guard unlatched."""
+    model = module_with_weight_keys(["a.norm1.weight", "a.norm2.weight"])
+    model.config = SimpleNamespace(model_type="qwen3")
+    group = GroupWeightRename(source_patterns=[r"norm0", r"norm1"], target_patterns=["norm1", "norm2"])
+    model._weight_conversions = [group]
+    mapping, _ = family_key_mapping(model, ["a.norm1.weight", "a.norm0.weight"], replay_loaded=True)
+    assert mapping == {"a.norm0.weight": "a.norm1.weight", "a.norm1.weight": "a.norm2.weight"}
+    assert not group._active
 
 
 if __name__ == "__main__":

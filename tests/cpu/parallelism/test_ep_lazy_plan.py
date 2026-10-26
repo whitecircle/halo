@@ -30,6 +30,7 @@ from src.model_loading.lazy_safetensors.materialization import (  # noqa: E402
 )
 from src.model_loading.parallel.ep import _check_fused_experts_mapped  # noqa: E402
 from tests.common.models import TINY_GPTOSS_CONFIG  # noqa: E402
+from tests.common.tiny_models import module_with_weight_keys  # noqa: E402
 
 
 class MockEPConfig:
@@ -256,7 +257,9 @@ def test_load_ep_model_lazy_raises_on_unmapped_fused_experts(monkeypatch):
         "resolve_checkpoint_weights",
         lambda path: CheckpointWeights(path, ("s.safetensors",), index={"weight_map": wm}),
     )
-    monkeypatch.setattr(ep_loading, "instantiate_on_meta", lambda *a, **k: _MockModel(["unrelated.weight"]))
+    shell = module_with_weight_keys(["unrelated.weight"])
+    shell.config = SimpleNamespace(model_type="")
+    monkeypatch.setattr(ep_loading, "instantiate_on_meta", lambda *a, **k: shell)
     # num_experts must be real: require_expert_count fails loud rather than guessing.
     config = SimpleNamespace(dtype=torch.bfloat16, num_experts=MockEPConfig().num_experts)
     with pytest.raises(RuntimeError, match="none map"):
@@ -318,120 +321,35 @@ def test_lazy_supported_missing_index_defaults_true(tmp_path):
     assert is_lazy_loadable(str(tmp_path)) is True
 
 
-class _MockModel:
-    """Minimal stand-in for the parts of nn.Module that family_key_mapping uses."""
-
-    def __init__(self, keys, base_model_prefix="", model_type=""):
-        self._keys = list(keys)
-        self.base_model_prefix = base_model_prefix
-        self.config = SimpleNamespace(model_type=model_type)
-
-    def state_dict(self):
-        return {k: None for k in self._keys}
-
-    def named_modules(self):
-        """No sub-model claims a conversion scope: these keys exercise alignment, not conversion."""
-        return iter(())
-
-
-def _family_key_mapping(model, disk_keys):
-    """The disk→model half of the live mapping the EP/PP loaders build."""
-    return family_key_mapping(model, disk_keys)[0]
-
-
-def test_key_mapping_identity():
-    model = _MockModel(["model.layers.0.mlp.experts.gate_up_proj"])
-    mapping = _family_key_mapping(model, ["model.layers.0.mlp.experts.gate_up_proj"])
-    assert mapping["model.layers.0.mlp.experts.gate_up_proj"] == "model.layers.0.mlp.experts.gate_up_proj"
-
-
-def test_key_mapping_adds_base_prefix():
-    """Checkpoint saved without the ``model.`` base prefix gets it added back."""
-    model = _MockModel(["model.embed_tokens.weight"], base_model_prefix="model")
-    mapping = _family_key_mapping(model, ["embed_tokens.weight"])
-    assert mapping["embed_tokens.weight"] == "model.embed_tokens.weight"
-
-
-def test_key_mapping_strips_base_prefix_for_a_bare_backbone():
-    """Mirror of the add branch: a ``*ForCausalLM`` checkpoint (``model.layers.*``) loaded into the
-    bare backbone ``AutoModel`` builds (``layers.*``) must have the prefix stripped."""
-    model = _MockModel(["layers.0.self_attn.q_proj.weight"], base_model_prefix="model")
-    disk_key = "model.layers.0.self_attn.q_proj.weight"
-    assert _family_key_mapping(model, [disk_key])[disk_key] == "layers.0.self_attn.q_proj.weight"
-
-
-def test_key_mapping_covers_every_key_of_a_bare_moe_backbone():
-    """The failure the strip exists for, stated end-to-end on a real MoE pair.
+@pytest.mark.parametrize(
+    ("disk_class", "shell_class"),
+    ((GptOssForCausalLM, GptOssModel), (GptOssModel, GptOssForCausalLM)),
+    ids=("strip", "add"),
+)
+def test_key_mapping_aligns_the_base_model_prefix(disk_class, shell_class):
+    """A ``*ForCausalLM`` checkpoint (``model.layers.*``) loaded into the bare backbone (``layers.*``) has
+    the prefix stripped, and a backbone checkpoint loaded into ``*ForCausalLM`` has it added.
 
     ``scripts/training/embedding.py`` loads with ``model_class=AutoModel`` under EP, so the shell is
     ``GptOssModel`` while the checkpoint on disk is ``GptOssForCausalLM``. A key that maps to nothing
-    is dropped by :class:`WeightPlanner` without a word, so an unstripped prefix leaves the ENTIRE
-    backbone unplanned — every weight random. Without the strip the intersection below is empty.
+    is dropped by :class:`WeightPlanner` without a word, so an unaligned prefix leaves the ENTIRE
+    backbone unplanned — every weight random.
     """
     config = GptOssConfig(**TINY_GPTOSS_CONFIG)
     with torch.device("meta"):
-        disk_keys = sorted(GptOssForCausalLM(config).state_dict())
-        backbone = GptOssModel(config)
+        disk_keys = sorted(disk_class(config).state_dict())
+        shell = shell_class(config)
 
-    model_keys = set(backbone.state_dict())
-    mapping = _family_key_mapping(backbone, disk_keys)
+    model_keys = set(shell.state_dict())
+    mapping, fanout = family_key_mapping(shell, disk_keys)
     planner = WeightPlanner(MockEPConfig(0, 4, TINY_GPTOSS_CONFIG["num_local_experts"]))
     planned = {
-        plan.model_key for plan in planner.build(dict.fromkeys(disk_keys, "s.safetensors"), mapping, model_keys)
+        plan.model_key
+        for plan in planner.build(dict.fromkeys(disk_keys, "s.safetensors"), mapping, model_keys, fanout=fanout)
     }
 
-    assert planned == model_keys, sorted(model_keys - planned)
+    assert planned == {key for key in model_keys if not key.startswith("lm_head.")}, sorted(model_keys - planned)
     assert any(plan_key.endswith("experts.gate_up_proj") for plan_key in planned)
-
-
-def test_key_mapping_strips_vlm_language_model_segment():
-    """A VLM checkpoint key ``model.language_model.layers...`` loaded as a text-only
-    CausalLM has the ``language_model.`` segment stripped (the VLM-reuse case)."""
-    model = _MockModel(["model.layers.0.self_attn.q_proj.weight"])
-    disk_key = "model.language_model.layers.0.self_attn.q_proj.weight"
-    mapping = _family_key_mapping(model, [disk_key])
-    assert mapping[disk_key] == "model.layers.0.self_attn.q_proj.weight"
-
-
-def test_key_mapping_strips_leading_language_model():
-    model = _MockModel(["embed_tokens.weight"])
-    mapping = _family_key_mapping(model, ["language_model.embed_tokens.weight"])
-    assert mapping["language_model.embed_tokens.weight"] == "embed_tokens.weight"
-
-
-def test_key_mapping_reorders_nested_vlm_language_model():
-    """Public Mistral3 checkpoints and their instantiated VLM use different text namespaces."""
-    model = _MockModel(
-        [
-            "model.language_model.layers.0.mlp.experts.gate_up_proj",
-            "lm_head.weight",
-        ],
-        base_model_prefix="model",
-    )
-    expert_key = "language_model.model.layers.0.mlp.experts.gate_up_proj"
-    head_key = "language_model.lm_head.weight"
-
-    mapping = _family_key_mapping(model, [expert_key, head_key])
-
-    assert mapping[expert_key] == "model.language_model.layers.0.mlp.experts.gate_up_proj"
-    assert mapping[head_key] == "lm_head.weight"
-
-
-def test_key_mapping_applies_the_family_hub_renames():
-    """A family whose hub spelling differs from its module spelling (Laguna) is rewritten when the
-    raw key misses. Unmapped keys are silently skipped by the planner, so a missed rename loads the
-    module it belongs to as random weights."""
-    model = _MockModel(["model.layers.1.mlp.shared_experts.gate_proj.weight"], model_type="laguna")
-    disk_key = "model.layers.1.mlp.shared_expert.gate_proj.weight"
-    mapping = _family_key_mapping(model, [disk_key])
-    assert mapping[disk_key] == "model.layers.1.mlp.shared_experts.gate_proj.weight"
-
-
-def test_key_mapping_leaves_a_family_without_renames_alone():
-    """Anti-over-rejection: an unregistered or rename-free family keeps every key verbatim."""
-    model = _MockModel(["model.layers.0.mlp.experts.gate_up_proj"], model_type="qwen3_moe")
-    disk_key = "model.layers.0.mlp.shared_expert.gate_proj.weight"
-    assert _family_key_mapping(model, [disk_key])[disk_key] == disk_key
 
 
 def _individual_fuse_map(experts, layer=0):

@@ -27,7 +27,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 - **A missing router bias** (inherited). A checkpoint without `e_score_correction_bias` would leave it on meta under lazy loading; the wrapper materializes it at zero (a no-op additive bias) instead of letting the first routing matmul fault. The released Laguna checkpoints carry it.
 - **Hub vs module key spelling.** Laguna is the only family whose spec declares `export_key_renames`: module `mlp.shared_experts.` is hub `mlp.shared_expert.`, and module `mlp.gate.e_score_correction_bias` is hub `mlp.experts.e_score_correction_bias`.
 
-    Transformers declares both as `WeightRenaming` entries and applies them only inside `from_pretrained`, so `LAGUNA.export_key_renames` mirrors them for the three paths that bypass it: the gather, the RL weight sync, and the lazy loader (which applies the inverse on read). Without them the export writes keys vLLM silently skips and the loader leaves that submodule randomly initialized.
+    Transformers declares both as `WeightRenaming` entries, which `from_pretrained` and the lazy loader apply on read. `LAGUNA.export_key_renames` mirrors them for the three save-side paths that bypass transformers: the gather, the RL weight sync and `merge_ep_shards.py`. Without them the export writes keys vLLM silently skips.
 
     The pairs fire only when the live name actually differs, so a remote-code revision already spelling `shared_expert` is untouched. See [Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp).
 

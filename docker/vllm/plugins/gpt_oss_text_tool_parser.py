@@ -2,7 +2,7 @@
 """Text-based tool-call parser for gpt-oss served with harmony disabled.
 
 The toolkit serves gpt-oss with vLLM's harmony pipeline disabled
-(``patch_vllm_disable_gptoss.sh`` sets ``use_harmony = False``) because the
+(``patch_vllm_source.py`` sets ``use_harmony = False``) because the
 native harmony serving path returns malformed output and parser errors on this
 stack. With harmony off, the model still follows its harmony chat template and
 emits the channel structure, but vLLM detokenizes the output with the harmony

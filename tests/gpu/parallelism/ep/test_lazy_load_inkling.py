@@ -3,8 +3,8 @@
 
 ``save_pretrained`` on transformers >= 5.14 writes the composite class in Thinking Machines'
 original namespace (``model.llm.*``, ``attn.wq_du``, interleaved ``experts.w13_weight``) — the same
-layout the hub ships. The lazy loaders translate it through the family's declared conversion entry
-(``hub_conversion_keys`` → ``conversion_selection.py``), so this gate proves, against a ``from_pretrained``
+layout the hub ships. The lazy loaders plan its keys on transformers' Inkling conversion
+(``checkpoint_keys.build_key_plan``), as ``from_pretrained`` does, so this gate proves, against a ``from_pretrained``
 reference on the same checkpoint:
 
   1. **EP=2 composite** — every expert shard equals the reference's slice bitwise, attention/backbone
@@ -12,7 +12,7 @@ reference on the same checkpoint:
   2. **Pure ETP (ep1 x etp2)** — the wrapper's contiguous-halves split runs on the DE-INTERLEAVED
      tensor; an un-applied Deinterleave would hand each rank interleaved halves and move the loss.
   3. **Text-only artifact** — the same TM-layout weights with an `InklingTextConfig` ``config.json``
-     load as ``InklingForCausalLM`` (composite renames + the standard ``language_model.`` alignment),
+     load as ``InklingForCausalLM`` (the composite entries the spec declares, its text level dropped),
      with the tower/MTP-free key space fully covered.
 
 Run with 2 GPUs:

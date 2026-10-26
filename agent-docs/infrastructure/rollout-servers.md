@@ -234,6 +234,13 @@ logit-space no-mask check to the split top-p pipeline vLLM runs for the top-k-of
 most 64: without it, a budget cut (the forced token's logit is 1e9) at `rollout_top_p < 1` masks the
 whole row, the engine samples token 0 and reports a NaN log-prob.
 
+**The build-time source edits** (`docker/vllm/patches/patch_vllm_source.py`, applied through
+`docker/engine_source_patch.py`, the patcher the SGLang image shares) turn vLLM's harmony pipeline off
+for gpt-oss ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)), point the server log at stderr and
+move FlashInfer CUTLASS to the back of the unquantized MoE backends. Each edit asserts its pre- and
+post-image at build, and the script stays in the image (`/opt/halo/`) so `--verify` re-checks a running
+container.
+
 **Prompt log-probs under speculative decoding.** Model Runner V2, the image's runner, computes prompt
 log-probs before the drafter runs. The V1 runner runs the drafter first, and when the prefill ran as a
 CUDA graph the drafter's graph overwrites the target's hidden states, so every prompt position comes back

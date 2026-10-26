@@ -1,34 +1,17 @@
-"""Patch the pinned SGLang where it silently serves stale routing or another request's log-probs.
+"""Source edits to the installed SGLang, applied at image build through ``engine_source_patch``.
 
-``/update_weights_from_distributed`` ends in ``model.load_weights`` and nothing else, so a loader that
-caches a derived form of a parameter keeps serving the cached one after the parameter is rewritten.
-Gemma 4 (``gemma4_causal.py``, shared by the multimodal classes) does that: its router folds ``scale``
-into its norm weight once, behind a latch, so a pushed ``scale`` never reaches the fold. The latch is
-released by the parameter's own loader. The GLM-4 MoE gates (``glm4_moe.py``, ``glm4_moe_lite.py``)
-hold their weight in fp32 and read it live upstream; that is asserted, not rewritten, because a
-return of the cached fp32 copy would serve stale routing the same way.
-
-The prefill result loop (``batch_result_processor.py``) reads each request's input log-probs from one
-flat array at a running offset. It skips a retracted request, or one finished in a mixed batch,
-without stepping over that request's block, so each later request in the batch reads a slice
-shifted back by it, under its own ids. The skip is rewritten to advance the offset, a port of
-sgl-project/sglang#36939.
-
-Every rewrite asserts its pre-image once and its post-image after, and the asserted-only GLM gate its
-post-image, so an upstream change fails the image build rather than shipping a server that silently
-serves stale routing or shifted log-probs.
-
-    python3 patch_sglang.py            # patch the installed sglang in place
-    python3 patch_sglang.py --verify   # assert the post-images only
+python3 patch_sglang.py            # patch the installed sglang in place
+python3 patch_sglang.py --verify   # assert the post-images only
 """
 
-import argparse
-import importlib.util
+import ast
 import pathlib
 
-_GLM_GATE_FILES = ("models/glm4_moe.py", "models/glm4_moe_lite.py")
-_GEMMA4_ROUTER_FILE = "models/gemma4_causal.py"
-_PREFILL_RESULT_FILE = "managers/scheduler_components/batch_result_processor.py"
+from engine_source_patch import Edit, main
+
+_GLM_GATE_FILES = ("srt/models/glm4_moe.py", "srt/models/glm4_moe_lite.py")
+_GEMMA4_ROUTER_FILE = "srt/models/gemma4_causal.py"
+_PREFILL_RESULT_FILE = "srt/managers/scheduler_components/batch_result_processor.py"
 
 _GLM_WEIGHT_AFTER = """        self.weight = nn.Parameter(
             torch.empty(
@@ -41,16 +24,7 @@ _GLM_FORWARD_AFTER = """        logits = F.linear(hidden_states.to(torch.float32
 
 _GEMMA4_SCALE_BEFORE = """        self.scale = nn.Parameter(torch.ones(self.hidden_size))
 """
-_GEMMA4_SCALE_AFTER = """        self.scale = nn.Parameter(torch.ones(self.hidden_size))
-        self.scale.weight_loader = self._load_scale
-"""
 _GEMMA4_FUSE_BEFORE = """    def fuse_scale(self):
-"""
-_GEMMA4_FUSE_AFTER = """    def _load_scale(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
-        default_weight_loader(param, loaded_weight)
-        self._scale_fused = False
-
-    def fuse_scale(self):
 """
 
 _PREFILL_SKIP_BEFORE = """                if (
@@ -83,69 +57,56 @@ _PREFILL_SKIP_AFTER = """                if (
                     continue
 """
 
+EDITS = (
+    # /update_weights_from_distributed ends in model.load_weights, but the Gemma 4 router folds
+    # ``scale`` into its norm weight once, behind a latch: a pushed ``scale`` would never reach routing.
+    # A load of ``scale`` releases the latch.
+    Edit(
+        _GEMMA4_ROUTER_FILE,
+        _GEMMA4_SCALE_BEFORE,
+        _GEMMA4_SCALE_BEFORE + "        self.scale.weight_loader = self._load_scale\n",
+        "Gemma4 router scale",
+    ),
+    Edit(
+        _GEMMA4_ROUTER_FILE,
+        _GEMMA4_FUSE_BEFORE,
+        """    def _load_scale(self, param: nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        default_weight_loader(param, loaded_weight)
+        self._scale_fused = False
 
-def _replace_once(text: str, before: str, after: str, what: str) -> str:
-    count = text.count(before)
-    if count != 1:
-        raise SystemExit(f"{what}: expected the pre-image exactly once, found {count} — upstream changed")
-    return text.replace(before, after)
+"""
+        + _GEMMA4_FUSE_BEFORE,
+        "Gemma4 router fuse_scale",
+    ),
+    # The prefill result loop reads each request's input log-probs from one flat array at a running
+    # offset; upstream skips a retracted or mixed-batch-finished request without stepping over its
+    # block, so every later request reads a shifted slice (a port of sgl-project/sglang#36939).
+    Edit(_PREFILL_RESULT_FILE, _PREFILL_SKIP_BEFORE, _PREFILL_SKIP_AFTER, "prefill result skip"),
+)
 
 
-def patch_gemma4_router(text: str) -> str:
-    """A load of the Gemma 4 router's ``scale`` releases the fold latch."""
-    if "default_weight_loader" not in text:
-        raise SystemExit("Gemma4 router loader: default_weight_loader is no longer imported — upstream changed")
-    text = _replace_once(text, _GEMMA4_SCALE_BEFORE, _GEMMA4_SCALE_AFTER, "Gemma4 router scale")
-    return _replace_once(text, _GEMMA4_FUSE_BEFORE, _GEMMA4_FUSE_AFTER, "Gemma4 router fuse_scale")
-
-
-def patch_prefill_logprob_cursor(text: str) -> str:
-    """The prefill result loop steps over a skipped request's input log-probs."""
-    return _replace_once(text, _PREFILL_SKIP_BEFORE, _PREFILL_SKIP_AFTER, "prefill result skip")
-
-
-def verify_glm_gate(text: str, path: pathlib.Path) -> None:
+def verify_glm_gate(text: str, path: str) -> None:
+    """The GLM-4 gate holds its weight in fp32 and reads it live, so a synced gate weight reaches routing."""
     if "_weight_fp32" in text:
         raise SystemExit(f"{path}: the GLM gate still caches its fp32 weight")
     if _GLM_WEIGHT_AFTER not in text or _GLM_FORWARD_AFTER not in text:
         raise SystemExit(f"{path}: the GLM gate does not hold its weight in fp32 and read it live")
 
 
-def verify_gemma4_router(text: str, path: pathlib.Path) -> None:
-    if _GEMMA4_SCALE_AFTER not in text or _GEMMA4_FUSE_AFTER not in text:
-        raise SystemExit(f"{path}: the Gemma4 router scale loader does not release the fold latch")
-
-
-def verify_prefill_logprob_cursor(text: str, path: pathlib.Path) -> None:
-    if _PREFILL_SKIP_AFTER not in text:
-        raise SystemExit(f"{path}: the prefill result loop skips a request without stepping over its input log-probs")
-
-
-def _srt_dir() -> pathlib.Path:
-    spec = importlib.util.find_spec("sglang")
-    if spec is None or not spec.submodule_search_locations:
-        raise SystemExit("sglang is not importable in this interpreter")
-    return pathlib.Path(next(iter(spec.submodule_search_locations))) / "srt"
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--verify", action="store_true", help="assert the post-images without rewriting")
-    args = parser.parse_args()
-    srt = _srt_dir()
-    targets = [(srt / name, None, verify_glm_gate) for name in _GLM_GATE_FILES]
-    targets.append((srt / _GEMMA4_ROUTER_FILE, patch_gemma4_router, verify_gemma4_router))
-    targets.append((srt / _PREFILL_RESULT_FILE, patch_prefill_logprob_cursor, verify_prefill_logprob_cursor))
-    for path, patch, verify in targets:
-        if not path.is_file():
-            raise SystemExit(f"{path} is missing — upstream moved the file")
-        text = path.read_text(encoding="utf-8")
-        if patch is not None and not args.verify:
-            text = patch(text)
-            path.write_text(text, encoding="utf-8")
-        verify(text, path)
-        print(f"{path.name}: {'patched' if patch is not None and not args.verify else 'verified'}")
+def verify_upstream(root: pathlib.Path) -> None:
+    """Assert the upstream code the edits rely on: the GLM-4 gates and the loader ``_load_scale`` calls."""
+    for name in _GLM_GATE_FILES:
+        verify_glm_gate((root / name).read_text(encoding="utf-8"), name)
+    gemma4 = ast.parse((root / _GEMMA4_ROUTER_FILE).read_text(encoding="utf-8"))
+    imported = {
+        alias.asname or alias.name
+        for node in ast.walk(gemma4)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    if "default_weight_loader" not in imported:
+        raise SystemExit("Gemma4 router loader: default_weight_loader is no longer imported — upstream changed")
 
 
 if __name__ == "__main__":
-    main()
+    main("sglang", EDITS, verify_upstream)

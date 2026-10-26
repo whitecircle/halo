@@ -2,18 +2,16 @@
 """Laguna's hub checkpoint spells two modules differently from the live module tree.
 
 ``transformers`` declares the difference as two ``WeightRenaming`` entries and applies them inside
-``from_pretrained`` only. Both of the toolkit's own key paths therefore have to carry it:
+``from_pretrained`` only, while the toolkit's own key paths carry it in both directions:
 
 - the EP **gather** writes the live module names, so without the rewrite a gathered/merged checkpoint
   and the online-GRPO weight sync ship ``mlp.shared_experts.*`` and
   ``mlp.gate.e_score_correction_bias``. vLLM keys on hub names and silently skips unknown ones, so
-  serving loses the router correction bias;
-- the EP **lazy loader** reads safetensors directly and never sees transformers' mapping, so the hub's
-  ``mlp.shared_expert.*`` matches no live key and is dropped — the shared expert loads as random
-  weights (the shipped ``examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml`` is that shape).
-
-``MoEFamilySpec.export_key_renames``-driven rewriting closes both, and
-``test_declaration_matches_transformers`` keeps the declaration honest.
+  serving loses the router correction bias. ``MoEFamilySpec.export_key_renames`` drives that rewrite,
+  and ``test_declaration_matches_transformers`` keeps it equal to transformers' entries;
+- the EP **lazy loader** reads safetensors directly, planning its keys on transformers' mapping, so the
+  hub's ``mlp.shared_expert.*`` must land on the live module rather than load as random weights (the
+  shipped ``examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml`` is that shape).
 
     python tests/cpu/parallelism/test_laguna_export_key_renames.py
 """
@@ -30,7 +28,7 @@ from transformers.core_model_loading import WeightRenaming
 from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
-from src.models.moe.family_specs import MoEFamilySpec, find_moe_family_spec
+from src.models.moe.family_specs import MoEFamilySpec
 
 LAGUNA_MOE_LAYER = 1  # layer 0 is dense (first_k_dense_replace)
 
@@ -125,8 +123,6 @@ def test_a_family_without_renames_is_untouched():
     gathered = set(_Plain().gather_layer_state_dict("model.layers.1.mlp", retain=True))
     assert "model.layers.1.mlp.gate.e_score_correction_bias" in gathered
     assert "model.layers.1.mlp.shared_experts.weight" in gathered
-    assert find_moe_family_spec("qwen3_moe").hub_to_module_renames() == ()
-    assert find_moe_family_spec("gpt_oss").hub_to_module_renames() == ()
 
 
 def test_lazy_loader_maps_hub_keys_onto_the_live_module():
@@ -147,16 +143,8 @@ def test_lazy_loader_maps_hub_keys_onto_the_live_module():
         assert mapping[hub_key] in live, f"{hub_key} -> {mapping[hub_key]} matches no live tensor"
     assert mapping[f"{prefix}.experts.e_score_correction_bias"] == f"{prefix}.gate.e_score_correction_bias"
     assert mapping[f"{prefix}.shared_expert.gate_proj.weight"] == f"{prefix}.shared_experts.gate_proj.weight"
-    # An already-resolving key must not be rewritten by the fallback.
+    # An already-live key is not renamed.
     assert mapping[f"{prefix}.gate.weight"] == f"{prefix}.gate.weight"
-
-
-def test_export_and_load_renames_are_inverses():
-    for module_spelling, hub_spelling in EPLagunaMoELayer.FAMILY.export_key_renames:
-        assert EPLagunaMoELayer.FAMILY.to_hub_key(f"{module_spelling}x") == f"{hub_spelling}x"
-    assert dict(find_moe_family_spec("laguna").hub_to_module_renames()) == {
-        hub: module for module, hub in EPLagunaMoELayer.FAMILY.export_key_renames
-    }
 
 
 if __name__ == "__main__":

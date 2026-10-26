@@ -72,10 +72,6 @@ class MoEFamilySpec:
                 return key.replace(module_spelling, hub_spelling, 1)
         return key
 
-    def hub_to_module_renames(self) -> tuple[tuple[str, str], ...]:
-        """``(hub, live module)`` pairs: the load-side inverse of :meth:`to_hub_key`."""
-        return tuple((hub, module) for module, hub in self.export_key_renames)
-
 
 _E_SCORE_CORRECTION_BIAS = NativeBalancingSlot(("gate.e_score_correction_bias",))
 

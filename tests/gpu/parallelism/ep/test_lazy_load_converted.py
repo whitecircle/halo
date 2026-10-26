@@ -5,8 +5,8 @@ GLM-5 Next and Step-3.7 ship in a layout transformers bridges only inside ``from
 GLM-5 Next's vendor-namespace KDA / hyper-connection keys, per-expert projections and the
 three-source ``q/k/v_conv1d → conv1d`` Concatenate; Step-3.7's prefix renames, ``moe.*`` → ``mlp.*``,
 the two-source per-layer ``moe.gate_proj + moe.up_proj → gate_up_proj`` Concatenate and the Step-3.5
-vision tower's chunked, RoPE-permuted ``in_proj``. The lazy loaders replay that mapping per key
-(``hub_conversion_keys`` → ``conversion_selection.py``), so this gate proves, against a
+vision tower's chunked, RoPE-permuted ``in_proj``. The lazy loaders plan their keys on that mapping
+(``checkpoint_keys.build_key_plan``), as ``from_pretrained`` does, so this gate proves, against a
 ``from_pretrained`` reference on the same checkpoint (written by the family's own ``save_pretrained``):
 
   1. **EP=2** — every expert shard equals the reference's slice bitwise (a fan-in sliced through

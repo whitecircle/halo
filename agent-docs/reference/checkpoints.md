@@ -274,11 +274,14 @@ the per-expert merges, runs on every streamed chunk, so a vendor or wrapper name
 spells it. No reverse entry fuses tensors across two chunks, which
 `tests/cpu/checkpoint/test_ep_hub_namespace_export.py` pins per family. Inside an EP layer a family whose
 live names differ from its hub's declares the pairs in its spec's `export_key_renames` (Laguna), which the
-gather, the lazy loader (inverted) and `merge_ep_shards.py` apply. Four families declare transformers'
-load-side conversion for their hub checkpoints (`hub_conversion_keys`: Inkling, DeepSeek-V4, GLM-5 Next,
-Step-3.7 Flash), which the lazy loaders replay per key, as they replay a SigLIP tower's `vision_model`
-level for every family; a converted key whose targets all miss the model's key space while the key itself
-resolves is kept, so a canonical checkpoint (an EP resume of a toolkit save) loads untouched.
+gather and `merge_ep_shards.py` apply; the lazy loader reads the hub spelling through transformers' own
+Laguna renamings. Every lazy build plans its keys with the family's whole transformers conversion mapping,
+as `from_pretrained` does (`src/model_loading/checkpoint_keys.py`), a SigLIP tower's `vision_model` level
+included. Four families declare the mapping their hub checkpoints need (`hub_conversion_keys`: Inkling,
+DeepSeek-V4, GLM-5 Next, Step-3.7 Flash); each declared key must resolve in the installed transformers, and
+a text-only class with no mapping of its own (Inkling's text artifact) plans with those entries. A key stays
+unconverted when its rename target misses the live names while the key itself is live, the retry
+transformers' own loader makes, so a canonical checkpoint (an EP resume of a toolkit save) loads untouched.
 
 **Sharded (`save_sharded_ep: true`)** writes each rank's expert shard keyed by global rank, with global
 rank 0 adding non-expert params and the index. `merge_ep_shards.py` needs the shards co-located and
@@ -465,7 +468,9 @@ optimizer and LR scheduler. WandB does **not** continue the same run on its own 
 
 Every whole-weight read into an already-built model (Path A, and every best-model load) first maps the
 checkpoint onto the live names through `ModuleLayoutView` (`src/checkpoint/hub_layout.py`), replaying the
-conversions the save reverted, so a per-expert checkpoint lands in fused experts. Where the tensors live is
+conversions the save reverted, so a per-expert checkpoint lands in fused experts. It plans the keys with the
+lazy loaders' planner (`src/model_loading/checkpoint_keys.py`), so a resume and a lazy build read a
+checkpoint the same way. Where the tensors live is
 resolved by `resolve_checkpoint_weights()` (`src/checkpoint/reading.py`): the index first (read as the map
 itself, so a key-set read opens no shard), then a single `model.safetensors`, then a legacy
 `pytorch_model.bin`; each reader keeps its own verdict on an empty, per-rank or torn directory. Whether the

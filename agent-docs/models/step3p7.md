@@ -65,7 +65,7 @@ ETP uses the shared fused-GLU helper: at `expert_tp_size > 1` the gate/up halves
 
 EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor namespace (the top-level prefix renames, `moe.*` → `mlp.*`, the two-source `moe.gate_proj + moe.up_proj → gate_up_proj` concatenate, the Step-3.5 vision tower's own chunked, RoPE-permuted `in_proj`).
 
-The lazy loaders replay transformers' `step3p7` and `step3p5_vision` conversions per key (`hub_conversion_keys`; the vision entries scoped under the tower's module path, as transformers scopes them) while reading only this rank's expert slice through both fan-in sources, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py --family step3p7`).
+The lazy loaders plan their keys on transformers' `step3p7` and `step3p5_vision` conversions, as `from_pretrained` does (the vision entries scoped under the tower's module path), while reading only this rank's expert slice through both fan-in sources, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py --family step3p7`).
 
 There is no full-model host residency at 198B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~398 GB of page cache node-wide at ep8 (the checkpoint minus the MTP tail, shared by the 8 ranks), up to ~65 GB of file-backed RSS per rank while its shard handles are open. The fan-in's 2× transient (~0.8 GB per layer) is on the GPU.
 

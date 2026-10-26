@@ -16,18 +16,9 @@ from dataclasses import dataclass
 from functools import partial
 
 import torch
-from transformers.conversion_mapping import get_model_conversion_mapping
-from transformers.core_model_loading import (
-    PrefixChange,
-    WeightConverter,
-    WeightRenaming,
-    dot_natural_key,
-    rename_source_key,
-    revert_weight_conversion,
-)
+from transformers.core_model_loading import PrefixChange, WeightConverter, WeightRenaming, revert_weight_conversion
 
-from src.model_loading.lazy_safetensors.conversion import is_expert_bank_merge, is_sub_model_prefix_change
-from src.models.model_classes import transformers_model_class
+from src.model_loading.checkpoint_keys import build_key_plan, is_expert_bank_merge, resolve_model_conversions
 from src.models.param_roles import persistent_buffers
 
 logger = logging.getLogger(__name__)
@@ -43,23 +34,16 @@ def _has_child_at_prefix(model: torch.nn.Module, dotted_prefix: str) -> bool:
     return True
 
 
-def _family_conversions(model: torch.nn.Module, *, add_legacy: bool) -> list:
-    """transformers' conversion mapping for ``model``'s family; empty without a ``config``, which keys the
-    registry. FSDP2's ``FSDP<Name>`` classes read as custom code there, so each module gets its
-    transformers class back for the lookup."""
-    if getattr(model, "config", None) is None:
-        return []
-    swapped = []
-    try:
-        for module in model.modules():
-            original = transformers_model_class(module)
-            if original is not None and type(module) is not original:
-                swapped.append((module, type(module)))
-                module.__class__ = original
-        return get_model_conversion_mapping(model, add_legacy=add_legacy)
-    finally:
-        for module, wrapped_class in swapped:
-            module.__class__ = wrapped_class
+def _is_sub_model_prefix_change(conversion) -> bool:
+    """Whether ``conversion`` strips the leading level of a sub-model's own keys: a ``PrefixChange`` scoped to
+    the sub-model, such as the ``vision_model`` level of a SigLIP tower (Command A+, LFM2-VL), which the hub
+    index and both engines' loaders keep and the module tree drops."""
+    return (
+        isinstance(conversion, PrefixChange)
+        and bool(conversion.scope_prefix)
+        and bool(conversion.prefix_to_remove)
+        and not conversion.model_prefix
+    )
 
 
 def conversions_to_revert(model: torch.nn.Module) -> list:
@@ -79,8 +63,8 @@ def conversions_to_revert(model: torch.nn.Module) -> list:
         keep_prefix_change = quantized and any(isinstance(c, PrefixChange) for c in conversions)
         conversions = [
             c
-            for c in _family_conversions(model, add_legacy=False)
-            if keep_prefix_change or not isinstance(c, PrefixChange) or is_sub_model_prefix_change(c)
+            for c in resolve_model_conversions(model, add_legacy=False)
+            if keep_prefix_change or not isinstance(c, PrefixChange) or _is_sub_model_prefix_change(c)
         ]
     # A text-only load of a multimodal checkpoint must not re-emit wrapper-prefixed keys engines cannot serve.
     return [
@@ -89,7 +73,7 @@ def conversions_to_revert(model: torch.nn.Module) -> list:
         if not (
             isinstance(c, PrefixChange)
             and c.prefix_to_remove
-            and not is_sub_model_prefix_change(c)
+            and not _is_sub_model_prefix_change(c)
             and not _has_child_at_prefix(model, c.prefix_to_remove)
         )
     ]
@@ -168,20 +152,17 @@ class CheckpointNamespace:
     @classmethod
     def of(cls, model: torch.nn.Module) -> CheckpointNamespace:
         return cls(
-            conversions=tuple(_family_conversions(model, add_legacy=True)),
+            conversions=tuple(resolve_model_conversions(model, add_legacy=True)),
             base_model_prefix=getattr(model, "base_model_prefix", None) or None,
             export_conversions=tuple(export_conversions(model)),
         )
 
 
 class ModuleLayoutView:
-    """A checkpoint's tensors under the live model's own names: the read side of :func:`revert_to_load_layout`.
-
-    Reads the way ``from_pretrained`` does, through the family's whole conversion mapping (renames, then
-    at most one converter per key; a key whose rename misses the live tree but which hits itself stays),
-    so any layout a save wrote reads back. Planned from key names alone: :attr:`keys` (the names it
-    supplies) and :attr:`sources` (the checkpoint keys the live names read) are known before any shard
-    opens. ``live_names`` and ``namespace`` stand in for a module holding part of the model (a PP stage).
+    """A checkpoint's tensors under the live model's own names (the read side of :func:`revert_to_load_layout`),
+    planned by :func:`~src.model_loading.checkpoint_keys.build_key_plan` through the family's whole conversion
+    mapping, so any layout a save wrote reads back. ``live_names`` and ``namespace`` stand in for a module
+    holding part of the model (a PP stage).
     """
 
     def __init__(
@@ -195,66 +176,30 @@ class ModuleLayoutView:
         self._model = model
         if live_names is None:
             live_names = (name for name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)))
-        # A mapping, not a set: ``rename_source_key`` probes its ``meta_state_dict`` with ``.get``.
-        self._live = dict.fromkeys(live_names, True)
         if namespace is None:
             namespace = CheckpointNamespace.of(model)
-        renamings = [c for c in namespace.conversions if isinstance(c, WeightRenaming)]
-        converters = [c for c in namespace.conversions if isinstance(c, WeightConverter)]
-        by_source = {pattern: converter for converter in converters for pattern in converter.source_patterns}
-        prefix = namespace.base_model_prefix
-        self._renamed: dict[str, str] = {}
-        # First target → (the converter its group runs, its ``(checkpoint key, source pattern)`` in arrival order).
-        self._converted: dict[str, tuple[WeightConverter, list[tuple[str, str]]]] = {}
-        # Natural order, as from_pretrained collects: a converter stacks experts in arrival order.
-        for key in sorted(checkpoint_keys, key=dot_natural_key):
-            target, pattern = rename_source_key(key, renamings, converters, prefix, self._live)
-            if target not in self._live and key in self._live:
-                target, pattern = rename_source_key(key, [], [], prefix, self._live)
-            if pattern is None:
-                self._renamed.setdefault(target, key)
-            else:
-                self._converted.setdefault(target, (by_source[pattern], []))[1].append((key, pattern))
-        self.keys = frozenset(self._renamed).union(
-            *(self._targets(first, converter) for first, (converter, _) in self._converted.items())
-        )
-        self.sources = frozenset(
-            itertools.chain(
-                (key for target, key in self._renamed.items() if target in self._live),
-                (key for _, _, parts in self._live_groups() for key, _ in parts),
-            )
-        )
-
-    @staticmethod
-    def _targets(first: str, converter: WeightConverter) -> tuple[str, ...]:
-        """The live names a converter group produces, spelled off its first target as transformers does."""
-        return tuple(first.replace(converter.target_patterns[0], target, 1) for target in converter.target_patterns)
-
-    def _live_groups(self) -> Iterator[tuple[str, WeightConverter, list[tuple[str, str]]]]:
-        """The converter groups that produce at least one live name."""
-        for first, (converter, parts) in self._converted.items():
-            if any(target in self._live for target in self._targets(first, converter)):
-                yield first, converter, parts
+        self._plan = build_key_plan(checkpoint_keys, live_names, namespace.conversions, namespace.base_model_prefix)
+        self.keys = self._plan.keys
+        self.sources = self._plan.sources
 
     def items(self, read: Callable[[str], torch.Tensor]) -> Iterator[tuple[str, torch.Tensor]]:
         """``(live name, tensor)`` for every live tensor the checkpoint supplies, one converted group at a
         time; ``read`` serves one checkpoint tensor by key, called only when its group is reached."""
-        for target, key in self._renamed.items():
-            if target in self._live:
-                yield target, read(key)
+        for target, key in self._plan.live_renames().items():
+            yield target, read(key)
         config = getattr(self._model, "config", None)
-        for first, converter, parts in self._live_groups():
-            expected = self._targets(first, converter)
-            group = deepcopy(converter)
-            for key, pattern in parts:
-                group.add_tensor(first, key, pattern, partial(read, key))
-            for target, tensor in group.convert(first, model=self._model, config=config).items():
-                if target not in expected:
+        for group in self._plan.live_groups():
+            first = group.targets[0]
+            converter = deepcopy(group.converter)
+            for key, pattern in group.parts:
+                converter.add_tensor(first, key, pattern, partial(read, key))
+            for target, tensor in converter.convert(first, model=self._model, config=config).items():
+                if target not in group.targets:
                     raise RuntimeError(
                         f"The load conversion for {first!r} produced {target!r}, outside the names "
-                        f"{list(expected)} the resume matched against the live model."
+                        f"{list(group.targets)} the resume matched against the live model."
                     )
-                if target in self._live:
+                if target in self._plan.live:
                     yield target, tensor[0] if isinstance(tensor, list) else tensor
 
 

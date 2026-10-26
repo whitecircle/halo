@@ -94,7 +94,7 @@ print('expert loader layouts: OK (gpt_oss fused, qwen3_moe per-expert)')"
 # hands a skipped request's input log-probs to the requests after it (docker/sglang/patches/
 # patch_sglang.py names each). Its pre- and post-image assertions fail the build on an upstream change,
 # and it stays in the image for `--verify`.
-COPY docker/sglang/patches/patch_sglang.py /opt/halo/patch_sglang.py
+COPY docker/engine_source_patch.py docker/sglang/patches/patch_sglang.py /opt/halo/
 RUN python3 /opt/halo/patch_sglang.py
 
 # The log-prob rewrite is asserted as text above; this drives the patched loop with a retracted

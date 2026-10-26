@@ -7,8 +7,8 @@ The shared round trip (``tests/common/ep_sft_roundtrip.py``) on the registry's t
 fused-but-split ``moe.gate_proj`` / ``moe.up_proj`` / ``moe.down_proj`` tensors, ``moe.gate.weight`` +
 ``moe.router_bias``, ``share_expert.*``, the vendor-namespace vision tower. Then all ranks:
 
-  1. Load it through ``load_distributed_model`` with EP=2 — the lazy loader route, which replays
-     the family's hub conversion per key (``hub_conversion_keys``: the prefix renames, the
+  1. Load it through ``load_distributed_model`` with EP=2 — the lazy loader route, which plans its
+     keys on the family's hub conversion (the prefix renames, the
      ``moe.*`` → ``mlp.*`` renames, the two-source ``moe.gate_proj + moe.up_proj → gate_up_proj``
      fan-in sliced through both sources, the scoped Step-3.5 vision tower) on a HETEROGENEOUS
      config (per-layer 4-vs-2 attention heads); its bit-exactness against ``from_pretrained`` is

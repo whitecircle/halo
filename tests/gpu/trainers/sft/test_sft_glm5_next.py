@@ -7,9 +7,9 @@ The shared round trip (``tests/common/ep_sft_roundtrip.py``) on the registry's t
 plus the vendor-namespace KDA/hyper-connection keys (``hc_attn_fn``, ``self_attn.f_a_proj``, split
 ``q/k/v_conv1d``). Then all ranks:
 
-  1. Load it through ``load_distributed_model`` with EP=2 — the lazy loader route, which replays
-     the family's hub conversion per key (``hub_conversion_keys``: the vendor-namespace renames,
-     the three-source ``q/k/v_conv1d → conv1d`` fan-in) and fuses the per-expert projections
+  1. Load it through ``load_distributed_model`` with EP=2 — the lazy loader route, which plans its
+     keys on the family's hub conversion (the vendor-namespace renames, the three-source
+     ``q/k/v_conv1d → conv1d`` fan-in) and fuses the per-expert projections
      locally; its bit-exactness against ``from_pretrained`` is pinned by
      ``tests/gpu/parallelism/ep/test_lazy_load_converted.py``.
   2. Run a short DistributedSFTTrainer run over text-only conversations (forward + backward +

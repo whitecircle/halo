@@ -20,11 +20,10 @@ LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
 # The Halo-authored patches/plugins under /opt ship under the Halo License.
 COPY LICENSE APACHE-2.0.txt /opt/halo-license/
 
-COPY docker/vllm/patches/patch_vllm_disable_gptoss.sh /tmp/patch_vllm_disable_gptoss.sh
-RUN chmod +x /tmp/patch_vllm_disable_gptoss.sh \
-    && VLLM_PATH=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
-    && /tmp/patch_vllm_disable_gptoss.sh "$VLLM_PATH" \
-    && rm /tmp/patch_vllm_disable_gptoss.sh
+# Source edits to the installed vLLM (docker/vllm/patches/patch_vllm_source.py names each). Every edit
+# asserts its pre- and post-image, failing the build on an upstream change; it stays for `--verify`.
+COPY docker/engine_source_patch.py docker/vllm/patches/patch_vllm_source.py /opt/halo/
+RUN python3 /opt/halo/patch_vllm_source.py
 
 COPY docker/vllm/plugins/gpt_oss_text_tool_parser.py /opt/gpt_oss_text_tool_parser.py
 

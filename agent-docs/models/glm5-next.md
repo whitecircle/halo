@@ -49,7 +49,7 @@ The checkpoint is a composite VLM with **no text-only CausalLM sibling** in tran
 
 ETP uses the shared fused-GLU helper: at `expert_tp_size > 1` the gate/up halves store as separate shards ([ETP](../parallelism/expert-tensor-parallelism.md#limitations)).
 
-EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor namespace (hc tensors, the KDA `forget_gate` family, a three-source `q/k/v_conv1d → conv1d` merge, per-expert projections), and the lazy loaders replay transformers' `glm5_next` conversion per key (`hub_conversion_keys`) while fusing only this rank's experts, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py`).
+EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor namespace (hc tensors, the KDA `forget_gate` family, a three-source `q/k/v_conv1d → conv1d` merge, per-expert projections), and the lazy loaders plan their keys on transformers' `glm5_next` conversion, as `from_pretrained` does, while fusing only this rank's experts, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py`).
 
 There is no full-model host residency at 321B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~628 GB of page cache node-wide at ep8 (the bf16 conversion minus the MTP tail, shared by the 8 ranks), up to ~95 GB of file-backed RSS per rank while its shard handles are open. The per-expert gate+up fusion's 2× transient (~1.2 GB per layer) is on the GPU.
 

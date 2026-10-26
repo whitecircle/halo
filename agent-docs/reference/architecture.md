@@ -53,6 +53,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/checkpoint/atomic.py` | exclusive staging with ordinary umask permissions (safetensors files included), atomic Torch-file publication, directory fsync — no rank coordination |
 | `src/checkpoint/format.py` | every on-disk checkpoint name two modules share, and the builders that spell them — no model |
 | `src/checkpoint/reading.py` | raw checkpoint reads: the layout cascade, the JSON configs, the streaming reader, the partial-checkpoint refusals, the tools' shard walks and header sizing — no model |
+| `src/model_loading/checkpoint_keys.py` | where each checkpoint key lands on the live names, planned once on transformers' rename rules from key names alone (no shard read, no collective), and the conversion mapping it plans with, so a lazy build and a resume read the same keys |
 | `src/checkpoint/hub_layout.py` | the transformers load conversions a save reverts to write the hub's tensor names, and `ModuleLayoutView`, which reads a saved layout under the live names |
 | `src/checkpoint/writing.py` | save-dtype casts, the stale-file sweep, the merged index, the whole-dict and streaming shard writers, the tied-embedding reconcile |
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules, with no boto3 import |
@@ -153,16 +154,16 @@ These packages import each other acyclically
 
 No parallelism package imports `src/model_loading/parallel/`, so what both sides need sits in the
 parallelism packages: `expert_parallel/lazy_plan.py` holds the expert-key vocabulary, the lazy gate, the
-per-key weight planner, the family key mapping and the prologue both lazy loaders share, and
+per-key weight planner and the prologue both lazy loaders share, and
 `expert_parallel/expert_fuser.py` stacks a per-expert checkpoint's local experts. The loaders themselves
 sit in the dispatch package: `ep.py`, `pp.py`, and `fp32_masters.py`, which selects the configured FP32
 parameter masters off the EP layer registry, captures them for a lazy load and streams their stored
 values back for eager construction ([Load precision](../models/README.md#load-precision)).
 
-The machinery both lazy loaders share — conversion-op math and key alignment (`conversion.py`), which
-transformers conversions apply (`conversion_selection.py`), per-key weight plans and the shared stream
-tail (`materialization.py`), meta-shell instantiation (`meta_shell.py`) — lives in
-`src/model_loading/lazy_safetensors/`, with no parallelism knowledge.
+The machinery both lazy loaders share — the conversion-op vocabulary and the key plan translated into it
+(`conversion.py`), which transformers conversions a load plans with (`conversion_selection.py`), per-key
+weight plans and the shared stream tail (`materialization.py`), meta-shell instantiation (`meta_shell.py`) —
+lives in `src/model_loading/lazy_safetensors/`, with no parallelism knowledge.
 
 The FSDP2, HSDP, and TP axes ride a torch `DeviceMesh` (`src/distributed/mesh.py`); EP and CP use
 hand-built `dist.new_group` groups whose all-to-all patterns do not map to a mesh. The trainer reads
