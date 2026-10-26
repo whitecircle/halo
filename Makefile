@@ -9,7 +9,7 @@ SHELL := /bin/bash
 
 IMAGE        ?= halo:blackwell
 # SemVer for the versioned image tags the push targets publish alongside the moving tags.
-VERSION      ?= 1.1.0
+VERSION      ?= 1.2.0
 # The engine release a server image builds, read off its Dockerfile ARG (the one place it is pinned).
 VLLM_VERSION   := $(shell sed -n 's/^ARG VLLM_VERSION=//p' Dockerfile.vllm)
 SGLANG_VERSION := $(shell sed -n 's/^ARG SGLANG_VERSION=//p' Dockerfile.sglang)

@@ -58,7 +58,7 @@ RUN python3 /tmp/verify_prefill_logprob_cursor.py && rm /tmp/verify_prefill_logp
 # Per-build labels, set last: an ARG in scope reaches every later RUN as environment, so a new date or
 # commit above the build steps would re-key their cache. make build-sglang passes all three, and
 # the base's revision label (its engine's commit) is replaced.
-ARG VERSION=1.1.0
+ARG VERSION=1.2.0
 ARG BUILD_DATE
 ARG SOURCE_REVISION=dev
 LABEL org.opencontainers.image.version="${VERSION}"

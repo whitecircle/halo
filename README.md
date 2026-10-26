@@ -51,6 +51,11 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
+- **2026-10-25 — Halo 1.2.0.** Pipeline parallelism, tree packing and a newer stack: pipeline
+  parallelism for SFT, preference, offline GRPO, reward and classification training, alone or with EP
+  or ETP inside each stage; SFT tree packing, which stores a prefix that several rows share once;
+  transformers 5.20 and TRL 1.14, with rollouts on vLLM 0.32 or SGLang 0.5.22; and the import
+  package renamed to `halo`.
 - **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL: fused
   MoE kernels and FlexAttention on sliding-window layers (1.67× over Halo 1.0.0 for Gemma 4 26B-A4B on
   two GPUs), an atomic-free expert permute (up to 27% faster for gpt-oss at EP8), checkpoint and resume
@@ -77,10 +82,10 @@ docker pull public.ecr.aws/whitecircle/halo:blackwell
 docker pull public.ecr.aws/whitecircle/halo:hopper
 ```
 
-Versioned tags (`:blackwell-1.1.0`, `:hopper-1.1.0`) pin the release. There is
+Versioned tags (`:blackwell-1.2.0`, `:hopper-1.2.0`) pin the release. There is
  no `latest` tag, since the images are architecture-specific. The RL
 inference images are published alongside them (`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as
-`:vllm-0.32.0-1.1.0` and `:sglang-0.5.22-1.1.0`.
+`:vllm-0.32.0-1.2.0` and `:sglang-0.5.22-1.2.0`.
 
 To build locally instead: 
 ```bash
