@@ -42,12 +42,18 @@ from trl import GRPOConfig, GRPOTrainer
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.registry import build_environment
 from src.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND
-from src.trainers.grpo.environmental import (
-    DistributedAsyncEnvironmentalGRPOTrainer,
+from src.trainers.grpo.environmental.environmental_rules import (
+    reject_answerless_datasets,
+    reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
+    reject_unneutralized_forced_closes,
+    reject_unread_grpo_knobs,
+    reject_unverified_carried_reasoning,
     reject_vespo_loss,
 )
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
+from src.trainers.training_args_overrides import keep_all_dataset_columns
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 
@@ -61,20 +67,22 @@ def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
 # Every gate below is driven as a bound method on a bare host, which pins its logic but not its
 # wiring: a deleted call site would leave all of those green and the gate dead.
 _INIT_GATES = (
-    "_reject_unverified_carried_reasoning",
-    "_validate_eval_round",
-    "_force_full_dataset_columns",
-    "_reject_answerless_datasets",
-    "_validate_reasoning_terms",
+    "reject_unverified_carried_reasoning",
+    "reject_straddling_train_groups",
+    "validate_eval_round",
+    "keep_all_dataset_columns",
+    "reject_answerless_datasets",
+    "reject_inert_reasoning_terms",
     "_resolve_reasoning_end_ids",
     "_resolve_forced_close_ids",
-    "_require_forced_close_neutralized",
+    "reject_unneutralized_forced_closes",
+    "reject_inert_is_stages",
     "reject_off_policy_mask_threshold",
     "reject_vespo_loss",
     "reject_inert_std_floor",
     "resolve_rollout_stop_token_ids",
     "_arm_update_breaker",
-    "_refuse_unread_grpo_knobs",
+    "reject_unread_grpo_knobs",
 )
 
 
@@ -90,12 +98,19 @@ def _called_names(fn: ast.FunctionDef) -> set[str]:
     return names
 
 
-def _init_source() -> ast.FunctionDef:
-    return ast.parse(textwrap.dedent(inspect.getsource(DistributedAsyncEnvironmentalGRPOTrainer.__init__))).body[0]
+# The trainer's init and the configure phases it runs.
+_INIT_PHASES = ("__init__", "_configure_rollout_state", "_configure_importance_sampling")
+
+
+def _method_source(name: str) -> ast.FunctionDef:
+    method = getattr(DistributedAsyncEnvironmentalGRPOTrainer, name)
+    return ast.parse(textwrap.dedent(inspect.getsource(method))).body[0]
 
 
 def test_every_gate_is_still_called_from_the_trainers_init():
-    called = _called_names(_init_source())
+    init = _method_source("__init__")
+    assert {"_configure_rollout_state", "_configure_importance_sampling"} <= _called_names(init)
+    called = set().union(*(_called_names(_method_source(name)) for name in _INIT_PHASES))
     missing = [gate for gate in _INIT_GATES if gate not in called]
     assert not missing, f"DistributedAsyncEnvironmentalGRPOTrainer.__init__ no longer calls: {missing}"
 
@@ -106,10 +121,10 @@ def test_a_refused_knob_is_refused_before_the_balance_gate_reads_it(gate):
     knob this trainer refuses on its own: a user who unsets the balance meets the real refusal only on the
     next launch."""
     first_call = {}
-    for node in ast.walk(_init_source()):
+    for node in ast.walk(_method_source("_configure_rollout_state")):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             first_call[node.func.id] = min(node.lineno, first_call.get(node.func.id, node.lineno))
-    assert first_call[gate] < first_call["validate_token_mass_balance"]
+    assert first_call[gate] < first_call["reject_unbalanceable_token_mass"]
 
 
 def test_off_policy_mask_threshold_is_refused_with_the_working_knob_named(tmp_path):
@@ -152,12 +167,6 @@ def test_one_forced_close_drops_a_whole_turn_row_under_trls_vespo_weight():
     assert weight.item() < 1e-12
 
 
-def _knob_host(tmp_path, **overrides):
-    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.args = _grpo_config(tmp_path, **overrides)
-    return host
-
-
 @pytest.mark.parametrize(
     ("knob", "value", "named"),
     [
@@ -173,7 +182,7 @@ def test_a_grpo_knob_this_trainer_never_reads_is_refused_when_set(tmp_path, knob
     """The actors sample from the rollout config and the IS correction truncates per token from above, so
     each of these set away from TRL's default would change nothing: refused, naming what does the job."""
     with pytest.raises(ValueError, match=rf"(?s)'{knob}'.*{named}"):
-        _knob_host(tmp_path, **{knob: value})._refuse_unread_grpo_knobs()
+        reject_unread_grpo_knobs(_grpo_config(tmp_path, **{knob: value}))
 
 
 @pytest.mark.parametrize("mode", ["token_mask", "sequence_truncate"])
@@ -181,10 +190,10 @@ def test_an_is_mode_the_correction_does_not_apply_is_refused_naming_the_one_it_d
     """``token_mask`` would zero a ratio above the cap that the correction clamps, ``sequence_truncate`` would take
     one ratio per sequence: refused, naming the mode the trainer accepts, and that mode passes."""
     with pytest.raises(ValueError, match=rf"vllm_importance_sampling_mode='{mode}'") as refused:
-        _knob_host(tmp_path, vllm_importance_sampling_mode=mode)._refuse_unread_grpo_knobs()
+        reject_unread_grpo_knobs(_grpo_config(tmp_path, vllm_importance_sampling_mode=mode))
     named = re.search(r"TRL's '(\w+)'", str(refused.value)).group(1)
     assert named.startswith("token_")
-    _knob_host(tmp_path, vllm_importance_sampling_mode=named)._refuse_unread_grpo_knobs()
+    reject_unread_grpo_knobs(_grpo_config(tmp_path, vllm_importance_sampling_mode=named))
 
 
 def test_the_correction_is_trls_token_truncate_and_not_its_token_mask():
@@ -204,34 +213,33 @@ def test_the_correction_is_trls_token_truncate_and_not_its_token_mask():
 
 def test_the_trl_defaults_of_the_unread_knobs_pass_even_when_spelled_out(tmp_path):
     """Only a changed value is refused: a config that writes TRL's own defaults, or leaves them, starts."""
-    _knob_host(tmp_path)._refuse_unread_grpo_knobs()
-    _knob_host(
-        tmp_path,
-        top_p=1.0,
-        top_k=0,
-        min_p=None,
-        repetition_penalty=1.0,
-        generation_kwargs=None,
-        vllm_importance_sampling_mode="sequence_mask",
-        vllm_importance_sampling_clip_min=None,
-    )._refuse_unread_grpo_knobs()
+    reject_unread_grpo_knobs(_grpo_config(tmp_path))
+    reject_unread_grpo_knobs(
+        _grpo_config(
+            tmp_path,
+            top_p=1.0,
+            top_k=0,
+            min_p=None,
+            repetition_penalty=1.0,
+            generation_kwargs=None,
+            vllm_importance_sampling_mode="sequence_mask",
+            vllm_importance_sampling_clip_min=None,
+        )
+    )
 
 
-def _carry_host(backend: str, carry_reasoning: bool):
-    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.async_config = AsyncTrainingConfig(rollout_backend=backend)
-    host._rollout_env = types.SimpleNamespace(carry_reasoning=carry_reasoning)
-    return host
+def _check_carried_reasoning(backend: str, carry_reasoning: bool) -> None:
+    reject_unverified_carried_reasoning(types.SimpleNamespace(carry_reasoning=carry_reasoning), backend)
 
 
 def test_carried_reasoning_on_sglang_is_refused_as_unverified():
     with pytest.raises(ValueError, match="unverified"):
-        _carry_host("sglang", carry_reasoning=True)._reject_unverified_carried_reasoning()
+        _check_carried_reasoning("sglang", carry_reasoning=True)
 
 
 def test_carried_reasoning_on_vllm_and_plain_sglang_pass():
-    _carry_host("vllm", carry_reasoning=True)._reject_unverified_carried_reasoning()
-    _carry_host("sglang", carry_reasoning=False)._reject_unverified_carried_reasoning()
+    _check_carried_reasoning("vllm", carry_reasoning=True)
+    _check_carried_reasoning("sglang", carry_reasoning=False)
 
 
 def test_the_wire_backend_keys_are_the_weight_sync_clients_keys():
@@ -248,37 +256,31 @@ def _dataset(**columns) -> Dataset:
     return Dataset.from_dict({"prompt": _PROMPT, **columns})
 
 
-def _answer_host(env_type: str, env_kwargs: dict, train, eval_dataset=None):
-    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host._rollout_env = build_environment(env_type, env_kwargs)
-    host.train_dataset = train
-    host.eval_dataset = eval_dataset
-    return host
+def _check_answers(env_type: str, env_kwargs: dict, train, eval_dataset=None) -> None:
+    reject_answerless_datasets(build_environment(env_type, env_kwargs), train, eval_dataset)
 
 
 def test_a_grading_environment_refuses_a_dataset_without_the_answer_column():
     """code_contests reads its hidden tests out of ``answer``: with no column every submission grades
     against zero tests and grades 0, which reads as a policy that never solves anything."""
-    host = _answer_host("code_contests", {"sandbox_backend": "local"}, _dataset())
     with pytest.raises(ValueError, match="CodeContestsEnvironment"):
-        host._reject_answerless_datasets()
+        _check_answers("code_contests", {"sandbox_backend": "local"}, _dataset())
 
 
 def test_a_grading_environment_accepts_the_dataset_that_carries_it():
     """Guards the refusal above from being satisfied by refusing everything."""
-    _answer_host("code_contests", {"sandbox_backend": "local"}, _dataset(answer=["{}"]))._reject_answerless_datasets()
+    _check_answers("code_contests", {"sandbox_backend": "local"}, _dataset(answer=["{}"]))
 
 
 def test_the_eval_dataset_is_held_to_the_same_column():
     """An eval split without the column scores nothing on every evaluation round, N steps in."""
-    host = _answer_host("exam_qa", {}, _dataset(answer=["A"]), eval_dataset=_dataset())
     with pytest.raises(ValueError, match="eval_dataset"):
-        host._reject_answerless_datasets()
+        _check_answers("exam_qa", {}, _dataset(answer=["A"]), eval_dataset=_dataset())
 
 
 def test_a_non_grading_environment_accepts_an_answer_less_dataset():
     """native_math pays for completing the task, so prompts alone are a complete dataset for it."""
-    _answer_host("native_math", {}, _dataset(), eval_dataset=_dataset())._reject_answerless_datasets()
+    _check_answers("native_math", {}, _dataset(), eval_dataset=_dataset())
 
 
 def _level_host(budgets: dict, effort: str | None = "random", **config):
@@ -288,6 +290,16 @@ def _level_host(budgets: dict, effort: str | None = "random", **config):
         reasoning_effort=effort, thinking_budget_for_effort=budgets.get, thinking_budget_enforced=lambda level: True
     )
     return host
+
+
+def _check_reasoning_terms(host) -> None:
+    """The reasoning-terms refusals as the trainer's init runs them, the drawable levels' own contract first."""
+    reject_inert_reasoning_terms(
+        host.async_config,
+        host._rollout_env,
+        budgeted=host._any_episode_budgeted,
+        every_budget_soft=host._every_budget_soft,
+    )
 
 
 _EVERY_LEVEL = {"low": 8192, "medium": 12288, "high": 16384}
@@ -301,35 +313,30 @@ def test_a_drawable_levels_budget_must_sit_below_the_turn_cap():
     with pytest.raises(
         ValueError, match=r"'high' level's thinking_tokens \(16384\) must sit below rollout_max_tokens"
     ):
-        _level_host(_EVERY_LEVEL, **turn)._validate_reasoning_terms()
+        _check_reasoning_terms(_level_host(_EVERY_LEVEL, **turn))
     with pytest.raises(ValueError, match="'high' level's thinking_tokens"):
-        _level_host(_EVERY_LEVEL, effort="high", **turn)._validate_reasoning_terms()
-    _level_host(_EVERY_LEVEL, effort="low", **turn)._validate_reasoning_terms()
-    _level_host(_EVERY_LEVEL, effort=None, **turn)._validate_reasoning_terms()
-    _level_host(_EVERY_LEVEL, rollout_max_tokens=16385)._validate_reasoning_terms()
+        _check_reasoning_terms(_level_host(_EVERY_LEVEL, effort="high", **turn))
+    _check_reasoning_terms(_level_host(_EVERY_LEVEL, effort="low", **turn))
+    _check_reasoning_terms(_level_host(_EVERY_LEVEL, effort=None, **turn))
+    _check_reasoning_terms(_level_host(_EVERY_LEVEL, rollout_max_tokens=16385))
 
 
 def test_column_pruning_is_forced_off(tmp_path):
     """The rollout context is every non-``prompt`` column of the row, and pruning keeps only what the
     model's forward signature names — so it would drop ``answer`` and every context field, leaving
     the environment grading episodes it was handed no ground truth for."""
-    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.args = _grpo_config(tmp_path, remove_unused_columns=True)
-    host._force_full_dataset_columns()
-    assert host.args.remove_unused_columns is False
+    args = _grpo_config(tmp_path, remove_unused_columns=True)
+    keep_all_dataset_columns(args, "forcing it off")
+    assert args.remove_unused_columns is False
 
 
 def test_an_enforced_thinking_budget_needs_the_is_correction():
     """Forced reasoning closes are neutralized through the IS ratio; with the correction off they would train
     with the episode's advantage and teach the model to stop closing its reasoning."""
-    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host._forced_close_ids, host._is_correction = (7,), False
     with pytest.raises(ValueError, match="importance-sampling correction is off"):
-        host._require_forced_close_neutralized()
-    host._is_correction = True
-    host._require_forced_close_neutralized()
-    host._forced_close_ids, host._is_correction = None, False
-    host._require_forced_close_neutralized()
+        reject_unneutralized_forced_closes((7,), is_correction=False)
+    reject_unneutralized_forced_closes((7,), is_correction=True)
+    reject_unneutralized_forced_closes(None, is_correction=False)
 
 
 _CLOSE_ID = 7
@@ -426,7 +433,7 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
     """Nothing else reads the marker, so a family whose reasoning ends otherwise still runs, told that
     its forced closes stay in the loss."""
     host = _close_host({"high": 16384}, knows_close=False)
-    with caplog.at_level(logging.WARNING, logger="src.trainers.grpo.environmental"):
+    with caplog.at_level(logging.WARNING, logger="src.trainers.grpo.environmental.reasoning"):
         assert _forced_close_ids(host) is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(

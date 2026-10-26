@@ -9,10 +9,10 @@ from accelerate import PartialState
 from datasets import Dataset
 from torch import nn
 
-import src.trainers.grpo.offline as offline_module
+import src.trainers.grpo.offline.reference as reference_module
 from src.trainers.checkpointing import CheckpointingMixin
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.reference_logps import ReferenceLogpsCheckpointMixin
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from src.trainers.reference_logps import ReferenceLogpsMixin
 from tests.common.gloo import run_gloo_ranks
 
 
@@ -60,7 +60,7 @@ def test_reference_cache_constructor_failure_preserves_the_live_training_mode(tm
     def fail_cache(*args, **kwargs):
         raise OSError("cannot create reference cache")
 
-    monkeypatch.setattr(offline_module, "ReferenceScoreCache", fail_cache)
+    monkeypatch.setattr(reference_module, "ReferenceScoreCache", fail_cache)
     dataset = Dataset.from_dict(
         {"prompt_input_ids": [[1], [2], [3]], "completion_input_ids": [[4, 5], [6], []], "group_id": [0, 1, 2]}
     )
@@ -70,7 +70,7 @@ def test_reference_cache_constructor_failure_preserves_the_live_training_mode(tm
 
 
 def test_trainer_sidecar_hook_is_shared_and_does_not_override_checkpoint_rotation():
-    assert OfflineGRPOTrainer._persist_trainer_sidecars is ReferenceLogpsCheckpointMixin._persist_trainer_sidecars
+    assert OfflineGRPOTrainer._persist_trainer_sidecars is ReferenceLogpsMixin._persist_trainer_sidecars
     assert (
         OfflineGRPOTrainer._rotate_checkpoints_after_sidecars is CheckpointingMixin._rotate_checkpoints_after_sidecars
     )

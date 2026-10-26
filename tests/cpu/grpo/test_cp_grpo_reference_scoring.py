@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from src.data.collators.offline_grpo import OfflineGRPOCPDataCollatorWithPadding
 from src.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 
@@ -68,7 +68,7 @@ def _reassembly_worker(rank, cp_size):
         gather(shards, local, **kwargs)
         shards.reverse()
 
-    with patch("src.trainers.grpo.offline.dist.all_gather", side_effect=reverse_shards):
+    with patch("torch.distributed.all_gather", side_effect=reverse_shards):
         broken = trainer._cp_score_reference_batch(batch)
     assert all(got.shape == want.shape for got, want in zip(broken, expected, strict=True))
     assert any(not torch.equal(got, want) for got, want in zip(broken, expected, strict=True)), (
@@ -121,7 +121,7 @@ def _local_mask_worker(rank, cp_size):
         grid[:, start : start + local_labels.size(1)],
         local_labels,
     )
-    with patch("src.trainers.grpo.offline.dist.all_gather", wraps=dist.all_gather) as gathers:
+    with patch("torch.distributed.all_gather", wraps=dist.all_gather) as gathers:
         actual = trainer._cp_score_reference_batch(batch)
     assert gathers.call_count == 1, "only the log-probs need gathering; every rank holds the full labels"
     for got, scores, valid in zip(actual, grid, gathered, strict=True):

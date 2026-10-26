@@ -26,6 +26,7 @@ import torch
 from trl import GRPOTrainer
 
 from src.configs.grpo import RLRRConfig
+from src.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks
 from src.trainers.grpo.objective.advantages import degenerate_group_mask
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from src.trainers.grpo.online import DistributedGRPOTrainer
@@ -35,9 +36,17 @@ NORMALIZE_THEN_SUM = types.SimpleNamespace(multi_objective_aggregation="normaliz
 
 
 def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedGRPOTrainer:
-    """Run only the pre-super hook resolution on a bare instance (TRL's ctor needs a live server)."""
+    """Run only the pre-super hook adoption and refusals on a bare instance (TRL's ctor needs a live server)."""
     trainer = object.__new__(DistributedGRPOTrainer)
-    trainer._resolve_advantage_hooks(kwargs, grpo_args)
+    trainer._adopt_advantage_hooks(kwargs)
+    reject_conflicting_advantage_hooks(
+        grpo_args,
+        trainer._rlrr_config,
+        std_floor=trainer._scale_rewards_std_floor,
+        drop_degenerate_groups=trainer._drop_degenerate_groups,
+        balance_token_mass=trainer._balance_token_mass,
+        recomputes_from_gathered_rewards=trainer._recomputes_from_gathered_rewards,
+    )
     return trainer
 
 

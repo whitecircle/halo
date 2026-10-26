@@ -36,7 +36,7 @@ from src.models.head_transform import (
     verify_head_transform,
 )
 from src.models.moe.family_specs import moe_model_types
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
+from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from tests.common.models import (
     BAILING_MOE_LING_MINI,
     BAILING_MOE_RING_MINI,
@@ -148,7 +148,7 @@ _TINY_MODELS = {
 _TRANSFORM_FAMILIES = ("inkling", "cohere2_moe", "gemma4_text", "gemma4", "granite", "minicpm3")
 
 
-class _ForwardParityHarness(ChunkedLogprobsCore):
+class _ForwardParityHarness(LogprobScoringMixin):
     """The chunked sweep over a real model, fed the hidden state TRL's and the offline trainer's
     ``_get_last_hidden_state`` take: ``base_model``, the final position dropped, the completion kept."""
 

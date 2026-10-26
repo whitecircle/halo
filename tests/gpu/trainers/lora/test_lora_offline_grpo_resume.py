@@ -56,7 +56,7 @@ from src.distributed.expert_parallel.moe_layer.expert_lora import disable_expert
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.unwrapping import find_peft_model
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import ensure_model_downloaded, pin_deterministic_ep_dispatch, shared_scratch_dir
 from tests.common.harness import gpu_test_main
@@ -202,9 +202,9 @@ def _probe_logps(trainer, probe, *, adapters_disabled: bool) -> torch.Tensor:
         with torch.no_grad():
             if adapters_disabled:
                 with _adapters_disabled(unwrapped):
-                    logps, _ = trainer._get_per_token_logps(trainer.model, ids, mask, keep)
+                    logps = trainer._get_per_token_logps(trainer.model, ids, mask, keep)
             else:
-                logps, _ = trainer._get_per_token_logps(trainer.model, ids, mask, keep)
+                logps = trainer._get_per_token_logps(trainer.model, ids, mask, keep)
     finally:
         reshard_fsdp2_modules(trainer.model)
         if was_training:

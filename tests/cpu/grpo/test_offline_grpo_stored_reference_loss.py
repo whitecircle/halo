@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 
 class _Policy(nn.Module):

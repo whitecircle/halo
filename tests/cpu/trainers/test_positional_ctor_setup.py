@@ -25,7 +25,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer

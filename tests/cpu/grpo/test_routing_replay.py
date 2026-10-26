@@ -20,7 +20,7 @@ from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from src.models.gradient_checkpointing import RecomputeScope
 from src.models.moe.family_specs import MoEFamilySpec
-from src.trainers.grpo.rollout.routing_replay import (
+from src.trainers.grpo.environmental.routing_replay import (
     RoutingReplayInjector,
     assemble_rollout_masks,
     build_routing_replay_injector,

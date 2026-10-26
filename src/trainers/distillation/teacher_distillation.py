@@ -1,5 +1,5 @@
 """Off-policy teacher→student knowledge distillation (a separate frozen teacher scores fixed dataset
-completions through a ``losses.DIVERGENCES`` entry). EP/TP on the student; CP unsupported (would
+completions through a ``divergences.DIVERGENCES`` entry). EP/TP on the student; CP unsupported (would
 require wrapping both models). Same-model variants live in ``self_distillation`` and ``sdpg``.
 """
 
@@ -21,24 +21,34 @@ from transformers.trainer_callback import TrainerCallback
 from src.configs.distillation import DistillationConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.model_loading.parallel.frozen_models import place_and_freeze
 from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
 from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
-from src.trainers.distillation.losses import (
+from src.trainers.distillation.divergences import (
     call_divergence,
-    consumes_hard_labels,
-    get_divergence,
     global_token_mean,
     hard_labels_coefficient,
     logits_forward_inputs,
-    shared_vocab_width,
+    place_frozen_scorer,
+    require_divergence,
     shifted_token_cross_entropy,
+    uses_hard_labels,
 )
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.mixins.stored_metrics import StoredMetricsMixin
+from src.trainers.stored_metrics import StoredMetricsMixin
 
 logger = get_logger(__name__, log_level="info")
+
+
+def require_distill_loss(args: DistillationConfig) -> Callable:
+    """The ``distill_loss`` divergence, refused under ``apply_hard_labels`` when it weighs the gold token itself."""
+    loss_fn = require_divergence(args.distill_loss)
+    if args.apply_hard_labels and uses_hard_labels(loss_fn):
+        raise ValueError(
+            f"apply_hard_labels cannot combine with distill_loss={args.distill_loss!r}, which applies its "
+            f"own gold-token weight in place of the hard-label gate. Set apply_hard_labels: false."
+        )
+    return loss_fn
 
 
 class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
@@ -118,12 +128,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
 
         # The method knobs live on ``args`` (DistillationConfig) and are read there; only the
         # resolved loss callable is worth holding.
-        self.distillation_loss_fn = get_divergence(args.distill_loss)
-        if args.apply_hard_labels and consumes_hard_labels(self.distillation_loss_fn):
-            raise ValueError(
-                f"apply_hard_labels cannot combine with distill_loss={args.distill_loss!r}, which applies its "
-                f"own gold-token weight in place of the hard-label gate. Set apply_hard_labels: false."
-            )
+        self.distillation_loss_fn = require_distill_loss(args)
 
         self.teacher_model = teacher_model
 
@@ -144,14 +149,9 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
         self.model.add_model_tags(self._tag_names)
 
         self._configure_distributed_modes()
-        self._setup_teacher_model(teacher_tokenizer)
-
-    def _setup_teacher_model(self, teacher_tokenizer: PreTrainedTokenizerBase):
-        """Check the teacher scores the student's token ids, then move it to the student device frozen."""
-        self._vocab_width = shared_vocab_width(
-            self.model.config, self.teacher_model.config, resolve_tokenizer(self.processing_class), teacher_tokenizer
+        self._vocab_width, device = place_frozen_scorer(
+            self.teacher_model, self.model, resolve_tokenizer(self.processing_class), teacher_tokenizer
         )
-        device = place_and_freeze(self.teacher_model, self.model)
         logger.info(f"Teacher model moved to {device} and set to eval mode")
 
     def compute_loss(

@@ -79,14 +79,7 @@ class TrlVLLMClient(VLLMWeightSyncClient):
         if structured_outputs_regex:
             sampling["structured_outputs"] = {"regex": structured_outputs_regex}
 
-        prompt_ids = []
-        for prompt in prompts:
-            if isinstance(prompt, (list, tuple)):
-                prompt_ids.append(list(prompt))
-            else:
-                reply = self.request("POST", "/tokenize", retry=True, timeout=POST_TIMEOUT_S, json={"prompt": prompt})
-                prompt_ids.append(reply.json()["tokens"])
-
+        prompt_ids = self._prompt_ids(prompts)
         # One batched, single-shot request: a session retry would re-queue a full generation server-side.
         data = self.request(
             "POST",
@@ -95,10 +88,25 @@ class TrlVLLMClient(VLLMWeightSyncClient):
             timeout=self._generation_timeout,
             json={"prompt": list(prompts), **sampling},
         ).json()
+        return {"prompt_ids": prompt_ids, **self._parse_choices(data["choices"])}
+
+    def _prompt_ids(self, prompts: list[str] | list[list[int]]) -> list[list[int]]:
+        """Each prompt's token ids: a token list as given, a string through the server's ``/tokenize``."""
+        prompt_ids = []
+        for prompt in prompts:
+            if isinstance(prompt, (list, tuple)):
+                prompt_ids.append(list(prompt))
+            else:
+                reply = self.request("POST", "/tokenize", retry=True, timeout=POST_TIMEOUT_S, json={"prompt": prompt})
+                prompt_ids.append(reply.json()["tokens"])
+        return prompt_ids
+
+    def _parse_choices(self, choices: list[dict]) -> dict[str, list]:
+        """``{completion_ids, logprobs, logprob_token_ids}`` of the completion choices, in prompt order."""
         all_completion_ids: list[list[int]] = []
         all_logprobs: list[list[list[float]]] = []
         all_logprob_token_ids: list[list[list[int]]] = []
-        for choice in sorted(data["choices"], key=lambda c: c.get("index", 0)):
+        for choice in sorted(choices, key=lambda c: c.get("index", 0)):
             token_logprobs = (choice.get("logprobs") or {}).get("token_logprobs") or []
             completion_ids = choice.get("token_ids")
             if completion_ids is None:
@@ -112,9 +120,7 @@ class TrlVLLMClient(VLLMWeightSyncClient):
             all_completion_ids.append(completion_ids)
             all_logprobs.append([[v] for v in token_logprobs])
             all_logprob_token_ids.append([[tid] for tid in completion_ids[: len(token_logprobs)]])
-
         return {
-            "prompt_ids": prompt_ids,
             "completion_ids": all_completion_ids,
             "logprobs": all_logprobs,
             "logprob_token_ids": all_logprob_token_ids,

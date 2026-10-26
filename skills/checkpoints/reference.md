@@ -55,7 +55,7 @@ All three restore `trainer_state.json`, the LR scheduler from `scheduler.pt` (wr
 `save_only_model`), LoRA adapters (`restore_adapters`, `src/checkpoint/parallel/adapters.py`),
 the router-balancing biases
 (`restore_balancing_biases`, `src/checkpoint/parallel/sidecars.py`) and the frozen reference
-scores in `reference_logps.pt` (DPO/KTO precompute, offline GRPO KL; `src/trainers/mixins/reference_logps.py`,
+scores in `reference_logps.pt` (DPO/KTO precompute, offline GRPO KL; `src/trainers/reference_logps.py`,
 which validates token digests and settings before attaching them). Optimizer state resumes from the per-rank shards when
 `OptimizerStateFingerprint` matches; a mismatch warm-restarts, and
 shards whose `optimizer_meta.pt` carries no fingerprint at all raise — delete every

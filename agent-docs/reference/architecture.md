@@ -16,7 +16,7 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Layer | Owns | Source | Deeper page |
 |---|---|---|---|
 | Config | YAML parse, toolkit defaults, strict rejection of unknown or retired keys; env knobs read through one seam; the per-method argument/config dataclasses and the field guards and argument refusals they share | `src/configs/` (`parser.py` among them), `src/env.py`, `src/config_validation.py` | [Configuration](../getting-started/configuration.md) |
-| Trainers | Training loop, loss, gradient clipping, saving | `src/trainers/mixins/` (the spine is `base.py`) | [Trainer Architecture](trainer-architecture.md) |
+| Trainers | Training loop, loss, gradient clipping, saving | `src/trainers/` (the spine is `distributed_trainer.py`) | [Trainer Architecture](trainer-architecture.md) |
 | Runtime | Process plumbing every layer above shares: rank and node math, process-group construction and timeouts, barriers and broadcasts, cross-rank verdicts and the c10d-store joins, the shared-filesystem scope and main-first ordering, the per-node load throttle, DTensor access | `src/runtime/` | [Multi-Node](../parallelism/multi-node.md) |
 | Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `src/distributed/parallelism_config.py`, `src/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
 | Data | Dataset loading, sharding, collators | `src/data/`, `src/data/collators/` | [Dataset Formats](../data/dataset-formats.md) |
@@ -120,10 +120,10 @@ offline GRPO. The per-trainer
 matrix and the reason behind each exclusion are in
 [Trainer Architecture](trainer-architecture.md#trainer-compatibility).
 
-Offline GRPO's frozen-reference scores span three modules: `src/trainers/grpo/reference_cache.py`
+Offline GRPO's frozen-reference scores span three modules: `src/trainers/grpo/offline/reference_cache.py`
 (bounded, filesystem-aware score storage and the memory-mapped token buffers),
-`src/trainers/grpo/mixins/offline_reference.py` (the ragged payload, the training-checkpoint contract
-and evaluation's original-reference scores), and the shared `src/trainers/mixins/reference_logps.py` (checkpoint identity and
+`src/trainers/grpo/offline/reference.py` (the run-start sweep, the ragged payload, the training-checkpoint
+contract and evaluation's original-reference scores), and the shared `src/trainers/reference_logps.py` (checkpoint identity and
 persistence, which DPO/KTO precompute also use). Storage, resume and recovery:
 [Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model).
 

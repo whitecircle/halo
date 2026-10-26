@@ -21,7 +21,7 @@ from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.configs.grpo_offline import OfflineGRPOScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.entrypoints.script import ScriptContext
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main

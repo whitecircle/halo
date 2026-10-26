@@ -34,7 +34,7 @@ from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading import model_preparation
 from src.model_loading.tokenizer_setup import configure_run_tokenizer, sync_special_token_id
-from src.trainers.reward.pooling import sequence_classification_pad_id
+from src.trainers.parallelism.pipeline_rules import require_pooling_pad_id
 
 PartialState()  # the loader's logger needs accelerate state initialized
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -275,7 +275,7 @@ def test_a_borrowed_eos_still_satisfies_the_pp_pooling_seam():
         MAX_LENGTH,
         embeddings_sharded=is_input_embedding_tp_sharded,
     )
-    assert sequence_classification_pad_id(model.config, tokenizer.pad_token_id) == SPECIAL_TOKEN_IDS["<eos>"]
+    assert require_pooling_pad_id(model.config, tokenizer.pad_token_id) == SPECIAL_TOKEN_IDS["<eos>"]
 
 
 def test_a_config_with_no_pad_id_at_all_still_raises_at_the_pp_seam():
@@ -283,7 +283,7 @@ def test_a_config_with_no_pad_id_at_all_still_raises_at_the_pp_seam():
     row at the last filler token at a finite loss. The message has to name the way out."""
     model = _seq_cls_model()
     with pytest.raises(ValueError, match="--added_special_tokens"):
-        sequence_classification_pad_id(model.config, None)
+        require_pooling_pad_id(model.config, None)
 
 
 def test_setup_is_a_no_op_where_the_ids_already_agree():

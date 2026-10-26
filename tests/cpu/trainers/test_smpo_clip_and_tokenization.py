@@ -20,22 +20,22 @@ import torch
 import torch.distributed as dist
 
 from src.data.pipeline.preferences import tokenize_preference_row
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from src.trainers.preference.smpo_objective import SMPOObjective, cp_quantile
 from tests.common.gloo import run_gloo_ranks
 
 CP_WORLD_SIZE = 2
 
 
-class _Clipper:
-    """Minimal stand-in exposing the real clip methods without building a Trainer."""
-
-    def __init__(self, lower=None, upper=None, min_log_prob=None):
-        self.lower_clip_percentile = lower
-        self.upper_clip_percentile = upper
-        self.min_log_prob = min_log_prob
-
-    _cp_quantile = SmoothMarginPOTrainer._cp_quantile
-    _clip_log_probs = SmoothMarginPOTrainer._clip_log_probs
+def _clipper(lower=None, upper=None, min_log_prob=None) -> SMPOObjective:
+    """The objective carrying only the clip knobs under test."""
+    return SMPOObjective(
+        beta=1.0,
+        loss_type="sigmoid",
+        chosen_sft_ratio=1.0,
+        lower_clip_percentile=lower,
+        upper_clip_percentile=upper,
+        min_log_prob=min_log_prob,
+    )
 
 
 def _rejected_logps(rows=1, seq=600, seed=0):
@@ -60,8 +60,8 @@ def test_percentile_clip_bound_carries_no_gradient():
     loss_mask = torch.ones_like(logps, dtype=torch.bool)
     is_chosen = torch.zeros(logps.size(0), dtype=torch.bool).unsqueeze(1)  # every row rejected
 
-    clipper = _Clipper(lower=0.02)
-    clipped = clipper._clip_log_probs(logps, loss_mask, is_chosen, cp_config=None)
+    clipper = _clipper(lower=0.02)
+    clipped = clipper.clip_log_probs(logps, loss_mask, is_chosen, cp_config=None)
     clipped.sum().backward()
 
     max_grad = logps.grad.abs().max().item()
@@ -77,8 +77,8 @@ def test_padding_free_percentile_clip_bound_carries_no_gradient():
     loss_mask = torch.ones_like(flat, dtype=torch.bool)
     is_chosen = torch.zeros_like(flat, dtype=torch.bool)
 
-    clipper = _Clipper(lower=0.02, upper=0.98)
-    clipped = clipper._clip_log_probs(flat, loss_mask, is_chosen)
+    clipper = _clipper(lower=0.02, upper=0.98)
+    clipped = clipper.clip_log_probs(flat, loss_mask, is_chosen)
     clipped.sum().backward()
 
     assert flat.grad.abs().max().item() <= 1.0 + 1e-6
@@ -89,8 +89,8 @@ def test_clip_still_clamps_the_low_tail():
     logps = _rejected_logps()
     loss_mask = torch.ones_like(logps, dtype=torch.bool)
     is_chosen = torch.zeros(logps.size(0), dtype=torch.bool).unsqueeze(1)
-    clipper = _Clipper(lower=0.02)
-    clipped = clipper._clip_log_probs(logps, loss_mask, is_chosen, cp_config=None)
+    clipper = _clipper(lower=0.02)
+    clipped = clipper.clip_log_probs(logps, loss_mask, is_chosen, cp_config=None)
 
     assert clipped.min().item() > logps.min().item(), "the low tail was not raised at all"
     bound = torch.quantile(logps.float(), 0.02)
@@ -102,7 +102,7 @@ def _row_split_clip(clipper, per_token_logps, loss_mask, num_chosen, cp_config=N
     per_token_logps = per_token_logps.clone()
     if clipper.lower_clip_percentile is not None:
         rejected_logps = per_token_logps[num_chosen:][loss_mask[num_chosen:]]
-        lower_bound = clipper._cp_quantile(rejected_logps, clipper.lower_clip_percentile, cp_config)
+        lower_bound = cp_quantile(rejected_logps, clipper.lower_clip_percentile, cp_config)
         if lower_bound is not None:
             per_token_logps[num_chosen:] = torch.where(
                 loss_mask[num_chosen:] & (per_token_logps[num_chosen:] < lower_bound),
@@ -111,7 +111,7 @@ def _row_split_clip(clipper, per_token_logps, loss_mask, num_chosen, cp_config=N
             )
     if clipper.upper_clip_percentile is not None:
         chosen_logps = per_token_logps[:num_chosen][loss_mask[:num_chosen]]
-        upper_bound = clipper._cp_quantile(chosen_logps, clipper.upper_clip_percentile, cp_config)
+        upper_bound = cp_quantile(chosen_logps, clipper.upper_clip_percentile, cp_config)
         if upper_bound is not None:
             per_token_logps[:num_chosen] = torch.where(
                 loss_mask[:num_chosen] & (per_token_logps[:num_chosen] > upper_bound),
@@ -133,13 +133,13 @@ def _boolean_mask_clip(clipper, per_token_logps, loss_mask, is_chosen):
     rejected_valid = loss_mask & ~is_chosen
     chosen_valid = loss_mask & is_chosen
     if clipper.lower_clip_percentile is not None:
-        lower_bound = clipper._cp_quantile(per_token_logps[rejected_valid], clipper.lower_clip_percentile, None)
+        lower_bound = cp_quantile(per_token_logps[rejected_valid], clipper.lower_clip_percentile, None)
         if lower_bound is not None:
             per_token_logps[rejected_valid] = per_token_logps[rejected_valid].clamp(
                 min=lower_bound.to(per_token_logps.dtype)
             )
     if clipper.upper_clip_percentile is not None:
-        upper_bound = clipper._cp_quantile(per_token_logps[chosen_valid], clipper.upper_clip_percentile, None)
+        upper_bound = cp_quantile(per_token_logps[chosen_valid], clipper.upper_clip_percentile, None)
         if upper_bound is not None:
             per_token_logps[chosen_valid] = per_token_logps[chosen_valid].clamp(
                 max=upper_bound.to(per_token_logps.dtype)
@@ -161,10 +161,10 @@ def test_the_clip_reproduces_both_selector_spellings(dtype):
     logps = _rejected_logps(rows=2 * num_chosen, seq=seq, seed=7).to(dtype)
     loss_mask = torch.ones_like(logps, dtype=torch.bool)
     loss_mask[:, -17:] = False  # padded tail: must stay untouched by every branch
-    clipper = _Clipper(lower=0.05, upper=0.9, min_log_prob=-2.0)
+    clipper = _clipper(lower=0.05, upper=0.9, min_log_prob=-2.0)
 
     row_is_chosen = (torch.arange(2 * num_chosen) < num_chosen).unsqueeze(1)
-    clipped = clipper._clip_log_probs(logps, loss_mask, row_is_chosen, cp_config=None)
+    clipped = clipper.clip_log_probs(logps, loss_mask, row_is_chosen, cp_config=None)
 
     reference = _row_split_clip(clipper, logps, loss_mask, num_chosen)
     assert torch.equal(clipped, reference), "the clip disagrees with the padded spelling"
@@ -172,7 +172,7 @@ def test_the_clip_reproduces_both_selector_spellings(dtype):
     flat_logps = logps.reshape(-1)
     flat_mask = loss_mask.reshape(-1)
     flat_is_chosen = row_is_chosen.expand_as(logps).reshape(-1)
-    clipped_flat = clipper._clip_log_probs(flat_logps, flat_mask, flat_is_chosen)
+    clipped_flat = clipper.clip_log_probs(flat_logps, flat_mask, flat_is_chosen)
     assert torch.equal(clipped_flat, _boolean_mask_clip(clipper, flat_logps, flat_mask, flat_is_chosen)), (
         "the clip disagrees with the padding-free spelling"
     )
@@ -189,13 +189,13 @@ def _cp_clip_worker(rank: int, out_path: str) -> None:
     logps = _rejected_logps(rows=2 * num_chosen, seq=seq, seed=11)
     loss_mask = torch.ones_like(logps, dtype=torch.bool)
     row_is_chosen = (torch.arange(2 * num_chosen) < num_chosen).unsqueeze(1)
-    clipper = _Clipper(lower=0.05, upper=0.9, min_log_prob=-2.0)
+    clipper = _clipper(lower=0.05, upper=0.9, min_log_prob=-2.0)
 
-    whole = clipper._clip_log_probs(logps, loss_mask, row_is_chosen, cp_config=None)
+    whole = clipper.clip_log_probs(logps, loss_mask, row_is_chosen, cp_config=None)
 
     chunk = seq // CP_WORLD_SIZE
     sl = slice(rank * chunk, (rank + 1) * chunk)
-    local = clipper._clip_log_probs(
+    local = clipper.clip_log_probs(
         logps[:, sl],
         loss_mask[:, sl],
         row_is_chosen,
@@ -208,7 +208,7 @@ def _cp_clip_worker(rank: int, out_path: str) -> None:
 
 
 def test_cp_sliced_clip_matches_the_whole_sequence_clip(tmp_path):
-    """The collective branch of ``_cp_quantile`` is what keeps the clip independent of ``cp_size``.
+    """The collective branch of ``cp_quantile`` is what keeps the clip independent of ``cp_size``.
 
     Each rank clips only its own sequence chunk; the bound is the quantile of the GATHERED tokens, so
     the result must be the whole-sequence clip restricted to that chunk. A local quantile (or a bound

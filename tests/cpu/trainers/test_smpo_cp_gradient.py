@@ -34,6 +34,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.first_step import AUTOGRAD_FALLBACK_WARNING
 from tests.common.gloo import run_gloo_ranks
+from tests.common.smpo_trainer import smpo_trainer
 
 CP_WORLD_SIZE = 2
 VOCAB = 16
@@ -62,22 +63,15 @@ class _TokenTableLM(nn.Module):
 
 
 def _trainer(parallelism_config: ParallelismConfig, cp_config) -> SmoothMarginPOTrainer:
-    """A construction-free SMPO carrying what ``get_batch_loss_metrics`` reads."""
-    trainer = object.__new__(SmoothMarginPOTrainer)
-    trainer.parallelism_config = parallelism_config
-    trainer.cp_config = cp_config
-    trainer.pad_token_id = PAD_TOKEN_ID
-    trainer.padding_free = False
     # Clipping on, so the CP quantile's all-gather runs inside the backward-carrying forward.
-    trainer.lower_clip_percentile = 0.25
-    trainer.upper_clip_percentile = 0.9
-    trainer.min_log_prob = -3.0
-    trainer.beta = 2.0
-    trainer.loss_type = "sigmoid"
-    trainer.target_margin = 0.3
-    trainer.use_margin_schedule = False
-    trainer.chosen_sft_ratio = 0.7
-    return trainer
+    return smpo_trainer(
+        parallelism_config=parallelism_config,
+        cp_config=cp_config,
+        pad_token_id=PAD_TOKEN_ID,
+        lower_clip_percentile=0.25,
+        upper_clip_percentile=0.9,
+        min_log_prob=-3.0,
+    )
 
 
 def _batch(ragged_prompts: bool) -> dict[str, torch.Tensor]:

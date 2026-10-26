@@ -10,7 +10,7 @@ row 1 has two loss tokens and group size 4 (weight 0.25).
 import pytest
 import torch
 
-from src.trainers.grpo.objective.offline import LOSS_TYPES, offline_loss_normalizer, offline_loss_numerator
+from src.trainers.grpo.objective.offline_loss import LOSS_TYPES, offline_loss_normalizer, offline_loss_numerator
 
 PER_TOKEN_LOSS = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 7.0]])
 MASK = torch.tensor([[1, 1, 1], [1, 1, 0]])

@@ -12,11 +12,11 @@ import torch
 from src.data.collators.self_distill import format_field_names, privileged_hint
 from src.log import warn_once
 from src.model_loading.tokenizer_setup import resolve_tokenizer
-from src.trainers.distillation.losses import global_token_mean, privileged_teacher_pass
-from src.trainers.distillation.opd_term import OPDTermMixin
+from src.trainers.distillation.divergences import global_token_mean
+from src.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from src.trainers.evaluation import split_rows_head
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.stored_metrics import StoredMetricsMixin
+from src.trainers.stored_metrics import StoredMetricsMixin
 from src.trainers.token_metrics import effective_loss_mask
 
 # Stdlib, not accelerate's adapter: the warning below fires per rollout row on whichever rank drew
@@ -29,17 +29,9 @@ def positive_advantage_gate(
     advantages: torch.Tensor,
     enabled: bool,
 ) -> torch.Tensor:
-    """The OPD token gate: the tokens the GRPO loss trains, optionally restricted to
-    strictly-positive-advantage rows.
-
-    Strict ``> 0``: a zero advantage means a tied or unscorable group, where the verifier expressed
-    no preference, so those rows must not pull the student toward the teacher.
-
-    Args:
-        loss_mask: ``[B, C]`` mask, 1 on the trained completion tokens (``effective_loss_mask``).
-        advantages: ``[B]`` or ``[B, 1]`` per-sample advantages.
-        enabled: when False the gate is the loss mask alone.
-    """
+    """The OPD token gate: the trained completion tokens of ``loss_mask`` ``[B, C]``, restricted when ``enabled``
+    to rows whose ``advantages`` (``[B]`` or ``[B, 1]``) are strictly positive. A zero advantage is a tied or
+    unscorable group, where the verifier expressed no preference to pull the student toward."""
     if not enabled:
         return loss_mask
     adv = advantages.unsqueeze(1) if advantages.dim() == 1 else advantages

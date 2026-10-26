@@ -18,11 +18,11 @@ import types
 import pytest
 import torch
 
-import src.trainers.grpo.mixins.chunked_logprobs as chunked
+import src.trainers.grpo.logprob_scoring as chunked
 from src.runtime.consensus import RankConsensus
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth, full_logits_verdict
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.logprob_scoring import LogitsWidth, LogprobScoringMixin, full_logits_verdict
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 
 _GIB = 1024**3
@@ -90,7 +90,7 @@ def free_memory(monkeypatch):
 def test_an_oversized_plane_refuses_the_run(free_memory):
     asked = free_memory(_GIB // 2)
     with pytest.raises(RuntimeError, match="use_chunked_grpo_logprobs: true"):
-        ChunkedLogprobsCore._check_full_logits_fit(_host(), _WIDTH)
+        LogprobScoringMixin._verify_full_logits_fit(_host(), _WIDTH)
     assert asked == ["cuda:3"], "free memory must be read on the trainer's own device"
 
 
@@ -99,13 +99,13 @@ def test_a_plane_another_rank_cannot_hold_refuses_the_run_here_too(free_memory, 
     free_memory(64 * _GIB)
     monkeypatch.setattr(chunked, "rank_consensus", lambda ok: RankConsensus(False, True))
     with pytest.raises(RuntimeError, match="Another rank"):
-        ChunkedLogprobsCore._check_full_logits_fit(_host(), _WIDTH)
+        LogprobScoringMixin._verify_full_logits_fit(_host(), _WIDTH)
 
 
 def test_a_plane_taking_most_of_the_free_memory_warns(free_memory, caplog):
     free_memory(int(1.5 * _GIB))
     with caplog.at_level(logging.WARNING, logger=chunked.__name__):
-        ChunkedLogprobsCore._check_full_logits_fit(_host(), _WIDTH)
+        LogprobScoringMixin._verify_full_logits_fit(_host(), _WIDTH)
     assert any("use_chunked_grpo_logprobs" in r.getMessage() for r in caplog.records)
 
 
@@ -118,13 +118,13 @@ def test_an_evaluating_run_weighs_the_wider_eval_chunk(free_memory, eval_strateg
     free_memory(int(1.5 * _GIB))
     host = _host(rows=1, eval_rows=4, eval_strategy=eval_strategy, eval_on_start=eval_on_start)
     with pytest.raises(RuntimeError, match=r"lower per_device_eval_batch_size \(4\)"):
-        ChunkedLogprobsCore._check_full_logits_fit(host, _WIDTH)
+        LogprobScoringMixin._verify_full_logits_fit(host, _WIDTH)
 
 
 def test_a_run_that_never_evaluates_weighs_only_the_train_chunk(free_memory, caplog):
     free_memory(4 * _GIB)
     with caplog.at_level(logging.WARNING, logger=chunked.__name__):
-        ChunkedLogprobsCore._check_full_logits_fit(_host(rows=1, eval_rows=16), _WIDTH)
+        LogprobScoringMixin._verify_full_logits_fit(_host(rows=1, eval_rows=16), _WIDTH)
     assert not caplog.records
 
 
@@ -132,26 +132,26 @@ def test_a_narrower_eval_chunk_leaves_the_train_chunk_the_one_weighed(free_memor
     free_memory(_GIB // 2)
     host = _host(rows=2, eval_rows=1, eval_strategy="steps")
     with pytest.raises(RuntimeError, match=r"lower per_device_train_batch_size \(2\)"):
-        ChunkedLogprobsCore._check_full_logits_fit(host, _WIDTH)
+        LogprobScoringMixin._verify_full_logits_fit(host, _WIDTH)
 
 
 def test_a_small_plane_stays_quiet(free_memory, caplog):
     free_memory(64 * _GIB)
     with caplog.at_level(logging.WARNING, logger=chunked.__name__):
-        ChunkedLogprobsCore._check_full_logits_fit(_host(), _WIDTH)
+        LogprobScoringMixin._verify_full_logits_fit(_host(), _WIDTH)
     assert not caplog.records
 
 
 @pytest.mark.parametrize(("chunked_on", "width"), [(True, _WIDTH), (False, None)], ids=["chunked", "unbounded"])
 def test_chunked_log_probs_or_an_unbounded_width_skip_the_check(free_memory, chunked_on, width):
     free_memory(1)
-    ChunkedLogprobsCore._check_full_logits_fit(_host(chunked_on=chunked_on), width)
+    LogprobScoringMixin._verify_full_logits_fit(_host(chunked_on=chunked_on), width)
 
 
 def test_a_model_without_an_output_embedding_is_refused_by_name(free_memory):
     free_memory(64 * _GIB)
     with pytest.raises(ValueError, match="get_output_embeddings"):
-        ChunkedLogprobsCore._check_full_logits_fit(_host(vocab=None), _WIDTH)
+        LogprobScoringMixin._verify_full_logits_fit(_host(vocab=None), _WIDTH)
 
 
 def _env_host(*, per_turn: bool, row_cap: int | None):
@@ -218,8 +218,8 @@ def test_the_offline_width_is_the_completion_budget_off_pp(host, expected):
 def test_offline_construction_weighs_the_plane_after_the_model_is_placed():
     """The offline trainer has no shared spine to call the check; its own ctor must, once the parallel
     wrap has put the model where the free memory is read."""
-    checks = _call_lines(OfflineGRPOTrainer.__init__, "_check_full_logits_fit")
-    setups = _call_lines(OfflineGRPOTrainer.__init__, "_configure_distributed_modes")
+    checks = _call_lines(OfflineGRPOTrainer._finish_offline_init, "_verify_full_logits_fit")
+    setups = _call_lines(OfflineGRPOTrainer._finish_offline_init, "_configure_distributed_modes")
     assert checks and setups and min(checks) > max(setups)
 
 

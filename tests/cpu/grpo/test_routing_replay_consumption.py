@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """CPU tests for routing-replay mask consumption integrity
-(:class:`~src.trainers.grpo.rollout.routing_replay.RoutingReplayInjector` +
+(:class:`~src.trainers.grpo.environmental.routing_replay.RoutingReplayInjector` +
 ``EPMoELayerBase._maybe_replace_selection``).
 
 Consumption model under test: only non-recompute forwards advance the cursor / monotonic
@@ -22,7 +22,7 @@ from torch import nn
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.models.gradient_checkpointing import RecomputeScope
 from src.models.moe.family_specs import MoEFamilySpec
-from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
+from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 
 ROWS, SEQ, K, E = 2, 4, 2, 8
 

@@ -17,13 +17,14 @@ from collections import defaultdict
 import pytest
 import torch
 
-import src.trainers.grpo.rollout.rollout_metrics as rm
+import src.trainers.grpo.environmental.rollout_metrics as rm
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.episode import RolloutResult
 from src.environments.episode_keys import SOLVE_RATE_KEY
 from src.environments.messages import Trajectory
-from src.trainers.grpo.environmental import BatchRows, DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.rollout_metrics import group_solve_counts
+from src.trainers.grpo.environmental.rollout_metrics import group_solve_counts
+from src.trainers.grpo.environmental.step_batch import BatchRows
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.world_metrics import WorldMetrics
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
@@ -128,9 +129,19 @@ def _is_host(clip_max: float):
     return attach_world_metrics(
         types.SimpleNamespace(
             vllm_importance_sampling_clip_max=clip_max,
+            _is_correction=True,
             _is_mask_config=types.SimpleNamespace(any_mask_active=False),
             _metrics={"train": defaultdict(list)},
         )
+    )
+
+
+def _step(sampling):
+    """The stacked rows the correction reads: every row sampled, every completion token attended."""
+    return types.SimpleNamespace(
+        sampling_logps=sampling,
+        has_sampling=torch.ones(sampling.size(0), dtype=torch.bool),
+        completion_mask=torch.ones_like(sampling, dtype=torch.bool),
     )
 
 
@@ -145,16 +156,7 @@ def _two_rows():
 def test_extreme_ratios_are_those_past_the_truncation_point_either_way():
     host = _is_host(clip_max=3.0)
     sampling, recompute, rows = _two_rows()
-    ratio, _, corrected, _ = _Trainer._apply_is_correction(
-        host,
-        True,
-        recompute,
-        sampling,
-        torch.ones(2, dtype=torch.bool),
-        torch.ones(2, 3, dtype=torch.bool),
-        rows,
-        torch.device("cpu"),
-    )
+    ratio, _, corrected, _ = _Trainer._apply_is_correction(host, recompute, _step(sampling), rows)
     _Trainer._score_is_correction(host, ratio, corrected, torch.ones(2, 3, dtype=torch.bool))
     logged = flushed_metrics(host)
 
@@ -168,16 +170,7 @@ def test_extreme_ratios_are_those_past_the_truncation_point_either_way():
 def test_a_truncation_point_at_one_leaves_no_band_and_logs_no_extreme_fraction():
     host = _is_host(clip_max=1.0)
     sampling, recompute, rows = _two_rows()
-    _Trainer._apply_is_correction(
-        host,
-        True,
-        recompute,
-        sampling,
-        torch.ones(2, dtype=torch.bool),
-        torch.ones(2, 3, dtype=torch.bool),
-        rows,
-        torch.device("cpu"),
-    )
+    _Trainer._apply_is_correction(host, recompute, _step(sampling), rows)
     assert "sampling/is_ratio_extreme_frac" not in flushed_metrics(host)
 
 

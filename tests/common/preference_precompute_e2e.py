@@ -144,8 +144,7 @@ def _reference_columns(trainer) -> dict[str, dict[str, torch.Tensor]]:
     """Each split's attached reference columns, by split name then column."""
     splits = {"train": trainer.train_dataset, **trainer.eval_dataset}
     return {
-        name: {key: column(dataset, key) for key in trainer._required_ref_logps_columns()}
-        for name, dataset in splits.items()
+        name: {key: column(dataset, key) for key in trainer._reference_columns()} for name, dataset in splits.items()
     }
 
 

@@ -29,8 +29,16 @@ from torch.utils.data import DataLoader
 from src.environments.episode import RolloutResult
 from src.environments.episode_keys import SOLVE_RATE_KEY
 from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental import BatchBuildFence, BatchRows, DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence, BatchRows
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.env_grpo_batch import batch_host, row
+
+
+class _Rollout(str):
+    """A stub rollout: its text, with no trajectory to count reasoning in."""
+
+    trajectory = None
+
 
 _Trainer = DistributedAsyncEnvironmentalGRPOTrainer
 
@@ -106,7 +114,8 @@ class _EvalRound:
     """The real round entry over a recorded rollout collection: which rows were rolled out, and what the
     batch build and the rollout metrics were handed."""
 
-    _generate_and_score_completions_base = _Trainer._generate_and_score_completions_base
+    _collect_and_score_rollouts = _Trainer._collect_and_score_rollouts
+    _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
     _extract_prompts_and_contexts = _Trainer._extract_prompts_and_contexts
 
     def __init__(self, split_rows: int):
@@ -128,13 +137,10 @@ class _EvalRound:
 
     def _collect(self, prompts, contexts):
         self.rolled_out.extend(prompts)
-        return [f"rollout:{p}" for p in prompts]
+        return [_Rollout(f"rollout:{p}") for p in prompts]
 
-    def _broadcast_rollouts_for_tp(self, rollout_results):
+    def _broadcast_object_from_tp_leader(self, rollout_results):
         return rollout_results
-
-    def _episode_reasoning_tokens(self, rollout_results):
-        return [[] for _ in rollout_results]
 
     def _build_training_tensors(self, rollout_results, device, mode, num_padding, reasoning_tokens):
         self.built = (list(rollout_results), mode, num_padding)
@@ -147,7 +153,7 @@ class _EvalRound:
 @pytest.mark.parametrize("split_rows", [3, 0], ids=["partial-batch", "all-padding"])
 def test_the_eval_round_rolls_out_only_the_split_rows(split_rows):
     host = _EvalRound(split_rows)
-    host._generate_and_score_completions_base([{"prompt": f"p{i}"} for i in range(4)])
+    host._collect_and_score_rollouts([{"prompt": f"p{i}"} for i in range(4)])
     episodes = [f"rollout:p{i}" for i in range(split_rows)]
     assert host.rolled_out == [f"p{i}" for i in range(split_rows)]
     assert host.built == (episodes, "eval", 4 - split_rows)

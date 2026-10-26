@@ -5,7 +5,7 @@
 reference model cannot be parallelized, so the EP-patched policy is swept once inside ``__init__``
 and the log-probs become dataset columns. TRL hands them to the ranks through an Arrow cache file
 the main process writes beside the dataset and every rank reads back, which fails wherever the
-ranks do not share that directory. ``PrecomputeRefLogpsRankConsistentMixin`` runs the sweep itself
+ranks do not share that directory. ``TRLPreferenceMixin`` runs the sweep itself
 and attaches the gathered columns in memory on every rank.
 
 This test pins that seam three ways, and fails when any of them breaks:

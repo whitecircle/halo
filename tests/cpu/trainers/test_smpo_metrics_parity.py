@@ -3,8 +3,8 @@
 
 The non-PP forward sees one whole batch and hands the shared helpers quantities that are already
 means (under CP, CP-global means) with unit divisors; the PP loss sees one microbatch at a time and
-hands them raw sums with the full-batch divisors. Both fold through ``_smpo_metric_sums`` +
-``_smpo_metrics_from_sums``, so these tests fail if either caller starts dividing by something the
+hands them raw sums with the full-batch divisors. Both fold through ``metric_sums`` +
+``metrics_from_sums``, so these tests fail if either caller starts dividing by something the
 other does not — the class of drift (a re-reduced CP mean, a swapped divisor, a key added on one
 side only) that no loss curve would show. The PP side's own accumulator — summing over microbatches,
 draining at the step boundary, and reporting the full key set from an empty one — is pinned here too,
@@ -18,8 +18,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer, _PPStepState
+from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from src.trainers.preference.smpo_objective import SMPOStepConstants, metric_sums, metrics_from_sums
+from src.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
+from tests.common.smpo_trainer import smpo_trainer
 
 BETA = 0.5
 TARGET_MARGIN = 0.75
@@ -66,22 +68,21 @@ def _total(key: str) -> float:
     return sum(microbatch[key] for microbatch in MICROBATCHES)
 
 
+# The PP step's whole-batch divisors.
+_PP_CONSTANTS = SMPOStepConstants(
+    pair_count=len(CHOSEN_LOGPS),
+    chosen_token_count=torch.tensor(CHOSEN_TOKEN_COUNT),
+    rejected_token_count=torch.tensor(REJECTED_TOKEN_COUNT),
+    target_margin=TARGET_MARGIN,
+)
+
+
 def _trainer(margin_schedule: bool = False) -> SmoothMarginPOTrainer:
-    """A construction-free SMPO carrying only what the loss paths and the metric fold read."""
-    trainer = object.__new__(SmoothMarginPOTrainer)
-    trainer.use_margin_schedule = margin_schedule
-    trainer.target_margin = TARGET_MARGIN
-    trainer.model = SimpleNamespace(target_margin=TARGET_MARGIN)  # where the scheduler writes it
-    trainer.beta = BETA
-    trainer.loss_type = "sigmoid"
-    trainer.chosen_sft_ratio = 0.8
-    trainer.parallelism_config = ParallelismConfig()  # cp_size reads this (all-ones default)
-    trainer._pp_step_state = _PPStepState(
-        pair_count=len(CHOSEN_LOGPS),
-        chosen_token_count=torch.tensor(CHOSEN_TOKEN_COUNT),
-        rejected_token_count=torch.tensor(REJECTED_TOKEN_COUNT),
-        target_margin=TARGET_MARGIN,
+    """A construction-free SMPO whose forward returns the fixed per-side outputs above."""
+    trainer = smpo_trainer(
+        use_margin_schedule=margin_schedule, target_margin=TARGET_MARGIN, beta=BETA, chosen_sft_ratio=0.8
     )
+    trainer.model = SimpleNamespace(target_margin=TARGET_MARGIN)  # where the scheduler writes it
     trainer.concatenated_forward = lambda model, batch, real_pairs=None: {
         "chosen_logps": torch.tensor(CHOSEN_LOGPS),
         "rejected_logps": torch.tensor(REJECTED_LOGPS),
@@ -93,12 +94,20 @@ def _trainer(margin_schedule: bool = False) -> SmoothMarginPOTrainer:
     return trainer
 
 
-def _whole_batch_sums(trainer: SmoothMarginPOTrainer, pair_valid: torch.Tensor | None = None) -> dict:
+def _pipeline(margin_schedule: bool = False) -> SMPOPipelineLoss:
+    """The PP loss the trainer's adapter hook builds, at the PP step's divisors."""
+    trainer = _trainer(margin_schedule)
+    trainer._pp_loss_adapter()
+    trainer._pp_loss.constants = _PP_CONSTANTS
+    return trainer._pp_loss
+
+
+def _whole_batch_sums(pair_valid: torch.Tensor | None = None) -> dict:
     """The non-PP call: the whole batch at once, already-mean quantities on unit divisors."""
     chosen_logps = torch.tensor(CHOSEN_LOGPS)
     rejected_logps = torch.tensor(REJECTED_LOGPS)
     unit = torch.ones(())
-    return trainer._smpo_metric_sums(
+    return metric_sums(
         chosen_rewards=BETA * chosen_logps,
         rejected_rewards=BETA * rejected_logps,
         chosen_logps=chosen_logps,
@@ -113,12 +122,12 @@ def _whole_batch_sums(trainer: SmoothMarginPOTrainer, pair_valid: torch.Tensor |
     )
 
 
-def _microbatch_contributions(trainer: SmoothMarginPOTrainer, index: int) -> dict:
-    """One PP microbatch's raw sums, as ``_pp_token_loss`` hands them to the shared helper."""
+def _microbatch_contributions(index: int) -> dict:
+    """One PP microbatch's raw sums, as the PP token loss hands them to the shared helper."""
     rows = slice(index * 2, index * 2 + 2)
     chosen_logps = torch.tensor(CHOSEN_LOGPS[rows])
     rejected_logps = torch.tensor(REJECTED_LOGPS[rows])
-    return trainer._smpo_metric_sums(
+    return metric_sums(
         chosen_rewards=BETA * chosen_logps,
         rejected_rewards=BETA * rejected_logps,
         chosen_logps=chosen_logps,
@@ -128,31 +137,27 @@ def _microbatch_contributions(trainer: SmoothMarginPOTrainer, index: int) -> dic
     )
 
 
-def _microbatch_sums(trainer: SmoothMarginPOTrainer) -> dict:
-    """The PP call: two microbatches of raw sums, folded the way ``_pp_accumulate_metrics`` folds."""
+def _microbatch_sums() -> dict:
+    """The PP call: two microbatches of raw sums, folded the way the PP loss accumulates them."""
     accumulated: dict[str, torch.Tensor] = {}
     for index in range(len(MICROBATCHES)):
-        for key, value in _microbatch_contributions(trainer, index).items():
+        for key, value in _microbatch_contributions(index).items():
             accumulated[key] = value if key not in accumulated else accumulated[key] + value
     return accumulated
 
 
-def _fold(trainer: SmoothMarginPOTrainer, sums: dict, *, whole_batch: bool) -> dict:
-    return trainer._smpo_metrics_from_sums(
-        sums,
-        pair_count=len(CHOSEN_LOGPS),
-        chosen_token_count=1.0 if whole_batch else torch.tensor(CHOSEN_TOKEN_COUNT),
-        rejected_token_count=1.0 if whole_batch else torch.tensor(REJECTED_TOKEN_COUNT),
-        target_margin=TARGET_MARGIN,
+def _fold(sums: dict, *, whole_batch: bool, margin_schedule: bool = False) -> dict:
+    constants = (
+        SMPOStepConstants(pair_count=len(CHOSEN_LOGPS), target_margin=TARGET_MARGIN) if whole_batch else _PP_CONSTANTS
     )
+    return metrics_from_sums(sums, constants, report_margin=margin_schedule)
 
 
 @pytest.mark.parametrize("margin_schedule", [False, True])
 def test_the_two_metric_paths_report_the_same_batch(margin_schedule):
     """Whole-batch means on unit divisors must equal microbatch sums on full-batch divisors."""
-    trainer = _trainer(margin_schedule)
-    non_pp = _fold(trainer, _whole_batch_sums(trainer), whole_batch=True)
-    pipelined = _fold(trainer, _microbatch_sums(trainer), whole_batch=False)
+    non_pp = _fold(_whole_batch_sums(), whole_batch=True, margin_schedule=margin_schedule)
+    pipelined = _fold(_microbatch_sums(), whole_batch=False, margin_schedule=margin_schedule)
 
     assert non_pp.keys() == pipelined.keys()
     for key in non_pp:
@@ -166,10 +171,9 @@ def test_the_two_metric_paths_report_the_same_batch(margin_schedule):
 
 def test_each_metric_carries_its_own_divisor():
     """Both paths must land on the hand-computed values — a swapped or extra divisor fails here."""
-    trainer = _trainer()
     for label, metrics in (
-        ("non-PP", _fold(trainer, _whole_batch_sums(trainer), whole_batch=True)),
-        ("PP", _fold(trainer, _microbatch_sums(trainer), whole_batch=False)),
+        ("non-PP", _fold(_whole_batch_sums(), whole_batch=True)),
+        ("PP", _fold(_microbatch_sums(), whole_batch=False)),
     ):
         assert set(metrics) == set(EXPECTED), label
         for key, expected in EXPECTED.items():
@@ -180,8 +184,7 @@ def test_already_averaged_quantities_are_reported_untouched():
     """The CP contract: log-probs, logit means and SFT losses arrive as CP-GLOBAL means off PP, so
     the unit-divisor path must hand them back as-is. Re-dividing them by the pair count (the divisor
     the per-pair metrics carry) would silently scale every CP run's metrics by 1/pairs."""
-    trainer = _trainer()
-    metrics = _fold(trainer, _whole_batch_sums(trainer), whole_batch=True)
+    metrics = _fold(_whole_batch_sums(), whole_batch=True)
 
     for key in ("logits/chosen", "logits/rejected", "sft_loss/chosen", "sft_loss/rejected"):
         assert metrics[key].item() == pytest.approx(EXPECTED[key]), key
@@ -191,9 +194,8 @@ def test_already_averaged_quantities_are_reported_untouched():
 def test_invalid_pairs_contribute_nothing():
     """PP eval padding rides in as all-ignore pairs: pair_valid=0 must drop them from every per-pair
     metric, while the divisor stays the real pair count."""
-    trainer = _trainer()
     valid = torch.tensor([1.0, 1.0, 0.0, 0.0])
-    masked = _fold(trainer, _whole_batch_sums(trainer, pair_valid=valid), whole_batch=True)
+    masked = _fold(_whole_batch_sums(pair_valid=valid), whole_batch=True)
 
     kept = [CHOSEN_LOGPS[0], CHOSEN_LOGPS[1]]
     assert masked["logps/chosen"].item() == pytest.approx(sum(kept) / len(CHOSEN_LOGPS))
@@ -203,15 +205,15 @@ def test_invalid_pairs_contribute_nothing():
 
 @pytest.mark.parametrize("margin_schedule", [False, True])
 def test_the_real_callers_stay_pinned_to_the_shared_helpers(margin_schedule):
-    """End to end: ``get_batch_loss_metrics`` and ``_pp_step_metrics`` must agree on names AND
+    """End to end: ``get_batch_loss_metrics`` and the PP loss's step metrics must agree on names AND
     values for the same batch, or a metric added to one path alone would desync the PP chain
     broadcast (whose key set is pinned) and split the logged series in two."""
     trainer = _trainer(margin_schedule)
     _, non_pp, _ = trainer.get_batch_loss_metrics(model=None, batch={}, train_eval="train")
 
-    pipelined_trainer = _trainer(margin_schedule)
-    pipelined_trainer._pp_accumulate_metrics(_microbatch_sums(pipelined_trainer))
-    pipelined = pipelined_trainer._pp_step_metrics()
+    pipeline = _pipeline(margin_schedule)
+    pipeline._accumulate_metrics(_microbatch_sums())
+    pipelined = pipeline.step_metrics()
 
     assert non_pp.keys() == pipelined.keys()
     for key in non_pp:
@@ -223,18 +225,18 @@ def test_the_accumulator_sums_microbatches_and_drains_at_the_step_boundary():
     """The PP loss hands the accumulator ONE microbatch per call, so the step's metrics are the sum
     over all of them: a fold that overwrote would report only the last microbatch, and one that did
     not drain would make every later step the running total of the run."""
-    trainer = _trainer()
+    pipeline = _pipeline()
     for index in range(len(MICROBATCHES)):
-        trainer._pp_accumulate_metrics(_microbatch_contributions(trainer, index))
-    stepped = trainer._pp_step_metrics()
+        pipeline._accumulate_metrics(_microbatch_contributions(index))
+    stepped = pipeline.step_metrics()
 
     for key, expected in EXPECTED.items():
         torch.testing.assert_close(stepped[key], torch.tensor(expected), msg=f"summed over microbatches: {key}")
 
-    trainer._pp_accumulate_metrics(_microbatch_contributions(trainer, 0))
-    fresh = _trainer()
-    fresh._pp_accumulate_metrics(_microbatch_contributions(fresh, 0))
-    second_step, first_step_only = trainer._pp_step_metrics(), fresh._pp_step_metrics()
+    pipeline._accumulate_metrics(_microbatch_contributions(0))
+    fresh = _pipeline()
+    fresh._accumulate_metrics(_microbatch_contributions(0))
+    second_step, first_step_only = pipeline.step_metrics(), fresh.step_metrics()
     for key, value in second_step.items():
         torch.testing.assert_close(value, first_step_only[key], msg=f"step 2 kept step 1's sums: {key}")
 
@@ -242,11 +244,11 @@ def test_the_accumulator_sums_microbatches_and_drains_at_the_step_boundary():
 def test_a_stage_that_accumulated_nothing_reports_the_same_names():
     """The PP chain broadcasts values against a key set pinned at setup, so the stages that ran no
     microbatch — every one but the last — must report every name, at zero, or the pin desyncs."""
-    empty = _trainer()._pp_step_metrics()
-    populated = _trainer()
-    populated._pp_accumulate_metrics(_microbatch_sums(populated))
+    empty = _pipeline().step_metrics()
+    populated = _pipeline()
+    populated._accumulate_metrics(_microbatch_sums())
 
-    assert empty.keys() == populated._pp_step_metrics().keys()
+    assert empty.keys() == populated.step_metrics().keys()
     assert all(value.item() == 0.0 for value in empty.values()), empty
 
 
@@ -259,7 +261,7 @@ def test_eval_prefixes_only_the_caller_side():
 
     assert {name.removeprefix("eval_") for name in evaluated} == set(EXPECTED)
     assert all(name.startswith("eval_") for name in evaluated)
-    assert not any(name.startswith("eval_") for name in _fold(trainer, _whole_batch_sums(trainer), whole_batch=True))
+    assert not any(name.startswith("eval_") for name in _fold(_whole_batch_sums(), whole_batch=True))
 
 
 if __name__ == "__main__":

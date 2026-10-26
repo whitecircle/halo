@@ -22,7 +22,8 @@ from sklearn.metrics import matthews_corrcoef, roc_auc_score
 from transformers.trainer_utils import EvalPrediction
 
 from src.configs.classification import ClassificationConfig
-from src.trainers.reward.classification import ClassificationTrainer, _validate_best_model_metric
+from src.trainers.reward.classification import ClassificationTrainer, reject_unsupported_classification_args
+from src.trainers.reward.classification_loss import build_classification_loss
 
 # Binary fixture: labels are 4 positives then 6 negatives; argmax gives TP=3 FN=1 FP=2 TN=4, an
 # asymmetric confusion matrix (so the two per-class rows differ). The logit-0 column varies, so
@@ -104,10 +105,8 @@ def _metrics(config, logits, labels, *, is_binary=True, is_multi_label=False, la
 
 
 def _build_loss_fn(config, *, is_multi_label: bool):
-    trainer = ClassificationTrainer.__new__(ClassificationTrainer)
-    trainer.is_multi_label = is_multi_label
     model = SimpleNamespace(config=SimpleNamespace(num_labels=2))
-    return trainer._build_loss_fn(config, None, model)
+    return build_classification_loss(config, model, None, multi_label=is_multi_label)
 
 
 def test_shipped_defaults_compute_mcc_and_nothing_else(tmp_path):
@@ -222,14 +221,33 @@ def test_omitted_auc_roc_raises_when_checkpoints_are_ranked_by_it(tmp_path, labe
 def test_ranking_on_auc_roc_with_the_knob_off_is_refused_at_construction(tmp_path):
     """`compute_auc_roc: false` + `metric_for_best_model: auc_roc` can never report the key at all."""
     with pytest.raises(ValueError, match="compute_auc_roc is off"):
-        _validate_best_model_metric(_config(tmp_path, compute_auc_roc=False, metric_for_best_model="auc_roc"))
+        reject_unsupported_classification_args(
+            _config(tmp_path, compute_auc_roc=False, metric_for_best_model="auc_roc"), default_metrics=True
+        )
 
     # The eval_-prefixed spelling transformers itself uses must be caught the same way, and a metric
     # the trainer always emits must stay accepted.
     with pytest.raises(ValueError, match="compute_auc_roc is off"):
-        _validate_best_model_metric(_config(tmp_path, metric_for_best_model="eval_auc_roc"))
-    _validate_best_model_metric(_config(tmp_path, metric_for_best_model="f1"))
-    _validate_best_model_metric(_config(tmp_path, compute_auc_roc=True, metric_for_best_model="auc_roc"))
+        reject_unsupported_classification_args(
+            _config(tmp_path, metric_for_best_model="eval_auc_roc"), default_metrics=True
+        )
+    reject_unsupported_classification_args(_config(tmp_path, metric_for_best_model="f1"), default_metrics=True)
+    reject_unsupported_classification_args(
+        _config(tmp_path, compute_auc_roc=True, metric_for_best_model="auc_roc"), default_metrics=True
+    )
+    # A caller's own compute_metrics decides its own keys.
+    reject_unsupported_classification_args(_config(tmp_path, metric_for_best_model="auc_roc"), default_metrics=False)
+
+
+def test_construction_refusals_run_label_smoothing_then_best_metric_then_max_length(tmp_path):
+    every_refusal = {"label_smoothing_factor": 0.1, "metric_for_best_model": "auc_roc", "max_length": 0}
+    with pytest.raises(ValueError, match="label_smoothing_factor=0.1"):
+        reject_unsupported_classification_args(_config(tmp_path, **every_refusal), default_metrics=True)
+    every_refusal.pop("label_smoothing_factor")
+    with pytest.raises(ValueError, match="compute_auc_roc is off"):
+        reject_unsupported_classification_args(_config(tmp_path, **every_refusal), default_metrics=True)
+    with pytest.raises(ValueError, match="max_length must be a positive int"):
+        reject_unsupported_classification_args(_config(tmp_path, **every_refusal), default_metrics=False)
 
 
 def test_per_class_metrics_emit_named_keys_with_per_class_values(tmp_path):
@@ -338,9 +356,9 @@ def test_focal_alpha_balances_the_multi_label_focal_loss(tmp_path):
     focal = ((1 - torch.exp(-ce)) ** gamma) * ce
     expected = ((alpha * targets + (1 - alpha) * (1 - targets)) * focal).mean()
 
-    assert loss_fn(logits, targets).item() == pytest.approx(expected.item(), rel=1e-6)
+    assert loss_fn.mean(logits, targets).item() == pytest.approx(expected.item(), rel=1e-6)
     # Alpha must actually move the loss: the unbalanced form is a different number.
-    assert loss_fn(logits, targets).item() != pytest.approx(focal.mean().item(), rel=1e-3)
+    assert loss_fn.mean(logits, targets).item() != pytest.approx(focal.mean().item(), rel=1e-3)
 
 
 if __name__ == "__main__":

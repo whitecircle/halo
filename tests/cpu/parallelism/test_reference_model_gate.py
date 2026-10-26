@@ -22,6 +22,7 @@ from accelerate import PartialState
 from trl import SFTTrainer
 
 import src.model_loading.parallel.frozen_models as frozen_models
+import src.trainers.distillation.self_distillation as self_distillation
 from src.configs.script_arguments import ModelArguments
 from src.entrypoints.model_setup import PolicyLoad
 from src.model_loading.parallel.frozen_models import (
@@ -83,11 +84,15 @@ def _self_distillation(config, reference_kl_coef):
 
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", init_config),
-        mock.patch.object(SFTTrainer, "__init__", lambda self, *a, **k: setattr(self, "data_collator", None)),
+        mock.patch.object(
+            SFTTrainer,
+            "__init__",
+            lambda self, *a, **k: vars(self).update(data_collator=None, model=None, processing_class=None),
+        ),
         mock.patch.object(DistributedSelfDistillationTrainer, "_configure_distributed_modes"),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids"),
         mock.patch.object(
-            DistributedSelfDistillationTrainer, "_setup_reference_model", lambda self: setup_calls.append(True)
+            self_distillation, "place_frozen_scorer", lambda *a: setup_calls.append(True) or (None, None)
         ),
     ):
         DistributedSelfDistillationTrainer(

@@ -120,7 +120,7 @@ def run(ctx):
     )
     log(f"  Trainer created: {type(trainer).__name__}")
     log(f"  Parallelism: {parallelism_config.mode_string or 'Standard FSDP'}")
-    log(f"  padding_free: {trainer.padding_free}")
+    log(f"  padding_free: {trainer.args.padding_free}")
     log(f"  Loss type: {config.loss_type}, Beta: {config.beta}")
     log(f"  Target margin: {config.target_margin}")
 
@@ -131,7 +131,7 @@ def run(ctx):
     # -- Assertions --
     log("\n  --- Assertions ---")
     checks = training_run_checks(train_result, trainer, MAX_STEPS)
-    checks["padding_free_active"] = trainer.padding_free is True
+    checks["padding_free_active"] = trainer.args.padding_free is True
 
     return {"checks": checks, "metrics": {"final_train_loss": train_result.training_loss}}
 

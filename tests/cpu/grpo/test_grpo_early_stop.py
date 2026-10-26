@@ -26,7 +26,7 @@ from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from src.entrypoints.script import EarlyStopExit, run_trainer
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.repo import REPO_ROOT
@@ -233,16 +233,20 @@ def test_a_gap_the_run_never_logs_is_refused_and_no_condition_attaches_nothing()
 
 
 @pytest.mark.parametrize(
-    ("trainer", "gap_key", "gap_logged"),
+    ("setup", "gap_key", "gap_logged"),
     [
-        (DistributedAsyncEnvironmentalGRPOTrainer, "LOGRATIO_MEAN_KEY", "self._is_correction"),
-        (DistributedGRPOTrainer, "SAMPLING_LOGP_GAP_KEY", "training_args.vllm_importance_sampling_correction"),
+        (
+            DistributedAsyncEnvironmentalGRPOTrainer._configure_importance_sampling,
+            "LOGRATIO_MEAN_KEY",
+            "self._is_correction",
+        ),
+        (DistributedGRPOTrainer.__init__, "SAMPLING_LOGP_GAP_KEY", "grpo_args.vllm_importance_sampling_correction"),
     ],
     ids=["environmental", "online"],
 )
-def test_each_trainer_attaches_the_stop_on_the_gap_it_logs(trainer, gap_key, gap_logged):
+def test_each_trainer_attaches_the_stop_on_the_gap_it_logs(setup, gap_key, gap_logged):
     """A dropped attach leaves a run that parses its knobs and never stops; a wrong key or gate never feeds it."""
-    init = ast.parse(textwrap.dedent(inspect.getsource(trainer.__init__))).body[0]
+    init = ast.parse(textwrap.dedent(inspect.getsource(setup))).body[0]
     (build,) = [
         node
         for node in ast.walk(init)

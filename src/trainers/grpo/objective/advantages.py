@@ -122,16 +122,6 @@ def scales_rewards(scale_rewards: str | bool | None) -> bool:
     return scale_rewards not in (None, False, "none")
 
 
-def reject_inert_std_floor(scale_rewards: str | bool | None, std_floor: float) -> None:
-    """Refuse ``scale_rewards_std_floor`` on a run whose advantages divide by no std: it floors nothing."""
-    if std_floor > 0 and not scales_rewards(scale_rewards):
-        raise ValueError(
-            f"scale_rewards_std_floor={std_floor} with scale_rewards={scale_rewards!r}: the floor bounds the std "
-            "the advantages divide by, and this run divides by none. Set scale_rewards to 'group' or 'batch', "
-            "or drop the floor."
-        )
-
-
 def valid_group_stats(
     rewards: torch.Tensor, num_generations: int, valid_mask: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -153,6 +143,20 @@ def valid_group_stats(
     return group_mean, torch.where(valid_count > 1, var.sqrt(), torch.zeros_like(var))
 
 
+def _verify_finite(rewards: torch.Tensor, advantages: torch.Tensor) -> None:
+    """COLLECTIVE: raise on every rank when any rank's rewards or advantages are non-finite; a rank raising
+    alone would leave its peers in the next collective."""
+    if rank_consensus(bool(torch.isfinite(rewards).all() & torch.isfinite(advantages).all())).all_ok:
+        return
+    raise ValueError(
+        f"Non-finite GRPO rewards or advantages on at least one rank (this rank: "
+        f"{int((~torch.isfinite(rewards)).sum())} of {rewards.numel()} rewards and "
+        f"{int((~torch.isfinite(advantages)).sum())} advantages non-finite). Fix the reward function or "
+        f"environment returning NaN/Inf; under scale_rewards='batch' a single one makes every advantage "
+        f"of the step non-finite."
+    )
+
+
 def group_relative_advantages(
     rewards: torch.Tensor,
     num_generations: int,
@@ -163,18 +167,11 @@ def group_relative_advantages(
 ) -> torch.Tensor:
     """GRPO advantage: reward minus its group mean, optionally rescaled.
 
-    ``valid_mask`` (True = real completion) excludes infra-failed placeholder rows from the group-mean
-    baseline so they cannot poison the advantages of their valid siblings; a group with no valid member
-    falls back to the plain mean.
-
-    ``scale_rewards`` is read by :func:`scales_rewards`. ``"group"`` divides by the per-group std
-    (dangerous on sparse reward — degenerate groups have std → 0); ``"batch"`` divides by the
-    global-batch std, keeping degenerate groups near 0 while holding the gradient scale steady.
-
-    ``std_floor`` bounds the scaling amplification: the divisor is ``max(std, std_floor)``. A
-    behaviorally-degenerate batch/group (every reward within a few hundredths) otherwise divides its own
-    shaping noise by a near-zero std, inflating it to full-scale advantages; batches with real spread
-    (std above the floor) are unaffected.
+    ``valid_mask`` (True = real completion) keeps infra-failed placeholder rows out of the baseline and the
+    std; a group with no valid member takes its plain mean. ``scale_rewards`` (:func:`scales_rewards`)
+    divides by the per-group std (``"group"``, which degenerate groups drive toward 0) or the global-batch
+    std (``"batch"``). The divisor is ``max(std, std_floor)``, so a near-degenerate group's shaping noise is
+    not inflated to full-scale advantages.
     """
     grouped = _grouped(rewards, num_generations)
     if valid_mask is not None:
@@ -198,24 +195,8 @@ def group_relative_advantages(
             advantages = advantages / (group_std.expand_as(grouped).flatten().clamp_min(std_floor) + STD_EPS)
         # num_generations == 1: singleton groups have advantage 0; leave unscaled rather than /NaN.
 
-    _require_finite(rewards, advantages)
+    _verify_finite(rewards, advantages)
     return advantages
-
-
-def _require_finite(rewards: torch.Tensor, advantages: torch.Tensor) -> None:
-    """Raise on every rank when any rank's rewards or advantages are non-finite.
-
-    The verdict is agreed across ranks: a rank raising alone leaves its peers in the next collective.
-    """
-    if rank_consensus(bool(torch.isfinite(rewards).all() & torch.isfinite(advantages).all())).all_ok:
-        return
-    raise ValueError(
-        f"Non-finite GRPO rewards or advantages on at least one rank (this rank: "
-        f"{int((~torch.isfinite(rewards)).sum())} of {rewards.numel()} rewards and "
-        f"{int((~torch.isfinite(advantages)).sum())} advantages non-finite). Fix the reward function or "
-        f"environment returning NaN/Inf; under scale_rewards='batch' a single one makes every advantage "
-        f"of the step non-finite."
-    )
 
 
 def degenerate_group_mask(

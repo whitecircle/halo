@@ -31,18 +31,14 @@ from trl.trainer.utils import pad
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
 from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental import (
-    BatchBuildFence,
-    BatchRows,
-    DistributedAsyncEnvironmentalGRPOTrainer,
-    rollout_valid_mask,
-)
-from src.trainers.grpo.objective.logratio import zero_engine_forced_closes
-from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
-from src.trainers.grpo.rollout.trajectory_tokenize import (
+from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence, BatchRows, rollout_valid_mask
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trajectory_tokenize import (
     SAMPLED_IDS_MISSING_WARNING,
     UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY,
 )
+from src.trainers.grpo.objective.logratio import zero_engine_forced_closes
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 from tests.common.routing import BareEPLayer, npy_routing_payload
 
@@ -295,15 +291,17 @@ def _cut_episode_batch(trainer, advantage: float, flag: dict):
         (_REASONING_CLOSE,),
     )
     batch = BatchRows([result], [len(rows)], 0, True)
+    step = types.SimpleNamespace(
+        completion_mask=completion_mask,
+        tool_mask=completion_mask.clone(),
+        negative_only=torch.tensor([r.negative_only for r in rows]),
+    )
     _comp, tool_mask, _loss, num_items = trainer._narrow_masks_and_normalizer(
         batch,
+        step,
         rollout_valid_mask([result], torch.device("cpu")),
         1,
-        completion_mask,
-        completion_mask.clone(),
         batch.to_rows(torch.tensor([advantage])),
-        torch.tensor([r.negative_only for r in rows]),
-        torch.device("cpu"),
         "train",
     )
     return rows, ratio, tool_mask, num_items

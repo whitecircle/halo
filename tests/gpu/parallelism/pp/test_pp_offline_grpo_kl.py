@@ -32,7 +32,7 @@ from transformers import AutoTokenizer
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.distributed import hf_eval_loss_reference, shared_output_dir, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B

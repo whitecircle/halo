@@ -9,7 +9,7 @@ own longer, hinted sequence. The oracle below pairs each branch's response posit
 stub model scores a token by its position and its sequence's length, so the teacher's rows differ
 from the student's and a misaligned pairing lands on a different number.
 
-The divergences themselves are covered by test_distillation_losses.py.
+The divergences themselves are covered by test_distillation_divergences.py.
 
 Run: python tests/cpu/trainers/test_self_distillation_trainer.py
 """
@@ -25,7 +25,7 @@ from torch.nn.functional import cross_entropy
 
 import src.trainers.distillation.self_distillation as sd
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.distillation.losses import reverse_kl_loss, unnormalized_kl_loss
+from src.trainers.distillation.divergences import reverse_kl_loss, unnormalized_kl_loss
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 
 VOCAB = 13
@@ -203,6 +203,18 @@ def test_the_anchor_is_off_at_a_zero_coefficient():
     assert "reference_kl" not in _stored(trainer)
 
 
+def _opd(trainer, student_logits, student_labels, teacher_logits, teacher_labels, weights):
+    """The OPD term ``compute_loss`` adds: the divergence between the two branches' OPD positions."""
+    return trainer._response_divergence(
+        trainer.sdpg_loss_fn,
+        student_logits,
+        trainer._opd_mask(student_labels),
+        teacher_logits,
+        trainer._opd_mask(teacher_labels),
+        weights,
+    )
+
+
 def _loop_opd(student_logits, student_labels, teacher_logits, teacher_labels, weights, stop_ids):
     """A per-row reference loop over each row's response rows, on batches whose two branches carry
     equal per-row counts."""
@@ -233,7 +245,7 @@ def test_the_masked_gather_matches_a_per_row_reference_loop(seed):
     weights = torch.rand(len(rows), generator=generator)
 
     trainer = _trainer()
-    got = trainer._opd_loss(student, labels, teacher, teacher_labels, weights)
+    got = _opd(trainer, student, labels, teacher, teacher_labels, weights)
     (got_grad,) = torch.autograd.grad(got, student)
     expected = _loop_opd(student, labels, teacher, teacher_labels, weights, torch.tensor([EOS]))
     (expected_grad,) = torch.autograd.grad(expected, student)
@@ -255,7 +267,7 @@ def test_misaligned_branches_raise_instead_of_pairing_different_tokens(totals_ma
         teacher_labels[1, last_supervised] = LABEL_IGNORE_INDEX
     logits = torch.zeros(len(ROWS), teacher_labels.size(1), VOCAB)
     with pytest.raises(RuntimeError, match="response alignment contract"):
-        trainer._opd_loss(logits[:, : labels.size(1)], labels, logits, teacher_labels, None)
+        _opd(trainer, logits[:, : labels.size(1)], labels, logits, teacher_labels, None)
 
 
 def test_one_mask_on_both_sides_skips_the_count_check(monkeypatch):
@@ -269,12 +281,12 @@ def test_one_mask_on_both_sides_skips_the_count_check(monkeypatch):
     monkeypatch.setattr(torch, "equal", lambda a, b: compared.append(True) or real_equal(a, b))
     trainer._reference_loss(logits, logits, labels)
     assert compared == []
-    trainer._opd_loss(logits, labels, logits, labels.clone(), None)
+    _opd(trainer, logits, labels, logits, labels.clone(), None)
     assert compared == [True]
 
 
 def _vision_reuse_probe(model_type):
-    """Run ``_maybe_setup_vision_reuse`` against a fake VLM of ``model_type``.
+    """Run ``_install_vision_reuse`` against a fake VLM of ``model_type``.
 
     Returns ``(activated, wrapper_installed)``.
     """
@@ -294,7 +306,7 @@ def _vision_reuse_probe(model_type):
     )
     # accelerate's logger needs a PartialState; a plain one keeps this call unit-level.
     with patch.object(sd, "logger", logging.getLogger(__name__)):
-        activated = DistributedSelfDistillationTrainer._maybe_setup_vision_reuse(me, inner)
+        activated = DistributedSelfDistillationTrainer._install_vision_reuse(me, inner)
     return activated, inner.model.get_image_features is not original_get_image_features
 
 

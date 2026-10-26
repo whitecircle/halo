@@ -29,7 +29,8 @@ from src.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
 from src.rewards.samples import CUT_TOOL_CALLS_KEY
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 
 def _environment_classes(cls: type = EnvironmentBase) -> list[type]:

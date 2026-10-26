@@ -17,17 +17,16 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 from datasets import Dataset
 from sklearn.utils.class_weight import compute_class_weight
 
-from src.trainers.reward.classification import ClassificationTrainer
+from src.trainers.reward.classification_loss import balanced_class_weights, build_classification_loss
 
-_MODULE = "src.trainers.reward.classification"
+_MODULE = "src.trainers.reward.classification_loss"
 
 
 class _FakeDist:
-    """Fake of the ``torch.distributed`` surface used by _balanced_class_weights.
+    """Fake of the ``torch.distributed`` surface used by balanced_class_weights.
 
     Emulates one rank of a world where ``other_ranks_labels`` are the label shards held
     by the OTHER ranks: MAX all-reduce over the count-vector length, SUM all-reduce over
@@ -58,18 +57,18 @@ class _FakeDist:
 
 
 def _weights_on_rank(rank_labels: list[int], other_ranks_labels: list[list[int]], model=None) -> torch.Tensor:
-    """Run _balanced_class_weights as one simulated rank of a fake world."""
+    """Run balanced_class_weights as one simulated rank of a fake world."""
     with (
         patch(f"{_MODULE}.dist", _FakeDist(other_ranks_labels)),
         patch(f"{_MODULE}.current_device", return_value=torch.device("cpu")),
         patch(f"{_MODULE}.has_process_group", return_value=True),
     ):
-        return ClassificationTrainer._balanced_class_weights({"labels": rank_labels}, model)
+        return balanced_class_weights({"labels": rank_labels}, model)
 
 
 def _local_weights(labels: list[int], model=None) -> torch.Tensor:
-    """Run _balanced_class_weights with distributed NOT initialized (single-process path)."""
-    return ClassificationTrainer._balanced_class_weights({"labels": labels}, model)
+    """Run balanced_class_weights with distributed NOT initialized (single-process path)."""
+    return balanced_class_weights({"labels": labels}, model)
 
 
 # Two DP shards with deliberately different label distributions AND different local max
@@ -94,23 +93,23 @@ def test_presharded_ranks_produce_identical_global_weights():
     assert not torch.allclose(_local_weights(RANK0_LABELS + [2]), GLOBAL_WEIGHTS, atol=1e-6)
 
 
-def test_build_loss_fn_uses_global_counts():
-    """The production path (_build_loss_fn) must weight CrossEntropyLoss by global counts."""
-    trainer = ClassificationTrainer.__new__(ClassificationTrainer)
-    trainer.is_multi_label = False
-    args = SimpleNamespace(loss_type="cross_entropy", class_weights=None, derive_class_weights=True)
+def test_build_classification_loss_uses_global_counts():
+    """The production path (build_classification_loss) must weight the cross-entropy by global counts."""
+    args = SimpleNamespace(
+        loss_type="cross_entropy", class_weights=None, derive_class_weights=True, label_smoothing=0.0
+    )
 
     with (
         patch(f"{_MODULE}.dist", _FakeDist([RANK1_LABELS])),
         patch(f"{_MODULE}.current_device", return_value=torch.device("cpu")),
         patch(f"{_MODULE}.has_process_group", return_value=True),
     ):
-        loss_fn = trainer._build_loss_fn(
-            args, {"labels": RANK0_LABELS}, SimpleNamespace(config=SimpleNamespace(num_labels=3))
+        loss = build_classification_loss(
+            args, SimpleNamespace(config=SimpleNamespace(num_labels=3)), {"labels": RANK0_LABELS}, multi_label=False
         )
 
-    assert isinstance(loss_fn, nn.CrossEntropyLoss)
-    assert torch.allclose(loss_fn.weight, GLOBAL_WEIGHTS, atol=1e-6), loss_fn.weight
+    assert loss.focal_gamma is None and not loss.multi_label
+    assert torch.allclose(loss.weight, GLOBAL_WEIGHTS, atol=1e-6), loss.weight
 
 
 def test_world_reduce_is_scale_invariant_for_tp_siblings():
@@ -151,7 +150,7 @@ def test_label_beyond_num_labels_raises():
 def test_empty_labels_raise():
     """An empty labels column must fail loud instead of returning an empty weight vector."""
     with pytest.raises(ValueError, match="empty"):
-        ClassificationTrainer._balanced_class_weights({"labels": np.array([], dtype=np.int64)}, None)
+        balanced_class_weights({"labels": np.array([], dtype=np.int64)}, None)
 
 
 def test_resolves_singular_label_column_from_script_dataset():
@@ -163,7 +162,7 @@ def test_resolves_singular_label_column_from_script_dataset():
     the other tests feed) so the column name is load-bearing.
     """
     ds = Dataset.from_dict({"input_ids": [[1], [2], [3], [4]], "label": [0, 0, 0, 1]})
-    weights = ClassificationTrainer._balanced_class_weights(ds, None)
+    weights = balanced_class_weights(ds, None)
     # counts [3, 1], n=4, 2 present -> balanced 4/(2*count) = [2/3, 2].
     assert torch.allclose(weights, torch.tensor([2 / 3, 2.0], dtype=torch.float32), atol=1e-6), weights
 

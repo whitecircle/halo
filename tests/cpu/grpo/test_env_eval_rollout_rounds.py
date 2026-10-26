@@ -17,7 +17,8 @@ from trl import GRPOTrainer
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.dataloaders import DataParallelLoaderMixin
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.environmental_rules import validate_eval_round
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 SENTINEL = object()
 
@@ -100,36 +101,40 @@ def test_custom_dp_path_sizes_its_loader_params_from_the_hook():
     assert seen == [68]
 
 
+def _validate(host) -> None:
+    validate_eval_round(host.args, host.async_config, host.num_generations_eval)
+
+
 def test_round_must_hold_whole_eval_groups_and_a_full_tail():
-    _trainer(68)._validate_eval_round()
-    _trainer(None, drop_last=True)._validate_eval_round()
+    _validate(_trainer(68))
+    _validate(_trainer(None, drop_last=True))
     with pytest.raises(ValueError, match="divisible by num_generations_eval"):
-        _trainer(70, num_generations_eval=4)._validate_eval_round()
+        _validate(_trainer(70, num_generations_eval=4))
     with pytest.raises(ValueError, match="dataloader_drop_last"):
-        _trainer(68, drop_last=True)._validate_eval_round()
+        _validate(_trainer(68, drop_last=True))
 
 
 def test_the_default_round_must_hold_whole_groups_per_rank():
     """With no ``eval_rollout_batch_size`` the round IS ``per_device_eval_batch_size``, so that is the
     geometry the gate reads. TRL validates only the GLOBAL eval batch, so nothing else catches it."""
     with pytest.raises(ValueError, match=r"per_device_eval_batch_size \(6\) must be divisible"):
-        _trainer(None, per_device=6, num_generations_eval=4)._validate_eval_round()
-    _trainer(None, per_device=8, num_generations_eval=4)._validate_eval_round()
+        _validate(_trainer(None, per_device=6, num_generations_eval=4))
+    _validate(_trainer(None, per_device=8, num_generations_eval=4))
 
 
 def test_an_explicit_round_is_the_geometry_that_is_checked():
     """With ``eval_rollout_batch_size`` set, the loader draws that many rows per rank and the eval batch
     is only the loss forward's chunk, so it is the round that must hold whole groups."""
-    _trainer(8, per_device=6, num_generations_eval=4)._validate_eval_round()
+    _validate(_trainer(8, per_device=6, num_generations_eval=4))
     with pytest.raises(ValueError, match=r"eval_rollout_batch_size \(6\)"):
-        _trainer(6, per_device=8, num_generations_eval=4)._validate_eval_round()
+        _validate(_trainer(6, per_device=8, num_generations_eval=4))
 
 
 def test_round_may_not_exceed_the_in_flight_cap():
-    _trainer(68)._check_eval_round_fits_cap(68)
-    _trainer(None)._check_eval_round_fits_cap(4)
+    _trainer(68)._reject_eval_round_over_cap(68)
+    _trainer(None)._reject_eval_round_over_cap(4)
     with pytest.raises(ValueError, match="3 waves"):
-        _trainer(68)._check_eval_round_fits_cap(32)
+        _trainer(68)._reject_eval_round_over_cap(32)
 
 
 def test_config_refuses_a_non_positive_round():

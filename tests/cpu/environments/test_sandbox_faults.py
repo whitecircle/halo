@@ -62,7 +62,7 @@ from src.environments.tools.toolsets import build_session_code_tools
 from src.rewards import composer as scorers_module
 from src.rewards.scorers.base import Scorer, ScoreResult
 from src.rewards.terms import JudgeTerm
-from src.trainers.grpo.environmental import rollout_valid_mask
+from src.trainers.grpo.environmental.step_batch import rollout_valid_mask
 from src.trainers.grpo.objective.advantages import group_relative_advantages
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
 from tests.common.repo import REPO_ROOT

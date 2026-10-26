@@ -13,8 +13,8 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.distributed.context_parallel.ulysses_model import find_ulysses_model
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_targets
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
-from src.trainers.grpo.objective.offline import offline_loss
+from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from src.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import full_row_loss
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -52,7 +52,7 @@ def _model():
 
 
 def _scorer():
-    scorer = ChunkedLogprobsCore()
+    scorer = LogprobScoringMixin()
     scorer.temperature = 1.0
     return scorer
 

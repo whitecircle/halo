@@ -136,7 +136,7 @@ the sync.
 
 `wiring.md` + `agent-docs/training-methods/` document the setup (`grpo/rewards/README.md` owns the
 term list, `async-grpo/setup.md` the servers and launch). The code is the **ultimate** authority:
-`src/trainers/grpo/environmental.py`, `src/weight_sync/` (the weight-sync clients), and
+`src/trainers/grpo/environmental/trainer.py`, `src/weight_sync/` (the weight-sync clients), and
 `Dockerfile.vllm` decide the real handshake — when a doc, this skill, or memory disagrees, or you are
 unsure, read those files before wiring it up. (`CLAUDE.md`: docs-first, the code wins.) Related skills:
 `data` (the async-GRPO format: `prompt`, plus `answer` where the environment's `requires_answer` is

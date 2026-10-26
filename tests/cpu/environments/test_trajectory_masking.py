@@ -9,14 +9,15 @@ EOS ``<|im_end|>`` doubles as the turn delimiter — the exact case a first-EOS
 heuristic mis-handles). Run: ``pytest tests/cpu/environments/test_trajectory_masking.py``.
 """
 
+from collections import defaultdict
 from types import MethodType, SimpleNamespace
 
 import pytest
 
 from src.environments.environment_base import EnvironmentBase
 from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.rollout_metrics import _summarize_episode_generation_tokens
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -47,6 +48,8 @@ def _stub(tokenizer):
     stub._tokenizer = tokenizer  # mirror __init__: processing_class may be a Processor
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
     stub._context_limit = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._context_limit, stub)
+    for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
+        setattr(stub, name, MethodType(getattr(DistributedAsyncEnvironmentalGRPOTrainer, name), stub))
     stub._masked_trajectory_tensors = MethodType(
         DistributedAsyncEnvironmentalGRPOTrainer._masked_trajectory_tensors, stub
     )
@@ -195,6 +198,8 @@ def _tokenize_with(tok, reasoning_effort):
     stub._tokenizer = tok
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
     stub._context_limit = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._context_limit, stub)
+    for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
+        setattr(stub, name, MethodType(getattr(DistributedAsyncEnvironmentalGRPOTrainer, name), stub))
     traj = Trajectory(reasoning_effort=reasoning_effort)
     traj.add_message(Message.user("solve it"))
     traj.add_message(Message.assistant("done", thinking="cot"))
@@ -226,14 +231,28 @@ def test_render_omits_effort_when_unset():
     assert tok.efforts and all(e == "<<unset>>" for e in tok.efforts), tok.efforts
 
 
-def test_summarize_episode_generation_tokens_mean_max_p90():
+def test_episode_generation_tokens_mean_max_p90():
     # Guards the aggregation the trainer logs as episode/generation_tokens{,_max,_p90}.
     vals = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]  # each = one episode's total (summed over turns)
-    s = _summarize_episode_generation_tokens(vals)
-    assert s["episode/generation_tokens"] == 55.0  # mean, NOT the max/last
-    assert s["episode/generation_tokens_max"] == 100.0
+    episodes = [
+        {
+            "latency": 0.0,
+            "requests_expired_in_sync": 0,
+            "generation_tokens": v,
+            "turns": 1,
+            "success": True,
+            "truncated": False,
+            "error": False,
+        }
+        for v in vals
+    ]
+    host = SimpleNamespace(_sound_truncation_alarm=lambda rate, mode: None)
+    m = defaultdict(list)
+    DistributedAsyncEnvironmentalGRPOTrainer._log_episode_metrics(host, m, episodes, "train")
+    assert m["episode/generation_tokens"] == [55.0]  # mean, NOT the max/last
+    assert m["episode/generation_tokens_max"] == [100.0]
     # nearest-rank p90 of 10 sorted values -> ceil(0.9 * 10) = 9th = 90
-    assert s["episode/generation_tokens_p90"] == 90.0
+    assert m["episode/generation_tokens_p90"] == [90.0]
 
 
 if __name__ == "__main__":

@@ -68,14 +68,11 @@ def world_sums(values: Sequence[Count]) -> list[float]:
 
 
 class WorldMetrics:
-    """Per-step accumulator for batch-level fractions, means, maxima, effective sample sizes and
-    covariances.
+    """Per-step accumulator of batch-level fractions, means, maxima, effective sample sizes and covariances.
 
-    Sites record the local sums (or maximum) each metric is derived from here, and :meth:`flush` folds
-    every rank's entries in ONE collective. Recording issues no collective and no host sync, so a site
-    behind a data-dependent gate is safe: a rank that never reaches it contributes nothing to that key.
-    A step that raises between a record and its flush ends the run — every such raise in the trainer
-    is rank-uniform and fatal — so no entry survives into the next step.
+    Sites record local sums with no collective and no host sync, so a site behind a data-dependent gate is
+    safe, and :meth:`flush` folds every rank's entries in one collective. A raise between a record and its
+    flush is rank-uniform and fatal, so no entry survives into the next step.
     """
 
     def __init__(self) -> None:

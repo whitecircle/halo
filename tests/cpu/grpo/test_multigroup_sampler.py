@@ -16,7 +16,7 @@ from accelerate import PartialState
 # MultiGroupSampler.__init__ logs via the accelerate logger, which requires an initialized state.
 PartialState()
 
-from src.trainers.grpo.offline import MultiGroupSampler
+from src.trainers.grpo.offline.group_sampler import MultiGroupSampler
 
 
 def _group_ids(num_groups=24, group_size=5):

@@ -23,7 +23,8 @@ from transformers.models.deepseek_v4 import DeepseekV4Config, DeepseekV4ForCausa
 from src.configs.preference import SmoothMarginPOConfig
 from src.models import segment_markers
 from src.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarkers, segment_markers_for
-from src.trainers.preference.smpo import SmoothMarginPOTrainer, reject_padding_free_without_varlen
+from src.trainers.preference.preference_rules import reject_padding_free_without_varlen
+from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.segment_isolation import (
     FAMILIES,
@@ -33,6 +34,7 @@ from tests.common.segment_isolation import (
     preference_batch,
     tiny_model,
 )
+from tests.common.smpo_trainer import smpo_trainer
 
 # Same tokens, same weights: only the matmul reduction order differs between the flattened row and a
 # lone document, so fp32 agreement is at rounding level.
@@ -52,11 +54,7 @@ def _model(family: str):
 
 def _trainer(markers: SegmentMarkers) -> SmoothMarginPOTrainer:
     """A construction-free SMPO carrying only what the padding-free forward reads."""
-    trainer = object.__new__(SmoothMarginPOTrainer)
-    trainer.padding_free = True
-    trainer.pad_token_id = PAD_ID
-    trainer.parallelism_config = SimpleNamespace(cp_size=1)  # cp_size is a mixin property over it
-    trainer.lower_clip_percentile = trainer.upper_clip_percentile = trainer.min_log_prob = None
+    trainer = smpo_trainer(pad_token_id=PAD_ID, padding_free=True)
     trainer._segment_markers = markers
     return trainer
 

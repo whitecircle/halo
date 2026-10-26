@@ -51,7 +51,7 @@ from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.runtime.filesystem import hub_metadata_main_first
 from src.runtime.ranks import is_global_main_process
-from src.trainers.distillation.losses import shared_vocab_width
+from src.trainers.distillation.divergences import resolve_shared_vocab_width
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 
 logger = get_logger(__name__, log_level="INFO")
@@ -80,7 +80,7 @@ def _load_distill_teacher(*, args, model_config, training_config, is_vlm: bool, 
         attn_implementation=requested_attn,
         reset_sinks=args.reset_sinks,
         is_vlm=is_vlm,
-        # VLM only: the text teacher lands in host memory and the trainer moves it (_setup_teacher_model).
+        # VLM only: the text teacher lands in host memory and the trainer moves it (place_frozen_scorer).
         device_map={"": local_rank} if is_vlm else None,
         download_tag="teacher_model",
     )
@@ -99,7 +99,7 @@ def _load_teacher_tokenizer(*, args, model_config, student_config, student_token
         )
 
     teacher_tokenizer, teacher_config = hub_metadata_main_first("teacher_metadata", fetch)
-    shared_vocab_width(student_config, teacher_config, student_tokenizer, teacher_tokenizer)
+    resolve_shared_vocab_width(student_config, teacher_config, student_tokenizer, teacher_tokenizer)
     return teacher_tokenizer
 
 

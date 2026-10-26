@@ -30,15 +30,15 @@ import pandas as pd
 import pytest
 import torch
 
+import src.trainers.grpo.environmental.rollout_metrics as rm
 import src.trainers.grpo.rollout.completions_logging as cl
-import src.trainers.grpo.rollout.rollout_metrics as rm
 from src.environments.episode_keys import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY
 from src.environments.messages import Message, Trajectory
 from src.rewards.samples import CUT_CALL_NOTE
 from src.runtime import filesystem, ranks
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 

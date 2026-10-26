@@ -23,7 +23,7 @@ from src.distributed.fsdp import reshard_fsdp2_modules
 from src.model_loading.liger.dispatch import apply_liger_kernel
 from src.model_loading.parallel.loader import load_distributed_model
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, finish_phase, log, max_or_nan

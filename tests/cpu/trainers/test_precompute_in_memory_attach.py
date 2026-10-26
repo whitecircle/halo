@@ -20,7 +20,7 @@ from datasets import Dataset, concatenate_datasets, load_from_disk
 from trl.trainer.dpo_trainer import DPOTrainer as TrlDPOTrainer
 from trl.trainer.kto_trainer import KTOTrainer as TrlKTOTrainer
 
-from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
+from src.trainers.preference.trl_preference import TRLPreferenceMixin
 from tests.common.preference_precompute import (
     BASE,
     N_ROWS,
@@ -90,9 +90,9 @@ def test_dataset_supplied_columns_skip_the_sweep(kind):
 def test_the_trainers_route_the_precompute_through_the_mixin(kind):
     """The mixin's sweep must shadow TRL's, whose cache-file hand-off is what fails across nodes."""
     trainer_cls, _ = TRAINERS[kind]
-    assert trainer_cls._precompute_ref_logps is PrecomputeRefLogpsRankConsistentMixin._precompute_ref_logps
+    assert trainer_cls._precompute_ref_logps is TRLPreferenceMixin._precompute_ref_logps
     mro = trainer_cls.__mro__
-    assert mro.index(PrecomputeRefLogpsRankConsistentMixin) < mro.index(TRL_BASES[kind])
+    assert mro.index(TRLPreferenceMixin) < mro.index(TRL_BASES[kind])
 
 
 if __name__ == "__main__":

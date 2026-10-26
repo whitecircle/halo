@@ -12,8 +12,8 @@ from accelerate import PartialState
 from datasets import Dataset
 from torch import nn
 
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.grpo.reference_cache import ReferenceScoreCache
+from src.trainers.grpo.offline.reference_cache import ReferenceScoreCache
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 PartialState()

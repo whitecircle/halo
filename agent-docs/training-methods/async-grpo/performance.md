@@ -22,7 +22,7 @@ The estimate is a floor: it covers one forward chunk, a single-row fallback traj
 
 ## Chunked log-probs
 
-`use_chunked_grpo_logprobs: true` (default off) removes the wall: log-probs come from the backbone's `last_hidden_state` through a chunked (sequence × vocab) matmul, so peak follows the tile size. Every code-contests recipe sets it; online and offline GRPO take the same flag.
+`use_chunked_grpo_logprobs: true` (default off) removes the wall: log-probs come from the backbone's `last_hidden_state` through a chunked (sequence × vocab) matmul (`src/kernels/head_logprobs.py`, driven by `src/trainers/grpo/logprob_scoring.py`), so peak follows the tile size. Every code-contests recipe sets it; online and offline GRPO take the same flag.
 
 - **Precision.** Logits and log-probs stay fp32 (the backward takes bf16 operands, fp32 accumulation), within 5e-3 nats of an fp64 reference. The full path rounds logits to bf16, about 0.1 nats at |logit| ≈ 20.
 - **Cost.** A recompute backward at about the full path's cost (Qwen3-8B head, 8k tokens: 51 ms forward+backward on a B300). Offline GRPO on 8× B300: Qwen3-8B at 8,192 tokens runs 18,367 tok/s/GPU against 19,266 on full logits; gpt-oss-20b EP8 at 4,096 tokens, 9,042 against 8,980.

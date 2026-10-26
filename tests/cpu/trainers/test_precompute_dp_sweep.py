@@ -1,4 +1,4 @@
-"""``PrecomputeRefLogpsRankConsistentMixin`` pins TRL's reference sweep to the data-parallel axis.
+"""``TRLPreferenceMixin`` pins TRL's reference sweep to the data-parallel axis.
 
 The sweep builds its loader with ``accelerator.prepare`` and reassembles the results with
 ``accelerator.gather_for_metrics``, both keyed on the GLOBAL rank. It runs inside TRL's ``__init__``,
@@ -19,8 +19,7 @@ PartialState()
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.dataloaders import DataParallelLoaderMixin
-from src.trainers.preference.logprobs import FP32LogprobsMixin
-from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
+from src.trainers.preference.trl_preference import TRLPreferenceMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.preference_precompute import TRAINERS
 
@@ -69,11 +68,12 @@ class _ReferenceForward:
         return batch.float(), None
 
 
-class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelLoaderMixin, _ReferenceForward):
+class _Trainer(TRLPreferenceMixin, DataParallelLoaderMixin, _ReferenceForward):
     """Real mixin over a stub reference forward, with a world gather simulated from all ranks' shards."""
 
-    # The stub forward stands in for FP32LogprobsMixin's, so it declares that mixin's precision.
-    logprob_precision = FP32LogprobsMixin.logprob_precision
+    REFERENCE_COLUMNS = ("ref_logps",)
+    # Over the mixin's fp32 rebind, which wraps TRL's forward and this stub is not one.
+    compute_ref_log_probs = _ReferenceForward.compute_ref_log_probs
 
     def __init__(self, rank: int, *, presharded: bool = False, world_chunks=None):
         self.parallelism_config = _parallelism_config(rank)
@@ -98,9 +98,6 @@ class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelLoaderMixin, _
             # accelerate's gather_for_metrics gathers through ``gather``, so the DP scoping applies.
             gather_for_metrics=lambda data: self.accelerator.gather(data),
         )
-
-    def _required_ref_logps_columns(self) -> tuple[str, ...]:
-        return ("ref_logps",)
 
     def _reference_settings(self) -> dict:
         return {}

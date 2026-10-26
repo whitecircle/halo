@@ -21,7 +21,7 @@ import math
 import pytest
 import torch
 
-from src.trainers.mixins.stored_metrics import StoredMetricsMixin
+from src.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.gloo import run_gloo_ranks
 
 

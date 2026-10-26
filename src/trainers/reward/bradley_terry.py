@@ -16,6 +16,8 @@ pairs are interleaved. A VLM run swaps TRL's tokenize map and collator for the v
 (:mod:`src.data.pipeline.preferences`, :mod:`src.data.collators.vlm_preference`).
 """
 
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from accelerate.logging import get_logger
@@ -36,24 +38,20 @@ from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.runtime.consensus import agree_probe_across_ranks
 from src.trainers.ctor_slots import get_ctor_config, resolve_ctor_positions
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.parallelism.pipeline_loss_adapter import (
     PipelineLossAdapter,
-    interleave_pairs,
-    pair_count_normalizer,
-    split_pairs,
-)
-from src.trainers.reward.pooling import (
     decode_pooling_plane,
     encode_pooling_plane,
-    pooled_outputs,
-    pooling_pad_id_for,
+    interleave_halves,
+    pair_count_normalizer,
+    pair_placeholder_labels,
+    pooled_logits,
+    split_pairs,
 )
+from src.trainers.parallelism.pipeline_rules import require_pooling_pad_id
+from src.trainers.trl_dataset_prep import TRLDatasetPrepMixin
 
 logger = get_logger(__name__, log_level="info")
-
-# TRL RewardTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-_CTOR_POSITIONS = resolve_ctor_positions(RewardTrainer, "model", "args")
 
 # The two rendered sides; their presence marks a dataset the VLM map has already prepared.
 _RENDERED_SIDE_COLUMNS = frozenset(VLM_PREFERENCE_COLUMNS[:2])
@@ -68,17 +66,19 @@ def _rendered_sides_fit(row: dict, tokenizer, max_length: int) -> bool:
     """
     return all(
         len(tokenizer(row[column], add_special_tokens=False)["input_ids"]) <= max_length
-        for column in ("chosen_text", "rejected_text")
+        for column in _RENDERED_SIDE_COLUMNS
     )
 
 
-class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPrepMixin, RewardTrainer):
-    """TRL RewardTrainer plus EP/TP/PP via DistributedTrainerMixin (CP excluded;
-    pooled representations are incompatible with sequence splitting)."""
+class DistributedRewardTrainer(DistributedTrainerMixin, TRLDatasetPrepMixin, RewardTrainer):
+    """TRL RewardTrainer plus EP/TP/PP via DistributedTrainerMixin (CP excluded: the pooled score needs the
+    whole sequence)."""
 
     _tag_names = ["trl", "reward"]
 
     PP_REFUSAL = None
+    # TRL RewardTrainer's positional slots, derived from its installed signature.
+    CTOR_POSITIONS = resolve_ctor_positions(RewardTrainer, "model", "args")
     # The BT pair scores in one forward that is chunked in two, so a MoE layer sees twice the rows.
     FORWARD_ROWS_PER_EXAMPLE = 2
 
@@ -104,7 +104,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
                 # paired by hand.
                 kwargs["data_collator"] = DataCollatorForVLMPreference(
                     processor=processing_class,
-                    max_length=getattr(get_ctor_config(args, kwargs, _CTOR_POSITIONS), "max_length", None),
+                    max_length=getattr(get_ctor_config(args, kwargs, self.CTOR_POSITIONS), "max_length", None),
                 )
             # TRL's reward ctor settles the pad token through the tokenizer api (``pad_token``,
             # ``get_vocab``), none of which a ProcessorMixin carries — handed a processor it raises
@@ -112,7 +112,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
             # and the processor is reinstated below because ``save_pretrained`` writes
             # ``processing_class``: without it the export carries no processor_config.json.
             kwargs["processing_class"] = resolve_tokenizer(processing_class)
-        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
+        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=self.CTOR_POSITIONS)
         super().__init__(*args, **kwargs)
         if self._is_vlm:
             self.processing_class = self._processor
@@ -121,14 +121,9 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
     def _prepare_dataset(self, dataset, processing_class, args, dataset_name: str):
         """Render VLM preference rows; text runs take TRL's own tokenize + filter path unchanged.
 
-        The VLM map renders both sides whole and keeps the prompt's images as PIL objects; TRL's
-        text ``tokenize_fn`` is bypassed, since tokenizing before placeholder expansion would
-        produce ids that no longer match the batch the model sees. ``max_length`` stays a filter on
-        the rendered text (see :func:`_rendered_sides_fit`).
-
-        The VLM branch renders through ``self._processor``, not the ``processing_class`` argument:
-        the base ctor calls this with the inner tokenizer, which chat-templates without expanding
-        image placeholders into the parts-form content the processor understands.
+        The VLM map renders both sides whole, keeping the prompt's images as PIL objects: tokenizing before
+        placeholder expansion would not match the batch the model sees. It renders through ``self._processor``,
+        since the base ctor passes the inner tokenizer, which cannot expand image placeholders.
         """
         if not self._is_vlm:
             return super()._prepare_dataset(dataset, processing_class, args, dataset_name)
@@ -152,8 +147,6 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
             remove_columns=[column for column in dataset.column_names if column != MARGIN_COLUMN],
             desc=f"Rendering {dataset_name} VLM preference dataset",
             features=vlm_preference_features(dataset),
-            # In fn_kwargs, not read off self: the map fn must stay picklable, and the cache key
-            # fingerprints fn_kwargs.
             fn_kwargs={"processing_class": processor},
         )
         if args.max_length is None:
@@ -183,72 +176,46 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
         )
         return dataset
 
-    def _configure_pipeline_parallel(self):
-        """Seed the PP-only pooling state and refuse a head this objective cannot score, then run
-        the mixin's setup.
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
+        """The Bradley-Terry objective as a last-stage pipeline loss, over a scalar head.
 
-        Kept out of ``_pp_loss_adapter``, which the mixin may call as a declarative accessor.
+        The collator's ``[chosen ⧺ rejected]`` is interleaved so no microbatch split separates a pair, and
+        each row's pooled position rides the synthesized labels plane, from which the loss pools and reads
+        row validity. ``extra_signature_columns`` keeps the preference columns past HF's pruning.
         """
-        self._pp_pool_pad_id = pooling_pad_id_for(self)
+        tokenizer = resolve_tokenizer(self.processing_class)
+        self._pp_pool_pad_id = require_pooling_pad_id(self.model.config, getattr(tokenizer, "pad_token_id", None))
         if self.model.config.num_labels != 1:
             raise ValueError(
                 f"Bradley-Terry reward modeling under pipeline parallelism needs a scalar head "
                 f"(num_labels=1), got num_labels={self.model.config.num_labels}."
             )
-        columns = getattr(self.train_dataset, "column_names", None) or []
-        self._pp_use_margins = "margin" in columns
-        super()._configure_pipeline_parallel()
-
-    def _pp_loss_adapter(self) -> PipelineLossAdapter:
-        """The Bradley-Terry objective as a last-stage pipeline loss.
-
-        The collator's ``[chosen ⧺ rejected]`` is re-laid out interleaved so no microbatch split can
-        separate a pair, and each row's pooled position is recorded as a marker in the synthesized
-        labels plane, the per-row channel the runner already ships. The loss pools and reads row
-        validity off that plane: no ``input_ids`` side tensor, no second pooling pass.
-        ``eval_normalizer`` counts the marked rows, so eval_loss means over pairs;
-        ``extra_signature_columns`` keeps the preference dataset's columns past HF's pruning.
-        """
+        self._pp_use_margins = MARGIN_COLUMN in (getattr(self.train_dataset, "column_names", None) or [])
         return PipelineLossAdapter(
             token_loss_fn=self._pp_bt_token_loss,
             batch_transform=self._pp_reward_batch_transform,
             normalizer=pair_count_normalizer,
-            extra_target_keys=("margin",) if self._pp_use_margins else (),
-            eval_normalizer=self._pp_bt_eval_pair_count,
-            extra_signature_columns=("chosen_ids", "rejected_ids", "margin"),
-            predictions_fn=self._pp_bt_predictions,
-            eval_labels_fn=self._pp_bt_eval_labels,
+            extra_target_keys=(MARGIN_COLUMN,) if self._pp_use_margins else (),
+            # Every row is marked and the eval padding appends unmarked rows: half the marked rows are pairs.
+            eval_normalizer=lambda inputs: (decode_pooling_plane(inputs["labels"]).valid.sum() / 2).clamp(min=1.0),
+            extra_signature_columns=("chosen_ids", "rejected_ids", MARGIN_COLUMN),
+            # The [pairs, 2] (chosen, rejected) scores preference metrics read (argmax == 0 is the accuracy),
+            # not the [rows, S, 1] plane, where the score sits at one pooled position per row.
+            predictions_fn=lambda logits, inputs: torch.stack(
+                split_pairs(pooled_logits(logits, decode_pooling_plane(inputs["labels"])).squeeze(-1).float()), dim=-1
+            ),
+            eval_labels_fn=partial(pair_placeholder_labels, dtype=torch.long),
         )
-
-    def _pp_bt_predictions(self, logits: torch.Tensor, inputs: dict) -> torch.Tensor:
-        """Per-token scores → the ``[pairs, 2]`` (chosen, rejected) a preference metric consumes.
-
-        Without this the raw ``[rows, S, 1]`` plane would reach ``compute_metrics``, which for a
-        reward model is not a prediction: the score sits at one pooled position per row. The
-        pairwise layout matches the convention preference metrics expect, so ``argmax == 0`` is the
-        accuracy.
-        """
-        _valid, positions, _values = decode_pooling_plane(inputs["labels"])
-        pooled = pooled_outputs(logits, positions).squeeze(-1).float()
-        chosen, rejected = split_pairs(pooled)
-        return torch.stack((chosen, rejected), dim=-1)
-
-    def _pp_bt_eval_labels(self, inputs: dict) -> torch.Tensor:
-        """Chosen is column 0 of every pair, so the target index is 0 — one label per pair."""
-        pairs = inputs["input_ids"].size(0) // 2
-        return torch.zeros(pairs, dtype=torch.long, device=inputs["input_ids"].device)
 
     def _pp_reward_batch_transform(self, batch: dict) -> dict:
         """``[chosen ⧺ rejected]`` → interleaved ``[c0, r0, ...]``, plus the synthesized labels plane."""
-        chosen_ids, rejected_ids = batch["input_ids"].chunk(2)
-        chosen_mask, rejected_mask = batch["attention_mask"].chunk(2)
-        input_ids = interleave_pairs(chosen_ids, rejected_ids)
-        attention_mask = interleave_pairs(chosen_mask, rejected_mask)
+        input_ids = interleave_halves(batch["input_ids"])
+        attention_mask = interleave_halves(batch["attention_mask"])
         # Both rows of the pair are marked: the loss needs a chosen and a rejected score per pair.
         labels = encode_pooling_plane(input_ids, self._pp_pool_pad_id, 0)
         out = {**batch, "input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
         if self._pp_use_margins:
-            margin = batch.get("margin")
+            margin = batch.get(MARGIN_COLUMN)
             if margin is None:
                 raise ValueError(
                     "The PP loss adapter was resolved WITH margins (the train dataset has a 'margin' "
@@ -256,8 +223,8 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
                     "margin-free objective on exactly these rows. Use a margin column in both "
                     "datasets or in neither."
                 )
-            out["margin"] = margin.repeat_interleave(2)
-        elif "margin" in batch:
+            out[MARGIN_COLUMN] = margin.repeat_interleave(2)
+        elif MARGIN_COLUMN in batch:
             raise ValueError(
                 "This batch carries a 'margin' column but the train dataset had none, so the PP "
                 "loss adapter was resolved without margins and would silently ignore them. Use a "
@@ -268,14 +235,12 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
     def _pp_bt_token_loss(self, logits: torch.Tensor, target: torch.Tensor | dict) -> torch.Tensor:
         """Summed BT loss over the microbatch's pairs (the runner divides by the pair count)."""
         if isinstance(target, dict):
-            plane, margin = target["labels"], target.get("margin")
+            labels, margin = target["labels"], target.get(MARGIN_COLUMN)
         else:
-            plane, margin = target, None
-        valid, positions, _ = decode_pooling_plane(plane)
-        pooled = pooled_outputs(logits, positions).squeeze(-1).float()
-        chosen, rejected = split_pairs(pooled)
-        # Eval row-padding appends inert rows whose pooled score is meaningless — mask those pairs.
-        chosen_valid, rejected_valid = split_pairs(valid)
+            labels, margin = target, None
+        plane = decode_pooling_plane(labels)
+        chosen, rejected = split_pairs(pooled_logits(logits, plane).squeeze(-1).float())
+        chosen_valid, rejected_valid = split_pairs(plane.valid)
         pair_valid = (chosen_valid & rejected_valid).float()
         difference = chosen - rejected
         if margin is not None:
@@ -285,12 +250,3 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
         if coefficient is not None:
             loss = loss + coefficient * (((chosen + rejected) ** 2) * pair_valid).sum()
         return loss
-
-    def _pp_bt_eval_pair_count(self, inputs: dict) -> torch.Tensor:
-        """Real-pair count for the loss-only PP eval, read off the synthesized labels plane.
-
-        The batch transform marks every row and the eval row-padding appends only all-ignore rows,
-        so half the marked-row count is the batch's real pair count — the unit the BT loss means over.
-        """
-        valid, _, _ = decode_pooling_plane(inputs["labels"])
-        return (valid.sum() / 2).clamp(min=1.0)

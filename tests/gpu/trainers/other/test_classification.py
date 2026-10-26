@@ -4,7 +4,7 @@
 The trainer has two loss paths and both fail silently. The default is the trainer's own fp32
 cross-entropy over the head's logits pooled at each row's last non-pad token, where a wrong pooling
 position scores padding and a label misalignment trains on the wrong class — both finite, both
-step-count-clean. The ``focal`` path is halo's own code (``ClassificationTrainer._focal_loss``) and
+step-count-clean. The ``focal`` path is halo's own code (``focal_loss``, selected through ``ClassificationLoss``) and
 carries a detail that is easy to get wrong and impossible to see from finiteness: the ``(1-pt)^gamma``
 modulator is built from the UNWEIGHTED cross-entropy while the class weight scales only the summand.
 That distinction exists ONLY when class weights are configured — with ``weight=None`` the weighted and
@@ -246,8 +246,9 @@ def run(ctx):
     trainer, captured, weights, losses = train_and_capture(
         ctx, tokenizer, dataset, make_config(ctx.output_dir), PINNED_STEP
     )
+    loss = trainer._classification_loss
     checks["cross_entropy_builds_unweighted_ce"] = (
-        isinstance(trainer._loss_fn, torch.nn.CrossEntropyLoss) and trainer._loss_fn.weight is None
+        not loss.multi_label and loss.focal_gamma is None and loss.weight is None and loss.label_smoothing == 0.0
     )
     # Constructing with cp_size=1 and then asserting is_cp_mode is False only restates the test's own
     # input. What matters is that the trainer REJECTS CP (SUPPORTS_CP is False), so ask it to.
@@ -334,9 +335,7 @@ def run(ctx):
         ),
         FOCAL_STEPS,
     )
-    checks["focal_selects_focal_loss_fn"] = (
-        getattr(focal_trainer._loss_fn, "func", None) is ClassificationTrainer._focal_loss
-    )
+    checks["focal_selects_focal_loss_fn"] = focal_trainer._classification_loss.focal_gamma == FOCAL_GAMMA
 
     focal_scorer = build_model(tokenizer)
     focal_scorer.load_state_dict(focal_weights)
@@ -358,10 +357,10 @@ def run(ctx):
         plain_ce,
     )
     metrics["focal_modulated_by_weighted_ce"] = modulated_by_weighted
-    # The configured weights must actually be inside the partial the trainer built, or the
+    # The configured weights must actually be inside the loss the trainer built, or the
     # weighted-vs-unweighted distinction this leg exists to pin is not being exercised at all.
     # Compared at the dtype the trainer stores them in: fp32, built once and only moved to the device.
-    configured = focal_trainer._loss_fn.keywords.get("weight")
+    configured = focal_trainer._classification_loss.weight
     checks["focal_class_weights_reached_the_loss"] = configured is not None and torch.equal(
         configured.float().cpu(),
         torch.tensor(FOCAL_CLASS_WEIGHTS).to(configured.dtype).float(),

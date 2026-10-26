@@ -58,7 +58,7 @@ from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.environments.tasks.qa import ExamQAEnvironment
 from src.environments.tools.toolsets import build_math_tools, build_python_tools
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory, step_losses

@@ -20,7 +20,8 @@ import torch
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPODataCollatorWithPadding
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, token_logprobs
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.offline_rules import reject_offline_pp_options, resolve_pp_max_length
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 BATCH, PROMPT, COMPLETION, VOCAB, MAX_LENGTH = 4, 3, 4, 16, 10
 PAD = 0
@@ -107,10 +108,14 @@ def _stub(*, beta, loss_type, pg, min_log_prob, policy, reference) -> types.Simp
         _sign_metric_buffer={"train": defaultdict(list), "eval": defaultdict(list)},
         _pp_ref_sweep=None,
         _pp_min_log_prob=min_log_prob,
+        _live_min_log_prob=min_log_prob,
+        _joined_rows=OfflineGRPOTrainer._joined_rows,
     )
     for name in (
         "_get_per_token_logps",
         "_compute_loss_inner",
+        "_token_objective",
+        "_reference_policy",
         "_pp_batch_transform",
         "_buffer_sign_metrics",
         "_pp_normalizer",
@@ -339,20 +344,29 @@ def test_all_empty_completions_keep_reference_and_completion_shapes_aligned():
 
 def test_the_pp_ctor_gate_accepts_a_kl_term():
     """The construction gate accepts ``kl_beta != 0`` under PP."""
-    trainer = types.SimpleNamespace(max_prompt_length=PROMPT, max_completion_length=COMPLETION)
-    args = types.SimpleNamespace(kl_beta=0.1, use_chunked_grpo_logprobs=False, max_length=None)
-    OfflineGRPOTrainer._reject_pp_explicit_options(trainer, args, types.SimpleNamespace(is_pp_mode=True), None, None)
-    assert args.max_length == PROMPT + COMPLETION
+    args = types.SimpleNamespace(
+        kl_beta=0.1,
+        use_chunked_grpo_logprobs=False,
+        max_length=None,
+        max_prompt_length=PROMPT,
+        max_completion_length=COMPLETION,
+    )
+    pipeline = types.SimpleNamespace(is_pp_mode=True)
+    reject_offline_pp_options(args, pipeline, None, None)
+    assert resolve_pp_max_length(args, pipeline) == PROMPT + COMPLETION
 
 
 def test_the_pp_ctor_gate_refuses_chunked_logprobs():
     """The pipeline's last stage materializes its own logits plane; the switch would parse and do nothing."""
-    trainer = types.SimpleNamespace(max_prompt_length=PROMPT, max_completion_length=COMPLETION)
-    args = types.SimpleNamespace(kl_beta=0.0, use_chunked_grpo_logprobs=True, max_length=None)
+    args = types.SimpleNamespace(
+        kl_beta=0.0,
+        use_chunked_grpo_logprobs=True,
+        max_length=None,
+        max_prompt_length=PROMPT,
+        max_completion_length=COMPLETION,
+    )
     with pytest.raises(ValueError, match="use_chunked_grpo_logprobs does nothing under pipeline parallelism"):
-        OfflineGRPOTrainer._reject_pp_explicit_options(
-            trainer, args, types.SimpleNamespace(is_pp_mode=True), None, None
-        )
+        reject_offline_pp_options(args, types.SimpleNamespace(is_pp_mode=True), None, None)
 
 
 if __name__ == "__main__":

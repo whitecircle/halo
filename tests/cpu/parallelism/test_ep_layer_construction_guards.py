@@ -40,7 +40,7 @@ from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
-from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
+from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 

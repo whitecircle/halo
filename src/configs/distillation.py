@@ -14,7 +14,7 @@ from src.data.collators.self_distill import format_field_names
 # The teacher hint both OPD flows default to, through SDPGArguments.
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
 
-# Keys of the trainer-side divergence registry (``losses.DIVERGENCES``), which a test pins this to.
+# Keys of the trainer-side divergence registry (``divergences.DIVERGENCES``), which a test pins this to.
 SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
 
 

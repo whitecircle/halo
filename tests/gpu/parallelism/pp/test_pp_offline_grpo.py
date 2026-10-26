@@ -34,7 +34,7 @@ from transformers import AutoTokenizer
 
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.distributed import hf_eval_loss_reference, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B

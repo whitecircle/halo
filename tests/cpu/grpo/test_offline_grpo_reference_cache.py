@@ -10,12 +10,12 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset
 
-import src.trainers.grpo.reference_cache as cache_module
+import src.trainers.grpo.offline.reference_cache as cache_module
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.entrypoints.run_setup import _validate_output_dir
 from src.runtime import consensus
-from src.trainers.grpo.reference_cache import ReferenceScoreCache, reference_cache_writers
+from src.trainers.grpo.offline.reference_cache import ReferenceScoreCache, reference_cache_writers
 from tests.common.distributed import shared_output_dir
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import (
@@ -43,12 +43,11 @@ def test_cache_writer_election_gathers_the_checkpoint_owner_predicate(monkeypatc
     monkeypatch.setattr(cache_module, "get_global_world_size", lambda: len(owners))
     monkeypatch.setattr(cache_module, "is_fs_save_rank", lambda: bool(owners[1]))
 
-    def gather(output, flag):
+    def gather(output, flag, group=None):
         assert flag.item() == owners[1]
-        for tensor, owner in zip(output, owners, strict=True):
-            tensor.fill_(owner)
+        output.copy_(torch.tensor(owners, dtype=output.dtype))
 
-    monkeypatch.setattr(dist, "all_gather", gather)
+    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
     assert reference_cache_writers() == tuple(rank for rank, owner in enumerate(owners) if owner)
 
 
@@ -536,7 +535,7 @@ def test_a_new_launch_removes_earlier_launches_scratch_but_not_live_nfs_remnants
     held.mkdir()
     (held / ".nfs000000001").write_bytes(b"a file a process on another host still maps")
     # The earlier launch's process exits, which releases its lock.
-    os.close(cache_module._HELD_LAUNCH_LOCKS.pop(str(tmp_path / REFERENCE_CACHE_DIR_NAME)))
+    os.close(cache_module._held_launch_locks.pop(str(tmp_path / REFERENCE_CACHE_DIR_NAME)))
     monkeypatch.setattr(cache_module, "_launch_id", lambda: "next-launch")
     current = mapped_scores(tmp_path, reference_dataset(), reference_rows())
     remaining = sorted(_scratch_files(tmp_path))

@@ -25,7 +25,7 @@ from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout import engine_preflight
 from src.trainers.grpo.rollout.engine_preflight import (
-    _check_sampler_logprob_reference,
+    _verify_sampler_logprob_reference_on_rank0,
     verify_sampler_logprob_reference,
 )
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
@@ -90,13 +90,13 @@ def test_vespo_folds_every_tokens_engine_ratio_into_one_sequence_weight():
 def test_a_nucleus_reference_is_refused_for_any_sequence_summing_consumer(nucleus_server):
     """The refusal names both remedies, since either consumer may be the one summing."""
     with pytest.raises(ValueError, match="top_p: 1.0") as excinfo:
-        _check_sampler_logprob_reference(
+        _verify_sampler_logprob_reference_on_rank0(
             VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=True
         )
     message = str(excinfo.value)
     assert "vllm_importance_sampling_mode" in message and "isr_geo_band" in message, message
     # A token-level consumer takes the ratio per token: the lift cancels nothing, so it passes.
-    _check_sampler_logprob_reference(
+    _verify_sampler_logprob_reference_on_rank0(
         VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=False
     )
 
@@ -110,9 +110,11 @@ def test_both_refusals_point_each_arm_at_the_remedy_it_honors(nucleus_server):
         r"environmental arm[^;.]*drop isr_geo_band_min/max and isr_opsm_delta"
     )
     with pytest.raises(ValueError) as penalty:
-        _check_sampler_logprob_reference(VLLMWeightSyncClient, [], 1.0, 1.0, 0, 0.0, 1.1, sequence_ratio_active=True)
+        _verify_sampler_logprob_reference_on_rank0(
+            VLLMWeightSyncClient, [], 1.0, 1.0, 0, 0.0, 1.1, sequence_ratio_active=True
+        )
     with pytest.raises(ValueError) as nucleus:
-        _check_sampler_logprob_reference(
+        _verify_sampler_logprob_reference_on_rank0(
             VLLMWeightSyncClient, [nucleus_server.url], 1.0, 0.95, 0, 0.0, 1.0, sequence_ratio_active=True
         )
     for refusal in (penalty, nucleus):
@@ -145,7 +147,7 @@ def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error
     def fail(*args):
         raise error
 
-    monkeypatch.setattr(engine_preflight, "_check_sampler_logprob_reference", fail)
+    monkeypatch.setattr(engine_preflight, "_verify_sampler_logprob_reference_on_rank0", fail)
     with pytest.raises(ValueError, match=message) as raised:
         verify_sampler_logprob_reference(
             ["http://unused"],

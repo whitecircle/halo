@@ -30,7 +30,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.models.moe.family_specs import find_moe_family_spec
 from src.optimizers.param_groups import decay_groups
-from src.trainers.grpo.rollout.routing_replay import build_routing_replay_injector
+from src.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
 from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.ep_reference import random_token_batch, roll_expert_banks
 from tests.common.equivalence.revisions import (

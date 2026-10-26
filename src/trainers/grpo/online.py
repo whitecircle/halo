@@ -17,28 +17,25 @@ from trl import GRPOTrainer
 
 from src.configs.grpo import EarlyStopConfig, RLRRConfig
 from src.environments.rollout_config import VLLM_BACKEND
-from src.trainers.ctor_slots import get_ctor_arg, resolve_ctor_positions
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, build_early_stop_callback
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, LogitsWidth
-from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
-from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
-from src.trainers.grpo.mixins.generation_buffer import GRPOGenerationBufferMixin
-from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
-from src.trainers.grpo.objective.advantages import (
-    degenerate_group_mask,
-    group_relative_advantages,
-    reject_inert_std_floor,
+from src.trainers.grpo.grpo_rules import (
+    reject_conflicting_advantage_hooks,
+    reject_tool_calling_loop,
+    reject_unshared_rollout_func,
+    require_vllm_server_mode,
 )
-from src.trainers.grpo.objective.application import (
+from src.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
+from src.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
+from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps, kl_clamp_counts
+from src.trainers.grpo.objective.loss_inputs import (
     DEGENERATE_GROUP_FRAC_KEY,
     gathered_num_items,
     narrow_loss_masks,
     record_token_mass,
-    validate_token_mass_balance,
 )
-from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps, kl_clamp_counts
 from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
+from src.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
 from src.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
 from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from src.trainers.grpo.rollout.weight_push import sync_trainer_weights
@@ -47,21 +44,10 @@ from src.trainers.token_metrics import effective_loss_mask
 
 logger = get_logger(__name__, log_level="info")
 
-# TRL ctor parameters that run its tool-calling loop, whose round count is each rank's own.
-_TOOL_LOOP_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "tools", "environment_factory")
-# TRL's custom rollout, which generates in place of _generate_single_turn.
-_ROLLOUT_FUNC_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "rollout_func")
-
-
-def _vllm_available_stub() -> bool:
-    """Stand in for TRL's ``is_vllm_available`` while ``TrlVLLMClient`` is installed."""
-    return True
-
 
 class DistributedGRPOTrainer(
     OnPolicyGRPOInitMixin,
-    GRPOTrainDataLoaderMixin,
-    GRPOGenerationBufferMixin,
+    GenerationRoundMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
     DecoupledCompletionsLogMixin,
@@ -86,15 +72,23 @@ class DistributedGRPOTrainer(
     def __init__(self, *args, **kwargs):
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
-        self._require_vllm_server_mode(training_args)
-        self._reject_tool_calling_loop(args, kwargs)
-        self._reject_unshared_rollout_func(args, kwargs)
-        self._resolve_advantage_hooks(kwargs, training_args)
+        grpo_args = require_vllm_server_mode(training_args)
+        reject_tool_calling_loop(args, kwargs)
+        reject_unshared_rollout_func(self.parallelism_config, args, kwargs)
+        self._adopt_advantage_hooks(kwargs)
+        reject_conflicting_advantage_hooks(
+            grpo_args,
+            self._rlrr_config,
+            std_floor=self._scale_rewards_std_floor,
+            drop_degenerate_groups=self._drop_degenerate_groups,
+            balance_token_mass=self._balance_token_mass,
+            recomputes_from_gathered_rewards=self._recomputes_from_gathered_rewards,
+        )
         # Built before TRL's ctor opens the NCCL group to the rollout server, so a refused condition costs nothing.
         early_stop = build_early_stop_callback(
             kwargs.pop("early_stop", EarlyStopConfig()),
             gap_key=SAMPLING_LOGP_GAP_KEY,
-            gap_logged=training_args.vllm_importance_sampling_correction,
+            gap_logged=grpo_args.vllm_importance_sampling_correction,
         )
 
         self._last_rewards_per_func: torch.Tensor | None = None
@@ -119,40 +113,6 @@ class DistributedGRPOTrainer(
 
         self._finish_on_policy_init()
 
-    def _resolve_advantage_hooks(self, kwargs: dict[str, Any], grpo_args) -> None:
-        """Pop the advantage-hook kwargs and refuse the combinations that cancel or diverge, before
-        TRL's ctor opens the NCCL group to the rollout server. The floor is range-validated
-        (finiteness included) by ``ValidatedConfig._validate_fields``.
-        """
-        self._rlrr_config: RLRRConfig | None = kwargs.pop("rlrr_config", None)
-        self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)
-        self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
-        self._balance_token_mass: bool = kwargs.pop("balance_token_mass", False)
-        reject_inert_std_floor(grpo_args.scale_rewards, self._scale_rewards_std_floor)
-        if self._balance_token_mass:
-            validate_token_mass_balance(grpo_args)
-        if self._rlrr_config is not None:
-            if self._scale_rewards_std_floor > 0:
-                raise ValueError(
-                    "scale_rewards_std_floor and rlrr_config cannot be combined: RLRR replaces the "
-                    "group-normalized advantages wholesale with relative-ranking ones, which never divide "
-                    "by a reward std, so the floor would silently do nothing. Set only one."
-                )
-            if self._drop_degenerate_groups:
-                raise ValueError(
-                    "drop_degenerate_groups and rlrr_config cannot be combined: the drop keys on raw-reward "
-                    "equality, so it masks out of the loss every all-correct group RLRR just gave length-ranked "
-                    "advantages — the signal RLRR exists to keep. Set only one."
-                )
-        # Every hook re-derives its values from the gathered rewards summed as TRL's sum_then_normalize
-        # branch does; under any other aggregation the recompute would silently diverge from TRL's.
-        if self._recomputes_from_gathered_rewards and grpo_args.multi_objective_aggregation != "sum_then_normalize":
-            raise ValueError(
-                "RLRR / drop_degenerate_groups / scale_rewards_std_floor recompute rewards "
-                "with TRL's sum_then_normalize aggregation; multi_objective_aggregation="
-                f"{grpo_args.multi_objective_aggregation!r} would silently diverge."
-            )
-
     @staticmethod
     def sums_sequence_logratio(grpo_args) -> bool:
         """Whether TRL's vLLM IS correction sums the per-token log-ratios over each sequence — the online arm's
@@ -164,85 +124,25 @@ class DistributedGRPOTrainer(
             return False
         return grpo_args.loss_type == "vespo" or grpo_args.vllm_importance_sampling_mode.startswith("sequence")
 
-    @staticmethod
-    def _require_vllm_server_mode(grpo_args) -> None:
-        """Require vLLM server-mode; reject in-process HF generation (``use_vllm=False``, slow +
-        rank-divergent under FSDP2/EP) and colocate (no vLLM in the training image). The raised
-        messages carry the rationale."""
-        if grpo_args is None:
-            raise ValueError(
-                "DistributedGRPOTrainer requires a GRPOConfig: pass it as the `args` keyword or in "
-                "the conventional positional slot. Without it the vLLM server-mode requirement, the "
-                "parallelism config and the Liger overrides all silently go unapplied."
-            )
-        if not grpo_args.use_vllm:
-            raise ValueError(
-                "DistributedGRPOTrainer requires vLLM server-mode generation: set use_vllm=True "
-                "and vllm_mode='server'. In-process HF generation (use_vllm=False) is not "
-                "supported — it is slow and desyncs ranks under FSDP2/EP. Run a separate vLLM "
-                "container (docker-compose.vllm.yml) and point vllm_server_host/vllm_server_port "
-                "at it (weights sync over NCCL)."
-            )
-        if grpo_args.vllm_mode != "server":
-            raise ValueError(
-                f"DistributedGRPOTrainer supports only vllm_mode='server', got "
-                f"'{grpo_args.vllm_mode}'. Colocate mode would launch an in-process vLLM on the "
-                f"training GPUs, but the training image has no vLLM (ABI-incompatible "
-                f"with the training PyTorch/Transformers). Run a separate vLLM "
-                f"container (docker-compose.vllm.yml) and set vllm_mode='server' "
-                f"with vllm_server_host/vllm_server_port (weights sync over NCCL)."
-            )
-
-    @staticmethod
-    def _reject_tool_calling_loop(ctor_args: tuple, kwargs: dict) -> None:
-        """Refuse TRL's tool-calling loop (``tools``, ``environment_factory``): it regenerates while any
-        rank-local completion still calls a tool, and each round is a collective generate, so ranks whose
-        completions stop calling tools at different rounds desync."""
-        given = [
-            name
-            for name in _TOOL_LOOP_CTOR_POSITIONS
-            if get_ctor_arg(ctor_args, kwargs, name, _TOOL_LOOP_CTOR_POSITIONS)
-        ]
-        if given:
-            raise ValueError(
-                f"DistributedGRPOTrainer does not run TRL's tool-calling loop ({', '.join(given)}): it loops as "
-                "long as some completion on this rank calls a tool, each round a collective vLLM generate, so ranks "
-                "fall out of step. Train tool use with Async GRPO with Environments "
-                "(scripts/training/environmental_grpo.py), whose episodes run in the rollout actors."
-            )
-
-    def _reject_unshared_rollout_func(self, ctor_args: tuple, kwargs: dict) -> None:
-        """Refuse TRL's ``rollout_func`` where a TP/ETP group shares one model replica: it generates in
-        place of :meth:`_generate_single_turn`, the override that hands every sibling its leader's
-        completions, so each sibling would forward its own rollouts into the group's in-forward
-        collectives. Elsewhere TRL syncs the weights before each call and the rollouts are the rank's own."""
-        config = self.parallelism_config
-        if not (config.is_tp_mode or config.is_expert_tp_mode):
-            return
-        if get_ctor_arg(ctor_args, kwargs, "rollout_func", _ROLLOUT_FUNC_CTOR_POSITIONS) is not None:
-            raise ValueError(
-                "rollout_func is not supported under tensor or expert-tensor parallelism: it replaces the "
-                "generation that broadcasts the group leader's completions, so siblings sharing one sharded "
-                "replica would forward different tokens and deadlock in the model's collectives. Drop "
-                "rollout_func, or run without tensor_parallel_size / expert_tensor_parallel_size."
-            )
+    def _adopt_advantage_hooks(self, kwargs: dict[str, Any]) -> None:
+        """Pop the advantage-hook kwargs TRL's explicit signature would reject."""
+        self._rlrr_config: RLRRConfig | None = kwargs.pop("rlrr_config", None)
+        self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)
+        self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
+        self._balance_token_mass: bool = kwargs.pop("balance_token_mass", False)
 
     @staticmethod
     @contextlib.contextmanager
     def _installing_trl_vllm_client() -> Iterator[None]:
-        """Swap TRL's vLLM client + availability checks for the duration of init.
-
-        vLLM isn't installed, so force ``is_vllm_available`` True and substitute ``TrlVLLMClient``.
-        Reverted after ``super().__init__``; the ctor has already required server mode, the only shape
-        TRL builds that client for.
-        """
+        """Install ``TrlVLLMClient`` and force TRL's ``is_vllm_available`` True for the duration of TRL's ctor,
+        since vLLM is not installed here; server mode, the only shape TRL builds that client for, is required
+        first."""
         originals = (
             _trl_vllm_generation.is_vllm_available,
             _trl_vllm_client.is_vllm_available,
             _trl_vllm_generation.VLLMClient,
         )
-        _trl_vllm_generation.is_vllm_available = _vllm_available_stub
-        _trl_vllm_client.is_vllm_available = _vllm_available_stub
+        _trl_vllm_generation.is_vllm_available = _trl_vllm_client.is_vllm_available = lambda: True
         _trl_vllm_generation.VLLMClient = TrlVLLMClient
         try:
             yield
@@ -253,6 +153,38 @@ class DistributedGRPOTrainer(
                 _trl_vllm_generation.VLLMClient,
             ) = originals
 
+    def _loss_logits_width(self) -> LogitsWidth | None:
+        """TRL keeps one logit past the completion for the next-token shift."""
+        if self.max_completion_length is None:
+            return None
+        return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
+
+    def _install_weight_sync(self) -> None:
+        """Replace ``VLLMGeneration.sync_weights`` with the distributed-aware push: TRL unfolds DTensors only
+        under ``is_fsdp_enabled``, which the toolkit's ``fully_shard`` under accelerate MULTI_GPU never sets, so
+        it would forward them verbatim and deadlock against the trainer-vLLM NCCL group."""
+        if getattr(self, "vllm_generation", None) is None:
+            raise RuntimeError(
+                "TRL built no vllm_generation for this trainer, so the distributed-aware weight sync "
+                "cannot be installed and every rollout would be generated by an engine that never "
+                "receives the trained weights. Server-mode vLLM is required (use_vllm=True, "
+                "vllm_mode='server') — check vllm_server_host/vllm_server_port reach a running server."
+            )
+
+        self.vllm_generation.sync_weights = types.MethodType(type(self)._distributed_sync_weights, self)
+        config = self.parallelism_config
+        logger.info(
+            "Installed distributed-aware vLLM weight sync "
+            f"(ep={config.has_ep_group}, tp={config.is_tp_mode}, "
+            f"expert_tp={config.is_expert_tp_mode})"
+        )
+
+    def _distributed_sync_weights(self) -> None:
+        """COLLECTIVE: the EP/TP/FSDP2/PEFT-aware ``VLLMGeneration.sync_weights``; the client TRL holds on
+        ``vllm_generation`` forwards from the main process."""
+        client = self.vllm_generation.vllm_client if self.accelerator.is_main_process else None
+        sync_trainer_weights(self, client)
+
     def _generate_single_turn(self, *args, **kwargs):
         """Override TRL's single-turn vLLM generation to be TP-consistent.
 
@@ -262,14 +194,24 @@ class DistributedGRPOTrainer(
         result = super()._generate_single_turn(*args, **kwargs)
         return self._broadcast_object_from_tp_leader(result)
 
+    def _calculate_rewards(self, *args, **kwargs):
+        """Stash TRL's gathered per-function rewards, so the advantage hooks see the full group set."""
+        rewards_per_func = super()._calculate_rewards(*args, **kwargs)
+        if self._recomputes_from_gathered_rewards:
+            self._last_rewards_per_func = rewards_per_func
+        return rewards_per_func
+
+    @property
+    def _recomputes_from_gathered_rewards(self) -> bool:
+        """Whether any hook re-derives advantages or masks from the stashed full reward set; the stash in
+        :meth:`_calculate_rewards` and every consumer read this one gate."""
+        return self._rlrr_config is not None or self._drop_degenerate_groups or self._scale_rewards_std_floor > 0
+
     def _generate_and_score_completions(
         self, inputs: list[dict[str, torch.Tensor | Any]]
     ) -> dict[str, torch.Tensor | Any]:
-        """Generate, score, and broadcast scoring tensors across the TP/ETP group.
-
-        Generation is already broadcast in ``_generate_single_turn``; this post-call broadcast
-        guards against non-deterministic CPU-side post-processing diverging a tensor between ranks.
-        """
+        """Generate, score, run the advantage hooks, and broadcast the scored tensors across the TP/ETP group,
+        whose generation ``_generate_single_turn`` already shares: CPU-side post-processing may diverge."""
         result = super()._generate_and_score_completions(inputs)
 
         # Before the TP/ETP broadcast, so the reshaped tensors are what gets broadcast.
@@ -284,99 +226,33 @@ class DistributedGRPOTrainer(
 
         return self._broadcast_tensors_from_tp_leader(result)
 
-    def _clamp_kl_reference(self, result: dict[str, torch.Tensor | Any]) -> None:
-        """The k3 tail clamp on the reference log-probs, and ``kl_clamp_frac`` over the batch's loss
-        tokens (:func:`kl_clamp_counts`). Both tensors exist only when ``beta != 0`` and TRL's
-        recompute gate fired, config verdicts every rank shares, so the gather is reached by all or none."""
-        old_logps = result.get("old_per_token_logps")
-        ref_logps = result.get("ref_per_token_logps")
-        if old_logps is None or ref_logps is None:
+    def _apply_rlrr_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
+        """Replace the group-normalized advantages with RLRR relative-ranking ones, recomputed on the full
+        gathered reward set in TRL's group order. Train mode only."""
+        if self._rlrr_config is None:
             return
-        result["ref_per_token_logps"], clamped = clamp_ref_logps(ref_logps, old_logps)
-        mode = "train" if self.model.training else "eval"
-        self._metrics[mode][KL_CLAMP_FRAC_KEY].extend(
-            gathered_fractions([kl_clamp_counts(clamped, effective_loss_mask(result))], self.accelerator.gather)
+        gathered = self._gathered_rewards()
+        if gathered is None:
+            return
+        rewards, unscorable = gathered
+
+        # Same process order as the rewards, so the length re-ranking sees each group's members.
+        local_lengths = result["completion_mask"].sum(dim=1).to(rewards.device)
+        full_lengths = self.accelerator.gather(local_lengths)
+
+        # ``valid`` both keeps the unscorable placeholders out of their group's ranking and returns
+        # their own advantage as 0, which is TRL's unscorable handling.
+        advantages_full = torch.from_numpy(
+            relative_advantages_grouped(
+                rewards.float().cpu().numpy(),
+                group_size=self.num_generations,
+                config=self._rlrr_config,
+                lengths=full_lengths.float().cpu().numpy(),
+                valid=(~unscorable).cpu().numpy(),
+            )
         )
 
-    def _calculate_rewards(self, *args, **kwargs):
-        """Capture the (gathered) per-function rewards so the advantage hooks see the full group set.
-
-        TRL gathers ``rewards_per_func`` across processes before group-normalizing; stashing it here
-        gives the RLRR / std-floor / degenerate-drop hooks the same full reward set.
-        """
-        rewards_per_func = super()._calculate_rewards(*args, **kwargs)
-        if self._recomputes_from_gathered_rewards:
-            self._last_rewards_per_func = rewards_per_func
-        return rewards_per_func
-
-    @property
-    def _recomputes_from_gathered_rewards(self) -> bool:
-        """Whether any hook re-derives advantages/masks from the stashed full reward set.
-
-        The stash in :meth:`_calculate_rewards` and every consumer below read this same gate. A knob
-        covered by one but not the other leaves the stash ``None``, which the consumer's first train
-        batch refuses.
-        """
-        return self._rlrr_config is not None or self._drop_degenerate_groups or self._scale_rewards_std_floor > 0
-
-    def _gathered_rewards(self) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Stashed full (gathered) rewards as ``(rewards, unscorable)``, or ``None`` outside train.
-
-        ``rewards`` aggregates the reward functions as TRL's ``sum_then_normalize`` branch does
-        (weighted nansum), in the gathered process order; ``unscorable`` marks rows where every
-        reward fn returned NaN (TRL forces their advantage to 0).
-
-        Called only by a hook that is armed, so a missing stash in train mode means TRL scored this
-        batch without passing through :meth:`_calculate_rewards`; returning ``None`` would leave the
-        hook's setting silently unapplied, so it raises.
-        """
-        if not self.model.training:
-            return None
-        if self._last_rewards_per_func is None:
-            raise RuntimeError(
-                "An advantage hook (RLRR / drop_degenerate_groups / scale_rewards_std_floor) is armed "
-                "but no gathered rewards were stashed for this generation batch: TRL's scoring no "
-                "longer goes through _calculate_rewards, so the hook would silently leave TRL's "
-                "advantages in place."
-            )
-        rewards_per_func = self._last_rewards_per_func
-        weights = self.reward_weights.to(rewards_per_func.device).unsqueeze(0)
-        rewards = (rewards_per_func * weights).nansum(dim=1)  # [total], gathered order
-        return rewards, torch.isnan(rewards_per_func).all(dim=1)
-
-    def _local_slice(self, full: torch.Tensor, n_local: int) -> torch.Tensor:
-        """This rank's rows of a gathered per-completion tensor — TRL's own world-order process slice.
-
-        Every hook computes on the FULL gathered set, where groups are contiguous whatever the per-rank
-        geometry, so a group spanning two ranks is fine here (TRL only requires whole groups per
-        generation batch; the TP-duplicate case is refused at dataloader construction).
-        """
-        start = self.accelerator.process_index * n_local
-        return full[start : start + n_local]
-
-    def _apply_token_mass_balance(self, result: dict[str, torch.Tensor | Any]) -> None:
-        """Log the batch's net token mass and, under ``balance_token_mass``, cancel it
-        (:func:`~src.trainers.grpo.objective.application.record_token_mass`), as the environmental
-        trainer does: a token weighs its place in the loss times TRL's vLLM IS ratio. Train mode only."""
-        if not self.model.training:
-            return
-        loss_mask = effective_loss_mask(result)
-        if loss_mask is None:
-            raise RuntimeError(
-                "The net token mass cannot be weighed: TRL's scored batch carries no completion_mask, so no "
-                "row's trained token count is known."
-            )
-        advantages = result["advantages"]
-        balance = record_token_mass(
-            advantages,
-            loss_mask.to(advantages.dtype),
-            result.get("importance_sampling_ratio"),
-            self.accelerator.gather,
-            self._metrics["train"],
-            self._balance_token_mass,
-        )
-        if balance is not None:
-            self._install_advantages(result, balance.apply(self.accelerator.gather(advantages)), "balance_token_mass")
+        self._install_advantages(result, advantages_full, "RLRR")
 
     def _apply_std_floor_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
         """Replace TRL's group-normalized advantages with ones whose std divisor honours
@@ -399,33 +275,6 @@ class DistributedGRPOTrainer(
         )
         advantages_full = advantages_full.masked_fill(unscorable, 0.0)  # match TRL's unscorable handling
         self._install_advantages(result, advantages_full, "scale_rewards_std_floor")
-
-    def _install_advantages(
-        self, result: dict[str, torch.Tensor | Any], advantages_full: torch.Tensor, what: str
-    ) -> None:
-        """Slice ``advantages_full`` to this rank, install it, and realign TRL's advantage log.
-
-        Every advantage-replacement hook hands over the full gathered set (recomputed from the rewards,
-        or this batch's advantages rescaled), so each must re-slice and re-log; doing one without the
-        other trains on values the logged record does not carry.
-
-        TRL fills ``_logs["advantages"]`` with its own group-normalized values inside
-        ``_generate_and_score_completions``, before any hook runs. The gathered tensor carries the
-        same world order and length TRL appended, so overwriting that tail realigns the record row
-        for row.
-        """
-        local = self._local_slice(advantages_full, result["advantages"].shape[0])
-        result["advantages"] = local.to(device=result["advantages"].device, dtype=result["advantages"].dtype)
-        logged = self._logs["advantages"]
-        replacement = advantages_full.tolist()
-        if len(logged) < len(replacement):
-            raise RuntimeError(
-                f"{what} cannot realign the completions record: TRL logged {len(logged)} advantages "
-                f"for this generation batch but the recomputed set has {len(replacement)}. Overwriting "
-                f"the tail would attribute each row's advantage to the wrong completion."
-            )
-        for i, value in enumerate(replacement):
-            logged[len(logged) - len(replacement) + i] = value
 
     def _apply_degenerate_group_drop(self, result: dict[str, torch.Tensor | Any]) -> None:
         """Mask the completions of all-equal-reward groups out of the loss (parity with the
@@ -456,71 +305,90 @@ class DistributedGRPOTrainer(
                 )
             result["num_items_in_batch"] = gathered_num_items(loss_mask, self.accelerator.gather)
 
-    def _apply_rlrr_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
-        """Replace group-normalized advantages with RLRR relative-ranking advantages.
-
-        Recomputes on the full gathered reward set (matching TRL's group-normalization order), then
-        re-slices to this process. In-place on ``result["advantages"]``. Train mode only.
-        """
-        if self._rlrr_config is None:
+    def _apply_token_mass_balance(self, result: dict[str, torch.Tensor | Any]) -> None:
+        """Log the batch's net token mass and, under ``balance_token_mass``, cancel it
+        (:func:`~src.trainers.grpo.objective.loss_inputs.record_token_mass`), as the environmental
+        trainer does: a token weighs its place in the loss times TRL's vLLM IS ratio. Train mode only."""
+        if not self.model.training:
             return
-        gathered = self._gathered_rewards()
-        if gathered is None:
-            return
-        rewards, unscorable = gathered
-
-        # Same process order as the rewards, so the length re-ranking sees each group's members.
-        local_lengths = result["completion_mask"].sum(dim=1).to(rewards.device)
-        full_lengths = self.accelerator.gather(local_lengths)
-
-        # ``valid`` both keeps the unscorable placeholders out of their group's ranking and returns
-        # their own advantage as 0, which is TRL's unscorable handling.
-        advantages_full = torch.from_numpy(
-            relative_advantages_grouped(
-                rewards.float().cpu().numpy(),
-                group_size=self.num_generations,
-                config=self._rlrr_config,
-                lengths=full_lengths.float().cpu().numpy(),
-                valid=(~unscorable).cpu().numpy(),
-            )
-        )
-
-        self._install_advantages(result, advantages_full, "RLRR")
-
-    def _loss_logits_width(self) -> LogitsWidth | None:
-        """TRL keeps one logit past the completion for the next-token shift."""
-        if self.max_completion_length is None:
-            return None
-        return LogitsWidth(self.max_completion_length + 1, "max_completion_length")
-
-    def _setup_weight_sync(self) -> None:
-        """Replace ``VLLMGeneration.sync_weights`` with the distributed-aware version.
-
-        TRL only unfolds DTensors when ``is_fsdp_enabled`` is set, but the toolkit applies FSDP2 via
-        ``fully_shard`` under accelerate MULTI_GPU, so it forwards DTensors verbatim and deadlocks
-        against the trainer↔vLLM NCCL group. The replacement gathers EP then TP shards, then broadcasts.
-        """
-        if getattr(self, "vllm_generation", None) is None:
+        loss_mask = effective_loss_mask(result)
+        if loss_mask is None:
             raise RuntimeError(
-                "TRL built no vllm_generation for this trainer, so the distributed-aware weight sync "
-                "cannot be installed and every rollout would be generated by an engine that never "
-                "receives the trained weights. Server-mode vLLM is required (use_vllm=True, "
-                "vllm_mode='server') — check vllm_server_host/vllm_server_port reach a running server."
+                "The net token mass cannot be weighed: TRL's scored batch carries no completion_mask, so no "
+                "row's trained token count is known."
             )
+        advantages = result["advantages"]
+        balance = record_token_mass(
+            advantages,
+            loss_mask.to(advantages.dtype),
+            result.get("importance_sampling_ratio"),
+            self.accelerator.gather,
+            self._metrics["train"],
+            self._balance_token_mass,
+        )
+        if balance is not None:
+            self._install_advantages(result, balance.apply(self.accelerator.gather(advantages)), "balance_token_mass")
 
-        self.vllm_generation.sync_weights = types.MethodType(type(self)._distributed_sync_weights, self)
-        config = self.parallelism_config
-        logger.info(
-            "Installed distributed-aware vLLM weight sync "
-            f"(ep={config.has_ep_group}, tp={config.is_tp_mode}, "
-            f"expert_tp={config.is_expert_tp_mode})"
+    def _clamp_kl_reference(self, result: dict[str, torch.Tensor | Any]) -> None:
+        """The k3 tail clamp on the reference log-probs, and ``kl_clamp_frac`` over the batch's loss
+        tokens (:func:`kl_clamp_counts`). Both tensors exist only when ``beta != 0`` and TRL's
+        recompute gate fired, config verdicts every rank shares, so the gather is reached by all or none."""
+        old_logps = result.get("old_per_token_logps")
+        ref_logps = result.get("ref_per_token_logps")
+        if old_logps is None or ref_logps is None:
+            return
+        result["ref_per_token_logps"], clamped = clamp_ref_logps(ref_logps, old_logps)
+        mode = "train" if self.model.training else "eval"
+        self._metrics[mode][KL_CLAMP_FRAC_KEY].extend(
+            gathered_fractions([kl_clamp_counts(clamped, effective_loss_mask(result))], self.accelerator.gather)
         )
 
-    def _distributed_sync_weights(self) -> None:
-        """EP/TP/FSDP2/PEFT-aware replacement for ``VLLMGeneration.sync_weights``.
+    def _gathered_rewards(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Stashed full (gathered) rewards as ``(rewards, unscorable)``, or ``None`` outside train.
 
-        All ranks join the gathers; only global-main (and, under TP, TP-rank 0) forwards. The client
-        is held on ``vllm_generation`` here, whereas the environmental trainer holds one directly.
+        ``rewards`` aggregates the reward functions as TRL's ``sum_then_normalize`` branch does (weighted
+        nansum), in the gathered process order; ``unscorable`` marks rows where every reward fn returned NaN
+        (TRL forces their advantage to 0). Only an armed hook calls it, so a missing stash in train mode, TRL
+        scoring the batch past :meth:`_calculate_rewards`, raises rather than leave the hook unapplied.
         """
-        client = self.vllm_generation.vllm_client if self.accelerator.is_main_process else None
-        sync_trainer_weights(self, client)
+        if not self.model.training:
+            return None
+        if self._last_rewards_per_func is None:
+            raise RuntimeError(
+                "An advantage hook (RLRR / drop_degenerate_groups / scale_rewards_std_floor) is armed "
+                "but no gathered rewards were stashed for this generation batch: TRL's scoring no "
+                "longer goes through _calculate_rewards, so the hook would silently leave TRL's "
+                "advantages in place."
+            )
+        rewards_per_func = self._last_rewards_per_func
+        weights = self.reward_weights.to(rewards_per_func.device).unsqueeze(0)
+        rewards = (rewards_per_func * weights).nansum(dim=1)  # [total], gathered order
+        return rewards, torch.isnan(rewards_per_func).all(dim=1)
+
+    def _local_slice(self, full: torch.Tensor, n_local: int) -> torch.Tensor:
+        """This rank's rows of a gathered per-completion tensor, TRL's own world-order process slice. The hooks
+        compute on the full gathered set, where groups are contiguous, so a group may span two ranks."""
+        start = self.accelerator.process_index * n_local
+        return full[start : start + n_local]
+
+    def _install_advantages(
+        self, result: dict[str, torch.Tensor | Any], advantages_full: torch.Tensor, what: str
+    ) -> None:
+        """Slice ``advantages_full`` (a hook's full gathered set) to this rank, install it, and realign TRL's
+        advantage log, so the logged record carries the values trained on.
+
+        TRL fills ``_logs["advantages"]`` inside ``_generate_and_score_completions``, before any hook runs, in
+        the gathered tensor's world order and length, so overwriting that tail realigns the record row for row.
+        """
+        local = self._local_slice(advantages_full, result["advantages"].shape[0])
+        result["advantages"] = local.to(device=result["advantages"].device, dtype=result["advantages"].dtype)
+        logged = self._logs["advantages"]
+        replacement = advantages_full.tolist()
+        if len(logged) < len(replacement):
+            raise RuntimeError(
+                f"{what} cannot realign the completions record: TRL logged {len(logged)} advantages "
+                f"for this generation batch but the recomputed set has {len(replacement)}. Overwriting "
+                f"the tail would attribute each row's advantage to the wrong completion."
+            )
+        for i, value in enumerate(replacement):
+            logged[len(logged) - len(replacement) + i] = value

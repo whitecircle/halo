@@ -34,7 +34,7 @@ from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.optimizer_selection import resolve_bf16_optimizer
 from src.trainers.parallelism.trainer_rules import reject_stock_adamw_on_mixed_params
-from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
+from src.trainers.preference.trl_preference import TRLPreferenceMixin
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.repo import REPO_ROOT, load_script_module
 
@@ -449,7 +449,7 @@ def test_precompute_trainers_receive_the_resume_context():
     for script in _TRAINER_SCRIPTS:
         call = _trainer_call(script)
         trainer_cls = _constructed_trainer_class(script, call)
-        if trainer_cls is None or not issubclass(trainer_cls, PrecomputeRefLogpsRankConsistentMixin):
+        if trainer_cls is None or not issubclass(trainer_cls, TRLPreferenceMixin):
             continue
         passed = {kw.arg: kw.value for kw in call.keywords if kw.arg}
         wired[str(script.relative_to(REPO_ROOT))] = all(

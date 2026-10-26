@@ -14,7 +14,8 @@ import types
 import pytest
 import torch
 
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
 
 
 class _PeftPolicy:
@@ -46,6 +47,7 @@ def _ref_forward(ref_model):
         accelerator=types.SimpleNamespace(unwrap_model=lambda model: model),
         _get_per_token_logps_and_entropies=forward,
     )
+    host._reference_policy = types.MethodType(LogprobScoringMixin._reference_policy, host)
     DistributedAsyncEnvironmentalGRPOTrainer._compute_ref_logps(host, torch.zeros(1, 3), torch.ones(1, 3), 2)
     return seen, policy
 

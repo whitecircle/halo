@@ -19,7 +19,7 @@ from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.parallelism_config import ParallelismConfig
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main

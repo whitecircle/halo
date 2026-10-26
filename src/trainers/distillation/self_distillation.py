@@ -12,32 +12,47 @@ from src.configs.distillation import SelfDistillScriptArguments
 from src.data.turn_markers import resolve_eos_token_ids
 from src.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.model_loading.parallel.frozen_models import (
-    ReferenceAlternatives,
-    place_and_freeze,
-    warn_unparallelized_reference,
-)
+from src.model_loading.parallel.frozen_models import ReferenceAlternatives, warn_unparallelized_reference
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.config_access import model_type_matches
 from src.models.unwrapping import unwrap_framework_wrappers
-from src.trainers.distillation.losses import (
-    get_divergence,
+from src.trainers.distillation.divergences import (
     logits_forward_inputs,
     masked_token_mean,
-    privileged_teacher_pass,
-    shared_vocab_width,
+    place_frozen_scorer,
+    require_divergence,
     shifted_token_cross_entropy,
 )
-from src.trainers.distillation.opd_term import OPDTermMixin
+from src.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from src.trainers.evaluation import split_rows_head
-from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 from src.trainers.sft import DistributedSFTTrainer
+from src.trainers.stored_metrics import StoredMetricsMixin
 
 logger = get_logger(__name__, log_level="info")
 
 
 # Opt-in per family: replay is only sound when both passes call get_image_features once, identically.
 _VISION_REUSE_MODEL_TYPES = ("lfm2_vl",)
+
+
+def _teacher_inputs(model_inputs: dict, teacher: dict) -> dict:
+    """The teacher forward's inputs: the student's, with every per-token tensor taken from the ``teacher_*``
+    branch, whose sequence the hint lengthens."""
+    per_token = (
+        "input_ids",
+        "attention_mask",
+        "mm_token_type_ids",
+        "token_type_ids",
+        "position_ids",
+        "cache_position",
+    )
+    teacher_inputs = {k: v for k, v in model_inputs.items() if k not in per_token}
+    teacher_inputs["input_ids"] = teacher["input_ids"]
+    teacher_inputs["attention_mask"] = teacher["attention_mask"]
+    for extra in SEQUENCE_ALIGNED_VISION_KEYS:
+        if extra in teacher:
+            teacher_inputs[extra] = teacher[extra]
+    return teacher_inputs
 
 
 class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, DistributedSFTTrainer):
@@ -81,7 +96,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         # The dataset-side fields stay with the script, which bakes the hint into the teacher prompts.
         self._adopt_sdpg_arguments(kwargs, exclude=SelfDistillScriptArguments.DATASET_SIDE_SDPG_FIELDS)
         self.reference_kl_coef = reference_kl_coef
-        self.reference_kl_loss_fn = get_divergence(reference_kl_loss) if reference_kl_coef > 0 else None
+        self.reference_kl_loss_fn = require_divergence(reference_kl_loss) if reference_kl_coef > 0 else None
         self.confidence_weight_opd = confidence_weight_opd
         self.opd_exclude_eos = opd_exclude_eos
         self._reference_model = reference_model
@@ -106,7 +121,13 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
             warn_unparallelized_reference(
                 self.parallelism_config, ReferenceAlternatives("reference_kl_coef: 0 loads no reference.")
             )
-            self._setup_reference_model()
+            # Keyed to the policy's own tokenizer, so only the row counts are checked; the script checks the token
+            # ids of a reference from another repo before any load.
+            tokenizer = resolve_tokenizer(self.processing_class)
+            self._reference_vocab_width, device = place_frozen_scorer(
+                self._reference_model, self.model, tokenizer, tokenizer
+            )
+            logger.info(f"Reference model moved to {device} and frozen (alpha={self.reference_kl_coef})")
 
     def _resolve_stop_token_ids(self):
         """EOS/stop token ids excluded from OPD when ``opd_exclude_eos``, via ``resolve_eos_token_ids``."""
@@ -115,7 +136,69 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         self._stop_token_ids = set(resolve_eos_token_ids(tok, model_config))
         self._stop_ids_tensor = None
 
-    def _maybe_setup_vision_reuse(self, model) -> bool:
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        self._warn_once_on_empty_labels(inputs)
+
+        teacher = {k[len("teacher_") :]: inputs.pop(k) for k in list(inputs) if k.startswith("teacher_")}
+        confidence_weights = inputs.pop("confidence_weights", None)
+
+        labels = inputs["labels"]
+        # Full-vocab logits (no fused-LCE shortcut); CE computed manually below.
+        model_inputs = logits_forward_inputs(inputs)
+
+        reuse = self._install_vision_reuse(model)
+        self._vision_cache = None
+        self._vision_record, self._vision_replay = reuse, False
+
+        student_outputs = model(**model_inputs)
+        self._vision_record = False
+        # Rows padding an eval split's final round repeat its first rows: every term reads the
+        # split's own (in train, the whole batch, unsliced).
+        real = self.eval_split_rows(labels.size(0))
+        student_logits, labels = split_rows_head(student_outputs.logits, real), split_rows_head(labels, real)
+        if confidence_weights is not None:
+            confidence_weights = split_rows_head(confidence_weights, real)
+
+        sft_loss = self._weighted_cross_entropy(student_logits, labels, confidence_weights)
+        loss = sft_loss
+
+        metrics = {"sft_loss": sft_loss.detach()}
+
+        # The teacher forward is a collective: config-gated, never batch-gated, so every rank enters it.
+        if self.sdpg_beta_base != 0.0:
+            self._vision_replay = reuse
+            with privileged_teacher_pass(model):
+                teacher_logits = split_rows_head(model(**_teacher_inputs(model_inputs, teacher)).logits, real)
+            self._vision_replay = False
+            self._vision_cache = None
+            # Each branch's response rows are gathered by its own mask, which the collators align
+            # (require_aligned_responses); opd_exclude_eos drops EOS/stop tokens from OPD, not SFT.
+            opd_loss = self._response_divergence(
+                self.sdpg_loss_fn,
+                student_logits,
+                self._opd_mask(labels),
+                teacher_logits,
+                self._opd_mask(split_rows_head(teacher["labels"], real)),
+                confidence_weights if self.confidence_weight_opd else None,
+            )
+            beta = self._opd_beta()
+            loss = loss + beta * opd_loss
+            metrics.update(self._opd_metrics(opd_loss, beta))
+
+        if self.reference_kl_coef > 0:
+            with torch.no_grad():
+                ref_logits = split_rows_head(self._reference_model(**model_inputs).logits, real)
+            ref_loss = self._reference_loss(student_logits, ref_logits, labels)
+            loss = loss + self.reference_kl_coef * ref_loss
+            metrics["reference_kl"] = ref_loss.detach()
+
+        self.store_batch_metrics(metrics, "train" if self.model.training else "eval", real)
+
+        if return_outputs:
+            return loss, student_outputs
+        return loss
+
+    def _install_vision_reuse(self, model) -> bool:
         """Install a caching wrapper around the VLM's ``get_image_features`` (once).
 
         The wrapper records the student's image features and replays them on the teacher pass, gated
@@ -146,116 +229,11 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         logger.info(f"Vision-feature reuse enabled for OPD teacher forward (model_type={config.model_type})")
         return True
 
-    def _setup_reference_model(self):
-        """Size the logit rows compared with the reference, then move it to the student device frozen.
-
-        The reference is keyed to the policy's own tokenizer, so only the row counts are checked here:
-        equal rows compare whole, padding past the tokenizer is sliced away, too few rows raise. The
-        token ids of a reference from another repo are the script's check, made before any load.
-        """
-        tokenizer = resolve_tokenizer(self.processing_class)
-        self._reference_vocab_width = shared_vocab_width(
-            self.model.config, self._reference_model.config, tokenizer, tokenizer
-        )
-        device = place_and_freeze(self._reference_model, self.model)
-        logger.info(f"Reference model moved to {device} and frozen (alpha={self.reference_kl_coef})")
-
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        self._warn_once_on_empty_labels(inputs)
-
-        teacher = {k[len("teacher_") :]: inputs.pop(k) for k in list(inputs) if k.startswith("teacher_")}
-        confidence_weights = inputs.pop("confidence_weights", None)
-
-        labels = inputs["labels"]
-        # Full-vocab logits (no fused-LCE shortcut); CE computed manually below.
-        model_inputs = logits_forward_inputs(inputs)
-
-        reuse = self._maybe_setup_vision_reuse(model)
-        self._vision_cache = None
-        self._vision_record, self._vision_replay = reuse, False
-
-        student_outputs = model(**model_inputs)
-        self._vision_record = False
-        # Rows padding an eval split's final round repeat its first rows: every term reads the
-        # split's own (in train, the whole batch, unsliced).
-        real = self.eval_split_rows(labels.size(0))
-        student_logits, labels = split_rows_head(student_outputs.logits, real), split_rows_head(labels, real)
-        if confidence_weights is not None:
-            confidence_weights = split_rows_head(confidence_weights, real)
-
-        sft_loss = self._weighted_cross_entropy(student_logits, labels, confidence_weights)
-        loss = sft_loss
-
-        metrics = {"sft_loss": sft_loss.detach()}
-
-        # The teacher forward is a collective: config-gated, never batch-gated, so every rank enters it.
-        if self.sdpg_beta_base != 0.0:
-            # Every per-token tensor must come from the teacher branch: its sequence is longer (the hint).
-            per_token = (
-                "input_ids",
-                "attention_mask",
-                "mm_token_type_ids",
-                "token_type_ids",
-                "position_ids",
-                "cache_position",
-            )
-            teacher_inputs = {k: v for k, v in model_inputs.items() if k not in per_token}
-            teacher_inputs["input_ids"] = teacher["input_ids"]
-            teacher_inputs["attention_mask"] = teacher["attention_mask"]
-            for extra in SEQUENCE_ALIGNED_VISION_KEYS:
-                if extra in teacher:
-                    teacher_inputs[extra] = teacher[extra]
-            self._vision_replay = reuse
-            with privileged_teacher_pass(model):
-                teacher_logits = split_rows_head(model(**teacher_inputs).logits, real)
-            self._vision_replay = False
-            self._vision_cache = None
-
-            opd_loss = self._opd_loss(
-                student_logits,
-                labels,
-                teacher_logits,
-                split_rows_head(teacher["labels"], real),
-                confidence_weights if self.confidence_weight_opd else None,
-            )
-            beta = self._opd_beta()
-            loss = loss + beta * opd_loss
-            metrics.update(self._opd_metrics(opd_loss, beta))
-
-        if self.reference_kl_coef > 0:
-            with torch.no_grad():
-                ref_logits = split_rows_head(self._reference_model(**model_inputs).logits, real)
-            ref_loss = self._reference_loss(student_logits, ref_logits, labels)
-            loss = loss + self.reference_kl_coef * ref_loss
-            metrics["reference_kl"] = ref_loss.detach()
-
-        self.store_batch_metrics(metrics, "train" if self.model.training else "eval", real)
-
-        if return_outputs:
-            return loss, student_outputs
-        return loss
-
     def _weighted_cross_entropy(self, logits, labels, sample_weights):
         """Token-mean SFT cross-entropy with optional per-sample confidence weighting."""
         shift_labels = labels[:, 1:]
         token_ce = shifted_token_cross_entropy(logits[:, :-1, :], shift_labels)
         return masked_token_mean(token_ce, shift_labels != LABEL_IGNORE_INDEX, sample_weights)
-
-    def _opd_loss(self, student_logits, student_labels, teacher_logits, teacher_labels, sample_weights):
-        """Full-vocab OPD divergence on the response tokens both branches supervise.
-
-        The teacher's sequence is longer by the hint, so each branch's rows are gathered by its own
-        mask; the collators guarantee both masks select the same tokens in the same order
-        (``require_aligned_responses``). ``opd_exclude_eos`` drops EOS/stop tokens from OPD, not SFT.
-        """
-        return self._response_divergence(
-            self.sdpg_loss_fn,
-            student_logits,
-            self._opd_mask(student_labels),
-            teacher_logits,
-            self._opd_mask(teacher_labels),
-            sample_weights,
-        )
 
     def _opd_mask(self, labels):
         """The positions OPD distils: supervised next tokens, less EOS/stop under ``opd_exclude_eos``."""

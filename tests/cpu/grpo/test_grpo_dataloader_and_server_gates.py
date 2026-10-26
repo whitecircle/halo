@@ -7,7 +7,7 @@
   ``remove_unused_columns`` — via the collator, the base ``Trainer`` contract. A diverged copy that
   only prunes when the dataset exposes ``column_names`` silently trains such a dataset on every
   column and fails here.
-- ``_require_vllm_server_mode`` raises instead of no-opping when no training config reaches the
+- ``require_vllm_server_mode`` raises instead of no-opping when no training config reaches the
   ctor, refuses every non-server shape before TRL's vLLM client is swapped in, and accepts the
   server shape.
 - TRL's tool-calling loop (``tools``, ``environment_factory``) is refused by keyword or position: it
@@ -27,7 +27,13 @@ import pytest
 from datasets import Dataset
 from torch.utils.data import SequentialSampler
 
-from src.trainers.grpo.online import _ROLLOUT_FUNC_CTOR_POSITIONS, _TOOL_LOOP_CTOR_POSITIONS, DistributedGRPOTrainer
+from src.trainers.grpo.grpo_rules import (
+    _GATED_CTOR_POSITIONS,
+    reject_tool_calling_loop,
+    reject_unshared_rollout_func,
+    require_vllm_server_mode,
+)
+from src.trainers.grpo.online import DistributedGRPOTrainer
 
 _ROWS = [{"prompt": "p", "unused": i} for i in range(6)]
 
@@ -127,7 +133,7 @@ def test_missing_training_config_raises():
     """``get_ctor_config`` resolved no config: silently returning would leave in-process HF generation
     running under FSDP2/EP (slow and rank-divergent) with nothing in the log to say the gate never ran."""
     with pytest.raises(ValueError, match="GRPOConfig"):
-        DistributedGRPOTrainer._require_vllm_server_mode(None)
+        require_vllm_server_mode(None)
 
 
 @pytest.mark.parametrize(
@@ -140,12 +146,12 @@ def test_missing_training_config_raises():
 def test_non_server_configs_are_refused(use_vllm, vllm_mode, match):
     args = SimpleNamespace(use_vllm=use_vllm, vllm_mode=vllm_mode)
     with pytest.raises(ValueError, match=match):
-        DistributedGRPOTrainer._require_vllm_server_mode(args)
+        require_vllm_server_mode(args)
 
 
 def test_the_server_config_is_accepted():
     """Anti-over-rejection: the one shape the gate exists to let through."""
-    DistributedGRPOTrainer._require_vllm_server_mode(SimpleNamespace(use_vllm=True, vllm_mode="server"))
+    require_vllm_server_mode(SimpleNamespace(use_vllm=True, vllm_mode="server"))
 
 
 def _calculator(expression: str) -> str:
@@ -153,19 +159,19 @@ def _calculator(expression: str) -> str:
     return expression
 
 
-@pytest.mark.parametrize("name", sorted(_TOOL_LOOP_CTOR_POSITIONS))
+@pytest.mark.parametrize("name", ["environment_factory", "tools"])
 def test_the_tool_calling_loop_is_refused_by_keyword_and_by_position(name):
     with pytest.raises(ValueError, match=f"tool-calling loop .{name}."):
-        DistributedGRPOTrainer._reject_tool_calling_loop((), {name: [_calculator]})
-    positional = [None] * (_TOOL_LOOP_CTOR_POSITIONS[name] + 1)
-    positional[_TOOL_LOOP_CTOR_POSITIONS[name]] = [_calculator]
+        reject_tool_calling_loop((), {name: [_calculator]})
+    positional = [None] * (_GATED_CTOR_POSITIONS[name] + 1)
+    positional[_GATED_CTOR_POSITIONS[name]] = [_calculator]
     with pytest.raises(ValueError, match="Async GRPO with Environments"):
-        DistributedGRPOTrainer._reject_tool_calling_loop(tuple(positional), {})
+        reject_tool_calling_loop(tuple(positional), {})
 
 
 def test_no_tools_passes():
-    DistributedGRPOTrainer._reject_tool_calling_loop((), {"tools": None, "environment_factory": None})
-    DistributedGRPOTrainer._reject_tool_calling_loop((), {"tools": []})
+    reject_tool_calling_loop((), {"tools": None, "environment_factory": None})
+    reject_tool_calling_loop((), {"tools": []})
 
 
 def test_the_ctor_refuses_tools_before_trl_builds_anything():
@@ -173,7 +179,7 @@ def test_the_ctor_refuses_tools_before_trl_builds_anything():
     config = SimpleNamespace(use_vllm=True, vllm_mode="server")
     with (
         mock.patch.object(DistributedGRPOTrainer, "_begin_on_policy_init", lambda self, a, k: (config, k)),
-        mock.patch.object(DistributedGRPOTrainer, "_resolve_advantage_hooks", side_effect=AssertionError("too late")),
+        mock.patch.object(DistributedGRPOTrainer, "_adopt_advantage_hooks", side_effect=AssertionError("too late")),
         pytest.raises(ValueError, match="tool-calling loop"),
     ):
         DistributedGRPOTrainer(model=None, args=config, tools=[_calculator])
@@ -191,22 +197,17 @@ def _parallel(tp: bool = False, etp: bool = False) -> SimpleNamespace:
 @pytest.mark.parametrize("config", [_parallel(tp=True), _parallel(etp=True)], ids=["tp", "etp"])
 def test_rollout_func_is_refused_where_siblings_share_a_replica(config):
     """It replaces the generation that hands TP/ETP siblings their leader's completions."""
-    host = SimpleNamespace(parallelism_config=config)
     with pytest.raises(ValueError, match="rollout_func is not supported under tensor or expert-tensor"):
-        DistributedGRPOTrainer._reject_unshared_rollout_func(host, (), {"rollout_func": _rollout})
-    positional = [None] * (_ROLLOUT_FUNC_CTOR_POSITIONS["rollout_func"] + 1)
+        reject_unshared_rollout_func(config, (), {"rollout_func": _rollout})
+    positional = [None] * (_GATED_CTOR_POSITIONS["rollout_func"] + 1)
     positional[-1] = _rollout
     with pytest.raises(ValueError, match="rollout_func"):
-        DistributedGRPOTrainer._reject_unshared_rollout_func(host, tuple(positional), {})
+        reject_unshared_rollout_func(config, tuple(positional), {})
 
 
 def test_rollout_func_passes_off_tp_and_absent_under_tp():
-    DistributedGRPOTrainer._reject_unshared_rollout_func(
-        SimpleNamespace(parallelism_config=_parallel()), (), {"rollout_func": _rollout}
-    )
-    DistributedGRPOTrainer._reject_unshared_rollout_func(
-        SimpleNamespace(parallelism_config=_parallel(tp=True)), (), {}
-    )
+    reject_unshared_rollout_func(_parallel(), (), {"rollout_func": _rollout})
+    reject_unshared_rollout_func(_parallel(tp=True), (), {})
 
 
 def test_the_ctor_refuses_rollout_func_under_tp_before_trl_builds_anything():
@@ -218,7 +219,7 @@ def test_the_ctor_refuses_rollout_func_under_tp_before_trl_builds_anything():
 
     with (
         mock.patch.object(DistributedGRPOTrainer, "_begin_on_policy_init", begin),
-        mock.patch.object(DistributedGRPOTrainer, "_resolve_advantage_hooks", side_effect=AssertionError("too late")),
+        mock.patch.object(DistributedGRPOTrainer, "_adopt_advantage_hooks", side_effect=AssertionError("too late")),
         pytest.raises(ValueError, match="rollout_func is not supported"),
     ):
         DistributedGRPOTrainer(model=None, args=config, rollout_func=_rollout)

@@ -32,7 +32,7 @@ from src.runtime.consensus import (
     reject_across_ranks,
     reject_divergent_settings,
 )
-from src.trainers.mixins.stored_metrics import StoredMetricsMixin
+from src.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.gloo import run_gloo_ranks
 
 WORLD = 3

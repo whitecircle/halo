@@ -73,7 +73,7 @@ from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.runtime.filesystem import hub_metadata_main_first
 from src.runtime.ranks import is_global_main_process
-from src.trainers.distillation.losses import require_same_token_ids
+from src.trainers.distillation.divergences import verify_same_token_ids
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 
 logger = get_logger(__name__, log_level="INFO")
@@ -228,7 +228,7 @@ def _require_reference_token_ids(args, model_config) -> None:
             AutoTokenizer.from_pretrained(ref_path, trust_remote_code=trust),
         )
 
-    require_same_token_ids(*hub_metadata_main_first("reference_tokenizers", fetch))
+    verify_same_token_ids(*hub_metadata_main_first("reference_tokenizers", fetch))
 
 
 def _load_sdpg_reference(*, args, model_config, sft_config, tokenizer, is_vlm: bool) -> PreTrainedModel | None:

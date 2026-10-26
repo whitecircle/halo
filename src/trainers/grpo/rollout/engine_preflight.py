@@ -121,7 +121,7 @@ def _probe_server(
             client.close_session()
 
 
-def _check_context_window(
+def _verify_context_window_on_rank0(
     client_cls: type[WeightSyncClientBase],
     urls: list[str],
     single_turn_tokens: int,
@@ -149,7 +149,46 @@ def _check_context_window(
             )
 
 
-def _check_sampler_logprob_reference(
+def _verify_probed_sampler(
+    url: str, temperature: float, cuts: list[str], temperature_applied: bool | None, nucleus_renormalized: bool | None
+) -> None:
+    """Refuse the server at ``url`` whose probed logprobs are not the IS reference, and warn where the probe could
+    not tell. ``cuts`` are the sampler cuts a sequence-summing consumer reads, empty where none does."""
+    if temperature != 1.0:
+        if temperature_applied is None:
+            logger.warning(
+                f"Rollout server {url}: could not verify that its logprobs carry the sampling temperature "
+                f"({temperature}); the IS ratio is biased if they are raw pre-temperature values (vLLM's default)."
+            )
+        elif not temperature_applied:
+            raise ValueError(
+                f"Rollout server {url} reports RAW (pre-temperature) logprobs while the sampling temperature is "
+                f"{temperature}: the IS ratio would divide the trainer's temperature-{temperature} log-probs "
+                f"by temperature-1 ones, biasing every token weight. Serve vLLM with "
+                f"`--logprobs-mode processed_logprobs` (the compose recipe sets it), or leave "
+                f"SGLANG_RETURN_ORIGINAL_LOGPROB unset on SGLang, or sample at temperature 1.0."
+            )
+    if not cuts:
+        return
+    if nucleus_renormalized is None:
+        logger.warning(
+            f"Rollout server {url}: could not verify whether its logprobs are renormalized over the "
+            f"sampler's cut; with {', '.join(cuts)} a renormalized reference biases every "
+            f"sequence-summed log-ratio (geometric band, OPSM, sequence-level IS)."
+        )
+    elif nucleus_renormalized:
+        raise ValueError(
+            f"Rollout server {url} reports logprobs renormalized over the sampler's cut while "
+            f"{', '.join(cuts)} and the per-token log-ratios are summed over each sequence: every "
+            f"uncertain position is lifted by the mass the cut kept, so the trajectory geometric band and "
+            f"OPSM's per-trajectory mean log-ratio read the sum as drift and a sequence-level vLLM IS ratio "
+            f"collapses toward 0 (sequence_mask only zeroes ratios ABOVE the cap, so the run stalls "
+            f"silently). Sample with every cut off — top_p: 1.0, top_k: 0, min_p: 0.0 (rollout_top_p: 1.0, "
+            f"rollout_top_k: -1, rollout_min_p: 0.0 on the environmental arm) — or {_PER_TOKEN_RATIO_REMEDY}."
+        )
+
+
+def _verify_sampler_logprob_reference_on_rank0(
     client_cls: type[WeightSyncClientBase],
     urls: list[str],
     temperature: float,
@@ -168,6 +207,7 @@ def _check_sampler_logprob_reference(
             f"sequence-level vLLM IS ratio collapses. Sample with repetition_penalty: 1.0 "
             f"(rollout_repetition_penalty: 1.0 on the environmental arm), or {_PER_TOKEN_RATIO_REMEDY}."
         )
+    # A renormalizing cut biases only a consumer that sums the per-token log-ratios over a sequence.
     cuts = [
         f"{name}={value}"
         for name, value, on in (
@@ -175,47 +215,15 @@ def _check_sampler_logprob_reference(
             ("top_k", top_k, top_k > 0),
             ("min_p", min_p, min_p > 0),
         )
-        if on
+        if on and sequence_ratio_active
     ]
-    if temperature == 1.0 and not (cuts and sequence_ratio_active):
+    if temperature == 1.0 and not cuts:
         return
     # Each probe request moves one knob from the identity sampler, so every other filter goes out off.
     probe = partial(probe_sampler_logprob_semantics, **SAMPLER_FILTERS_OFF)
     for url in urls:
-        temperature_applied, nucleus_renormalized = _probe_server(
-            client_cls, url, probe, (None, None), "probe the sampler-logprob semantics of"
-        )
-        if temperature != 1.0:
-            if temperature_applied is None:
-                logger.warning(
-                    f"Rollout server {url}: could not verify that its logprobs carry the sampling temperature "
-                    f"({temperature}); the IS ratio is biased if they are raw pre-temperature values (vLLM's default)."
-                )
-            elif not temperature_applied:
-                raise ValueError(
-                    f"Rollout server {url} reports RAW (pre-temperature) logprobs while the sampling temperature is "
-                    f"{temperature}: the IS ratio would divide the trainer's temperature-{temperature} log-probs "
-                    f"by temperature-1 ones, biasing every token weight. Serve vLLM with "
-                    f"`--logprobs-mode processed_logprobs` (the compose recipe sets it), or leave "
-                    f"SGLANG_RETURN_ORIGINAL_LOGPROB unset on SGLang, or sample at temperature 1.0."
-                )
-        if cuts and sequence_ratio_active:
-            if nucleus_renormalized is None:
-                logger.warning(
-                    f"Rollout server {url}: could not verify whether its logprobs are renormalized over the "
-                    f"sampler's cut; with {', '.join(cuts)} a renormalized reference biases every "
-                    f"sequence-summed log-ratio (geometric band, OPSM, sequence-level IS)."
-                )
-            elif nucleus_renormalized:
-                raise ValueError(
-                    f"Rollout server {url} reports logprobs renormalized over the sampler's cut while "
-                    f"{', '.join(cuts)} and the per-token log-ratios are summed over each sequence: every "
-                    f"uncertain position is lifted by the mass the cut kept, so the trajectory geometric band and "
-                    f"OPSM's per-trajectory mean log-ratio read the sum as drift and a sequence-level vLLM IS ratio "
-                    f"collapses toward 0 (sequence_mask only zeroes ratios ABOVE the cap, so the run stalls "
-                    f"silently). Sample with every cut off — top_p: 1.0, top_k: 0, min_p: 0.0 (rollout_top_p: 1.0, "
-                    f"rollout_top_k: -1, rollout_min_p: 0.0 on the environmental arm) — or {_PER_TOKEN_RATIO_REMEDY}."
-                )
+        semantics = _probe_server(client_cls, url, probe, (None, None), "probe the sampler-logprob semantics of")
+        _verify_probed_sampler(url, temperature, cuts, *semantics)
 
 
 def _probe_prompt_logprobs(client: WeightSyncClientBase, token_ids: list[int]) -> tuple[float, float, int]:
@@ -233,7 +241,9 @@ def _probe_prompt_logprobs(client: WeightSyncClientBase, token_ids: list[int]) -
     return -sum(whole) / len(whole), gap, length
 
 
-def _check_engine_prompt_logprobs(client_cls: type[WeightSyncClientBase], urls: list[str], tokenizer) -> None:
+def _verify_engine_prompt_logprobs_on_rank0(
+    client_cls: type[WeightSyncClientBase], urls: list[str], tokenizer
+) -> None:
     """Rank 0's body of :func:`verify_engine_prompt_logprobs`."""
     # A counting sequence cut past vLLM's CUDA-graph capture range (512 tokens), so the whole prefills eagerly.
     counting = " ".join(str(n) for n in range(2048))
@@ -275,7 +285,7 @@ def verify_context_window(
 ) -> None:
     """COLLECTIVE: refuse a rollout server whose context window cannot hold ``single_turn_tokens``; a
     ``full_trajectory_tokens`` worst case past it only warns."""
-    _on_rank0(_check_context_window, backend, urls, single_turn_tokens, full_trajectory_tokens)
+    _on_rank0(_verify_context_window_on_rank0, backend, urls, single_turn_tokens, full_trajectory_tokens)
 
 
 def verify_sampler_logprob_reference(
@@ -298,7 +308,7 @@ def verify_sampler_logprob_reference(
     ``repetition_penalty`` other than 1, refused there without a probe.
     """
     _on_rank0(
-        _check_sampler_logprob_reference,
+        _verify_sampler_logprob_reference_on_rank0,
         backend,
         urls,
         temperature,
@@ -315,4 +325,4 @@ def verify_engine_prompt_logprobs(urls: list[str], tokenizer, *, backend: str) -
     follow from the tokens alone. The probe scores a counting sequence that prefills eagerly, then prefixes of
     it at captured-graph lengths, and compares the shared positions.
     """
-    _on_rank0(_check_engine_prompt_logprobs, backend, urls, tokenizer)
+    _on_rank0(_verify_engine_prompt_logprobs_on_rank0, backend, urls, tokenizer)

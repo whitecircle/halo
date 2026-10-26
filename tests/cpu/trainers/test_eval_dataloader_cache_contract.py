@@ -20,7 +20,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime.consensus import RankConsensus
 from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 _ROWS = [{"x": 1}, {"x": 2}]
 

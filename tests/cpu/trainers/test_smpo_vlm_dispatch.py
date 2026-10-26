@@ -16,6 +16,7 @@ That split is what these tests pin:
   existing run's data).
 """
 
+from functools import partial
 from types import SimpleNamespace
 from unittest import mock
 
@@ -26,7 +27,8 @@ from transformers import ProcessorMixin
 
 from src.data.pipeline.map_cache_key import kwargs_fingerprint
 from src.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from src.trainers.preference.preference_rules import reject_smpo_pp_options, reject_smpo_vlm_options
+from src.trainers.preference.smpo import resolve_vlm_mode
 from tests.cpu.trainers.test_smpo_vlm import EOS_ID, StubProcessor, StubTokenizer, make_features, make_trainer
 
 # Already chat-templated strings — the shape the script's text path (prepare_preference_datasets)
@@ -59,7 +61,7 @@ def _capture_map(trainer, dataset, processing_class):
         return Dataset.from_dict({"images": [[]]})
 
     with mock.patch("src.trainers.preference.smpo.coordinated_map", _fake_map):
-        trainer._prepare_dataset(dataset, processing_class, "train")
+        trainer._prepare_dataset(dataset, processing_class, trainer.args, "train")
     return captured
 
 
@@ -92,7 +94,9 @@ def test_text_run_on_multimodal_checkpoint_tokenizes_end_to_end():
     processor = ProcessorStub(tokenizer)
     trainer = make_trainer(is_vlm=False)
 
-    prepared = trainer._prepare_dataset(Dataset.from_dict({k: [v] for k, v in TEXT_ROW.items()}), processor, "train")
+    prepared = trainer._prepare_dataset(
+        Dataset.from_dict({k: [v] for k, v in TEXT_ROW.items()}), processor, trainer.args, "train"
+    )
 
     row = prepared[0]
     assert set(prepared.column_names) == {"prompt_input_ids", "chosen_input_ids", "rejected_input_ids"}
@@ -104,9 +108,14 @@ def test_text_run_on_multimodal_checkpoint_tokenizes_end_to_end():
 @pytest.mark.parametrize(
     ("gate", "attrs", "parallelism_config", "message"),
     [
-        ("_validate_vlm_mode", {"padding_free": True}, None, "padding_free"),
-        ("_validate_vlm_mode", {}, SimpleNamespace(cp_size=2), "Context Parallelism"),
-        ("_reject_pp_explicit_options", {}, SimpleNamespace(is_pp_mode=True), "pipeline parallelism"),
+        (reject_smpo_vlm_options, {"padding_free": True}, None, "padding_free"),
+        (reject_smpo_vlm_options, {}, SimpleNamespace(cp_size=2), "Context Parallelism"),
+        (
+            partial(reject_smpo_pp_options, peft_config=None),
+            {},
+            SimpleNamespace(is_pp_mode=True),
+            "pipeline parallelism",
+        ),
     ],
 )
 def test_vlm_gates_follow_the_run_verdict(gate, attrs, parallelism_config, message):
@@ -118,9 +127,8 @@ def test_vlm_gates_follow_the_run_verdict(gate, attrs, parallelism_config, messa
     """
 
     def _run(is_vlm):
-        trainer = make_trainer(is_vlm=is_vlm, **attrs)
-        args = (parallelism_config,) if gate == "_validate_vlm_mode" else (parallelism_config, None)
-        getattr(trainer, gate)(*args)
+        args = {"padding_free": False, "lower_clip_percentile": None, "upper_clip_percentile": None, **attrs}
+        gate(SimpleNamespace(**args), parallelism_config, is_vlm=is_vlm)
 
     with pytest.raises(ValueError, match=message):
         _run(is_vlm=True)
@@ -132,13 +140,13 @@ def test_is_vlm_true_requires_a_processor():
     processor = ProcessorStub(tokenizer)
 
     with pytest.raises(ValueError, match="ProcessorMixin"):
-        SmoothMarginPOTrainer._resolve_vlm_mode(tokenizer, True)
+        resolve_vlm_mode(tokenizer, True)
 
-    assert SmoothMarginPOTrainer._resolve_vlm_mode(processor, True) is True
-    assert SmoothMarginPOTrainer._resolve_vlm_mode(processor, False) is False
+    assert resolve_vlm_mode(processor, True) is True
+    assert resolve_vlm_mode(processor, False) is False
     # Omitted → derived from the processing class, the contract for direct trainer users.
-    assert SmoothMarginPOTrainer._resolve_vlm_mode(processor, None) is True
-    assert SmoothMarginPOTrainer._resolve_vlm_mode(tokenizer, None) is False
+    assert resolve_vlm_mode(processor, None) is True
+    assert resolve_vlm_mode(tokenizer, None) is False
 
 
 def test_text_checkpoint_cache_key_unchanged():

@@ -13,9 +13,10 @@ import torch
 from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
 from src.environments.episode import RolloutResult
 from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from src.trainers.grpo.rollout.completions_logging import unbounded_completion_logs
-from src.trainers.grpo.rollout.trajectory_tokenize import TurnRow
 from tests.common.grpo_metrics import attach_world_metrics
 
 

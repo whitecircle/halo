@@ -36,13 +36,20 @@ import pytest
 import torch
 
 import src.trainers.checkpointing as checkpointing_mod
-import src.trainers.grpo.rollout.async_rollouts as async_mod
+import src.trainers.grpo.environmental.async_rollouts as async_mod
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.checkpointing import CheckpointingMixin
-from src.trainers.grpo.environmental import BatchBuildFence
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as _T
-from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
+from src.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from tests.common.repo import load_script_module
+
+
+class _Rollout(str):
+    """A stub rollout: its text, with no trajectory to count reasoning in."""
+
+    trajectory = None
+
 
 env_grpo_script = load_script_module("scripts/training/environmental_grpo.py")
 
@@ -51,7 +58,8 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
     """Minimal stand-in running the REAL prefetch decision flow with mocked rollout collection; the
     checkpointing base gives the sidecar hooks the mixin's ``super()`` calls end in."""
 
-    _generate_and_score_completions_base = _T._generate_and_score_completions_base
+    _collect_and_score_rollouts = _T._collect_and_score_rollouts
+    _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
     _extract_prompts_and_contexts = _T._extract_prompts_and_contexts
     eval_split_rows = _T.eval_split_rows
 
@@ -84,13 +92,10 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
 
     def _collect(self, prompts, contexts):
         self.sync_calls.append(list(prompts))
-        return [f"sync:{p}" for p in prompts]
+        return [_Rollout(f"sync:{p}") for p in prompts]
 
-    def _broadcast_rollouts_for_tp(self, rollout_results):
+    def _broadcast_object_from_tp_leader(self, rollout_results):
         return rollout_results
-
-    def _episode_reasoning_tokens(self, rollout_results):
-        return [[] for _ in rollout_results]
 
     def _build_training_tensors(self, rollout_results, device, mode, num_padding, reasoning_tokens):
         assert num_padding == 0, "a train round is never padded"
@@ -101,12 +106,12 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         pass
 
     def round(self, prompts: list[str]):
-        return self._generate_and_score_completions_base([{"prompt": p} for p in prompts])
+        return self._collect_and_score_rollouts([{"prompt": p} for p in prompts])
 
     def worker_step(self):
         """One synchronous stand-in for the prefetch worker: input batch → completed rollouts."""
         prompts, _contexts = self._prefetch_input_queue.get_nowait()
-        self._prefetch_queue.put((len(prompts), [f"prefetch:{p}" for p in prompts]))
+        self._prefetch_queue.put((len(prompts), [_Rollout(f"prefetch:{p}") for p in prompts]))
 
     def _sync_weights_to_engine_fenced(self, force: bool = False) -> bool:
         return True
@@ -159,7 +164,7 @@ def test_failure_marker_decrements_inflight_and_falls_back():
     host = _Host(buffer_size=2)
     host._prefetch_pending = _pending("pW", "pX")
     host._prefetch_queue.put((1, None))  # worker failure marker
-    host._prefetch_queue.put((1, ["prefetch:pX"]))
+    host._prefetch_queue.put((1, [_Rollout("prefetch:pX")]))
 
     assert host._try_get_prefetched_results() is None
     assert host._prefetch_inflight == 1
@@ -227,7 +232,7 @@ class _LifecycleHost:
     _form_weight_sync_group = _T._form_weight_sync_group
     _weight_sync_group_formed = False
     _start_rank_rollout_components = _T._start_rank_rollout_components
-    _check_eval_round_fits_cap = _T._check_eval_round_fits_cap
+    _reject_eval_round_over_cap = _T._reject_eval_round_over_cap
     _start_rollout_generation = _T._start_rollout_generation
 
     def __init__(self, weight: torch.Tensor):

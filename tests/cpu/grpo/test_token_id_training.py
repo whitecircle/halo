@@ -21,8 +21,8 @@ import torch
 from src.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
 from src.environments.episode import RolloutResult
 from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental import BatchBuildFence
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.models import GPT_OSS_20B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -88,6 +88,8 @@ def _make_trainer_stub(tok):
     stub._render_messages_to_ids = types.MethodType(Trainer._render_messages_to_ids, stub)
     stub._context_limit = types.MethodType(Trainer._context_limit, stub)
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
+    for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
+        setattr(stub, name, types.MethodType(getattr(Trainer, name), stub))
     return stub
 
 
@@ -122,6 +124,8 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
     stub._render_messages_to_ids = _no_render
     stub._context_limit = types.MethodType(Trainer._context_limit, stub)
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
+    for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
+        setattr(stub, name, types.MethodType(getattr(Trainer, name), stub))
 
     rows = stub._tokenize_trajectory_turns(result)
     assert len(rows) == 1
@@ -273,6 +277,8 @@ def _turns_stub():
     stub._context_limit = lambda: 10**9  # no overflow in this test's tiny rows
     stub._tokenize_trajectory = lambda result: (torch.tensor([0]),) * 3
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
+    for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
+        setattr(stub, name, types.MethodType(getattr(Trainer, name), stub))
     return stub
 
 
@@ -350,6 +356,8 @@ def _render_stub(render):
     stub._invalidate_untrainable_episode = types.MethodType(Trainer._invalidate_untrainable_episode, stub)
     stub._tokenize_trajectory = types.MethodType(Trainer._tokenize_trajectory, stub)
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
+    for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
+        setattr(stub, name, types.MethodType(getattr(Trainer, name), stub))
     return stub
 
 

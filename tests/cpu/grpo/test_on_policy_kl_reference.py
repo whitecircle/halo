@@ -38,8 +38,8 @@ from src.model_loading.parallel.frozen_models import (
 )
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.trainers.grpo import online
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.frozen_loader import captured_load, stub_frozen_loader
 from tests.common.models import TINY_QWEN3_CONFIG

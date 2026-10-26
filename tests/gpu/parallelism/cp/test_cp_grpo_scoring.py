@@ -21,8 +21,8 @@ from src.distributed.context_parallel.ulysses_attention import _flash_attn_func
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.fsdp import apply_fsdp2_for_dp, reshard_fsdp2_modules
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
-from src.trainers.grpo.objective.offline import offline_loss
+from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from src.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import (
     boundary_loss_negative_control,
     full_row_loss,
@@ -115,7 +115,7 @@ def run(ctx) -> dict:
             cp_size, stage_world_size=ctx.world_size, stage_base_rank=0, nvlink_domain_size=ctx.world_size
         )
         model = UlyssesModel(_model(ctx.device), cp_config)
-        scorer = ChunkedLogprobsCore()
+        scorer = LogprobScoringMixin()
         scorer.temperature = 1.0
         scorer.accelerator = SimpleNamespace(unwrap_model=lambda m: m)
         local_logps, shifted_labels = scorer._cp_chunked_logps(model, ids, mask, labels)
@@ -221,7 +221,7 @@ def run(ctx) -> dict:
     hook = model.model.model.layers[0].register_forward_pre_hook(
         lambda _module, _args: layer_calls.__setitem__("count", layer_calls["count"] + 1)
     )
-    scorer = ChunkedLogprobsCore()
+    scorer = LogprobScoringMixin()
     scorer.temperature = 1.0
     scorer.accelerator = SimpleNamespace(unwrap_model=lambda m: m)
     local_logps, shifted_labels = scorer._cp_chunked_logps(model, ids, mask, labels)

@@ -329,7 +329,7 @@ def test_online_grpo_replaces_each_trl_method_the_surface_walk_skips():
     host.vllm_generation = types.SimpleNamespace()
     host.parallelism_config = types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, is_expert_tp_mode=False)
 
-    DistributedGRPOTrainer._setup_weight_sync(host)
+    DistributedGRPOTrainer._install_weight_sync(host)
 
     assert vars(trl_vllm_generation.VLLMGeneration).keys() >= _REPLACED_BY_ONLINE_GRPO
     assert vars(host.vllm_generation).keys() >= _REPLACED_BY_ONLINE_GRPO

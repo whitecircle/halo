@@ -21,7 +21,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.trainers.grpo.environmental import BatchBuildFence
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
 from tests.common.env_grpo_batch import batch_host, episode, row
 
 PartialState()  # the world-metrics flush gathers through accelerate, which reads the process state
@@ -86,21 +86,21 @@ _TASKS = [{"prompt": "task"}, {"prompt": "task"}]
 
 def test_a_round_joins_the_fence_at_each_phase_boundary():
     events = []
-    _round(events)._generate_and_score_completions_base(_TASKS)
+    _round(events)._collect_and_score_rollouts(_TASKS)
     assert events == ["fence", "fence", "rollout", "tokenize", "fence", "recompute forward"]
 
 
 def test_a_wedged_prefetch_is_raised_before_the_synchronous_fallback():
     events = []
     with pytest.raises(ValueError, match="wedged"):
-        _round(events, wedged_prefetch=True)._generate_and_score_completions_base(_TASKS)
+        _round(events, wedged_prefetch=True)._collect_and_score_rollouts(_TASKS)
     assert events == ["fence", "fence"], "the wedged rank rolled out a synchronous round first"
 
 
 def test_a_row_failure_is_raised_before_the_recompute_forward():
     events = []
     with pytest.raises(ValueError, match="context window"):
-        _round(events, row_error=True)._generate_and_score_completions_base(_TASKS)
+        _round(events, row_error=True)._collect_and_score_rollouts(_TASKS)
     assert events == ["fence", "fence", "rollout", "tokenize", "fence"]
 
 

@@ -32,8 +32,8 @@ from src.models.attention.gpt_oss_sinks import (
     uses_gpt_oss_sinks,
 )
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main

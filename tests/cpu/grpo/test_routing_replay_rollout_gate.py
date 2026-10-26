@@ -21,13 +21,12 @@ import numpy as np
 import pytest
 import torch
 from accelerate import PartialState
-from trl.trainer.utils import pad
 
 from src.environments.episode import RolloutResult
 from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental import BatchBuildFence
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
+from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 from tests.common.routing import BareEPLayer, raw_routing_payload
 
@@ -87,31 +86,33 @@ def _host():
         _max_train_row_tokens=None,
         _rows_over_cap=0,
         _warned_once=set(),
+        _is_correction=False,
         _tokenizer=types.SimpleNamespace(model_max_length=4096),
         pad_token_id=0,
         eos_token_id=1,
         _metrics=defaultdict(lambda: defaultdict(list)),
     )
     attach_world_metrics(host)
-    for name in ("_tokenize_trajectory_turns", "_masked_trajectory_tensors", "_context_limit"):
+    for name in (
+        "_tokenize_trajectory_turns",
+        "_masked_trajectory_tensors",
+        "_context_limit",
+        "_template_kwargs",
+        "_admit_row",
+        "_sampled_turn_row",
+        "_stack_rows",
+        "_assemble_rollout_routing",
+        "_rollout_masks_with_coverage",
+    ):
         setattr(host, name, types.MethodType(getattr(Trainer, name), host))
-    host._assemble_rollout_routing = types.MethodType(Trainer._assemble_rollout_routing, host)
     return host
 
 
 def _gate(host, rows):
     """Run the gate over ``rows`` exactly as ``_build_training_tensors`` assembles its inputs."""
-    tool_masks = [r.completion_mask.to(torch.bool) for r in rows]
-    return host._assemble_rollout_routing(
-        [r.turn_routing for r in rows],
-        [torch.ones(len(r.prompt_ids), dtype=torch.bool) for r in rows],
-        [r.completion_ids for r in rows],
-        pad(tool_masks, padding_value=0, padding_side="right"),
-        pad([r.prompt_ids for r in rows], padding_value=0, padding_side="left"),
-        pad([r.completion_ids for r in rows], padding_value=0, padding_side="right"),
-        torch.device("cpu"),
-        "train",
-    )
+    rows = [r._replace(completion_mask=r.completion_mask.to(torch.bool)) for r in rows]
+    step = host._stack_rows(rows, torch.device("cpu"))
+    return host._assemble_rollout_routing(rows, step, torch.device("cpu"), "train")
 
 
 def test_an_engine_cut_turn_keeps_its_routing_on_a_negative_only_row():

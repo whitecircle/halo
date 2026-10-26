@@ -23,8 +23,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer, _PPStepState
+from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from src.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
+from tests.common.smpo_trainer import smpo_trainer
 
 VOCAB = 64
 PAD_TOKEN_ID = 0
@@ -51,22 +52,13 @@ class _TokenTableLM(nn.Module):
 
 
 def _trainer() -> SmoothMarginPOTrainer:
-    """A construction-free SMPO carrying what both loss paths read."""
-    trainer = object.__new__(SmoothMarginPOTrainer)
-    trainer.parallelism_config = ParallelismConfig()
-    trainer.cp_config = None
-    trainer.pad_token_id = PAD_TOKEN_ID
-    trainer.padding_free = False
-    trainer.lower_clip_percentile = trainer.upper_clip_percentile = None
-    trainer.min_log_prob = -4.0
-    trainer.beta = 2.0
-    trainer.loss_type = "sigmoid"
-    trainer.target_margin = 0.3
-    trainer.use_margin_schedule = False
-    trainer.chosen_sft_ratio = 0.7
-    trainer.args = SimpleNamespace(max_length=MAX_LENGTH)
-    trainer._pp_step_state = _PPStepState()
-    return trainer
+    return smpo_trainer(pad_token_id=PAD_TOKEN_ID, min_log_prob=-4.0, max_length=MAX_LENGTH)
+
+
+def _pipeline(trainer: SmoothMarginPOTrainer) -> SMPOPipelineLoss:
+    """The pipeline loss the trainer's adapter hook builds."""
+    trainer._pp_loss_adapter()
+    return trainer._pp_loss
 
 
 def _batch() -> dict[str, torch.Tensor]:
@@ -100,11 +92,11 @@ def _pp_loss_and_grad(batch, rows_per_microbatch: int) -> tuple[torch.Tensor, to
     """The pipeline's contract: one transform and step-state refresh over the batch, then a loss per
     microbatch, summed."""
     model = _TokenTableLM()
-    trainer = _trainer()
-    inputs = trainer._pp_batch_transform(batch)
-    trainer._pp_refresh_step_state(inputs)
+    pipeline = _pipeline(_trainer())
+    inputs = pipeline.batch_transform(batch)
+    pipeline.refresh_constants(inputs)
     loss = sum(
-        trainer._pp_token_loss(model(input_ids).logits, labels)
+        pipeline.token_loss(model(input_ids).logits, labels)
         for input_ids, labels in zip(
             inputs["input_ids"].split(rows_per_microbatch), inputs["labels"].split(rows_per_microbatch), strict=True
         )
@@ -136,12 +128,12 @@ def test_the_pp_logit_means_accumulate_in_fp32():
     """Each microbatch hands the step its masked logit sums over the vocab; summed in the bf16 logits'
     own dtype they round each row's total to 8 mantissa bits, which this vocab's logits resolve."""
     model = _TokenTableLM()
-    trainer = _trainer()
-    inputs = trainer._pp_batch_transform(_batch())
-    trainer._pp_refresh_step_state(inputs)
+    pipeline = _pipeline(_trainer())
+    inputs = pipeline.batch_transform(_batch())
+    pipeline.refresh_constants(inputs)
     for input_ids, labels in zip(inputs["input_ids"].split(2), inputs["labels"].split(2), strict=True):
-        trainer._pp_token_loss(model(input_ids).logits, labels)
-    metrics = trainer._pp_step_metrics()
+        pipeline.token_loss(model(input_ids).logits, labels)
+    metrics = pipeline.step_metrics()
 
     logits = model(inputs["input_ids"]).logits.double()[:, :-1]
     tokens = inputs["labels"][:, 1:] != -100
@@ -155,25 +147,26 @@ def test_the_pipeline_predicts_the_non_pp_rewards():
     model, batch = _TokenTableLM(), _batch()
     _, _, rewards = _trainer().get_batch_loss_metrics(model, batch)
     trainer = _trainer()
-    inputs = trainer._pp_batch_transform(batch)
-    pipelined = trainer._pp_smpo_predictions(model(inputs["input_ids"]).logits, inputs)
+    adapter = trainer._pp_loss_adapter()
+    inputs = adapter.batch_transform(batch)
+    pipelined = adapter.predictions_fn(model(inputs["input_ids"]).logits, inputs)
 
     assert rewards.shape == pipelined.shape == (4, 2)
     torch.testing.assert_close(pipelined, rewards, rtol=REL_TOL, atol=REL_TOL)
-    assert trainer._pp_smpo_eval_labels(inputs).shape == (4,)
+    assert adapter.eval_labels_fn(inputs).shape == (4,)
 
 
 @torch.no_grad()
 def test_a_pipeline_step_of_padding_alone_scores_zero():
     """An eval step whose every pair pads the final round reaches the schedule as filler rows alone:
     the step state counts no pair, and the margin loss divides by 1 rather than by that 0."""
-    trainer, model = _trainer(), _TokenTableLM()
-    inputs = trainer._pp_batch_transform(_batch())
-    trainer._pp_refresh_step_state({key: value[:0] for key, value in inputs.items()})
+    pipeline, model = _pipeline(_trainer()), _TokenTableLM()
+    inputs = pipeline.batch_transform(_batch())
+    pipeline.refresh_constants({key: value[:0] for key, value in inputs.items()})
     filler = torch.full_like(inputs["labels"], -100)
 
-    assert trainer._pp_step_state.pair_count == 1
-    assert trainer._pp_token_loss(model(inputs["input_ids"]).logits, filler).item() == 0.0
+    assert pipeline.constants.pair_count == 1
+    assert pipeline.token_loss(model(inputs["input_ids"]).logits, filler).item() == 0.0
 
 
 def _eval_trainer(real_pairs: int) -> SmoothMarginPOTrainer:

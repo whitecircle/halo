@@ -38,8 +38,8 @@ from src.entrypoints.script import (
 from src.model_loading.parallel.frozen_models import load_frozen_reference_model
 from src.model_loading.parallel.peft_setup import configure_adapter_training, wraps_in_peft_model
 from src.runtime.collectives import barrier
-from src.trainers.grpo.mixins.offline_reference import reject_unsupported_reference_input
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 
 def build_chat_template_row_fn(tokenizer, tools_field: str | None):

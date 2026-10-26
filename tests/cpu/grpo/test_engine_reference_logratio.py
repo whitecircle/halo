@@ -16,10 +16,12 @@ import torch
 from accelerate import PartialState
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.trainers.grpo import environmental
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental import async_rollouts, importance_sampling
+from src.trainers.grpo.environmental.environmental_rules import reject_unsupported_engine_reference
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from src.trainers.grpo.objective.logratio import select_mask_logratio
-from src.trainers.grpo.rollout import async_rollouts, engine_preflight
+from src.trainers.grpo.rollout import engine_preflight
 from src.trainers.grpo.rollout.engine_preflight import _probe_prompt_logprobs, verify_engine_prompt_logprobs
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient as VLLMClient
@@ -86,7 +88,18 @@ def _rescore_host(clients):
         _metrics={"train": defaultdict(list)},
     )
     attach_world_metrics(host)
-    return DistributedAsyncEnvironmentalGRPOTrainer._rescore_rows_on_engine.__get__(host), host
+    rescore = DistributedAsyncEnvironmentalGRPOTrainer._rescore_rows_on_engine.__get__(host)
+
+    def rescore_rows(prompts, completions, has_sampling, turns_per_traj):
+        rows = [
+            TurnRow(
+                prompt, completion, torch.ones_like(completion), torch.zeros(len(completion)) if has else None, None
+            )
+            for prompt, completion, has in zip(prompts, completions, has_sampling, strict=True)
+        ]
+        return rescore(rows, turns_per_traj)
+
+    return rescore_rows, host
 
 
 def test_rescore_clients_are_built_per_rank_from_the_server_urls(monkeypatch):
@@ -173,8 +186,8 @@ def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, fail
     record off the main process by default: unless the report opts out, a dead route on rank 3 would never
     print."""
     recorder = mock.MagicMock()
-    monkeypatch.setattr(environmental, "logger", recorder)
-    monkeypatch.setattr(environmental, "get_global_rank", lambda: 3)
+    monkeypatch.setattr(importance_sampling, "logger", recorder)
+    monkeypatch.setattr(importance_sampling, "get_global_rank", lambda: 3)
     rescore, _host = _rescore_host([_FakeClient(fail=fail) for fail in failing])
     prompts, completions = _rows()
     rescore(prompts, completions, [True, True, True, True], [2, 1, 1])
@@ -203,16 +216,14 @@ def test_rescore_rejects_a_length_mismatch_as_that_rows_miss():
     assert scored[1] is not None and scored[2] is None, "one log-prob for a three-token completion is a miss"
 
 
-def _gate_probe(*, is_correction=True, **sampler):
-    """A trainer whose rollout config is the identity sampler, with ``sampler`` overriding its knobs."""
-    trainer = DistributedAsyncEnvironmentalGRPOTrainer.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer._is_correction = is_correction
-    trainer.async_config = AsyncTrainingConfig(**{"rollout_temperature": 1.0, "rollout_top_p": 1.0, **sampler})
-    return trainer
+def _gate(client_cls, *, is_correction=True, **sampler) -> None:
+    """The gate over a rollout config at the identity sampler, with ``sampler`` overriding its knobs."""
+    config = AsyncTrainingConfig(**{"rollout_temperature": 1.0, "rollout_top_p": 1.0, **sampler})
+    reject_unsupported_engine_reference(client_cls, config, is_correction)
 
 
 def test_engine_reference_gate_accepts_the_identity_sampler_on_vllm():
-    _gate_probe()._validate_engine_reference(VLLMClient)
+    _gate(VLLMClient)
 
 
 @pytest.mark.parametrize(
@@ -234,13 +245,13 @@ def test_engine_reference_gate_accepts_the_identity_sampler_on_vllm():
 )
 def test_engine_reference_gate_refuses(kwargs, client_cls, match):
     with pytest.raises(ValueError, match=match):
-        _gate_probe(**kwargs)._validate_engine_reference(client_cls)
+        _gate(client_cls, **kwargs)
 
 
 def test_both_engines_declare_the_rescore():
     assert VLLMClient.SUPPORTS_ENGINE_RESCORE is True
     assert SGLangWeightSyncClient.SUPPORTS_ENGINE_RESCORE is True
-    _gate_probe()._validate_engine_reference(SGLangWeightSyncClient)
+    _gate(SGLangWeightSyncClient)
 
 
 def _word_tokenizer(text):

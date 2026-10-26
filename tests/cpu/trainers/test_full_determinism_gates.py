@@ -30,7 +30,7 @@ from transformers import Gemma4ForCausalLM, Gemma4TextConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention import sdpa_flex_sliding
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.sft import DistributedSFTTrainer

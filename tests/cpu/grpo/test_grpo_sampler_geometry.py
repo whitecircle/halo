@@ -4,7 +4,7 @@ TRL sizes the train ``RepeatSampler`` from ``generation_batch_size`` (world-rate
 block consumed per generation round across ``accelerator.num_processes``). The custom dataloader
 (TP/ETP/pre-sharded) consumes only ``data_parallel_size`` batches per fetch, so under the
 world-rate geometry each generation round re-rolls the leading ``dp/world`` fraction of every
-prompt block and silently skips the rest. ``GRPOTrainDataLoaderMixin._get_train_sampler`` rebuilds
+prompt block and silently skips the rest. ``GenerationRoundMixin._get_train_sampler`` rebuilds
 the sampler at the DP consumption rate; these tests assert the exact per-round index geometry.
 """
 
@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from trl.trainer.utils import RepeatSampler
 
-from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
+from src.trainers.grpo.on_policy import GenerationRoundMixin
 
 
 class _TrlWorldRateBase:
@@ -32,7 +32,7 @@ class _TrlWorldRateBase:
         )
 
 
-class _Trainer(GRPOTrainDataLoaderMixin, _TrlWorldRateBase):
+class _Trainer(GenerationRoundMixin, _TrlWorldRateBase):
     """Minimal composition exposing exactly the attributes the mixin reads."""
 
     def __init__(

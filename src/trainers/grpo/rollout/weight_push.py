@@ -52,13 +52,31 @@ class WeightSyncSender(Protocol):
     def abort_weight_update(self) -> None: ...
 
 
-def reject_unsyncable_model(model: torch.nn.Module, backend: str) -> None:
-    """Refuse at construction a model the ``backend`` engine cannot take a weight sync for; structural, so every
-    rank raises alike."""
-    ep_layers = dict(named_ep_layers(model))
-    _reject_model_state(model, ep_layers)
-    _reject_engine_fit(model, backend, ep_layers)
-    _reject_balancing_state(model)
+def _dense_params(
+    model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]
+) -> Iterator[tuple[str, torch.nn.Parameter]]:
+    """The parameters the dense push sends, in ``named_parameters`` order: all but the EP experts and the
+    hand-sliced TP shards, which are not DTensors and go gathered through the drain."""
+    hand_sliced = hand_sliced_suffixes(model)
+    for name, param in model.named_parameters():
+        expert = any(
+            name.startswith(root + ".") and is_expert_weight_attr(name[len(root) + 1 :]) for root in ep_layers
+        )
+        if expert or (hand_sliced and name.endswith(hand_sliced)):
+            continue
+        yield name, param
+
+
+def _reject_unpushed_folds(model: torch.nn.Module, folds: LoraFolds, pushed: set[int]) -> None:
+    """Refuse a LoRA fold target outside ``pushed`` (the ids the dense push sends), the only path that folds."""
+    unpushed = folds.keys() - pushed
+    if unpushed:
+        names = sorted(name for name, param in model.named_parameters() if id(param) in unpushed)
+        raise ValueError(
+            f"PEFT LoRA adapts {names}, which the weight sync does not send through its dense push, the "
+            f"only path that folds PEFT adapters: the served weights would miss their delta. EP expert "
+            f"weights take native expert LoRA (list the expert projections in lora_target_modules)."
+        )
 
 
 def _reject_model_state(model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]) -> None:
@@ -155,31 +173,13 @@ def _reject_balancing_state(model: torch.nn.Module) -> None:
         )
 
 
-def _dense_params(
-    model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]
-) -> Iterator[tuple[str, torch.nn.Parameter]]:
-    """The parameters the dense push sends, in ``named_parameters`` order: all but the EP experts and the
-    hand-sliced TP shards, which are not DTensors and go gathered through the drain."""
-    hand_sliced = hand_sliced_suffixes(model)
-    for name, param in model.named_parameters():
-        expert = any(
-            name.startswith(root + ".") and is_expert_weight_attr(name[len(root) + 1 :]) for root in ep_layers
-        )
-        if expert or (hand_sliced and name.endswith(hand_sliced)):
-            continue
-        yield name, param
-
-
-def _reject_unpushed_folds(model: torch.nn.Module, folds: LoraFolds, pushed: set[int]) -> None:
-    """Refuse a LoRA fold target outside ``pushed`` (the ids the dense push sends), the only path that folds."""
-    unpushed = folds.keys() - pushed
-    if unpushed:
-        names = sorted(name for name, param in model.named_parameters() if id(param) in unpushed)
-        raise ValueError(
-            f"PEFT LoRA adapts {names}, which the weight sync does not send through its dense push, the "
-            f"only path that folds PEFT adapters: the served weights would miss their delta. EP expert "
-            f"weights take native expert LoRA (list the expert projections in lora_target_modules)."
-        )
+def reject_unsyncable_model(model: torch.nn.Module, backend: str) -> None:
+    """Refuse at construction a model the ``backend`` engine cannot take a weight sync for; structural, so every
+    rank raises alike."""
+    ep_layers = dict(named_ep_layers(model))
+    _reject_model_state(model, ep_layers)
+    _reject_engine_fit(model, backend, ep_layers)
+    _reject_balancing_state(model)
 
 
 class _HubForwarder:
@@ -263,8 +263,8 @@ def _send_ep_expert_weights(
 ) -> None:
     """COLLECTIVE: gather each EP layer's experts in the family's hub layout and forward them.
 
-    The retained assembly is the sync's largest rank-local allocation (~28 GB for one 397B layer), so it runs
-    under ``guard`` and retaining stops after a failure, with nothing left to send.
+    The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and retaining
+    stops after a failure, with nothing left to send.
     """
     for layer_name, module in ep_layers.items():
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
@@ -312,49 +312,6 @@ def _send_dense_weights(
         forwarder.flush()
 
 
-def _finish_and_close(sender: WeightSyncSender) -> None:
-    """Send the tail chunk and close the engine's update, aborting it if that raises before the close."""
-    try:
-        sender.finish_weight_update()
-    except BaseException:
-        sender.abort_weight_update()
-        raise
-
-
-def _refuse_missing_client() -> None:
-    raise RuntimeError(
-        "The weight-sync push reached its forwarding rank with no engine client: the gather would run and "
-        "send nothing, leaving the engine serving the old weights. The client must be formed before a push "
-        "(the environmental trainer's _form_weight_sync_group; online GRPO's TRL vllm_client)."
-    )
-
-
-def sync_weights_to_client(
-    model: torch.nn.Module, client: WeightSyncSender | None, is_main: bool, is_tp_main: bool
-) -> None:
-    """COLLECTIVE: gather the policy and push it to ``client``, then close the update. Only the forwarding rank
-    (global main, TP rank 0) sends, and its missing ``client`` is refused on every rank at the close's verdict."""
-    forwarding = is_main and is_tp_main
-    sender = client if forwarding else None
-    flush = DeferredRankFailure("weight-sync flush to the rollout engine")
-    if forwarding and client is None:
-        flush.run(_refuse_missing_client)
-    # Co-load groups are scoped to the pushed module tree before the first chunk.
-    if sender is not None:
-        sender.scope_co_load_groups(name for name, _ in model.named_modules())
-    try:
-        gather_and_send_weights(model, sender)
-    except BaseException:
-        # The push opened an update mid-gather, which only the forwarding rank can close.
-        if sender is not None:
-            sender.abort_weight_update()
-        raise
-    # After every gather, so no peer waits in a collective, but a peer must not roll out against a paused engine.
-    if sender is not None:
-        flush.run(partial(_finish_and_close, sender))
-    flush.reject()
-
-
 def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | None) -> None:
     """COLLECTIVE: gather the EP and dense weights of ``model`` and forward them through ``sender``, the engine
     client on the forwarding rank and ``None`` elsewhere; the caller closes the update afterwards.
@@ -380,6 +337,49 @@ def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | N
     _send_dense_weights(model, ep_layers, forwarder, folds)
     # The sync writes none of the trainer's weights, so a failed one leaves them untouched.
     guard.reject()
+
+
+def _finish_and_close(sender: WeightSyncSender) -> None:
+    """Send the tail chunk and close the engine's update, aborting it if that raises before the close."""
+    try:
+        sender.finish_weight_update()
+    except BaseException:
+        sender.abort_weight_update()
+        raise
+
+
+def _reject_missing_client() -> None:
+    raise RuntimeError(
+        "The weight-sync push reached its forwarding rank with no engine client: the gather would run and "
+        "send nothing, leaving the engine serving the old weights. The client must be formed before a push "
+        "(the environmental trainer's _form_weight_sync_group; online GRPO's TRL vllm_client)."
+    )
+
+
+def sync_weights_to_client(
+    model: torch.nn.Module, client: WeightSyncSender | None, is_main: bool, is_tp_main: bool
+) -> None:
+    """COLLECTIVE: gather the policy and push it to ``client``, then close the update. Only the forwarding rank
+    (global main, TP rank 0) sends, and its missing ``client`` is refused on every rank at the close's verdict."""
+    forwarding = is_main and is_tp_main
+    sender = client if forwarding else None
+    flush = DeferredRankFailure("weight-sync flush to the rollout engine")
+    if forwarding and client is None:
+        flush.run(_reject_missing_client)
+    # Co-load groups are scoped to the pushed module tree before the first chunk.
+    if sender is not None:
+        sender.scope_co_load_groups(name for name, _ in model.named_modules())
+    try:
+        gather_and_send_weights(model, sender)
+    except BaseException:
+        # The push opened an update mid-gather, which only the forwarding rank can close.
+        if sender is not None:
+            sender.abort_weight_update()
+        raise
+    # After every gather, so no peer waits in a collective, but a peer must not roll out against a paused engine.
+    if sender is not None:
+        flush.run(partial(_finish_and_close, sender))
+    flush.reject()
 
 
 def sync_trainer_weights(trainer, client: WeightSyncSender | None) -> None:

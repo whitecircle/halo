@@ -15,7 +15,7 @@ from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import scripts.training.offline_grpo as offline_grpo_script
-import src.trainers.grpo.mixins.offline_reference as reference_logps_module
+import src.trainers.grpo.offline.reference as reference_logps_module
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.configs.script_arguments import ModelArguments
@@ -23,8 +23,9 @@ from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
+from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from src.trainers.reference_logps import LOGPROB_PRECISION_KEY
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import captured_load, stub_frozen_loader
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
@@ -328,19 +329,20 @@ def _loss_forwards(ref_model) -> tuple[list[dict], _PeftPolicy]:
         forwards.append({"model": model, "grad": torch.is_grad_enabled(), "adapters_off": policy.adapters_off})
         if len(forwards) == 2:
             raise _ReferenceReached
-        logps = torch.zeros(input_ids.size(0), 2)
-        return logps, logps
+        return torch.zeros(input_ids.size(0), 2)
 
     host = types.SimpleNamespace(
         model=policy,
-        min_log_prob=None,
+        _live_min_log_prob=None,
         beta=0.1,
         _precompute_reference=False,
         parallelism_config=ParallelismConfig(),
         ref_model=ref_model,
         accelerator=types.SimpleNamespace(unwrap_model=lambda model: model),
         _get_per_token_logps=per_token_logps,
+        _joined_rows=OfflineGRPOTrainer._joined_rows,
     )
+    host._reference_policy = types.MethodType(LogprobScoringMixin._reference_policy, host)
     inputs = {
         "prompt_input_ids": torch.zeros(1, 3, dtype=torch.long),
         "prompt_attention_mask": torch.ones(1, 3, dtype=torch.long),

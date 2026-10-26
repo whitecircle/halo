@@ -11,8 +11,8 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
-from src.trainers.grpo.objective.offline import offline_token_objective
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.objective.offline_loss import offline_token_objective
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 
@@ -58,7 +58,7 @@ def _diagnostics_worker(rank, cp_size, training):
     assert not actual._sign_metric_buffer[mode]
 
     broken = _trainer(cp_size=cp_size, cp_rank=rank, training=training)
-    with patch("src.trainers.grpo.offline.cp_sum_rows", side_effect=lambda totals, _config: totals):
+    with patch("src.trainers.grpo.offline.trainer.cp_sum_rows", side_effect=lambda totals, _config: totals):
         broken._buffer_sign_metrics(
             {key: value[:, start:end] for key, value in values.items()}, advantages, mask[:, start:end]
         )

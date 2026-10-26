@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 
@@ -100,3 +101,64 @@ def row_count_normalizer(inputs: Mapping[str, torch.Tensor]) -> float:
 def pair_count_normalizer(inputs: Mapping[str, torch.Tensor]) -> float:
     """Chain-local pair count for interleaved preference batches (DPO, Bradley-Terry reward)."""
     return row_count_normalizer(inputs) / 2
+
+
+def interleave_halves(concatenated: torch.Tensor) -> torch.Tensor:
+    """:func:`interleave_pairs` over a ``[chosen ⧺ rejected]`` concatenation."""
+    return interleave_pairs(*concatenated.chunk(2))
+
+
+def valid_pairs(labels: torch.Tensor) -> torch.Tensor:
+    """Float ``[pairs]`` mask of an interleaved batch, ``0`` for the PP eval's filler pairs."""
+    return rows_with_labels(labels)[0::2].float()
+
+
+def pair_placeholder_labels(inputs: Mapping[str, torch.Tensor], dtype: torch.dtype) -> torch.Tensor:
+    """One zero label per interleaved pair, the eval target a per-pair prediction is paired with."""
+    input_ids = inputs["input_ids"]
+    return torch.zeros(input_ids.size(0) // 2, dtype=dtype, device=input_ids.device)
+
+
+def last_non_pad_positions(input_ids: torch.Tensor, pad_token_id: int) -> torch.Tensor:
+    """Rightmost position whose token != ``pad_token_id``, per row (an all-pad row yields 0).
+
+    Transformers' exact sequence-classification pooling rule (``GenericForSequenceClassification``), left- and
+    right-padding alike: PP must score the tokens the unsplit model scores.
+    """
+    non_pad_mask = (input_ids != pad_token_id).to(torch.int32)
+    token_indices = torch.arange(input_ids.shape[-1], device=input_ids.device, dtype=torch.int32)
+    return (token_indices * non_pad_mask).argmax(dim=-1)
+
+
+def encode_pooling_plane(input_ids: torch.Tensor, pad_token_id: int, values: int | torch.Tensor) -> torch.Tensor:
+    """``[B, S]`` labels plane: ``LABEL_IGNORE_INDEX`` except ``values`` at each row's pooled position.
+
+    The plane is the only per-row channel the pipeline runner ships unconditionally, so it hands the last stage
+    the position and the row's target with no side tensors, and makes the eval's inert row padding
+    self-identifying — which ``input_ids`` are not, their filler carrying the tokenizer's pad id.
+    """
+    plane = torch.full_like(input_ids, LABEL_IGNORE_INDEX)
+    rows = torch.arange(input_ids.size(0), device=input_ids.device)
+    plane[rows, last_non_pad_positions(input_ids, pad_token_id)] = values
+    return plane
+
+
+class PoolingPlane(NamedTuple):
+    """A decoded labels plane: the marked rows, each row's pooled position and the value marked there."""
+
+    valid: torch.Tensor
+    positions: torch.Tensor
+    values: torch.Tensor
+
+
+def decode_pooling_plane(plane: torch.Tensor) -> PoolingPlane:
+    """Inverse of :func:`encode_pooling_plane` on a batch or any microbatch of it; unmarked rows are the PP eval's
+    row padding."""
+    positions = (plane != LABEL_IGNORE_INDEX).int().argmax(dim=-1)
+    rows = torch.arange(plane.size(0), device=plane.device)
+    return PoolingPlane(rows_with_labels(plane), positions, plane[rows, positions])
+
+
+def pooled_logits(logits: torch.Tensor, plane: PoolingPlane) -> torch.Tensor:
+    """Each row's ``[B, S, ...]`` head output at its pooled position."""
+    return logits[torch.arange(logits.size(0), device=logits.device), plane.positions]

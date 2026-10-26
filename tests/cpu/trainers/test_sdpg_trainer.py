@@ -22,7 +22,7 @@ from datasets import Dataset
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.trainers.distillation.losses import reverse_kl_loss
+from src.trainers.distillation.divergences import reverse_kl_loss
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer, positive_advantage_gate
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG

@@ -21,9 +21,11 @@ from accelerate import PartialState
 from torch.nn.functional import log_softmax
 from trl import SFTTrainer
 
+import src.trainers.distillation.self_distillation as self_distillation
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.distillation.losses import privileged_teacher_pass, shifted_token_cross_entropy
+from src.trainers.distillation.divergences import place_frozen_scorer, shifted_token_cross_entropy
+from src.trainers.distillation.opd_term import privileged_teacher_pass
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.sft import DistributedSFTTrainer
 
@@ -42,18 +44,18 @@ def _build(
         return kwargs
 
     def _sft_init(self, *args, **kwargs):
-        self.data_collator = collator
+        self.data_collator, self.model, self.processing_class = collator, None, None
+
+    def _place(scorer, *args):
+        setup_calls.append(scorer)
+        return None, torch.device("cpu")
 
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", _init_cfg),
         mock.patch.object(SFTTrainer, "__init__", _sft_init),
         mock.patch.object(DistributedSelfDistillationTrainer, "_configure_distributed_modes", return_value=None),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids", return_value=None),
-        mock.patch.object(
-            DistributedSelfDistillationTrainer,
-            "_setup_reference_model",
-            lambda self: setup_calls.append(self._reference_model),
-        ),
+        mock.patch.object(self_distillation, "place_frozen_scorer", _place),
     ):
         return DistributedSelfDistillationTrainer(
             reference_model=reference_model,
@@ -115,21 +117,17 @@ class _Tokenizer:
         return self.size
 
 
-def _reference_setup(policy_rows, reference_rows, tokenizer_len=10):
-    trainer = object.__new__(DistributedSelfDistillationTrainer)
-    trainer.model, trainer._reference_model = _Rows(policy_rows), _Rows(reference_rows)
-    trainer.processing_class = _Tokenizer(tokenizer_len)
-    trainer.reference_kl_coef = 0.1
-    trainer._setup_reference_model()
-    return trainer
+def _reference_width(policy_rows, reference_rows, tokenizer_len=10):
+    tokenizer = _Tokenizer(tokenizer_len)
+    return place_frozen_scorer(_Rows(reference_rows), _Rows(policy_rows), tokenizer, tokenizer)[0]
 
 
 def test_the_reference_shares_the_policy_vocab_check():
     """Same tokenizer: equal rows compare whole, padding past it is sliced away, too few rows raise."""
-    assert _reference_setup(16, 16)._reference_vocab_width is None
-    assert _reference_setup(16, 12)._reference_vocab_width == 10
+    assert _reference_width(16, 16) is None
+    assert _reference_width(16, 12) == 10
     with pytest.raises(ValueError, match="fewer logit rows than the tokenizer"):
-        _reference_setup(16, 8)
+        _reference_width(16, 8)
 
 
 def test_shifted_ce_is_the_negative_gold_log_prob_and_zero_where_ignored():

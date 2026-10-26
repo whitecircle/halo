@@ -9,8 +9,8 @@ from datasets import Dataset
 
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.filesystem import is_fs_save_rank
-from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
-from src.trainers.grpo.reference_cache import ReferenceScoreCache
+from src.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
+from src.trainers.grpo.offline.reference_cache import ReferenceScoreCache
 
 SETTINGS = {"max_prompt_length": 8, "max_completion_length": 6, "pad_token_id": 0}
 

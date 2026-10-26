@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The chunked GRPO log-prob sweep keeps fp32 logits and fp32-accumulated gradients on bf16 operands.
+"""The head log-prob kernel keeps fp32 logits and fp32-accumulated gradients on bf16 operands.
 
 Each logits tile is a tensor-core matmul with an fp32 result, so logits of a peaked distribution are not
 rounded to bf16 (at |logit| ≈ 20 a bf16 step is 0.125 nats), and the backward's two GEMMs accumulate in
@@ -13,16 +13,11 @@ Run with 1 GPU:
 
 import torch
 
-from src.trainers.grpo.mixins.chunked_logprobs import (
-    _VOCAB_CHUNK,
-    _selective_logprob_backward,
-    _selective_logprob_entropy_forward,
-    chunked_selective_log_softmax,
-)
+from src.kernels.head_logprobs import VOCAB_TILE, _logprobs_backward, _logprobs_forward, chunked_head_logprobs
 from tests.common.harness import gpu_test_main
 from tests.common.utils import fro_rel_err
 
-ROWS, HIDDEN, VOCAB = 5000, 1024, 8 * _VOCAB_CHUNK + 1000
+ROWS, HIDDEN, VOCAB = 5000, 1024, 8 * VOCAB_TILE + 1000
 # Logit spread of a trained model's head: most mass on a few tokens, |logit| in the tens.
 LOGIT_STD = 6.0
 # A bf16-rounded logits tile costs ~1e-1 nats of log-prob at this spread.
@@ -58,11 +53,11 @@ def run(ctx) -> dict:
 
     h = hidden.clone().requires_grad_(True)
     w = weight.clone().requires_grad_(True)
-    logps = chunked_selective_log_softmax(h.unsqueeze(0), w, targets.unsqueeze(0), None, 1.0).squeeze(0)
+    logps, _ = chunked_head_logprobs(h, w, targets, None, 1.0)
     (logps * grad).sum().backward()
 
-    _, log_z, _ = _selective_logprob_entropy_forward(hidden, weight, targets, None, 1.0, None, None, False)
-    dh_fp32, dw_fp32, _ = _selective_logprob_backward(hidden, weight, targets, None, log_z, grad, 1.0, None, None)
+    _, log_z, _ = _logprobs_forward(hidden, weight, targets, None, 1.0, None, None, False)
+    dh_fp32, dw_fp32, _ = _logprobs_backward(hidden, weight, targets, None, log_z, grad, 1.0, None, None)
 
     logp_err = (logps.double() - ref_logps).abs().max().item()
     dh_err, dw_err = fro_rel_err(h.grad, ref_dh), fro_rel_err(w.grad, ref_dw)

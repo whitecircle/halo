@@ -20,10 +20,10 @@ import pytest
 import torch
 from torch.nn.functional import kl_div, log_softmax, softmax
 
-from src.trainers.distillation.losses import (
+from src.trainers.distillation.divergences import (
     call_divergence,
     forward_kl_loss,
-    get_divergence,
+    require_divergence,
     reverse_kl_loss,
     softened_log_probs,
     unnormalized_kl_loss,
@@ -102,7 +102,7 @@ def _logits(dtype, seed=0):
 
 
 def _teacher_loss(name):
-    loss_fn = get_divergence(name)
+    loss_fn = require_divergence(name)
     hard_labels = torch.zeros(BATCH, SEQ, dtype=torch.long)
     return lambda student, teacher, temperature: call_divergence(loss_fn, student, teacher, temperature, hard_labels)
 

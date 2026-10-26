@@ -23,8 +23,8 @@ from datasets import Dataset
 PartialState()
 
 from src.trainers.dataloaders import DataParallelLoaderMixin
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.on_policy import GenerationRoundMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from src.trainers.reward.classification import ClassificationTrainer
@@ -163,7 +163,7 @@ def test_grpo_trainers_inherit_mixin_eval_dataloader():
     """The GRPO dataloader mixin overrides only the TRAIN path; eval must resolve to
     DataParallelLoaderMixin.get_eval_dataloader through the MRO (ahead of TRL's GRPOTrainer),
     so the pre-sharded eval equalization applies to online + environmental GRPO too."""
-    assert "get_eval_dataloader" not in vars(GRPOTrainDataLoaderMixin)
+    assert "get_eval_dataloader" not in vars(GenerationRoundMixin)
     for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         assert cls.get_eval_dataloader is DataParallelLoaderMixin.get_eval_dataloader, (
             f"{cls.__name__}.get_eval_dataloader does not resolve to the DP mixin's eval path"

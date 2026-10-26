@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.trainers.reward.classification import ClassificationTrainer
+from src.trainers.reward.classification_loss import focal_loss
 
 GAMMA = 2.0
 
@@ -48,7 +48,7 @@ def _logits_and_labels():
 def test_unweighted_focal_matches_canonical():
     """The unweighted case matches the textbook form."""
     logits, labels = _logits_and_labels()
-    got = ClassificationTrainer._focal_loss(logits, labels, gamma=GAMMA)
+    got = focal_loss(logits, labels, gamma=GAMMA)
     assert got.item() == pytest.approx(_canonical_focal(logits, labels, None).item(), rel=1e-5)
 
 
@@ -57,7 +57,7 @@ def test_weighted_focal_matches_canonical():
     logits, labels = _logits_and_labels()
     weight = torch.tensor([1.0, 5.0, 0.2])
 
-    got = ClassificationTrainer._focal_loss(logits, labels, gamma=GAMMA, weight=weight)
+    got = focal_loss(logits, labels, gamma=GAMMA, weight=weight)
     expected = _canonical_focal(logits, labels, weight)
     assert got.item() == pytest.approx(expected.item(), rel=1e-5)
 
@@ -79,12 +79,8 @@ def test_weighted_focal_modulator_is_weight_independent():
     single = torch.tensor([1.0, 1.0, 1.0])
     doubled = torch.tensor([1.0, 2.0, 1.0])
 
-    per_example_1 = ClassificationTrainer._focal_loss(
-        logits, labels, gamma=GAMMA, weight=single, reduction="none"
-    ).sum()
-    per_example_2 = ClassificationTrainer._focal_loss(
-        logits, labels, gamma=GAMMA, weight=doubled, reduction="none"
-    ).sum()
+    per_example_1 = focal_loss(logits, labels, gamma=GAMMA, weight=single, reduction="none").sum()
+    per_example_2 = focal_loss(logits, labels, gamma=GAMMA, weight=doubled, reduction="none").sum()
 
     class_1_mask = labels == 1
     unweighted_terms = _canonical_focal(logits[class_1_mask], labels[class_1_mask], None) * class_1_mask.sum()
@@ -103,7 +99,7 @@ def test_multilabel_focal_pos_weight_matches_canonical():
     weighted = F.binary_cross_entropy_with_logits(logits.float(), labels, pos_weight=pos_weight, reduction="none")
     expected = (((1 - torch.exp(-raw)) ** GAMMA) * weighted).mean()
 
-    got = ClassificationTrainer._focal_loss(logits, labels, gamma=GAMMA, weight=pos_weight)
+    got = focal_loss(logits, labels, gamma=GAMMA, weight=pos_weight)
     assert got.item() == pytest.approx(expected.item(), rel=1e-5)
 
 
@@ -112,8 +108,8 @@ def test_per_element_form_recovers_the_mean_for_the_pipeline_normalizer():
     that identity must hold when weighted, and it is the only non-mean reduction the loss offers."""
     logits, labels = _logits_and_labels()
     weight = torch.tensor([1.0, 5.0, 0.2])
-    summed = ClassificationTrainer._focal_loss(logits, labels, gamma=GAMMA, weight=weight, reduction="none").sum()
-    meaned = ClassificationTrainer._focal_loss(logits, labels, gamma=GAMMA, weight=weight, reduction="mean")
+    summed = focal_loss(logits, labels, gamma=GAMMA, weight=weight, reduction="none").sum()
+    meaned = focal_loss(logits, labels, gamma=GAMMA, weight=weight, reduction="mean")
     assert (summed / labels.size(0)).item() == pytest.approx(meaned.item(), rel=1e-6)
 
 
@@ -121,7 +117,7 @@ def test_an_unsupported_reduction_raises_instead_of_silently_meaning():
     """Only the two reductions the trainer asks for exist; anything else would be a silent mean."""
     logits, labels = _logits_and_labels()
     with pytest.raises(ValueError, match="reduction"):
-        ClassificationTrainer._focal_loss(logits, labels, gamma=GAMMA, reduction="sum")
+        focal_loss(logits, labels, gamma=GAMMA, reduction="sum")
 
 
 if __name__ == "__main__":

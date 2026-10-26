@@ -19,12 +19,12 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.trainers.grpo.objective.application import (
+from src.trainers.grpo.grpo_rules import reject_unbalanceable_token_mass
+from src.trainers.grpo.objective.loss_inputs import (
     NEGATIVE_ONLY_MASS_KEY,
     NET_TOKEN_MASS_KEY,
     TOKEN_MASS_SCALE_KEY,
     record_token_mass,
-    validate_token_mass_balance,
 )
 from src.trainers.grpo.online import DistributedGRPOTrainer
 
@@ -256,12 +256,12 @@ def _grpo_args(loss_type="dapo", top_entropy_quantile=1.0, off_policy_mask_thres
 )
 def test_a_loss_where_token_mass_is_not_the_pull_is_refused(args):
     with pytest.raises(ValueError, match="balance_token_mass"):
-        validate_token_mass_balance(args)
+        reject_unbalanceable_token_mass(args)
 
 
 @pytest.mark.parametrize("loss_type", ["cispo", "dapo", "dr_grpo"])
 def test_the_token_sum_losses_take_the_balance(loss_type):
-    validate_token_mass_balance(_grpo_args(loss_type))
+    reject_unbalanceable_token_mass(_grpo_args(loss_type))
 
 
 def _online_host(balance: bool, training: bool = True):

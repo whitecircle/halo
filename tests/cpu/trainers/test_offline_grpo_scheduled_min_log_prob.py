@@ -17,14 +17,14 @@ import pytest
 import torch
 
 from src.callbacks.variable_scheduler import VariableSchedulerCallback
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 _CONFIG_START = -2.3
 _SCHEDULED = -0.5
 
 
 class _Sentinel(Exception):
-    """Raised from the stubbed log-prob call to end compute_loss at the point of interest."""
+    """Raised from the stubbed objective to end compute_loss at the point of interest."""
 
 
 def _inputs(batch=2, prompt_len=3, completion_len=4):
@@ -45,14 +45,14 @@ def _trainer_and_wrapped(*, scheduled_on_module):
     """
     unwrapped = types.SimpleNamespace()
     wrapped = types.SimpleNamespace(module=unwrapped)
-    me = types.SimpleNamespace(
-        model=unwrapped,
-        min_log_prob=_CONFIG_START,
-        # compute_loss opens the (inert here) QLoRA bf16 autocast region around the forwards.
-        _peft_has_been_casted_to_bf16=False,
-        accelerator=types.SimpleNamespace(device=torch.device("cpu")),
-        parallelism_config=types.SimpleNamespace(is_cp_mode=False),
-    )
+    me = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
+    me.model = unwrapped
+    me.min_log_prob = _CONFIG_START
+    me.beta = 0.0
+    # compute_loss opens the (inert here) QLoRA bf16 autocast region around the forwards.
+    me._peft_has_been_casted_to_bf16 = False
+    me.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
+    me.parallelism_config = types.SimpleNamespace(is_cp_mode=False)
 
     if scheduled_on_module:
         callback = VariableSchedulerCallback(
@@ -65,13 +65,14 @@ def _trainer_and_wrapped(*, scheduled_on_module):
 
     seen = {}
 
-    def _fake_logps(_model, *_args, min_log_prob=None, **_kwargs):
+    def _fake_objective(_logps, _advantages, _ref_logps, min_log_prob):
         seen["min_log_prob"] = min_log_prob
         raise _Sentinel
 
-    me._get_per_token_logps = _fake_logps
-    # compute_loss is the autocast wrapper; the body under test is the inner half.
-    me._compute_loss_inner = types.MethodType(OfflineGRPOTrainer._compute_loss_inner, me)
+    me._get_per_token_logps = lambda _model, input_ids, _mask, logits_to_keep: torch.zeros(
+        input_ids.size(0), logits_to_keep
+    )
+    me._token_objective = _fake_objective
     return me, wrapped, seen
 
 

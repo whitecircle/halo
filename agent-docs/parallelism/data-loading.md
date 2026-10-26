@@ -106,7 +106,7 @@ TRL's default `scale_rewards="group"`). When TP or ETP reduces DP, `_prepare_dat
 prompts across DP groups while all ranks within a TP group share the same prompts.
 
 On that custom-dataloader path the trainers override `_get_train_sampler`
-(`GRPOTrainDataLoaderMixin` in `src/trainers/grpo/mixins/dataloader.py`) to size the sampler at the
+(`GenerationRoundMixin` in `src/trainers/grpo/on_policy.py`) to size the sampler at the
 loader's real DP consumption rate. TRL's world-rate geometry would re-roll part of every prompt
 block and silently skip the rest.
 
@@ -116,7 +116,7 @@ too, because TP siblings inject duplicate blocks into TRL's world-order reward g
 per-rank groups regroup correctly. Pre-sharded datasets consume per DP rank, so the rate is one
 rank's.
 
-**Offline GRPO** uses `MultiGroupSampler` (`src/trainers/grpo/offline.py`). Advantages are
+**Offline GRPO** uses `MultiGroupSampler` (`src/trainers/grpo/offline/group_sampler.py`). Advantages are
 pre-computed per example at tokenization time (`compute_group_advantages` normalizes a group's
 rewards via `advantage_method`, default `quantile_norm`), so the sampler does not pack a group into
 one batch. It emits each group's indices in group-appearance order, shards the sequence across DP

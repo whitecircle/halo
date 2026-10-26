@@ -1,9 +1,6 @@
-"""Decoupled completion/trajectory artifact logging for GRPO trainers.
-
-TRL's ``GRPOTrainer.log`` couples the console table, the parquet record and the wandb table under one flag;
-:func:`emit_completion_artifacts` gates the record (parquet + wandb) by ``save`` and the console table by
-``console``, and :class:`DecoupledCompletionsLogMixin` routes the on-policy trainers' ``log`` through it.
-"""
+"""Completion artifacts of the GRPO trainers, decoupled: TRL's ``GRPOTrainer.log`` couples the console table,
+the parquet record and the wandb table under one flag, and :func:`emit_completion_artifacts` gates the record
+by ``save`` and the console table by ``console``."""
 
 from __future__ import annotations
 
@@ -67,37 +64,6 @@ def _clear_completion_logs(logs: Mapping) -> None:
             buffer.clear()
 
 
-def emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str | None = None) -> None:
-    """Write the completions parquet + wandb table and/or print the console sample table, then
-    empty ``trainer._logs`` on every rank. COLLECTIVE — every rank calls it.
-
-    Writer rank only; reads ``trainer._logs``. ``console`` prints the per-sample table on the global
-    main process alone, where a per-node writer would print it once per node; ``save`` writes the
-    parquet under ``<output_dir>/completions/`` and logs a ``completions`` table to wandb.
-    ``mode`` names the rows' mode when it is not the model's current one (train rows written as an
-    eval round begins); by default the model's mode picks the file.
-
-    Elected with ``is_fs_save_rank`` like every other output artifact: on a non-shared output
-    filesystem global rank 0 is the only writer, so nodes 1..N would lose their completions entirely.
-    A writer's failure (a full disk, a wandb outage) is raised on every rank, since raised on the
-    writer alone it would leave the peers in the next collective; with neither artifact asked for (a
-    config verdict every rank shares) nothing is written and no verdict is taken. The buffers are
-    emptied on writers and non-writers alike: they are unbounded on the async trainer, and a rank that
-    never wrote would otherwise hold the run's whole record.
-    """
-    if not (console or save):
-        _clear_completion_logs(trainer._logs)
-        return
-    mode = mode or ("train" if trainer.model.training else "eval")
-    guard = DeferredRankFailure(f"Completions record at step {trainer.state.global_step}")
-    try:
-        if is_fs_save_rank():
-            guard.run(partial(_emit_completion_artifacts, trainer, console=console, save=save, mode=mode))
-    finally:
-        _clear_completion_logs(trainer._logs)
-    guard.reject()
-
-
 def _emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str) -> None:
     logs = trainer._logs
     prompts = list(logs["prompt"])
@@ -152,3 +118,25 @@ def _emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str)
     if trainer.log_unique_prompts:
         df = df.drop_duplicates(subset=["prompt"])
     wandb.log({"completions": wandb.Table(dataframe=df)})
+
+
+def emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str | None = None) -> None:
+    """COLLECTIVE: on the ``is_fs_save_rank`` writers, write ``trainer._logs`` as the completions parquet under
+    ``<output_dir>/completions/`` and a wandb table (``save``) and print the sample table on the global main
+    process (``console``); then empty the logs on every rank, since they are unbounded on the async trainer.
+
+    ``mode`` names the rows' mode when it is not the model's current one (train rows written as an eval round
+    begins). A writer's failure is raised on every rank, so no peer waits in the next collective; with neither
+    artifact asked for (a config verdict every rank shares) no verdict is taken.
+    """
+    if not (console or save):
+        _clear_completion_logs(trainer._logs)
+        return
+    mode = mode or ("train" if trainer.model.training else "eval")
+    guard = DeferredRankFailure(f"Completions record at step {trainer.state.global_step}")
+    try:
+        if is_fs_save_rank():
+            guard.run(partial(_emit_completion_artifacts, trainer, console=console, save=save, mode=mode))
+    finally:
+        _clear_completion_logs(trainer._logs)
+    guard.reject()

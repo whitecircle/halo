@@ -20,7 +20,6 @@ Run: python tests/cpu/trainers/test_classification_pooled_loss.py
 """
 
 import types
-from functools import partial
 
 import pytest
 import torch
@@ -31,8 +30,9 @@ from transformers import Qwen3Config, Qwen3ForSequenceClassification
 import src.trainers.token_metrics as token_metrics
 from src.configs.classification import ClassificationConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
+from src.trainers.parallelism.pipeline_loss_adapter import decode_pooling_plane, pooled_logits
 from src.trainers.reward.classification import ClassificationTrainer
-from src.trainers.reward.pooling import decode_pooling_plane, pooled_outputs
+from src.trainers.reward.classification_loss import ClassificationLoss, build_classification_loss, focal_loss
 
 NUM_CLASSES = 6
 # Not bf16-representable, and spanning two orders of magnitude — the shape derive_class_weights
@@ -41,13 +41,18 @@ CLASS_WEIGHTS = torch.tensor([0.2571, 17.3, 1.379, 0.6153, 4.77, 0.9091])
 _PAD_ID = 0
 
 
-def _trainer(loss_fn, *, is_multi_label=False):
-    """A trainer stub carrying only what the loss seams read (no model, no accelerator)."""
+def _trainer(loss: ClassificationLoss):
+    """A trainer stub carrying only what the loss seams read (no model)."""
     trainer = ClassificationTrainer.__new__(ClassificationTrainer)
-    trainer._loss_fn = loss_fn
-    trainer.is_multi_label = is_multi_label
+    trainer._classification_loss = loss
+    trainer.is_multi_label = loss.multi_label
     trainer.model = types.SimpleNamespace(training=True)  # what eval_split_rows reads: a train step
+    trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
     return trainer
+
+
+def _weighted_ce() -> ClassificationLoss:
+    return ClassificationLoss(multi_label=False, weight=CLASS_WEIGHTS.clone())
 
 
 def _head(dtype, *, num_labels=NUM_CLASSES, seed=0):
@@ -91,11 +96,11 @@ def _head_batch(*, num_labels=NUM_CLASSES, multi_label=False, rows=16, seq=12, s
     }
 
 
-def _built_trainer(model, *, is_multi_label=False):
-    """A trainer stub whose loss is what ``_build_loss_fn`` returns for the shipped config defaults."""
-    trainer = _trainer(None, is_multi_label=is_multi_label)
-    trainer._loss_fn = trainer._build_loss_fn(ClassificationConfig(output_dir="unused"), None, model)
-    return trainer
+def _built_trainer(model, *, is_multi_label=False, **overrides):
+    """A trainer stub whose loss is what ``build_classification_loss`` returns for the config (shipped defaults
+    plus ``overrides``)."""
+    config = ClassificationConfig(output_dir="unused", **overrides)
+    return _trainer(build_classification_loss(config, model, None, multi_label=is_multi_label))
 
 
 def _bf16_batch(rows=16, seed=3):
@@ -128,11 +133,10 @@ def test_weighted_ce_matches_an_fp64_reference_on_bf16_logits():
     "close to fp64" tolerance loose enough for bf16 would pass either way.
     """
     logits, targets = _bf16_batch()
-    trainer = _trainer(nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone()))
     valid = torch.ones(logits.size(0), dtype=torch.bool)
 
     reference = F.cross_entropy(logits.double(), targets, weight=CLASS_WEIGHTS.double(), reduction="sum")
-    got = trainer._pooled_loss(logits, targets, valid)
+    got = _weighted_ce().masked_sum(logits, targets, valid)
     bf16_path = F.cross_entropy(logits, targets, weight=CLASS_WEIGHTS.bfloat16(), reduction="sum")
 
     def relative(value):
@@ -149,11 +153,10 @@ def test_weighted_ce_normalizer_matches_an_fp64_reference():
     """The denominator is a sum of the same class weights, so rounding them biases it too — and it
     divides the loss, so the error does not cancel against the numerator's."""
     _, targets = _bf16_batch()
-    trainer = _trainer(nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone()))
     valid = torch.ones(targets.size(0), dtype=torch.bool)
 
     reference = CLASS_WEIGHTS.double()[targets].sum()
-    got = trainer._pooled_loss_normalizer(targets, valid)
+    got = _weighted_ce().normalizer(targets, valid)
     bf16_path = CLASS_WEIGHTS.bfloat16()[targets].sum()
 
     assert abs(got.double().item() - reference.item()) / reference.item() < 1e-5
@@ -165,10 +168,9 @@ def test_the_weighted_normalizer_never_divides_an_all_inert_batch_by_zero():
     then NaN — carried into every stage's reported loss and into the nan/inf filter. The row-count
     branches floor at 1.0; the weight-sum branch owes the same floor, and only at zero, so a real
     batch's denominator (the sum of its rows' class weights) is untouched."""
-    trainer = _trainer(nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone()))
     targets = torch.full((4,), LABEL_IGNORE_INDEX, dtype=torch.long)
 
-    normalizer = trainer._pooled_loss_normalizer(targets, torch.zeros(4, dtype=torch.bool))
+    normalizer = _weighted_ce().normalizer(targets, torch.zeros(4, dtype=torch.bool))
 
     assert normalizer.item() == 1.0
     assert torch.isfinite(torch.zeros(()) / normalizer).item()
@@ -185,25 +187,24 @@ class _StubHead:
 
 
 def _non_pp_loss(trainer, logits, labels):
-    """Drive the NON-pipeline seam (``_compute_loss_inner``), where the loss met bf16 logits."""
+    """Drive the NON-pipeline seam (``compute_loss``), where the loss met bf16 logits."""
     inputs = {
         "input_ids": torch.zeros(logits.size(0), 4, dtype=torch.long),
         "attention_mask": torch.ones(logits.size(0), 4, dtype=torch.long),
         "labels": labels,
     }
-    return trainer._compute_loss_inner(_StubHead(logits), inputs, return_outputs=False)
+    return trainer.compute_loss(_StubHead(logits), inputs)
 
 
 def test_non_pp_weighted_loss_evaluates_in_fp32():
     """The seam a bf16 evaluation would run on.
 
-    The PP adapter hands ``_pooled_loss`` fp32 (it floats the pooled logits itself), so only this
+    The PP adapter hands ``masked_sum`` fp32 (it floats the pooled logits itself), so only this
     path could run a class-weighted CE in bf16 with the weights rounded to match — ~1% off the
     exact value, every step.
     """
     logits, targets = _bf16_batch()
-    loss_fn = nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone())
-    trainer = _trainer(loss_fn)
+    trainer = _trainer(_weighted_ce())
 
     got = _non_pp_loss(trainer, logits, targets)
     reference = F.cross_entropy(logits.double(), targets, weight=CLASS_WEIGHTS.double())
@@ -220,7 +221,7 @@ def test_non_pp_multi_label_loss_evaluates_in_fp32():
     generator = torch.Generator().manual_seed(21)
     logits = (torch.randn(8, NUM_CLASSES, generator=generator) * 6.0).bfloat16()
     targets = (torch.rand(8, NUM_CLASSES, generator=generator) > 0.5).bfloat16()
-    trainer = _trainer(nn.BCEWithLogitsLoss(pos_weight=CLASS_WEIGHTS.clone()), is_multi_label=True)
+    trainer = _trainer(ClassificationLoss(multi_label=True, weight=CLASS_WEIGHTS.clone()))
 
     got = _non_pp_loss(trainer, logits, targets)
     reference = F.binary_cross_entropy_with_logits(
@@ -234,17 +235,16 @@ def test_non_pp_multi_label_loss_evaluates_in_fp32():
 def test_class_weight_vector_is_never_downcast():
     """The weights are moved, never rounded: the loss upcasts the LOGITS to meet them instead.
 
-    Downcasting would be permanent — ``_move_loss_weights_to`` writes back onto the loss object, so
-    the first bf16 step would round the vector for the rest of the run.
+    Downcasting would be permanent — the trainer keeps the moved loss, so the first bf16 step would
+    round the vector for the rest of the run.
     """
     logits, targets = _bf16_batch()
-    loss_fn = nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone())
-    trainer = _trainer(loss_fn)
+    trainer = _trainer(_weighted_ce())
 
     _non_pp_loss(trainer, logits, targets)
 
-    assert loss_fn.weight.dtype is torch.float32
-    assert torch.equal(loss_fn.weight, CLASS_WEIGHTS)
+    assert trainer._classification_loss.weight.dtype is torch.float32
+    assert torch.equal(trainer._classification_loss.weight, CLASS_WEIGHTS)
 
 
 def test_multi_label_bce_stays_fp32_against_a_bf16_target():
@@ -253,58 +253,73 @@ def test_multi_label_bce_stays_fp32_against_a_bf16_target():
     generator = torch.Generator().manual_seed(11)
     logits = (torch.randn(8, NUM_CLASSES, generator=generator) * 6.0).bfloat16()
     targets = (torch.rand(8, NUM_CLASSES, generator=generator) > 0.5).bfloat16()
-    trainer = _trainer(nn.BCEWithLogitsLoss(), is_multi_label=True)
-
-    got = trainer._pooled_loss(logits, targets, torch.ones(8, dtype=torch.bool))
+    got = ClassificationLoss(multi_label=True).masked_sum(logits, targets, torch.ones(8, dtype=torch.bool))
     reference = F.binary_cross_entropy_with_logits(logits.double(), targets.double(), reduction="sum")
 
     assert got.dtype is torch.float32, f"multi-label BCE reduced in {got.dtype}"
     assert abs(got.double().item() - reference.item()) / reference.item() < 1e-5
 
 
-@pytest.mark.parametrize(
-    "loss_fn, multi_label",
-    [
-        (nn.CrossEntropyLoss(), False),
-        (nn.BCEWithLogitsLoss(), True),
-        (nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone()), False),
-        (nn.CrossEntropyLoss(label_smoothing=0.1), False),
-        (nn.BCEWithLogitsLoss(pos_weight=CLASS_WEIGHTS.clone()), True),
-    ],
-)
-def test_every_loss_variant_returns_fp32(loss_fn, multi_label):
-    """One dtype for every ``_build_loss_fn`` outcome — a variant reducing in bf16 would feed the PP
-    runner a summand it then divides by an fp32 normalizer."""
-    generator = torch.Generator().manual_seed(5)
+# Every loss the config can build, with the torch module or function that defines its mean.
+_LOSS_DEFINITIONS = {
+    "ce": (ClassificationLoss(multi_label=False), nn.CrossEntropyLoss()),
+    "weighted-ce": (_weighted_ce(), nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone())),
+    "smoothed-ce": (
+        ClassificationLoss(multi_label=False, weight=CLASS_WEIGHTS.clone(), label_smoothing=0.1),
+        nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone(), label_smoothing=0.1),
+    ),
+    "bce": (ClassificationLoss(multi_label=True), nn.BCEWithLogitsLoss()),
+    "pos-weighted-bce": (
+        ClassificationLoss(multi_label=True, weight=CLASS_WEIGHTS.clone()),
+        nn.BCEWithLogitsLoss(pos_weight=CLASS_WEIGHTS.clone()),
+    ),
+    "weighted-focal": (
+        ClassificationLoss(multi_label=False, weight=CLASS_WEIGHTS.clone(), focal_gamma=2.0),
+        lambda logits, targets: focal_loss(logits, targets, gamma=2.0, weight=CLASS_WEIGHTS),
+    ),
+    "alpha-focal": (
+        ClassificationLoss(multi_label=True, focal_gamma=2.0, focal_alpha=0.25),
+        lambda logits, targets: focal_loss(logits, targets, gamma=2.0, alpha=0.25),
+    ),
+}
+
+
+def _variant_batch(multi_label: bool, seed: int = 5):
+    generator = torch.Generator().manual_seed(seed)
     logits = (torch.randn(8, NUM_CLASSES, generator=generator) * 4.0).bfloat16()
     targets = (
         (torch.rand(8, NUM_CLASSES, generator=generator) > 0.5).bfloat16()
         if multi_label
         else torch.randint(0, NUM_CLASSES, (8,), generator=generator)
     )
-    trainer = _trainer(loss_fn, is_multi_label=multi_label)
-    assert trainer._pooled_loss(logits, targets, torch.ones(8, dtype=torch.bool)).dtype is torch.float32
+    return logits, targets
 
 
-def test_focal_loss_variant_returns_fp32():
-    """The focal partial reduces itself, so it needs the same upcast at the seam."""
-    generator = torch.Generator().manual_seed(6)
-    logits = (torch.randn(8, NUM_CLASSES, generator=generator) * 4.0).bfloat16()
-    targets = torch.randint(0, NUM_CLASSES, (8,), generator=generator)
-    trainer = _trainer(partial(ClassificationTrainer._focal_loss, gamma=2.0, alpha=None, weight=None))
-    assert trainer._pooled_loss(logits, targets, torch.ones(8, dtype=torch.bool)).dtype is torch.float32
+@pytest.mark.parametrize("variant", sorted(_LOSS_DEFINITIONS))
+def test_each_loss_mean_is_its_torch_definition_in_fp32(variant):
+    """The loss's mean is exactly the torch loss it stands for, evaluated on fp32 inputs."""
+    loss, definition = _LOSS_DEFINITIONS[variant]
+    logits, targets = _variant_batch(loss.multi_label)
+    fp32_targets = targets.float() if targets.is_floating_point() else targets
+
+    assert torch.equal(loss.mean(logits, targets), definition(logits.float(), fp32_targets))
+
+
+@pytest.mark.parametrize("variant", sorted(_LOSS_DEFINITIONS))
+def test_every_loss_variant_returns_fp32(variant):
+    """One dtype for every built loss — a variant reducing in bf16 would feed the PP runner a summand it
+    then divides by an fp32 normalizer."""
+    loss, _ = _LOSS_DEFINITIONS[variant]
+    logits, targets = _variant_batch(loss.multi_label)
+    assert loss.masked_sum(logits, targets, torch.ones(8, dtype=torch.bool)).dtype is torch.float32
 
 
 @pytest.mark.parametrize("multi_label", [False, True])
 def test_the_default_config_builds_plain_ce_or_bce(multi_label):
     """``loss_type: cross_entropy`` with no weights is the trainer's own unweighted objective — the
     shape the seams above are exercised with — never a hand-off to the head's loss."""
-    loss_fn = _built_trainer(_head(torch.float32), is_multi_label=multi_label)._loss_fn
-    if multi_label:
-        assert type(loss_fn) is nn.BCEWithLogitsLoss and loss_fn.pos_weight is None
-    else:
-        assert type(loss_fn) is nn.CrossEntropyLoss
-        assert loss_fn.weight is None and loss_fn.label_smoothing == 0.0
+    loss = _built_trainer(_head(torch.float32), is_multi_label=multi_label)._classification_loss
+    assert loss == ClassificationLoss(multi_label=multi_label)
 
 
 def test_the_default_loss_is_fp32_on_a_bf16_head():
@@ -317,7 +332,7 @@ def test_the_default_loss_is_fp32_on_a_bf16_head():
     inputs = _head_batch()
     trainer = _built_trainer(model)
 
-    got = trainer._compute_loss_inner(model, inputs, return_outputs=False)
+    got = trainer.compute_loss(model, inputs)
     with torch.no_grad():
         head = model(**inputs)
     reference = F.cross_entropy(head.logits.double(), inputs["labels"])
@@ -340,7 +355,7 @@ def test_the_default_loss_value_is_the_heads_own_on_an_fp32_head(multi_label):
     trainer = _built_trainer(model, is_multi_label=multi_label)
 
     with torch.no_grad():
-        got = trainer._compute_loss_inner(model, inputs, return_outputs=False)
+        got = trainer.compute_loss(model, inputs)
         head_loss = model(**inputs).loss
 
     assert torch.equal(got, head_loss), f"{got.item()} != head loss {head_loss.item()}"
@@ -354,7 +369,6 @@ def test_prediction_step_returns_the_head_logits_and_the_labels():
     trainer = _built_trainer(model)
     trainer._pp_runner = None
     trainer._prepare_inputs = lambda batch: batch
-    trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
 
     loss, logits, labels = trainer.prediction_step(model, inputs, prediction_loss_only=False)
     with torch.no_grad():
@@ -375,7 +389,7 @@ def test_soft_label_targets_are_refused_on_both_paths():
     batch["labels"] = F.one_hot(batch["labels"], NUM_CLASSES).float()
 
     with pytest.raises(ValueError, match="integer class ids"):
-        trainer._compute_loss_inner(model, batch, return_outputs=False)
+        trainer.compute_loss(model, batch)
     with pytest.raises(ValueError, match="integer class ids"):
         trainer._pp_classification_batch_transform(batch)
 
@@ -385,9 +399,7 @@ def test_a_single_logit_single_label_head_is_refused():
     identically zero, so a single-label run would train on nothing. Multi-label keeps its one sigmoid."""
     with pytest.raises(ValueError, match="num_labels >= 2"):
         _built_trainer(_head(torch.float32, num_labels=1))
-    assert (
-        type(_built_trainer(_head(torch.float32, num_labels=1), is_multi_label=True)._loss_fn) is nn.BCEWithLogitsLoss
-    )
+    assert _built_trainer(_head(torch.float32, num_labels=1), is_multi_label=True)._classification_loss.multi_label
 
 
 # --------------------------------------------------------------------------------------------
@@ -451,17 +463,16 @@ def test_masked_sum_equals_indexing_the_surviving_rows_out(multi_label):
     unmasked sum — otherwise a tolerance this loose could hide a mask that never applied.
     """
     logits, plane, class_targets, valid = _pp_batch(multi_label=multi_label)
-    loss_fn = nn.BCEWithLogitsLoss() if multi_label else nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone())
-    trainer = _trainer(loss_fn, is_multi_label=multi_label)
+    loss = ClassificationLoss(multi_label=True) if multi_label else _weighted_ce()
 
-    _, positions, plane_values = decode_pooling_plane(plane)
-    pooled = pooled_outputs(logits, positions)
-    targets = class_targets if multi_label else plane_values.clamp_min(0)
+    decoded = decode_pooling_plane(plane)
+    pooled = pooled_logits(logits, decoded)
+    targets = class_targets if multi_label else decoded.values.clamp_min(0)
     all_rows = torch.ones(pooled.size(0), dtype=torch.bool)
 
-    masked = trainer._pooled_loss(pooled, targets, valid)
-    indexed = trainer._pooled_loss(pooled[valid], targets[valid], all_rows[valid])
-    unmasked = trainer._pooled_loss(pooled, targets, all_rows)
+    masked = loss.masked_sum(pooled, targets, valid)
+    indexed = loss.masked_sum(pooled[valid], targets[valid], all_rows[valid])
+    unmasked = loss.masked_sum(pooled, targets, all_rows)
 
     assert masked.item() == pytest.approx(indexed.item(), rel=_REDUCTION_ORDER_TOLERANCE)
     assert abs(unmasked.item() - indexed.item()) / indexed.item() > 0.01, (
@@ -475,16 +486,14 @@ def test_masked_normalizer_equals_indexing_the_surviving_rows_out(multi_label):
     """Numerator and denominator must agree on which rows exist, so the normalizer gets the same
     treatment — a mismatch would rescale the loss by the inert-row fraction."""
     _, plane, class_targets, valid = _pp_batch(multi_label=multi_label)
-    loss_fn = nn.BCEWithLogitsLoss() if multi_label else nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone())
-    trainer = _trainer(loss_fn, is_multi_label=multi_label)
+    loss = ClassificationLoss(multi_label=True) if multi_label else _weighted_ce()
 
-    _, _, plane_values = decode_pooling_plane(plane)
-    targets = class_targets if multi_label else plane_values
+    targets = class_targets if multi_label else decode_pooling_plane(plane).values
     ones = torch.ones(int(valid.sum()), dtype=torch.bool)
 
-    masked = trainer._pooled_loss_normalizer(targets, valid)
-    indexed = trainer._pooled_loss_normalizer(targets[valid], ones)
-    unmasked = trainer._pooled_loss_normalizer(targets, torch.ones_like(valid))
+    masked = loss.normalizer(targets, valid)
+    indexed = loss.normalizer(targets[valid], ones)
+    unmasked = loss.normalizer(targets, torch.ones_like(valid))
 
     assert masked.item() == pytest.approx(indexed.item(), rel=_REDUCTION_ORDER_TOLERANCE)
     assert unmasked.item() != pytest.approx(indexed.item(), rel=_REDUCTION_ORDER_TOLERANCE)
@@ -498,10 +507,7 @@ def test_token_loss_runs_without_a_single_host_sync(multi_label):
     micro-batch — at 512 GPUs, three per micro-batch per rank on the pipeline's critical path.
     """
     logits, plane, class_targets, valid = _pp_batch(multi_label=multi_label)
-    trainer = _trainer(
-        nn.BCEWithLogitsLoss() if multi_label else nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone()),
-        is_multi_label=multi_label,
-    )
+    trainer = _trainer(ClassificationLoss(multi_label=True) if multi_label else _weighted_ce())
 
     target = {"labels": plane.as_subclass(_NoHostSyncTensor)}
     if multi_label:
@@ -515,7 +521,7 @@ def test_token_loss_runs_without_a_single_host_sync(multi_label):
 def test_normalizer_runs_without_a_host_sync():
     """The step normalizer is off the micro-batch path but takes the same masked form."""
     _, plane, _, _ = _pp_batch()
-    trainer = _trainer(nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone()))
+    trainer = _trainer(_weighted_ce())
     normalizer = trainer._pp_classification_normalizer({"labels": plane.as_subclass(_NoHostSyncTensor)})
     assert normalizer.as_subclass(torch.Tensor).item() > 0
 
@@ -530,7 +536,7 @@ def test_all_inert_microbatch_is_zero_and_still_wired_to_the_graph():
     rows, seq = 4, 5
     plane = torch.full((rows, seq), LABEL_IGNORE_INDEX, dtype=torch.long)
     logits = torch.randn(rows, seq, NUM_CLASSES, requires_grad=True)
-    trainer = _trainer(nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone()))
+    trainer = _trainer(_weighted_ce())
 
     loss = trainer._pp_classification_token_loss(logits, plane)
 
@@ -554,7 +560,7 @@ def test_inert_rows_cannot_leak_a_nan_from_a_saturated_logit():
     logits = torch.randn(rows, seq, NUM_CLASSES)
     logits[1] = float("inf")
     logits.requires_grad_(True)
-    trainer = _trainer(nn.CrossEntropyLoss(weight=CLASS_WEIGHTS.clone()))
+    trainer = _trainer(_weighted_ce())
 
     loss = trainer._pp_classification_token_loss(logits, plane)
     assert torch.isfinite(loss).all()
@@ -587,19 +593,18 @@ def test_pp_and_non_pp_score_one_batch_identically(overrides, multi_label):
     """The same batch through both seams: the non-PP head forward + mean, and the PP last stage's
     per-token head outputs, pooled per micro-batch, summed, and divided by the batch normalizer.
 
-    Every ``_build_loss_fn`` variant, on a real bf16 head whose ragged rows make the pooling position
+    Every built loss variant, on a real bf16 head whose ragged rows make the pooling position
     load-bearing, split into two uneven micro-batches.
     """
     model = _head(torch.bfloat16)
     batch = _head_batch(multi_label=multi_label)
-    trainer = _trainer(None, is_multi_label=multi_label)
-    trainer._loss_fn = trainer._build_loss_fn(ClassificationConfig(output_dir="unused", **overrides), None, model)
+    trainer = _built_trainer(model, is_multi_label=multi_label, **overrides)
     trainer.model = model
     trainer.eval_split_rows = lambda num_rows: num_rows  # no eval loader is running: every row is real
     trainer._pp_pool_pad_id = _PAD_ID
 
     with torch.no_grad():
-        non_pp = trainer._compute_loss_inner(model, batch, return_outputs=False)
+        non_pp = trainer.compute_loss(model, batch)
         hidden = model.model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).last_hidden_state
         per_token = model.score(hidden)
     planes = trainer._pp_classification_batch_transform(batch)
@@ -626,17 +631,16 @@ def test_an_eval_split_s_padding_rows_leave_the_loss(overrides, multi_label):
     own, as the same rows score alone, and a rank of padding alone scores 0."""
     model = _head(torch.float32)
     batch = _head_batch(multi_label=multi_label)
-    trainer = _trainer(None, is_multi_label=multi_label)
-    trainer._loss_fn = trainer._build_loss_fn(ClassificationConfig(output_dir="unused", **overrides), None, model)
+    trainer = _built_trainer(model, is_multi_label=multi_label, **overrides)
     alone = {key: value[:10] for key, value in batch.items()}
 
     with torch.no_grad():
-        expected = trainer._compute_loss_inner(model, alone, return_outputs=False)
+        expected = trainer.compute_loss(model, alone)
         trainer.model = types.SimpleNamespace(training=False)
         trainer.eval_split_rows = lambda num_rows: 10
-        padded = trainer._compute_loss_inner(model, batch, return_outputs=False)
+        padded = trainer.compute_loss(model, batch)
         trainer.eval_split_rows = lambda num_rows: 0
-        empty = trainer._compute_loss_inner(model, batch, return_outputs=False)
+        empty = trainer.compute_loss(model, batch)
 
     assert padded.item() == pytest.approx(expected.item(), rel=_REDUCTION_ORDER_TOLERANCE)
     assert empty.item() == 0.0
@@ -653,9 +657,8 @@ def test_compute_loss_never_runs_the_token_label_check(monkeypatch):
     "has no training signal", so the check must stay off this trainer's path."""
     warnings = []
     monkeypatch.setattr(token_metrics, "logger", types.SimpleNamespace(warning=warnings.append))
-    trainer = _trainer(nn.CrossEntropyLoss())
+    trainer = _trainer(ClassificationLoss(multi_label=False))
     trainer.processing_class = types.SimpleNamespace(pad_token_id=0, eos_token_id=1)
-    trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
     trainer.state = None
     trainer._warned_empty_labels = False
     logits, _ = _bf16_batch()

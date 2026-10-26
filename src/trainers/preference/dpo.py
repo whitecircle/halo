@@ -24,15 +24,15 @@ from trl import DPOTrainer
 
 from src.data.completion_spans import completion_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
-from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from src.trainers.ctor_slots import get_ctor_arg
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.parallelism.pipeline_loss_adapter import (
     PipelineLossAdapter,
+    interleave_halves,
     interleave_pairs,
     pair_count_normalizer,
-    rows_with_labels,
     split_pairs,
+    valid_pairs,
 )
 from src.trainers.parallelism.pipeline_rules import (
     reject_missing_precomputed_reference,
@@ -40,38 +40,9 @@ from src.trainers.parallelism.pipeline_rules import (
     reject_pp_compute_metrics,
     reject_pp_ref_model,
 )
-from src.trainers.preference.logprobs import FP32LogprobsMixin
-from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
-from src.trainers.training_args_overrides import disable_trl_liger
-
-# TRL DPOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-_CTOR_POSITIONS = resolve_ctor_positions(DPOTrainer, "model", "args", "ref_model")
-
-_REF_LOGPS_COLUMNS = ("ref_chosen_logps", "ref_rejected_logps")
-
-_PP_BATCH_COUPLED_LOSS_TYPES = {
-    "aot": "it sorts the paired log-ratios across the whole batch (torch.sort over dim 0), so a "
-    "microbatch split re-pairs the sorted quantiles",
-    "aot_unpaired": "it sorts the chosen and rejected log-ratios across the whole batch "
-    "(torch.sort over dim 0), so a microbatch split re-pairs the sorted quantiles",
-    "sft": "its cross-entropy is a mean over the whole batch's chosen completion tokens — a "
-    "batch-global token denominator that changes with the microbatch split",
-}
-
-
-# Uniform signature so the registry dispatches on the loss type alone; score-only types drop labels.
-def _sigmoid_pair_loss(
-    beta: float, chosen_scores: torch.Tensor, rejected_scores: torch.Tensor, labels: torch.Tensor
-) -> torch.Tensor:
-    del labels
-    return -F.logsigmoid(beta * (chosen_scores - rejected_scores))
-
-
-def _hinge_pair_loss(
-    beta: float, chosen_scores: torch.Tensor, rejected_scores: torch.Tensor, labels: torch.Tensor
-) -> torch.Tensor:
-    del labels
-    return torch.relu(1 - beta * (chosen_scores - rejected_scores))
+from src.trainers.preference.preference_rules import reject_dpo_pp_objective
+from src.trainers.preference.trl_preference import TRLPreferenceMixin
+from src.trainers.trl_dataset_prep import TRLDatasetPrepMixin
 
 
 def _ipo_pair_loss(
@@ -86,71 +57,37 @@ def _ipo_pair_loss(
     return (ipo_delta - 1 / (2 * beta)) ** 2
 
 
-# Shared by the PP gate and the last-stage loss so the two cannot drift apart.
+# ``(beta, chosen_scores, rejected_scores, labels) -> per-pair loss``, shared by the PP gate and the
+# last-stage loss so the two cannot drift apart; score-only types drop the labels.
 _PP_PAIR_LOSSES: dict[str, Callable[[float, torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]] = {
-    "sigmoid": _sigmoid_pair_loss,
-    "hinge": _hinge_pair_loss,
+    "sigmoid": lambda beta, chosen, rejected, labels: -F.logsigmoid(beta * (chosen - rejected)),
+    "hinge": lambda beta, chosen, rejected, labels: torch.relu(1 - beta * (chosen - rejected)),
     "ipo": _ipo_pair_loss,
 }
 
 
-class DistributedDPOTrainer(
-    FP32LogprobsMixin,
-    PrecomputeRefLogpsRankConsistentMixin,
-    DistributedTrainerMixin,
-    CoordinatedTRLDatasetPrepMixin,
-    DPOTrainer,
-):
-    """TRL's DPOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
-
-    ``FP32LogprobsMixin`` keeps TRL's loss and reference pass on fp32 sequence log-probs; TRL's own
-    chunked (``use_liger_kernel``) path is switched off at construction.
-
-    ``PrecomputeRefLogpsRankConsistentMixin`` runs ``precompute_ref_log_probs`` (the EP/TP
-    full-finetune reference path) on the DP axis, attaches its columns in memory on every rank and
-    carries them across a resume; it precedes ``DistributedTrainerMixin`` so its checkpoint hook
-    wins. PP is precompute-only with the reference log-probs shipped as dataset columns; the PP
-    contract is in ``_pp_loss_adapter``.
-    """
+class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLDatasetPrepMixin, DPOTrainer):
+    """TRL's DPOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring)."""
 
     _tag_names = ["trl", "dpo"]
 
     PP_REFUSAL = None
-    # TRL's DPO loss adds the aux term itself and this class does not override it.
-    ROUTER_AUX_LOSS_ADDED_BY = "trl_loss"
     # TRL concatenates chosen ⧺ rejected into one forward, so every MoE layer sees twice the rows.
     FORWARD_ROWS_PER_EXAMPLE = 2
-
-    def __init__(self, *args, **kwargs):
-        # TRL's chunked DPO path refuses the router aux loss this trainer hands it and skips the family's
-        # head transform; must precede _init_distributed_config.
-        disable_trl_liger(
-            get_ctor_config(args, kwargs, _CTOR_POSITIONS),
-            "Disabling TRL's use_liger_kernel for DPO: TRL's chunked DPO log-prob path refuses the router "
-            "aux loss and skips the family's head transform. Liger kernels are still applied at the model "
-            "level by load_distributed_model.",
-        )
-        self._init_reference_resume(kwargs)
-        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
-        self._validate_reference_model(get_ctor_arg(args, kwargs, "ref_model", _CTOR_POSITIONS))
-        with self._trl_reference_hash_skipped():
-            super().__init__(*args, **kwargs)
-        # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not
-        # PEFT-wrapped and precompute_ref_log_probs is off.
-        self._validate_held_reference_model()
-        self._configure_distributed_modes()
+    REFERENCE_COLUMNS = ("ref_chosen_logps", "ref_rejected_logps")
+    LIGER_DISABLE_REASON = (
+        "Disabling TRL's use_liger_kernel for DPO: TRL's chunked DPO log-prob path refuses the router "
+        "aux loss and skips the family's head transform. Liger kernels are still applied at the model "
+        "level by load_distributed_model."
+    )
 
     def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
-        """Reject DPO configurations pipeline parallelism cannot honor, at construction.
-
-        Runs before the model is split, so every raise is cheap and rank-uniform. Remaining ctor
-        parameters are read from ``kwargs`` only: ``reject_positional_model_or_args`` forces ``model``
-        into kwargs, and any positional argument would rebind TRL's ``model`` slot.
-        """
+        """Refuse the DPO options the PP last-stage loss cannot honor; ctor parameters are read from
+        ``kwargs`` only, since a positional argument would rebind TRL's ``model`` slot."""
         reject_positional_model_or_args(kwargs)
         training_args = kwargs["args"]
         reject_pp_ref_model(
-            get_ctor_arg(ctor_args, kwargs, "ref_model", _CTOR_POSITIONS),
+            get_ctor_arg(ctor_args, kwargs, "ref_model", self.CTOR_POSITIONS),
             "ref_chosen_logps/ref_rejected_logps dataset columns",
         )
         reject_missing_precomputed_reference(
@@ -158,7 +95,7 @@ class DistributedDPOTrainer(
             training_args,
             kwargs.get("train_dataset"),
             kwargs.get("eval_dataset"),
-            _REF_LOGPS_COLUMNS,
+            self.REFERENCE_COLUMNS,
         )
         reject_pp_compute_metrics(
             kwargs.get("compute_metrics"),
@@ -175,43 +112,7 @@ class DistributedDPOTrainer(
                 "path's. Evaluate on eval_loss alone, or compute the metric in a non-PP run."
             ),
         )
-        loss_types = training_args.loss_type
-        loss_types = loss_types if isinstance(loss_types, list) else [loss_types]
-        for loss_type in loss_types:
-            if loss_type in _PP_PAIR_LOSSES:
-                continue
-            mechanism = _PP_BATCH_COUPLED_LOSS_TYPES.get(
-                loss_type,
-                "its per-pair loss is not re-implemented in the PP last-stage loss, and running it "
-                "unaudited would train a silently different objective",
-            )
-            raise ValueError(
-                f"loss_type '{loss_type}' is not supported under pipeline parallelism: {mechanism}. "
-                f"Supported under PP: {', '.join(_PP_PAIR_LOSSES)}."
-            )
-        if training_args.f_divergence_type != "reverse_kl":
-            raise ValueError(
-                f"f_divergence_type='{training_args.f_divergence_type}' is not supported under "
-                f"pipeline parallelism: the PP last-stage loss implements the standard reverse-KL "
-                f"scores only; another divergence would silently be computed as reverse-KL."
-            )
-        if training_args.use_weighting:
-            raise ValueError(
-                "use_weighting (WPO) is not supported under pipeline parallelism: the per-pair "
-                "weights need a full-vocab logsumexp over the shifted logits inside the loss, which "
-                "the PP last-stage loss does not implement."
-            )
-        if training_args.ld_alpha is not None:
-            raise ValueError(
-                "ld_alpha (length-desensitized DPO) is not supported under pipeline parallelism: it "
-                "reshapes the sequence log-probs themselves, the PP last-stage loss does not "
-                "implement that shaping, and the precomputed reference columns would have to be "
-                "produced with the identical shaping to stay comparable."
-            )
-
-    def _required_ref_logps_columns(self) -> tuple[str, ...]:
-        """Both columns TRL's DPO sweep would write; present ⇒ the sweep is skipped."""
-        return _REF_LOGPS_COLUMNS
+        reject_dpo_pp_objective(training_args, supported=_PP_PAIR_LOSSES)
 
     def _reference_settings(self) -> dict:
         """The collator's truncation and ``ld_alpha``'s reshaping of the summed reference log-probs."""
@@ -246,9 +147,9 @@ class DistributedDPOTrainer(
         microbatches comparing unrelated examples; interleaving keeps every pair together. Labels are
         the completion token ids at their positions — those TRL's ``shift_completion_mask`` scores.
         """
-        input_ids = interleave_pairs(*batch["input_ids"].chunk(2, dim=0))
-        attention_mask = interleave_pairs(*batch["attention_mask"].chunk(2, dim=0))
-        completion_mask = interleave_pairs(*batch["completion_mask"].chunk(2, dim=0))
+        input_ids = interleave_halves(batch["input_ids"])
+        attention_mask = interleave_halves(batch["attention_mask"])
+        completion_mask = interleave_halves(batch["completion_mask"])
         labels = completion_labels(input_ids, completion_mask)
         ref_logps = interleave_pairs(batch["ref_chosen_logps"].float(), batch["ref_rejected_logps"].float())
         return {
@@ -271,8 +172,7 @@ class DistributedDPOTrainer(
         ref_chosen_logps, ref_rejected_logps = split_pairs(target["ref_logps"].float())
         chosen_scores = chosen_logps - ref_chosen_logps
         rejected_scores = rejected_logps - ref_rejected_logps
-        # Inert eval-padding pairs must contribute 0: at zero scores every type is nonzero.
-        pair_valid = rows_with_labels(labels)[0::2].float()
+        pair_valid = valid_pairs(labels)
 
         loss = seq_logps.new_zeros(())
         for loss_type, loss_weight in zip(self.loss_types, self.loss_weights, strict=True):

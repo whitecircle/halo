@@ -88,7 +88,7 @@ def interleave_pairs(rows) -> list[list[int]]:
 
 
 def reference_pair_scores(model, rows, device) -> torch.Tensor:
-    """``[pairs, 2]`` pooled (chosen, rejected) scores — what ``_pp_bt_predictions`` must produce."""
+    """``[pairs, 2]`` pooled (chosen, rejected) scores — what the BT adapter's ``predictions_fn`` must produce."""
     input_ids, attention_mask = pad_to(interleave_pairs(rows), SEQ_LEN)
     with torch.no_grad():
         pooled = model(input_ids=input_ids.to(device), attention_mask=attention_mask.to(device))

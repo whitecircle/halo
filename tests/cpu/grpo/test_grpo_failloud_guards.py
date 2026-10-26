@@ -27,9 +27,11 @@ from accelerate import PartialState
 
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.environments.rollout_config import resolve_rollout_stop_token_ids
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer, batch_reward_std
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence, batch_reward_std
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS
-from src.trainers.grpo.offline import OfflineGRPOTrainer, tokenize_offline_grpo_rows
+from src.trainers.grpo.offline.tokenization import tokenize_offline_grpo_rows
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 PartialState()  # both trainers log through accelerate, which refuses to log without it
 
@@ -195,7 +197,7 @@ def test_a_prompt_with_no_user_turn_raises_before_any_rollout_is_submitted():
     convo = [{"role": "system", "content": "sys only"}]
 
     with pytest.raises(ValueError, match="no 'user' message"):
-        host._generate_and_score_completions_base([{"prompt": convo}])
+        host._collect_and_score_rollouts([{"prompt": convo}])
 
 
 def test_last_user_turn_is_the_task_text():

@@ -9,8 +9,8 @@ that seam on fixed reward/mask tensors:
 
 * the ONLINE path drives the real ``DistributedGRPOTrainer._apply_degenerate_group_drop`` hook
   (with ``_gathered_rewards`` / ``_local_slice`` bound, gather = identity);
-* the ENVIRONMENTAL path drives the real ``_narrow_masks_and_normalizer`` (and ``_compute_advantages``)
-  on a fake self — a transcription of that block cannot catch it drifting away from the transcription;
+* the ENVIRONMENTAL path drives the real ``_step_advantages`` and ``_narrow_masks_and_normalizer`` on a
+  fake self;
 * every scenario asserts hand-derived constants (masks, num_items, advantages), so any refactor of
   the shared seam must reproduce them bit-for-bit.
 
@@ -23,12 +23,9 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.trainers.grpo.environmental import (
-    BatchRows,
-    DistributedAsyncEnvironmentalGRPOTrainer,
-    rollout_valid_mask,
-)
-from src.trainers.grpo.objective.application import expand_traj_to_rows
+from src.trainers.grpo.environmental.step_batch import BatchRows, rollout_valid_mask
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.objective.loss_inputs import expand_traj_to_rows
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
@@ -191,17 +188,9 @@ def _env_application(
     local_advantages = rows.to_rows(traj_advantages)
     if negative_only is None:
         negative_only = torch.zeros(local_advantages.numel(), dtype=torch.bool)
+    step = types.SimpleNamespace(completion_mask=completion_mask, tool_mask=tool_mask, negative_only=negative_only)
     comp, tool, _loss_mask, num_items = DistributedAsyncEnvironmentalGRPOTrainer._narrow_masks_and_normalizer(
-        me,
-        rows,
-        rollout_valid_mask(rollout_results, rewards.device),
-        num_generations,
-        completion_mask,
-        tool_mask,
-        local_advantages,
-        negative_only,
-        rewards.device,
-        mode,
+        me, rows, step, rollout_valid_mask(rollout_results, rewards.device), num_generations, local_advantages, mode
     )
     metrics = flushed_metrics(me, mode)
     fracs = metrics["sampling/degenerate_group_frac"]
@@ -223,15 +212,15 @@ def _env_scenario():
     return rewards, truncated, turns_per_traj, completion_mask, tool_mask
 
 
-def _env_compute_advantages(rewards, num_generations, valid_mask=None):
-    """Drive the REAL env ``_compute_advantages`` (group_relative_advantages framing) on a fake self."""
-    me = types.SimpleNamespace(
-        args=types.SimpleNamespace(scale_rewards="none"),
-        _scale_rewards_std_floor=0.0,
+def _env_compute_advantages(rewards, num_generations, valid=None):
+    """The per-trajectory advantages of the REAL ``_step_advantages`` on a fake self: ``scale_rewards='none'``,
+    no std floor, one row per trajectory; ``valid`` marks the episodes in the baseline (default: all)."""
+    me = types.SimpleNamespace(args=types.SimpleNamespace(scale_rewards="none"), _scale_rewards_std_floor=0.0)
+    rows = BatchRows(_rollouts([False] * len(rewards), rewards.tolist(), valid), [1] * len(rewards), 0, False)
+    _state, traj_advantages, _rows = DistributedAsyncEnvironmentalGRPOTrainer._step_advantages(
+        me, rewards, rows, 0, num_generations
     )
-    return DistributedAsyncEnvironmentalGRPOTrainer._compute_advantages(
-        me, rewards, num_generations, valid_mask=valid_mask
-    )
+    return traj_advantages
 
 
 def test_env_application_pins_advantages_masks_and_num_items():
@@ -333,7 +322,7 @@ def test_an_invalid_episode_is_dropped_and_excluded_from_degeneracy():
     drops. Its own rows go either way — invalid or degenerate.
     """
     rewards = torch.tensor([1.0, 1.0, 0.0])
-    traj_advantages = _env_compute_advantages(rewards, num_generations=3, valid_mask=torch.tensor([True, True, False]))
+    traj_advantages = _env_compute_advantages(rewards, num_generations=3, valid=[True, True, False])
 
     _adv, comp, _tool, num_items, frac, _metrics = _env_application(
         traj_advantages,

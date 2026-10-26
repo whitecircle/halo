@@ -59,7 +59,7 @@ from src.environments.tools.toolsets import build_math_tools, build_python_tools
 from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from src.rewards.graders.matching import extract_last_boxed
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B

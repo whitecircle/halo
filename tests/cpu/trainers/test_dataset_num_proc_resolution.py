@@ -28,7 +28,7 @@ from src.data.pipeline.coordinated_map import (
     resolve_map_num_proc,
 )
 from src.data.pipeline.preferences import tokenize_preference_row
-from src.trainers.grpo.offline import tokenize_offline_grpo_rows
+from src.trainers.grpo.offline.tokenization import tokenize_offline_grpo_rows
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 
 # >1 is what makes datasets pickle the mapped callable.
@@ -85,10 +85,9 @@ class _FakeDataset:
 def _smpo_self(*, dataset_num_proc, is_vlm=False):
     return types.SimpleNamespace(
         is_vlm=is_vlm,
-        dataset_num_proc=dataset_num_proc,
+        args=types.SimpleNamespace(dataset_num_proc=dataset_num_proc, truncation_mode="keep_end"),
         max_prompt_length=17,
         max_completion_length=23,
-        truncation_mode="keep_end",
         _eos_token_ids=frozenset({2}),
     )
 
@@ -105,7 +104,7 @@ def _run_smpo_prepare(me):
     original = smpo_module.coordinated_map
     smpo_module.coordinated_map = _fake_map
     try:
-        SmoothMarginPOTrainer._prepare_dataset(me, _FakeDataset(), None, "train")
+        SmoothMarginPOTrainer._prepare_dataset(me, _FakeDataset(), None, me.args, "train")
     finally:
         smpo_module.coordinated_map = original
     return captured

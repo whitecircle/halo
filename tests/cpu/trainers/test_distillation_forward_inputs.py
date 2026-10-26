@@ -16,7 +16,7 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.trainers.distillation.losses import logits_forward_inputs
+from src.trainers.distillation.divergences import logits_forward_inputs
 from tests.common.models import TINY_QWEN3_CONFIG
 
 

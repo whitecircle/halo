@@ -40,7 +40,11 @@ from src.rewards.terms import (
     parse_reward_terms,
     resolve_environment_checks,
 )
-from src.trainers.grpo.reasoning_terms import REASONING_TARGET_SHARE, reasoning_floor_term, reasoning_price_term
+from src.trainers.grpo.environmental.reasoning import (
+    REASONING_TARGET_SHARE,
+    reasoning_floor_term,
+    reasoning_price_term,
+)
 from tests.common.repo import REPO_ROOT
 
 RECIPES = sorted((REPO_ROOT / "examples" / "grpo" / "environmental").rglob("*code-contests*.yaml"))

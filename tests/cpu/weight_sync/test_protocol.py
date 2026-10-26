@@ -40,8 +40,8 @@ from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
 from src.distributed.nccl._nccl_wrapper import ncclUniqueId
 from src.trainers.grpo.rollout.engine_preflight import (
-    _check_context_window,
-    _check_sampler_logprob_reference,
+    _verify_context_window_on_rank0,
+    _verify_sampler_logprob_reference_on_rank0,
     probe_sampler_logprob_semantics,
 )
 from src.weight_sync.clients import base as client_base
@@ -494,9 +494,9 @@ def test_context_window_preflight_raises_on_a_server_that_cannot_hold_one_turn(s
     server.max_model_len = 1024
 
     with pytest.raises(ValueError, match="context window"):
-        _check_context_window(VLLMWeightSyncClient, [server.url], 4096, None)
+        _verify_context_window_on_rank0(VLLMWeightSyncClient, [server.url], 4096, None)
 
-    _check_context_window(VLLMWeightSyncClient, [server.url], 512, None)
+    _verify_context_window_on_rank0(VLLMWeightSyncClient, [server.url], 512, None)
 
 
 # The filters' off values the preflight hands the probe, so each probe request moves one knob only.
@@ -513,7 +513,7 @@ def _preflight(
     min_p=0.0,
     repetition_penalty=1.0,
 ):
-    _check_sampler_logprob_reference(
+    _verify_sampler_logprob_reference_on_rank0(
         VLLMWeightSyncClient, [url], temperature, top_p, top_k, min_p, repetition_penalty, sequence_ratio_active
     )
 
@@ -601,7 +601,7 @@ def test_context_window_preflight_skips_an_unreachable_server(server):
     """An unreadable probe must never be what fails the run — it warns and moves on."""
     server.close()
 
-    _check_context_window(VLLMWeightSyncClient, [server.url], 10**9, None)
+    _verify_context_window_on_rank0(VLLMWeightSyncClient, [server.url], 10**9, None)
 
 
 @pytest.mark.parametrize("client_cls", [VLLMWeightSyncClient, SGLangWeightSyncClient], ids=["vllm", "sglang"])
@@ -612,9 +612,9 @@ def test_the_preflight_probe_reads_each_engines_server(client_cls, caplog):
     try:
         server.max_model_len = 1024
         with caplog.at_level(logging.WARNING):
-            _check_context_window(client_cls, [server.url], 512, None)
+            _verify_context_window_on_rank0(client_cls, [server.url], 512, None)
             with pytest.raises(ValueError, match=r"context window \(1024\)"):
-                _check_context_window(client_cls, [server.url], 4096, None)
+                _verify_context_window_on_rank0(client_cls, [server.url], 4096, None)
     finally:
         server.close()
     assert not [record.getMessage() for record in caplog.records if "Could not" in record.getMessage()]

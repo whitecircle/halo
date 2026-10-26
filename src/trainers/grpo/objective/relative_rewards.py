@@ -17,9 +17,6 @@ from src.configs.grpo import RLRRConfig
 ArrayLike = Sequence[float] | np.ndarray
 BoolArrayLike = Sequence[bool] | np.ndarray
 
-# Guards the ``std_normalize`` divisor against an all-equal shaped group; not a tuning knob.
-_STD_EPS = 1e-6
-
 
 def dense_ranks(keys: Sequence[tuple]) -> np.ndarray:
     """Dense-rank sortable keys, ``1`` = best (smallest key); equal keys share a rank."""
@@ -80,22 +77,12 @@ def relative_advantages(
     lengths: ArrayLike | None = None,
     valid: BoolArrayLike | None = None,
 ) -> np.ndarray:
-    """Compute RLRR advantages for a single group of responses.
+    """RLRR advantages ``(G,)`` of one group's scalar ``rewards``.
 
-    Correctness is the ``rewards >= config.correctness_threshold`` label, which is also HRR's
-    binary rule score ``s_rule`` (Eq. 3): the reward this toolkit scores is the rule reward.
-
-    Args:
-        rewards: Raw scalar reward / RM score per response (group size ``G``).
-        config: :class:`RLRRConfig` hyperparameters.
-        lengths: Optional response token lengths for length re-ranking (Eq. 6).
-        valid: Optional per-response mask (True = a real response). A placeholder row carries a
-            sentinel, not a score, so ranking it as a group member would move ``r_max`` and the
-            group mean and thereby every sibling's advantage; ranking and centring run over the
-            real responses alone and the placeholders return 0.
-
-    Returns:
-        ``np.ndarray`` of shape ``(G,)`` with the per-response advantage.
+    Correctness is ``rewards >= config.correctness_threshold``, also HRR's binary rule score (Eq. 3).
+    ``lengths`` feed the length re-ranking (Eq. 6). ``valid`` (True = a real response) ranks and centres
+    the real responses alone: a placeholder carries a sentinel, not a score, so it would move ``r_max`` and
+    the mean of every sibling. Placeholders return 0.
     """
     rewards_arr = np.asarray(rewards, dtype=np.float64)
     n = len(rewards_arr)
@@ -118,7 +105,8 @@ def relative_advantages(
 
     advantages = shaped - shaped.mean()
     if config.std_normalize:
-        advantages = advantages / (shaped.std() + _STD_EPS)
+        # The epsilon guards an all-equal shaped group.
+        advantages = advantages / (shaped.std() + 1e-6)
 
     if config.correctness_clip:
         # Eq. 5: floor correct advantages at ξ⁻, cap incorrect ones at ξ⁺.

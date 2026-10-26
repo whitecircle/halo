@@ -20,7 +20,7 @@ from accelerate import PartialState
 PartialState()  # MultiGroupSampler logs through accelerate's logger, which requires the state
 
 from src.trainers.dataloaders import DataParallelLoaderMixin
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 # 4 groups x 2 completions, as the per-rank slice of an already-sharded dataset.
 GROUP_IDS = [0, 0, 1, 1, 2, 2, 3, 3]

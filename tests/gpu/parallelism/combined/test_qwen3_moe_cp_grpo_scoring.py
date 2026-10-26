@@ -21,8 +21,8 @@ from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
-from src.trainers.grpo.objective.offline import offline_loss
+from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from src.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import (
     boundary_loss_negative_control,
     ep_gradient_parameter_names,
@@ -149,7 +149,7 @@ def run(ctx) -> dict:
     for cp_size in (2, 4):
         model, cp_config, ep_layers = _build_model(ctx.device, cp_size)
         assert ep_gradient_parameter_names(model, ep_layers) == ep_names
-        scorer = ChunkedLogprobsCore()
+        scorer = LogprobScoringMixin()
         scorer.temperature = 1.0
         scorer.accelerator = SimpleNamespace(unwrap_model=lambda m: m)
         local_logps, local_labels = scorer._cp_chunked_logps(model, ids, mask, labels)

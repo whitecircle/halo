@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.offline_rules import reject_offline_pp_options
 from src.trainers.parallelism.pipeline_rules import (
     reject_missing_precomputed_columns,
     reject_missing_precomputed_reference,
@@ -37,7 +37,7 @@ from src.trainers.parallelism.pipeline_rules import (
 from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from src.trainers.preference.preference_rules import reject_smpo_pp_options
 
 PEFT_SENTINEL = object()
 """Stand-in for a ``peft_config``: the gates test identity against ``None``, never structure."""
@@ -251,22 +251,14 @@ def _drive_kto(**overrides):
 
 def _drive_smpo(peft_config=None):
     """SMPO gates its explicit ctor parameters itself — the mixin's kwargs hook never sees them."""
-    trainer = SimpleNamespace(
-        is_vlm=False,
-        padding_free=False,
-        lower_clip_percentile=None,
-        upper_clip_percentile=None,
-    )
-    SmoothMarginPOTrainer._reject_pp_explicit_options(trainer, _pp_config(), peft_config)
+    args = SimpleNamespace(padding_free=False, lower_clip_percentile=None, upper_clip_percentile=None)
+    reject_smpo_pp_options(args, _pp_config(), peft_config, is_vlm=False)
 
 
 def _drive_offline_grpo(peft_config=None, compute_metrics=None):
     """Offline GRPO likewise: ``peft_config`` and ``compute_metrics`` are explicit ctor parameters."""
-    trainer = SimpleNamespace(
-        loss_type="grpo", policy_gradient_formulation="prob_weighted", max_prompt_length=64, max_completion_length=64
-    )
-    OfflineGRPOTrainer._reject_pp_explicit_options(
-        trainer, _training_args(), _pp_config(), peft_config, compute_metrics
+    reject_offline_pp_options(
+        _training_args(max_prompt_length=64, max_completion_length=64), _pp_config(), peft_config, compute_metrics
     )
 
 

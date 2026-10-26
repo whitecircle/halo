@@ -17,11 +17,15 @@ Run: ``python tests/cpu/trainers/test_ctor_positions_derived.py`` (or ``pytest -
 import pytest
 
 from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, get_ctor_model_and_config, resolve_ctor_positions
-from src.trainers.grpo.mixins.on_policy_init import GRPO_CTOR_POSITIONS
-from src.trainers.preference.dpo import _CTOR_POSITIONS as DPO_CTOR_POSITIONS
-from src.trainers.preference.kto import _CTOR_POSITIONS as KTO_CTOR_POSITIONS
-from src.trainers.reward.bradley_terry import _CTOR_POSITIONS as REWARD_CTOR_POSITIONS
+from src.trainers.grpo.on_policy import GRPO_CTOR_POSITIONS
+from src.trainers.preference.dpo import DistributedDPOTrainer
+from src.trainers.preference.kto import DistributedKTOTrainer
+from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from src.trainers.sft import _CTOR_POSITIONS as SFT_CTOR_POSITIONS
+
+DPO_CTOR_POSITIONS = DistributedDPOTrainer.CTOR_POSITIONS
+KTO_CTOR_POSITIONS = DistributedKTOTrainer.CTOR_POSITIONS
+REWARD_CTOR_POSITIONS = DistributedRewardTrainer.CTOR_POSITIONS
 
 
 def test_sft_slots_match_installed_trl():
@@ -54,7 +58,7 @@ def test_ctor_config_reads_the_slot_of_the_forwarded_base():
 
 
 def test_ctor_config_falls_through_an_explicit_none_keyword():
-    """Load-bearing at ``_require_vllm_server_mode``: ``args=None`` must not mask a positional config."""
+    """Load-bearing at ``require_vllm_server_mode``: ``args=None`` must not mask a positional config."""
     config = object()
     assert get_ctor_config((None, None, config), {"args": None}, GRPO_CTOR_POSITIONS) is config
     assert get_ctor_config((), {"args": config}, GRPO_CTOR_POSITIONS) is config

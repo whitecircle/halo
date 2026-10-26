@@ -22,11 +22,11 @@ import pytest
 import torch
 from accelerate import PartialState
 
+from src.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, KL_LOGRATIO_CLAMP, kl_clamp_counts
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
-from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
-from src.trainers.grpo.rollout.trajectory_tokenize import TurnRow
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.gloo import run_gloo_ranks
 from tests.common.routing import BareEPLayer

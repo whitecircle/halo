@@ -110,7 +110,7 @@ Three cluster-wide totals bound a large run: actors (above), in-flight episodes
 (`world_size × max_concurrent_rollouts`), and per-node sandbox slots (next section).
 
 **Under TP/ETP, most of that load is discarded.** Every rank collects a full batch, then
-`_broadcast_rollouts_for_tp` replaces each rank's results with its TP-group leader's, so all ranks
+the round entry replaces each rank's results with its TP-group leader's (`_broadcast_object_from_tp_leader`), so all ranks
 tokenize identical trajectories. Actor and rollout-server load therefore scales with `world_size`
 while useful rollouts scale with `data_parallel_size`.
 

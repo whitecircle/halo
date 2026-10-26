@@ -18,9 +18,20 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 PartialState()  # the breaker warns through accelerate's logger, which refuses to log without it
+
+
+class _TrainerStandIn(types.SimpleNamespace):
+    """Weak-referenceable, as the trainer the breaker's hook holds is."""
+
+
+def _skip_hook(host):
+    """The breaker's pre-optimizer-step hook over ``host``, as the trainer registers it."""
+    callback = _BreakerOptimizerSkipCallback(host)
+    return lambda: callback.on_pre_optimizer_step(None, None, None)
 
 
 def _breaker_host(threshold: float, tripped: bool = False):
@@ -44,11 +55,11 @@ def _batch(masked_trajs: list[bool]):
 
 def test_the_skip_fires_on_every_optimizer_step_while_the_round_is_tripped():
     calls = []
-    host = types.SimpleNamespace(
+    host = _TrainerStandIn(
         _breaker_tripped_this_step=True,
         optimizer=types.SimpleNamespace(zero_grad=lambda set_to_none: calls.append(set_to_none)),
     )
-    skip = DistributedAsyncEnvironmentalGRPOTrainer._skip_optimizer_step_if_breaker_tripped.__get__(host)
+    skip = _skip_hook(host)
     for _ in range(3):
         skip()
     assert calls == [True, True, True], "a round of three optimizer steps must skip all three"

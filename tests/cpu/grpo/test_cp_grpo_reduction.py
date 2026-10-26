@@ -10,7 +10,7 @@ import torch.distributed as dist
 
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.sequence_chunks import cp_sum_rows
-from src.trainers.grpo.objective.offline import offline_loss, offline_loss_normalizer, offline_loss_numerator
+from src.trainers.grpo.objective.offline_loss import offline_loss, offline_loss_normalizer, offline_loss_numerator
 from tests.common.gloo import run_gloo_ranks
 
 COEFFICIENTS = torch.tensor([[0.0, 0.0, 0.0], [2.0, -3.0, 4.0], [-1.0, 5.0, 2.0], [3.0, 1.0, -2.0]])

@@ -8,7 +8,7 @@ indices they hold unpadded, which two of the roster's attentions read:
 * DeepSeek-V4's CSA/HCA compressors pool KV over windows cut at fixed tensor indices, with no pad mask,
   and judge causality per window, so no choice of ``position_ids`` realigns them.
 
-``concatenated_inputs`` moves every pad behind its completion, after which a model's default positions
+``concatenate_pairs`` moves every pad behind its completion, after which a model's default positions
 and windows are the unpadded row's. Pinned through the real ``concatenated_forward``:
 
 * a ragged batch's left-padded pair scores the log-probs that pair scores alone, on a tiny Mistral4
@@ -30,8 +30,10 @@ import torch.nn as nn
 from transformers import Gemma4Config, Gemma4ForConditionalGeneration
 from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
 
+from src.data.collators.smpo import concatenate_pairs
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG, TINY_MISTRAL4_CONFIG
+from tests.common.smpo_trainer import smpo_trainer
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 PAD_TOKEN_ID = 0
@@ -73,13 +75,7 @@ class _CPAttention(nn.Module):
 
 def _host(cp_layout: bool) -> SmoothMarginPOTrainer:
     """A construction-free SMPO; ``cp_layout`` lays the batch out as CP does, on one process."""
-    host = object.__new__(SmoothMarginPOTrainer)
-    host.parallelism_config = SimpleNamespace(cp_size=2 if cp_layout else 1)
-    host.cp_config = None
-    host.pad_token_id = PAD_TOKEN_ID
-    host.padding_free = False
-    host.lower_clip_percentile = host.upper_clip_percentile = host.min_log_prob = None
-    return host
+    return smpo_trainer(parallelism_config=SimpleNamespace(cp_size=2 if cp_layout else 1), pad_token_id=PAD_TOKEN_ID)
 
 
 def _batch(prompts: list[list[int]], chosen: list[list[int]], rejected: list[list[int]]) -> dict[str, torch.Tensor]:
@@ -182,7 +178,7 @@ def test_the_flush_reads_nothing_back_from_the_device(cp_size):
     batch = {key: value.to("meta") for key, value in _batch(_PROMPTS, _CHOSEN, _REJECTED).items()}
     batch["mm_token_type_ids"] = torch.zeros_like(batch["prompt_input_ids"])
 
-    out = SmoothMarginPOTrainer.concatenated_inputs(batch, pad_token_id=PAD_TOKEN_ID, cp_size=cp_size)
+    out = concatenate_pairs(batch, pad_token_id=PAD_TOKEN_ID, cp_size=cp_size)
 
     width = batch["prompt_input_ids"].size(1) + max(
         batch[f"{side}_input_ids"].size(1) for side in ("chosen", "rejected")

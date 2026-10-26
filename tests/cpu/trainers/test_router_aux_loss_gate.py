@@ -21,7 +21,7 @@ from src.models.moe.router_logits import router_logits_forced_off
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.preference.smpo import SmoothMarginPOTrainer

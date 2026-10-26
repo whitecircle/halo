@@ -14,10 +14,7 @@ from src.trainers.grpo.objective.logratio import UPDATE_SKIPPED_KEY
 
 logger = get_logger(__name__)
 
-# TRL's metrics the conditions read: the entropy and, under its vLLM IS correction, the online trainer's
-# gap (a mean absolute difference). The environmental trainer's own gap (a signed mean, read by
-# magnitude) and the breaker's verdict are keyed in ``objective/logratio.py``, beside the IS ratio and
-# the mask stages they read.
+# TRL's entropy and, under its vLLM IS correction, the online trainer's log-prob gap (a mean absolute difference).
 ENTROPY_KEY = "entropy"
 SAMPLING_LOGP_GAP_KEY = "sampling/sampling_logp_difference/mean"
 
@@ -37,22 +34,6 @@ class GRPOEarlyStopCallback(StopsTrainingEarly):
         self.gap_key = gap_key
         self._streaks: dict[str, int] = {}
         self._evidence: dict[str, str] = {}
-
-    def _readings(self, logs: dict[str, float]) -> dict[str, str | None]:
-        """Each armed condition this log reads: the breaching reading's description, or ``None`` when healthy."""
-        config, found = self.config, {}
-        entropy = logs.get(ENTROPY_KEY)
-        if config.entropy_band is not None and entropy is not None:
-            low, high = config.entropy_band
-            found["entropy"] = None if low <= entropy <= high else f"entropy {entropy:.3f} outside [{low}, {high}]"
-        gap = logs.get(self.gap_key)
-        if config.logratio_gap is not None and gap is not None:
-            breach = abs(gap) > config.logratio_gap
-            found["logratio_gap"] = f"log-prob gap {abs(gap):.4f} above {config.logratio_gap}" if breach else None
-        skipped = logs.get(UPDATE_SKIPPED_KEY)
-        if config.on_skipped_updates and skipped is not None:
-            found["skipped_updates"] = "every update skipped by the trust-region breaker" if skipped >= 1.0 else None
-        return found
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs or ENTROPY_KEY not in logs:
@@ -80,6 +61,22 @@ class GRPOEarlyStopCallback(StopsTrainingEarly):
         if self.stopped:
             control.should_save = False
             control.should_evaluate = False
+
+    def _readings(self, logs: dict[str, float]) -> dict[str, str | None]:
+        """Each armed condition this log reads: the breaching reading's description, or ``None`` when healthy."""
+        config, found = self.config, {}
+        entropy = logs.get(ENTROPY_KEY)
+        if config.entropy_band is not None and entropy is not None:
+            low, high = config.entropy_band
+            found["entropy"] = None if low <= entropy <= high else f"entropy {entropy:.3f} outside [{low}, {high}]"
+        gap = logs.get(self.gap_key)
+        if config.logratio_gap is not None and gap is not None:
+            breach = abs(gap) > config.logratio_gap
+            found["logratio_gap"] = f"log-prob gap {abs(gap):.4f} above {config.logratio_gap}" if breach else None
+        skipped = logs.get(UPDATE_SKIPPED_KEY)
+        if config.on_skipped_updates and skipped is not None:
+            found["skipped_updates"] = "every update skipped by the trust-region breaker" if skipped >= 1.0 else None
+        return found
 
 
 def build_early_stop_callback(

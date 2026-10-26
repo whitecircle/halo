@@ -22,8 +22,8 @@ from accelerate import PartialState
 # The online install logs through accelerate's logger, which requires an initialized state.
 PartialState()
 
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
@@ -65,29 +65,29 @@ def _install_host(model, vllm_generation):
     return me
 
 
-def test_online_setup_weight_sync_replaces_trl_sync_on_float_model():
+def test_online_install_weight_sync_replaces_trl_sync_on_float_model():
     """The install must actually bind the distributed-aware sync — TRL's own ``sync_weights``
     forwards DTensors verbatim and deadlocks against the trainer↔vLLM NCCL group."""
     me = _install_host(_FloatStub(), types.SimpleNamespace())
-    DistributedGRPOTrainer._setup_weight_sync(me)
+    DistributedGRPOTrainer._install_weight_sync(me)
     assert me.vllm_generation.sync_weights.__func__ is DistributedGRPOTrainer._distributed_sync_weights
 
 
-def test_online_setup_weight_sync_raises_without_vllm_generation():
+def test_online_install_weight_sync_raises_without_vllm_generation():
     """TRL builds ``vllm_generation`` on EVERY rank whenever ``use_vllm`` is set (only its client is
     main-only), and this trainer requires server-mode vLLM — so a missing one means generation is
     not wired at all. Returning quietly would leave TRL's own ``sync_weights`` in place and every
     rollout would come from an engine that never receives the trained weights."""
     me = _install_host(_FloatStub(), None)
     with pytest.raises(RuntimeError, match="vllm_generation"):
-        DistributedGRPOTrainer._setup_weight_sync(me)
+        DistributedGRPOTrainer._install_weight_sync(me)
 
 
 _SPINE_STEPS = (
     "_configure_distributed_modes",
     "_validate_held_reference_model",
     "_resolve_chunked_head_transform",
-    "_setup_weight_sync",
+    "_install_weight_sync",
     "_disable_dropout_for_onpolicy",
 )
 
@@ -98,7 +98,7 @@ def _spine_host(model, backend: str, ran: list[str]):
         model=model,
         _rollout_backend=backend,
         _loss_logits_width=lambda: 7,
-        _check_full_logits_fit=lambda width: ran.append(f"_check_full_logits_fit({width})"),
+        _verify_full_logits_fit=lambda width: ran.append(f"_verify_full_logits_fit({width})"),
     )
 
 
@@ -109,7 +109,7 @@ def test_the_spine_gates_a_quantized_model_before_anything_can_push(backend):
     ran: list[str] = []
     with pytest.raises(ValueError, match="QLoRA .* not supported with rollout-engine weight sync"):
         OnPolicyGRPOInitMixin._finish_on_policy_init(_spine_host(_QuantizedStub(), backend, ran))
-    assert "_setup_weight_sync" not in ran, "the sync was wired for a model it cannot ship"
+    assert "_install_weight_sync" not in ran, "the sync was wired for a model it cannot ship"
 
 
 def test_both_trainers_reach_the_gate_through_the_shared_init_spine():
@@ -126,18 +126,16 @@ def test_both_trainers_reach_the_gate_through_the_shared_init_spine():
         "_configure_distributed_modes",
         "_validate_held_reference_model",
         "_resolve_chunked_head_transform",
-        "_check_full_logits_fit(7)",
-        "_setup_weight_sync",
+        "_verify_full_logits_fit(7)",
+        "_install_weight_sync",
         "_disable_dropout_for_onpolicy",
     ], f"the shared init spine no longer runs its gates in order: {ran}"
     for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         assert "_finish_on_policy_init" in inspect.getsource(cls.__init__), (
             f"{cls.__name__}.__init__ no longer closes through the shared spine"
         )
-        assert cls._loss_logits_width is not OnPolicyGRPOInitMixin._loss_logits_width, (
-            f"{cls.__name__} never states its logits width"
-        )
-    assert DistributedGRPOTrainer._setup_weight_sync is not OnPolicyGRPOInitMixin._setup_weight_sync, (
+        assert "_loss_logits_width" in vars(cls), f"{cls.__name__} never states its logits width"
+    assert DistributedGRPOTrainer._install_weight_sync is not OnPolicyGRPOInitMixin._install_weight_sync, (
         "the online trainer no longer installs its distributed-aware sync"
     )
 

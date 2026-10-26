@@ -7,7 +7,7 @@ Covers the pieces GPU tests can't cheaply exercise:
     invariant, completion tokenization parity with the text path (EOS append, truncation);
   - ``DataCollatorForVLMSMPO``: placeholder expansion at collation, row-major vision stacking,
     left-padded prompts, BOS handling, over-length prompt fail-loud;
-  - ``concatenated_inputs``: vision-key duplication for the chosen|rejected concat (odd/even
+  - ``concatenate_pairs``: vision-key duplication for the chosen|rejected concat (odd/even
     batches) with the text keys byte-identical to the no-vision batch;
   - ``concatenated_forward``: vision tensors reach the model forward; padding_free rejects them;
   - the VLM-mode guards (padding_free, CP);
@@ -33,10 +33,11 @@ from accelerate import PartialState
 from datasets import Dataset
 from PIL import Image
 
-from src.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO
+from src.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
 from src.data.pipeline.preferences import tokenize_vlm_preference_row
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from src.trainers.preference.preference_rules import reject_smpo_vlm_options
 from tests.common.models import QWEN3_5_9B
+from tests.common.smpo_trainer import smpo_trainer
 from tests.common.tokenizers import load_cached_processor
 
 IMAGE_TOKEN = "<image>"
@@ -129,29 +130,15 @@ class StubProcessor:
         return out
 
 
-def make_trainer(**attrs):
+def make_trainer(*, is_vlm: bool = True, max_prompt_length: int = 512, max_completion_length: int = 64, **args):
     """Bare SmoothMarginPOTrainer with just the attributes the tested methods read."""
-    trainer = SmoothMarginPOTrainer.__new__(SmoothMarginPOTrainer)
-    defaults = {
-        "is_vlm": True,
-        "padding_free": False,
-        "max_prompt_length": 512,
-        "max_completion_length": 64,
-        "truncation_mode": "keep_start",
-        "dataset_num_proc": None,
-        # The real trainer resolves this once from tokenizer + model config.
-        "_eos_token_ids": frozenset({EOS_ID}),
-        "pad_token_id": 0,
-        # cp_size is a read-only mixin property; has_ep_group gates dataset-map workers (EP pins 1).
-        "parallelism_config": SimpleNamespace(cp_size=1, has_ep_group=False),
-        "cp_config": None,
-        "lower_clip_percentile": None,
-        "upper_clip_percentile": None,
-        "min_log_prob": None,
-    }
-    defaults.update(attrs)
-    for key, value in defaults.items():
-        setattr(trainer, key, value)
+    # cp_size is a read-only mixin property; has_ep_group gates dataset-map workers (EP pins 1).
+    trainer = smpo_trainer(parallelism_config=SimpleNamespace(cp_size=1, has_ep_group=False), **args)
+    trainer.is_vlm = is_vlm
+    trainer.max_prompt_length = max_prompt_length
+    trainer.max_completion_length = max_completion_length
+    # The real trainer resolves this once from tokenizer + model config.
+    trainer._eos_token_ids = frozenset({EOS_ID})
     return trainer
 
 
@@ -177,7 +164,7 @@ def prep_row(trainer, features, processor):
         processor,
         max_prompt_length=trainer.max_prompt_length,
         max_completion_length=trainer.max_completion_length,
-        truncation_mode=trainer.truncation_mode,
+        truncation_mode=trainer.args.truncation_mode,
     )
 
 
@@ -408,21 +395,21 @@ def make_text_batch(batch_size):
     }
 
 
-def test_concatenated_inputs_duplicates_vision_keys():
+def test_concatenate_pairs_duplicates_vision_keys():
     for batch_size in (1, 2, 3):  # odd and even
         batch = make_text_batch(batch_size)
         pixel_values = torch.randn(batch_size * PATCHES_PER_IMAGE, PATCH_DIM)
         grid = torch.tensor([[1, 2, 2]] * batch_size)
         vision_batch = {**batch, "pixel_values": pixel_values, "image_grid_thw": grid}
 
-        out = SmoothMarginPOTrainer.concatenated_inputs(vision_batch, pad_token_id=0)
+        out = concatenate_pairs(vision_batch, pad_token_id=0)
 
         assert torch.equal(out["pixel_values"], torch.cat([pixel_values, pixel_values], dim=0))
         assert torch.equal(out["image_grid_thw"], torch.cat([grid, grid], dim=0))
         assert out["num_chosen"] == batch_size
 
         # Text keys must stay byte-identical to the no-vision batch.
-        out_text = SmoothMarginPOTrainer.concatenated_inputs(batch, pad_token_id=0)
+        out_text = concatenate_pairs(batch, pad_token_id=0)
         assert set(out_text.keys()) == {"input_ids", "attention_mask", "labels", "num_chosen"}
         for key in ("input_ids", "attention_mask", "labels"):
             assert torch.equal(out[key], out_text[key])
@@ -478,27 +465,29 @@ def test_concatenated_forward_padding_free_rejects_vision():
 
 def test_vlm_mode_guards():
     with pytest.raises(ValueError, match="padding_free"):
-        make_trainer(padding_free=True)._validate_vlm_mode(None)
+        reject_smpo_vlm_options(SimpleNamespace(padding_free=True), None, is_vlm=True)
 
     with pytest.raises(ValueError, match="Context Parallelism"):
-        make_trainer()._validate_vlm_mode(SimpleNamespace(cp_size=2))
+        reject_smpo_vlm_options(SimpleNamespace(padding_free=False), SimpleNamespace(cp_size=2), is_vlm=True)
 
-    make_trainer()._validate_vlm_mode(None)
-    make_trainer()._validate_vlm_mode(SimpleNamespace(cp_size=1))
+    reject_smpo_vlm_options(SimpleNamespace(padding_free=False), None, is_vlm=True)
+    reject_smpo_vlm_options(SimpleNamespace(padding_free=False), SimpleNamespace(cp_size=1), is_vlm=True)
 
     # Text mode must never trip the VLM guards.
-    make_trainer(is_vlm=False, padding_free=True)._validate_vlm_mode(SimpleNamespace(cp_size=2))
+    reject_smpo_vlm_options(SimpleNamespace(padding_free=True), SimpleNamespace(cp_size=2), is_vlm=False)
 
 
 def test_prepare_dataset_skips_prepared_rows():
     PartialState()  # the accelerate logger in _prepare_dataset requires an initialized state
     vlm_ds = Dataset.from_dict({"prompt_text": ["p"], "chosen_input_ids": [[1, 2]], "rejected_input_ids": [[3, 2]]})
-    assert make_trainer()._prepare_dataset(vlm_ds, None, "train") is vlm_ds
+    trainer = make_trainer()
+    assert trainer._prepare_dataset(vlm_ds, None, trainer.args, "train") is vlm_ds
 
     text_ds = Dataset.from_dict(
         {"prompt_input_ids": [[1]], "chosen_input_ids": [[1, 2]], "rejected_input_ids": [[3, 2]]}
     )
-    assert make_trainer(is_vlm=False)._prepare_dataset(text_ds, None, "train") is text_ds
+    trainer = make_trainer(is_vlm=False)
+    assert trainer._prepare_dataset(text_ds, None, trainer.args, "train") is text_ds
 
     # A prepared TEXT dataset must not satisfy the VLM check, else a pixel-less run passes silently.
     assert not {"prompt_text"}.issubset(text_ds.column_names)
@@ -523,7 +512,7 @@ def test_dataset_map_arrow_roundtrip():
                 }
             ]
         )
-        mapped = trainer._prepare_dataset(ds, processor, "train")
+        mapped = trainer._prepare_dataset(ds, processor, trainer.args, "train")
 
         row = mapped[0]
         assert IMAGE_TOKEN in row["prompt_text"]
@@ -559,7 +548,7 @@ def test_real_qwen35_processor_end_to_end():
     )
     assert (batch["prompt_input_ids"][0] == image_token_id).sum() > 1
 
-    concat = SmoothMarginPOTrainer.concatenated_inputs(batch, pad_token_id=0)
+    concat = concatenate_pairs(batch, pad_token_id=0)
     assert concat["pixel_values"].shape[0] == 2 * batch["pixel_values"].shape[0]
 
 

@@ -18,7 +18,7 @@ from collections import defaultdict
 
 import pytest
 
-import src.trainers.grpo.rollout.rollout_metrics as rm
+import src.trainers.grpo.environmental.rollout_metrics as rm
 
 
 class _MetricsHost(rm.RolloutMetricsMixin):

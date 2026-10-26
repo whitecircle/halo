@@ -21,8 +21,14 @@ import torch
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.episode import RolloutResult
 from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.reasoning_terms import reasoning_floor_term, reasoning_price_term
+from src.trainers.grpo.environmental.environmental_rules import reject_inert_reasoning_terms
+from src.trainers.grpo.environmental.reasoning import (
+    reasoning_floor_term,
+    reasoning_price_term,
+    reasoning_token_counts,
+)
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
 
 PRICE = {"low": 0.01, "medium": 0.005, "high": 0.001}
@@ -82,19 +88,35 @@ def test_the_floor_target_rounds_a_cap_the_share_does_not_divide():
     assert reasoning_floor_term([750], 1001, 1.0) == pytest.approx(-1 / 751)
 
 
+class _CharTokenizer:
+    """One token per character: deterministic reasoning lengths without a real tokenizer."""
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": [0] * len(text)}
+
+
+def _reward_host(**config) -> DistributedAsyncEnvironmentalGRPOTrainer:
+    trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
+    trainer.async_config = AsyncTrainingConfig(**config)
+    trainer._tokenizer = _CharTokenizer()
+    trainer._metrics = {"train": defaultdict(list)}
+    trainer._carry_reasoning = False
+    trainer._warned_once = set()
+    return trainer
+
+
 def _rollout(level, tokens, budget=None, soft=False):
+    """An episode of zero environment reward whose turns carry ``tokens`` reasoning tokens each."""
     trajectory = types.SimpleNamespace(
-        reasoning_effort=level, reasoning_budget=budget, reasoning_budget_soft=soft, tokens=tokens
+        reasoning_effort=level, reasoning_budget=budget, reasoning_budget_soft=soft, tokens=tokens, messages=[]
     )
-    return types.SimpleNamespace(trajectory=trajectory)
+    return types.SimpleNamespace(trajectory=trajectory, total_reward=0.0)
 
 
 def _apply(rollouts, **config):
-    trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
-    trainer.async_config = AsyncTrainingConfig(**config)
-    trainer._metrics = {"train": defaultdict(list)}
-    rewards = torch.zeros(len(rollouts))
-    trainer._apply_reasoning_terms(rewards, rollouts, [r.trajectory.tokens if r.trajectory else [] for r in rollouts])
+    trainer = _reward_host(**config)
+    tokens = [r.trajectory.tokens if r.trajectory else [] for r in rollouts]
+    rewards = trainer._build_rollout_rewards(rollouts, tokens, torch.device("cpu"))
     return rewards, flushed_metrics(trainer)
 
 
@@ -140,28 +162,11 @@ def test_each_term_is_off_on_its_own_and_records_only_its_own_metric():
     assert rewards[0].item() == pytest.approx(-0.05 / 3) and "reward/reasoning_price" not in metrics
 
 
-class _CharTokenizer:
-    """One token per character: deterministic reasoning lengths without a real tokenizer."""
-
-    def __call__(self, text, add_special_tokens=False):
-        return {"input_ids": [0] * len(text)}
-
-
 def _episode(thinkings, budget=1000, level="low"):
     turns = (Message.assistant("step", thinking=thinking) for thinking in thinkings)
     trajectory = Trajectory(messages=[Message.user("task"), *turns])
     trajectory.reasoning_budget, trajectory.reasoning_effort = budget, level
     return RolloutResult(prompt="task", trajectory=trajectory)
-
-
-def _reward_host(**config) -> DistributedAsyncEnvironmentalGRPOTrainer:
-    trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
-    trainer.async_config = AsyncTrainingConfig(**config)
-    trainer._tokenizer = _CharTokenizer()
-    trainer._metrics = {"train": defaultdict(list)}
-    trainer._carry_reasoning = False
-    trainer._warned_once = set()
-    return trainer
 
 
 def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
@@ -177,7 +182,7 @@ def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
         _episode(["x" * 300, "x" * 75]),  # 375 summed over two turns: half the target short, 375 priced
     ]
     rewards = trainer._build_rollout_rewards(
-        episodes, trainer._episode_reasoning_tokens(episodes), torch.device("cpu")
+        episodes, [reasoning_token_counts(trainer._tokenizer, e.trajectory) for e in episodes], torch.device("cpu")
     )
     assert rewards.tolist() == pytest.approx([-0.05, 0.0, -0.0075, -0.025 - 0.00375])
     metrics = flushed_metrics(trainer)
@@ -189,7 +194,7 @@ def test_with_both_terms_off_nothing_is_charged_or_logged():
     trainer = _reward_host()
     episodes = [_episode(["x" * 10])]
     rewards = trainer._build_rollout_rewards(
-        episodes, trainer._episode_reasoning_tokens(episodes), torch.device("cpu")
+        episodes, [reasoning_token_counts(trainer._tokenizer, e.trajectory) for e in episodes], torch.device("cpu")
     )
     assert rewards.tolist() == [0.0]
     metrics = flushed_metrics(trainer)
@@ -197,7 +202,9 @@ def test_with_both_terms_off_nothing_is_charged_or_logged():
 
 
 def test_a_missing_trajectory_is_free():
-    rewards, _ = _apply([types.SimpleNamespace(trajectory=None)], reasoning_price=PRICE, reasoning_floor=0.05)
+    rewards, _ = _apply(
+        [types.SimpleNamespace(trajectory=None, total_reward=0.0)], reasoning_price=PRICE, reasoning_floor=0.05
+    )
     assert rewards[0].item() == 0.0
 
 
@@ -243,23 +250,33 @@ def _constructing(budgets, effort="random", soft=(), **config):
     return trainer
 
 
+def _check_terms(host) -> None:
+    """The reasoning-terms refusals as the trainer's init runs them, the drawable levels' own contract first."""
+    reject_inert_reasoning_terms(
+        host.async_config,
+        host._rollout_env,
+        budgeted=host._any_episode_budgeted,
+        every_budget_soft=host._every_budget_soft,
+    )
+
+
 def test_construction_refuses_a_price_table_that_misses_or_invents_a_level():
     """The config parses any non-empty map; the trainer, beside the environment that draws the levels,
     refuses one that is not exactly low, medium and high."""
     with pytest.raises(ValueError, match=r"missing \['high'\]"):
-        _constructing({}, reasoning_price={"low": 0.01, "medium": 0.005})._validate_reasoning_terms()
+        _check_terms(_constructing({}, reasoning_price={"low": 0.01, "medium": 0.005}))
     with pytest.raises(ValueError, match=r"unknown \['extreme'\]"):
-        _constructing({}, reasoning_price={**PRICE, "extreme": 0.0})._validate_reasoning_terms()
-    _constructing({}, reasoning_price=PRICE)._validate_reasoning_terms()
-    _constructing({}, reasoning_price=TEMPLATE_PRICE)._validate_reasoning_terms()
-    _constructing({})._validate_reasoning_terms()  # the price off: no table to check
+        _check_terms(_constructing({}, reasoning_price={**PRICE, "extreme": 0.0}))
+    _check_terms(_constructing({}, reasoning_price=PRICE))
+    _check_terms(_constructing({}, reasoning_price=TEMPLATE_PRICE))
+    _check_terms(_constructing({}))  # the price off: no table to check
 
 
 def test_construction_refuses_a_price_with_no_level_to_price_at():
     """The price reads the episode's level; an environment drawing none would charge nothing, silently."""
     with pytest.raises(ValueError, match="reasoning_effort is unset"):
-        _constructing({}, effort=None, reasoning_price=PRICE)._validate_reasoning_terms()
-    _constructing({}, effort="low", reasoning_price=PRICE)._validate_reasoning_terms()
+        _check_terms(_constructing({}, effort=None, reasoning_price=PRICE))
+    _check_terms(_constructing({}, effort="low", reasoning_price=PRICE))
 
 
 def test_construction_refuses_an_answer_room_bound_on_a_level_with_no_reasoning_cap():
@@ -267,10 +284,8 @@ def test_construction_refuses_an_answer_room_bound_on_a_level_with_no_reasoning_
     the bound bounding nothing, so the trainer refuses the run before any episode instead of every episode
     raising in its actor."""
     with pytest.raises(ValueError, match="rollout_max_answer_tokens"):
-        _constructing({"low": 8192, "medium": 12288}, rollout_max_answer_tokens=8192)._validate_reasoning_terms()
-    _constructing(
-        {"low": 8192, "medium": 12288, "high": 16384}, rollout_max_answer_tokens=8192
-    )._validate_reasoning_terms()
+        _check_terms(_constructing({"low": 8192, "medium": 12288}, rollout_max_answer_tokens=8192))
+    _check_terms(_constructing({"low": 8192, "medium": 12288, "high": 16384}, rollout_max_answer_tokens=8192))
 
 
 def test_a_budget_on_a_level_the_environment_never_draws_budgets_no_episode():
@@ -278,22 +293,24 @@ def test_a_budget_on_a_level_the_environment_never_draws_budgets_no_episode():
     none, so a budget elsewhere would leave the floor never pricing an episode."""
     for effort in ("low", None):
         with pytest.raises(ValueError, match="no episode of this run carries one"):
-            _constructing({"high": 16384}, effort=effort, reasoning_floor=0.05)._validate_reasoning_terms()
-    _constructing({"high": 16384}, effort="high", reasoning_floor=0.05)._validate_reasoning_terms()
-    _constructing(
-        {}, effort=None, reasoning_floor=0.05, rollout_max_tokens=30000, rollout_max_thinking_tokens=8000
-    )._validate_reasoning_terms()
+            _check_terms(_constructing({"high": 16384}, effort=effort, reasoning_floor=0.05))
+    _check_terms(_constructing({"high": 16384}, effort="high", reasoning_floor=0.05))
+    _check_terms(
+        _constructing(
+            {}, effort=None, reasoning_floor=0.05, rollout_max_tokens=30000, rollout_max_thinking_tokens=8000
+        )
+    )
 
 
 def test_construction_refuses_a_floor_no_episode_can_ever_be_priced_by():
     with pytest.raises(ValueError, match="reasoning_floor prices an episode against its per-turn thinking cap"):
-        _constructing({}, reasoning_floor=0.05)._validate_reasoning_terms()
+        _check_terms(_constructing({}, reasoning_floor=0.05))
     # One budgeted level is enough, and so is the run-wide cap.
-    _constructing({"high": 16384}, reasoning_floor=0.05)._validate_reasoning_terms()
-    _constructing({}, reasoning_floor=0.05, rollout_max_thinking_tokens=8000)._validate_reasoning_terms()
+    _check_terms(_constructing({"high": 16384}, reasoning_floor=0.05))
+    _check_terms(_constructing({}, reasoning_floor=0.05, rollout_max_thinking_tokens=8000))
     # The floor reads the stated budget, so a soft one no engine cap backs still carries it.
-    _constructing({"high": 16384}, soft=("high",), reasoning_floor=0.05)._validate_reasoning_terms()
-    _constructing({})._validate_reasoning_terms()  # off: nothing to check
+    _check_terms(_constructing({"high": 16384}, soft=("high",), reasoning_floor=0.05))
+    _check_terms(_constructing({}))  # off: nothing to check
 
 
 def test_past_a_budget_the_price_counts_only_what_each_turn_spent_past_it():
@@ -334,13 +351,15 @@ def test_construction_refuses_pricing_past_a_budget_unless_every_drawable_budget
     config = {"reasoning_price": PRICE, "reasoning_price_past_budget": True}
     for soft in ((), ("high",)):
         with pytest.raises(ValueError, match="budget is enforced or unset"):
-            _constructing(budgets, soft=soft, **config)._validate_reasoning_terms()
+            _check_terms(_constructing(budgets, soft=soft, **config))
     with pytest.raises(ValueError, match="budget is enforced or unset"):
-        _constructing({"low": 8192}, effort="high", soft=("low", "high"), **config)._validate_reasoning_terms()
-    _constructing(budgets, effort="high", soft=("high",), **config)._validate_reasoning_terms()
-    _constructing(
-        budgets, soft=("low", "medium", "high"), rollout_max_tokens=30000, rollout_max_answer_tokens=8192, **config
-    )._validate_reasoning_terms()
+        _check_terms(_constructing({"low": 8192}, effort="high", soft=("low", "high"), **config))
+    _check_terms(_constructing(budgets, effort="high", soft=("high",), **config))
+    _check_terms(
+        _constructing(
+            budgets, soft=("low", "medium", "high"), rollout_max_tokens=30000, rollout_max_answer_tokens=8192, **config
+        )
+    )
 
 
 class _CountingTokenizer(_CharTokenizer):
@@ -356,11 +375,8 @@ class _Round:
     """The real round entry over two collected episodes, recording what each consumer was handed.
     ``leader`` stands in for the TP/ETP group leader's rollouts, which the broadcast hands every rank."""
 
-    _generate_and_score_completions_base = (
-        DistributedAsyncEnvironmentalGRPOTrainer._generate_and_score_completions_base
-    )
+    _collect_and_score_rollouts = DistributedAsyncEnvironmentalGRPOTrainer._collect_and_score_rollouts
     _extract_prompts_and_contexts = DistributedAsyncEnvironmentalGRPOTrainer._extract_prompts_and_contexts
-    _episode_reasoning_tokens = DistributedAsyncEnvironmentalGRPOTrainer._episode_reasoning_tokens
     eval_split_rows = DistributedAsyncEnvironmentalGRPOTrainer.eval_split_rows
 
     def __init__(self, leader: list[RolloutResult] | None = None):
@@ -375,7 +391,7 @@ class _Round:
         self._rollout_manager = types.SimpleNamespace(collect_rollouts=lambda prompts, contexts: episodes)
         self.handed: dict[str, list] = {}
 
-    def _broadcast_rollouts_for_tp(self, rollout_results):
+    def _broadcast_object_from_tp_leader(self, rollout_results):
         return rollout_results if self._leader is None else self._leader
 
     def _build_training_tensors(self, rollout_results, device, mode, num_padding, reasoning_tokens):
@@ -390,7 +406,7 @@ def test_a_rounds_reasoning_is_counted_once_for_both_consumers():
     """The reasoning terms and the rollout metrics read one count: tokenizing every trace twice per step
     costs a second pass over the longest text the step holds."""
     host = _Round()
-    host._generate_and_score_completions_base([{"prompt": "task"}, {"prompt": "task"}])
+    host._collect_and_score_rollouts([{"prompt": "task"}, {"prompt": "task"}])
     assert host.handed["rewards"] == [[2, 0, 4], [3]]
     assert host.handed["metrics"] is host.handed["rewards"]
     assert host._tokenizer.calls == 3, "each reasoning trace is tokenized once per step"
@@ -400,7 +416,7 @@ def test_the_counts_are_the_tp_leaders_episodes():
     """Under TP/ETP every rank trains the group leader's rollouts, so both consumers count the leader's
     reasoning, not the episodes this rank collected."""
     host = _Round(leader=[_episode(["xxxxx"]), _episode(["xxxxxx", None])])
-    host._generate_and_score_completions_base([{"prompt": "task"}, {"prompt": "task"}])
+    host._collect_and_score_rollouts([{"prompt": "task"}, {"prompt": "task"}])
     assert host.handed["rewards"] == host.handed["metrics"] == [[5], [6, 0]]
 
 

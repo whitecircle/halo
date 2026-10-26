@@ -71,13 +71,13 @@ from src.model_loading.parallel.frozen_models import load_reference_model_for_on
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.models.context_window import get_model_context_window
 from src.runtime.collectives import barrier
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from src.trainers.grpo.rollout.engine_preflight import (
     verify_context_window,
     verify_engine_prompt_logprobs,
     verify_sampler_logprob_reference,
 )
-from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 
 logger = get_logger(__name__, log_level="INFO")
 

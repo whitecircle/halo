@@ -248,3 +248,27 @@ def require_pad_token_id(processing_class, why: str) -> int:
             f"{why} and needs the tokenizer's pad_token_id; the processing_class passed to the trainer has none."
         )
     return pad_id
+
+
+def require_pooling_pad_id(config, tokenizer_pad_id: int | None) -> int:
+    """The pad id sequence-classification pooling keys on, or a raise when it is unset or disagrees with the
+    tokenizer's, which pads every PP batch: no filler would count as padding, and every row would pool a pad."""
+    pad_id = config.get_text_config().pad_token_id
+    if pad_id is None:
+        raise ValueError(
+            "Sequence-classification pooling under pipeline parallelism picks each row's rightmost "
+            "token != config.pad_token_id, but the model config has pad_token_id=None (transformers "
+            "itself cannot pool batches > 1 in this state). The setup seam records the tokenizer's "
+            "pad id for you, so reaching here means the tokenizer settled on none either: give it "
+            "one with --pad_token (a token already in the vocabulary) or --added_special_tokens (to "
+            "add the token first)."
+        )
+    if tokenizer_pad_id is not None and tokenizer_pad_id != pad_id:
+        raise ValueError(
+            f"config.pad_token_id ({pad_id}) disagrees with the tokenizer's pad_token_id "
+            f"({tokenizer_pad_id}). Pipeline parallelism pads every batch to max_length with the "
+            f"tokenizer's id while pooling keys on the config's, so every row would pool at the last "
+            f"filler token instead of its last real one — a finite loss that learns nothing. Set "
+            f"model.config.pad_token_id = tokenizer.pad_token_id (or pass --pad_token)."
+        )
+    return pad_id

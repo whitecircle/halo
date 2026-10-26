@@ -25,7 +25,7 @@ from transformers import AutoTokenizer
 
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import (
     TP_RESUME_PROBE_TEXT,
     RestorePointSnapshot,
@@ -90,9 +90,9 @@ def _batch_parity_check(trainer) -> tuple[float, float]:
     with torch.no_grad():
         try:
             trainer._use_chunked_grpo_logprobs = False
-            full, _ = trainer._get_per_token_logps(trainer.model, input_ids, attention_mask, logits_to_keep)
+            full = trainer._get_per_token_logps(trainer.model, input_ids, attention_mask, logits_to_keep)
             trainer._use_chunked_grpo_logprobs = True
-            chunked, _ = trainer._get_per_token_logps(trainer.model, input_ids, attention_mask, logits_to_keep)
+            chunked = trainer._get_per_token_logps(trainer.model, input_ids, attention_mask, logits_to_keep)
         finally:
             trainer._use_chunked_grpo_logprobs = was_chunked
 

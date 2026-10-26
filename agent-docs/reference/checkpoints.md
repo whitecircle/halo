@@ -161,7 +161,7 @@ Every checkpoint start restores the configured masters at FP32, under every para
 ([Load precision](../models/README.md#load-precision)). A BF16 export promotes exactly the values it
 stored; it cannot recover precision discarded during export.
 
-`ReferenceLogpsCheckpointMixin` persists DPO/KTO and offline GRPO scores on the filesystem-aware
+`ReferenceLogpsMixin` persists DPO/KTO and offline GRPO scores on the filesystem-aware
 save rank. The save completes only after its file and parent directory are synced. Unchanged
 checkpoints hardlink the immutable file, falling back to a copy where links are unavailable;
 adding a scored split writes a new payload. Write failures rendezvous across ranks before
@@ -177,8 +177,8 @@ Export copies omit every unpublished file an interrupted save leaves: a staged w
 sidecars, `optimizer_meta.pt`, the model card), the withheld `.trainer_state.json.uncommitted`, and
 the `.<name>.<uuid hex>.tmp` staging spelling.
 
-Offline GRPO's mapped reference storage and old-checkpoint recovery are covered in its
-[reference contract](../training-methods/grpo/offline.md#reference-model).
+Offline GRPO's ragged payload (`src/trainers/grpo/offline/reference.py`), its mapped storage and
+old-checkpoint recovery are covered in its [reference contract](../training-methods/grpo/offline.md#reference-model).
 
 The exported `config.json` is serialized with run-scoped router mutations restored
 (`config_export_ready`): the balancing strategy's zeroed `router_aux_loss_coef`, forced

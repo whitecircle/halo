@@ -27,10 +27,10 @@ from trl import DPOConfig, DPOTrainer
 from trl.trainer import utils as trl_trainer_utils
 
 from src.data.sources.loading import load_datasets
-from src.trainers.mixins.trl_dataset_prep import _MAIN_FIRST_METHODS, CoordinatedTRLDatasetPrepMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from src.trainers.trl_dataset_prep import _MAIN_FIRST_METHODS, TRLDatasetPrepMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer, try_cached_tokenizer
@@ -55,7 +55,7 @@ class _CountingDPO(DPOTrainer):
         return super()._prepare_dataset(dataset, processing_class, args, dataset_name)
 
 
-class _CoordinatedDPO(CoordinatedTRLDatasetPrepMixin, _CountingDPO):
+class _CoordinatedDPO(TRLDatasetPrepMixin, _CountingDPO):
     def __init__(self, tokenizer, rank: int, tmp_dir: str):
         self._tokenizer = tokenizer
         self._is_vlm = False
@@ -158,8 +158,8 @@ def test_every_trainer_over_a_trl_preparation_routes_through_the_seam(trainer_cl
     assert scopes, f"{trainer_cls.__name__}: TRL no longer prepares under a main-first scope — revisit the seam"
     assert scopes <= set(_MAIN_FIRST_METHODS), f"{trainer_cls.__name__}: the seam leaves {scopes} live"
     mro = trainer_cls.__mro__
-    assert CoordinatedTRLDatasetPrepMixin in mro, f"{trainer_cls.__name__} prepares through TRL uncoordinated"
-    assert mro.index(CoordinatedTRLDatasetPrepMixin) < mro.index(owner)
+    assert TRLDatasetPrepMixin in mro, f"{trainer_cls.__name__} prepares through TRL uncoordinated"
+    assert mro.index(TRLDatasetPrepMixin) < mro.index(owner)
 
 
 if __name__ == "__main__":

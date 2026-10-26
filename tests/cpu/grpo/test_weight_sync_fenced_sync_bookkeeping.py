@@ -13,7 +13,7 @@ import pytest
 
 from src.environments.ray_actors import RolloutManager
 from src.environments.rollout_config import RolloutConfig
-from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
+from src.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 
 _SYNC_S = 0.05
 

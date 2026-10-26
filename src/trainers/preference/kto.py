@@ -22,9 +22,8 @@ from trl import KTOTrainer
 from src.data.collators.fixed_shape import pad_to_fixed_length
 from src.data.completion_spans import completion_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
-from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from src.trainers.ctor_slots import get_ctor_arg
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, row_count_normalizer, rows_with_labels
 from src.trainers.parallelism.pipeline_rules import (
     reject_missing_precomputed_reference,
@@ -32,91 +31,40 @@ from src.trainers.parallelism.pipeline_rules import (
     reject_pp_compute_metrics,
     reject_pp_ref_model,
 )
-from src.trainers.preference.logprobs import FP32LogprobsMixin
-from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
-from src.trainers.training_args_overrides import disable_trl_liger
-
-# TRL KTOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-_CTOR_POSITIONS = resolve_ctor_positions(KTOTrainer, "model", "args", "ref_model")
-
-_REF_LOGPS_COLUMN = "ref_logps"
+from src.trainers.preference.preference_rules import reject_kto_pp_loss_type
+from src.trainers.preference.trl_preference import TRLPreferenceMixin
+from src.trainers.trl_dataset_prep import TRLDatasetPrepMixin
 
 
-class DistributedKTOTrainer(
-    FP32LogprobsMixin,
-    PrecomputeRefLogpsRankConsistentMixin,
-    DistributedTrainerMixin,
-    CoordinatedTRLDatasetPrepMixin,
-    KTOTrainer,
-):
-    """TRL's KTOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring).
-
-    ``FP32LogprobsMixin`` keeps TRL's loss (policy, reference and KL terms) and reference pass on fp32
-    sequence log-probs.
-
-    ``PrecomputeRefLogpsRankConsistentMixin`` runs ``precompute_ref_log_probs`` (the EP/TP
-    full-finetune reference path) on the DP axis, attaches its columns in memory on every rank and
-    carries them across a resume; it precedes ``DistributedTrainerMixin`` so its checkpoint hook
-    wins. PP is ``apo_zero_unpaired``-only and precompute-only with the reference log-probs shipped
-    as a dataset column; the PP contract is in ``_pp_loss_adapter``.
-    """
+class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLDatasetPrepMixin, KTOTrainer):
+    """TRL's KTOTrainer plus EP/TP/PP via DistributedTrainerMixin. CP unsupported (see module docstring)."""
 
     _tag_names = ["trl", "kto"]
-    _reference_token_settings = "per_device_train_batch_size or dataset_num_proc, which pair the KL completions"
 
     PP_REFUSAL = None
-    # TRL's KTO loss adds the aux term itself and this class does not override it.
-    ROUTER_AUX_LOSS_ADDED_BY = "trl_loss"
-
-    def __init__(self, *args, **kwargs):
-        # TRL's chunked KTO path refuses the router aux loss this trainer hands it; must precede
-        # _init_distributed_config.
-        disable_trl_liger(
-            get_ctor_config(args, kwargs, _CTOR_POSITIONS),
-            "Disabling TRL's use_liger_kernel for KTO: TRL's chunked KTO log-prob path refuses the "
-            "router aux loss. Liger kernels are still applied at the model level by "
-            "load_distributed_model.",
-        )
-
-        self._init_reference_resume(kwargs)
-        kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
-        self._validate_reference_model(get_ctor_arg(args, kwargs, "ref_model", _CTOR_POSITIONS))
-        with self._trl_reference_hash_skipped():
-            super().__init__(*args, **kwargs)
-        # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not
-        # PEFT-wrapped and precompute_ref_log_probs is off.
-        self._validate_held_reference_model()
-        self._configure_distributed_modes()
+    REFERENCE_COLUMNS = ("ref_logps", "ref_KL_logps")
+    REFERENCE_TOKEN_SETTINGS = "per_device_train_batch_size or dataset_num_proc, which pair the KL completions"
+    LIGER_DISABLE_REASON = (
+        "Disabling TRL's use_liger_kernel for KTO: TRL's chunked KTO log-prob path refuses the "
+        "router aux loss. Liger kernels are still applied at the model level by "
+        "load_distributed_model."
+    )
 
     def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
-        """Reject KTO configurations pipeline parallelism cannot honor, at construction.
-
-        Runs before the model is split, so every raise is cheap and rank-uniform. The KTO options
-        the PP loss reproduces — ``beta``, ``desirable_weight``, ``undesirable_weight`` — need no
-        gate; the loss type is gated below. Remaining ctor parameters are read from ``kwargs`` only:
-        ``reject_positional_model_or_args`` forces ``model`` into kwargs, and any positional argument
-        would rebind TRL's ``model`` slot.
-        """
+        """Refuse the KTO options the PP last-stage loss cannot honor (it reproduces ``beta`` and both
+        desirability weights); ctor parameters are read from ``kwargs`` only, as in DPO."""
         reject_positional_model_or_args(kwargs)
         training_args = kwargs["args"]
-        if training_args.loss_type != "apo_zero_unpaired":
-            raise ValueError(
-                f"loss_type '{training_args.loss_type}' is not supported under pipeline "
-                f"parallelism: the default 'kto' loss needs a world-global detached KL baseline "
-                f"(per-rank batch mean, all-gathered, clamped) that no microbatch can compute, "
-                f"plus a per-batch no-grad policy forward over the KL sequences — a full-model "
-                f"pass even with precomputed reference log-probs. Only the KL-free "
-                f"'apo_zero_unpaired' loss is decomposable and supported under PP."
-            )
+        reject_kto_pp_loss_type(training_args)
         reject_pp_ref_model(
-            get_ctor_arg(ctor_args, kwargs, "ref_model", _CTOR_POSITIONS), "the ref_logps dataset column"
+            get_ctor_arg(ctor_args, kwargs, "ref_model", self.CTOR_POSITIONS), "the ref_logps dataset column"
         )
         reject_missing_precomputed_reference(
             "KTO",
             training_args,
             kwargs.get("train_dataset"),
             kwargs.get("eval_dataset"),
-            (_REF_LOGPS_COLUMN,),
+            ("ref_logps",),
         )
         reject_pp_compute_metrics(
             kwargs.get("compute_metrics"),
@@ -132,10 +80,9 @@ class DistributedKTOTrainer(
             ),
         )
 
-    def _required_ref_logps_columns(self) -> tuple[str, ...]:
-        """Columns TRL's KTO sweep would write; ``ref_KL_logps`` only when the loss carries a KL
-        term (``calculate_KL``, never under PP)."""
-        return (_REF_LOGPS_COLUMN, "ref_KL_logps") if self.calculate_KL else (_REF_LOGPS_COLUMN,)
+    def _reference_columns(self) -> tuple[str, ...]:
+        """``ref_KL_logps`` only when the loss carries a KL term (``calculate_KL``, never under PP)."""
+        return self.REFERENCE_COLUMNS if self.calculate_KL else ("ref_logps",)
 
     def _reference_settings(self) -> dict:
         """The collator's truncation, which keeps the start of each assembled sequence."""
@@ -206,5 +153,4 @@ class DistributedKTOTrainer(
             self.desirable_weight * (1 - torch.sigmoid(self.beta * logratios)),
             self.undesirable_weight * torch.sigmoid(self.beta * logratios),
         )
-        # Inert eval-padding rows must contribute exactly 0 (σ(0) = 0.5 otherwise) — train-time no-op.
         return (per_row * rows_with_labels(target["labels"]).float()).sum()

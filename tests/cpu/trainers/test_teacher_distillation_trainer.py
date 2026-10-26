@@ -32,7 +32,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.entrypoints.model_setup import PolicyLoad
 from src.entrypoints.script import ScriptContext
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.distillation.losses import get_divergence
+from src.trainers.distillation.divergences import place_frozen_scorer, require_divergence
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
@@ -90,7 +90,7 @@ def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALP
         distill_temperature=TEMPERATURE,
         apply_hard_labels=apply_hard_labels,
     )
-    trainer.distillation_loss_fn = get_divergence(distill_loss)
+    trainer.distillation_loss_fn = require_divergence(distill_loss)
     trainer._vocab_width = None
     trainer._peft_has_been_casted_to_bf16 = peft_casted
     trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
@@ -139,10 +139,10 @@ def _construct(args, *, peft_config=None):
     with (
         mock.patch.object(teacher_distillation, "resolve_trainer_model", lambda model, *a, **k: model),
         mock.patch.object(DistributedDistillationTrainer, "_init_distributed_config", init_config),
-        mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: setattr(self, "model", model)),
+        mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: vars(self).update(kwargs, model=model)),
         mock.patch.object(nn.Linear, "add_model_tags", create=True),
         mock.patch.object(DistributedDistillationTrainer, "_configure_distributed_modes"),
-        mock.patch.object(DistributedDistillationTrainer, "_setup_teacher_model"),
+        mock.patch.object(teacher_distillation, "place_frozen_scorer", return_value=(None, torch.device("cpu"))),
     ):
         return DistributedDistillationTrainer(
             student_model=nn.Linear(2, 2),
@@ -247,12 +247,12 @@ def test_the_teacher_tokenizer_is_keyword_only_so_positional_callers_keep_their_
 
 
 def _setup(student_rows, teacher_rows, teacher_tokens=TOKENS):
-    trainer = object.__new__(DistributedDistillationTrainer)
-    trainer.model = _TokenTableModel(seed=0, rows=student_rows)
-    trainer.teacher_model = _TokenTableModel(seed=1, rows=teacher_rows)
-    trainer.processing_class = _Tokenizer(TOKENS)
-    trainer._setup_teacher_model(_Tokenizer(teacher_tokens))
-    return trainer
+    """The teacher gate the trainer's ctor runs (``place_frozen_scorer``), on stub models."""
+    teacher = _TokenTableModel(seed=1, rows=teacher_rows)
+    width, _ = place_frozen_scorer(
+        teacher, _TokenTableModel(seed=0, rows=student_rows), _Tokenizer(TOKENS), _Tokenizer(teacher_tokens)
+    )
+    return types.SimpleNamespace(teacher_model=teacher, _vocab_width=width)
 
 
 def test_a_teacher_of_another_tokenizer_is_refused_even_at_an_equal_vocab_size():

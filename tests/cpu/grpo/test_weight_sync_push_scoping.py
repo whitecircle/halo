@@ -27,7 +27,7 @@ import torch.nn as nn
 import src.weight_sync.clients.base as base_module
 import src.weight_sync.pool as pool_module
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.pool import WeightSyncPool

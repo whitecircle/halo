@@ -15,7 +15,7 @@ budget patches target.
 import requests
 
 from src.inference.response import get_reasoning_text
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.on_policy_e2e import PROBE_TIMEOUT_S
 from tests.common.utils import log
 

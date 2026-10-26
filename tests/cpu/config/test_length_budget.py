@@ -33,8 +33,9 @@ from src.configs.parser import HaloArgumentParser
 from src.configs.preference import SmoothMarginPOConfig
 from src.entrypoints.model_setup import apply_max_length, apply_prompt_completion_window, apply_tokenizer_window
 from src.models.context_window import get_model_context_window, resolve_length_to_context
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.offline.offline_rules import reject_inert_max_length
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 # resolve_length_to_context logs through accelerate's rank-aware logger, which raises until the
 # state exists. Production always has it (init_training_script runs first); mirror that here.
@@ -330,22 +331,22 @@ def test_offline_grpo_max_length_is_refused_off_pipeline_parallelism(parallelism
     """Only the PP path reads ``max_length`` (the fixed shape P2P buffers freeze on). Off PP the
     budget is the two caps, so a set ``max_length`` would reach nothing, leaving the run uncapped."""
     with pytest.raises(ValueError, match="pipeline-parallel-only"):
-        OfflineGRPOTrainer._reject_inert_max_length(_offline_config(max_length=4096), parallelism_config)
+        reject_inert_max_length(_offline_config(max_length=4096), parallelism_config)
 
 
 def test_offline_grpo_max_length_is_accepted_under_pipeline_parallelism():
     """Under PP it IS the knob — the guard must not fire on the one mode that honors it."""
-    OfflineGRPOTrainer._reject_inert_max_length(_offline_config(max_length=4096), SimpleNamespace(is_pp_mode=True))
+    reject_inert_max_length(_offline_config(max_length=4096), SimpleNamespace(is_pp_mode=True))
 
 
 def test_offline_grpo_unset_max_length_is_the_normal_case():
-    OfflineGRPOTrainer._reject_inert_max_length(_offline_config(), SimpleNamespace(is_pp_mode=False))
+    reject_inert_max_length(_offline_config(), SimpleNamespace(is_pp_mode=False))
 
 
 def test_offline_grpo_construction_runs_the_inert_max_length_guard():
     """The guard is only worth anything if ``__init__`` calls it — before every dataset map, so the
     rejection costs no tokenization."""
-    assert "_reject_inert_max_length" in inspect.getsource(OfflineGRPOTrainer.__init__)
+    assert "reject_inert_max_length" in inspect.getsource(OfflineGRPOTrainer.__init__)
 
 
 def test_legacy_max_seq_length_yaml_is_refused_by_the_parser(tmp_path):

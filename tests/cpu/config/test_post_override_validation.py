@@ -35,7 +35,7 @@ from src.configs.preference import SmoothMarginPOConfig
 from src.entrypoints.script import init_training_script
 from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from src.subclass_registry import iter_subclasses
-from src.trainers.distillation.losses import DIVERGENCES
+from src.trainers.distillation.divergences import DIVERGENCES
 
 # bf16/use_cpu keep TrainingArguments constructible on a GPU-less runner.
 _CPU_TAIL = "bf16: false\nuse_cpu: true\n"

@@ -1,9 +1,6 @@
-"""Truncated log-ratio terms of the GRPO objectives. Pure functions: no trainer state.
-
-:func:`clamp_ref_logps` caps the k3 KL estimator at :data:`KL_LOGRATIO_CLAMP` in all three GRPO trainers;
-:func:`compute_is_ratio` clamps the environmental trainer's sampler-to-trainer importance ratio. The
-masking stages (:func:`apply_is_masks`, :func:`apply_opsm`, default off) give a masked token ratio 0,
-leaving the DAPO normalizer and the β·k3 KL anchor in place; trajectories pool turn rows by ``traj_ids``.
+"""Truncated log-ratio terms of the GRPO objectives, pure functions over trainer tensors: the k3 KL tail clamp,
+the sampler-to-trainer importance ratio, and the masking stages (default off), which give a masked token ratio 0
+and leave the DAPO normalizer and the KL anchor in place. Trajectories pool turn rows by ``traj_ids``.
 """
 
 from __future__ import annotations
@@ -52,17 +49,14 @@ def zero_engine_forced_closes(
     completion_ids: torch.Tensor,
     reasoning_end_ids: tuple[int, ...],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Zero the ratio at reasoning closes the engine forced: a run of the reasoning-end ids every token of
-    which the sampler emitted at probability 1, which is what vLLM's thinking budget appends when a turn
-    reaches its cap (one token for ``</think>``, five for gpt-oss's final-channel opener). Returns
-    ``(ratio, forced)``.
+    """``(ratio, forced)``: the ratio zeroed at reasoning closes the engine forced, a run of the reasoning-end
+    ids the sampler emitted wholly at probability 1, as vLLM's thinking budget appends at a turn's cap.
 
-    The close was not the policy's action; trained with the episode's advantage it moves the model's own
-    probability of ending its reasoning, which repeated forced closes can drive down until the model stops
-    closing at all. Ratio 0 drops the policy-gradient term and keeps the DAPO normalizer, like every mask
-    stage here. A naturally certain token outside such a run (a collapsed nucleus) is left alone; a natural
-    run emitted wholly at probability 1 is zeroed too, which costs nothing without nucleus truncation (the
-    budgeted recipes sample at top_p 1) and otherwise drops the little gradient its near-certain tokens carry."""
+    The close was not the policy's action; trained with the episode's advantage, repeated forced closes drive
+    down the model's own probability of ending its reasoning. Ratio 0 drops the policy-gradient term and keeps
+    the DAPO normalizer, like every mask stage here. A natural run emitted wholly at probability 1 is zeroed
+    too, which costs nothing at top_p 1 (the budgeted recipes) and otherwise only a near-certain token's
+    gradient."""
     certain = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
     width = len(reasoning_end_ids)
     forced = torch.zeros_like(certain)
@@ -162,6 +156,12 @@ def _traj_scatter(values: torch.Tensor, traj_ids: torch.Tensor, num_trajs: int, 
     return out[:num_trajs]
 
 
+def _traj_to_rows(per_traj: torch.Tensor, traj_ids: torch.Tensor, dummy: bool) -> torch.Tensor:
+    """Each row's entry of the per-trajectory bool ``per_traj``; a dummy row (id < 0) reads ``dummy``."""
+    dummy_rows = torch.full_like(traj_ids, dummy, dtype=torch.bool)
+    return torch.where(traj_ids >= 0, per_traj.gather(0, traj_ids.clamp(min=0)), dummy_rows)
+
+
 def _traj_mean_logratio(
     logps_diff: torch.Tensor, corrected_mask: torch.Tensor, traj_ids: torch.Tensor, num_trajs: int
 ) -> torch.Tensor:
@@ -208,7 +208,7 @@ def apply_is_masks(
         vetoed = (traj_min < config.veto_min) & present
         stats["sampling/is_veto_masked_frac"] = (vetoed.sum(), num_trajs)
         traj_keep &= ~vetoed
-    row_keep = torch.where(traj_ids >= 0, traj_keep.gather(0, traj_ids.clamp(min=0)), torch.ones_like(traj_ids).bool())
+    row_keep = _traj_to_rows(traj_keep, traj_ids, dummy=True)
     return torch.where(row_keep.unsqueeze(1), ratio, torch.zeros_like(ratio)), stats
 
 
@@ -230,6 +230,6 @@ def apply_opsm(
     traj_mean = _traj_mean_logratio(logps_diff, corrected_mask, traj_ids, num_trajs)
     traj_negative = _traj_scatter(row_advantages, traj_ids, num_trajs, "amin") < 0
     masked = traj_negative & (traj_mean.abs() > delta)
-    row_masked = torch.where(traj_ids >= 0, masked.gather(0, traj_ids.clamp(min=0)), torch.zeros_like(traj_ids).bool())
+    row_masked = _traj_to_rows(masked, traj_ids, dummy=False)
     out = torch.where(row_masked.unsqueeze(1), torch.zeros_like(ratio), ratio)
     return out, masked

@@ -25,11 +25,8 @@ from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_R
 from src.environments.messages import Trajectory
 from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
-from src.trainers.grpo.environmental import (
-    EMPTY_ROLLOUT_STEP_LIMIT,
-    DistributedAsyncEnvironmentalGRPOTrainer,
-    rollout_valid_mask,
-)
+from src.trainers.grpo.environmental.step_batch import EMPTY_ROLLOUT_STEP_LIMIT, rollout_valid_mask
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
 
 PartialState()  # the trainer warns through accelerate's logger, which refuses to log without it
@@ -164,7 +161,7 @@ def _guard_stub():
 
 
 def _check(stub, results):
-    DistributedAsyncEnvironmentalGRPOTrainer._check_step_has_valid_episodes(
+    DistributedAsyncEnvironmentalGRPOTrainer._verify_step_has_valid_episodes(
         stub, results, rollout_valid_mask(results, _DEVICE)
     )
 

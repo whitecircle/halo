@@ -26,7 +26,7 @@ from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.cp_grpo import (
     ep_gradient_parameter_names,
     gradient_agreement,
@@ -290,7 +290,7 @@ def run(ctx):
                     [local_batch["prompt_attention_mask"], local_batch["completion_attention_mask"]], dim=1
                 )
                 width = local_batch["completion_input_ids"].size(1)
-                _, got_logps = trainer._get_per_token_logps(trainer.model, ids, mask, width)
+                got_logps = trainer._get_per_token_logps(trainer.model, ids, mask, width)
                 valid = local_batch["completion_attention_mask"].bool()
                 start = local_batch["prompt_input_ids"].size(1) - 1
                 expected_tokens = expected_logps[:, start : start + width]

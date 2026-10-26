@@ -39,13 +39,11 @@ from accelerate import PartialState
 from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
 from src.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
 from src.environments.rollout_config import VALID_REASONING_EFFORTS
-from src.trainers.grpo import environmental
-from src.trainers.grpo.environmental import (
-    EMPTY_ROLLOUT_STEP_LIMIT,
-    BatchBuildFence,
-    DistributedAsyncEnvironmentalGRPOTrainer,
-)
-from src.trainers.grpo.objective.application import (
+from src.trainers.grpo.environmental import step_batch
+from src.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from src.trainers.grpo.environmental.step_batch import EMPTY_ROLLOUT_STEP_LIMIT, BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.objective.loss_inputs import (
     NEGATIVE_ONLY_MASS_KEY,
     NET_TOKEN_MASS_KEY,
     TOKEN_MASS_SCALE_KEY,
@@ -53,6 +51,16 @@ from src.trainers.grpo.objective.application import (
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 
 PartialState()  # the breaker warns through accelerate's logger, which refuses to log without it
+
+
+class _TrainerStandIn(types.SimpleNamespace):
+    """Weak-referenceable, as the trainer the breaker's hook holds is."""
+
+
+def _skip_hook(host):
+    """The breaker's pre-optimizer-step hook over ``host``, as the trainer registers it."""
+    callback = _BreakerOptimizerSkipCallback(host)
+    return lambda: callback.on_pre_optimizer_step(None, None, None)
 
 
 def _breaker_host(threshold):
@@ -156,11 +164,11 @@ def test_a_tripped_breaker_drops_the_gradients_on_every_optimizer_step_of_the_ro
     step the round feeds — a generation round spans ``num_iterations`` of them, all trained on the
     zeroed advantages — so the skip must not consume the flag. Only the next round's verdict does."""
     calls = []
-    host = types.SimpleNamespace(
+    host = _TrainerStandIn(
         _breaker_tripped_this_step=True,
         optimizer=types.SimpleNamespace(zero_grad=lambda set_to_none: calls.append(set_to_none)),
     )
-    skip = DistributedAsyncEnvironmentalGRPOTrainer._skip_optimizer_step_if_breaker_tripped.__get__(host)
+    skip = _skip_hook(host)
     skip()
     skip()
     assert calls == [True, True]
@@ -271,7 +279,7 @@ def _gathered_with_a_peer(monkeypatch, rewards: list[float], state: list[int]) -
     """The world gather of a two-rank run whose peer holds ``rewards`` and per-trajectory ``state``
     (1 valid, 0 invalid)."""
     peer = {torch.float32: torch.tensor(rewards), torch.int8: torch.tensor(state, dtype=torch.int8)}
-    monkeypatch.setattr(environmental, "gather", lambda t: torch.cat([t, peer[t.dtype]]))
+    monkeypatch.setattr(step_batch, "gather", lambda t: torch.cat([t, peer[t.dtype]]))
 
 
 def _failed_round(training: bool):
@@ -386,12 +394,20 @@ def _calls(stmt: ast.stmt, name: str) -> list[ast.Call]:
 # The phase helpers ``_build_training_tensors`` is partitioned into, in call order.
 _PHASE_HELPERS = (
     "_build_rollout_rewards",
+    "_rows_for_step",
+    "_pad_rows_across_ranks",
+    "_stack_rows",
     "_assemble_rollout_routing",
-    "_recompute_logps_and_routing_masks",
-    "_apply_is_correction",
+    "_score_step",
+    "_step_advantages",
+    "_apply_opsm_stage",
     "_narrow_masks_and_normalizer",
-    "_score_is_correction",
+    "_apply_token_mass_balance",
+    "_record_step_metrics",
 )
+# The helpers those phases call in turn, each holding or gating a collective of its own.
+_NESTED_HELPERS = ("_recompute_logps_and_routing_masks", "_apply_is_correction", "_score_is_correction")
+_RECORDING = ("fraction", "maximum", "effective_sample_frac", "covariance", "_record_step_diagnostics")
 
 
 def test_build_training_tensors_routes_through_every_phase_helper():
@@ -399,31 +415,39 @@ def test_build_training_tensors_routes_through_every_phase_helper():
     fn = _build_training_tensors_ast()
     missing = [name for name in _PHASE_HELPERS if not _calls(fn, name)]
     assert not missing, f"phase helpers no longer called: {missing}"
+    nested = [_method_ast("_score_step"), _method_ast("_record_step_metrics")]
+    missing = [name for name in _NESTED_HELPERS if not any(_calls(phase, name) for phase in nested)]
+    assert not missing, f"nested helpers no longer called: {missing}"
 
 
 def test_world_metrics_flush_once_after_every_recording_site_with_no_return_between():
-    """The step's rank-local counts fold in ONE collective at the end of ``_build_training_tensors``:
+    """The step's rank-local counts fold in ONE collective, in the last phase of ``_build_training_tensors``:
     a second flush or a return before it strands the peers in the fold, and a site recording after it
     logs its count a step late."""
-    fn = _build_training_tensors_ast()
+    parent = _build_training_tensors_ast()
+    assert not _calls(parent, "flush"), "the batch build flushes outside its metrics phase"
+    phase_at = [i for i, stmt in enumerate(parent.body) if _calls(stmt, "_record_step_metrics")]
+    recorded_at = [i for i, stmt in enumerate(parent.body) if any(_calls(stmt, name) for name in _RECORDING)]
+    assert len(phase_at) == 1 and max(recorded_at) < phase_at[0], "a count recorded after the metrics phase"
+    assert not any(isinstance(node, ast.Return) for stmt in parent.body[: phase_at[0]] for node in ast.walk(stmt))
+    fn = _method_ast("_record_step_metrics")
     flush_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "flush")]
-    assert len(flush_at) == 1, f"_build_training_tensors flushes the world metrics {len(flush_at)} times"
-    recording = ("fraction", "maximum", "effective_sample_frac", "covariance", "_record_step_diagnostics")
-    recorded_at = [i for i, stmt in enumerate(fn.body) if any(_calls(stmt, name) for name in recording)]
+    assert len(flush_at) == 1, f"the metrics phase flushes the world metrics {len(flush_at)} times"
+    recorded_at = [i for i, stmt in enumerate(fn.body) if any(_calls(stmt, name) for name in _RECORDING)]
     logged_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "_populate_completion_logs")]
     assert recorded_at and max(recorded_at) < flush_at[0], "a count recorded after the flush logs a step late"
     assert max(logged_at) < flush_at[0], "the flush follows the completions record, the last phase every rank runs"
-    between = fn.body[min(recorded_at) : flush_at[0]]
-    assert not any(isinstance(node, ast.Return) for stmt in between for node in ast.walk(stmt)), (
-        "a return between a recording site and the flush skips the collective on that path"
+    assert not any(isinstance(node, ast.Return) for stmt in fn.body[: flush_at[0]] for node in ast.walk(stmt)), (
+        "a return before the flush skips the collective on that path"
     )
 
 
 def test_phase_helpers_never_early_return():
-    """Each phase helper returns exactly once, as its final statement. Three of them issue collectives
-    (the uniform raise, the recompute forward's EP dispatch, the normalizer gather), so a
-    data-dependent early-out would let one rank skip a collective its peers enter."""
-    for name in _PHASE_HELPERS:
+    """Each phase helper returns exactly once, as its final statement. Several issue collectives (the
+    uniform raise, the row padding, the recompute forward's EP dispatch, the normalizer and token-mass
+    gathers, the metrics fold), so a data-dependent early-out would let one rank skip a collective its
+    peers enter."""
+    for name in _PHASE_HELPERS + _NESTED_HELPERS:
         fn = _method_ast(name)
         returns = [node for node in ast.walk(fn) if isinstance(node, ast.Return)]
         assert len(returns) == 1 and fn.body[-1] is returns[0], (

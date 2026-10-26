@@ -13,7 +13,7 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
+from src.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
 
 # The mixin logs through accelerate's adapter, which needs the process state to exist.
 PartialState()

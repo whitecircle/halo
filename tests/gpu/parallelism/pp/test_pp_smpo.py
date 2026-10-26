@@ -195,7 +195,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
                 kw["attention_mask"].detach().cpu(),
                 labels.detach().cpu(),
             )
-        margins.append(float(trainer._pp_step_state.target_margin))
+        margins.append(float(trainer._pp_loss.constants.target_margin))
         return real_step(input_ids, labels, **kw)
 
     trainer._pp_runner.step = spying_step
@@ -211,7 +211,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
                     "input_ids": input_ids.detach().cpu(),
                     "labels": labels.detach().cpu(),
                     "attention_mask": kw["attention_mask"].detach().cpu(),
-                    "margin": float(trainer._pp_step_state.target_margin),
+                    "margin": float(trainer._pp_loss.constants.target_margin),
                     "num_items": float(kw["num_items_in_batch"]),
                 }
             )
@@ -435,7 +435,7 @@ def run(ctx):
     probe_logits = torch.randn(4, 6, 5, device=ctx.device)
     probe_labels = torch.full((4, 6), -100, dtype=torch.long, device=ctx.device)
     probe_labels[:2, 3:5] = 3  # rows 2 and 3 stay all-ignore: the inert row padding
-    rewards = metrics_trainer._pp_smpo_predictions(probe_logits, {"labels": probe_labels})
+    rewards = metrics_trainer._pp_loss.predictions(probe_logits, {"labels": probe_labels})
     probe_mask = probe_labels[:, 1:] != -100
     logps = F.log_softmax(probe_logits[:, :-1].float(), dim=-1)
     logps = logps.gather(-1, probe_labels[:, 1:].clamp(min=0).unsqueeze(-1)).squeeze(-1)

@@ -24,7 +24,8 @@ import types
 
 import pytest
 
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

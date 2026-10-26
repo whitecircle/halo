@@ -1,4 +1,4 @@
-"""CPU tests for the chunked GRPO log-prob / entropy helpers (src/trainers/grpo/mixins/chunked_logprobs.py).
+"""CPU tests for the chunked GRPO log-probs: the head kernel (src/kernels/head_logprobs.py) and its trainer side.
 
 The chunked path must compute the SAME per-token log-probs and entropy as the full-logits path TRL
 uses (``selective_log_softmax`` / ``entropy_from_logits`` over ``hidden @ lm_head.weight.T / temp``),
@@ -17,24 +17,22 @@ from transformers import Gemma2Config, Gemma2ForCausalLM, LlamaConfig, LlamaForC
 from trl import GRPOTrainer
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
+from src.kernels import head_logprobs
+from src.kernels.head_logprobs import VOCAB_TILE, chunked_head_logprobs
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
 from src.runtime.dtensor import materialize_dtensor
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.mixins import chunked_logprobs
-from src.trainers.grpo.mixins.chunked_logprobs import (
-    _VOCAB_CHUNK,
+from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from src.trainers.grpo.logprob_scoring import (
     ChunkedGRPOLogprobsMixin,
-    ChunkedLogprobsCore,
-    chunked_selective_log_softmax,
-    chunked_selective_log_softmax_with_entropy,
+    LogprobScoringMixin,
     rows_forward_densely,
 )
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
 
 # Vocab spans multiple chunk tiles so the online-softmax accumulation across chunks is exercised.
-VOCAB = _VOCAB_CHUNK * 2 + 137
+VOCAB = VOCAB_TILE * 2 + 137
 HIDDEN = 32
 B, T = 2, 16
 
@@ -55,7 +53,7 @@ def test_chunked_logps_match_full_path():
     ids = torch.randint(0, VOCAB, (B, T))
     for temperature in (1.0, 0.7):
         ref = selective_log_softmax(_ref_logits(hidden, weight, None, temperature), ids)
-        got = chunked_selective_log_softmax(hidden, weight, ids, None, temperature)
+        got = chunked_head_logprobs(hidden, weight, ids, None, temperature)[0]
         assert got.shape == (B, T)
         torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
 
@@ -67,7 +65,7 @@ def test_chunked_logps_match_with_bias():
     bias = torch.randn(VOCAB, dtype=torch.float32) * 0.1
     ids = torch.randint(0, VOCAB, (B, T))
     ref = selective_log_softmax(_ref_logits(hidden, weight, bias, 1.0), ids)
-    got = chunked_selective_log_softmax(hidden, weight, ids, bias, 1.0)
+    got = chunked_head_logprobs(hidden, weight, ids, bias, 1.0)[0]
     torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
 
 
@@ -80,7 +78,7 @@ def test_chunked_logps_backward_matches():
     selective_log_softmax(_ref_logits(h_ref, weight, None, 1.0), ids).sum().backward()
 
     h_chunk = h_ref.detach().clone().requires_grad_(True)
-    chunked_selective_log_softmax(h_chunk, weight, ids, None, 1.0).sum().backward()
+    chunked_head_logprobs(h_chunk, weight, ids, None, 1.0)[0].sum().backward()
 
     torch.testing.assert_close(h_chunk.grad, h_ref.grad, atol=1e-4, rtol=1e-4)
 
@@ -96,7 +94,7 @@ def test_fused_entropy_matches_full_path():
         for b in (None, bias):
             ref_entropy = entropy_from_logits(_ref_logits(hidden, weight, b, temperature))
             ref_logps = selective_log_softmax(_ref_logits(hidden, weight, b, temperature), ids)
-            logps, entropy = chunked_selective_log_softmax_with_entropy(hidden, weight, ids, b, temperature)
+            logps, entropy = chunked_head_logprobs(hidden, weight, ids, b, temperature, compute_entropy=True)
             assert entropy.shape == (B, T)
             assert not entropy.requires_grad  # detached diagnostic
             torch.testing.assert_close(entropy, ref_entropy, atol=1e-4, rtol=1e-4)
@@ -111,11 +109,11 @@ def test_fused_backward_matches_plain_chunked():
     ids = torch.randint(0, VOCAB, (B, T))
 
     h_plain = torch.randn(B, T, HIDDEN, dtype=torch.float32, requires_grad=True)
-    logps_plain = chunked_selective_log_softmax(h_plain, weight, ids, None, 1.0)
+    logps_plain = chunked_head_logprobs(h_plain, weight, ids, None, 1.0)[0]
     logps_plain.sum().backward()
 
     h_fused = h_plain.detach().clone().requires_grad_(True)
-    logps, _entropy = chunked_selective_log_softmax_with_entropy(h_fused, weight, ids, None, 1.0)
+    logps, _entropy = chunked_head_logprobs(h_fused, weight, ids, None, 1.0, compute_entropy=True)
     logps.sum().backward()
 
     torch.testing.assert_close(logps, logps_plain, atol=0.0, rtol=0.0)
@@ -401,7 +399,7 @@ class _RealBackboneHarness(ChunkedGRPOLogprobsMixin):
 )
 def test_every_chunked_trainer_forwards_the_backbone_through_the_core(trainer_cls):
     """TRL 1.14 dropped ``GRPOTrainer._get_last_hidden_state``, which the online sweep called."""
-    assert trainer_cls._get_last_hidden_state is ChunkedLogprobsCore._get_last_hidden_state
+    assert trainer_cls._get_last_hidden_state is LogprobScoringMixin._get_last_hidden_state
 
 
 def test_the_core_backbone_forward_reproduces_the_models_completion_logits():
@@ -437,8 +435,8 @@ def test_backward_matches_autograd_for_every_input_across_tiles(monkeypatch):
     # gradient — the head bias included, whose only chain to the loss is through this Function — has
     # to carry the 1/temperature factor and land in the right vocab tile. An upstream gradient that
     # varies per token catches a per-row scale that .sum() would hide.
-    monkeypatch.setattr(chunked_logprobs, "_SEQ_CHUNK", 5)
-    monkeypatch.setattr(chunked_logprobs, "_VOCAB_CHUNK", 7)
+    monkeypatch.setattr(head_logprobs, "SEQ_TILE", 5)
+    monkeypatch.setattr(head_logprobs, "VOCAB_TILE", 7)
     vocab, b, t, hidden_size = 23, 3, 11, 6
     torch.manual_seed(5)
     hidden0 = torch.randn(b, t, hidden_size)
@@ -458,7 +456,7 @@ def test_backward_matches_autograd_for_every_input_across_tiles(monkeypatch):
             (selective_log_softmax(_ref_logits(ref_h, ref_w, ref_b, temperature), ids) * upstream).sum().backward()
 
             got_h, got_w, got_b = leaves(with_bias)
-            (chunked_selective_log_softmax(got_h, got_w, ids, got_b, temperature) * upstream).sum().backward()
+            (chunked_head_logprobs(got_h, got_w, ids, got_b, temperature)[0] * upstream).sum().backward()
 
             for got, ref in ((got_h, ref_h), (got_w, ref_w), (got_b, ref_b)):
                 if ref is None:
@@ -470,8 +468,8 @@ def test_backward_matches_autograd_for_every_input_across_tiles(monkeypatch):
 def test_sweep_matches_full_path_across_sequence_and_vocab_tiles(monkeypatch):
     # Both loops must cross tile boundaries: sequence tiles carry independent online-softmax
     # accumulators, vocab tiles rescale them.
-    monkeypatch.setattr(chunked_logprobs, "_SEQ_CHUNK", 5)
-    monkeypatch.setattr(chunked_logprobs, "_VOCAB_CHUNK", 7)
+    monkeypatch.setattr(head_logprobs, "SEQ_TILE", 5)
+    monkeypatch.setattr(head_logprobs, "VOCAB_TILE", 7)
     vocab, temperature = 23, 0.8
     torch.manual_seed(2)
     hidden = torch.randn(B, T, HIDDEN, requires_grad=True)
@@ -486,7 +484,7 @@ def test_sweep_matches_full_path_across_sequence_and_vocab_tiles(monkeypatch):
     ref_entropy = entropy_from_logits(ref_logits)
     ref_logps.sum().backward()
 
-    logps, entropy = chunked_selective_log_softmax_with_entropy(hidden, weight, ids, bias, temperature)
+    logps, entropy = chunked_head_logprobs(hidden, weight, ids, bias, temperature, compute_entropy=True)
     logps.sum().backward()
 
     torch.testing.assert_close(logps, ref_logps, atol=1e-4, rtol=1e-4)
@@ -500,8 +498,8 @@ def test_softcapped_sweep_matches_the_capped_full_path(monkeypatch):
     # the cap scores a sharper distribution than the one the model samples from. Forward, entropy and
     # every gradient are checked across tile boundaries at a cap small enough for random weights to
     # saturate it, so an uncapped sweep is off by whole nats rather than rounding.
-    monkeypatch.setattr(chunked_logprobs, "_SEQ_CHUNK", 5)
-    monkeypatch.setattr(chunked_logprobs, "_VOCAB_CHUNK", 7)
+    monkeypatch.setattr(head_logprobs, "SEQ_TILE", 5)
+    monkeypatch.setattr(head_logprobs, "VOCAB_TILE", 7)
     vocab, softcap, temperature = 23, 0.5, 0.8
     torch.manual_seed(3)
     hidden0 = torch.randn(B, T, HIDDEN)
@@ -516,8 +514,8 @@ def test_softcapped_sweep_matches_the_capped_full_path(monkeypatch):
     (ref_logps * upstream).sum().backward()
 
     got_h, got_w, got_b = (x.clone().requires_grad_(True) for x in (hidden0, weight0, bias0))
-    logps, entropy = chunked_selective_log_softmax_with_entropy(
-        got_h, got_w, ids, got_b, temperature, HeadTransform(softcap=softcap)
+    logps, entropy = chunked_head_logprobs(
+        got_h, got_w, ids, got_b, temperature, softcap=softcap, compute_entropy=True
     )
     (logps * upstream).sum().backward()
 
@@ -534,8 +532,8 @@ def test_every_head_transform_term_reaches_forward_entropy_and_gradients(monkeyp
     # cut through the weight and bias rows (a cut the tiles do not align with), the logit scale ahead
     # of the cap, and the cap. Each term moves the log-probs by whole nats at this scale, and the
     # backward carries the scale and the cap's tanh derivative into every input's gradient.
-    monkeypatch.setattr(chunked_logprobs, "_SEQ_CHUNK", 5)
-    monkeypatch.setattr(chunked_logprobs, "_VOCAB_CHUNK", 7)
+    monkeypatch.setattr(head_logprobs, "SEQ_TILE", 5)
+    monkeypatch.setattr(head_logprobs, "VOCAB_TILE", 7)
     vocab, kept, temperature = 23, 19, 0.8
     transform = HeadTransform(hidden_scale=0.5, logit_scale=3.0, softcap=2.0, vocab_size=kept)
     torch.manual_seed(4)
@@ -556,7 +554,17 @@ def test_every_head_transform_term_reaches_forward_entropy_and_gradients(monkeyp
     (ref_logps * upstream).sum().backward()
 
     got_h, got_w, got_b = (x.clone().requires_grad_(True) for x in (hidden0, weight0, bias0))
-    logps, entropy = chunked_selective_log_softmax_with_entropy(got_h, got_w, ids, got_b, temperature, transform)
+    kept_w, kept_b = transform.kept_rows(got_w, got_b)
+    logps, entropy = chunked_head_logprobs(
+        transform.scale_hidden(got_h),
+        kept_w,
+        ids,
+        kept_b,
+        temperature,
+        logit_scale=transform.logit_scale,
+        softcap=transform.softcap,
+        compute_entropy=True,
+    )
     (logps * upstream).sum().backward()
 
     untransformed = selective_log_softmax(_ref_logits(hidden0, weight0, bias0, temperature), ids)

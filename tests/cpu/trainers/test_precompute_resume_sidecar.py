@@ -33,7 +33,7 @@ from datasets import Dataset, Features, List, Value, concatenate_datasets
 from trl import DPOConfig, KTOConfig
 
 import src.checkpoint.atomic as atomic_mod
-import src.trainers.mixins.reference_logps as precompute_mod
+import src.trainers.reference_logps as precompute_mod
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.parser import HaloArgumentParser
@@ -44,8 +44,8 @@ from src.entrypoints.script import ScriptContext
 from src.runtime import filesystem
 from src.runtime.consensus import RankConsensus
 from src.trainers.checkpointing import CheckpointingMixin
-from src.trainers.mixins.reference_logps import token_digest as _token_digest
-from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
+from src.trainers.preference.trl_preference import TRLPreferenceMixin
+from src.trainers.reference_logps import token_digest as _token_digest
 from tests.common.gloo import run_gloo_ranks
 from tests.common.preference_precompute import (
     BASE,
@@ -359,7 +359,7 @@ def test_a_split_saved_at_the_runs_precision_is_restored(kind, tmp_path):
     that precision attaches it."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     saved = torch.load(tmp_path / REFERENCE_LOGPS_FILE, weights_only=True)["train"]
-    assert saved["settings"]["logprob_precision"] == TRAINERS[kind][0].logprob_precision
+    assert saved["settings"]["logprob_precision"] == TRAINERS[kind][0].LOGPROB_PRECISION
 
     resumed = _resumed(kind, tmp_path)
     resumed._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
@@ -380,7 +380,7 @@ def test_a_split_summed_at_another_precision_is_not_reused(kind, tmp_path, saved
     else:
         settings["logprob_precision"] = saved_precision
     torch.save(saved, tmp_path / REFERENCE_LOGPS_FILE)
-    precision = TRAINERS[kind][0].logprob_precision
+    precision = TRAINERS[kind][0].LOGPROB_PRECISION
 
     resumed = _resumed(kind, tmp_path)
     with pytest.raises(ValueError, match=f"^Regenerate .* summed at .* this run sums them in {precision}") as raised:
@@ -391,17 +391,6 @@ def test_a_split_summed_at_another_precision_is_not_reused(kind, tmp_path, saved
     from_base = precompute_trainer(kind, resume_checkpoint=str(tmp_path), policy_from_checkpoint=False)
     from_base._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
     assert from_base.compute_ref_log_probs.batches > 0, "the old-precision split was reused, not re-swept"
-
-
-def test_a_trainer_without_a_declared_precision_refuses_before_sweeping(kind):
-    """The precision is every saved split's identity; a trainer that does not declare it would save
-    splits a resume could not tell apart from another precision's."""
-    trainer = precompute_trainer(kind)
-    trainer.logprob_precision = None
-
-    with pytest.raises(NotImplementedError, match="logprob_precision"):
-        trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
-    assert trainer.compute_ref_log_probs.batches == 0
 
 
 @pytest.mark.parametrize(
@@ -843,9 +832,9 @@ def test_the_trainers_checkpoint_hook_is_the_precompute_mixins(kind):
     """The mixin must precede ``DistributedTrainerMixin`` in the bases, or ``CheckpointingMixin``'s
     empty default shadows the write and no checkpoint carries the columns."""
     trainer_cls, _ = TRAINERS[kind]
-    assert trainer_cls._persist_trainer_sidecars is PrecomputeRefLogpsRankConsistentMixin._persist_trainer_sidecars
+    assert trainer_cls._persist_trainer_sidecars is TRLPreferenceMixin._persist_trainer_sidecars
     mro = trainer_cls.__mro__
-    assert mro.index(PrecomputeRefLogpsRankConsistentMixin) < mro.index(CheckpointingMixin)
+    assert mro.index(TRLPreferenceMixin) < mro.index(CheckpointingMixin)
 
 
 @pytest.mark.parametrize(

@@ -32,8 +32,8 @@ Each mixin is a class because it reads live trainer state; the methods a test or
 `_inner_training_loop`) must reach the base Trainer — `tests/cpu/trainers/test_mixin_composition.py`
 fails if a sibling base ever intercepts one.
 
-Additional modules in `src/trainers/mixins/` sit outside that composition. `StoredMetricsMixin`
-(`src/trainers/mixins/stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
+Three mixins sit outside that composition, in `src/trainers/`. `StoredMetricsMixin`
+(`stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
 distillation, and SDPG for buffered per-step metric logging. `log` reports
 each metric's row-weighted world mean: one all-reduce of `(Σ value·rows, Σ rows)` per log call, after
 the ranks agree on the key set (a mismatch raises on every rank). `store_metrics(..., rows=n)` weights
@@ -56,18 +56,25 @@ on-policy trainers decouple the completions table from the metric drain. The emb
 (`_wrap_for_parallel_mode`), and the EP one derives the FSDP ignored-module set in a single
 module-tree walk it hands to `_apply_ep_aware_dp_fsdp2`.
 
-`CoordinatedTRLDatasetPrepMixin` (`trl_dataset_prep.py`) is mixed in directly by DPO, KTO and the
+`TRLDatasetPrepMixin` (`trl_dataset_prep.py`) is mixed in directly by DPO, KTO and the
 reward trainer, ahead of TRL: it runs TRL's dataset preparation once per filesystem scope
 ([Filesystem handling](../data/filesystem-handling.md)).
 
-`ReferenceLogpsCheckpointMixin` is mixed in by DPO/KTO precompute and offline GRPO. It owns
-reference identity checks, resume attachment and atomic sidecar persistence; each trainer owns its
-score payload and sweep ([Checkpoints](checkpoints.md#what-gets-saved)). Both record the log-prob
+`ReferenceLogpsMixin` (`reference_logps.py`) is mixed in by DPO/KTO precompute and offline GRPO. It
+owns reference identity checks, resume attachment and atomic sidecar persistence; each trainer owns
+its score payload and sweep ([Checkpoints](checkpoints.md#what-gets-saved)). Both record the log-prob
 precision each split was scored in (`LOGPROB_PRECISION_KEY`;
 [DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run),
-[offline GRPO](../training-methods/grpo/offline.md#reference-model)). The preference mixin precedes
-`DistributedTrainerMixin` in the trainer's bases so the checkpointing default cannot shadow its
-sidecar hook.
+[offline GRPO](../training-methods/grpo/offline.md#reference-model)).
+
+DPO and KTO share one `TRLPreferenceMixin` (`preference/trl_preference.py`), first in their bases: it
+runs their construction (TRL's Liger path off, reference resume, distributed config, reference gates,
+TRL's construction-time reference hash skipped), rebinds TRL's log-prob functions to fp32 ones, and runs
+the reference sweep on the DP axis. Ahead of `DistributedTrainerMixin` its sidecar hook wins over the
+checkpointing default; ahead of the TRL base its rebinds wrap TRL's loss and reference pass. A subclass
+declares `REFERENCE_COLUMNS` and its Liger reason; `CTOR_POSITIONS` is derived from the TRL base's
+signature per subclass. SMPO, DPO and KTO construction refusals are pure functions in
+`preference/preference_rules.py`.
 Offline GRPO's `reference_cache.py` streams current-batch scores to filesystem-aware writers and
 maps the ordered ragged token values; its reference mixin attaches those buffers without repacking
 them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
@@ -81,7 +88,7 @@ them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 |---------|-----------|:--:|:--:|
 | `DistributedSFTTrainer` | `SFTTrainer` | Yes | Yes |
 | `SmoothMarginPOTrainer` | `Trainer` | Yes | Yes (no VLM / `padding_free` / clip percentile / PEFT) |
-| `OfflineGRPOTrainer` | `ChunkedLogprobsCore`, `Trainer` | Yes (full fine-tuning) | Yes (`kl_beta > 0` via a construction-time reference sweep) |
+| `OfflineGRPOTrainer` | `LogprobScoringMixin`, `Trainer` | Yes (full fine-tuning) | Yes (`kl_beta > 0` via a construction-time reference sweep) |
 | `DistributedDPOTrainer` | `DPOTrainer` | No | Yes (precompute-only; `sigmoid`/`hinge`/`ipo`) |
 | `DistributedKTOTrainer` | `KTOTrainer` | No | Yes (`apo_zero_unpaired`, precompute-only) |
 | `DistributedRewardTrainer` | `RewardTrainer` | No | Yes |
@@ -462,8 +469,8 @@ but under CP they cover only the local chunk.
   `ipo`, `smooth_lower_bound`; margin scheduling via `VariableSchedulerCallback`; CP via cross-rank
   all-reduce of log-prob sums and token counts. See [SMPO](../training-methods/preference/smpo.md).
 - **OfflineGRPOTrainer** — advantage methods `z_norm`, `minmax`, `quantile_norm`,
-  `quantile_uniform`, `robust`; PG formulations `prob_weighted` or `reinforce`. `ChunkedLogprobsCore`
-  owns its log-prob path.
+  `quantile_uniform`, `robust`; PG formulations `prob_weighted` or `reinforce`. `LogprobScoringMixin`
+  (`logprob_scoring.py`) owns its log-prob path.
 - **DistributedDPOTrainer** — the reference model is never parallelized: under EP/TP a frozen copy is a
   whole dense replica per rank (warned); `precompute_ref_log_probs=True`, or PEFT/LoRA with
   `ref_model=None` (LoRA works under EP, not TP), avoids it.
@@ -475,29 +482,38 @@ but under CP they cover only the local chunk.
   `environment_type` through `src/environments/registry.py`. See
   [Async GRPO](../training-methods/async-grpo/README.md).
 
-The `src/trainers/grpo/` package keeps the three trainers (`environmental.py`, `online.py`,
-`offline.py`) and these shared leaves at the top level: `early_stop.py`; `world_metrics.py`, the step
-metrics folded from every rank's counts in one collective; `reference_policy.py`, the model the KL
-reference forward runs (a held `ref_model`, else the PEFT policy with its adapters disabled);
-`reasoning_terms.py`, the reasoning-length reward terms the environmental trainer charges; and
-`reference_cache.py`, the storage of offline GRPO's frozen-reference scores. Support code lives in
-`objective/` (pure loss-side functions), `mixins/` (offline GRPO's reference lifecycle among them,
-`mixins/offline_reference.py`), and `rollout/`. `environmental.py` keeps the objective itself: batch assembly, advantages, the IS
-trust region and the rank-uniform fences.
+The `src/trainers/grpo/` package keeps the online trainer (`online.py`), the `offline/` and `environmental/`
+packages, and these shared leaves at the top level: `on_policy.py`, the constructor spine
+(`OnPolicyGRPOInitMixin`) and generation-round geometry (`GenerationRoundMixin`) both on-policy trainers
+compose; `grpo_rules.py`, their construction refusals as pure `reject_*` functions called ahead of TRL's
+constructor; `early_stop.py`; `world_metrics.py`, the step metrics folded from every rank's counts in one
+collective; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
+`src/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
+`_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
+its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`
+(`weight_push.py`, the push and its construction gate; `engine_preflight.py`, the COLLECTIVE rollout-server
+preflights; `trl_vllm_client.py`; and `completions_logging.py`, whose `DecoupledCompletionsLogMixin` both
+on-policy trainers compose to write the completions record under `save_completions` and the console table
+under TRL's `log_completions`). `offline/` holds `trainer.py`, `offline_rules.py` (its construction refusals),
+`tokenization.py`, `group_sampler.py`, `pipeline_loss.py`, `reference.py` (the reference mode, the run-start
+sweep, the checkpoint payload and evaluation reuse) and `reference_cache.py` (the storage of its
+frozen-reference scores).
 
-`rollout/` holds `weight_push.py` (the push and its construction gate), `engine_preflight.py` (the COLLECTIVE
-rollout-server preflights), `trl_vllm_client.py`,
-`trajectory_spans.py` and `routing_replay.py`, plus four mixins. The async GRPO trainer composes three of them:
-`AsyncRolloutMixin` (`async_rollouts.py` — Ray actors, the prefetch thread, engine weight sync),
-`TrajectoryTokenizeMixin` (`trajectory_tokenize.py` — trajectory → training rows) and
-`RolloutMetricsMixin` (`rollout_metrics.py` — completion logs and per-episode diagnostics). Both
-on-policy trainers compose the fourth, `DecoupledCompletionsLogMixin` (`completions_logging.py`, beside
-the artifact writers it routes `log` through): it writes the completions record under
-`save_completions` and the console table under TRL's `log_completions`.
+`environmental/` holds the async GRPO trainer, one concern per module: `trainer.py`
+(`DistributedAsyncEnvironmentalGRPOTrainer`: construction, the round entry, `compute_loss`, `log`),
+`environmental_rules.py` (the pure `reject_*` construction refusals), `step_batch.py` (`StepBatchMixin`:
+`_build_training_tensors` as named phases in their collective order, `BatchRows`, `StepRows`, `StepScores`, the
+`BatchBuildFence`), `importance_sampling.py` (`ImportanceSamplingMixin`: the engine-to-trainer ratio, its mask
+stages, the engine re-score and the trust-region breaker), `reasoning.py` (`ReasoningBudgetMixin`: the per-level
+thinking contract and the rollout rewards with the reasoning length terms charged), `routing_replay.py` (the
+routing-replay injector and `RoutingReplayMixin`), `async_rollouts.py` (`AsyncRolloutMixin`: Ray actors, the prefetch
+thread, engine weight sync), `trajectory_tokenize.py` and `trajectory_spans.py` (`TrajectoryTokenizeMixin`:
+trajectory → training rows), and `rollout_metrics.py` (`RolloutMetricsMixin`: completion logs and per-episode
+diagnostics).
 
 ### Online GRPO vLLM weight sync
 
-`DistributedGRPOTrainer._setup_weight_sync` replaces TRL's
+`DistributedGRPOTrainer._install_weight_sync` replaces TRL's
 `VLLMGeneration.sync_weights` with `_distributed_sync_weights` at construction, and raises when TRL
 built no `vllm_generation` (server-mode vLLM is required). Before it, the init spine both on-policy
 trainers close through (`OnPolicyGRPOInitMixin._finish_on_policy_init`) runs

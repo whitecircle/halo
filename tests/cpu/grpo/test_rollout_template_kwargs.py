@@ -20,7 +20,7 @@ from src.environments.rollout_config import (
     REASONING_BUDGET_TEMPLATE_VAR,
     RolloutConfig,
 )
-from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
+from src.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 
 
 def test_request_and_render_agree_on_the_episode_variables():

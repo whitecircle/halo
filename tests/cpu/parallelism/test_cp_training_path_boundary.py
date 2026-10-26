@@ -15,9 +15,9 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from src.distributed.context_parallel.config import CPConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_logprobs
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 from tests.common.gloo import run_gloo_ranks
+from tests.common.smpo_trainer import smpo_trainer
 
 VOCAB, SEQ = 17, 12
 
@@ -89,13 +89,9 @@ def _sft_worker(rank, cp_size):
 
 
 def _smpo_host(config):
-    host = object.__new__(SmoothMarginPOTrainer)
-    host.cp_config = config
-    host.parallelism_config = SimpleNamespace(cp_size=config.cp_size if config is not None else 1)
-    host.pad_token_id = 0
-    host.padding_free = False
-    host.lower_clip_percentile = host.upper_clip_percentile = host.min_log_prob = None
-    return host
+    return smpo_trainer(
+        parallelism_config=SimpleNamespace(cp_size=config.cp_size if config is not None else 1), cp_config=config
+    )
 
 
 def _smpo_worker(rank, cp_size):

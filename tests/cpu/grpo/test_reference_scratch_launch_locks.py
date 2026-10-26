@@ -19,7 +19,7 @@ import os
 
 import pytest
 
-import src.trainers.grpo.reference_cache as cache_module
+import src.trainers.grpo.offline.reference_cache as cache_module
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 
 # Bounds every wait on a spawned launch: spawn and import, then the step it signals.

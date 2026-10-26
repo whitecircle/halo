@@ -8,7 +8,7 @@ import shutil
 import pytest
 import torch
 
-import src.trainers.mixins.reference_logps as reference_mod
+import src.trainers.reference_logps as reference_mod
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME, REFERENCE_LOGPS_FILE
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from tests.common.gloo import run_gloo_ranks
