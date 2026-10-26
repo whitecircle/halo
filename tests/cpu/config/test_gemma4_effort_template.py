@@ -14,9 +14,9 @@ from huggingface_hub import try_to_load_from_cache
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
 from tests.common.models import GEMMA4_26B_A4B
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import skip_uncached
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_PATH = REPO_ROOT / "jinja-templates" / "gemma4" / "gemma4-reasoning-effort.jinja"
 STOCK_TEMPLATE_REPO = GEMMA4_26B_A4B
 

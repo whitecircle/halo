@@ -17,9 +17,10 @@ from pathlib import Path
 
 import pytest
 import torch
+from transformers.utils import CONFIG_NAME
 
 import src.distributed.expert_parallel.layers.roster  # noqa: F401  — registers the source-schema families
-from src.checkpoint.config_export import CONFIG_NAME, finalize_exported_config
+from src.checkpoint.config_export import finalize_exported_config
 from src.models.moe_balancing import exports_source_config_schema
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 

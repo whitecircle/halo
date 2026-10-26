@@ -12,19 +12,18 @@ Run: ``python tests/cpu/parallelism/test_shipped_diagram_topology.py`` (or ``pyt
 from __future__ import annotations
 
 import ast
-import os
 
 import pytest
 
 from src.distributed.parallelism_config import ParallelismConfig
+from tests.common.repo import REPO_ROOT
 
-_GENERATOR = os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", "diagrams", "gen_ep_group_tree.py")
+_GENERATOR = REPO_ROOT / "scripts/diagrams/gen_ep_group_tree.py"
 _FIGURES = ("ep_group_hierarchy", "ep_multi_node_layout")
 
 
 def _source() -> str:
-    with open(os.path.abspath(_GENERATOR), encoding="utf-8") as f:
-        return f.read()
+    return _GENERATOR.read_text(encoding="utf-8")
 
 
 def _topologies() -> dict[str, dict[str, int | str]]:

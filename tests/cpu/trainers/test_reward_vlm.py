@@ -40,7 +40,7 @@ from src.models.modality import config_declares_multimodality, is_vlm_model
 from src.models.structure import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 from tests.cpu.data.test_vlm_preference_collator import IMAGE_TOKEN, StubProcessor, StubTokenizer, make_row
 
 # A model id the name heuristic reads as multimodal, so the checkpoint verdict holds offline.

@@ -54,10 +54,9 @@ from scripts.inference.reward_model import _common as reward_model_common
 from scripts.inference.reward_model._common import build_generation_parser
 from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from tests.common.ports import free_port
-from tests.common.utils import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_INFERENCE_ROOT = _PROJECT_ROOT / "scripts" / "inference"
+_INFERENCE_ROOT = REPO_ROOT / "scripts" / "inference"
 _GRADIO_APPS = sorted(_INFERENCE_ROOT.rglob("gradio_*.py"))
 # Loopback spellings: an app reachable only from its own host. Anything else is published.
 _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -74,7 +73,7 @@ def _gradio_app(path: Path) -> types.ModuleType:
 
     Cached: every app pulls in gradio, a seconds-long import.
     """
-    return load_script_module(str(path.relative_to(_PROJECT_ROOT)))
+    return load_script_module(str(path.relative_to(REPO_ROOT)))
 
 
 def _argparse_default(source: str, flag: str):
@@ -411,7 +410,7 @@ def test_the_local_endpoint_default_has_one_home():
     second source of truth.
     """
     assert add_openai_endpoint_args(argparse.ArgumentParser()).get_default("base_url") is DEFAULT_LOCAL_BASE_URL
-    for script in sorted((_PROJECT_ROOT / "scripts").rglob("*.py")):
+    for script in sorted((REPO_ROOT / "scripts").rglob("*.py")):
         source = script.read_text(encoding="utf-8")
         assert "DEFAULT_LOCAL_BASE_URL = " not in source, f"{script.name} re-declares the endpoint constant"
 
@@ -441,9 +440,9 @@ def test_every_endpoint_flag_comes_from_the_shared_helper():
         "the endpoint pattern no longer recognizes the shared spellings, so the sweep below covers nothing"
     )
 
-    scripts_root = _PROJECT_ROOT / "scripts"
+    scripts_root = REPO_ROOT / "scripts"
     redeclared = [
-        f"{script.relative_to(_PROJECT_ROOT)}: {flag}"
+        f"{script.relative_to(REPO_ROOT)}: {flag}"
         for script in sorted(scripts_root.rglob("*.py"))
         if script != scripts_root / "_common.py" and script.relative_to(scripts_root).parts[0] != "profiling"
         for flag in _declared_flags(script.read_text(encoding="utf-8"))
@@ -462,9 +461,9 @@ def test_every_dtype_flag_comes_from_the_shared_helper():
     """One default and one choice set for every dtype flag under ``scripts/``: the scorer's
     ``--rm_dtype`` names a different model's dtype, not a different set of spellings or a different
     default from the checkpoint tools that produced that model."""
-    scripts_root = _PROJECT_ROOT / "scripts"
+    scripts_root = REPO_ROOT / "scripts"
     redeclared = [
-        f"{script.relative_to(_PROJECT_ROOT)}: {flag}"
+        f"{script.relative_to(REPO_ROOT)}: {flag}"
         for script in sorted(scripts_root.rglob("*.py"))
         if script != scripts_root / "_common.py"
         for flag in _declared_flags(script.read_text(encoding="utf-8"))
@@ -493,7 +492,7 @@ def test_the_prompt_row_fields_come_from_the_shared_helper():
     assert shared and shared <= scorer, f"the scorers do not carry the shared row fields {sorted(shared - scorer)}"
 
     redeclared = [
-        f"{script.relative_to(_PROJECT_ROOT)}: {flag}"
+        f"{script.relative_to(REPO_ROOT)}: {flag}"
         for script in sorted(_INFERENCE_ROOT.rglob("*.py"))
         if script != _INFERENCE_ROOT / "_common.py"
         for flag in _declared_flags(script.read_text(encoding="utf-8"))

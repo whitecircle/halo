@@ -42,15 +42,16 @@ template asks you to disclose the scaffold and models you used.
 
    ```bash
    make lint && make format   # host
-   make docs                  # host (stdlib python3): link and anchor check
+   make docs                  # host (stdlib Python 3.12+): links, anchors and code references
    make seed-hf-cache         # image: Hub configs and tokenizers the CPU tests read
    make test-cpu              # image, no GPU needed
    make test-gpu-core         # image, for GPU-affecting changes
    ```
 
    Re-run `make seed-hf-cache` when `tests/common/models.py` or `examples/` add
-   a Hub repo. Hosted CI runs only lint and the docs checks, so report your test
-   results in the PR.
+   a Hub repo. Hosted CI runs only lint, the convention tests and the docs checks,
+   so report your test results in the PR. A change to a path in
+   `.github/sensitive-paths` also needs the `sensitive` label from a maintainer.
 3. Ship tests that fail when the behavior breaks. Smoke-only tests and
    `assert x is not None` don't count. See the test guide in
    [`agent-docs/contributing/`](../agent-docs/contributing/README.md) ↗.

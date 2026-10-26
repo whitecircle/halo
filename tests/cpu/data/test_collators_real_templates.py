@@ -17,8 +17,6 @@ Run: python tests/cpu/data/test_collators_real_templates.py
 Requires the model tokenizers/configs in the HF cache (offline-friendly).
 """
 
-import os
-
 import pytest
 
 from src.data.collators.completions_only import DataCollatorForCompletionOnlyLM
@@ -28,6 +26,7 @@ from src.data.collators.packing import (
 )
 from src.data.spans import build_completion_only_labels, resolve_eos_token_ids
 from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, QWEN3_0_6B, QWEN3_5_2B
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
 
 # Distinctive content so decode-based assertions are unambiguous after templating/tokenization.
@@ -55,8 +54,7 @@ def _apply_sft_template(tok, model_id):
     """Use the framework SFT jinja template when the native template lacks a final-turn terminator."""
     path = SFT_TEMPLATE_FILES.get(model_id)
     if path:
-        with open(os.path.join(os.path.dirname(__file__), "../../..", path)) as f:
-            tok.chat_template = f.read()
+        tok.chat_template = (REPO_ROOT / path).read_text()
 
 
 CONVO = [

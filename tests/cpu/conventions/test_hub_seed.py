@@ -16,8 +16,8 @@ import yaml
 
 from tests.common.hub_seed import GATED_REPOS, example_repos, is_hub_repo, roster_repos, seed
 from tests.common.models import GEMMA3_4B_IT, GEMMA4_26B_A4B, GPT_OSS_20B_PATCHED, PINNED_REVISIONS, QWEN3_0_6B
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import REQUIRE_HUB_CACHE, require_cached, try_cached_config, try_cached_tokenizer
-from tests.common.utils import REPO_ROOT
 
 # Well-formed and certainly absent from any cache.
 _UNSEEDED = "halo-tests/no-such-repo"

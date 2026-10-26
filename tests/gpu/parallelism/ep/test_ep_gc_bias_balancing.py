@@ -50,8 +50,9 @@ from src.distributed.expert_parallel.patching import (
     patch_moe_model_for_ep,
 )
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.harness import gpu_test_main, log
+from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
+from tests.common.utils import log
 
 EP_SIZE = 2
 BATCH = 2

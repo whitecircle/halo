@@ -18,7 +18,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from PIL import Image
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 _ROWS_PER_MODALITY = 4
 

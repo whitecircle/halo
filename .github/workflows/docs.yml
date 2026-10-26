@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: link and anchor check (agent-docs, human-docs, skills, root markdown)
+      - name: links, anchors and code references (agent-docs, human-docs, skills, root markdown)
         run: ./scripts/docs/check_links.sh
 
   diagrams:
@@ -35,7 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install matplotlib at the locked version
-        run: pip install --quiet "matplotlib==$(awk '/^name = "matplotlib"$/{f=1} f && /^version = /{gsub(/"/,"",$3); print $3; exit}' uv.lock)"
+        run: |
+          version=$(python .github/scripts/locked_version.py matplotlib)
+          pip install --quiet "matplotlib==$version"
       - name: Regenerate the figures
         # Each generator writes at import time and most carry no `__main__` guard, so run them one
         # per interpreter.

@@ -54,6 +54,7 @@ from src.trainers.grpo.rollout.weight_sync_clients import (
     verify_sampler_logprob_reference,
 )
 from tests.common.ports import free_port
+from tests.common.weight_sync import offline_client
 
 # Well above the client deadlines each test monkeypatches down, so a block is observed, not waited out.
 JOIN_TIMEOUT_S = 30.0
@@ -981,9 +982,7 @@ def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():
     aligned to the whole prompt+completion sequence; only the completion slice comes back, in order."""
     server = FakeVLLMServer()
     try:
-        client = VLLMWeightSyncClient.__new__(VLLMWeightSyncClient)
-        client.base_url = server.url
-        client.session = requests.Session()
+        client = offline_client(VLLMWeightSyncClient, server.url)
         values = client.score_completion_logprobs([11, 12, 13], [14, 15])
         assert values == [pytest.approx(-((14 % 7) + 1) / 10), pytest.approx(-((15 % 7) + 1) / 10)]
         assert server.bodies["/v1/completions"]["prompt"] == [11, 12, 13, 14, 15]
@@ -999,9 +998,7 @@ def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():
     text] each, and must carry the completion's own ids in order."""
     server = FakeVLLMServer()
     try:
-        client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
-        client.base_url = server.url
-        client.session = requests.Session()
+        client = offline_client(SGLangWeightSyncClient, server.url)
         values = client.score_completion_logprobs([11, 12, 13], [14, 15])
         assert values == [pytest.approx(-((14 % 7) + 1) / 10), pytest.approx(-((15 % 7) + 1) / 10)]
         body = server.bodies["/generate"]
@@ -1015,9 +1012,7 @@ def test_sglang_score_completion_logprobs_refuses_a_window_that_does_not_open_on
     """A window whose anchor is not the last prompt token is a shifted reference, never silently read."""
     server = FakeVLLMServer()
     try:
-        client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
-        client.base_url = server.url
-        client.session = requests.Session()
+        client = offline_client(SGLangWeightSyncClient, server.url)
         with pytest.raises(ValueError, match="at least one prompt token"):
             client.score_completion_logprobs([], [14, 15])
     finally:

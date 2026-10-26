@@ -23,7 +23,7 @@ import pathlib
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _ROOTS = ("src", "scripts")
 # Receivers whose save_pretrained writes no model config.json: tokenizers, processors, generation

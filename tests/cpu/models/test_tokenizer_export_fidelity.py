@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import ast
 import json
-import pathlib
 import types
 
 import pytest
@@ -40,8 +39,7 @@ from src.models.loading.tokenizer_setup import pristine_model_max_length, setup_
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
-
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+from tests.common.repo import REPO_ROOT
 
 PartialState()  # the setup seam logs through accelerate's logger
 

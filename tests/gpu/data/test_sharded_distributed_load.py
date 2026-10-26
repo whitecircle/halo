@@ -29,7 +29,8 @@ from collections import Counter
 import torch.distributed as dist
 from datasets import Dataset
 
-from src.data.pipeline.preprocessing import SHARD_INDEX_FILE, shard_dataset
+from src.data.pipeline.preprocessing import shard_dataset
+from src.data.shard_index import SHARD_INDEX_FILE
 from src.data.sources.loading import is_sharded_dataset_coordinated
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin

@@ -161,7 +161,7 @@ test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside T
 bench: ## run the EP/TP throughput benchmarks
 	$(DOCKER_RUN) bash -lc "./tests/gpu/profiling/run_ep_tp_benchmarks.sh --gpus=$(NPROC)"
 
-docs: ## link and anchor check over agent-docs/, human-docs/, skills/ and the root markdown
+docs: ## links, anchors and code references in agent-docs/, human-docs/, skills/ and the root markdown
 	./scripts/docs/check_links.sh
 
 # One `python` per generator: most write their figures at import time with no `__main__` guard, and

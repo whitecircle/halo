@@ -22,8 +22,9 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_SCRIPTS = _REPO_ROOT / "scripts" / "training"
+from tests.common.repo import REPO_ROOT
+
+_SCRIPTS = REPO_ROOT / "scripts" / "training"
 
 # Every trainer a shipped script constructs — the PP-capable roster (agent-docs/parallelism/
 # pipeline-parallelism.md) and the rest alike. Kept explicit rather than imported so the test reads
@@ -86,7 +87,7 @@ def test_every_script_naming_a_trainer_has_its_construction_seen():
     spelling it does not resolve — would pass the positional check below unread."""
     constructed = {path for path, _trainer, _call in _trainer_constructions()}
     unseen = [
-        str(path.relative_to(_REPO_ROOT))
+        str(path.relative_to(REPO_ROOT))
         for path in sorted(_SCRIPTS.rglob("*.py"))
         if _trainer_names(ast.parse(path.read_text(), filename=str(path))) and path not in constructed
     ]
@@ -97,7 +98,7 @@ def test_no_script_passes_the_model_positionally():
     offenders = []
     for path, trainer, call in _trainer_constructions():
         if call.args:  # any positional argument at all — the model is always the first
-            offenders.append(f"{path.relative_to(_REPO_ROOT)}:{call.lineno} {trainer}(<positional>, ...)")
+            offenders.append(f"{path.relative_to(REPO_ROOT)}:{call.lineno} {trainer}(<positional>, ...)")
     assert not offenders, (
         "These scripts pass the model positionally, so it never reaches the kwargs the pipeline "
         "seam in src/trainers/mixins/base.py splits — PP becomes unreachable:\n  " + "\n  ".join(offenders)

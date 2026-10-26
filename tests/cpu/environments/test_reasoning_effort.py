@@ -22,7 +22,7 @@ from src.environments.base import (
     stable_reasoning_effort,
 )
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _DRAWN_PROBLEMS = [f"problem {i}" for i in range(24)]
 # Prints the stable draw of each of ``_DRAWN_PROBLEMS`` as JSON, for a fresh interpreter under a chosen hash seed.

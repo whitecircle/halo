@@ -29,8 +29,9 @@ import sys
 
 import pytest
 
-_REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-_SCRIPTS_DIR = _REPO_ROOT / "scripts"
+from tests.common.repo import REPO_ROOT
+
+_SCRIPTS_DIR = REPO_ROOT / "scripts"
 _SCRIPTS = sorted(
     path
     for path in _SCRIPTS_DIR.rglob("*.py")
@@ -56,8 +57,8 @@ def _help_in_subprocess(script: pathlib.Path) -> subprocess.CompletedProcess:
         [sys.executable, str(script), "--help"],
         capture_output=True,
         text=True,
-        cwd=_REPO_ROOT,
-        env={**os.environ, "PYTHONPATH": str(_REPO_ROOT)},
+        cwd=REPO_ROOT,
+        env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
         timeout=600,
     )
 
@@ -88,7 +89,7 @@ def test_every_tool_script_imports(tool: pathlib.Path, pristine_root_logging):
     `src` module moved out from under one breaks it silently until an operator runs it. In-process,
     unlike the subprocess sweep above — enough to catch a stale import, at seconds instead of 30 s
     a script."""
-    importlib.import_module(".".join(tool.relative_to(_REPO_ROOT).with_suffix("").parts))
+    importlib.import_module(".".join(tool.relative_to(REPO_ROOT).with_suffix("").parts))
 
 
 def test_the_script_scan_is_not_vacuous():

@@ -21,7 +21,6 @@ structural sweep requiring any ``save_model`` override to mark it too.
 """
 
 import ast
-import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +32,7 @@ from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.runtime import DeferredRankFailure
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
+from tests.common.repo import REPO_ROOT
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
@@ -196,7 +196,7 @@ def test_every_save_model_marks_its_collectives_done():
     """Structural, over the whole trainer tree: a ``save_model`` that replaces the mixin's still
     gathers, and an unmarked one silently downgrades every deferred tail failure of that trainer to a
     rank-local raise."""
-    trainers = pathlib.Path(__file__).resolve().parents[3] / "src" / "trainers"
+    trainers = REPO_ROOT / "src" / "trainers"
     assert trainers.is_dir(), f"premise: {trainers} must exist, else this test scans nothing"
     unmarked = []
     for path in trainers.rglob("*.py"):

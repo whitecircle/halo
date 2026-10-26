@@ -16,7 +16,7 @@ from accelerate import PartialState
 
 import src.kernels.liger.orchestrator as orch
 from src.kernels.liger.orchestrator import _apply_liger_for_standard_models
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 # The orchestrator logs through accelerate's rank-aware logger, which requires an initialized state.
 PartialState()

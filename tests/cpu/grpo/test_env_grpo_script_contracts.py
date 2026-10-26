@@ -19,7 +19,6 @@ import logging
 import re
 import sys
 import types
-from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -29,11 +28,9 @@ from datasets import Dataset, DatasetDict
 
 from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
 from src.configs.async_training_config import AsyncTrainingConfig
-from tests.common.utils import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
 PartialState()  # the script logs through accelerate, which refuses to log without it
-
-_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture(scope="module")
@@ -212,7 +209,7 @@ def test_docstring_launch_examples_are_runnable(env_grpo_module):
     launches = _docstring_launches(env_grpo_module.__doc__)
     assert launches, "premise: the docstring shows at least one launch command"
     for nproc, relative in launches:
-        config = _REPO_ROOT / relative
+        config = REPO_ROOT / relative
         assert config.is_file(), f"the docstring cites {relative}, which does not exist"
         ep_size = int(yaml.safe_load(config.read_text()).get("expert_parallel_size", 1))
         assert ep_size <= nproc and nproc % ep_size == 0, (

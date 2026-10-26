@@ -21,9 +21,9 @@ import yaml
 
 from src.configs.environment_config import EnvironmentConfig
 from src.environments.registry import resolve_environment
+from tests.common.repo import REPO_ROOT
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-ENV_EXAMPLES_ROOT = PROJECT_ROOT / "examples" / "grpo" / "environmental"
+ENV_EXAMPLES_ROOT = REPO_ROOT / "examples" / "grpo" / "environmental"
 
 _EXAMPLES = sorted(ENV_EXAMPLES_ROOT.rglob("*.yaml"))
 _ID = {"ids": lambda config: config.relative_to(ENV_EXAMPLES_ROOT).as_posix()}

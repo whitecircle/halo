@@ -33,11 +33,7 @@ from transformers.core_model_loading import (
 import src.distributed.expert_parallel.hub_conversion as hub_conversion
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.hub_conversion import resolve_conversion_steps, resolve_loaded_conversion_steps
-from src.distributed.expert_parallel.lazy_loader import (
-    EPWeightPlanner,
-    WeightAction,
-    build_family_key_mapping,
-)
+from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner, build_family_key_mapping
 from src.models.loading.lazy_safetensors.conversion import (
     Concat,
     Deinterleave,
@@ -47,7 +43,12 @@ from src.models.loading.lazy_safetensors.conversion import (
     translate_converter,
     translate_renaming,
 )
-from src.models.loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightPlan, build_key_mapping
+from src.models.loading.lazy_safetensors.weights import (
+    SafetensorsWeightLoader,
+    WeightAction,
+    WeightPlan,
+    build_key_mapping,
+)
 from src.models.loading.model_preparation import resolve_auto_model_class
 from tests.common.tiny_models import module_with_weight_keys
 

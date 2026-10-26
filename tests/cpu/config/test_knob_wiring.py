@@ -39,9 +39,7 @@ from src.training.script_runner import (
     reject_trl_dataset_prep_args,
     reject_unsupported_args,
 )
-from tests.common.utils import load_script_module
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from tests.common.repo import REPO_ROOT, load_script_module
 
 # bf16_optimizer: YAML/CLI reachable, tri-state, and honored by the mixin
 
@@ -327,7 +325,7 @@ def test_reject_non_default_args_refuses_a_field_the_dataclass_does_not_declare(
 def test_self_distill_guards_both_generation_eval_knobs():
     """Self-distillation keeps its dataset raw, so GenerateExamplesCallback is unreachable there and
     BOTH knobs are inert. Reading the call keeps the script's guard from losing one silently."""
-    source = (PROJECT_ROOT / "scripts/training/distillation/self_distill.py").read_text()
+    source = (REPO_ROOT / "scripts/training/distillation/self_distill.py").read_text()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "reject_non_default_args":
             guarded = {arg.value for arg in node.args if isinstance(arg, ast.Constant)}
@@ -347,7 +345,7 @@ def _rejected_knobs(script_path: str) -> set[str]:
     unfirable — restoring exactly the silent no-op it exists to stop. Requiring an attribute load
     somewhere in the value subtree covers the plain reads and the ``x if y else None`` forms alike.
     """
-    tree = ast.parse((PROJECT_ROOT / script_path).read_text())
+    tree = ast.parse((REPO_ROOT / script_path).read_text())
     rejected: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "reject_unsupported_args":
@@ -489,7 +487,7 @@ def _forwards_moe_balancing(script: Path) -> bool:
 
 
 _TRAINER_SCRIPTS = sorted(
-    path for path in (PROJECT_ROOT / "scripts" / "training").rglob("*.py") if _trainer_call(path) is not None
+    path for path in (REPO_ROOT / "scripts" / "training").rglob("*.py") if _trainer_call(path) is not None
 )
 
 
@@ -503,7 +501,7 @@ def test_every_training_script_forwards_moe_balancing_to_its_trainer():
     """
     assert _TRAINER_SCRIPTS, "no training script matched the trainer-construction scan"
     missing = [
-        str(script.relative_to(PROJECT_ROOT)) for script in _TRAINER_SCRIPTS if not _forwards_moe_balancing(script)
+        str(script.relative_to(REPO_ROOT)) for script in _TRAINER_SCRIPTS if not _forwards_moe_balancing(script)
     ]
     assert not missing, f"these scripts do not forward the parsed moe_balancing to their trainer: {missing}"
 
@@ -531,7 +529,7 @@ def test_precompute_trainers_receive_the_resume_context():
         if trainer_cls is None or not issubclass(trainer_cls, PrecomputeRefLogpsRankConsistentMixin):
             continue
         passed = {kw.arg: kw.value for kw in call.keywords if kw.arg}
-        wired[str(script.relative_to(PROJECT_ROOT))] = all(
+        wired[str(script.relative_to(REPO_ROOT))] = all(
             isinstance(passed.get(field), ast.Attribute)
             and passed[field].attr == field
             and getattr(passed[field].value, "id", None) == "runtime"
@@ -715,7 +713,7 @@ def test_sdpg_trainer_has_no_spelling_of_the_tunables_of_its_own():
 
 def _self_distill_script_splats_the_builder() -> bool:
     """Whether the script's trainer call splats ``args.build_sdpg_kwargs()``."""
-    tree = ast.parse((PROJECT_ROOT / "scripts/training/distillation/self_distill.py").read_text())
+    tree = ast.parse((REPO_ROOT / "scripts/training/distillation/self_distill.py").read_text())
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and getattr(node.func, "id", None) == "DistributedSelfDistillationTrainer"):
             continue
@@ -868,7 +866,7 @@ _MASK_FRACTION_KNOB = "skip_update_masked_frac"
 
 
 def _grpo_trainer_trees() -> list[ast.Module]:
-    return [ast.parse(path.read_text()) for path in sorted((PROJECT_ROOT / _IS_MASK_CONSUMER_ROOT).rglob("*.py"))]
+    return [ast.parse(path.read_text()) for path in sorted((REPO_ROOT / _IS_MASK_CONSUMER_ROOT).rglob("*.py"))]
 
 
 def test_every_is_mask_knob_reaches_the_mask_config():

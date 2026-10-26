@@ -22,7 +22,7 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 _TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
 

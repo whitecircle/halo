@@ -33,7 +33,7 @@ from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.mixins.validation import ParallelismValidationMixin
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 PartialState()  # the gate warns through accelerate's logger, which requires an initialized state
 

@@ -24,7 +24,7 @@ from src.distributed.expert_parallel.expert_weights import hf_fused_expert_keys,
 from src.kernels.lowp.mixed_precision import MLP_PROJECTIONS
 from src.kernels.lowp.quantization import BlockScaledTensor, dequantize, fake_quant
 from tests.common.checkpoint_io import weight_files
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 _quantize_to_lowp = load_script_module("scripts/after_training/quantize_to_lowp.py")
 _DEFAULT_EXCLUDE = _quantize_to_lowp._DEFAULT_EXCLUDE

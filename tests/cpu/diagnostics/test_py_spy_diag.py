@@ -17,7 +17,7 @@ import sys
 import pytest
 
 from src.diagnostics import debugging
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _PIDS = (101, 102, 103)
 

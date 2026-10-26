@@ -31,8 +31,9 @@ from src.distributed.expert_parallel.patching import (
 )
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.moe_balancing import declared_routers
-from tests.common.harness import gpu_test_main, log
+from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG
+from tests.common.utils import log
 
 EP_SIZE = 2
 BATCH, SEQ = 2, 64

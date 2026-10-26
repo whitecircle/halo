@@ -40,7 +40,8 @@ from src.checkpoint import adapters
 from src.distributed.loading import model_loading
 from src.models.loading import model_preparation
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import REPO_ROOT, imports_name
+from tests.common.repo import REPO_ROOT
+from tests.common.utils import imports_name
 
 PartialState()  # the loaders log through accelerate's logger
 

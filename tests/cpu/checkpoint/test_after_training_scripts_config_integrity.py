@@ -34,7 +34,7 @@ from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
 from src.checkpoint import tool_io
 from tests.common.checkpoint_io import weight_files
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 # Tiny but real: the scripts run the genuine load → transform → save path.
 _TINY_QWEN3 = {

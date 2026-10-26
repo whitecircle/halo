@@ -26,7 +26,8 @@ from accelerate import PartialState
 import src.distributed.expert_parallel.loading as ep_loading
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
 from src.distributed.expert_parallel.loading import reject_ep_sharded_checkpoint
-from tests.common.utils import REPO_ROOT, imports_name
+from tests.common.repo import REPO_ROOT
+from tests.common.utils import imports_name
 
 PartialState()  # the loader logs through accelerate's logger
 

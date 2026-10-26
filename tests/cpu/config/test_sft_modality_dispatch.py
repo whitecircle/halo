@@ -25,10 +25,9 @@ from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src.models import modality
-from tests.common.utils import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_TRAINING_DIR = _REPO_ROOT / "scripts" / "training"
+_TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 
 # Every script whose data path branches on modality. One seam, not four copies of it.
 _DISPATCHING_SCRIPTS = [

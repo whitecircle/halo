@@ -17,7 +17,7 @@ import re
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 SCRIPT = REPO_ROOT / "docker" / "efa" / "install_efa_userspace.sh"
 DOCKERFILES = ("Dockerfile", "Dockerfile.vllm", "Dockerfile.sglang")

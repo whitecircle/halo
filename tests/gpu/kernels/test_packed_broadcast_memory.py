@@ -20,6 +20,7 @@ import src.distributed.nccl.clients.vllm as vllm_client_module
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_NUM_BUFFERS, packed_broadcast_producer
 from tests.common.harness import gpu_test_main, record_check
+from tests.common.weight_sync import offline_client
 
 _SYNCS = 12
 _PARAMS_PER_SYNC = 24
@@ -73,10 +74,7 @@ def test_client_reuses_one_stream_pair_across_syncs():
     """The client half of the contract: VLLMWeightSyncClient must lazily create ONE stream pair and
     pass the same list into every producer call — dropping ``streams=``, or re-creating them per
     sync, reintroduces the production ratchet while the producer-contract test stays green."""
-    client = object.__new__(VLLMWeightSyncClient)
-    client._reset_buffer_state()  # the client's own initializer for the streamed-chunk state
-    client._packed_streams = None
-    client.base_url = "http://stub"
+    client = offline_client(VLLMWeightSyncClient)
     client.communicator = SimpleNamespace(device=torch.device("cuda", torch.cuda.current_device()), aborted=False)
 
     captured = []

@@ -59,10 +59,10 @@ from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.kernels.liger.orchestrator import apply_liger_kernel
 from src.models.loading.config_levels import text_config
 from tests.common.ep_merge_oracle import post_process_merged_weights
-from tests.common.harness import gpu_test_main, log, record_check
+from tests.common.harness import gpu_test_main, record_check
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.utils import cos_sim, fro_rel_err
+from tests.common.utils import cos_sim, fro_rel_err, log
 
 SEED = 0
 BATCH, SEQ = 2, 96

@@ -13,7 +13,7 @@ import re
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 CATALOGUE = REPO_ROOT / "agent-docs/reference/configuration-reference.md"
 

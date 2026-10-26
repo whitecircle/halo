@@ -18,7 +18,6 @@ import logging
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 from accelerate import PartialState
@@ -31,6 +30,7 @@ import src.data.sources.dataset_cache
 import src.data.sources.s3_client
 import src.data.sources.sharded_dataset  # noqa: F401  each module sets its logger level at import
 from src.data.sources.loading import _normalize_dataset_schema
+from tests.common.repo import REPO_ROOT
 
 _LOADING_LOGGER = "src.data.sources.loading"
 
@@ -143,7 +143,7 @@ def test_normalized_column_order_is_the_same_in_every_process():
             capture_output=True,
             text=True,
             check=True,
-            cwd=Path(__file__).resolve().parents[3],
+            cwd=REPO_ROOT,
             env={**os.environ, "PYTHONHASHSEED": seed},
         )
         orders.append(json.loads(result.stdout.strip().splitlines()[-1]))

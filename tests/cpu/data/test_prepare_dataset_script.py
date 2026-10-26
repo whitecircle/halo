@@ -38,10 +38,9 @@ from transformers import PreTrainedTokenizerFast
 
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.sources.loading import load_preprocessed_dataset
-from tests.common.utils import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
-REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-_SCRIPT = os.path.join(REPO, "scripts", "before_training", "prepare_dataset.py")
+_SCRIPT = REPO_ROOT / "scripts/before_training/prepare_dataset.py"
 
 # A real fast tokenizer built in-process, so the unstubbed run needs no download: one id per word.
 _WORDS = ("doc", *(str(i) for i in range(32)))
@@ -53,7 +52,7 @@ _WORDS = ("doc", *(str(i) for i in range(32)))
 _DRIVER = """
 import sys, traceback, types
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 mod = load_script_module("scripts/before_training/prepare_dataset.py")
 
@@ -116,8 +115,8 @@ def _run(argv: list[str], prelude: str = "") -> str:
 
         driver = _DRIVER.format(argv=["--input", raw, "--output", out, *argv], prelude=prelude)
         env = dict(os.environ)
-        env["PYTHONPATH"] = REPO + os.pathsep + env.get("PYTHONPATH", "")
-        proc = subprocess.run([sys.executable, "-c", driver], capture_output=True, text=True, env=env, cwd=REPO)
+        env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run([sys.executable, "-c", driver], capture_output=True, text=True, env=env, cwd=REPO_ROOT)
         return proc.stdout + proc.stderr
 
 
@@ -283,8 +282,8 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
             *("--mode", "text", "--text-field", "text", "--max-length", "8"),
             *("--num-shards", str(num_shards), "--test-size", "0.25"),
         ]
-        env = {**os.environ, "PYTHONPATH": REPO + os.pathsep + os.environ.get("PYTHONPATH", "")}
-        proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=REPO)
+        env = {**os.environ, "PYTHONPATH": str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=REPO_ROOT)
         assert proc.returncode == 0, proc.stdout + proc.stderr
         with open(os.path.join(out, "metadata.json")) as f:
             assert json.load(f)["num_shards"] == num_shards

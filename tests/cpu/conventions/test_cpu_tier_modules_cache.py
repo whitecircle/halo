@@ -19,7 +19,7 @@ import pytest
 import transformers.dynamic_module_utils
 
 import tests.cpu.conftest as tier
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 MARKER = "FINDINGS:"
 

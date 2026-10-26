@@ -29,10 +29,9 @@ from datasets import DatasetDict
 from src.distributed.parallelism_config import ParallelismConfig
 from src.training.script_runner import padded_workload_attn_implementation
 from tests.common.offline_grpo import offline_grpo_dataset
-from tests.common.utils import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_TRAINING_DIR = _REPO_ROOT / "scripts" / "training"
+_TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 
 # The three GRPO entry points; each pads its batches and loads through load_script_model.
 _GRPO_SCRIPTS = ["offline_grpo.py", "environmental_grpo.py", "online_grpo/rlvr.py"]

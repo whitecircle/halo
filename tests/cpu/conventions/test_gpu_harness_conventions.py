@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 from tests.gpu.manifest import MANIFEST, script_path
 
 _GPU_ROOT = Path(REPO_ROOT) / "tests" / "gpu"

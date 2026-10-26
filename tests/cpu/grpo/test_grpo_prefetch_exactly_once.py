@@ -41,7 +41,7 @@ from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
 from src.trainers.mixins.checkpointing import CheckpointingMixin
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 env_grpo_script = load_script_module("scripts/training/environmental_grpo.py")
 

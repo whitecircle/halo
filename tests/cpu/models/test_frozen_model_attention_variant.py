@@ -25,7 +25,7 @@ from src.models.loading import model_preparation
 from src.models.patches.flex_sliding_attention import FLEX_SLIDING
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 from tests.common.parallelism import make_parallelism_config
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 VARIANT_RESOLVER = "resolve_flex_sliding_attn_implementation"
 SEAM_MODULE = "src/models/loading/model_preparation.py"

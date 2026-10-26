@@ -24,7 +24,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 
 from src.data.pipeline.rendered import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 BOS_ID = 1
 TRAILING_EOS_ID = 555

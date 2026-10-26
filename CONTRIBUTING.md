@@ -48,13 +48,14 @@ Once your PR path is approved, the normal bar applies (full detail in
 - **Everything runs in the Docker image.** The host has no usable Python. Pull the prebuilt image
   (`docker pull public.ecr.aws/whitecircle/halo:blackwell`, then tag it `halo:blackwell` — or `hopper`)
   or build it (`make build-blackwell`), then use the `make` targets (`make test-cpu`, ...); only
-  `make lint` / `make format` / `make precommit` (`uvx ruff`) and `make docs` (a link and anchor check)
-  run on the host. `make test-cpu` needs Docker, not a GPU.
+  `make lint` / `make format` / `make precommit` (`uvx ruff`) and `make docs` (links, anchors and code
+  references) run on the host. `make test-cpu` needs Docker, not a GPU.
 - **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
   `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (and
   `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs only `ruff`,
-  `actionlint` and the docs checks on a PR; the test tiers run on your machine, so state their
-  result in the PR.
+  `actionlint`, the convention tests and the docs checks on a PR; the test tiers run on your machine,
+  so state their result in the PR. A PR that changes a path listed in `.github/sensitive-paths` also
+  needs the `sensitive` label, which a maintainer adds once the change is approved.
 - **Tests ship with behavior — and must not be slop.** A test must *fail when the behavior breaks*; no
   tautologies, smoke-only "didn't raise" checks, vacuous `assert x is not None`, or mock-the-thing-under-test.
   See the anti-slop test guide in [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md).

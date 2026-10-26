@@ -39,10 +39,9 @@ from datasets import Dataset
 from trl import GRPOConfig, GRPOTrainer
 
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import DEFAULT_REASONING_END_TOKEN
+from src.configs.rollout_config import DEFAULT_REASONING_END_TOKEN, SGLANG_BACKEND, VLLM_BACKEND
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
-from src.environments.engine_wire import SGLANG_BACKEND, VLLM_BACKEND
 from src.environments.registry import resolve_environment
 from src.trainers.grpo.environmental import (
     DistributedAsyncEnvironmentalGRPOTrainer,

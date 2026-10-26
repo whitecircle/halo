@@ -29,7 +29,7 @@ import pytest
 from transformers.models.deepseek_v4 import DeepseekV4Config
 
 from tests.common.models import TINY_DSV4_CONFIG
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 _REFUSED = "does not support these config fields"
 

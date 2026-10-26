@@ -25,11 +25,8 @@ Run: ``python tests/cpu/models/test_seq_cls_head_registration.py`` (or ``pytest 
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 import sys
-
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 import pytest
 import torch
@@ -48,6 +45,7 @@ from src.models.seq_cls_heads import (
     Qwen3_5MoeForSequenceClassification,
     Qwen3_5MoeTextForSequenceClassification,
 )
+from tests.common.repo import REPO_ROOT
 
 _GEMMA4_TEXT_KWARGS = {
     "vocab_size": 128,
@@ -120,7 +118,7 @@ def test_the_production_import_path_pulls_in_every_registration():
         "from transformers import AutoModelForSequenceClassification as A\n"
         "print(sorted(c.model_type for c in A._model_mapping._extra_content))\n"
     )
-    result = subprocess.run([sys.executable, "-c", probe], cwd=_REPO_ROOT, capture_output=True, text=True, check=True)
+    result = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
     registered = set(ast.literal_eval(result.stdout.strip().splitlines()[-1]))
 
     assert set(_IDS) <= registered, f"only {sorted(registered)} reachable from the production import"

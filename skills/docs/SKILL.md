@@ -51,9 +51,11 @@ owning doc page). This skill does both, to the house voice.
    `style.md` "one home per fact" rule enforced after the fact.
 6. **Run the link check.** `./scripts/docs/check_links.sh` resolves every relative
    markdown link and heading anchor in `agent-docs/`, `human-docs/`, `skills/` and
-   the root markdown and fails on a broken target, a missing anchor or a `{#id}`
-   heading (CI runs the same script in `docs.yml`). It runs on the bare host with
-   stdlib `python3` — no image needed. It must be green before the work is done.
+   the root markdown, and every repo path and dotted first-party name their code
+   cites; it fails on a broken target, a missing anchor, a `{#id}` heading or a cited
+   path or name that does not exist (CI runs the same script in `docs.yml`). It runs
+   on the bare host with stdlib Python 3.12 — no image needed. It must be green
+   before the work is done.
 
 ## Citing repo paths
 
@@ -63,7 +65,10 @@ hand-write `github.com` URLs — a relative markdown link is fine where the read
 should click through to another doc page, and plain code is right for source
 paths. Class/method names (`EPMoELayerBase._compute_experts`), config fields
 (`ep_size`), flags (`--expert_parallel_size`), and env vars stay plain code.
-This does not change the charter: still cite sparingly.
+This does not change the charter: still cite sparingly. The link check resolves
+each cited path and dotted name, so spell a placeholder in angle brackets
+(`examples/<method>/<family>/`) and give a path outside this repo its own root
+(`<gist>/scripts/…`).
 
 ## Reference material
 

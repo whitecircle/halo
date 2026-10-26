@@ -23,7 +23,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 # Model ids the name heuristic reads the same way offline as against the hub, paired with a config
 # that decides the same — so the checkpoint verdict never depends on a network round-trip.

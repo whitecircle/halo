@@ -52,8 +52,8 @@ from src.checkpoint.tool_io import PROCESSOR_FILES, iter_checkpoint_shard_entrie
 from src.models.loading.model_preparation import auto_load_model, resolve_auto_model_class
 from src.models.loading.tokenizer_setup import load_processing_class
 from tests.common.models import QWEN3_5_2B, TINY_QWEN35_CONFIG, TINY_QWEN35_MOE_CONFIG
+from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_processor
-from tests.common.utils import load_script_module
 
 _TARGET, _CONTROL = "q_proj", "o_proj"
 _WRAPPER_TEXT_PREFIX = "model.language_model."

@@ -22,7 +22,6 @@ from src.distributed.parallelism_config import accelerate_launch_rejection
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
-from tests.common.utils import REPO_ROOT, load_script_module
 
 INTERNAL_FIELD = re.compile(
     r"\b(ep_size|tp_size|expert_tp_size|cp_size|pp_size|pp_split|pp_schedule|pp_microbatches)\b|\b(CP|TP) size\b"
@@ -202,9 +201,6 @@ def test_ep1_sharding_refusal_points_at_the_docs_instead_of_a_benchmark():
     message = str(err.value)
     assert EP1_SHARDING_DOC in message, message
     assert "%" not in message, message
-    page, anchor = EP1_SHARDING_DOC.split("#")
-    check_links = load_script_module("scripts/docs/check_links.py")
-    assert anchor in check_links.parse_markdown((REPO_ROOT / page).read_text()).anchors
 
 
 def test_stock_adamw_refusal_names_the_yaml_knobs():

@@ -28,8 +28,8 @@ from src.data.collators.self_distill import (
 from src.data.collators.vlm import SelfDistillVLMDataCollator
 from src.data.pipeline.vlm_dataset import _filter_vlm_over_length
 from tests.common.models import QWEN3_0_6B
+from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_tokenizer
-from tests.common.utils import load_script_module
 
 MARKER = "<|im_start|>assistant\n"
 

@@ -1,0 +1,37 @@
+name: sensitive-label
+
+# Fails a pull request that changes a path in .github/sensitive-paths without the 'sensitive' label,
+# which a maintainer adds once the change is approved; a label change re-runs it. pull_request_target
+# runs this file, the check and the list as the base branch has them, so a pull request cannot edit
+# them for its own run; its commits are fetched and diffed, never executed.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  # github.ref is the base branch here, the same for every pull request into it.
+  group: sensitive-label-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sensitive-label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The base branch's whole history, so the diff finds where the pull request forked from it.
+          fetch-depth: 0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Changes to sensitive paths carry the 'sensitive' label
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          git fetch --no-tags origin "$HEAD_SHA"
+          python .github/scripts/check_sensitive_label.py HEAD "$HEAD_SHA" --labels "$LABELS"

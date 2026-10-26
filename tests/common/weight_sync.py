@@ -16,7 +16,6 @@ from transformers import CONFIG_MAPPING, PretrainedConfig
 
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.nccl.clients.base import BaseWeightSyncClient
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.runtime import DeferredRankFailure, broadcast_from_rank0, materialize_dtensor, to_local
 from src.env import env_int
 from src.trainers.grpo.rollout.weight_sync import _HubForwarder
@@ -38,10 +37,12 @@ def weight_transfer_port(knob: str, offset: int = 0) -> int:
     return broadcast_from_rank0(free_port())
 
 
-def offline_sglang_client(base_url: str = "http://localhost:30000") -> SGLangWeightSyncClient:
-    """A SGLang client built by its real ``__init__`` minus the live-server probe (``check_server``)."""
-    with patch.object(SGLangWeightSyncClient, "check_server"):
-        return SGLangWeightSyncClient(base_url=base_url)
+def offline_client[Client: BaseWeightSyncClient](
+    client_class: type[Client], base_url: str = "http://localhost", **kwargs
+) -> Client:
+    """A client built by its real ``__init__`` minus the live-server probe (``check_server``)."""
+    with patch.object(client_class, "check_server"):
+        return client_class(base_url=base_url, **kwargs)
 
 
 class StockModel(nn.Module):

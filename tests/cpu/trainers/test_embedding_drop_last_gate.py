@@ -19,7 +19,6 @@ Run: pytest tests/cpu/trainers/test_embedding_drop_last_gate.py
 import ast
 import inspect
 import textwrap
-from pathlib import Path
 
 import pytest
 from accelerate.data_loader import BatchSamplerShard, prepare_data_loader
@@ -30,9 +29,10 @@ from torch.utils.data import DataLoader, SequentialSampler
 from src.configs.embedding_config import EmbeddingConfig
 from src.trainers.embedding import trainer as embedding_module
 from src.trainers.embedding.trainer import EmbeddingTrainer, reject_uneven_sentence_transformers_batches
+from tests.common.repo import REPO_ROOT
 
 _ROWS = Dataset.from_dict({"anchor": ["a", "b", "c"], "positive": ["x", "y", "z"]})
-_SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "training" / "embedding.py"
+_SCRIPT = REPO_ROOT / "scripts" / "training" / "embedding.py"
 
 
 def _check(

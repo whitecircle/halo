@@ -65,7 +65,7 @@ from src.rewards.terms import JudgeTerm
 from src.trainers.grpo.environmental import rollout_valid_mask
 from src.trainers.grpo.objective.advantages import group_relative_advantages
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _TOOL_ERROR_PENALTY = 0.1
 _REMOVE_OWN_WORKDIR = "import os, shutil\nprint('hello')\nshutil.rmtree(os.getcwd())\n"

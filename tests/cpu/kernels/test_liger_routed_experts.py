@@ -38,7 +38,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.liger import orchestrator
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG, TINY_QWEN35_MOE_CONFIG
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 PartialState()  # the orchestrator logs through accelerate's rank-aware logger
 

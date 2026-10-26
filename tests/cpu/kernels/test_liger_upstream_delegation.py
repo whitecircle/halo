@@ -38,7 +38,7 @@ from src.kernels.liger import orchestrator
 from src.kernels.liger.builder import LigerApplier, LigerFamilySpec
 from src.kernels.liger.cross_entropy import liger_cross_entropy
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 PartialState()  # the orchestrator logs through accelerate's rank-aware logger
 

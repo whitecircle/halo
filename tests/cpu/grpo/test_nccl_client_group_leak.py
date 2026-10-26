@@ -19,7 +19,6 @@ the local half never starting at all.
 
 import socket
 import threading
-from unittest.mock import patch
 
 import pytest
 
@@ -28,6 +27,7 @@ import src.distributed.nccl.clients.vllm as vllm_module
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from tests.common.ports import free_port
+from tests.common.weight_sync import offline_client
 
 _SERVER_REFUSED = "server refused the group-init request"
 
@@ -54,8 +54,7 @@ def _failing_server_call(built: threading.Event):
 
 
 def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatch):
-    with patch.object(SGLangWeightSyncClient, "check_server"):
-        client = SGLangWeightSyncClient(base_url="http://localhost:30000")
+    client = offline_client(SGLangWeightSyncClient, "http://localhost:30000")
 
     group, store = object(), object()
     built = threading.Event()
@@ -88,8 +87,7 @@ def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeyp
     unbound call handle instead would raise UnboundLocalError, replacing the diagnosis and skipping
     the release that keeps the group name reusable. The listener no store took is closed with it."""
     port = free_port()
-    with patch.object(SGLangWeightSyncClient, "check_server"):
-        client = SGLangWeightSyncClient(base_url="http://localhost:30000", group_port=port)
+    client = offline_client(SGLangWeightSyncClient, "http://localhost:30000", group_port=port)
 
     destroyed: list[object] = []
     real_async_call = sglang_module._AsyncCall
@@ -116,8 +114,7 @@ def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeyp
 
 
 def test_vllm_aborts_a_communicator_it_built_when_the_server_half_fails(monkeypatch):
-    with patch.object(VLLMWeightSyncClient, "check_server"):
-        client = VLLMWeightSyncClient(base_url="http://localhost:8000")
+    client = offline_client(VLLMWeightSyncClient, "http://localhost:8000")
 
     built = threading.Event()
     aborted: list[str] = []

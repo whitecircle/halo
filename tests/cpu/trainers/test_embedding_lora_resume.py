@@ -98,7 +98,8 @@ from tests.common.distributed import fake_process_group_mesh
 from tests.common.embedding_lora_resume import backbone_prefix
 from tests.common.gloo import run_gloo_ranks
 from tests.common.peft_helpers import injected_lora_fold
-from tests.common.utils import load_script_module, snapshot_trainable, step_losses
+from tests.common.repo import load_script_module
+from tests.common.utils import snapshot_trainable, step_losses
 
 WORDS = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", *(f"w{i}" for i in range(60))]
 TARGET_MODULES = ("query", "value")

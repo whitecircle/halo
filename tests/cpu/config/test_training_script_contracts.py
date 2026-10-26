@@ -32,12 +32,11 @@ import pytest
 from src.cli import training_methods
 from src.data.collators import completions_only
 from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata, validate_preprocessing_compatibility
-from tests.common.utils import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_TRAINING_DIR = _REPO_ROOT / "scripts" / "training"
+_TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 
-_TRAINING_SCRIPTS = sorted(set(training_methods(_REPO_ROOT).values()))
+_TRAINING_SCRIPTS = sorted(set(training_methods(REPO_ROOT).values()))
 
 
 def _load_script_module(rel_path: str):
@@ -65,7 +64,7 @@ def _named_calls(tree: ast.AST, func_name: str) -> list[ast.Call]:
 # so all are held to the same contract. The shared helper is listed explicitly because a vacuous
 # parametrization (all scripts skipping) would silently stop testing anything —
 # ``test_loader_contract_is_not_vacuous`` pins that.
-_LOADER_CALL_SITES = [*_TRAINING_SCRIPTS, _REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py"]
+_LOADER_CALL_SITES = [*_TRAINING_SCRIPTS, REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py"]
 
 
 def _threads_loader_kwargs(script: Path) -> bool:
@@ -99,7 +98,7 @@ def test_loader_contract_is_not_vacuous():
 @pytest.mark.parametrize(
     "script",
     _LOADER_CALL_SITES,
-    ids=[str(p.relative_to(_REPO_ROOT)) for p in _LOADER_CALL_SITES],
+    ids=[str(p.relative_to(REPO_ROOT)) for p in _LOADER_CALL_SITES],
 )
 def test_load_distributed_model_threads_revision_and_quantization(script: Path):
     source = script.read_text(encoding="utf-8")
@@ -130,8 +129,8 @@ def test_training_script_index_is_nonempty():
 # pin is threaded.
 _VLM_PROBE_CALL_SITES = [
     *_TRAINING_SCRIPTS,
-    _REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py",
-    _REPO_ROOT / "src" / "training" / "script_runner.py",
+    REPO_ROOT / "src" / "distributed" / "loading" / "vlm_setup.py",
+    REPO_ROOT / "src" / "training" / "script_runner.py",
 ]
 
 
@@ -153,7 +152,7 @@ def test_vlm_probe_contract_is_not_vacuous():
 @pytest.mark.parametrize(
     "path",
     _VLM_PROBE_CALL_SITES,
-    ids=[str(p.relative_to(_REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
+    ids=[str(p.relative_to(REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
 )
 def test_is_vlm_model_probe_is_revision_pinned(path: Path):
     """Every probe must pin the revision (or be handed an already-loaded config).
@@ -177,7 +176,7 @@ def test_is_vlm_model_probe_is_revision_pinned(path: Path):
 @pytest.mark.parametrize(
     "path",
     _VLM_PROBE_CALL_SITES,
-    ids=[str(p.relative_to(_REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
+    ids=[str(p.relative_to(REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
 )
 def test_is_vlm_model_probe_threads_trust_remote_code(path: Path):
     """A probe that fetches the config must pass the run's ``trust_remote_code``: left at its
@@ -210,10 +209,10 @@ def test_no_src_load_forces_trust_remote_code():
     """Every load in ``src/`` takes the run's ``trust_remote_code``. Forced on, it runs a
     checkpoint's remote modules the run never trusted, and on a repo that ships a native class
     beside an ``auto_map`` it swaps the native config or processor for the remote one."""
-    src_files = sorted((_REPO_ROOT / "src").rglob("*.py"))
+    src_files = sorted((REPO_ROOT / "src").rglob("*.py"))
     assert len(src_files) > 100, f"the src/ sweep collapsed to {len(src_files)} files"
     forced = [
-        f"{path.relative_to(_REPO_ROOT)}:{line}" for path in src_files for line in _forced_remote_code_lines(path)
+        f"{path.relative_to(REPO_ROOT)}:{line}" for path in src_files for line in _forced_remote_code_lines(path)
     ]
     assert not forced, f"trust_remote_code=True hardcoded at {forced}; pass the run's model_config.trust_remote_code"
 

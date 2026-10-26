@@ -55,7 +55,7 @@ from scripts._common import (
 )
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.data.pipeline import preprocessing
-from tests.common.utils import REPO_ROOT, load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
 # (tool, the default its input source earns). Every standalone tool that executes a checkpoint's own
 # modeling/config/tokenizer code is here, including convert_deepseek_v4_bf16 and reattach_vision_tower

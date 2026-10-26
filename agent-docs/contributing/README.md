@@ -11,8 +11,8 @@ same targets. The Docker incantation lives once in the `Makefile`; `make help` l
   `torchrun`, `pytest` directly.
 - **`make lint`, `make format`, `make precommit`, and `make docs` are the only host-runnable gates**
   (ruff via `uvx ruff@$(RUFF_VERSION)`, `RUFF_VERSION ?= 0.9.10`, falling back to a `ruff` already on
-  `PATH`; the docs target is a stdlib-`python3` link and anchor check). Everything else — tests,
-  benchmarks — runs inside the image.
+  `PATH`; the docs target, on stdlib Python 3.12+, checks links, anchors and the code the docs cite).
+  Everything else — tests, benchmarks — runs inside the image.
 - **Credentials live in the repo-root `.env`.** `cp .env.example .env` and fill it in: the GPU
   `make` targets pass `--env-file .env` and fail outright without the file.
 - **Markdown lives in `agent-docs/` (the detailed reference), `human-docs/` (the concise human
@@ -118,6 +118,8 @@ make train METHOD=preference/smpo CONFIG=<config>    # METHOD defaults to sft
 - **Reuse over re-implementation.** New trainers extend `DistributedTrainerMixin`; new parallelism
   wrappers reuse the EP-layer base hooks. See
   [Trainer Architecture](../reference/trainer-architecture.md).
+- **Naming, named constants, module order, comments and docstrings** follow the Code style section
+  of `CLAUDE.md`.
 
 ## AI-assisted contributions
 
@@ -155,8 +157,59 @@ manifest.
   run), so `from src...` / `from tests.common...` work in both `pytest` and a standalone
   `torchrun tests/gpu/<script>.py`.
 
-    A per-file `sys.path.insert` is dead weight that only masks running outside the image. A `scripts/`
-    entry point (not an importable package) is loaded with `tests.common.utils.load_script_module`.
+    A per-file `sys.path.insert` is dead weight that only masks running outside the image. `scripts/`
+    is a namespace package, so a test imports a tool by dotted path
+    (`from scripts.after_training.merge_models import merge_models`);
+    `tests.common.repo.load_script_module` loads one by file path where a test needs a module object
+    of its own (a fresh copy per case, a name registered for `patch`) or the file sits outside the
+    packages (`docker/`).
+
+- **Every first-party reference resolves without running.** `tests/cpu/conventions/test_references_resolve.py`
+  statically resolves each first-party import, `patch` / `monkeypatch` target (string or object form),
+  attribute chain on an imported module or class, dotted name and repo-root path in the Python under
+  `src/`, `scripts/`, `tests/`, `docker/` and `.github/`, in the other text files of those trees (the
+  GPU benchmark runners, the workflows), and in the image builds, `Makefile`, `pyproject.toml`,
+  `.env.example`, `.pre-commit-config.yaml` and the recipes, so a moved module, a renamed method or a
+  dead patch target fails the CPU tier even where only a GPU script names it. A class attribute must be
+  defined in the first-party hierarchy; an attribute a third-party base supplies (`Function.apply`) is
+  listed per base in `_EXTERNAL_BASE_ATTRIBUTES` (`scripts/docs/references.py`). Text that only reads
+  as a reference (a scratch tree a test builds) is exempted per file in the test's `_NOT_REFERENCES`.
+
+    The same sweep holds each reference to the binding it means. An import names the module that
+    defines what it takes: a module that only re-binds the name by an import of its own is a second
+    path, which would keep a moved symbol reachable through its old home (one in a sensitive path waits
+    in `_SENSITIVE_REEXPORT_IMPORTS`). An attribute read through a module object only has to exist, since
+    the binding a module imports is what a patch replaces and restores through it. A patch of a module's
+    own top-level name, a `module.name = fake` assignment included, must target a name some function reads
+    when it runs, one of that module or, outside the tests, one reading it through the module object;
+    patching a name the module only binds intercepts nothing, so the test would pass whatever the code does.
+
+- **A move rewrites every reference in the same change.** One symbol keeps one import path, so moving a
+  module or a symbol rewrites the imports that name it (a `from` line split per destination), its
+  `patch` / `monkeypatch` / `caplog` / `sys.modules` / `import_module` strings and its repo-root paths,
+  and leaves no re-export behind. Rewrite them by splicing the source text at the AST nodes' offsets, or
+  with libcst in a throwaway environment (`uv run --no-project --with libcst <script>`, which leaves
+  `uv.lock` alone); never regenerate a file with `ast.unparse`, which drops its comments. The reference
+  sweep fails whatever the rewrite missed.
+
+- **The import layering is read off the import graph.** `tests/cpu/conventions/test_import_layering.py`
+  fails a `src.distributed` or `torch.distributed` import in `src/checkpoint/` or `src/models/loading/`,
+  an import of the loader dispatch from the rest of `src/distributed`, a cycle among the members of
+  `src/distributed` and a raw toolkit env read. It also lays the final layer table (`_LAYERS`: a unit
+  imports only units of lower rows, `cli` imports nothing from the package, the tool-safe units reach no
+  process group, parallelism or rollout sync, the member orders inside `src/distributed`, one lazy
+  `deep_ep` importer, package-internal modules, no module cycle) over today's tree, each module that has
+  not moved yet placed where it lands through `_PENDING_MOVES`. A break outside `_KNOWN_LAYER_BREAKS`
+  (the ones today's tree still makes, reported as one warning) fails, and so do a module the table
+  cannot place and an entry of either table that is out of date. `TYPE_CHECKING` imports are exempt.
+
+- **Convention tests also run on the hosted runner.** The `conventions` job in `.github/workflows/lint.yml`
+  runs the files it lists on the standard library and pytest alone, so such a test reads the source
+  with `ast` instead of importing it and takes repo helpers from `tests.common.repo`;
+  `tests/cpu/conventions/test_hosted_conventions_are_stdlib.py` fails when a listed file, a package
+  `__init__.py` or conftest pytest runs for it, or a file one of them imports or loads by path reaches
+  anything else. It cannot read what a probe script imports, so a listed test that runs one is refused
+  unless its `_PROBE_COLLECTS` entry names the files the probe has pytest collect.
 
 - **Remote code loads into the test process's own module cache.** `tests/cpu/conftest.py` points
   `HF_MODULES_CACHE` at a scratch dir per process before transformers is imported, so remote-code
@@ -402,11 +455,11 @@ Update the owning doc page in the same PR when you change `src/` (`skills/docs/d
 follow the anti-slop charter carried by the `/docs` skill: American English, active voice, short
 sentences, tables only for real matrices, no marketing register.
 
-`docs.yml` runs three jobs, and `make docs` runs only the first: the link and anchor check over
-`agent-docs/`, `human-docs/`, `skills/` and the root markdown, which blocks a merge; a `diagrams` job
-that re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result against the committed PNGs
-under `agent-docs/assets/` — touch a generator and you owe `make diagrams` plus the regenerated figure in
-the same commit; and `markdownlint`. The last two are advisory.
+`docs.yml` runs three jobs, and `make docs` runs only the first: the link, anchor and code-reference
+check over `agent-docs/`, `human-docs/`, `skills/` and the root markdown, which blocks a merge; a
+`diagrams` job that re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result against the
+committed PNGs under `agent-docs/assets/` — touch a generator and you owe `make diagrams` plus the
+regenerated figure in the same commit; and `markdownlint`. The last two are advisory.
 
 ## Proof of Value
 
@@ -434,7 +487,9 @@ first-class content — report it with the reason.
 3. **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
    `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (plus
    `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs `ruff`,
-   `actionlint` and the docs checks; the test tiers run locally, so report their result in the PR.
+   `actionlint`, the convention tests and the docs checks; the test tiers run locally, so report their
+   result in the PR. A PR that changes a path listed in `.github/sensitive-paths` also needs the
+   `sensitive` label, which a maintainer adds once the change is approved.
 4. **Fill the PR template** — what and why, type of change, Proof-of-Value evidence, checklist.
 5. **No secrets.** Never add `keys/`, `.env`, `*.pem`, or any credential.
 

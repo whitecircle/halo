@@ -29,7 +29,8 @@ from transformers import (
 
 import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.lazy_loader import init_checkpoint_absent_modules, load_ep_model_lazy
+from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
+from src.models.loading.lazy_safetensors.weights import init_checkpoint_absent_modules
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.models import TINY_GPTOSS_CONFIG
 

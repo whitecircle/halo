@@ -34,8 +34,8 @@ from src.configs.async_training_config import AsyncTrainingConfig
 from src.environments.base import VALID_REASONING_EFFORTS
 from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, JudgeTerm, OnError, parse_reward_terms
 from src.trainers.grpo.reasoning_terms import REASONING_TARGET_SHARE, reasoning_floor_term, reasoning_price_term
+from tests.common.repo import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 RECIPES = sorted((REPO_ROOT / "examples" / "grpo" / "environmental").rglob("*code-contests*.yaml"))
 _yaml = YAML(typ="safe")
 _DEFAULTS = AsyncTrainingConfig()

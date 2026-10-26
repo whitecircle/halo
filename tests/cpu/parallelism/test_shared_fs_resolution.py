@@ -88,7 +88,7 @@ def test_resolved_shared_filesystem_scope_is_logged(monkeypatch, caplog, env, ex
     the umbrella and rank 0's values override a disagreeing rank's, so only the agreed dict is the
     scope the run actually used.
     """
-    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+    runtime.reset_shared_filesystem_consensus()
     for var, value in env.items():
         monkeypatch.setenv(var, value)
 

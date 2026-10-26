@@ -30,7 +30,7 @@ import os
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _PARITY_ROOT = os.path.join(REPO_ROOT, "docker", "vllm", "parity")
 

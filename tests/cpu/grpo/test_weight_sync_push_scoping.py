@@ -32,7 +32,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, sync_weights_to_client
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
-from tests.common.weight_sync import Wire, offline_sglang_client
+from tests.common.weight_sync import Wire, offline_client
 
 # Each projection is a 2x2 bf16 weight, 8 bytes: a 16-byte budget holds two, so the cut falls between
 # the halves of the pair and only the scoped groups keep it whole.
@@ -115,7 +115,7 @@ def test_the_streamed_push_does_not_refuse_a_model_without_q_a_proj():
     its own, so holding it for a partner refuses a sound sync at the close."""
     model = _MLAModel(("q_b_proj", "kv_a_proj_with_mqa", "o_proj"))
     wire = Wire()
-    client = wire.attach(offline_sglang_client())
+    client = wire.attach(offline_client(SGLangWeightSyncClient))
 
     _stub_trainer(model, client)._sync_weights_to_engine(force=True)
 
@@ -126,7 +126,7 @@ def test_the_streamed_push_does_not_refuse_a_model_without_q_a_proj():
 def test_the_streamed_push_keeps_a_declared_pair_in_one_request():
     """Anti-over-scoping: where the model declares both halves, the scoped groups still hold the pair."""
     wire = Wire()
-    client = wire.attach(offline_sglang_client())
+    client = wire.attach(offline_client(SGLangWeightSyncClient))
 
     _stub_trainer(_MLAModel(_MLA_LEAVES), client)._sync_weights_to_engine(force=True)
 

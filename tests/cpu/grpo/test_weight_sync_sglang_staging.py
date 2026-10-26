@@ -24,7 +24,8 @@ import pytest
 import torch
 
 import src.distributed.nccl.clients.sglang as sglang_module
-from tests.common.weight_sync import offline_sglang_client
+from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
+from tests.common.weight_sync import offline_client
 
 _BUDGET = 4096
 
@@ -49,7 +50,7 @@ class _FakeEvent:
 def client(monkeypatch):
     """A client staging on the CPU, with the CUDA stream/event calls stubbed and the engine's declare
     answered at once; the arena, the settle bookkeeping and the failure path run as in production."""
-    handle = offline_sglang_client()
+    handle = offline_client(SGLangWeightSyncClient)
     handle._sync_device = torch.device("cpu")
     handle._group = object()
     handle._send_stream = _FakeStream()

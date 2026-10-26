@@ -10,7 +10,6 @@ rejections and the payload gating that stand in the way.
 import logging
 import re
 from typing import get_args, get_type_hints
-from unittest.mock import patch
 
 import pytest
 
@@ -24,7 +23,7 @@ from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_ba
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.ray_actors import EnvironmentActor
 from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
-from tests.common.weight_sync import StockModel
+from tests.common.weight_sync import StockModel, offline_client
 
 # --- Registry — derived from the client hierarchy, not a hand-maintained table ---
 
@@ -59,10 +58,9 @@ def test_sglang_clients_default_to_distinct_group_names_per_server():
     one fixed name fail group formation with "group name has already been created". The default is
     keyed on the server endpoint, not on group_port: port 0 means "auto-pick at group formation",
     which is one value for every auto-port client. An explicit name wins."""
-    with patch.object(SGLangWeightSyncClient, "check_server"):
-        a = SGLangWeightSyncClient(base_url="http://localhost:30000", group_port=0)
-        b = SGLangWeightSyncClient(base_url="http://localhost:30001", group_port=0)
-        named = SGLangWeightSyncClient(base_url="http://localhost:30000", group_port=51216, group_name="custom")
+    a = offline_client(SGLangWeightSyncClient, "http://localhost:30000", group_port=0)
+    b = offline_client(SGLangWeightSyncClient, "http://localhost:30001", group_port=0)
+    named = offline_client(SGLangWeightSyncClient, "http://localhost:30000", group_port=51216, group_name="custom")
     assert a.group_name != b.group_name, "two auto-port clients collided on one default group name"
     assert "localhost:30000" in a.group_name and "localhost:30001" in b.group_name
     assert named.group_name == "custom"
@@ -329,9 +327,7 @@ def test_online_generation_states_trl_s_filters():
     """TRL's generation layer hands the client top_k 0, min_p 0.0 and repetition_penalty 1.0 by default.
     vLLM's completions route fills an omitted field from the model's generation_config.json, so each goes
     out at its off value, top_k 0 being vLLM's own. Set values go out as set."""
-    client = VLLMWeightSyncClient.__new__(VLLMWeightSyncClient)
-    client.base_url = "http://stub"
-    client._generation_timeout = 60.0
+    client = offline_client(VLLMWeightSyncClient)
     bodies = []
 
     def post_once(_path, json, **_kwargs):

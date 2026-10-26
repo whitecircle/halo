@@ -20,7 +20,7 @@ import torch
 from safetensors.torch import save_file
 
 from src.diagnostics import weight_sync_transport as wst
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 preflight_cli = load_script_module("scripts/profiling/weight_sync_transport.py", register=True)
 

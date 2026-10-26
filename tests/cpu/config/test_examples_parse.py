@@ -22,11 +22,10 @@ import yaml
 
 from src.distributed.expert_parallel.config import GIN_MAX_TOKENS_PER_RANK
 from src.training.parser import H4ArgumentParser
-from tests.common.utils import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-EXAMPLES_ROOT = PROJECT_ROOT / "examples"
-TRAINING_ROOT = PROJECT_ROOT / "scripts" / "training"
+EXAMPLES_ROOT = REPO_ROOT / "examples"
+TRAINING_ROOT = REPO_ROOT / "scripts" / "training"
 
 # Which entry script owns a config, keyed by (directory prefix, file-name prefix). A directory maps
 # to one script except where several methods share it (preference/, distillation/),
@@ -69,7 +68,7 @@ _module_cache: dict[str, object] = {}
 
 def script_for(config: Path) -> str | None:
     """Entry script (relative to ``scripts/training``) that consumes ``config``, or None."""
-    relative = config.relative_to(PROJECT_ROOT).as_posix()
+    relative = config.relative_to(REPO_ROOT).as_posix()
     matches = [
         (dir_prefix, script)
         for dir_prefix, name_prefix, script in _SCRIPT_RULES
@@ -121,7 +120,7 @@ def test_examples_tree_is_not_empty():
 
 
 def test_every_example_is_mapped():
-    unmapped = [c.relative_to(PROJECT_ROOT).as_posix() for c in _EXAMPLES if script_for(c) is None]
+    unmapped = [c.relative_to(REPO_ROOT).as_posix() for c in _EXAMPLES if script_for(c) is None]
     assert not unmapped, (
         "these configs match no entry-script rule, so nothing parse-checks them; add a rule to "
         "_SCRIPT_RULES:\n  " + "\n  ".join(unmapped)

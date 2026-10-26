@@ -1,10 +1,11 @@
 #!/usr/bin/env python
-"""The docs link gate must check heading anchors the way GitHub generates them.
+"""The docs link gate must check heading anchors the way GitHub generates them, and the code its pages cite.
 
 ``scripts/docs/check_links.sh`` is the only gate on the doc trees' cross-references. A fragment it
 does not validate, or validates against a slug GitHub never produces, passes CI while the link lands
 at the top of the page. The expected slugs below are the ids GitHub's renderer emits for the same
-headings, including a ``{#id}`` attribute, which GitHub renders as heading text.
+headings, including a ``{#id}`` attribute, which GitHub renders as heading text. A path or a package
+name in a page's code that no longer exists must fail the gate the same way.
 
 Run: python tests/cpu/conventions/test_docs_link_check.py
 """
@@ -13,13 +14,13 @@ import subprocess
 
 import pytest
 
-from tests.common.utils import REPO_ROOT, load_script_module
-
-check_links = load_script_module("scripts/docs/check_links.py")
+from scripts.docs.markdown import parse_markdown
+from scripts.docs.references import PACKAGE
+from tests.common.repo import REPO_ROOT
 
 
 def _anchors(markdown: str) -> set[str]:
-    return set(check_links.parse_markdown(markdown).anchors)
+    return set(parse_markdown(markdown).anchors)
 
 
 @pytest.mark.parametrize(
@@ -60,7 +61,7 @@ def test_only_rendered_headings_and_explicit_anchors_count():
 
 
 def test_heading_id_attribute_is_refused():
-    document = check_links.parse_markdown("# Title\n\n## Section {#section}\n\n## Uses `{#x}` in code\n")
+    document = parse_markdown("# Title\n\n## Section {#section}\n\n## Uses `{#x}` in code\n")
     assert document.heading_attributes == ((3, "{#section}"),)
 
 
@@ -119,6 +120,43 @@ def test_gate_fails_on_a_missing_target_and_a_heading_id(tmp_path):
     page = tmp_path / "page.md"
     assert f"HEADING ID  {page}:1  {{#section}}" in result.stdout
     assert f"BROKEN  {page}:3  ->  missing.md" in result.stdout
+
+
+def test_code_spans_and_fenced_lines_are_the_code_a_page_names():
+    """A code span may wrap across the lines of its paragraph; a blank line, a heading or a fence ends it."""
+    document = parse_markdown(
+        "# Title with `head code`\n"
+        "Text `one` and `wrapped\nacross` lines.\n"
+        "\n"
+        "```bash\nrun this\n```\n"
+        "An unclosed ` tick\n"
+        "\n"
+        "`after the break`\n"
+    )
+    assert document.code == (
+        (1, "head code"),
+        (2, "one"),
+        (2, "wrapped across"),
+        (6, "run this"),
+        (10, "after the break"),
+    )
+
+
+def test_gate_fails_on_a_stale_path_or_name_in_code(tmp_path):
+    package = PACKAGE
+    page = tmp_path / "page.md"
+    page.write_text(
+        f"Live: `{package}/env.py`, `{package}.env.env_flag`, `examples/<method>/x.yaml`, `<gist>/scripts/x.sh`.\n\n"
+        f"Stale: `{package}/gone.py` and `{package}.env.gone`.\n\n"
+        f"```python\nfrom {package}.env import env_flag, gone_too\n```\n"
+    )
+    result = _run_gate(tmp_path)
+    assert result.returncode == 1
+    assert sorted(line for line in result.stdout.splitlines() if line.startswith("UNRESOLVED")) == [
+        f"UNRESOLVED  {page}:3  {package}.env.gone  ({package}.env has no 'gone')",
+        f"UNRESOLVED  {page}:3  {package}/gone.py  (no such file or directory)",
+        f"UNRESOLVED  {page}:6  from {package}.env import gone_too  ({package}.env has no 'gone_too')",
+    ]
 
 
 if __name__ == "__main__":

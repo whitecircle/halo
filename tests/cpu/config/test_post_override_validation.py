@@ -38,8 +38,6 @@ from src.trainers.distillation.losses import DIVERGENCES
 from src.training.parser import H4ArgumentParser, _literal_choices
 from src.training.script_runner import init_training_script
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-
 # bf16/use_cpu keep TrainingArguments constructible on a GPU-less runner.
 _CPU_TAIL = "bf16: false\nuse_cpu: true\n"
 

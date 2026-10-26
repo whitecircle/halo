@@ -30,8 +30,9 @@ from transformers import GptOssConfig, GptOssForCausalLM
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
-from tests.common.harness import gpu_test_main, log
+from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
+from tests.common.utils import log
 from tests.common.weight_sync import RecordingSender
 
 ETP_SIZE = 2

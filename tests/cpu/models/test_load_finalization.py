@@ -30,6 +30,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.trainers.mixins.base import DistributedTrainerMixin
+from tests.common.repo import REPO_ROOT
 from tests.common.source_sweep import (
     TOOLKIT_LOAD_CALLS,
     builds_a_model,
@@ -38,7 +39,6 @@ from tests.common.source_sweep import (
     functions_calling,
     functions_in,
 )
-from tests.common.utils import REPO_ROOT
 
 SEAM = finalize_loaded_model.__name__
 

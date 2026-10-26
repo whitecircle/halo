@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 from src.configs.environment_config import EnvironmentConfig
+from src.configs.rollout_config import RolloutConfig
 from src.environments.base import (
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
@@ -53,7 +54,7 @@ from src.environments.envs.tasks.qa import (
     multiple_choice_match,
     render_choices,
 )
-from src.environments.ray_actors import RolloutConfig, RolloutManager
+from src.environments.ray_actors import RolloutManager
 from src.environments.registry import (
     create_environment,
     get_registered_environments,

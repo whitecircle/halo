@@ -11,13 +11,11 @@ Run: python tests/cpu/config/test_yaml_cli_overrides.py
 import re
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 
 from src.training.parser import H4ArgumentParser
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from tests.common.repo import REPO_ROOT
 
 
 @dataclass
@@ -74,11 +72,11 @@ def test_example_launch_commands_use_the_equals_form():
         r"--(?!nproc_per_node|master_port|rdzv|config_file|num_processes|main_process_port)[a-z_]+\s+[^-\s]"
     )
     offenders = []
-    for config in sorted((PROJECT_ROOT / "examples").rglob("*.yaml")):
+    for config in sorted((REPO_ROOT / "examples").rglob("*.yaml")):
         for lineno, line in enumerate(config.read_text().splitlines(), 1):
             match = launch_line.search(line)
             if match and space_form.search(match.group()):
-                offenders.append(f"{config.relative_to(PROJECT_ROOT)}:{lineno}: {line.strip()}")
+                offenders.append(f"{config.relative_to(REPO_ROOT)}:{lineno}: {line.strip()}")
     assert not offenders, (
         "example launch commands must pass overrides as --key=value; these use the space form, "
         "which parse_yaml_and_args rejects outright:\n  " + "\n  ".join(offenders)

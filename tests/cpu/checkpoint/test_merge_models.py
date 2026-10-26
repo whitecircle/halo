@@ -43,7 +43,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.tool_io import iter_checkpoint_shard_entries
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 mm = load_script_module("scripts/after_training/merge_models.py")
 

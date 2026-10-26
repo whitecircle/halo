@@ -11,7 +11,6 @@ Run: python tests/cpu/data/test_cache_file_naming.py
 
 import ast
 import inspect
-from pathlib import Path
 
 import pytest
 from datasets import Dataset, DatasetDict
@@ -33,6 +32,7 @@ from src.data.pipeline.processing import (
 )
 from src.data.spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY
 from tests.common.models import QWEN3_0_6B
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_tokenizer
 
 # Helper functions & datasets
@@ -51,7 +51,7 @@ def _make_dataset(n: int, seed: int = 0) -> Dataset:
     return Dataset.from_dict({"value": list(range(seed, seed + n))})
 
 
-SELF_DISTILL_SCRIPT = Path(__file__).resolve().parents[3] / "scripts/training/distillation/self_distill.py"
+SELF_DISTILL_SCRIPT = REPO_ROOT / "scripts/training/distillation/self_distill.py"
 
 
 # _build_cache_file_name — determinism

@@ -17,7 +17,7 @@ import pytest
 
 from src.distributed import runtime
 from src.training.script_runner import verify_backend_on_rank0
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _PROBING_SCRIPTS = ("scripts/training/online_grpo/rlvr.py", "scripts/training/environmental_grpo.py")
 _PROBE_METHODS = frozenset({"verify", "verify_backend"})

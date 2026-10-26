@@ -31,8 +31,6 @@ import os
 import subprocess
 import sys
 
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
@@ -49,6 +47,7 @@ from scripts.before_training import convert_deepseek_v4_bf16, convert_glm5_bf16,
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE, is_sharded_checkpoint, save_sharded_state_dict
 from src.checkpoint.tool_io import checkpoint_shard_files, detect_model_type, reject_sharded_checkpoint
 from src.distributed.expert_parallel.expert_weights import per_expert_hub_model_types
+from tests.common.repo import REPO_ROOT
 
 
 def _write_ep_sharded_checkpoint(path, *, model_type="gpt_oss"):
@@ -639,7 +638,7 @@ def test_converter_progress_lines_survive_the_src_root_handler(module, progress_
         f"print('INFO_ENABLED', logging.getLogger({progress_logger!r}).isEnabledFor(logging.INFO))"
     )
     completed = subprocess.run(
-        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=_REPO_ROOT, check=True
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=REPO_ROOT, check=True
     )
     assert "INFO_ENABLED True" in completed.stdout, completed.stdout + completed.stderr
 

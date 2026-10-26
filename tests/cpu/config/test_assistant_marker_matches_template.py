@@ -20,14 +20,13 @@ Run: pytest tests/cpu/config/test_assistant_marker_matches_template.py
 """
 
 import re
-from pathlib import Path
 
 import pytest
 from jinja2.exceptions import TemplateError
 from ruamel.yaml import YAML
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from tests.common.repo import REPO_ROOT
 
 # Doc trees whose ```yaml fences are held to the same pairing contract as examples/.
 _DOC_TREES = ("human-docs", "agent-docs", "skills")
@@ -82,16 +81,16 @@ def _doc_fences() -> list[tuple[str, object]]:
     return [
         fence
         for tree in _DOC_TREES
-        for page in sorted((PROJECT_ROOT / tree).rglob("*.md"))
-        for fence in _page_fences(str(page.relative_to(PROJECT_ROOT)), page.read_text())
+        for page in sorted((REPO_ROOT / tree).rglob("*.md"))
+        for fence in _page_fences(str(page.relative_to(REPO_ROOT)), page.read_text())
     ]
 
 
 def _marker_configs() -> list[tuple[str, str, str]]:
     """Every pairing in the tree: the ``examples/`` YAML plus the doc trees' ```yaml fences."""
     sources = [
-        (str(config.relative_to(PROJECT_ROOT)), _yaml.load(config))
-        for config in sorted((PROJECT_ROOT / "examples").rglob("*.yaml"))
+        (str(config.relative_to(REPO_ROOT)), _yaml.load(config))
+        for config in sorted((REPO_ROOT / "examples").rglob("*.yaml"))
     ]
     return [pairing for source, data in sources + _DOC_FENCES if (pairing := _pairing(source, data))]
 
@@ -101,7 +100,7 @@ _MARKER_CONFIGS = _marker_configs()
 
 
 def _render(template_path: str, messages: list[dict]) -> str:
-    source = (PROJECT_ROOT / template_path).read_text()
+    source = (REPO_ROOT / template_path).read_text()
     compiled = _compile_jinja_template(source)
     return compiled.render(messages=messages, add_generation_prompt=False, bos_token="<bos>", eos_token="<eos>")
 
@@ -131,7 +130,7 @@ def test_a_doc_fence_pairing_is_held_to_the_contract():
 def test_the_scan_reads_each_doc_tree(tree):
     """Counted per tree: ``rglob`` on a missing or renamed root yields nothing, so one dead root would
     otherwise hide behind the other's fences."""
-    assert (PROJECT_ROOT / tree).is_dir(), f"{tree} is not a directory — that half of the scan is dead"
+    assert (REPO_ROOT / tree).is_dir(), f"{tree} is not a directory — that half of the scan is dead"
     assert any(source.startswith(f"{tree}/") for source, _ in _DOC_FENCES), (
         f"no ```yaml fence found under {tree} — that half of the scan is dead"
     )

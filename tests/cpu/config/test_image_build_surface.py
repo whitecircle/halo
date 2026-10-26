@@ -21,7 +21,7 @@ import tomllib
 import pytest
 from packaging.utils import canonicalize_name
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 # The training image's locked install: the one place its dependencies are resolved from.
 LOCKED_INSTALL = "uv pip install --system --no-deps -r"

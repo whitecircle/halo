@@ -1,7 +1,7 @@
 name: lint
 
 # Hosted gates that run on every PR/push outside the Docker image (the runner has no GPU stack).
-# ruff (lint + format-check) is pinned.
+# ruff (lint + format-check) and the conventions job's pytest are pinned.
 
 on:
   push:
@@ -34,6 +34,34 @@ jobs:
         run: ruff format --check .
       - name: ruff check
         run: ruff check --output-format=github .
+
+  conventions:
+    # The convention tests that read the tree without importing it, on the standard library and pytest
+    # alone: test_hosted_conventions_are_stdlib.py fails when a file listed here, or a file pytest runs
+    # for it, reaches anything else.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pytest at the locked version
+        run: |
+          version=$(python .github/scripts/locked_version.py pytest)
+          pip install "pytest==$version"
+      - name: Convention tests
+        run: >-
+          pytest -p no:cacheprovider
+          tests/cpu/conventions/test_docs_link_check.py
+          tests/cpu/conventions/test_env_var_catalogue.py
+          tests/cpu/conventions/test_gpu_harness_conventions.py
+          tests/cpu/conventions/test_hosted_conventions_are_stdlib.py
+          tests/cpu/conventions/test_import_layering.py
+          tests/cpu/conventions/test_package_inits.py
+          tests/cpu/conventions/test_references_resolve.py
+          tests/cpu/conventions/test_sensitive_label.py
+          tests/cpu/conventions/test_test_conventions.py
+          tests/cpu/conventions/test_warn_once_logger_convention.py
 
   actionlint:
     # Lints the workflow files themselves — unknown runner labels, invalid action

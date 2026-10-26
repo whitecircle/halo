@@ -23,7 +23,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 
 from src.data.vlm import VLM_IMAGE_COLUMNS
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 _MODEL_ID = "stub/qwen3-4b"
 

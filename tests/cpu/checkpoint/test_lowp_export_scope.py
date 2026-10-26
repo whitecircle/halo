@@ -23,7 +23,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from src.kernels.lowp.mixed_precision import block_index, kept_block_indices
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 quantize_checkpoint = load_script_module("scripts/after_training/quantize_to_lowp.py").quantize_checkpoint
 

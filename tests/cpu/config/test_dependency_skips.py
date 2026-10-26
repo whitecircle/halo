@@ -28,13 +28,14 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+from tests.common.repo import REPO_ROOT
+
 CPU_TESTS = REPO_ROOT / "tests" / "cpu"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 # A requirement string is the distribution name up to its extras bracket / version specifier / marker.
 _REQUIREMENT_TAIL = re.compile(r"[\[<>=!~;\s]")
 # Packages that ship in this repository: always importable, so a guard in front of one is never a
-# supported-configuration check. Load a scripts/ entry point with tests.common.utils.load_script_module.
+# supported-configuration check. Load a scripts/ entry point with tests.common.repo.load_script_module.
 FIRST_PARTY_ROOTS = {"src", "scripts", "tests"}
 
 

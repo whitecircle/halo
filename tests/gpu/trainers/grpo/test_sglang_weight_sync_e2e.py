@@ -28,10 +28,11 @@ import urllib.request
 import torch
 from transformers import AutoModelForCausalLM
 
+from src.configs.rollout_config import RolloutConfig
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.env import env_str
 from src.environments.engine_wire import capture_generation_tokens
-from src.environments.ray_actors import EnvironmentActor, RolloutConfig
+from src.environments.ray_actors import EnvironmentActor
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log

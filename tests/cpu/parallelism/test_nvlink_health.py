@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 nvlink_health = load_script_module("scripts/profiling/nvlink_health.py", register=True)
 

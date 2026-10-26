@@ -41,7 +41,7 @@ from src.trainers.mixins.base import DistributedTrainerMixin
 from src.training.parallelism_args import _LOWP_SHAPE_DEFAULTS, parallelism_config_from_args
 from src.training.parser import _literal_choices
 from tests.common.parallelism import make_parallelism_config
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 # Knobs the two dataclasses spell identically. The builder forwards them as themselves; whether it
 # does so in a derived loop or a line each is its own business, so this is read off the declarations

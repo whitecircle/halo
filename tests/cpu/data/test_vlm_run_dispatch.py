@@ -52,7 +52,7 @@ from src.data.vlm import (
     process_vlm_conversation,
 )
 from src.training.script_runner import enforce_text_path_padding_side, resolve_vlm_run
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 # Real configs, not stand-ins: the verdict must follow what transformers says about the architecture.
 VLM_CONFIG = CONFIG_MAPPING["gemma3"]()

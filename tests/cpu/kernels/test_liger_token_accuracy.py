@@ -14,12 +14,11 @@ from __future__ import annotations
 
 import ast
 import dataclasses
-import pathlib
 
 import pytest
 from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutputWithPast
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
+from tests.common.repo import REPO_ROOT
 
 LIGER_PACKAGE = REPO_ROOT / "src/kernels/liger"
 

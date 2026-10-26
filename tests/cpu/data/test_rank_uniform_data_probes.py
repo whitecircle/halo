@@ -31,7 +31,7 @@ from src.data.pipeline.preprocessing import shard_dataset
 from src.data.shard_index import SHARD_INDEX_FILE
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 from src.data.vlm import dataset_declares_images, is_vlm_run
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 VLM_CONFIG = CONFIG_MAPPING["gemma3"]()
 TEXT_CONFIG = CONFIG_MAPPING["qwen3"]()

@@ -30,7 +30,7 @@ from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.training.early_stopping import StopsTrainingEarly
 from src.training.environment import TrainingStoppedEarly
 from src.training.script_runner import run_trainer
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 PartialState()  # the stop logs through accelerate's logger, which refuses to log without it
 

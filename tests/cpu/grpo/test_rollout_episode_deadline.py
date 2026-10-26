@@ -10,8 +10,8 @@ from dataclasses import fields
 import pytest
 
 from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.rollout_config import DEFAULT_EPISODE_TIMEOUT_SECONDS
-from src.environments.ray_actors import RolloutConfig, _await_with_deadline
+from src.configs.rollout_config import DEFAULT_EPISODE_TIMEOUT_SECONDS, RolloutConfig
+from src.environments.ray_actors import _await_with_deadline
 
 
 class _SlowRef:

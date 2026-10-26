@@ -18,7 +18,7 @@ import yaml
 from huggingface_hub import snapshot_download
 
 from tests.common import models
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 ALLOW_PATTERNS = ["*.json", "*.jinja", "*.txt", "*.model", "*.py", "*.tiktoken"]
 # The Hub refuses these to an anonymous client, so the seed leaves them out and their tests skip. A

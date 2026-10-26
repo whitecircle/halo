@@ -231,7 +231,7 @@ def fake_world(monkeypatch):
     monkeypatch.setattr(runtime.c10d, "_get_default_store", lambda: store)
     monkeypatch.setattr(filesystem, "get_global_world_size", lambda: 2)
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
-    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+    runtime.reset_shared_filesystem_consensus()
     return store
 
 

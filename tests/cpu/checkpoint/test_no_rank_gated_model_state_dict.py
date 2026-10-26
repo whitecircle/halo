@@ -25,10 +25,10 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+from tests.common.repo import REPO_ROOT
 
 # The surface that writes or restores model weights; optimizer/scheduler state is per-rank by design.
-_SCANNED = (_REPO_ROOT / "src" / "distributed", _REPO_ROOT / "src" / "checkpoint")
+_SCANNED = (REPO_ROOT / "src" / "distributed", REPO_ROOT / "src" / "checkpoint")
 
 # Names that decide "this rank writes" — the gates that make a call rank-asymmetric.
 _RANK_GATES = (
@@ -74,7 +74,7 @@ def _offenders(path: Path) -> list[str]:
         for inner in ast.walk(node):
             receiver = _is_model_state_dict_call(inner)
             if receiver is not None:
-                rel = path.relative_to(_REPO_ROOT)
+                rel = path.relative_to(REPO_ROOT)
                 found.append(f"{rel}:{inner.lineno} — {receiver}.state_dict() under `if {gate}`")
     return found
 
@@ -97,7 +97,7 @@ def test_detector_catches_the_shape():
         "    if is_global_main_process():\n"
         "        matched = len(set(state) & set(model.state_dict()))\n"
     )
-    tmp = _REPO_ROOT / "src" / "distributed" / "checkpoint" / "__init__.py"  # any real path for relative_to
+    tmp = REPO_ROOT / "src" / "distributed" / "checkpoint" / "__init__.py"  # any real path for relative_to
     tree = ast.parse(source)
     hits = []
     for node in ast.walk(tree):

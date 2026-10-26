@@ -27,8 +27,8 @@ from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_shard
 from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
 from src.training.script_runner import install_resolved_tokenizer
 from tests.common.models import QWEN3_5_9B, TINY_QWEN35_CONFIG
+from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_processor
-from tests.common.utils import load_script_module
 
 PartialState()  # the setup seam and the savers log through accelerate's logger
 

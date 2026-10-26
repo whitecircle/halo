@@ -41,7 +41,7 @@ from src.kernels.liger.families import LIGER_FAMILY_SPECS
 from src.kernels.liger.lce_forward import build_lce_forward
 from src.kernels.liger.orchestrator import resolve_liger_applier
 from src.models.moe_balancing import honors_output_router_logits_config
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 PartialState()  # the orchestrator logs through accelerate's rank-aware logger
 

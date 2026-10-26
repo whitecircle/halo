@@ -20,7 +20,7 @@ from typing import NamedTuple
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 # Every image build file at the root: each one's ``ARG VERSION`` default labels the image it builds.
 DOCKERFILES = sorted(path.name for path in REPO_ROOT.glob("Dockerfile*"))

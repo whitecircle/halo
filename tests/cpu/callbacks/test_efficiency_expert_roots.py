@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import gc
 import importlib.util
-import os
 import subprocess
 import sys
 
@@ -29,8 +28,7 @@ import pytest
 from src.callbacks.model_flops import _is_expert_param
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
-
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+from tests.common.repo import REPO_ROOT
 
 
 def test_every_declared_root_classifies_as_expert_param():

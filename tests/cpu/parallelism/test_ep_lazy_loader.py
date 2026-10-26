@@ -17,16 +17,18 @@ from src.distributed.expert_parallel.lazy_loader import (  # noqa: E402
     CheckpointFormat,
     EPWeightPlanner,
     ExpertFuser,
+    _check_fused_experts_mapped,
+    build_family_key_mapping,
+    lazy_loader_supports_checkpoint,
+)
+from src.models.loading.lazy_safetensors.weights import (  # noqa: E402
     SafetensorsWeightLoader,
     WeightAction,
     WeightPlan,
-    _check_fused_experts_mapped,
     assign_tensor_to_model,
-    build_family_key_mapping,
-    lazy_loader_supports_checkpoint,
+    has_safetensors_checkpoint,
     resolve_safetensors_index,
 )
-from src.models.loading.lazy_safetensors.weights import has_safetensors_checkpoint  # noqa: E402
 from tests.common.models import TINY_GPTOSS_CONFIG  # noqa: E402
 
 

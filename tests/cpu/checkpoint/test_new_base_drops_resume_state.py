@@ -34,7 +34,7 @@ from src.checkpoint.format import (
 )
 from src.training.environment import _classify_resume_checkpoint
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 PartialState()
 

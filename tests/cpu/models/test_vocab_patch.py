@@ -23,7 +23,7 @@ import pytest
 import torch
 from torch import nn
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 pv = load_script_module("scripts/before_training/patch_vocab.py")
 

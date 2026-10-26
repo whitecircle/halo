@@ -41,10 +41,10 @@ from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.harness import gpu_test_main, log
+from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
 from tests.common.preference_precompute import TRAINERS, column
-from tests.common.utils import step_losses, training_run_checks
+from tests.common.utils import log, step_losses, training_run_checks
 
 EP_SIZE = 2
 N_ROWS = 16

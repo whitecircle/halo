@@ -41,6 +41,7 @@ from src.distributed.loading.frozen_models import (
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
+from tests.common.repo import REPO_ROOT
 
 # The SDPG reference load logs through accelerate's logger, which requires an initialized state.
 PartialState()
@@ -72,8 +73,6 @@ FROZEN_LOAD_STEP_OWNERS = frozenset(
         "scripts/after_training/reset_sinks.py",
     }
 )
-
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 
 def _token_setup_args():
@@ -185,10 +184,7 @@ FROZEN_LOAD_SITES = {
 }
 
 # The scripts that load a policy AND a live reference, i.e. the ones whose two loads must agree.
-PREFERENCE_SCRIPTS = tuple(
-    pathlib.Path(__file__).resolve().parents[3] / "scripts/training/preference" / f"{name}.py"
-    for name in ("dpo", "kto")
-)
+PREFERENCE_SCRIPTS = tuple(REPO_ROOT / "scripts/training/preference" / f"{name}.py" for name in ("dpo", "kto"))
 
 
 @pytest.mark.parametrize("site", FROZEN_LOAD_SITES.values(), ids=list(FROZEN_LOAD_SITES))

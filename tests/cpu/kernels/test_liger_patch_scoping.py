@@ -23,7 +23,7 @@ from src.kernels.liger.cross_entropy import (
     liger_cross_entropy,
     patch_loss_utils_cross_entropy,
 )
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 
 @pytest.fixture

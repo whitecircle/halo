@@ -31,7 +31,7 @@ from src.env import resolve_nccl_timeout_minutes
 from src.environments.envs.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from src.environments.registry import resolve_environment
 from tests.common.code_contests import StubSandbox
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _CALL_TOKEN_ID = 200012
 # A shipped recipe whose episode_timeout needs the raised NCCL watchdog its launch line exports.

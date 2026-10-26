@@ -3,11 +3,12 @@ defines it, and importing a leaf never pays for a package's whole tree. ``src/__
 process bootstrap and the one exception."""
 
 import ast
-from pathlib import Path
 
 import pytest
 
-_SRC = Path(__file__).resolve().parents[3] / "src"
+from tests.common.repo import REPO_ROOT
+
+_SRC = REPO_ROOT / "src"
 _BOOTSTRAP = _SRC / "__init__.py"
 _INITS = sorted(p for p in _SRC.rglob("__init__.py") if p != _BOOTSTRAP)
 

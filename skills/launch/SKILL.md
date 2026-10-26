@@ -85,7 +85,7 @@ make test-gpu-sglang
 make ecr-public-login
 make push-public-all                         # or push-public-{blackwell,hopper,vllm,sglang}
 
-# Host-only gates (pinned uvx ruff, no image; `make docs` is the link and anchor check)
+# Host-only gates (pinned uvx ruff, no image; `make docs` checks links, anchors and code references)
 make lint
 make format
 make precommit

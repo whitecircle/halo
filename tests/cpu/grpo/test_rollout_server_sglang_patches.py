@@ -16,7 +16,7 @@ exercised here without the image. What is pinned:
 
 import pytest
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 patches = load_script_module("docker/sglang/patches/patch_sglang.py")
 

@@ -574,10 +574,10 @@ def test_the_final_export_carries_no_resume_adapter(tmp_path, monkeypatch):
     """``save_model`` writes the serving artifact; the resume adapter is a checkpoint sidecar, which
     ``_save_checkpoint`` adds. Nothing resumes from the final export (no trainer or optimizer state),
     so an adapter copy there would only grow what gets served and pushed. The real saver ladder runs,
-    down to the merged EP write, so a resume-adapter write moved into any of it is caught."""
+    down to the merged EP write, so a resume-adapter write moved into any of it leaves the adapter
+    directory the last assertion reads."""
     merged_writes, resume_writes = _Recorder(), _Recorder()
     monkeypatch.setattr(save_mod, "save_ep_model", merged_writes)
-    monkeypatch.setattr(save_mod, "save_resume_adapter", resume_writes)
     monkeypatch.setattr(checkpointing_mod, "save_resume_adapter", resume_writes)
 
     _SaveModelTrainer(_save_context(_ExpertOnlyModel())).save_model(str(tmp_path / "final"))

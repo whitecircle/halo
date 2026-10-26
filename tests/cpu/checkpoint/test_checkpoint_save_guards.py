@@ -62,7 +62,7 @@ class _FakeEPLayer(EPMoELayerBase):
 
 def _non_shared_two_node_fs(monkeypatch, ranks_per_node=8):
     """Non-shared output FS on a 2-node shape (16 ranks / 8 per node), consensus memo cleared."""
-    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+    runtime.reset_shared_filesystem_consensus()
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "0")
     monkeypatch.setattr(ep_saving_mod, "get_local_world_size", lambda: ranks_per_node)
 

@@ -36,20 +36,20 @@ import torch
 
 import src.distributed.nccl.clients.base as base_module
 from src.distributed.nccl.clients.base import resolve_sync_device, resolve_weight_sync_chunk_bytes, snapshot_param
+from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.packed_tensor import DEFAULT_PACKED_BUFFER_SIZE_BYTES
 from src.trainers.grpo.rollout.weight_sync_clients import InferenceClientManager
-from tests.common.weight_sync import Wire, offline_sglang_client
+from tests.common.weight_sync import Wire, offline_client
 
 
 def _bare_client(wire: Wire | None = None) -> VLLMWeightSyncClient:
-    """A client without the HTTP handshake (``__init__`` probes a live server), wired to ``wire``.
+    """An offline client wired to ``wire``.
 
     Only the three engine phases are stubbed; the buffering, the chunk budget and the update
     bookkeeping under test are the client's own.
     """
-    client = VLLMWeightSyncClient.__new__(VLLMWeightSyncClient)
-    client._reset_buffer_state()
+    client = offline_client(VLLMWeightSyncClient)
     (wire or Wire()).attach(client)
     return client
 
@@ -406,7 +406,7 @@ def test_sglang_declares_one_request_per_chunk(monkeypatch):
     fragment its own ``/update_weights_from_distributed`` declare, thread and round-trip.
     """
     monkeypatch.setattr("src.distributed.nccl.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
-    client = offline_sglang_client()
+    client = offline_client(SGLangWeightSyncClient)
     declares: list[list[str]] = []
     client.begin_weight_update = lambda: None
     client._send_chunk = lambda chunk, flush_cache: declares.append([name for name, _ in chunk])

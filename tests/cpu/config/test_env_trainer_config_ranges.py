@@ -24,15 +24,13 @@ import importlib
 import math
 import types
 from dataclasses import fields
-from pathlib import Path
 from typing import Union, get_args, get_origin, get_type_hints
 
 import pytest
 from transformers import TrainingArguments
 
 from src.configs.async_training_config import AsyncTrainingConfig
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from tests.common.repo import REPO_ROOT
 
 # Keeps a TrainingArguments subclass constructible on a GPU-less runner, so a raise can only come from
 # the knob under test.
@@ -55,7 +53,7 @@ def _parse_targets() -> list[type]:
     an existing one — is swept the moment it lands.
     """
     targets: dict[str, type] = {}
-    for script in sorted((PROJECT_ROOT / "scripts" / "training").rglob("*.py")):
+    for script in sorted((REPO_ROOT / "scripts" / "training").rglob("*.py")):
         tree = ast.parse(script.read_text())
         imported = {
             alias.asname or alias.name: node.module

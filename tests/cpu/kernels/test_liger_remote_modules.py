@@ -27,7 +27,7 @@ from accelerate import PartialState
 
 from src.kernels.liger import remote_modules
 from src.kernels.liger.builder import _PATCHED_MARKER, LigerFamilySpec
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 PartialState()  # the module logs through accelerate's rank-aware logger
 

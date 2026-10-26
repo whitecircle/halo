@@ -18,7 +18,7 @@ import torch
 import src.distributed.nccl.clients.base as base_module
 from src.distributed.nccl.clients.base import chunk_by_bytes, split_co_loaded
 from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from tests.common.weight_sync import Wire, offline_sglang_client
+from tests.common.weight_sync import Wire, offline_client
 
 GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
 # Four bf16 elements: 8 bytes each, so a budget of 16 holds two.
@@ -88,7 +88,7 @@ def streamed(monkeypatch) -> tuple[SGLangWeightSyncClient, Wire]:
     """An SGLang client on a recording wire, with the chunk budget shrunk to two params."""
     monkeypatch.setattr(base_module, "WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
     wire = Wire()
-    return wire.attach(offline_sglang_client()), wire
+    return wire.attach(offline_client(SGLangWeightSyncClient)), wire
 
 
 def test_the_streamed_path_keeps_the_pair_in_one_request(streamed):

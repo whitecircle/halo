@@ -21,7 +21,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 # The name heuristic reads this as multimodal, so the checkpoint verdict holds offline too.
 _VLM_MODEL_ID = "stub/qwen3.5-9b"

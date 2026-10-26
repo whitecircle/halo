@@ -20,7 +20,7 @@ import pytest
 
 from tests.common import ports
 from tests.common.ports import POOL_FLOOR, ephemeral_floor, free_port, worker_port_block
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _WORKERS = 4
 _DRAWS = 8

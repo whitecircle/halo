@@ -13,7 +13,7 @@ import re
 import pytest
 import yaml
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 VLLM_COMPOSE = REPO_ROOT / "docker-compose.vllm.yml"
 SGLANG_COMPOSE = REPO_ROOT / "docker-compose.sglang.yml"

@@ -25,12 +25,12 @@ import pytest
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.distributed.parallelism_config import AXIS_FLAGS, SUPPORTED_AXIS_SETS
+from tests.common.repo import REPO_ROOT
 from tests.common.rosters import distributed_trainer_classes
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_PARALLELISM_INDEX = _REPO_ROOT / "agent-docs" / "parallelism" / "README.md"
-_EXPERT_PARALLELISM = _REPO_ROOT / "agent-docs" / "parallelism" / "expert-parallelism.md"
-_TRAINER_ARCHITECTURE = _REPO_ROOT / "agent-docs" / "reference" / "trainer-architecture.md"
+_PARALLELISM_INDEX = REPO_ROOT / "agent-docs" / "parallelism" / "README.md"
+_EXPERT_PARALLELISM = REPO_ROOT / "agent-docs" / "parallelism" / "expert-parallelism.md"
+_TRAINER_ARCHITECTURE = REPO_ROOT / "agent-docs" / "reference" / "trainer-architecture.md"
 
 # Doc column header -> the class attribute that decides it. EP, ETP and TP run under every trainer,
 # so the matrix carries the two axes a trainer declares.

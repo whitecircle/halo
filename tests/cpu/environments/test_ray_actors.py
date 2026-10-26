@@ -24,18 +24,16 @@ import pytest
 import ray
 
 from src.configs.async_training_config import AsyncTrainingConfig
+from src.configs.rollout_config import RolloutConfig
 from src.environments import ray_actors
 from src.environments.base import CUT_TOOL_CALLS_KEY, Trajectory
 from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.episode import step_context_from_generation
+from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
 from src.environments.ray_actors import (
     EnvironmentActor,
-    RolloutConfig,
     RolloutHTTPError,
     RolloutManager,
-    RolloutResult,
-    TurnGeneration,
     _is_client_error,
     _should_giveup,
     ray_init_kwargs,
@@ -44,7 +42,7 @@ from src.environments.registry import create_environment
 from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from src.environments.tools.factories import create_native_math_tools
 from src.inference.response import FINISH_REASON_LENGTH
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 # Test: Environment Actor (Direct - Without Ray)
 

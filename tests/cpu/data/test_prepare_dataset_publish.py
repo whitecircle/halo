@@ -23,7 +23,6 @@ import ast
 import os
 import sys
 import types
-from pathlib import Path
 
 import pytest
 from accelerate import PartialState
@@ -34,8 +33,9 @@ PartialState()
 from scripts.before_training import prepare_dataset as mod
 from src.checkpoint import tool_io
 from src.models.loading import tokenizer_setup
+from tests.common.repo import REPO_ROOT
 
-_SCRIPT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", "before_training", "prepare_dataset.py")
+_SCRIPT = REPO_ROOT / "scripts/before_training/prepare_dataset.py"
 
 
 def _staged(tmp_path, name="staged"):
@@ -204,7 +204,7 @@ def test_tokenizer_overrides_reach_the_recorded_config():
     """The knobs mutate the tokenizer that bakes the ids; if they do not reach PreprocessingConfig
     the artifact is byte-indistinguishable from an unmutated one and the training-time
     compatibility check passes on a dataset tokenized by a different tokenizer."""
-    tree = ast.parse(Path(_SCRIPT).read_text(encoding="utf-8"))
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
     config_calls = [
         node
         for node in ast.walk(tree)

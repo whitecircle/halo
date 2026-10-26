@@ -21,7 +21,6 @@ therefore have to be done here, and each is silent corruption when it is not:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -34,23 +33,18 @@ import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
 import src.distributed.expert_parallel.loading as ep_loading
 import src.distributed.runtime as runtime
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.lazy_loader import (
-    EPWeightPlanner,
-    ExpertFuser,
-    SafetensorsWeightLoader,
-    WeightAction,
-    WeightPlan,
-    load_ep_model_lazy,
-)
+from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner, ExpertFuser, load_ep_model_lazy
+from src.models.loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
 from tests.common.models import TINY_GPTOSS_CONFIG
+from tests.common.repo import REPO_ROOT
 
 E_GLOBAL, M, H = 8, 6, 4
 LOADER_LOGGER = "src.distributed.expert_parallel.lazy_loader"
 
 # Loaders that open the lazy safetensors path and must reach it through the shared rank-0 gate.
 _LAZY_GATE_CALL_SITES = (
-    Path(__file__).resolve().parents[3] / "src/distributed/expert_parallel/loading.py",
-    Path(__file__).resolve().parents[3] / "src/distributed/loading/model_loading.py",
+    REPO_ROOT / "src/distributed/expert_parallel/loading.py",
+    REPO_ROOT / "src/distributed/loading/model_loading.py",
 )
 
 

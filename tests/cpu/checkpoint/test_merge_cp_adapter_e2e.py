@@ -55,7 +55,7 @@ from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENT
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
 from src.distributed.loading.peft_setup import build_peft_config
 from src.models.patches.gpt_oss_sinks import SinksPolicy
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 _TINY_QWEN3 = {
     "vocab_size": 64,

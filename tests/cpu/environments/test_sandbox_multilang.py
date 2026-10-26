@@ -49,7 +49,7 @@ from src.environments.sandbox.remote import RemoteSandbox
 from src.environments.sandbox.resolve import resolve_sandbox
 from src.environments.tools.factories import create_session_bash_tools
 from tests.common.code_contests import RecordingSandboxSession
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 _HAS_GPP = shutil.which("g++") is not None
 _HAS_GCC = shutil.which("gcc") is not None

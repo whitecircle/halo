@@ -27,7 +27,6 @@ import socket
 import sys
 from pathlib import Path
 from typing import NamedTuple
-from unittest.mock import patch
 
 import pytest
 from torch.distributed import distributed_c10d as c10d
@@ -40,6 +39,7 @@ from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
 from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient
 from src.distributed.nccl.transport.stateless_group import RendezvousListener
 from tests.common.ports import free_port
+from tests.common.weight_sync import offline_client
 
 BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
 # RFC 5737 documentation range: never an address of the test host.
@@ -175,16 +175,14 @@ def client(request, monkeypatch, engine_requests, server_calls, opened_listeners
     monkeypatch.delenv(BIND_ALL_ENV, raising=False)
     if request.param == "vllm":
         monkeypatch.delenv("VLLM_GROUP_HOST", raising=False)
-        with patch.object(VLLMWeightSyncClient, "check_server"):
-            client = VLLMWeightSyncClient(base_url="http://127.0.0.1:8000")
+        client = offline_client(VLLMWeightSyncClient, "http://127.0.0.1:8000")
         monkeypatch.setattr(client, "probe_generation", lambda: None)
         monkeypatch.setattr(vllm_module.requests, "get", lambda url, timeout=None: _Response({"world_size": 0}))
         monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _GroupHoldingCommunicator)
         monkeypatch.setattr(vllm_module, "_AsyncCall", _InlineCall)
     else:
         monkeypatch.delenv("SGLANG_GROUP_HOST", raising=False)
-        with patch.object(SGLangWeightSyncClient, "check_server"):
-            client = SGLangWeightSyncClient(base_url="http://127.0.0.1:30000")
+        client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:30000")
         monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 0)
         monkeypatch.setattr(
             client, "_destroy_remote_group", lambda: server_calls.append("/destroy_weights_update_group")

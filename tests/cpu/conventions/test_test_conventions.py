@@ -17,7 +17,7 @@
   selection that only rots when the collector's rule changes.
 * No test file bootstraps ``sys.path`` to the repo root: the images bake ``PYTHONPATH=/workspace``
   and ``tests/conftest.py`` covers a pytest run, so the insert is dead weight. A ``scripts/`` entry
-  point is loaded through ``tests.common.utils.load_script_module`` instead of a path insert.
+  point is loaded through ``tests.common.repo.load_script_module`` instead of a path insert.
 
 The marker and ``sys.path`` pins read the AST, so every spelling of the binding or the call is caught
 and a mention in a docstring or a string is not. The two text-matched spellings are assembled from
@@ -33,7 +33,8 @@ import textwrap
 
 import pytest
 
-from tests.common.utils import REPO_ROOT, probe_findings
+from scripts.docs.references import loaded_module, string_constants
+from tests.common.repo import REPO_ROOT, probe_findings
 from tests.gpu.manifest import LAUNCHER_ENTRYPOINTS
 
 CPU_MAIN_ENTRY = 'if __name__ == "__main__":\n    raise SystemExit(pytest.main([__file__, "-v"]))'
@@ -60,7 +61,6 @@ GPU_IMPORTABLE = {
     GPU_PACKAGE,
     *(f"{GPU_PACKAGE}.{name.removesuffix('.py')}" for name in GPU_LAUNCHER_MODULES - {"__init__.py"}),
 }
-SCRIPT_LOADER = "load_script_module"
 # Where the CPU tier's code lives: its tests and the helpers they import.
 CPU_TIER_ROOTS = ("tests/cpu", "tests/common")
 
@@ -146,27 +146,19 @@ def _imported_gpu_scripts(node: ast.AST) -> list[str]:
     ]
 
 
-def _loads_a_gpu_script(node: ast.AST) -> bool:
+def _loads_a_gpu_script(node: ast.AST, constants: dict[str, str]) -> bool:
     """A ``load_script_module`` call, bare or through its module, on a path under ``tests/gpu/``."""
-    if not isinstance(node, ast.Call) or not node.args:
-        return False
-    func = node.func
-    name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
-    path = node.args[0]
-    return (
-        name == SCRIPT_LOADER
-        and isinstance(path, ast.Constant)
-        and isinstance(path.value, str)
-        and path.value.startswith(f"{GPU_DIR}/")
-    )
+    loaded = loaded_module(node, constants) if isinstance(node, ast.Call) else None
+    return loaded is not None and loaded.path is not None and loaded.path.startswith(f"{GPU_DIR}/")
 
 
 def _gpu_script_reach_lines(tree: ast.Module) -> list[int]:
     """Lines that import a torchrun script from ``tests/gpu/`` or load one by path, also inside a string
     that parses as the source of a probe script."""
     lines = []
+    constants = string_constants(tree)
     for node in ast.walk(tree):
-        if _imported_gpu_scripts(node) or _loads_a_gpu_script(node):
+        if _imported_gpu_scripts(node) or _loads_a_gpu_script(node, constants):
             lines.append(node.lineno)
         elif (
             isinstance(node, ast.Constant)
@@ -329,7 +321,7 @@ def test_no_test_bootstraps_the_repo_root_onto_sys_path():
     ]
     assert not offenders, (
         "growing `sys.path` is dead weight: the images bake PYTHONPATH=/workspace and tests/conftest.py "
-        "covers a pytest run. Load a scripts/ entry point with tests.common.utils.load_script_module. "
+        "covers a pytest run. Load a scripts/ entry point with tests.common.repo.load_script_module. "
         "Offenders:\n  " + "\n  ".join(offenders)
     )
 
@@ -427,7 +419,7 @@ def test_no_cpu_tier_module_reaches_a_gpu_script():
         f"import {GPU_PACKAGE}.parallelism.ep.test_ep_optimizer_resume",
         f"from {GPU_PACKAGE} import test_suite_helpers",
         f'suite = load_script_module("{GPU_DIR}/trainers/grpo/test_offline_grpo_chunked.py")',
-        f'suite = utils.load_script_module("{GPU_DIR}/parallelism/ep/test_ep_optimizer_resume.py")',
+        f'suite = repo.load_script_module("{GPU_DIR}/parallelism/ep/test_ep_optimizer_resume.py")',
         f'script = """\nfrom {GPU_PACKAGE}.trainers.grpo.test_x import fixture\nprint(fixture())\n"""',
     ],
 )

@@ -16,7 +16,7 @@ from transformers.integrations import hub_kernels
 
 from src.models.patches import kernel_dispatch
 from src.models.patches.kernel_dispatch import ensure_device_aware_kernel_dispatch
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 
 def _decorate_probe():

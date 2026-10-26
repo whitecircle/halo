@@ -25,7 +25,7 @@ from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
 from src.args.self_distill_args import SelfDistillationArguments
 from src.data.collators.self_distill import inject_privileged_hint, privileged_hint
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 PartialState()  # the RLVR script logs through accelerate, which refuses to log without it
 

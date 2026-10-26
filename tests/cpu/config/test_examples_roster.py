@@ -34,11 +34,11 @@ from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, nati
 from src.models.patches.attention import model_has_sinks, validate_attn_implementation
 from src.training.parallelism_args import parallelism_config_from_args
 from tests.common.parallelism import make_parallelism_config
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
     EXAMPLES_ROOT,
-    PROJECT_ROOT,
     TRAINING_ROOT,
     _bf16_capable,  # noqa: F401 — autouse fixture, imported so both modules validate as a training host does
     _script_module,
@@ -202,7 +202,7 @@ def model_config_for(config: Path, parsed: tuple):
 def test_examples_declare_their_launch_width():
     """A multi-node example must state its launch line, or the topology assumed here is fiction."""
     undeclared = [
-        config.relative_to(PROJECT_ROOT).as_posix()
+        config.relative_to(REPO_ROOT).as_posix()
         for config in _EXAMPLES
         if raw_config(config).get("ep_scope") == "global" and not _NPROC.search(config.read_text(encoding="utf-8"))
     ]

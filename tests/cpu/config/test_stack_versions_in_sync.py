@@ -33,7 +33,7 @@ from typing import NamedTuple
 
 import pytest
 
-from tests.common.utils import REPO_ROOT, load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
 nccl_pin = load_script_module("docker/nccl_pin.py")
 

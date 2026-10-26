@@ -15,7 +15,7 @@ import ast
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 SRC_ROOT = REPO_ROOT / "src"
 

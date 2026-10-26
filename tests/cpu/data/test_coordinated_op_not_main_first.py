@@ -33,8 +33,8 @@ from datasets import Dataset
 from src.data.pipeline.processing import coordinated_map
 from src.distributed import filesystem
 from tests.common.gloo import run_gloo_ranks
+from tests.common.repo import REPO_ROOT
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 SCANNED_ROOTS = ("src", "scripts")
 
 WORLD_SIZE = 2

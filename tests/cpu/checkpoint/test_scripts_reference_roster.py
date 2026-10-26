@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _DOC = REPO_ROOT / "agent-docs" / "reference" / "scripts-reference.md"
 _SUBTREES = ("after_training", "before_training")
