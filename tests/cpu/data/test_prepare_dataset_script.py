@@ -4,11 +4,10 @@
 What this drives through the real ``main()`` in a fresh subprocess (so the accelerate singleton
 starts unset, as in a real CLI run):
 
-* **The documented raw-text pre-training command.** The shared data-loading helpers log through
-  accelerate's logger, which raises unless ``PartialState()`` exists — and the completion-masking
-  default must resolve per ``--mode``: a flat default-on is rejected by ``PreprocessingConfig`` as
-  inapplicable to ``mode='text'``, which would exit every documented pre-training invocation on a
-  flag its user never passed.
+* **The documented raw-text pre-training command.** The completion-masking default must resolve per
+  ``--mode``: a flat default-on is rejected by ``PreprocessingConfig`` as inapplicable to
+  ``mode='text'``, which would exit every documented pre-training invocation on a flag its user never
+  passed.
 * **An explicit masking flag in text mode still fails.** The mode-aware default must not turn the
   applicability check into a no-op — asking for something ``mode='text'`` cannot do stays loud.
 * **Chat mode with no response marker fails BEFORE the input is fetched.** The labels are baked
@@ -30,7 +29,6 @@ import sys
 import tempfile
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
 from src.data.preprocessed.metadata import PreprocessingConfig
@@ -45,8 +43,8 @@ _WORDS = ("doc", *(str(i) for i in range(32)))
 
 # Runs in a subprocess: load the real script as a module, stub only the heavy/network steps
 # (tokenizer load + preprocessing) so the offline load path is exercised, then call main().
-# Reaching the stubbed preprocess proves load_input_dataset() ran past the accelerate logger; the
-# stubbed load reports whether a rejection came before or after the input was fetched.
+# Reaching the stubbed preprocess proves load_input_dataset() ran; the stubbed load reports whether a
+# rejection came before or after the input was fetched.
 _DRIVER = """
 import sys, traceback, types
 
@@ -82,11 +80,6 @@ try:
     mod.main()
 except _ReachedPreprocess:
     print("REACHED_PREPROCESS")
-except RuntimeError as e:
-    if "accelerate state" in str(e):
-        print("ACCELERATE_STATE_ERROR")
-    else:
-        raise
 except SystemExit as e:
     # Mirror the interpreter: a string payload is the message of an exit-status-1 exit.
     print(f"EXIT:1:{{e.code}}" if isinstance(e.code, str) else f"EXIT:{{e.code}}")
@@ -150,14 +143,9 @@ _DOC_CHAT_ARGV = [
 
 
 def test_the_documented_pretraining_invocation_runs():
-    """It reaches preprocessing: the accelerate state is initialized, and no flag the user never
-    passed is carried into a mode that rejects it."""
+    """It reaches preprocessing: no flag the user never passed is carried into a mode that rejects it."""
     output = _run(_DOC_TEXT_ARGV)
 
-    assert "ACCELERATE_STATE_ERROR" not in output, (
-        "prepare_dataset.py crashed on the accelerate logger before preprocessing — "
-        "PartialState()/Accelerator() is not initialized in main():\n" + output
-    )
     assert "REACHED_PREPROCESS" in output, (
         f"the documented pre-training command did not reach preprocessing:\n{output}"
     )
@@ -265,7 +253,6 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
     artifact must load through ``load_preprocessed_dataset`` for each of 4 data-parallel ranks, and
     the four slices must be a partition of the corpus — a gap silently drops data, an overlap silently
     double-trains it, and neither shows up as an error at training time."""
-    PartialState()  # the loaders log through accelerate's rank-aware logger
     num_shards, num_docs = 4, 16
     with tempfile.TemporaryDirectory() as directory:
         raw, tokenizer_dir, out = (os.path.join(directory, name) for name in ("raw", "tok", "out"))

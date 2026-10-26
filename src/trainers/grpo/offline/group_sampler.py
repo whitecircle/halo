@@ -1,5 +1,6 @@
 """Offline GRPO's DP-sharded group sampler and the train and eval loaders built on it."""
 
+import logging
 import random
 from collections import defaultdict
 from functools import partial
@@ -7,15 +8,14 @@ from functools import partial
 import datasets
 import torch
 import torch.distributed as dist
-from accelerate.logging import get_logger
 from torch.utils.data import BatchSampler, DataLoader, Dataset, Sampler
 from transformers.trainer_utils import seed_worker
 
 from src.hardware import current_device
-from src.runtime.ranks import get_global_world_size
+from src.runtime.ranks import get_global_world_size, is_global_main_process
 from src.trainers.dataloaders import resolve_data_seed
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 class MultiGroupSampler(Sampler):
@@ -44,10 +44,11 @@ class MultiGroupSampler(Sampler):
         if shuffle:
             random.Random(seed).shuffle(indices)
         self.indices_sequence = indices
-        logger.info(
-            f"MultiGroupSampler (rank {rank}): "
-            f"Created sequence of {len(self.indices_sequence)} indices from {len(groups)} groups"
-        )
+        if is_global_main_process():
+            logger.info(
+                f"MultiGroupSampler (rank {rank}): "
+                f"Created sequence of {len(self.indices_sequence)} indices from {len(groups)} groups"
+            )
 
     def set_epoch(self, epoch: int) -> None:
         """Re-seed the per-iteration shuffle for a new epoch (DistributedSampler convention)."""

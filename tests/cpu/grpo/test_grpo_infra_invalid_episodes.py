@@ -18,7 +18,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.environments.episode import RolloutResult
 from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
@@ -28,8 +27,6 @@ from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from src.trainers.grpo.environmental.step_batch import EMPTY_ROLLOUT_STEP_LIMIT, rollout_valid_mask
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
-
-PartialState()  # the trainer warns through accelerate's logger, which refuses to log without it
 
 _DEVICE = torch.device("cpu")
 

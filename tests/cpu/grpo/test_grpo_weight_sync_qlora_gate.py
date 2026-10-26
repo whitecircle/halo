@@ -17,10 +17,6 @@ import types
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
-
-# The online install logs through accelerate's logger, which requires an initialized state.
-PartialState()
 
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin

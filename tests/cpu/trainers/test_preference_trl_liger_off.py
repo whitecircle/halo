@@ -14,15 +14,12 @@ import types
 
 import pytest
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import PretrainedConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
-
-PartialState()  # the trainers' accelerate logger requires an initialized state
 
 
 class _SetupReached(Exception):

@@ -22,9 +22,9 @@ Usage:
 That student is dense, so it takes no --expert_parallel_size; the MoE configs pin it themselves.
 """
 
+import logging
 from functools import partial
 
-from accelerate.logging import get_logger
 from transformers import AutoTokenizer, PreTrainedModel
 from trl import SFTConfig
 
@@ -76,7 +76,7 @@ from src.runtime.ranks import is_global_main_process
 from src.trainers.distillation.divergences import verify_same_token_ids
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 def _require_privileged_columns(ds, args) -> None:

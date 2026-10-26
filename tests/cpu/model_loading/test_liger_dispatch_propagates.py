@@ -12,14 +12,10 @@ Run: pytest tests/cpu/model_loading/test_liger_dispatch_propagates.py
 import inspect
 
 import pytest
-from accelerate import PartialState
 
 from src.model_loading.liger import dispatch
 from src.model_loading.liger.dispatch import _apply_liger_for_standard_models
 from tests.common.repo import probe_findings
-
-# Dispatch logs through accelerate's rank-aware logger, which requires an initialized state.
-PartialState()
 
 # The exception types an applier can raise. Each must reach the caller.
 _APPLIER_EXCEPTIONS = (ImportError, ValueError, NotImplementedError, RuntimeError)
@@ -80,9 +76,6 @@ def test_every_registered_model_type_applies_without_raising():
     """
     script = """
 import sys
-from accelerate import PartialState
-
-PartialState()
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from src.model_loading.liger.dispatch import _TOOLKIT_LIGER_APPLIERS, _apply_liger_for_standard_models, _liger_model_types

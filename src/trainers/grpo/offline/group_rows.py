@@ -1,17 +1,17 @@
 """Offline GRPO's dataset rows: each stored ``(prompt, completions, rewards)`` group becomes one tokenized training
 row per completion, carrying its group-relative advantage."""
 
+import logging
 from typing import Any
-
-from accelerate.logging import get_logger
 
 from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.prompt_completion import tokenize_prompt_completions
 from src.data.turn_markers import resolve_eos_token_ids
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.runtime.ranks import is_global_main_process
 from src.trainers.grpo.objective.advantages import compute_group_advantages
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 def tokenize_offline_grpo_rows(
@@ -119,10 +119,11 @@ def verify_degenerate_drop(args, dataset, num_groups_in: int, what: str) -> None
     if not args.drop_degenerate_groups:
         return
     num_groups_kept = len(set(dataset["group_id"])) if len(dataset) else 0
-    logger.info(
-        f"drop_degenerate_groups: kept {num_groups_kept}/{num_groups_in} {what} groups "
-        f"(dropped groups scored all-alike or held < 2 completions)"
-    )
+    if is_global_main_process():
+        logger.info(
+            f"drop_degenerate_groups: kept {num_groups_kept}/{num_groups_in} {what} groups "
+            f"(dropped groups scored all-alike or held < 2 completions)"
+        )
     if num_groups_kept == 0:
         raise ValueError(
             f"drop_degenerate_groups removed every {what} group: all groups scored all-alike "

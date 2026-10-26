@@ -13,7 +13,6 @@ from unittest import mock
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.trainers.grpo.environmental import async_rollouts, importance_sampling
@@ -28,8 +27,6 @@ from src.weight_sync.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from tests.common.fake_engines import GRAPH_CAPTURE_TOKENS, FakeEngineServer, fake_server_class
 from tests.common.repo import REPO_ROOT
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
-
-PartialState()  # the re-score reports through accelerate's logger, which refuses to log without it
 
 ENV_SCRIPT = REPO_ROOT / "scripts/training/environmental_grpo.py"
 
@@ -182,18 +179,17 @@ def test_rescore_reports_partial_failures_and_never_raises():
     ("failing", "level", "silent"), [((True, False), "warning", "error"), ((True,), "error", "warning")]
 )
 def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, failing, level, silent):
-    """Each rank re-scores its own rows, so a failure is rank-local, and accelerate's adapter drops every
-    record off the main process by default: unless the report opts out, a dead route on rank 3 would never
-    print."""
+    """Each rank re-scores its own rows, so a failure is rank-local: guarded to the main process, a dead route
+    on rank 3 would never print."""
     recorder = mock.MagicMock()
     monkeypatch.setattr(importance_sampling, "logger", recorder)
     monkeypatch.setattr(importance_sampling, "get_global_rank", lambda: 3)
+    monkeypatch.setattr(importance_sampling, "is_global_main_process", lambda: False)
     rescore, _host = _rescore_host([_FakeClient(fail=fail) for fail in failing])
     prompts, completions = _rows()
     rescore(prompts, completions, [True, True, True, True], [2, 1, 1])
     getattr(recorder, silent).assert_not_called()
-    (msg,), kwargs = getattr(recorder, level).call_args
-    assert kwargs.get("main_process_only") is False, "the adapter's default drops a non-main rank's report"
+    (msg,), _ = getattr(recorder, level).call_args
     assert msg.startswith("[rank 3] isr_engine_reference:"), msg
 
 

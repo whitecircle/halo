@@ -17,7 +17,6 @@ from unittest import mock
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from torch.nn.functional import log_softmax
 from trl import SFTTrainer
 
@@ -28,8 +27,6 @@ from src.trainers.distillation.divergences import place_frozen_scorer, shifted_t
 from src.trainers.distillation.opd_term import privileged_teacher_pass
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.sft import DistributedSFTTrainer
-
-PartialState()  # the trainers' accelerate logger requires an initialized state
 
 _TEACHER_BRANCH_COLLATOR = types.SimpleNamespace(builds_teacher_branch=True)
 

@@ -26,12 +26,9 @@ import time
 
 import pytest
 import torch
-from accelerate import PartialState
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import GptOssConfig, GptOssForCausalLM
-
-PartialState()  # the script's model loading logs through accelerate's logger
 
 import scripts.after_training.reset_sinks as reset_sinks_mod
 from scripts.after_training.reset_sinks import reset_sinks

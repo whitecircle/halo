@@ -5,8 +5,9 @@ under ``torch.no_grad()``, as privileged teacher ``pi(. | c, x, y_<t)`` (``c`` =
 ``L = L_sft + beta(k) * L_OPD + alpha * L_ref``. The on-policy variant is :class:`DistributedSDPGTrainer`.
 """
 
+import logging
+
 import torch
-from accelerate.logging import get_logger
 
 from src.configs.distillation import SelfDistillScriptArguments
 from src.data.turn_markers import resolve_eos_token_ids
@@ -16,6 +17,7 @@ from src.model_loading.parallel.frozen_models import ReferenceAlternatives, warn
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.config_access import model_type_matches
 from src.models.unwrapping import unwrap_framework_wrappers
+from src.runtime.ranks import is_global_main_process
 from src.trainers.distillation.divergences import (
     logits_forward_inputs,
     masked_token_mean,
@@ -28,7 +30,7 @@ from src.trainers.evaluation import split_rows_head
 from src.trainers.sft import DistributedSFTTrainer
 from src.trainers.stored_metrics import StoredMetricsMixin
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 # Opt-in per family: replay is only sound when both passes call get_image_features once, identically.
@@ -127,7 +129,8 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
             self._reference_vocab_width, device = place_frozen_scorer(
                 self._reference_model, self.model, tokenizer, tokenizer
             )
-            logger.info(f"Reference model moved to {device} and frozen (alpha={self.reference_kl_coef})")
+            if is_global_main_process():
+                logger.info(f"Reference model moved to {device} and frozen (alpha={self.reference_kl_coef})")
 
     def _resolve_stop_token_ids(self):
         """EOS/stop token ids excluded from OPD when ``opd_exclude_eos``, via ``resolve_eos_token_ids``."""
@@ -226,7 +229,8 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
 
         mm.get_image_features = cached_get_image_features
         self._vision_reuse_active = True
-        logger.info(f"Vision-feature reuse enabled for OPD teacher forward (model_type={config.model_type})")
+        if is_global_main_process():
+            logger.info(f"Vision-feature reuse enabled for OPD teacher forward (model_type={config.model_type})")
         return True
 
     def _weighted_cross_entropy(self, logits, labels, sample_weights):

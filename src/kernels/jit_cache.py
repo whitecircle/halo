@@ -7,7 +7,6 @@ import os
 import tempfile
 import warnings
 
-# Stdlib, not accelerate's adapter: the GPU test harness anchors the FA4 cache before accelerate state exists.
 logger = logging.getLogger(__name__)
 
 

@@ -20,7 +20,6 @@ from collections import defaultdict
 import numpy as np
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.environments.episode import RolloutResult
 from src.environments.messages import Message, Trajectory
@@ -29,8 +28,6 @@ from src.trainers.grpo.environmental.step_batch import BatchBuildFence
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.routing import BareEPLayer, raw_routing_payload
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
-
-PartialState()  # the gate logs through accelerate, which refuses to log without it
 
 # The engine's rows are per decoder layer; the EP layers are two of the four.
 ENGINE_LAYERS, EP_LAYER_INDICES, TOP_K, EXPERTS = 4, [1, 3], 2, 8

@@ -30,7 +30,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, TrainerState
@@ -60,9 +59,6 @@ from tests.common.checkpoint_io import load_context, mark_resume_adapter, save_c
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
 from tests.common.peft_helpers import randomize_adapters
-
-# The resolver logs through the accelerate logger, which requires an initialized state.
-PartialState()
 
 BASE = "org/base-model"
 _EP = make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=8, use_grouped_gemm=True)

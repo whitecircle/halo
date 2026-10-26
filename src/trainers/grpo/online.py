@@ -5,6 +5,7 @@ the training environment (ABI-incompatible extensions, older transformers than t
 """
 
 import contextlib
+import logging
 import types
 from collections.abc import Iterator
 from typing import Any
@@ -12,11 +13,11 @@ from typing import Any
 import torch
 import trl.generation.vllm_client as _trl_vllm_client
 import trl.generation.vllm_generation as _trl_vllm_generation
-from accelerate.logging import get_logger
 from trl import GRPOTrainer
 
 from src.configs.grpo import EarlyStopConfig, RLRRConfig
 from src.environments.rollout_config import VLLM_BACKEND
+from src.runtime.ranks import is_global_main_process
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, build_early_stop_callback
 from src.trainers.grpo.grpo_rules import (
@@ -42,7 +43,7 @@ from src.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from src.trainers.token_metrics import effective_loss_mask
 from src.trainers.world_metrics import world_sums
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 class DistributedGRPOTrainer(
@@ -98,12 +99,12 @@ class DistributedGRPOTrainer(
         if early_stop is not None:
             self.add_callback(early_stop)
 
-        if self._rlrr_config is not None:
+        if self._rlrr_config is not None and is_global_main_process():
             logger.info("RLRR relative-reward shaping enabled (mode=%s)", self._rlrr_config.mode)
 
         # The k3 tail clamp engages only when TRL's recompute gate produces old_per_token_logps.
         recompute_gate = self._misaligned_accumulation or (self.use_vllm and self.vllm_importance_sampling_correction)
-        if self.beta != 0.0 and not recompute_gate:
+        if self.beta != 0.0 and not recompute_gate and is_global_main_process():
             logger.warning(
                 "beta=%s without the old-logps recompute (vllm_importance_sampling_correction off, "
                 "aligned accumulation): the k3 KL tail clamp cannot engage — a single suppressed "
@@ -173,11 +174,12 @@ class DistributedGRPOTrainer(
 
         self.vllm_generation.sync_weights = types.MethodType(type(self)._distributed_sync_weights, self)
         config = self.parallelism_config
-        logger.info(
-            "Installed distributed-aware vLLM weight sync "
-            f"(ep={config.has_ep_group}, tp={config.is_tp_mode}, "
-            f"expert_tp={config.is_expert_tp_mode})"
-        )
+        if is_global_main_process():
+            logger.info(
+                "Installed distributed-aware vLLM weight sync "
+                f"(ep={config.has_ep_group}, tp={config.is_tp_mode}, "
+                f"expert_tp={config.is_expert_tp_mode})"
+            )
 
     def _distributed_sync_weights(self) -> None:
         """COLLECTIVE: the EP/TP/FSDP2/PEFT-aware ``VLLMGeneration.sync_weights``; the client TRL holds on

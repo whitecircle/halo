@@ -1,15 +1,15 @@
 """The engine-to-trainer importance-sampling correction of environmental GRPO and its trust-region breaker."""
 
 import dataclasses
+import logging
 import math
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
-from accelerate.logging import get_logger
 from transformers import TrainerCallback
 
-from src.runtime.ranks import get_global_rank
+from src.runtime.ranks import get_global_rank, is_global_main_process
 from src.trainers.grpo.early_stop import build_early_stop_callback
 from src.trainers.grpo.environmental.environmental_rules import (
     reject_inert_is_stages,
@@ -32,7 +32,7 @@ from src.trainers.grpo.objective.logratio import (
 from src.trainers.world_metrics import world_sums
 from src.weight_sync.registry import resolve_weight_sync_client
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # Concurrent re-score prefills per rank under isr_engine_reference (each is one HTTP request in flight).
 _ENGINE_RESCORE_CONCURRENCY = 16
@@ -88,15 +88,16 @@ class ImportanceSamplingMixin:
         cfg = self.async_config
         # Score log-probs at the engine's sampling temperature, or the IS ratio picks up a systematic bias.
         if self.temperature != cfg.rollout_temperature:
-            logger.info(
-                f"Scoring log-probs at the sampling temperature: temperature "
-                f"{self.temperature} -> rollout_temperature {cfg.rollout_temperature}"
-            )
+            if is_global_main_process():
+                logger.info(
+                    f"Scoring log-probs at the sampling temperature: temperature "
+                    f"{self.temperature} -> rollout_temperature {cfg.rollout_temperature}"
+                )
             self.temperature = cfg.rollout_temperature
             self.args.temperature = cfg.rollout_temperature
         # Truncated per-token ratio vs the captured sampling logprobs, so it needs train_on_sampled_tokens.
         self._is_correction = cfg.train_on_sampled_tokens and self.vllm_importance_sampling_correction
-        if self.vllm_importance_sampling_correction and not cfg.train_on_sampled_tokens:
+        if self.vllm_importance_sampling_correction and not cfg.train_on_sampled_tokens and is_global_main_process():
             logger.warning(
                 "vllm_importance_sampling_correction is ON but train_on_sampled_tokens is off, so the "
                 "correction is DISABLED: the ratio needs the sampling log-probs the server returns "
@@ -153,13 +154,12 @@ class ImportanceSamplingMixin:
                     failures.append(e)
         self._world_metrics.fraction("sampling/engine_rescore_miss_frac", len(failures), len(indices))
         if failures:
+            # Every rank reports: the failure is this rank's own requests, invisible to rank 0.
             report = logger.error if len(failures) == len(indices) else logger.warning
-            # main_process_only=False: the failure is this rank's own requests, invisible to rank 0.
             report(
                 f"[rank {get_global_rank()}] isr_engine_reference: {len(failures)}/{len(indices)} re-score "
                 f"requests failed this step (those rows read the trainer's log-ratio instead); last error: "
-                f"{failures[-1]}",
-                main_process_only=False,
+                f"{failures[-1]}"
             )
         return scored
 
@@ -311,9 +311,10 @@ class ImportanceSamplingMixin:
         self._breaker_tripped_this_step = skipped
         if not skipped:
             return False
-        logger.warning(
-            f"IS trust region: {traj_frac:.0%} of corrected trajectories fully masked, {token_frac:.0%} of "
-            f"corrected tokens masked (> skip_update_masked_frac={threshold}) — zeroing "
-            "this step's policy gradient and skipping its optimizer step; rollouts re-anchor at the next weight sync."
-        )
+        if is_global_main_process():
+            logger.warning(
+                f"IS trust region: {traj_frac:.0%} of corrected trajectories fully masked, {token_frac:.0%} of "
+                f"corrected tokens masked (> skip_update_masked_frac={threshold}) — zeroing "
+                "this step's policy gradient and skipping its optimizer step; rollouts re-anchor at the next weight sync."
+            )
         return True

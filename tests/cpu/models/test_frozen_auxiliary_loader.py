@@ -23,7 +23,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from accelerate import PartialState
 from torch import nn
 from transformers import AutoModelForImageTextToText, GenerationConfig
 
@@ -43,9 +42,6 @@ from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
 from tests.common.repo import REPO_ROOT
-
-# The SDPG reference load logs through accelerate's logger, which requires an initialized state.
-PartialState()
 
 AUX_MODEL = "org/auxiliary"
 

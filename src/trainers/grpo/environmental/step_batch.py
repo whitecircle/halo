@@ -2,19 +2,19 @@
 
 import contextlib
 import dataclasses
+import logging
 import math
 
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
-from accelerate.logging import get_logger
 from accelerate.utils import gather
 from trl.trainer.utils import pad
 
 from src.environments.episode import RolloutResult
 from src.environments.episode_keys import EPISODE_INVALID_REASON_KEY, solve_verdict
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
-from src.runtime.ranks import is_multi_rank_run
+from src.runtime.ranks import is_global_main_process, is_multi_rank_run
 from src.trainers.grpo.environmental.rollout_metrics import group_solve_counts
 from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow, single_trajectory_row
 from src.trainers.grpo.logprob_scoring import dense_row_spans
@@ -33,7 +33,7 @@ from src.trainers.grpo.objective.loss_inputs import (
 )
 from src.trainers.token_metrics import effective_loss_mask
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # The batch key the routing-replay masks ride under, row-aligned with the rest of the batch.
 ROUTING_MASKS_KEY = "routing_masks"
@@ -446,10 +446,11 @@ class StepBatchMixin:
         else:
             detail = " No rollout carried an error: the environment marked every episode invalid."
         if self._empty_rollout_steps < EMPTY_ROLLOUT_STEP_LIMIT:
-            logger.warning(
-                f"Every rollout in this step failed or was marked invalid — the step contributes no "
-                f"gradient. Halting if the next step is empty too.{detail}"
-            )
+            if is_global_main_process():
+                logger.warning(
+                    f"Every rollout in this step failed or was marked invalid — the step contributes no "
+                    f"gradient. Halting if the next step is empty too.{detail}"
+                )
             return
         raise RuntimeError(
             f"{self._empty_rollout_steps} consecutive steps produced no valid episode anywhere in the "

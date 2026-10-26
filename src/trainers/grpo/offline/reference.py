@@ -5,6 +5,7 @@ of the original scores."""
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from enum import Enum
@@ -13,7 +14,6 @@ import numpy as np
 import pyarrow as pa
 import torch
 import torch.distributed as dist
-from accelerate.logging import get_logger
 from accelerate.utils import is_peft_model
 from datasets import Dataset
 from torch import nn
@@ -47,7 +47,7 @@ from src.trainers.reference_logps import (
     token_digest,
 )
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 _TOKEN_COLUMNS = ("prompt_input_ids", "completion_input_ids")
 

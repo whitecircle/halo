@@ -25,7 +25,6 @@ import json
 import torch
 import torch.nn.functional as F
 import triton
-from accelerate import PartialState
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from src.models.attention.backend_setup import patch_sdpa_for_wide_heads
@@ -70,7 +69,6 @@ def main():
             scores = (q @ kk.transpose(-1, -2)).masked_fill(~allowed, float("-inf"))
             (torch.softmax(scores.float(), -1).to(q.dtype) @ vv).backward(grad)
     elif args.backend == "halo":
-        PartialState()  # the toolkit logs through accelerate's logger
         patch_sdpa_for_wide_heads()  # the Gemma 4 loader's process-wide SDPA pin
         module = torch.nn.Module()
         module.is_causal = True

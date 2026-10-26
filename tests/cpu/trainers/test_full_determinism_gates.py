@@ -24,7 +24,6 @@ import types
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import Gemma4ForCausalLM, Gemma4TextConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
@@ -36,8 +35,6 @@ from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 from tests.common.parallelism import create_config
-
-PartialState()  # the trainers' accelerate logger requires an initialized state
 
 TRAINERS = [
     DistributedSFTTrainer,

@@ -12,11 +12,8 @@ must raise rather than leave the fused loss running on a shard.
 from types import SimpleNamespace
 
 import pytest
-from accelerate import PartialState
 
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-
-PartialState()  # the mixin logs through accelerate's rank-aware logger
 
 
 def _host(*, fsdp_wrapped=True, use_liger_kernel=True, **loss_attrs):

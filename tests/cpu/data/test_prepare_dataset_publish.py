@@ -25,10 +25,6 @@ import sys
 import types
 
 import pytest
-from accelerate import PartialState
-
-# The script logs through accelerate's rank-aware logger, which requires an initialized state.
-PartialState()
 
 from scripts.before_training import prepare_dataset as mod
 from src.checkpoint import atomic

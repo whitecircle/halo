@@ -37,7 +37,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from safetensors.torch import save_file
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
@@ -60,8 +59,6 @@ from tests.common.tiny_models import (
     build_tiny_family_checkpoint,
     tiny_family_model,
 )
-
-PartialState()  # the save path logs through accelerate's logger
 
 SHAPES = ("fsdp2_resume", "fsdp2_best_model", "tp_best_model", "unsharded_resume", "unsharded_best_model")
 FAMILIES = {**TINY_MOE_FAMILIES, **TINY_DENSE_FAMILIES}

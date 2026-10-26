@@ -13,12 +13,9 @@ file in one filesystem namespace. A single node has one local rank 0, so the fla
 from types import SimpleNamespace
 
 import pytest
-from accelerate import PartialState
 
 import src.trainers.training_args_overrides as base_mod
 from src.trainers.training_args_overrides import align_save_on_each_node
-
-PartialState()  # the mixin's accelerate logger requires an initialized state
 
 
 @pytest.mark.parametrize(

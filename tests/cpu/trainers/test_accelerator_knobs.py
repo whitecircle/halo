@@ -14,13 +14,10 @@ Run: python tests/cpu/trainers/test_accelerator_knobs.py
 import types
 
 import pytest
-from accelerate import PartialState
 
 import src.trainers.accelerator as mixin_module
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-
-PartialState()  # the mixin's accelerate logger requires an initialized state
 
 _configure = DistributedTrainerMixin._configure_fp32_output_conversion
 _warn_unapplied = DistributedTrainerMixin._warn_knobs_unapplied_under_accelerate

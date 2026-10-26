@@ -20,11 +20,8 @@ fixture would make every value comparison a dtype comparison.
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
-
-PartialState()  # the EP save logs through accelerate's logger
 
 from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase

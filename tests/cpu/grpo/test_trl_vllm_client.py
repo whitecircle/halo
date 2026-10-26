@@ -15,7 +15,6 @@ import types
 
 import pytest
 import trl.generation.vllm_generation as trl_vllm_generation
-from accelerate import PartialState
 
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
@@ -324,7 +323,6 @@ def test_the_client_takes_trl_s_constructor_keywords():
 
 def test_online_grpo_replaces_each_trl_method_the_surface_walk_skips():
     """The walk may skip a TRL method's client calls only while the trainer installs its own version."""
-    PartialState()  # the install logs through accelerate's logger
     host = object.__new__(DistributedGRPOTrainer)
     host.vllm_generation = types.SimpleNamespace()
     host.parallelism_config = types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, is_expert_tp_mode=False)

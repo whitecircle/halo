@@ -14,10 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers import GptOssConfig, GptOssForCausalLM
-
-PartialState()  # the sinks policy logs through accelerate's logger, which requires live state
 
 from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from src.model_loading.parallel.peft_setup import configure_adapter_training

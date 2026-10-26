@@ -11,10 +11,6 @@ global-``random.shuffle`` implementation.
 import random
 
 import pytest
-from accelerate import PartialState
-
-# MultiGroupSampler.__init__ logs via the accelerate logger, which requires an initialized state.
-PartialState()
 
 from src.trainers.grpo.offline.group_sampler import MultiGroupSampler
 

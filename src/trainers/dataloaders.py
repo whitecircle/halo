@@ -8,6 +8,7 @@ pre-sharded lengths and stamps the epoch on the running loader.
 from __future__ import annotations
 
 import contextlib
+import logging
 from collections.abc import Sequence
 from functools import partial
 from typing import Any
@@ -16,7 +17,6 @@ import datasets
 import torch
 import torch.distributed as dist
 from accelerate.data_loader import BatchSamplerShard, prepare_data_loader
-from accelerate.logging import get_logger
 from accelerate.utils import recursively_apply
 from torch.utils.data import DataLoader
 from transformers.trainer_utils import seed_worker
@@ -24,10 +24,10 @@ from transformers.trainer_utils import seed_worker
 from src.hardware import current_device
 from src.runtime.collectives import all_gather_cat
 from src.runtime.consensus import rank_consensus
-from src.runtime.ranks import get_global_world_size, has_process_group, is_multi_rank_run
+from src.runtime.ranks import get_global_world_size, has_process_group, is_global_main_process, is_multi_rank_run
 from src.trainers.parallelism.trainer_rules import reject_batch_rebalance_on_dp_sharded_loader, reject_dispatch_batches
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 # "absent from the instance __dict__", distinct from a legitimately stored ``None``.
 _UNSET = object()
@@ -162,7 +162,8 @@ class DataParallelLoaderMixin:
 
         if self.parallelism_config.is_pp_mode and not self.args.dataloader_drop_last:
             # PP's P2P buffer shapes freeze on step 1, so a short final batch crashes mid-epoch.
-            logger.info("Pipeline parallelism: forcing train dataloader drop_last=True (frozen P2P batch shape).")
+            if is_global_main_process():
+                logger.info("Pipeline parallelism: forcing train dataloader drop_last=True (frozen P2P batch shape).")
             params["drop_last"] = True
 
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
@@ -274,14 +275,15 @@ class DataParallelLoaderMixin:
             )
         if min_len < n:
             dropped = n - min_len
-            logger.warning(
-                f"⚠ Pre-sharded {split} dataset DATA LOSS: this rank holds {n} examples but is truncated to "
-                f"the global min {min_len} ({dropped} examples / {100.0 * dropped / n:.1f}% of this rank "
-                f"DROPPED each pass over the split) so all data-parallel ranks run the same number of steps. "
-                f"Cause: num_shards is not a multiple of data_parallel_size, so some ranks got more shards. "
-                f"Re-preprocess with num_shards a multiple of the DP degree (ideally >> it, e.g. "
-                f"k×world_size), so the truncation is even and negligible."
-            )
+            if is_global_main_process():
+                logger.warning(
+                    f"⚠ Pre-sharded {split} dataset DATA LOSS: this rank holds {n} examples but is truncated to "
+                    f"the global min {min_len} ({dropped} examples / {100.0 * dropped / n:.1f}% of this rank "
+                    f"DROPPED each pass over the split) so all data-parallel ranks run the same number of steps. "
+                    f"Cause: num_shards is not a multiple of data_parallel_size, so some ranks got more shards. "
+                    f"Re-preprocess with num_shards a multiple of the DP degree (ideally >> it, e.g. "
+                    f"k×world_size), so the truncation is even and negligible."
+                )
             return dataset.select(range(min_len))
         return dataset
 
@@ -418,7 +420,7 @@ class DataParallelLoaderMixin:
         if not isinstance(dataset, torch.utils.data.IterableDataset):
             params["sampler"] = self._get_eval_sampler(dataset)
             params["drop_last"] = self.args.dataloader_drop_last
-        elif (dp_size := self.dp_shard_geometry()[0]) > 1:
+        elif (dp_size := self.dp_shard_geometry()[0]) > 1 and is_global_main_process():
             logger.warning(
                 f"The {description} split is an iterable dataset sharded {dp_size} ways by data-parallel rank: "
                 f"its final round is padded with the split's first rows, which it has no length to count, so "

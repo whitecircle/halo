@@ -30,12 +30,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from accelerate import PartialState
 
 import src.trainers.evaluation as mixin_module
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-
-PartialState()  # the mixin logs through accelerate's rank-aware logger
 
 # Any quantile < 1.0 turns entropy masking on; the sentinel is what the stubbed super().evaluate()
 # returns, so an assert matching it proves the call passed THROUGH the escape hatch unchanged.
@@ -85,6 +82,7 @@ def distributed():
     with (
         patch.object(mixin_module.dist, "is_initialized", return_value=True),
         patch.object(mixin_module, "barrier", lambda *args, **kwargs: None),
+        patch.object(mixin_module, "is_global_main_process", return_value=True),
     ):
         yield
 

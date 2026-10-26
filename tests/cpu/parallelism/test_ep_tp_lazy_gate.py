@@ -18,12 +18,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 
 import src.model_loading.parallel.tp as tp_loading
 from src.model_loading.parallel.model_source import ModelSource
-
-PartialState()  # the loader's accelerate logger needs accelerate state initialized
 
 _SUPPORTED_KEYS = ["model.layers.0.mlp.experts.gate_up_proj", "model.layers.0.self_attn.q_proj.weight"]
 _UNSUPPORTED_KEYS = [

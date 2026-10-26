@@ -16,12 +16,12 @@ raw message rows plus an ``images`` column, processed in the collator; image tok
 ``-100``). VLM mode excludes ``padding_free``, CP and PP.
 """
 
+import logging
 from collections.abc import Callable
 from typing import Any, Literal
 
 import torch
 import torch.nn as nn
-from accelerate.logging import get_logger
 from datasets import Dataset, IterableDataset
 from datasets import Image as ImageFeature
 from datasets import Sequence as SequenceFeature
@@ -57,6 +57,7 @@ from src.models.segment_markers import (
     segment_marker_kwargs,
     segment_markers_for,
 )
+from src.runtime.ranks import is_global_main_process
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.evaluation import split_rows_head, split_rows_mean
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
@@ -78,7 +79,7 @@ from src.trainers.preference.smpo_objective import (
 from src.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
 from src.trainers.stored_metrics import StoredMetricsMixin
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 # The tokenized columns each data path's rows carry; present, the dataset is already prepared.
 _TEXT_COLUMNS = ("prompt_input_ids", "chosen_input_ids", "rejected_input_ids")
@@ -107,12 +108,12 @@ def resolve_vlm_mode(processing_class, is_vlm: bool | None) -> bool:
 def _margin_schedule_callback(args: SmoothMarginPOConfig, model) -> VariableSchedulerCallback:
     """Seed ``model.target_margin`` at ``initial_margin`` and schedule it up to ``target_margin``."""
     model.target_margin = args.initial_margin
-    logger.info(f"Initialized model.target_margin = {args.initial_margin} for scheduling")
-    scheduler = VariableSchedulerCallback(
+    if is_global_main_process():
+        logger.info(f"Initialized model.target_margin = {args.initial_margin} for scheduling")
+        logger.info(f"Added target_margin scheduler: {args.initial_margin} → {args.target_margin}")
+    return VariableSchedulerCallback(
         attribute_name="target_margin", initial_value=args.initial_margin, final_value=args.target_margin
     )
-    logger.info(f"Added target_margin scheduler: {args.initial_margin} → {args.target_margin}")
-    return scheduler
 
 
 def _side_statistics(
@@ -456,7 +457,8 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
             # that second slot as images — and reads bos/eos ids a ProcessorMixin does not carry.
             row_processing_class = resolve_tokenizer(processing_class)
         if isinstance(dataset, Dataset) and set(prepared_columns).issubset(dataset.column_names):
-            logger.info(f"Dataset '{dataset_name}' already prepared, skipping _prepare_dataset")
+            if is_global_main_process():
+                logger.info(f"Dataset '{dataset_name}' already prepared, skipping _prepare_dataset")
             return dataset
 
         # Coordinated, not local_main_process_first + raw map: one rank tokenizes to a deterministic

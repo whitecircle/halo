@@ -17,14 +17,10 @@ interface *inputs* are the whole question): the defect exists unpatched, the pat
 import pytest
 import torch
 import transformers.models.mistral4.modeling_mistral4 as m4
-from accelerate import PartialState
 from transformers import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import ALL_ATTENTION_FUNCTIONS, Mistral4ForCausalLM
 
 from src.models.attention.packed_position_ids import patch_mistral4_flash_packed_position_ids
-
-PartialState()  # the patch logs through accelerate's logger, which needs the state initialized
-
 
 SEED = 1234
 

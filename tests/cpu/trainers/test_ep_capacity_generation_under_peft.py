@@ -19,7 +19,6 @@ import inspect
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig, PeftModel
 from tokenizers import Tokenizer, models, pre_tokenizers
@@ -27,8 +26,6 @@ from transformers import PreTrainedTokenizerFast, Trainer
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 from trl import SFTConfig
-
-PartialState()  # the trainer logs through accelerate's logger, which refuses an uninitialized state
 
 from src.distributed.expert_parallel.deepep.capacity import capacity_scope
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase

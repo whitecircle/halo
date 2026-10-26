@@ -34,7 +34,6 @@ import types
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from transformers import CONFIG_MAPPING
 from trl import GRPOConfig, GRPOTrainer
@@ -43,6 +42,7 @@ from src.configs.grpo_environmental import AsyncTrainingConfig
 from src.environments.reasoning_effort import has_thinking_budget
 from src.environments.registry import build_environment
 from src.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND, resolve_reasoning_end_token_id
+from src.trainers.grpo.environmental import reasoning
 from src.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
@@ -57,8 +57,6 @@ from src.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_f
 from src.trainers.training_args_overrides import keep_all_dataset_columns
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-
-PartialState()  # the per-turn close-marker warning logs through accelerate, which refuses to log without it
 
 
 def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
@@ -445,7 +443,7 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
 def test_the_marker_warning_is_logged_once_by_the_main_process_under_the_trainers_name(caplog, monkeypatch):
     """Every rank resolves the marker, so a warning each logged would repeat once per rank."""
     for is_main, expected in ((True, 1), (False, 0)):
-        monkeypatch.setattr(PartialState, "is_main_process", property(lambda self, is_main=is_main: is_main))
+        monkeypatch.setattr(reasoning, "is_global_main_process", lambda is_main=is_main: is_main)
         caplog.clear()
         with caplog.at_level(logging.WARNING):
             assert _forced_close_ids(_close_host({"high": 16384}, knows_close=False)) is None

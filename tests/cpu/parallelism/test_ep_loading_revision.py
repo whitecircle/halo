@@ -14,15 +14,12 @@ from unittest.mock import patch
 
 import pytest
 import torch.nn as nn
-from accelerate import PartialState
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.model_loading.parallel.cp import load_ep_cp_model
 from src.model_loading.parallel.ep import load_ep_model
 from src.model_loading.parallel.model_source import ModelSource
 from src.model_loading.parallel.tp import load_ep_tp_model
-
-PartialState()  # the loaders' accelerate logger needs accelerate state initialized
 
 _EP_LOADING = "src.model_loading.parallel.ep"
 _CP_LOADING = "src.model_loading.parallel.cp"

@@ -6,9 +6,8 @@ and dense MLPs are not misclassified.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
-
-from accelerate.logging import get_logger
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
@@ -16,7 +15,7 @@ from src.models.moe.config_fields import has_routed_experts
 from src.runtime.ranks import is_global_main_process
 from src.trainers.parallelism.trainer_rules import reject_ep_gradient_checkpointing
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 def uses_reentrant_checkpointing(parallelism_config, model_config) -> bool:
@@ -38,7 +37,7 @@ def resolve_use_reentrant(parallelism_config, model_config, configured: bool | N
     configured ``False``; else ``configured``."""
     if not uses_reentrant_checkpointing(parallelism_config, model_config):
         return configured
-    if configured is False:
+    if configured is False and is_global_main_process():
         logger.warning(
             "Expert/Context Parallelism and MoE routing use use_reentrant=True for gradient "
             "checkpointing; overriding the configured use_reentrant=False. CP's sequence "

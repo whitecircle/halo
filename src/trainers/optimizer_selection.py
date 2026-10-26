@@ -1,6 +1,6 @@
 """Which optimizer a trainer run builds: AdamWBF16, a toolkit-named optimizer, the tensor-type-grouped build, or stock."""
 
-from accelerate.logging import get_logger
+import logging
 
 from src.optimizers.adamw_bf16 import adamw_bf16_optimizer_from_args
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
@@ -10,9 +10,10 @@ from src.optimizers.registry import (
     optim_name,
     register_custom_optimizers,
 )
+from src.runtime.ranks import is_global_main_process
 from src.trainers.parallelism.trainer_rules import reject_conflicting_optimizer_choice
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 register_custom_optimizers()
 
@@ -32,12 +33,13 @@ def resolve_bf16_optimizer(explicit: bool | None, config, training_args, *, repl
         return False
     if replicated_ddp:
         # Replicated DDP is outside the validated SR matrix (FSDP/EP/TP/HSDP).
-        logger.warning(
-            "bf16=True with replicated DDP (accelerate MULTI_GPU): "
-            "skipping AdamWBF16 stochastic-rounding auto-enable to avoid "
-            "cross-replica weight drift. Use FSDP/EP/TP for SR, or set "
-            "bf16_optimizer=True explicitly to override."
-        )
+        if is_global_main_process():
+            logger.warning(
+                "bf16=True with replicated DDP (accelerate MULTI_GPU): "
+                "skipping AdamWBF16 stochastic-rounding auto-enable to avoid "
+                "cross-replica weight drift. Use FSDP/EP/TP for SR, or set "
+                "bf16_optimizer=True explicitly to override."
+            )
         return False
     return True
 

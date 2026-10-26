@@ -11,11 +11,8 @@ Run: pytest tests/cpu/models/test_attention_patch_hook_loss.py
 import types
 
 import pytest
-from accelerate import PartialState
 
 from src.models.attention import backend_setup, packed_position_ids
-
-PartialState()  # the patches log through accelerate's logger
 
 
 def _attention_class() -> type:

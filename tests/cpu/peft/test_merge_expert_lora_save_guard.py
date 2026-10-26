@@ -28,7 +28,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
@@ -42,8 +41,6 @@ from src.checkpoint.reading import load_full_state_dict
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.parallelism.adapter_rules import reject_unmergeable_expert_lora_save
 from tests.common.peft_helpers import randomize_adapters
-
-PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
 
 
 class _TinyLM(nn.Module):

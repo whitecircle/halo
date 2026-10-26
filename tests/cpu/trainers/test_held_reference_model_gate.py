@@ -23,7 +23,6 @@ import types
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import GptOssConfig, GptOssForCausalLM
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 from trl.trainer.utils import create_model_from_path
@@ -34,9 +33,6 @@ from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, 
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.parallelism import make_parallelism_config
-
-# The sinks patches log through accelerate's logger, which refuses to emit before the state exists.
-PartialState()
 
 NUM_HEADS = 4
 

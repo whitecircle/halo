@@ -7,13 +7,13 @@ its chunked (``use_liger_kernel``) path TRL sums bf16 per-token log-probs; here 
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import ClassVar
 
 import torch
-from accelerate.logging import get_logger
 from datasets import Dataset, concatenate_datasets
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -26,6 +26,7 @@ from trl.trainer.utils import (
 
 from src.checkpoint.format import REFERENCE_LOGPS_FILE
 from src.kernels.logprobs import selective_logprobs
+from src.runtime.ranks import is_global_main_process
 from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from src.trainers.preference.preference_rules import reject_policy_from_checkpoint_without_resume
 from src.trainers.reference_logps import (
@@ -38,7 +39,7 @@ from src.trainers.reference_logps import (
 )
 from src.trainers.training_args_overrides import disable_trl_liger
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 def _fp32_logprobs_and_entropy(logits, index, entropy_requires_grad=True, temperature=1.0, row_mask=None):
@@ -177,7 +178,8 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
     def _precompute_ref_logps(self, dataset, name, batch_size):
         needed = self._reference_columns()
         if all(column in (dataset.column_names or []) for column in needed):
-            logger.info(f"Dataset '{name}' already carries {needed}; skipping the reference sweep.")
+            if is_global_main_process():
+                logger.info(f"Dataset '{name}' already carries {needed}; skipping the reference sweep.")
             return dataset
         if self._dataset_presharded:
             raise ValueError(

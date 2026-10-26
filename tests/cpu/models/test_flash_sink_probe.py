@@ -25,7 +25,6 @@ import types
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers import LlamaConfig
 from transformers import modeling_flash_attention_utils as flash_utils
 
@@ -33,9 +32,6 @@ import src.model_loading.parallel.whole_model as warmup_mod
 from src.model_loading.parallel.whole_model import warm_attention_kernels
 from src.models.attention.backend_setup import warm_fa4_kernels
 from src.models.attention.selection import FLASH_SINK_PARAM_NAMES, _attn_impl_handles_sinks, flash_kernel
-
-PartialState()  # the warm-up logs through accelerate's logger
-
 
 # The probed entry point must stay the one transformers reads
 

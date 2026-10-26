@@ -120,15 +120,16 @@ def resolve_reasoning_end_ids(tokenizer, marker: str) -> tuple[int, ...]:
 
 
 def find_reasoning_end_ids(
-    tokenizer, marker: str, *, also_lost: str = "", logger: logging.Logger | logging.LoggerAdapter = logger
+    tokenizer, marker: str, *, also_lost: str = "", logger: logging.Logger | None = logger
 ) -> tuple[int, ...] | None:
     """:func:`resolve_reasoning_end_ids`, or ``None`` for a marker this tokenizer does not write, warned through
-    ``logger`` (a trainer's logs on its main process only): a turn's reasoning then goes uncounted, and
-    ``also_lost`` names what else the run loses."""
+    ``logger`` unless it is ``None`` (a trainer passes its own on the main process only): a turn's reasoning then
+    goes uncounted, and ``also_lost`` names what else the run loses."""
     try:
         return resolve_reasoning_end_ids(tokenizer, marker)
     except ValueError as e:
-        logger.warning("%s A turn's reasoning goes uncounted%s.", e, also_lost)
+        if logger is not None:
+            logger.warning("%s A turn's reasoning goes uncounted%s.", e, also_lost)
         return None
 
 

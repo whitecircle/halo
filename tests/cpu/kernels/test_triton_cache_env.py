@@ -22,7 +22,6 @@ import os
 import tempfile
 
 import pytest
-from accelerate.state import PartialState
 
 from src.entrypoints.run_setup import configure_training_run
 from src.kernels import jit_cache
@@ -91,9 +90,6 @@ def test_read_only_hf_home_falls_back_to_tempdir_with_a_warning(monkeypatch, tem
     hf_home.mkdir()
     monkeypatch.setenv("HF_HOME", str(hf_home))
     _deny_writes_under(monkeypatch, hf_home)
-    # No accelerate state, as when the GPU harness anchors the FA4 cache: accelerate's logging adapter
-    # raises then, so the warning has to go through the stdlib logger.
-    monkeypatch.setattr(PartialState, "_shared_state", {})
     with caplog.at_level(logging.WARNING, logger=jit_cache.__name__):
         anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
     assert os.environ[_TRITON_VAR] == os.path.join(str(temp_root), _TRITON_SUBDIR), (

@@ -17,12 +17,9 @@ level that declares it, an undeclared key raising — is pinned across every mod
 from __future__ import annotations
 
 import pytest
-from accelerate import PartialState
 from transformers import LlamaConfig
 
 from src.models.config_access import apply_config_overrides
-
-PartialState()  # the loader logs through accelerate's logger
 
 # Spelled out rather than read off the production tuple: parametrizing over the very collection under
 # test turns shrinking it into a silently dropped test node instead of a failure. transformers 5

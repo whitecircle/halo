@@ -22,11 +22,8 @@ import datasets
 import numpy as np
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 from transformers import GptOssConfig, Qwen3Config
-
-PartialState()  # the dataset stages log through accelerate, which refuses to log without it
 
 from scripts.training import sft as sft_script
 from scripts.training.sft import _prepare_text_data

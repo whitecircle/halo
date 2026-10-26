@@ -5,7 +5,8 @@ Usage: torchrun --nproc_per_node=8 scripts/training/distillation/teacher_distill
     examples/distillation/qwen3_5/distill-qwen3.5-9b-from-qwen3.6-35b-a3b.yaml
 """
 
-from accelerate.logging import get_logger
+import logging
+
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
 from src.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
@@ -45,7 +46,7 @@ from src.runtime.ranks import is_global_main_process
 from src.trainers.distillation.divergences import resolve_shared_vocab_width
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 def _load_distill_teacher(*, args, model_config, training_config, is_vlm: bool, local_rank: int) -> PreTrainedModel:

@@ -145,8 +145,6 @@ def run(ctx) -> dict:
     return {"checks": checks}
 
 
-# PartialState stays on: the shared data-loading helpers log through the accelerate logger
-# (used on the probe's disagreement path), as the training scripts do.
 main = gpu_test_main(min_world_size=2, prefix="sharded_distributed_load")(run)
 
 if __name__ == "__main__":

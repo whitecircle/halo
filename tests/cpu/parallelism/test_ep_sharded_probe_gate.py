@@ -20,7 +20,6 @@ import json
 import pathlib
 
 import pytest
-from accelerate import PartialState
 
 import src.model_loading.parallel.model_source as model_source
 import src.runtime.consensus as consensus
@@ -28,8 +27,6 @@ from src.checkpoint.format import SAFETENSORS_INDEX_FILE
 from src.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint, resolve_lazy_checkpoint
 from tests.common.repo import REPO_ROOT
 from tests.common.utils import imports_name
-
-PartialState()  # the loader logs through accelerate's logger
 
 # The PP stage loader and the EP+TP loader, each a module that could hold a probe of its own.
 LOADER_MODULES = {

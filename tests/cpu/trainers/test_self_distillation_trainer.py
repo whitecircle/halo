@@ -14,16 +14,13 @@ The divergences themselves are covered by test_distillation_divergences.py.
 Run: python tests/cpu/trainers/test_self_distillation_trainer.py
 """
 
-import logging
 import types
-from unittest.mock import patch
 
 import pytest
 import torch
 from torch import nn
 from torch.nn.functional import cross_entropy
 
-import src.trainers.distillation.self_distillation as sd
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.distillation.divergences import reverse_kl_loss, unnormalized_kl_loss
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
@@ -311,9 +308,7 @@ def _vision_reuse_probe(model_type):
         _vision_replay=False,
         _vision_cache=None,
     )
-    # accelerate's logger needs a PartialState; a plain one keeps this call unit-level.
-    with patch.object(sd, "logger", logging.getLogger(__name__)):
-        activated = DistributedSelfDistillationTrainer._install_vision_reuse(me, inner)
+    activated = DistributedSelfDistillationTrainer._install_vision_reuse(me, inner)
     return activated, inner.model.get_image_features is not original_get_image_features
 
 

@@ -15,9 +15,6 @@ from functools import partial
 from types import SimpleNamespace
 
 import pytest
-from accelerate import PartialState
-
-PartialState()  # MultiGroupSampler logs through accelerate's logger, which requires the state
 
 from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer

@@ -13,7 +13,6 @@ import types
 
 import pytest
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import PretrainedConfig
 from trl import SFTConfig
 
@@ -21,8 +20,6 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.sft import DistributedSFTTrainer
-
-PartialState()  # the trainers' accelerate logger requires an initialized state
 
 REQUIRED_KWARGS = {
     DistributedSelfDistillationTrainer: {

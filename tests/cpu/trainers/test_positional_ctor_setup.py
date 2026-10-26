@@ -17,7 +17,6 @@ import types
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import PretrainedConfig
 
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
@@ -31,8 +30,6 @@ from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from src.trainers.sft import DistributedSFTTrainer
-
-PartialState()  # the trainers' accelerate logger requires an initialized state
 
 # (trainer, the positional slot of its config); the model is slot 0 on every one.
 TRAINERS = [

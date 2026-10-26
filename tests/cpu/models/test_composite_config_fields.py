@@ -23,7 +23,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers import CONFIG_MAPPING, Qwen3_5MoeForCausalLM, Qwen3_5MoeForConditionalGeneration
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 
@@ -43,8 +42,6 @@ from src.models.config_access import (
 from src.models.moe import balancing
 from src.models.moe.config_fields import has_routed_experts
 from src.models.moe.router_logits import honors_router_logits_flag
-
-PartialState()  # the loader's logger needs accelerate state initialized
 
 # Families whose decoder lives on a nested ``text_config``; the plain ones are the control group.
 COMPOSITE_MODEL_TYPES = ("qwen3_5_moe", "qwen3_5", "gemma4")

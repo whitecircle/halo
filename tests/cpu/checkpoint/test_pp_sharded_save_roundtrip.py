@@ -37,7 +37,6 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate import PartialState
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
@@ -75,8 +74,6 @@ from tests.common.models import (
 from tests.common.pp_fakes import hand_built_stage, registered_pp_backbones
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.utils import safetensors_state_dict
-
-PartialState()  # the EP save logs through accelerate's logger
 
 _PC_MOD = "src.distributed.parallelism_config"
 

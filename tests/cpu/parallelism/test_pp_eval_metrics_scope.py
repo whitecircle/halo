@@ -17,7 +17,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from accelerate.data_loader import prepare_data_loader
 from torch.utils.data import DataLoader
 
@@ -30,8 +29,6 @@ from src.trainers.dataloaders import (
 from src.trainers.evaluation import EvaluationMixin
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
-
-PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
 
 PP_SIZE, STAGE_WORLD = 2, 2
 WORLD = PP_SIZE * STAGE_WORLD

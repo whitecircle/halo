@@ -16,12 +16,8 @@ from collections import Counter
 from unittest.mock import patch
 
 import pytest
-from accelerate import PartialState
 from botocore.exceptions import ClientError, NoCredentialsError
 from datasets import Dataset, DatasetDict, load_from_disk
-
-# load_preprocessed_dataset logs via the accelerate logger, which requires an initialized state.
-PartialState()
 
 import src.data.sources.loading as loading
 from src.data.preprocessed.preparation import shard_dataset

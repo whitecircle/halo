@@ -28,7 +28,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from peft.utils import ModulesToSaveWrapper
 from transformers.models.zaya import modeling_zaya
 
@@ -380,7 +379,6 @@ def test_zaya_load_patch_declares_the_discard_slot_end_to_end() -> None:
     ``_has_discard_expert_slot`` on the hub router class, and ``resolve_moe_routing`` must read it off an
     instance of that class. Break either and the discard slot is bias-balanced like a real expert.
     """
-    PartialState()  # the patch logs through accelerate's logger, which needs an initialized state
     patch_zaya_router_load_recording()
     assert modeling_zaya.ZayaRouter._has_discard_expert_slot is True, (
         "the Zaya load patch no longer declares the discard slot on the hub router class"

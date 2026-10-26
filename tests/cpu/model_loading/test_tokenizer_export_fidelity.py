@@ -28,7 +28,6 @@ import types
 
 import pytest
 import torch.nn as nn
-from accelerate import PartialState
 from tokenizers import Tokenizer, models, pre_tokenizers
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
@@ -40,8 +39,6 @@ from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
-
-PartialState()  # the setup seam logs through accelerate's logger
 
 MODEL_CONTEXT = 8192
 RUN_BUDGET = 512

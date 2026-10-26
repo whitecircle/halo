@@ -6,13 +6,13 @@ arXiv:2510.23027)."""
 import base64
 import contextlib
 import io
+import logging
 import sys
 from collections.abc import Iterable
 from typing import get_args
 
 import numpy as np
 import torch
-from accelerate.logging import get_logger
 from numpy.lib.format import MAGIC_PREFIX as NPY_MAGIC_PREFIX
 from torch import nn
 
@@ -21,13 +21,14 @@ from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, name
 from src.models.config_access import text_config
 from src.models.module_tree import decoder_layer_index
 from src.models.unwrapping import unwrap_framework_wrappers
+from src.runtime.ranks import is_global_main_process
 from src.trainers.grpo.environmental.environmental_rules import reject_unsupported_routing_replay
 from src.trainers.grpo.environmental.step_batch import StepRows
 from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from src.trainers.grpo.logprob_scoring import dense_row_spans, rows_forward_densely
 from src.trainers.world_metrics import world_sums
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # The coverage conventions a routed row falls into, exactly one per row (``prompt_len_mismatch`` is
 # counted on top of them, so it stays out of any per-row denominator).
@@ -311,7 +312,8 @@ class RoutingReplayMixin:
             train_on_sampled_tokens=self.async_config.train_on_sampled_tokens,
             runs_logprob_recompute=self._runs_logprob_recompute,
         )
-        logger.info(f"Routing replay enabled (mode={mode}) over {injector.num_ep_layers} EP MoE layers")
+        if is_global_main_process():
+            logger.info(f"Routing replay enabled (mode={mode}) over {injector.num_ep_layers} EP MoE layers")
         return injector
 
     @property
@@ -339,7 +341,7 @@ class RoutingReplayMixin:
                     "and --moe-runner-backend triton (the triton_kernel/flashinfer runners bypass "
                     "the capture hook)."
                 )
-            else:
+            elif is_global_main_process():
                 logger.warning(
                     "routing_replay='rollout': nothing to replay this step — every training row is "
                     "masked (no assistant turn yielded a row), so the step contributes "

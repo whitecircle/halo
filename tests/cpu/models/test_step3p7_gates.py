@@ -16,7 +16,6 @@ through the per-layer-aware seam instead.
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config, Step3p7TextConfig
 from transformers.models.step3p7.modeling_step3p7 import Step3p7TextModel
 
@@ -41,8 +40,6 @@ from src.models.moe.balancing import resolve_balancing_mode
 from src.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
 from src.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
 from tests.common.distributed import fake_process_group_mesh
-
-PartialState()  # the attention resolver and balancing strategy log through accelerate's logger
 
 # The real checkpoint's shape at divisibility floors: period-4 layer_types (full, sliding x3),
 # HETEROGENEOUS head counts (4 full / 6 sliding, mirroring the hub's 64/96), dense + sparse MLPs.

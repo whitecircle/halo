@@ -29,7 +29,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from datasets import Dataset
 from PIL import Image
 
@@ -477,7 +476,6 @@ def test_vlm_mode_guards():
 
 
 def test_prepare_dataset_skips_prepared_rows():
-    PartialState()  # the accelerate logger in _prepare_dataset requires an initialized state
     vlm_ds = Dataset.from_dict({"prompt_text": ["p"], "chosen_input_ids": [[1, 2]], "rejected_input_ids": [[3, 2]]})
     trainer = make_trainer()
     assert trainer._prepare_dataset(vlm_ds, None, trainer.args, "train") is vlm_ds
@@ -493,7 +491,6 @@ def test_prepare_dataset_skips_prepared_rows():
 
 
 def test_dataset_map_arrow_roundtrip():
-    PartialState()  # _prepare_dataset's map/logging path needs an initialized accelerate state
     tokenizer = StubTokenizer()
     processor = StubProcessor(tokenizer)
     trainer = make_trainer()

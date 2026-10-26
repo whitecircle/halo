@@ -14,7 +14,6 @@ from types import SimpleNamespace
 import httpx
 import pytest
 import torch
-from accelerate import PartialState
 from huggingface_hub import constants as hub_constants
 from huggingface_hub.errors import LocalEntryNotFoundError, RemoteEntryNotFoundError
 from transformers import (
@@ -52,7 +51,6 @@ def _hub_offline(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_weight_load(monkeypatch):
     """The processing-class rule runs ahead of the weight load, which is stubbed out here."""
-    PartialState()  # the loader logs through accelerate
     monkeypatch.setattr(model_setup, "load_model_and_tokenizer", lambda *args, **kwargs: ("model", None))
 
 

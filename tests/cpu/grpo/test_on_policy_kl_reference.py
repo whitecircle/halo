@@ -23,7 +23,6 @@ import pytest
 import torch
 import trl.generation.vllm_generation as trl_vllm_generation
 import trl.trainer.grpo_trainer as trl_grpo_trainer
-from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -46,8 +45,6 @@ from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.offline_grpo import make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.source_sweep import call_name, functions_in
-
-PartialState()  # the trainers' accelerate loggers require an initialized state
 
 BASE = "org/base"
 ON_POLICY_GRPO_SCRIPTS = ("scripts/training/online_grpo/rlvr.py", "scripts/training/environmental_grpo.py")

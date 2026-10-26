@@ -9,7 +9,6 @@ import types
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -30,8 +29,6 @@ from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import captured_load, stub_frozen_loader
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 from tests.common.offline_grpo_reference import mapped_scores
-
-PartialState()  # the trainer's accelerate logger requires an initialized state
 
 BASE = "org/base"
 RESUMED = "/runs/offline-grpo/checkpoint-40"

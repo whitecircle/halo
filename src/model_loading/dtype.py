@@ -150,7 +150,6 @@ def configure_float32_matmul_precision() -> None:
     """
     precision = env_str("HALO_FP32_MATMUL_PRECISION") or "highest"
     if precision not in _VALID_FP32_MATMUL_PRECISION:
-        # warnings.warn, not the accelerate logger (which needs an initialized PartialState).
         warnings.warn(
             f"Ignoring invalid HALO_FP32_MATMUL_PRECISION={precision!r} "
             f"(expected one of {_VALID_FP32_MATMUL_PRECISION}); using 'highest'.",

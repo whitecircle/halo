@@ -19,7 +19,6 @@ import types
 from unittest import mock
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
 from tests.common.repo import load_script_module
@@ -33,7 +32,6 @@ class _ReachedTokenization(Exception):
 
 @pytest.fixture(scope="module")
 def classification():
-    PartialState()  # the script logs through accelerate's logger, which needs the state initialized
     return load_script_module("scripts/training/classification.py", "halo_test_classification_script")
 
 

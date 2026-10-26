@@ -23,7 +23,6 @@ from typing import get_args
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.configs.grpo_offline import OfflineGRPOConfig
 from src.environments.rollout_config import resolve_rollout_stop_token_ids
@@ -32,8 +31,6 @@ from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmenta
 from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS
 from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-
-PartialState()  # both trainers log through accelerate, which refuses to log without it
 
 # --- _context_limit fail-loud ---
 

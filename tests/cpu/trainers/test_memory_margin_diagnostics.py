@@ -5,15 +5,15 @@ The thin-margin warning and the rank-local OOM banner exist so a one-rank OOM in
 step does not read as a DeepEP/cuBLAS kernel fault: the hot rank OOMs by a fraction of a GiB and its
 peers die on Xid 43 launch failures inside combine. No GPU or distributed init.
 
-Both are PER-RANK verdicts emitted through accelerate's ``MultiProcessAdapter``, which drops records
-on every non-main rank unless ``main_process_only=False`` — so the kwarg is pinned here alongside the
-message text. Without it each one prints only when rank 0 is the affected rank, which is precisely
-the case it was not written for.
+Both are PER-RANK verdicts, so neither sits behind the module's ``is_global_main_process()`` guard: each is
+pinned here to log on a rank that is not the main process. Guarded, each would print only when rank 0 is
+the affected rank, which is precisely the case it was not written for.
 
 Run: python tests/cpu/trainers/test_memory_margin_diagnostics.py
 """
 
 import types
+from unittest import mock
 
 import pytest
 import torch
@@ -52,19 +52,6 @@ def test_message_survives_zero_total():
     assert thin_memory_margin_message(0, 0, rank=0) is None
 
 
-class _RecordingLogger:
-    """Stands in for the module's accelerate adapter, capturing the kwargs each call passes."""
-
-    def __init__(self):
-        self.calls: list[tuple[str, str, dict]] = []
-
-    def error(self, msg, **kwargs):
-        self.calls.append(("error", msg, kwargs))
-
-    def warning(self, msg, **kwargs):
-        self.calls.append(("warning", msg, kwargs))
-
-
 class _OOMingTrainer:
     """Stands in for the TRL/HF base whose step the spine wraps."""
 
@@ -90,39 +77,38 @@ def _oom_step():
     DistributedTrainerMixin.training_step(host, None, {})
 
 
-def test_primary_failure_banner_escapes_the_main_process_only_default(monkeypatch):
-    """The banner names the rank that OOMed, and this module logs through accelerate's
-    ``MultiProcessAdapter``, which drops records on every non-main rank unless
-    ``main_process_only=False``. On the default the banner prints only when rank 0 is the one that
+def _recorder(monkeypatch, main: bool) -> mock.MagicMock:
+    """The module logger replaced by a recorder, on a rank that is or is not the global main process."""
+    recorder = mock.MagicMock()
+    monkeypatch.setattr("src.trainers.distributed_trainer.logger", recorder)
+    monkeypatch.setattr("src.trainers.distributed_trainer.is_global_main_process", lambda: main)
+    return recorder
+
+
+def test_primary_failure_banner_logs_off_the_main_process(monkeypatch):
+    """The banner names the rank that OOMed. Guarded to the main process it would print only when rank 0
     died — never in the case it exists for, leaving a post-mortem with peer watchdog timeouts and no
     primary cause."""
-    recorder = _RecordingLogger()
-    monkeypatch.setattr("src.trainers.distributed_trainer.logger", recorder)
+    recorder = _recorder(monkeypatch, main=False)
     monkeypatch.setattr("src.trainers.distributed_trainer.get_global_rank", lambda: 3)
 
     with pytest.raises(torch.OutOfMemoryError):
         _oom_step()
 
-    assert len(recorder.calls) == 1
-    level, msg, kwargs = recorder.calls[0]
-    assert level == "error"
-    assert kwargs.get("main_process_only") is False, (
-        "the banner must be emitted on every rank; the adapter's default silently drops it on the "
-        "non-zero rank that actually OOMed"
-    )
+    recorder.error.assert_called_once()
+    (msg,), _ = recorder.error.call_args
     assert "RANK 3" in msg and "53.56 GiB" in msg
     assert "PRIMARY FAILURE" in msg and "Xid 43" in msg, "the banner must name the primary failure and the collateral"
 
 
-def test_thin_margin_warning_escapes_the_main_process_only_default(monkeypatch):
-    """Same adapter, same trap: the thin-margin verdict is per-rank by construction (MoE routing
-    skew concentrates dispatch buffers and expert activations on hot ranks), so a main-process-only
-    emit reports it for the one rank whose margin is least likely to be the problem.
+def test_thin_margin_warning_logs_off_the_main_process(monkeypatch):
+    """The thin-margin verdict is per-rank by construction (MoE routing skew concentrates dispatch buffers
+    and expert activations on hot ranks), so a main-process-only emit reports it for the one rank whose
+    margin is least likely to be the problem.
 
-    CUDA is faked rather than skipped: on the CPU tier a skip would leave the kwarg unpinned, which
-    is the whole behaviour under test."""
-    recorder = _RecordingLogger()
-    monkeypatch.setattr("src.trainers.distributed_trainer.logger", recorder)
+    CUDA is faked rather than skipped: on the CPU tier a skip would leave the emit unpinned, which is the
+    whole behaviour under test."""
+    recorder = _recorder(monkeypatch, main=False)
     monkeypatch.setattr("src.trainers.distributed_trainer.thin_memory_margin_message", lambda *a, **k: "thin margin")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 99 * 1024**3)
@@ -134,12 +120,19 @@ def test_thin_margin_warning_escapes_the_main_process_only_default(monkeypatch):
 
     DistributedTrainerMixin._warn_once_on_thin_memory_margin(me)
 
-    assert recorder.calls, "the thin-margin warning never reached the logger"
-    level, msg, kwargs = recorder.calls[0]
-    assert level == "warning" and msg == "thin margin"
-    assert kwargs.get("main_process_only") is False, (
-        "a per-rank margin verdict emitted main-process-only is invisible on the hot rank it describes"
-    )
+    recorder.warning.assert_called_once_with("thin margin")
+
+
+@pytest.mark.parametrize("main", [True, False])
+def test_the_released_buffers_line_logs_on_the_main_process_only(monkeypatch, main):
+    """The control for the two above: the released-buffers line is for global rank 0 only."""
+    recorder = _recorder(monkeypatch, main)
+    monkeypatch.setattr("src.trainers.distributed_trainer.free_unclaimed_ep_buffers", lambda: 2)
+    monkeypatch.setattr("src.trainers.distributed_trainer.barrier", lambda: None)
+
+    DistributedTrainerMixin.cleanup_ep(types.SimpleNamespace(_ep_layers=lambda: []))
+
+    assert recorder.info.called is main
 
 
 def test_margin_check_runs_once_and_only_after_the_first_step():

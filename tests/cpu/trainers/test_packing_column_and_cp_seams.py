@@ -20,7 +20,6 @@ import types
 from unittest import mock
 
 import pytest
-from accelerate import PartialState
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from trl import SFTTrainer
 
@@ -28,8 +27,6 @@ from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorW
 from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
 from tests.common.models import TINY_DSV4_CONFIG
-
-PartialState()  # the trainer's accelerate logger requires an initialized state
 
 
 class _Base:

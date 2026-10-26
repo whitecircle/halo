@@ -20,7 +20,6 @@ Run: python tests/cpu/models/test_tree_attention_oracle.py  (or pytest)
 
 import pytest
 import torch
-from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from transformers import modeling_flash_attention_utils as flash_utils
 
@@ -54,8 +53,6 @@ from tests.common.trees import (
     tree_attention_masks,
     tree_columns,
 )
-
-PartialState()  # the install logs through accelerate, which refuses to log without it
 
 WINDOW = 6
 VOCAB = 1024

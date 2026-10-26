@@ -13,13 +13,10 @@ Run: python tests/cpu/trainers/test_cp_trainer_args_gate.py
 import types
 
 import pytest
-from accelerate import PartialState
 
 import src.trainers.parallelism.mode_setup as mode_setup
 from src.distributed.context_parallel.config import CPConfigError
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-
-PartialState()  # the mixin's accelerate logger requires an initialized state
 
 _configure_cp = DistributedTrainerMixin._adopt_cp_wrapper
 

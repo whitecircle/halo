@@ -135,9 +135,6 @@ def test_an_upstream_family_leaves_the_process_wide_function_alone():
     """
     script = """
 import torch.nn.functional as F
-from accelerate import PartialState
-
-PartialState()
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 

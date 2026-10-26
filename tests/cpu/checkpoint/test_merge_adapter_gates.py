@@ -23,10 +23,6 @@ import os
 from pathlib import Path
 
 import pytest
-from accelerate import PartialState
-
-PartialState()  # the merge's helpers log through accelerate's logger
-
 import torch
 from safetensors.torch import save_file
 

@@ -11,7 +11,6 @@ Run: pytest tests/cpu/trainers/test_reentrant_checkpointing_rule.py
 """
 
 import pytest
-from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3MoeConfig
 
 from src.trainers.parallelism.ep_layers import resolve_use_reentrant, uses_reentrant_checkpointing
@@ -49,7 +48,6 @@ def test_pipeline_parallelism_keeps_non_reentrant_even_for_a_moe():
 
 @pytest.mark.parametrize("configured", [None, True, False])
 def test_a_forced_run_resolves_to_reentrant_whatever_is_configured(configured):
-    PartialState()  # the override warning logs through accelerate's logger
     assert resolve_use_reentrant(_config(ep_size=2), DENSE, configured) is True
 
 

@@ -28,11 +28,7 @@ import shutil
 import tempfile
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
-
-# The module logs through the accelerate logger, which requires an initialized state.
-PartialState()
 
 from src.data.preprocessed.metadata import PreprocessedDatasetMetadata
 from src.data.preprocessed.preparation import shard_dataset

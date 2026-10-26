@@ -15,7 +15,6 @@ from functools import partial
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
 from src.data.collators.self_distill import (
@@ -32,8 +31,6 @@ from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_tokenizer
 
 MARKER = "<|im_start|>assistant\n"
-
-PartialState()  # the VLM filter logs through accelerate's logger, which requires an initialized state
 
 
 def _tokenizer():

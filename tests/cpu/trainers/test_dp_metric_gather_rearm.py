@@ -17,12 +17,9 @@ import re
 import types
 
 import pytest
-from accelerate import PartialState
 from transformers import Trainer
 
 from src.trainers.distributed_trainer import DistributedTrainerMixin
-
-PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
 
 WORLD, KEEP = 4, [0, 2]
 

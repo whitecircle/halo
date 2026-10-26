@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4Config
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextConfig, Glm5NextTextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextModel
@@ -45,8 +44,6 @@ from src.models.attention.selection import (
 )
 from src.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
 from tests.common.distributed import fake_process_group_mesh
-
-PartialState()  # the collator factory logs through accelerate's logger, which needs the state
 
 # One layer of each block type, MLA/indexer/KDA widths shrunk to the divisibility floors
 # (index_topk must divide by index_kpool).

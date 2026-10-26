@@ -11,12 +11,8 @@ drops the structural tokens from the trained set — the template rot the mixin 
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
-
-# The mixin logs through accelerate's adapter, which needs the process state to exist.
-PartialState()
 
 SPECIAL_ID = 100
 

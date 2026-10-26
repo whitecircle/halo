@@ -20,7 +20,6 @@ from unittest import mock
 
 import pytest
 import torch
-from accelerate import PartialState
 from peft import LoraConfig
 from torch import nn
 from torch.nn.functional import cross_entropy, log_softmax, softmax
@@ -36,8 +35,6 @@ from src.trainers.distillation.divergences import place_frozen_scorer, require_d
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
-
-PartialState()  # the trainer's accelerate logger requires an initialized state
 
 VOCAB = 11
 TEMPERATURE = 2.0

@@ -26,7 +26,6 @@ import logging
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 from transformers.trainer_utils import align_special_tokens
 
@@ -34,8 +33,6 @@ from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading.tokenizer_setup import configure_run_tokenizer, sync_special_token_id
 from src.trainers.parallelism.pipeline_rules import require_pooling_pad_id
-
-PartialState()  # the loader's logger needs accelerate state initialized
 from tests.common.models import TINY_QWEN3_CONFIG
 
 MAX_LENGTH = 128

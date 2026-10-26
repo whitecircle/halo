@@ -3,12 +3,12 @@ completions through a ``divergences.DIVERGENCES`` entry). EP/TP on the student; 
 require wrapping both models). Same-model variants live in ``self_distillation`` and ``sdpg``.
 """
 
+import logging
 from collections.abc import Callable
 from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
-from accelerate.logging import get_logger
 from datasets import Dataset, IterableDataset
 from transformers import (
     DataCollator,
@@ -24,6 +24,7 @@ from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
 from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.runtime.ranks import is_global_main_process
 from src.trainers.distillation.divergences import (
     call_divergence,
     global_token_mean,
@@ -37,7 +38,7 @@ from src.trainers.distillation.divergences import (
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.stored_metrics import StoredMetricsMixin
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 def require_distill_loss(args: DistillationConfig) -> Callable:
@@ -152,7 +153,8 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
         self._vocab_width, device = place_frozen_scorer(
             self.teacher_model, self.model, resolve_tokenizer(self.processing_class), teacher_tokenizer
         )
-        logger.info(f"Teacher model moved to {device} and set to eval mode")
+        if is_global_main_process():
+            logger.info(f"Teacher model moved to {device} and set to eval mode")
 
     def compute_loss(
         self,

@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -182,7 +181,6 @@ def test_drop_degenerate_groups_off_keeps_everything():
 
 
 def test_verify_degenerate_drop_refuses_empty_dataset():
-    PartialState()  # the accelerate logger the check reports through needs initialized state
     args = SimpleNamespace(drop_degenerate_groups=True)
     kept = Dataset.from_dict({"group_id": [0, 0]})
     verify_degenerate_drop(args, kept, num_groups_in=3, what="training")  # survivors: fine

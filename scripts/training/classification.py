@@ -16,8 +16,9 @@ Usage:
         examples/classification/gptoss/clf-gptoss-20b-mage-ep.yaml
 """
 
+import logging
+
 import torch.distributed as dist
-from accelerate.logging import get_logger
 from datasets import DatasetDict
 from transformers import AutoModelForSequenceClassification
 
@@ -53,7 +54,7 @@ from src.runtime.ranks import get_global_world_size, is_global_main_process
 from src.trainers.reward.classification import ClassificationTrainer
 from src.trainers.training_args_overrides import uses_evaluation
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # A "no label" row, in the stringified form get_label_list gives every label.
 NO_LABEL_SENTINEL = "-1"

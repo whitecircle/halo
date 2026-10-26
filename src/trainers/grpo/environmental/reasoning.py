@@ -2,10 +2,10 @@
 it resolves, and the length terms it charges (a per-level price and an under-use floor), waived in a training
 group no episode of which earned the objective."""
 
+import logging
 from collections.abc import Sequence
 
 import torch
-from accelerate.logging import get_logger
 
 from src.environments.engine_wire import reject_unenforceable_thinking_budget
 from src.environments.episode import RolloutResult
@@ -16,8 +16,9 @@ from src.environments.rollout_config import SGLANG_BACKEND, find_reasoning_end_i
 from src.models.config_access import config_model_types
 from src.models.unwrapping import unwrap_framework_wrappers
 from src.rewards.terms import OBJECTIVE_REWARD_KEY
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # The share of the per-turn thinking budget the floor asks an episode for, summed over its turns; under 1, so
 # one turn can clear it without hitting an enforced budget.
@@ -113,7 +114,10 @@ class ReasoningBudgetMixin:
             else ""
         )
         return find_reasoning_end_ids(
-            self._tokenizer, cfg.rollout_reasoning_end_token, also_lost=also_lost, logger=logger
+            self._tokenizer,
+            cfg.rollout_reasoning_end_token,
+            also_lost=also_lost,
+            logger=logger if is_global_main_process() else None,
         )
 
     @property

@@ -1,12 +1,12 @@
 """The TRL/HF TrainingArguments fields the toolkit owns, written before the TRL/HF constructor reads them."""
 
-from accelerate.logging import get_logger
+import logging
 
 from src.models.config_access import config_sources
 from src.runtime.filesystem import is_output_shared_filesystem
 from src.runtime.ranks import get_num_nodes, is_global_main_process
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 def align_save_on_each_node(training_args) -> None:
@@ -44,7 +44,7 @@ def disable_trl_liger(training_args, reason: str | None = None) -> bool:
     applied; True when the flag was on. ``reason`` is logged as a warning when given."""
     if training_args is None or not getattr(training_args, "use_liger_kernel", False):
         return False
-    if reason:
+    if reason and is_global_main_process():
         logger.warning(reason)
     training_args.use_liger_kernel = False
     return True
@@ -55,7 +55,7 @@ def keep_all_dataset_columns(training_args, reason: str | None = None) -> None:
     forward signature does not name; ``reason`` is logged as a warning when the flag was on."""
     if training_args is None or not training_args.remove_unused_columns:
         return
-    if reason:
+    if reason and is_global_main_process():
         logger.warning(reason)
     training_args.remove_unused_columns = False
 

@@ -23,13 +23,10 @@ from unittest import mock
 
 import pytest
 import yaml
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
 from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments
 from tests.common.repo import REPO_ROOT, load_script_module
-
-PartialState()  # the script logs through accelerate, which refuses to log without it
 
 
 @pytest.fixture(scope="module")
@@ -176,7 +173,7 @@ def test_tools_discovered_on_reset_are_warned_as_missing(env_grpo_module, caplog
     def warned():
         return [r for r in caplog.records if "tools arrive when its first reset" in r.getMessage()]
 
-    with caplog.at_level(logging.WARNING, logger=env_grpo_module.logger.logger.name):
+    with caplog.at_level(logging.WARNING, logger=env_grpo_module.logger.name):
         for declared in (None, []):
             env_grpo_module.measure_env_prompt_overhead(_env(tools=declared), _Tokenizer(), {})
         assert not warned()

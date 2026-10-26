@@ -25,7 +25,6 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
-from accelerate import PartialState
 from transformers import PretrainedConfig
 
 from src.configs.grpo_offline import OfflineGRPOConfig
@@ -36,10 +35,6 @@ from src.models.context_window import get_model_context_window, resolve_length_t
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.offline.offline_rules import reject_inert_max_length
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-
-# resolve_length_to_context logs through accelerate's rank-aware logger, which raises until the
-# state exists. Production always has it (init_training_script runs first); mirror that here.
-PartialState()
 
 _CPU_OK = {"output_dir": "/tmp/test_length_budget", "bf16": False, "use_cpu": True}
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 from collections.abc import Mapping, Sequence
 from functools import partial
@@ -11,7 +12,6 @@ from typing import ClassVar
 import numpy as np
 import pyarrow as pa
 import torch
-from accelerate.logging import get_logger
 from datasets import Dataset
 
 from src.checkpoint.atomic import atomic_torch_save
@@ -20,8 +20,9 @@ from src.checkpoint.parallel.reading import consensus_read
 from src.runtime.collectives import barrier_on_exit
 from src.runtime.consensus import DeferredRankFailure, rank_consensus, reject_across_ranks, reject_divergent_settings
 from src.runtime.filesystem import is_fs_save_rank
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 # Rows per Arrow batch wherever a token or score table is scanned, so no scan materializes a split.
 REFERENCE_SCAN_ROWS = 256
@@ -166,13 +167,15 @@ class ReferenceLogpsMixin:
         if not present.all_ok:
             if required:
                 raise RuntimeError(self._missing_reference_split(checkpoint, name, needed))
-            logger.info(f"No saved '{name}' reference in {checkpoint}; sweeping untrained reference weights.")
+            if is_global_main_process():
+                logger.info(f"No saved '{name}' reference in {checkpoint}; sweeping untrained reference weights.")
             return None
         guard = DeferredRankFailure(f"Validating the '{name}' reference payload", exc_type=ValueError)
         mismatch = guard.run(lambda: self._reference_entry_mismatch(entry, dataset, needed, identity))
         guard.reject()
         if not required and not rank_consensus(mismatch is None).all_ok:
-            logger.info(f"Saved '{name}' reference does not match ({mismatch or 'another rank'}); sweeping.")
+            if is_global_main_process():
+                logger.info(f"Saved '{name}' reference does not match ({mismatch or 'another rank'}); sweeping.")
             return None
         reject_across_ranks(
             None if mismatch is None else self._reference_mismatch_refusal(name, entry, identity, mismatch),
@@ -184,7 +187,10 @@ class ReferenceLogpsMixin:
         guard.reject()
         self._validate_restored_reference_payload(name, entry)
         self._remember_reference_split(name, identity, entry, attached)
-        logger.info(f"Restored the '{name}' reference log-probs from {self._reference_saved_path}; skipping sweep.")
+        if is_global_main_process():
+            logger.info(
+                f"Restored the '{name}' reference log-probs from {self._reference_saved_path}; skipping sweep."
+            )
         return attached
 
     def _saved_reference_file(self, checkpoint: str) -> str:

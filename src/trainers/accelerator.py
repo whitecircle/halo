@@ -5,7 +5,6 @@ import os
 
 import torch
 from accelerate import Accelerator
-from accelerate.logging import get_logger
 from accelerate.utils import DataLoaderConfiguration
 
 from src.config_validation import differs_from_default
@@ -13,7 +12,7 @@ from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from src.runtime.ranks import get_global_world_size, is_global_main_process
 from src.trainers.parallelism.trainer_rules import FSDP_SHAPING_KNOBS
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 def accelerate_manages_fsdp(config) -> bool:
@@ -96,7 +95,8 @@ class AcceleratorMixin:
             self.is_deepspeed_enabled = False
             # Runs before any FSDP2 wrapping, so _fsdp_wrapped is False — the checkpoint path relies on it.
             self.is_fsdp_enabled = False
-            logger.info(f"Created Accelerator with distributed_type: {self.accelerator.state.distributed_type}")
+            if is_global_main_process():
+                logger.info(f"Created Accelerator with distributed_type: {self.accelerator.state.distributed_type}")
 
         # Both branches: the fp32 logits upcast costs the same under an accelerate-managed launch.
         self._configure_fp32_output_conversion()
@@ -130,14 +130,16 @@ class AcceleratorMixin:
         if self.parallelism_config.fp32_output_conversion:
             return
         if self.args.fp16:
-            logger.warning(
-                "fp32_output_conversion=false is IGNORED under fp16: accelerate's native_amp also "
-                "owns GradScaler unscaling, so disabling it would clip and step on scaled gradients. "
-                "Use bf16 (the toolkit default) to drop the fp32 logits upcast."
-            )
+            if is_global_main_process():
+                logger.warning(
+                    "fp32_output_conversion=false is IGNORED under fp16: accelerate's native_amp also "
+                    "owns GradScaler unscaling, so disabling it would clip and step on scaled gradients. "
+                    "Use bf16 (the toolkit default) to drop the fp32 logits upcast."
+                )
             return
         self.accelerator.native_amp = False
-        logger.info("Disabled native_amp to prevent fp32 output conversion (avoids OOM for long sequences)")
+        if is_global_main_process():
+            logger.info("Disabled native_amp to prevent fp32 output conversion (avoids OOM for long sequences)")
 
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None

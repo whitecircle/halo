@@ -16,11 +16,7 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
-
-# _equalize_presharded_length logs via the accelerate logger, which requires an initialized state.
-PartialState()
 
 from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer

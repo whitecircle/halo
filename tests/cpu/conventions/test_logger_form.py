@@ -15,49 +15,6 @@ _SWEPT_ROOTS = ("src", "scripts")
 _FOREIGN_LOGGING_MODULES = frozenset({"accelerate.logging", "transformers.utils.logging"})
 _LOGGER_FORMS = frozenset({"logging.getLogger(__name__)", "info_logger(__name__)"})
 _LOGGER_FACTORIES = frozenset({"getLogger", "get_logger", "info_logger"})
-# Still on accelerate's logger; the logging codemod converts them when the last of their owners merges.
-_AWAITING_MERGE_CODEMOD = frozenset(
-    {
-        "scripts/training/classification.py",
-        "scripts/training/distillation/self_distill.py",
-        "scripts/training/distillation/teacher_distill.py",
-        "scripts/training/embedding.py",
-        "scripts/training/environmental_grpo.py",
-        "scripts/training/sft.py",
-        "src/trainers/accelerator.py",
-        "src/trainers/checkpointing.py",
-        "src/trainers/dataloaders.py",
-        "src/trainers/distillation/self_distillation.py",
-        "src/trainers/distillation/teacher_distillation.py",
-        "src/trainers/distributed_trainer.py",
-        "src/trainers/evaluation.py",
-        "src/trainers/grpo/early_stop.py",
-        "src/trainers/grpo/environmental/environmental_rules.py",
-        "src/trainers/grpo/environmental/importance_sampling.py",
-        "src/trainers/grpo/environmental/reasoning.py",
-        "src/trainers/grpo/environmental/routing_replay.py",
-        "src/trainers/grpo/environmental/step_batch.py",
-        "src/trainers/grpo/logprob_scoring.py",
-        "src/trainers/grpo/offline/group_rows.py",
-        "src/trainers/grpo/offline/group_sampler.py",
-        "src/trainers/grpo/offline/reference.py",
-        "src/trainers/grpo/offline/trainer.py",
-        "src/trainers/grpo/on_policy.py",
-        "src/trainers/grpo/online.py",
-        "src/trainers/optimizer_selection.py",
-        "src/trainers/parallelism/ep_layers.py",
-        "src/trainers/parallelism/grad_sync.py",
-        "src/trainers/parallelism/mode_setup.py",
-        "src/trainers/parallelism/pipeline_trainer.py",
-        "src/trainers/preference/smpo.py",
-        "src/trainers/preference/trl_preference.py",
-        "src/trainers/reference_logps.py",
-        "src/trainers/reward/bradley_terry.py",
-        "src/trainers/sft.py",
-        "src/trainers/token_metrics.py",
-        "src/trainers/training_args_overrides.py",
-    }
-)
 
 
 def _is_logger_binding(node: ast.stmt) -> bool:
@@ -108,17 +65,10 @@ _OFFENCES, _MODULE_LOGGER_COUNT = _sweep()
 
 
 def test_every_module_uses_the_stdlib_logger_form():
-    offenders = {file: found for file, found in _OFFENCES.items() if file not in _AWAITING_MERGE_CODEMOD}
-    assert not offenders, (
+    assert not _OFFENCES, (
         "bind `logger = logging.getLogger(__name__)` and guard a rank-0-only line with "
-        f"`if is_global_main_process():` (src.runtime.ranks): {offenders}"
+        f"`if is_global_main_process():` (src.runtime.ranks): {_OFFENCES}"
     )
-
-
-def test_every_awaiting_file_still_offends():
-    """The list only shrinks: a converted or deleted file must leave it."""
-    stale = sorted(_AWAITING_MERGE_CODEMOD - set(_OFFENCES))
-    assert not stale, f"these files no longer break the logger form; drop them from _AWAITING_MERGE_CODEMOD: {stale}"
 
 
 def test_the_sweep_sees_the_module_loggers():

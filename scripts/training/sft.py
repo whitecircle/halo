@@ -4,7 +4,8 @@
 Usage: torchrun --nproc_per_node=8 scripts/training/sft.py examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml
 """
 
-from accelerate.logging import get_logger
+import logging
+
 from trl import SFTConfig
 
 from src.callbacks.generate_examples import GenerateExamplesCallback
@@ -67,7 +68,7 @@ from src.trainers.sft_rules import (
     reject_unsupported_vlm_sft_options,
 )
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 def _reject_empty_split(dataset, split: str, max_length: int) -> None:
@@ -164,7 +165,8 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
         )
 
     if args.tree_packing:
-        logger.info(f"Using DataCollatorWithTreePacking (full layers: {args.tree_full_attention})")
+        if is_global_main_process():
+            logger.info(f"Using DataCollatorWithTreePacking (full layers: {args.tree_full_attention})")
         collator = DataCollatorWithTreePacking(
             tokenizer, full_form=args.tree_full_attention, **resolve_tree_plan_options(hf_config)
         )

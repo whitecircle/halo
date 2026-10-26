@@ -14,16 +14,12 @@ import logging
 from types import SimpleNamespace
 
 import pytest
-from accelerate import PartialState
 
 from src.model_loading.liger.dispatch import warn_if_flce_unreachable
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
-
-# Dispatch logs through accelerate's rank-aware logger, which requires an initialized state.
-PartialState()
 
 _LOGGER_NAME = "src.model_loading.liger.dispatch"
 

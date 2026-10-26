@@ -19,8 +19,6 @@ from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.stored_metrics import StoredMetricsMixin
 from src.trainers.token_metrics import effective_loss_mask
 
-# Stdlib, not accelerate's adapter: the warning below fires per rollout row on whichever rank drew
-# it, and the adapter drops everything off rank 0 (warn_once cannot pass main_process_only).
 logger = logging.getLogger(__name__)
 
 

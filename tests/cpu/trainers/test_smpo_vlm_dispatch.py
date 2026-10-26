@@ -21,7 +21,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset
 from transformers import ProcessorMixin
 
@@ -43,11 +42,6 @@ TEXT_ROW = {
 class ProcessorStub(StubProcessor, ProcessorMixin):
     """The VLM stub processor, also satisfying the ``isinstance(..., ProcessorMixin)`` contract the
     trainer's guard checks (a real run always hands it a transformers processor)."""
-
-
-@pytest.fixture(autouse=True)
-def _accelerate_state():
-    PartialState()  # the accelerate logger inside _prepare_dataset requires an initialized state
 
 
 def _capture_map(trainer, dataset, processing_class):

@@ -16,7 +16,6 @@ import tempfile
 from dataclasses import asdict
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, load_from_disk
 from huggingface_hub.errors import EntryNotFoundError
 
@@ -571,9 +570,6 @@ def test_tokenizer_override_mismatch_raises():
 def test_chat_template_compared_as_resolved_text_not_as_a_path(tmp_path):
     """The config records the RESOLVED template; the run may spell the same template as a file path.
     Comparing the raw values would report every path-spelled template as a mismatch."""
-    # The shared path→text resolver logs through accelerate's rank-aware logger; every caller of this
-    # check runs after the toolkit has initialized the state.
-    PartialState()
 
     template = "{% for m in messages %}{{ m.content }}{% endfor %}"
     template_file = tmp_path / "tpl.jinja"

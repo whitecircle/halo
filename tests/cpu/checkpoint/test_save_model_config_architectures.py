@@ -24,10 +24,7 @@ import os
 
 import pytest
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import CONFIG_MAPPING, AutoModelForSequenceClassification
-
-PartialState()  # save_model_config logs through accelerate's logger
 
 from src.checkpoint.config_export import hf_architecture_name, save_model_config
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage

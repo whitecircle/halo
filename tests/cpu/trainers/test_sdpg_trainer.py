@@ -17,7 +17,6 @@ from unittest import mock
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -27,8 +26,6 @@ from src.trainers.distillation.sdpg import DistributedSDPGTrainer, positive_adva
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.tokenizers import load_cached_tokenizer
-
-PartialState()  # the trainer warns through accelerate's logger, which refuses to log without it
 
 
 def _bare_trainer(tokenizer):

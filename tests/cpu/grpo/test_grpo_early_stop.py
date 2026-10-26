@@ -17,7 +17,6 @@ import textwrap
 import types
 
 import pytest
-from accelerate import PartialState
 from transformers import TrainerControl, TrainerState
 
 from src.callbacks.early_stop import StopsTrainingEarly
@@ -30,8 +29,6 @@ from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmenta
 from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.repo import REPO_ROOT
-
-PartialState()  # the stop logs through accelerate's logger, which refuses to log without it
 
 
 def _run(config: EarlyStopConfig, steps: list[dict], gap_key: str = LOGRATIO_MEAN_KEY) -> int | None:

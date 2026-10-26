@@ -29,7 +29,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from accelerate import PartialState
 from huggingface_hub.constants import HF_HUB_CACHE
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
@@ -43,9 +42,6 @@ from src.models.head_transform import resolve_head_transform_spec
 from src.models.moe.family_specs import moe_model_types
 from src.models.moe.router_logits import honors_router_logits_flag
 from tests.common.repo import probe_findings
-
-PartialState()  # dispatch logs through accelerate's rank-aware logger
-
 
 NATIVE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.modeling_module]
 REMOTE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.remote_classes]
@@ -502,9 +498,6 @@ def test_the_fused_head_reproduces_the_family_head_bit_for_bit():
     """
     script = """
 import inspect, sys, torch
-from accelerate import PartialState
-
-PartialState()
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 

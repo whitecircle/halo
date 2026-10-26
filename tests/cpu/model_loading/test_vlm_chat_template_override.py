@@ -18,7 +18,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGeneration
 
 from src.checkpoint.parallel.save import save_checkpoint
@@ -30,8 +29,6 @@ from tests.common.checkpoint_io import save_context
 from tests.common.models import QWEN3_5_9B, TINY_QWEN35_CONFIG
 from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_processor
-
-PartialState()  # the setup seam and the savers log through accelerate's logger
 
 OVERRIDE = "{% for message in messages %}<run>{% for part in message['content'] %}{{ part['text'] }}{% endfor %}</run>{% endfor %}"
 MESSAGES = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]

@@ -23,14 +23,11 @@ from pathlib import Path
 
 import pytest
 import transformers.dynamic_module_utils
-from accelerate import PartialState
 
 from src.model_loading.liger import applier
 from src.model_loading.liger.family_specs import LigerFamilySpec
 from src.model_loading.liger.fused_modules import _PATCHED_MARKER
 from tests.common.repo import probe_findings
-
-PartialState()  # the module logs through accelerate's rank-aware logger
 
 _LOGGER_NAME = "src.model_loading.liger.applier"
 
@@ -161,9 +158,6 @@ def test_lagunas_hub_modeling_code_takes_the_library_swaps(tmp_path):
     script = f"""
 import inspect, sys, types
 import transformers.dynamic_module_utils as dmu
-from accelerate import PartialState
-
-PartialState()
 from transformers.models.laguna import modeling_laguna
 from src.model_loading.liger.dispatch import resolve_liger_applier
 
@@ -216,9 +210,6 @@ def test_the_hook_composes_with_the_remote_code_compat_shims(liger_first):
     """
     script = f"""
 import transformers.dynamic_module_utils as dmu
-from accelerate import PartialState
-
-PartialState()
 from src.model_loading.liger.applier import _fire, patch_remote_modules
 from src.model_loading import remote_code
 from src.model_loading.remote_code import apply_remote_code_compat_shims

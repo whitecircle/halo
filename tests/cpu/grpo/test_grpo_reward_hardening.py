@@ -18,7 +18,6 @@ import logging
 import numpy as np
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.runtime.consensus import RankConsensus
 from src.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
@@ -28,9 +27,6 @@ from src.trainers.grpo.objective.advantages import (
     degenerate_group_mask,
     group_relative_advantages,
 )
-
-# The mixin logs through accelerate's adapter, which needs the process state to exist.
-PartialState()
 
 # --- top_entropy_quantile must never exclude structural tokens ---
 

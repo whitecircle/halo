@@ -7,11 +7,11 @@ user's accumulation becomes the microbatch count. Composes with FSDP2 and EP ins
 
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 
 import torch
 import torch.distributed as dist
-from accelerate.logging import get_logger
 
 from src.callbacks.moe_metrics import MoELoadMetricsCallback
 from src.checkpoint.writing import save_dtype_caster
@@ -57,7 +57,7 @@ from src.trainers.parallelism.pipeline_rules import (
 )
 from src.trainers.training_args_overrides import uses_evaluation
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 def wrapper_state_outside_stages(model) -> dict[str, torch.Tensor]:
@@ -144,7 +144,7 @@ class PipelineTrainerMixin:
         )
 
         context_window = context_window_from_config(kwargs["model"].config)
-        if context_window and training_args.max_length >= context_window:
+        if context_window and training_args.max_length >= context_window and is_global_main_process():
             # `max_length: null` resolves to the context window, so every row pays full-window
             # compute with no visibly larger batch shape to explain it.
             logger.warning(
@@ -195,15 +195,16 @@ class PipelineTrainerMixin:
                 callback.reduce_group = self._pp_stage_group
         self._pp_adapter = adapter = self._pp_hoist_metrics_reduction(adapter)
         self._pp_pin_metric_keys()
-        logger.info(
-            "✓ Pipeline parallelism: %d stages × %d ranks, %d microbatches, %s schedule%s%s",
-            config.pp_size,
-            config.stage_world_size,
-            self._pp_n_microbatches,
-            config.pp_schedule,
-            f", {len(ep_layers)} EP MoE layers" if ep_layers else "",
-            ", fused head loss (no logits plane)" if isinstance(self._pp_runner.loss, FusedHeadLoss) else "",
-        )
+        if is_global_main_process():
+            logger.info(
+                "✓ Pipeline parallelism: %d stages × %d ranks, %d microbatches, %s schedule%s%s",
+                config.pp_size,
+                config.stage_world_size,
+                self._pp_n_microbatches,
+                config.pp_schedule,
+                f", {len(ep_layers)} EP MoE layers" if ep_layers else "",
+                ", fused head loss (no logits plane)" if isinstance(self._pp_runner.loss, FusedHeadLoss) else "",
+            )
 
     def _pp_wrap_collator(self):
         """Wrap the trainer's final collator for fixed shapes, after ``super().__init__`` so every
@@ -286,10 +287,11 @@ class PipelineTrainerMixin:
             "evaluate without pipeline parallelism.",
         )
         self.preprocess_logits_for_metrics = None
-        logger.info(
-            "compute_metrics under pipeline parallelism: preprocess_logits_for_metrics runs on the "
-            "last stage, before the chain broadcast, and is not re-applied by the evaluation loop."
-        )
+        if is_global_main_process():
+            logger.info(
+                "compute_metrics under pipeline parallelism: preprocess_logits_for_metrics runs on the "
+                "last stage, before the chain broadcast, and is not re-applied by the evaluation loop."
+            )
         return replace(
             adapter,
             predictions_fn=lambda outputs, inputs: reduction(outputs, inputs["labels"]),

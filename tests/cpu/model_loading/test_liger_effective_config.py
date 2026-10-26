@@ -16,7 +16,6 @@ import types
 
 import pytest
 import torch.nn.functional as F
-from accelerate import PartialState
 from liger_kernel.transformers import _apply_liger_kernel_to_instance
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
@@ -28,8 +27,6 @@ from src.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cr
 from src.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from src.models.moe.family_specs import find_moe_family_spec_for_config
-
-PartialState()  # dispatch's logger needs accelerate state initialized
 
 
 class _RecordingApplier:

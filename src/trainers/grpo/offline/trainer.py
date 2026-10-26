@@ -14,6 +14,7 @@ EP / TP / CP / PP. Full fine-tuning scores raw run-start reference log-probs onc
 owns token shards of the same rows, and PP's microbatch numerators share the whole-batch denominators.
 """
 
+import logging
 from collections import defaultdict
 from collections.abc import Callable
 from typing import Any, Union
@@ -21,7 +22,6 @@ from typing import Any, Union
 import datasets
 import torch
 import torch.nn.functional as F
-from accelerate.logging import get_logger
 from peft import PeftConfig
 from torch import nn
 from torch.utils.data import Dataset, IterableDataset
@@ -52,6 +52,7 @@ from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_au
 from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.models.context_window import is_bounded_length
 from src.runtime.collectives import all_gather_cat
+from src.runtime.ranks import is_global_main_process
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.logprob_scoring import LogitsWidth, LogprobScoringMixin
 from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS
@@ -78,7 +79,7 @@ from src.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
 from src.trainers.training_args_overrides import keep_all_dataset_columns
 from src.trainers.world_metrics import WorldMetrics
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 class OfflineGRPOTrainer(
@@ -241,8 +242,9 @@ class OfflineGRPOTrainer(
                 f"generation budget. A zero or negative constant divides the loss by zero or flips its sign."
             )
         self.beta = args.kl_beta
-        logger.info(f"Using loss type: {self.loss_type}")
-        logger.info(f"Using PG formulation: {args.policy_gradient_formulation}")
+        if is_global_main_process():
+            logger.info(f"Using loss type: {self.loss_type}")
+            logger.info(f"Using PG formulation: {args.policy_gradient_formulation}")
 
     def _build_policy_model(self, model, args: OfflineGRPOConfig, parallelism_config, peft_config):
         """The policy loaded, adapted when ``peft_config`` is given, and its dropout disabled on request."""
@@ -265,7 +267,8 @@ class OfflineGRPOTrainer(
         seeds the floor on ``model``."""
         if args.initial_min_log_prob is not None and args.min_log_prob is not None:
             model.min_log_prob = args.initial_min_log_prob
-            logger.info(f"Initialized model.min_log_prob = {args.initial_min_log_prob} for scheduling")
+            if is_global_main_process():
+                logger.info(f"Initialized model.min_log_prob = {args.initial_min_log_prob} for scheduling")
 
             min_log_prob_scheduler = VariableSchedulerCallback(
                 attribute_name="min_log_prob", initial_value=args.initial_min_log_prob, final_value=args.min_log_prob
@@ -274,12 +277,15 @@ class OfflineGRPOTrainer(
             if callbacks is None:
                 callbacks = []
             callbacks.append(min_log_prob_scheduler)
-            logger.info(f"Added min_log_prob scheduler: {args.initial_min_log_prob} → {args.min_log_prob}")
+            if is_global_main_process():
+                logger.info(f"Added min_log_prob scheduler: {args.initial_min_log_prob} → {args.min_log_prob}")
         elif args.initial_min_log_prob is not None and args.min_log_prob is None:
-            logger.warning("initial_min_log_prob is set but min_log_prob is None. Scheduler will not be added.")
+            if is_global_main_process():
+                logger.warning("initial_min_log_prob is set but min_log_prob is None. Scheduler will not be added.")
         elif args.initial_min_log_prob is None and args.min_log_prob is not None:
-            logger.info(f"Using constant min_log_prob = {args.min_log_prob} (no scheduling)")
-        else:
+            if is_global_main_process():
+                logger.info(f"Using constant min_log_prob = {args.min_log_prob} (no scheduling)")
+        elif is_global_main_process():
             logger.info("No min_log_prob clipping enabled")
         return callbacks
 

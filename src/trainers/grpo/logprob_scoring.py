@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from accelerate.logging import get_logger
 from torch import nn
 from trl import GRPOTrainer
 from trl.extras.profiling import profiling_decorator
@@ -32,11 +31,10 @@ from src.models.module_tree import embedding_module, find_module_path
 from src.models.unwrapping import base_transformers_model
 from src.runtime.consensus import rank_consensus
 from src.runtime.dtensor import materialize_dtensor
+from src.runtime.ranks import is_global_main_process
 from src.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
-# The entropy mask's lines log on the main process only, as accelerate's logger does for the trainers.
-main_process_logger = get_logger(__name__, log_level="INFO")
 
 # Bytes per logit the full-logits loss forward holds at its peak: an fp32 plane, or the bf16 logits
 # plus the bf16 log-softmax TRL's selective_log_softmax saves for backward.
@@ -524,10 +522,10 @@ class ProtectedTokenEntropyMixin:
             ids.update(added().values())
         self._protected_ids_cache = torch.tensor(sorted(ids), dtype=torch.long)
         if not ids:
-            main_process_logger.warning(
-                "No special/added tokens found on the tokenizer; entropy mask left unprotected."
-            )
+            if is_global_main_process():
+                logger.warning("No special/added tokens found on the tokenizer; entropy mask left unprotected.")
             return None
 
-        main_process_logger.info(f"Entropy mask protects {len(ids)} special/added tokens (always policy-trained).")
+        if is_global_main_process():
+            logger.info(f"Entropy mask protects {len(ids)} special/added tokens (always policy-trained).")
         return self._protected_ids_cache

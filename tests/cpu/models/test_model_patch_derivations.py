@@ -22,7 +22,6 @@ import pytest
 import torch
 import torch.nn as nn
 import transformers
-from accelerate import PartialState
 from transformers.models.zaya import modeling_zaya
 
 from src.distributed.fsdp import _should_cast_forward_inputs
@@ -93,7 +92,6 @@ def test_the_zaya_load_patch_declares_the_fp32_residual_on_its_decoder_layer():
 
     Without the stamp the wrap would cast Zaya's residual and GC would fault in recompute.
     """
-    PartialState()  # the zaya patch module logs through accelerate's logger
     patch_zaya_fp32_interlayer_residual()
     assert modeling_zaya.ZayaDecoderLayer._fp32_interlayer_residual is True
 

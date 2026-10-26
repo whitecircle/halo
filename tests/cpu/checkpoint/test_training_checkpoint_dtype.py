@@ -21,10 +21,7 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import CONFIG_MAPPING, AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM, TrainerState
-
-PartialState()  # save_model_config logs through accelerate's logger
 
 import src.checkpoint.parallel.ep as ep
 from src.checkpoint.parallel.adapters import _adapter_file_state

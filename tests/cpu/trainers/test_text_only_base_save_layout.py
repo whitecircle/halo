@@ -21,12 +21,9 @@ from pathlib import Path
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from transformers import AutoConfig
 from trl import SFTConfig
-
-PartialState()  # the trainer logs through accelerate's logger, which refuses an uninitialized state
 
 from src.checkpoint.parallel.save import select_checkpoint_saver
 from src.model_loading.model_preparation import auto_load_model

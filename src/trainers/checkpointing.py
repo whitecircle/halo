@@ -3,11 +3,11 @@ shard store and the sidecars, with hooks for a trainer's own and rotation deferr
 Its zero-arg ``super()`` calls must resolve past every sibling mixin to the base Trainer.
 """
 
+import logging
 import os
 from functools import partial
 
 import torch.nn as nn
-from accelerate.logging import get_logger
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, rotate_checkpoints
 
 from src.checkpoint.atomic import apply_umask_mode
@@ -37,8 +37,9 @@ from src.models.unwrapping import base_transformers_model
 from src.runtime.collectives import barrier
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 class CheckpointingMixin:
@@ -146,7 +147,8 @@ class CheckpointingMixin:
         checkpoint = self.state.best_model_checkpoint
         if not checkpoint:
             return
-        logger.info(f"Loading best model from {checkpoint} (parallelism-aware)")
+        if is_global_main_process():
+            logger.info(f"Loading best model from {checkpoint} (parallelism-aware)")
         self._load_from_checkpoint(checkpoint, for_best_model=True)
 
     def _save_checkpoint(self, model, trial):

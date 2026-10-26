@@ -3,22 +3,23 @@ deferred-EP / TP-replicated post-backward sweeps, and the step-pre-hooks that ru
 where clipping is off.
 """
 
+import logging
 from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate.logging import get_logger
 from torch.distributed.tensor import DTensor
 
 from src.distributed.fsdp import fsdp2_modules
 from src.distributed.grad_reduce import agree_grad_presence, reduce_grads_bucketed
 from src.distributed.mesh import MeshDim, mesh_dim_names, tp_group
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, per_head_norm_param_names
+from src.runtime.ranks import is_global_main_process
 from src.trainers.parallelism.ep_layers import require_ep_config
 from src.trainers.parallelism.grad_clipping import is_clipping_enabled
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 def register_grad_sync_step_hook(
@@ -55,7 +56,7 @@ class GradientSyncMixin:
         self._window_modules = fsdp2_modules(self.model) if toggled else []
         # fully_shard's own default, and what the modules carry until the first microstep toggles them.
         self._window_end_armed = True
-        if self._window_modules:
+        if self._window_modules and is_global_main_process():
             logger.info(
                 f"  ✓ {len(self._window_modules)} FSDP2 modules toggle per grad-accum window "
                 f"(fsdp_reshard_after_backward={config.fsdp_reshard_after_backward}, fsdp_defer_grad_sync="

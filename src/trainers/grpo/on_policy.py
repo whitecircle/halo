@@ -3,10 +3,10 @@ environmental): :class:`OnPolicyGRPOInitMixin` opens and closes both constructor
 :class:`GenerationRoundMixin` fits TRL's loader, sampler and buffer to the DP-sharded loader."""
 
 import contextlib
+import logging
 from collections.abc import Iterator
 
 import trl.trainer.grpo_trainer as trl_grpo_trainer
-from accelerate.logging import get_logger
 from torch.utils.data import Dataset, Sampler
 from trl import GRPOTrainer
 from trl.trainer.utils import RepeatSampler, disable_dropout_in_model
@@ -17,12 +17,13 @@ from src.model_loading.parallel.frozen_models import (
     place_and_freeze,
 )
 from src.models.config_access import config_sources
+from src.runtime.ranks import is_global_main_process
 from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from src.trainers.grpo.grpo_rules import reject_unhonored_trl_options, reject_unread_reference
 from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from src.trainers.training_args_overrides import disable_trl_liger
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 # TRL's ctor slots of the policy and its config, read off the installed signature for a positional call.
 GRPO_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "model", "args")
@@ -219,7 +220,8 @@ class OnPolicyGRPOInitMixin:
         recomputed log-prob (Jensen), biasing the importance ratio, the k3 KL estimator and the PPO ratio.
         """
         if not self.args.disable_dropout:
-            logger.info("On-policy RL: disabling dropout for importance-sampling / vLLM consistency.")
+            if is_global_main_process():
+                logger.info("On-policy RL: disabling dropout for importance-sampling / vLLM consistency.")
             self.args.disable_dropout = True
         disable_dropout_in_model(self.model)
         if getattr(self, "ref_model", None) is not None:
@@ -232,7 +234,7 @@ class OnPolicyGRPOInitMixin:
         for cfg in config_sources(config):
             for field in ("attention_dropout", "attn_pdrop", "hidden_dropout", "resid_pdrop", "dropout"):
                 val = getattr(cfg, field, 0) or 0
-                if isinstance(val, (int, float)) and val > 0:
+                if isinstance(val, (int, float)) and val > 0 and is_global_main_process():
                     logger.warning(
                         "On-policy RL: model config %s=%s is a non-module dropout that cannot be zeroed by "
                         "disable_dropout_in_model — it perturbs recomputed log-probs vs vLLM's dropout-free "

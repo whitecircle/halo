@@ -16,12 +16,9 @@ from collections import defaultdict
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-
-PartialState()  # the breaker warns through accelerate's logger, which refuses to log without it
 
 
 class _TrainerStandIn(types.SimpleNamespace):

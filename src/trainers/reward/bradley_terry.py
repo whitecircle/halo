@@ -16,11 +16,11 @@ pairs are interleaved. A VLM run swaps TRL's tokenize map and collator for the v
 (:mod:`src.data.pipeline.preferences`, :mod:`src.data.collators.vlm_preference`).
 """
 
+import logging
 from functools import partial
 
 import torch
 import torch.nn.functional as F
-from accelerate.logging import get_logger
 from datasets import IterableDataset
 from transformers import ProcessorMixin
 from trl import RewardTrainer
@@ -36,6 +36,7 @@ from src.data.pipeline.preferences import (
 from src.data.pipeline.rejected_rows import report_rejected_rows
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.runtime.consensus import agree_probe_across_ranks
+from src.runtime.ranks import is_global_main_process
 from src.trainers.ctor_slots import get_ctor_config, resolve_ctor_positions
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.parallelism.pipeline_loss_adapter import (
@@ -51,7 +52,7 @@ from src.trainers.parallelism.pipeline_loss_adapter import (
 from src.trainers.parallelism.pipeline_rules import require_pooling_pad_id
 from src.trainers.trl_dataset_prep import TRLDatasetPrepMixin
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 # The two rendered sides; their presence marks a dataset the VLM map has already prepared.
 _RENDERED_SIDE_COLUMNS = frozenset(VLM_PREFERENCE_COLUMNS[:2])
@@ -135,7 +136,8 @@ class DistributedRewardTrainer(DistributedTrainerMixin, TRLDatasetPrepMixin, Rew
                 "Load the preference data as a regular dataset."
             )
         if _RENDERED_SIDE_COLUMNS.issubset(dataset.column_names):
-            logger.info(f"Dataset '{dataset_name}' already rendered, skipping the VLM preference map")
+            if is_global_main_process():
+                logger.info(f"Dataset '{dataset_name}' already rendered, skipping the VLM preference map")
             return dataset
 
         num_proc = resolve_map_num_proc(args.dataset_num_proc)

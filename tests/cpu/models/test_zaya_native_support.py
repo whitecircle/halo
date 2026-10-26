@@ -14,7 +14,6 @@ mixer-class sharing).
 import pytest
 import torch
 import transformers.models.zaya.modeling_zaya as zaya_modeling
-from accelerate import PartialState
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.zaya import ZayaConfig
 from transformers.models.zaya.modeling_zaya import ZayaForCausalLM
@@ -28,9 +27,6 @@ from src.models.zaya import (
     patch_zaya_router_load_recording,
 )
 from tests.common.models import TINY_ZAYA_CONFIG
-
-PartialState()  # the patches log through accelerate's logger, which needs the state initialized
-
 
 SEED = 1234
 

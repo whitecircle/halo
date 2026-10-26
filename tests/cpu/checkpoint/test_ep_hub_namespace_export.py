@@ -31,13 +31,10 @@ from dataclasses import dataclass
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import PrefixChange, WeightConverter, WeightRenaming, rename_source_key
 from transformers.integrations.mxfp4 import Mxfp4Dequantize
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
-
-PartialState()  # the EP save logs through accelerate's logger
 
 import src.checkpoint.parallel.ep as ep_save
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint

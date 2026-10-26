@@ -15,11 +15,8 @@ fail that way — the matrix below pins all of it.
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import CONFIG_MAPPING
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention
-
-PartialState()  # the sinks policy logs through accelerate's logger, which requires live state
 
 from src.distributed.context_parallel.families import GptOssUlyssesAttention
 from src.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks, neutralized_gpt_oss_sinks

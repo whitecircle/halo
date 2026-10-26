@@ -5,14 +5,15 @@ readings in a row; once one reaches ``patience`` training ends there, without sa
 step, so the run keeps only the periodic checkpoints taken before it.
 """
 
-from accelerate.logging import get_logger
+import logging
 
 from src.callbacks.early_stop import StopsTrainingEarly
 from src.configs.grpo import EarlyStopConfig
 from src.runtime.consensus import rank_consensus
+from src.runtime.ranks import is_global_main_process
 from src.trainers.grpo.objective.logratio import UPDATE_SKIPPED_KEY
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # TRL's entropy and, under its vLLM IS correction, the online trainer's log-prob gap (a mean absolute difference).
 ENTROPY_KEY = "entropy"
@@ -51,10 +52,11 @@ class GRPOEarlyStopCallback(StopsTrainingEarly):
         control.should_save = False
         control.should_evaluate = False
         reasons = "; ".join(self._evidence[name] for name in held) or "a condition held on another rank"
-        logger.error(
-            f"Early stop at step {state.global_step}: {reasons}, on {self.config.patience} readings in a row. "
-            "Training ends without saving this step; resume from a checkpoint taken before the drift began."
-        )
+        if is_global_main_process():
+            logger.error(
+                f"Early stop at step {state.global_step}: {reasons}, on {self.config.patience} readings in a row. "
+                "Training ends without saving this step; resume from a checkpoint taken before the drift began."
+            )
 
     def on_epoch_end(self, args, state, control, **kwargs):
         # The loop breaks into one more epoch-end save/eval pass, which an epoch save strategy would arm.

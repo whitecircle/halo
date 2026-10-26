@@ -10,7 +10,6 @@ import stat
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import save_file
@@ -82,7 +81,6 @@ def test_full_checkpoint_files_follow_the_umask(umask, tmp_path):
 def test_an_adapter_conversion_changes_the_mode_of_its_own_file_only(umask, tmp_path):
     """``convert_to_bf16 --peft`` writes adapter files and removes nothing, so an earlier save's weights in its
     output directory keep their mode (another user's file would refuse the chmod)."""
-    PartialState()  # the tool's loads log through accelerate's logger
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(tmp_path / "base")
     base = Qwen3ForCausalLM.from_pretrained(tmp_path / "base")
     get_peft_model(base, LoraConfig(r=4, target_modules=["q_proj"])).save_pretrained(tmp_path / "adapter")

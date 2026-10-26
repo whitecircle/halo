@@ -242,7 +242,6 @@ class _Snapshot(TrainerCallback):
 @pytest.fixture(scope="module")
 def run(tmp_path_factory):
     """One uninterrupted injected-LoRA run, checkpointed at ``SAVE_AT_STEP``; the tests read its artifacts."""
-    PartialState()  # the script's LoRA injection logs through the accelerate logger
     root = tmp_path_factory.mktemp("embedding_lora_resume")
     base = _tiny_base(root / "base")
     at_save = _Snapshot("save")

@@ -60,7 +60,7 @@ torchrun --nproc_per_node=2 scripts/training/preference/kto.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu`, plus `tests/gpu/trainers/preference/test_kto.py` and `test_kto_fsdp_multi_gpu.py`.
+Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu`, plus `tests/gpu/trainers/preference/test_kto.py`, `test_kto_fsdp_multi_gpu.py` and, for pipeline parallelism on precomputed reference log-probs, `tests/gpu/parallelism/pp/test_pp_preference_precompute.py --trainer kto`.
 
 ## What to watch
 

@@ -20,13 +20,10 @@ import types
 
 import pytest
 import torch.nn as nn
-from accelerate import PartialState
 
 from src.distributed.fsdp import fsdp2_modules
 from src.trainers.parallelism import grad_sync
 from src.trainers.parallelism.grad_sync import GradientSyncMixin
-
-PartialState()  # the mixin logs through accelerate's rank-aware logger
 
 GRAD_ACCUM = 3
 RESHARD = "set_reshard_after_backward"

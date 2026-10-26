@@ -25,12 +25,9 @@ import os
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from transformers import CONFIG_MAPPING
 from transformers.models.gemma4.configuration_gemma4 import Gemma4Config, Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
-
-PartialState()  # the EP save logs through accelerate's logger
 
 from src.checkpoint.config_export import (
     export_legacy_per_layer_config,

@@ -29,7 +29,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
@@ -42,8 +41,6 @@ from src.model_loading.parallel.whole_model import resolve_trainer_model
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
 from tests.common.utils import imports_name
-
-PartialState()  # the loaders log through accelerate's logger
 
 # The shared model loader: a script that binds it builds a transformers model from a checkpoint
 # directory, remote-code families included. Derived rather than listed, so a new tool is swept in.

@@ -6,7 +6,6 @@ after, and the read must not repeat per split.
 """
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
 from src.data.preprocessed import tokenization
@@ -16,8 +15,6 @@ from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
 
 _TURNS = [{"role": "user", "content": "What is two plus two?"}, {"role": "assistant", "content": "Four."}]
-
-PartialState()  # the data helpers log through accelerate's rank-aware logger
 
 
 class _Tokenized(Exception):

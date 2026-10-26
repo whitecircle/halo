@@ -17,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from datasets import Dataset
 from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 from transformers.training_args import OptimizerNames
@@ -212,7 +211,6 @@ def _tiny_composite():
 
 def _drive_composite_split(train_dataset=None, eval_dataset=None, data_collator=None):
     """``_split_pipeline_stage`` on the tiny composite, as stage 0 of a pp2 x dp2 topology."""
-    PartialState()  # the gate's accelerate logger needs an initialized state
     mixin = _pipeline_stub(parallelism_config=_pc(pp_size=2), save_sharded_ep=False, _moe_balancing="none")
     kwargs = {"model": _tiny_composite(), "train_dataset": train_dataset, "eval_dataset": eval_dataset}
     if data_collator is not None:

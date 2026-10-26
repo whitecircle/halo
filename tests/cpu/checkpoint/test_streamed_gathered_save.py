@@ -15,12 +15,8 @@ from functools import partial
 
 import pytest
 import torch
-from accelerate import PartialState
-from transformers import CONFIG_MAPPING, AutoModelForCausalLM
-
-PartialState()  # save_model_config logs through accelerate's logger
-
 from safetensors import safe_open
+from transformers import CONFIG_MAPPING, AutoModelForCausalLM
 
 import src.checkpoint.parallel.save as checkpoint_save_mod
 import src.checkpoint.parallel.writing as checkpoint_write_mod

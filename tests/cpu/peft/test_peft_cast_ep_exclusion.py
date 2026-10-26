@@ -22,7 +22,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 
 from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
@@ -90,7 +89,6 @@ def _fake_trainer(model: nn.Module) -> types.SimpleNamespace:
 
 
 def test_cast_skips_ep_owned_fp32_trainables_but_casts_adapters():
-    PartialState()  # the cast logs through accelerate's logger
     torch.manual_seed(0)
     peft_model = get_peft_model(
         _TinyMoEModel(), LoraConfig(r=4, lora_alpha=8, target_modules=["proj"], task_type=None)

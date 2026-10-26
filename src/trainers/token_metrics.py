@@ -6,16 +6,17 @@ once per log step and the attention work is read once per optimizer step, once a
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any
 
 import torch
-from accelerate.logging import get_logger
 
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.models.attention.tree_plan import TREE_ATTENTION_KEY
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 def effective_loss_mask(masks: Mapping[str, torch.Tensor | Any]) -> torch.Tensor | None:
@@ -161,9 +162,10 @@ class TokenMetricsMixin:
                 non_training = non_training | (labels == token_id)
         if non_training.all():
             self._warned_empty_labels = True
-            logger.warning(
-                "Batch contains no training signal — all labels are -100, pad, or eos. "
-                "This typically means the collator could not find the assistant_message_template "
-                "in the tokenized input, or the eval set is too small after packing. "
-                f"Labels shape: {list(labels.shape)}"
-            )
+            if is_global_main_process():
+                logger.warning(
+                    "Batch contains no training signal — all labels are -100, pad, or eos. "
+                    "This typically means the collator could not find the assistant_message_template "
+                    "in the tokenized input, or the eval set is too small after packing. "
+                    f"Labels shape: {list(labels.shape)}"
+                )

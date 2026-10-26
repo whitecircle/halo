@@ -11,11 +11,9 @@ same weights at ``router_aux_loss_coef=0``.
 
 import pytest
 import torch
-from accelerate import Accelerator, PartialState
+from accelerate import Accelerator
 from datasets import Dataset
 from trl import SFTConfig
-
-PartialState()  # the trainer logs through accelerate's logger, which refuses an uninitialized state
 
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.sft import DistributedSFTTrainer

@@ -29,7 +29,6 @@ import inspect
 import types
 
 import pytest
-from accelerate import PartialState
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 
@@ -38,9 +37,6 @@ from src.model_loading.liger.applier import LigerApplier
 from src.model_loading.liger.cross_entropy import liger_cross_entropy
 from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS, LigerFamilySpec
 from tests.common.repo import probe_findings
-
-PartialState()  # dispatch logs through accelerate's rank-aware logger
-
 
 DELEGATING_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.delegates_to_upstream]
 
@@ -255,9 +251,6 @@ def test_cross_entropy_never_reaches_upstreams_branch():
     """
     script = """
 import torch.nn.functional as F
-from accelerate import PartialState
-
-PartialState()
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
@@ -325,9 +318,6 @@ def test_re_application_neither_stacks_nor_undoes_the_added_glu():
     Subprocess: the swaps are process-global, and this one builds a model on top of them.
     """
     script = """
-from accelerate import PartialState
-
-PartialState()
 import transformers.models.qwen3_5_moe.modeling_qwen3_5_moe as modeling
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers import AutoModelForCausalLM
@@ -393,9 +383,6 @@ def test_the_upstream_applier_actually_runs():
     """
     script = """
 import importlib, inspect
-from accelerate import PartialState
-
-PartialState()
 from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from src.model_loading.liger.dispatch import resolve_liger_applier
 
@@ -444,9 +431,6 @@ def test_a_role_upstream_also_swaps_is_refused_when_the_patch_runs():
     Subprocess: proving the guard means letting upstream's applier really swap the class.
     """
     script = """
-from accelerate import PartialState
-
-PartialState()
 from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_qwen3_5
 from src.model_loading.liger.applier import LigerApplier
 from src.model_loading.liger.family_specs import LigerFamilySpec

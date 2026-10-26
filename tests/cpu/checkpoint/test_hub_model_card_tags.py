@@ -26,7 +26,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from huggingface_hub import ModelCard
 from huggingface_hub.repocard import metadata_load
 from peft import LoraConfig, get_peft_model
@@ -55,8 +54,6 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import word_level_tokenizer
-
-PartialState()  # the tools' loads log through accelerate's rank-aware logger
 
 HALO_TAG = "halo"
 CARD = "README.md"

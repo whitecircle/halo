@@ -22,7 +22,6 @@ from unittest import mock
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from bitsandbytes.nn import Linear4bit, Params4bit
 from safetensors.torch import save_file
 from torch.distributed.tensor import Shard, distribute_tensor
@@ -55,9 +54,6 @@ from tests.common.source_sweep import builds_a_model, functions_calling
 from tests.common.tiny_models import PINNED_FP32_FAMILIES, TINY_MOE_FAMILIES, build_tiny_family_checkpoint
 from tests.common.tokenizers import load_cached_tokenizer
 from tests.common.utils import params_off_dtype, safetensors_state_dict
-
-# The loaders log through accelerate's logger, which requires an initialized state.
-PartialState()
 
 # The run-dtype cast, directly or through its EP-aware wrapper.
 CASTS = frozenset({cast_parameters_to_run_dtype.__name__, cast_loaded_parameters.__name__})

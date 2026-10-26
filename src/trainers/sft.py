@@ -2,11 +2,11 @@
 and its own CP loss and metrics."""
 
 import inspect
+import logging
 from functools import cached_property
 from typing import ClassVar
 
 import torch
-from accelerate.logging import get_logger
 from transformers import Trainer
 from trl import SFTTrainer
 from trl.trainer.utils import entropy_from_logits
@@ -18,12 +18,13 @@ from src.models.attention.tree_plan import TREE_ATTENTION_KEY
 from src.models.moe.balancing import expert_load_token_weights
 from src.models.moe.config_fields import require_router_aux_loss_coef
 from src.models.unwrapping import base_transformers_model
+from src.runtime.ranks import is_global_main_process
 from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.parallelism.trainer_rules import reject_compressed_kv_collator, reject_cp_packed_collator
 from src.trainers.world_metrics import WorldMetrics
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # TRL SFTTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
 _CTOR_POSITIONS = resolve_ctor_positions(SFTTrainer, "model", "args", "data_collator")
@@ -38,10 +39,11 @@ def _replace_chunked_nll_loss_type(training_args) -> None:
     """
     if training_args is None or getattr(training_args, "loss_type", None) != "chunked_nll":
         return
-    logger.warning(
-        "Setting loss_type to 'nll': TRL's 'chunked_nll' replaces the model's forward with its own lm_head "
-        "projection, which skips the family's head transform and the router aux loss."
-    )
+    if is_global_main_process():
+        logger.warning(
+            "Setting loss_type to 'nll': TRL's 'chunked_nll' replaces the model's forward with its own lm_head "
+            "projection, which skips the family's head transform and the router aux loss."
+        )
     training_args.loss_type = "nll"
 
 

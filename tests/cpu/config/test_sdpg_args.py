@@ -18,15 +18,12 @@ from unittest import mock
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
 from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from src.data.collators.self_distill import format_field_names, inject_privileged_hint, privileged_hint
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from tests.common.repo import load_script_module
-
-PartialState()  # the RLVR script logs through accelerate, which refuses to log without it
 
 ONLINE_ARMS = (SDPGArguments, RLVROnlineGRPOScriptArguments)
 ALL_ARMS = (*ONLINE_ARMS, SelfDistillScriptArguments)

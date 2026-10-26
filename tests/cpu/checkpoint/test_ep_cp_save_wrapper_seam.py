@@ -20,7 +20,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from safetensors import safe_open
 
 from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save, save_ep_gathered_checkpoint
@@ -30,8 +29,6 @@ from src.models.unwrapping import unwrap_toolkit_wrappers
 from tests.common.checkpoint_io import save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
-
-PartialState()  # the EP save's accelerate logger needs accelerate state initialized
 
 NUM_EXPERTS = 4
 NUM_LOCAL_EXPERTS = 2  # simulates an ep2 rank: local params hold E/ep experts, the gather returns E

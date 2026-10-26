@@ -7,13 +7,13 @@ active loader's own geometry, after the DP scope drops the rows TP/CP/ETP siblin
 from __future__ import annotations
 
 import contextlib
+import logging
 from functools import partial
 from typing import Any, ClassVar
 
 import torch
 import torch.distributed as dist
 from accelerate.data_loader import BatchSamplerShard, DataLoaderDispatcher
-from accelerate.logging import get_logger
 from accelerate.utils import recursively_apply
 from torch.utils.data import BatchSampler, RandomSampler, SequentialSampler, SubsetRandomSampler
 from transformers.trainer_pt_utils import LengthGroupedSampler
@@ -22,10 +22,10 @@ from trl.trainer.utils import RepeatSampler
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.runtime.collectives import barrier, collective_device
 from src.runtime.consensus import rank_consensus
-from src.runtime.ranks import get_global_world_size, has_process_group, is_multi_rank_run
+from src.runtime.ranks import get_global_world_size, has_process_group, is_global_main_process, is_multi_rank_run
 from src.trainers.dataloaders import dp_representative_ranks, dp_scoped_gather, find_batch_sampler_shard
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 # Samplers whose ``len`` is the number of indices they yield (TRL's ``RepeatSampler`` counts its repeats).
 _COUNTED_SAMPLERS = (SequentialSampler, RandomSampler, SubsetRandomSampler, LengthGroupedSampler, RepeatSampler)
@@ -135,13 +135,14 @@ class EvaluationMixin:
                     "divisible eval dataset or set top_entropy_quantile: 1.0."
                 )
             metric_key_prefix = kwargs.get("metric_key_prefix", args[2] if len(args) > 2 else "eval")
-            logger.warning(
-                f"Evaluation batch counts differ across ranks (or cannot be measured), so the "
-                f"evaluation loop's cross-rank gather is replaced by the identity to avoid a deadlock: "
-                f"'{metric_key_prefix}_loss' and any compute_metrics output this evaluation logs are "
-                f"rank 0's own shard, not the global value. An eval dataset that splits evenly across "
-                f"the data-parallel ranks restores global metrics."
-            )
+            if is_global_main_process():
+                logger.warning(
+                    f"Evaluation batch counts differ across ranks (or cannot be measured), so the "
+                    f"evaluation loop's cross-rank gather is replaced by the identity to avoid a deadlock: "
+                    f"'{metric_key_prefix}_loss' and any compute_metrics output this evaluation logs are "
+                    f"rank 0's own shard, not the global value. An eval dataset that splits evenly across "
+                    f"the data-parallel ranks restores global metrics."
+                )
             original_gather = self.gather_function
             self.gather_function = lambda x: x
             # evaluation_loop also pads logits/labels outside gather_function; identity is safe (own shard only).
@@ -225,13 +226,14 @@ class EvaluationMixin:
             keep = dp_representative_ranks(dp_rank_by_global_rank)
             if len(keep) < world_size:
                 self._dp_metric_gather_scope = (keep, world_size)
-                logger.info(
-                    "Evaluation metrics gather scoped to the %d data-parallel replicas of %d ranks "
-                    "(siblings return identical rows; a world gather would repeat each replica %dx).",
-                    len(keep),
-                    world_size,
-                    world_size // len(keep),
-                )
+                if is_global_main_process():
+                    logger.info(
+                        "Evaluation metrics gather scoped to the %d data-parallel replicas of %d ranks "
+                        "(siblings return identical rows; a world gather would repeat each replica %dx).",
+                        len(keep),
+                        world_size,
+                        world_size // len(keep),
+                    )
         self.gather_function = self._dp_gather_for_metrics
 
     def _dp_gather_for_metrics(self, input_data, use_gather_object: bool | None = None):

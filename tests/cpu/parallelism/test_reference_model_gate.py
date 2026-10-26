@@ -18,7 +18,6 @@ import types
 from unittest import mock
 
 import pytest
-from accelerate import PartialState
 from trl import SFTTrainer
 
 import src.model_loading.parallel.frozen_models as frozen_models
@@ -37,8 +36,6 @@ from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import load_script_module
-
-PartialState()  # the gate warns through accelerate's logger, which requires an initialized state
 
 
 @pytest.fixture(autouse=True)

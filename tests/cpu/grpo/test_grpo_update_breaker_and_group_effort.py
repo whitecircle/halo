@@ -34,7 +34,6 @@ from collections import defaultdict
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
 from src.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
@@ -49,8 +48,6 @@ from src.trainers.grpo.objective.loss_inputs import (
     TOKEN_MASS_SCALE_KEY,
 )
 from tests.common.env_grpo_batch import batch_host, build, episode, row
-
-PartialState()  # the breaker warns through accelerate's logger, which refuses to log without it
 
 
 class _TrainerStandIn(types.SimpleNamespace):

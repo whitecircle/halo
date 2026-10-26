@@ -1,14 +1,14 @@
 """Construction refusals of the environmental GRPO trainer: configs the run would honor silently wrong."""
 
 import dataclasses
-
-from accelerate.logging import get_logger
+import logging
 
 from src.environments.episode_keys import ANSWER_KEY
 from src.environments.rollout_config import IDENTITY_SAMPLER, SGLANG_BACKEND, VALID_REASONING_EFFORTS
+from src.runtime.ranks import is_global_main_process
 from src.trainers.training_args_overrides import uses_evaluation
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # TRL sampling knobs no sampler reads here: the environment actors generate from RolloutConfig. ``temperature``
 # is reconciled the other way round instead: the trainer scores at the sampling temperature.
@@ -85,10 +85,11 @@ def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
     for name, dataset in datasets.items():
         columns = getattr(dataset, "column_names", None)
         if columns is None:
-            logger.warning(
-                f"{name} declares no columns, so the {ANSWER_KEY!r} column "
-                f"{type(env).__name__} grades against cannot be checked here."
-            )
+            if is_global_main_process():
+                logger.warning(
+                    f"{name} declares no columns, so the {ANSWER_KEY!r} column "
+                    f"{type(env).__name__} grades against cannot be checked here."
+                )
         elif ANSWER_KEY not in columns:
             raise ValueError(
                 f"{type(env).__name__} grades each episode against the dataset's "

@@ -1,11 +1,11 @@
 """The trainer spine every distributed trainer composes before its TRL/HF base: construction, the parallel-mode
 setup and the HF overrides; each concern lives in a sibling module the class composes."""
 
+import logging
 from typing import Any, ClassVar, Literal
 
 import torch
 import torch.nn as nn
-from accelerate.logging import get_logger
 
 from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from src.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
@@ -86,7 +86,7 @@ from src.trainers.training_args_overrides import (
     resolve_active_router_aux_loss_coef,
 )
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 # Where TRL keeps its fused Liger loss: the preference trainers (DPO/KTO) and GRPO.
 _TRL_LIGER_LOSS_ATTRS = ("liger_loss_fn", "liger_grpo_loss")
@@ -434,11 +434,12 @@ class DistributedTrainerMixin(
                 f"(moe_balancing='{self._moe_balancing}'), so it is left ON and keeps costing that "
                 f"tensor every forward."
             )
-        logger.warning(
-            f"output_router_logits is ON with router_aux_loss_coef={coef}, but that aux loss is "
-            f"INERT here. {INERT_AUX_LOSS_DETAIL.format(trainer=trainer)} {action} Set "
-            f"moe_balancing='bias_update' for real balancing on families whose EP wrappers support it."
-        )
+        if is_global_main_process():
+            logger.warning(
+                f"output_router_logits is ON with router_aux_loss_coef={coef}, but that aux loss is "
+                f"INERT here. {INERT_AUX_LOSS_DETAIL.format(trainer=trainer)} {action} Set "
+                f"moe_balancing='bias_update' for real balancing on families whose EP wrappers support it."
+            )
 
     def _warn_on_zeroed_lora_dropout(self) -> None:
         """Warn when the configured ``lora_dropout`` was zeroed: TRL's ``disable_dropout`` (on by default for the
@@ -457,7 +458,7 @@ class DistributedTrainerMixin(
             for name, module in self._top_level_model().named_modules()
             if isinstance(module, nn.Dropout) and "lora_dropout" in name
         ]
-        if live and not any(p > 0 for p in live):
+        if live and not any(p > 0 for p in live) and is_global_main_process():
             logger.warning(
                 f"lora_dropout={configured} is configured but every LoRA dropout in the live model is 0: "
                 f"this trainer disables dropout after the adapter wrap (disable_dropout=True), which "
@@ -594,12 +595,11 @@ class DistributedTrainerMixin(
             return super().training_step(model, inputs, num_items_in_batch)
         except torch.OutOfMemoryError as e:
             # The peers die on launch failures in whatever kernel is on-stream (DeepEP combine, cuBLAS; Xid 43),
-            # which read like a compute bug. Every rank logs: the adapter's main-process default would drop it.
+            # which read like a compute bug, so the rank that ran out of memory says so, whichever rank it is.
             logger.error(
                 f"RANK {get_global_rank()}: torch.OutOfMemoryError in training_step — THIS RANK IS THE PRIMARY "
                 f"FAILURE. Peer ranks will report DeepEP/NCCL/cuBLAS launch failures (Xid 43) as collateral of this "
-                f"context tearing down; diagnose this OOM, not those. {e}",
-                main_process_only=False,
+                f"context tearing down; diagnose this OOM, not those. {e}"
             )
             raise
 
@@ -618,8 +618,7 @@ class DistributedTrainerMixin(
             get_global_rank(),
         )
         if message is not None:
-            # Per-rank verdict, so it must escape the adapter's main-process-only default.
-            logger.warning(message, main_process_only=False)
+            logger.warning(message)
 
     def prediction_step(self, model, inputs, prediction_loss_only=True, ignore_keys=None):
         """Under PP the eval step must run through the schedule (no rank holds the whole model)."""
@@ -665,9 +664,10 @@ class DistributedTrainerMixin(
                 module.dispatcher.destroy()
                 count += 1
             except Exception as e:
-                logger.warning(f"Failed to destroy DeepEP buffer for {type(module).__name__}: {e}")
+                if is_global_main_process():
+                    logger.warning(f"Failed to destroy DeepEP buffer for {type(module).__name__}: {e}")
         # Layers already collected freed nothing (a finalizer must not run a collective); swept here instead.
         freed = free_unclaimed_ep_buffers()
-        if count > 0 or freed > 0:
+        if (count > 0 or freed > 0) and is_global_main_process():
             logger.info(f"✓ Released {count} DeepEP layers, freed {freed} buffers")
         barrier()

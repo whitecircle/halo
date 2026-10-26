@@ -23,7 +23,6 @@ import os
 
 import pytest
 import torch
-from accelerate import PartialState
 from safetensors.torch import save_file
 from transformers import (
     CONFIG_MAPPING,
@@ -32,8 +31,6 @@ from transformers import (
     Qwen3_5MoeConfig,
     Qwen3_5MoeForConditionalGeneration,
 )
-
-PartialState()  # save_model_config logs through accelerate's logger
 
 from src.checkpoint.hub_layout import save_pretrained_layout
 from src.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint

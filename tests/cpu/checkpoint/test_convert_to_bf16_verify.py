@@ -24,13 +24,10 @@ import os
 
 import pytest
 import torch
-from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM
-
-PartialState()  # the tool's loads log through accelerate's logger
 
 from scripts.after_training.convert_to_bf16 import (
     _BF16_VERIFY_MIN_FRACTION,

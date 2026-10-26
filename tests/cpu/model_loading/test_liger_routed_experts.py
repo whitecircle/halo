@@ -29,7 +29,6 @@ import logging
 import types
 
 import pytest
-from accelerate import PartialState
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
@@ -39,8 +38,6 @@ from src.model_loading.liger import dispatch
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG, TINY_QWEN35_MOE_CONFIG
 from tests.common.repo import probe_findings
-
-PartialState()  # dispatch logs through accelerate's rank-aware logger
 
 # One tiny config per family, each carrying routed experts and — where the family has one — a shared
 # expert and a dense layer, so the toolkit's fused GLU has somewhere to show up. All-full-attention
@@ -97,9 +94,6 @@ _MODEL_PROBE = """
 import inspect
 import json
 
-from accelerate import PartialState
-
-PartialState()
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from liger_kernel.transformers.swiglu import LigerExperts
 from transformers import AutoModelForCausalLM
@@ -151,10 +145,6 @@ print("FAILURES:" + "|".join(failures))
 
 _REGISTRY_SWEEP = """
 import sys
-
-from accelerate import PartialState
-
-PartialState()
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_qwen3_moe
 from liger_kernel.transformers.swiglu import LigerExperts
@@ -205,7 +195,6 @@ print("FAILURES:" + "|".join(failures))
 _HF_REAPPLICATION_PROBE = """
 import json
 import sys
-
 from liger_kernel.transformers.swiglu import LigerExperts
 from transformers import AutoModelForCausalLM
 from transformers.integrations.liger import apply_liger_kernel

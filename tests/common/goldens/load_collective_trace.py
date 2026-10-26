@@ -22,7 +22,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import torch
-from accelerate import PartialState
 from huggingface_hub import constants as hub_constants
 from huggingface_hub.file_download import repo_folder_name
 from transformers import PreTrainedModel
@@ -243,8 +242,6 @@ def trace_rank(
     The parallelism config is built before the recording starts and the rank-uniform EP environment
     counts as verified, as the entry scripts do both in their distributed setup, before the load.
     """
-    # Outside the recording, so accelerate sees one process; the loaders' accelerate loggers need a state.
-    PartialState()
     config = make_parallelism_config(
         world_size=WORLD_SIZE, gpus_per_node=GPUS_PER_NODE, rank=rank, max_concurrent_loading=1, **case.parallelism
     )

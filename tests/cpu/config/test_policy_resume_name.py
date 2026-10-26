@@ -5,7 +5,6 @@ policy load entry; a policy loaded from the base keeps the loader's name."""
 from types import SimpleNamespace
 
 import pytest
-from accelerate import PartialState
 
 from src.configs.script_arguments import ModelArguments
 from src.entrypoints import model_setup
@@ -21,8 +20,6 @@ def _loaded_name(source: str) -> str:
 
 @pytest.fixture(autouse=True)
 def _stub_loads(monkeypatch):
-    PartialState()  # the VLM load logs through accelerate's logger
-
     def load_distributed_model(*, model_name_or_path, **_):
         return SimpleNamespace(config=SimpleNamespace(_name_or_path=_loaded_name(model_name_or_path))), "tokenizer"
 

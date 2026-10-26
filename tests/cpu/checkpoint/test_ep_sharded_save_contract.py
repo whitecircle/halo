@@ -24,7 +24,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from safetensors import safe_open
 from safetensors.torch import save_file
 
@@ -34,8 +33,6 @@ from src.checkpoint.parallel.ep import save_ep_sharded_checkpoint
 from src.checkpoint.reading import checkpoint_shard_files, header_nbytes, reject_partial_checkpoint
 from tests.common.checkpoint_io import save_context
 from tests.common.ep_stubs import StubEPLayerBase
-
-PartialState()  # the EP save logs through accelerate's logger
 
 NUM_LOCAL_EXPERTS = 2
 HIDDEN = 8

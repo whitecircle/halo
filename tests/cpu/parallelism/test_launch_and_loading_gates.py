@@ -33,7 +33,6 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from accelerate import PartialState
 from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
@@ -64,8 +63,6 @@ from src.models.moe.family_specs import GEMMA4, MoEFamilySpec
 from src.trainers.accelerator import accelerate_manages_ddp
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.parallelism import make_parallelism_config
-
-PartialState()  # the loader's accelerate logger refuses to emit without an initialized state
 
 _CP_LOADING = "src.model_loading.parallel.cp"
 _SOURCE = ModelSource("org/x", None, "org/x")

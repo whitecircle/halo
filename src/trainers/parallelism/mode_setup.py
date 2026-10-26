@@ -1,5 +1,6 @@
 """Wrapping the trainer's model for its parallel mode: the mode ladder, the FSDP2 wraps and what they leave out."""
 
+import logging
 import os
 import time
 from collections.abc import Iterable
@@ -8,7 +9,6 @@ from typing import NamedTuple
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from accelerate.logging import get_logger
 from transformers.utils.output_capturing import _CAN_RECORD_REGISTRY
 
 from src.distributed.context_parallel.ulysses_model import UlyssesModel, find_ulysses_model
@@ -26,7 +26,7 @@ from src.trainers.parallelism.trainer_rules import (
     reject_fsdp_knobs_under_qlora,
 )
 
-logger = get_logger(__name__, log_level="info")
+logger = logging.getLogger(__name__)
 
 
 class FsdpExclusions(NamedTuple):
@@ -126,32 +126,33 @@ class ModeSetupMixin:
         dense TP-only model; an accelerate launch keeps its own wrap.
         """
         config = self.parallelism_config
+        mode = None
         if config.is_pp_mode:
             self._configure_pipeline_parallel()
         elif config.has_ep_group and config.is_tp_mode:
             self._install_ep_clip()
             self._device_mesh = require_tp_mesh(getattr(self.model, "_device_mesh", None), config.tp_size)
             self._apply_ep_tp_fsdp2()
-            logger.info("✓ EP+TP mode configured")
+            mode = "EP+TP"
         elif config.has_ep_group and config.is_cp_mode:
             self._adopt_cp_wrapper()
             self._install_ep_clip()
             self._apply_ep_fsdp2()
-            logger.info("✓ EP+CP mode configured")
+            mode = "EP+CP"
         elif config.is_cp_mode:
             self._adopt_cp_wrapper()
             self._apply_cp_fsdp2()
-            logger.info("✓ CP mode configured")
+            mode = "CP"
         elif config.is_tp_mode:
             self._apply_tp_fsdp2()
             self._install_tp_clip()
-            logger.info("✓ TP mode configured")
+            mode = "TP"
         elif config.has_ep_group or (
             not self._accelerate_manages_wrap and config.needs_ep_wrappers and self._ep_layers()
         ):
             self._install_ep_clip()
             self._apply_ep_fsdp2()
-            logger.info("✓ EP mode configured")
+            mode = "EP"
         elif self._accelerate_manages_wrap:
             reject_ep_wrappers_under_accelerate(self._ep_layers())
             self._log_accelerate_managed_wrap()
@@ -166,6 +167,8 @@ class ModeSetupMixin:
                     excluded_params=self._fsdp_exclusions().params,
                     dp_replicate_size=config.dp_replicate_size,
                 )
+        if mode and is_global_main_process():
+            logger.info(f"✓ {mode} mode configured")
 
     def _log_accelerate_managed_wrap(self) -> None:
         """Name the wrap accelerate applies; FSDP v1's sharded strategies draw a warning."""
@@ -201,7 +204,8 @@ class ModeSetupMixin:
             preprocess_logits_for_metrics=getattr(self, "preprocess_logits_for_metrics", None),
         )
         self.cp_config = require_ulysses_model(self._top_level_model()).cp_config
-        logger.info("✓ CP configured (NVLink-domain-local)")
+        if is_global_main_process():
+            logger.info("✓ CP configured (NVLink-domain-local)")
 
     def _find_cp_wrapper(self) -> UlyssesModel | None:
         """The CP wrapper in the model hierarchy, beneath any ``torch.compile`` wrapper."""
@@ -286,7 +290,8 @@ class ModeSetupMixin:
         reject_fsdp_knobs_under_qlora(self.parallelism_config)
         self._qlora_grad_sync = True
         self._install_qlora_clip()
-        logger.info(f"✓ QLoRA gradient sync for {mode} (FSDP2 skipped: quantized 4-bit base weights)")
+        if is_global_main_process():
+            logger.info(f"✓ QLoRA gradient sync for {mode} (FSDP2 skipped: quantized 4-bit base weights)")
 
     def _apply_dp_fsdp2(
         self,

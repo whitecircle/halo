@@ -15,7 +15,6 @@ import types
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers import AutoModelForCausalLM, GptOssConfig, LlamaConfig, PreTrainedModel
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 
@@ -30,8 +29,6 @@ from src.models.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )
-
-PartialState()  # the loader's logger needs accelerate state initialized
 
 
 def _gptoss():

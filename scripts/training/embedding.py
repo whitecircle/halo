@@ -6,7 +6,8 @@ reads the complete sequence. Usage:
     torchrun --nproc_per_node=8 scripts/training/embedding.py examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.yaml
 """
 
-from accelerate.logging import get_logger
+import logging
+
 from peft import inject_adapter_in_model
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.models import Normalize, Pooling
@@ -47,7 +48,7 @@ from src.trainers.embedding.embedding_rules import reject_uneven_sentence_transf
 from src.trainers.embedding.preloaded_transformer import PreloadedTransformer
 from src.trainers.embedding.trainer import EmbeddingTrainer
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 def build_sentence_transformer(
@@ -207,15 +208,17 @@ def align_st_pipeline_to_config(st_model: SentenceTransformer, embedding_config:
         )
     for module in pooling_modules:
         if module.pooling_mode != embedding_config.pooling_mode:
-            logger.warning(
-                f"Overriding the checkpoint's pooling_mode {module.pooling_mode!r} with the configured "
-                f"{embedding_config.pooling_mode!r}."
-            )
+            if is_global_main_process():
+                logger.warning(
+                    f"Overriding the checkpoint's pooling_mode {module.pooling_mode!r} with the configured "
+                    f"{embedding_config.pooling_mode!r}."
+                )
             module.pooling_mode = embedding_config.pooling_mode
 
     has_normalize = any(isinstance(module, Normalize) for module in st_model)
     if embedding_config.normalize_embeddings and not has_normalize:
-        logger.warning("Appending a Normalize module (normalize_embeddings=True); the checkpoint had none.")
+        if is_global_main_process():
+            logger.warning("Appending a Normalize module (normalize_embeddings=True); the checkpoint had none.")
         st_model.append(Normalize())
     elif not embedding_config.normalize_embeddings and has_normalize:
         raise ValueError(

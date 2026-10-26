@@ -35,7 +35,8 @@ See agent-docs/training-methods/async-grpo/README.md for the objective, the envi
 the rollout-server contract.
 """
 
-from accelerate.logging import get_logger
+import logging
+
 from trl import GRPOConfig
 
 from src.config_validation import reject_unsupported_args
@@ -71,6 +72,7 @@ from src.model_loading.parallel.frozen_models import load_reference_model_for_on
 from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.models.context_window import get_model_context_window
 from src.runtime.collectives import barrier
+from src.runtime.ranks import is_global_main_process
 from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from src.trainers.grpo.rollout.engine_preflight import (
@@ -79,7 +81,7 @@ from src.trainers.grpo.rollout.engine_preflight import (
     verify_sampler_logprob_reference,
 )
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 # Fallback token allowance when the environment preamble cannot be rendered.
 FALLBACK_ENV_PROMPT_OVERHEAD = 2048
@@ -102,7 +104,7 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
         {"role": "user", "content": ""}
     ]
     tools = environment.get_tools_schema()
-    if environment.TOOLS_ARRIVE_ON_RESET and not tools:
+    if environment.TOOLS_ARRIVE_ON_RESET and not tools and is_global_main_process():
         logger.warning(
             "An MCP server's tools arrive when its first reset connects, so the context-window check omits "
             "their schema from the prompt overhead."
@@ -116,13 +118,15 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
             **template_kwargs,
         )
         overhead = len(tokenizer(rendered, add_special_tokens=False)["input_ids"])
-        logger.info(f"Environment prompt overhead (system prompt + tool schema): {overhead} tokens (measured)")
+        if is_global_main_process():
+            logger.info(f"Environment prompt overhead (system prompt + tool schema): {overhead} tokens (measured)")
         return overhead
     except Exception as e:
-        logger.warning(
-            f"Could not render the environment prompt preamble ({e}); assuming "
-            f"{FALLBACK_ENV_PROMPT_OVERHEAD} tokens of overhead for the context-window check."
-        )
+        if is_global_main_process():
+            logger.warning(
+                f"Could not render the environment prompt preamble ({e}); assuming "
+                f"{FALLBACK_ENV_PROMPT_OVERHEAD} tokens of overhead for the context-window check."
+            )
         return FALLBACK_ENV_PROMPT_OVERHEAD
 
 
@@ -212,7 +216,7 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
     if args.answer_field:
         if args.answer_field != DEFAULT_ANSWER_FIELD:
             reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
-        elif missing_render_column_splits(ds, args.answer_field):
+        elif missing_render_column_splits(ds, args.answer_field) and is_global_main_process():
             logger.warning(
                 f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
                 f"environment that grades against one refuses this dataset at trainer construction; "
