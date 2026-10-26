@@ -52,21 +52,3 @@ jobs:
             || { echo "::error::A generator writes a figure that is not committed — add it."; exit 1; }
           sha256sum --check --quiet /tmp/before.sha256 \
             || { echo "::error::Committed figures are stale — run 'make diagrams' and commit the result."; exit 1; }
-
-  markdownlint:
-    # Warn-mode: surfaces markdown-hygiene issues as annotations without blocking the PR
-    # (human-docs/ is in the globs and is not held to a lints-clean bar). The action pins
-    # markdownlint-cli2 0.17.x; a bump past 0.18 adds MD060 (table-column-style), which needs a
-    # config decision in the same change.
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: markdownlint (docs)
-        uses: DavidAnson/markdownlint-cli2-action@05f32210e84442804257b2a6f20b273450ec8265 # v19
-        continue-on-error: true
-        with:
-          globs: |
-            agent-docs/**/*.md
-            human-docs/**/*.md
-            skills/**/*.md

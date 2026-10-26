@@ -23,7 +23,7 @@ from src.environments.rollout_config import (
     RolloutBackend,
     RolloutConfig,
 )
-from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms
+from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms, read_context_files
 from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -592,6 +592,7 @@ class EnvironmentConfig(ValidatedConfig):
         if not isinstance(self.environment_type, str):
             raise ValueError(f"environment_type must be a registry name, got {self.environment_type!r}")
         self.environment_type = self.environment_type.lower()
+        self.rewards = read_context_files(self.rewards)
         super().__post_init__()
 
     def _validate_fields(self) -> None:

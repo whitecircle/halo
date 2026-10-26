@@ -6,13 +6,12 @@ sink-dropping backend moves a GptOss loss by nats.
 
 from __future__ import annotations
 
-from datetime import datetime
-
 import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from tests.common.datasets import CHAT_TEMPLATE_NOW
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, cos_sim, log_all
 
@@ -25,12 +24,6 @@ _ROUTER_SUFFIXES = ("router.weight", "gate.weight")
 # Norm ratio and cosine reported for an EP gradient with nothing to compare: no agreement bound accepts
 # it, which also makes it unfit for a negative control's upper bound.
 MISSING_GRAD_SCORE = -1.0
-
-# The clock every fixed batch is rendered against. gpt-oss's harmony template stamps
-# ``strftime_now("%Y-%m-%d")`` into its system message, so an unpinned batch, and every loss threshold
-# measured against it, drifts with the calendar date. The value matters: it moves the rotated-expert
-# control's loss shift, which at 2025-01-01 falls under ``control_min_loss_shift``.
-CHAT_TEMPLATE_NOW = datetime(2026, 8, 26)
 
 # Deterministic conversations for the fixed batches, as (user, assistant) turns. Index 0 is the
 # default short exchange; the rest are longer and mutually distinct, for callers that fill more of

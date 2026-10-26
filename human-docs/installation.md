@@ -119,8 +119,8 @@ docker run --rm -it --gpus all \
 - Drop `-v ~/.aws:/root/.aws` unless you read S3 through your AWS profile.
 
 `make train` runs the same command for you, with `--network host` and without
-`--cap-add=SYS_PTRACE`. It mounts the volume named by `HALO_SCRATCH` (default
-`/mnt`):
+`--cap-add=SYS_PTRACE`. It mounts the volume named by `HALO_SCRATCH`, or, when
+that is unset, the local mount other than `/` with the most free space:
 
 ```bash
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8

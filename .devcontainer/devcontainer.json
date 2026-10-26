@@ -11,6 +11,10 @@
     "workspaceFolder": "/workspace",
     "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
 
+    // The host's large volume, exported as HALO_SCRATCH (resolve it as docker.md's launch recipe does,
+    // then confirm with `findmnt` / `df -h`); it mounts at /scratch.
+    "initializeCommand": "test -n \"$HALO_SCRATCH\" || { echo 'Export HALO_SCRATCH, the large host volume to mount at /scratch' >&2; exit 1; }",
+
     // GPU + IPC/ulimit/shm flags, py-spy's ptrace capability, and the repo-root .env (WANDB/HF/AWS
     // keys — not auto-loaded). Create it first: `cp .env.example .env`, else Docker refuses to start.
     // Scratch and AWS creds ride in as `-v` rather than "mounts" (`--mount`), which errors outright
@@ -23,13 +27,11 @@
         "--shm-size=128g",
         "--cap-add=SYS_PTRACE",
         "--env-file", "${localWorkspaceFolder}/.env",
-        "-v", "${localEnv:HALO_SCRATCH:/mnt}:/scratch",
+        "-v", "${localEnv:HALO_SCRATCH}:/scratch",
         "-v", "${localEnv:HOME}/.aws:/root/.aws"
     ],
 
-    // Caches and toolkit scratch off the small in-container root FS. /scratch is whatever
-    // HALO_SCRATCH points at on the host (default /mnt) — verify it is a large device with
-    // `findmnt` / `df -h` first: a path named /mnt is not guaranteed to be one.
+    // Caches and toolkit scratch off the small in-container root FS, on the host's HALO_SCRATCH.
     "containerEnv": {
         "HF_HOME": "/scratch/hf",
         "HF_DATASETS_CACHE": "/scratch/hf/datasets",
@@ -49,7 +51,6 @@
                 "ms-python.python",
                 "ms-python.vscode-pylance",
                 "ms-python.debugpy",
-                "ms-toolsai.jupyter",
                 "redhat.vscode-yaml"
             ]
         }

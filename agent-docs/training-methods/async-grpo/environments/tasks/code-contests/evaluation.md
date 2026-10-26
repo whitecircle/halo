@@ -27,6 +27,9 @@ python scripts/environments/inference/run_code_contests.py --adapter codeforces 
     --num_examples 100 --num_samples 4 --reasoning_effort high
 ```
 
+- `--adapter` takes the adapters that score raw rows: every [adapter](datasets.md#adapters) but `hardtests`, whose
+  suites join only in its prepared pool. `--env_type` picks `codeforces` or `code_contests`, else the training
+  config's `environment_type`, else `codeforces`.
 - `--training_config` supplies the recipe's rollout settings and language list. A policy trained on
   `[python, cpp]` names a language in every call, which `--language python` alone refuses.
 - `--eval_protocol` picks the protocol, else the training config's, else `harness`; the report title and trajectory meta name it.

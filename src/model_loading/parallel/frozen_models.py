@@ -36,7 +36,7 @@ if TYPE_CHECKING:
     # Annotation only: the entry scripts' argument layer sits beside this package.
     from src.configs.script_arguments import ModelArguments
 
-# Stdlib, not accelerate's adapter: warn_once marks a message seen on every rank, so each rank must emit it.
+# warn_once marks a message seen on every rank, so each rank must emit it.
 logger = logging.getLogger(__name__)
 
 

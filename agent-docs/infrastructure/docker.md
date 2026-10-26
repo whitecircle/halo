@@ -5,12 +5,13 @@ that executes runs inside an image.
 
 - `halo:hopper` — H100/H200 (SM90): FA2 + FA3 + DeepEP.
 - `halo:blackwell` — B200 (SM100) / B300 (SM103): FA2 + FA4 + DeepEP (no FA3).
-- `vllm-server:0.32.0` — vLLM inference server with native NCCL weight transfer (separate container).
-- `sglang-server:0.5.22` — SGLang inference server, NCCL matched to the training image so it can
+- `halo:vllm-0.32.0` — vLLM inference server with native NCCL weight transfer (separate container).
+- `halo:sglang-0.5.22` — SGLang inference server, NCCL matched to the training image so it can
   receive weight updates too ([Rollout Servers](rollout-servers.md)). Serving-only use needs no custom build.
 
-All four are published to Amazon ECR Public under `public.ecr.aws/whitecircle/halo` — anonymous pulls,
-no AWS account ([Registry](#registry)) — or build credential-free from source ([Building](#building)).
+All four are published to Amazon ECR Public under `public.ecr.aws/whitecircle/halo` with the same tags —
+anonymous pulls, no AWS account ([Registry](#registry)) — or build credential-free from source
+([Building](#building)), which tags them with these local names.
 The images are x86_64-only: Grace-based GB200/GB300 hosts (aarch64) need an arm64 build the
 Dockerfile does not provide.
 
@@ -34,8 +35,8 @@ creds-free. It also **omits `--cap-add=SYS_PTRACE`**, so py-spy attaches to a jo
 The equivalent detached background job:
 
 ```bash
-# Resolve the largest real (non-overlay/tmpfs) mount instead of assuming /mnt.
-D=$(findmnt -rbno TARGET,AVAIL,FSTYPE | awk '$3!~/tmpfs|overlay|squashfs|nfs|fuse|autofs/ && $2+0>20e9{print $2,$1}' | sort -rn | head -1 | awk '{print $2}')
+# Resolve the local mount (not /, tmpfs or overlay) with the most free space instead of assuming /mnt.
+D=$(findmnt -rbno TARGET,AVAIL,FSTYPE | awk '$1!="/" && $3!~/tmpfs|overlay|squashfs|nfs|fuse|autofs/ && $2+0>20e9{print $2,$1}' | sort -rn | head -1 | awk '{print $2}')
 docker run -d --rm --name <job> --gpus all \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
     --cap-add=SYS_PTRACE --env-file .env \
@@ -64,10 +65,13 @@ None of those four paths is a code default. Each falls back to its own default w
 (`~/.cache/huggingface`, `~/.cache/halo`, the system `/tmp`), so the redirect is a convention you
 supply.
 
-The Makefile defaults them to `/mnt` via `HALO_SCRATCH ?= /mnt`, the same variable the vLLM compose
-file and the devcontainer read, so exporting `HALO_SCRATCH` once points the whole toolchain at the
-host's large volume. `/mnt` is **not a guaranteed large volume**: on some hosts it shares the small root
-device. Confirm with `findmnt` / `df -h` before any multi-GB write.
+The Makefile puts them under `HALO_SCRATCH`, the same variable the devcontainer requires and the vLLM
+compose file reads, so exporting it once points the whole toolchain at the host's large volume. Unset,
+the Makefile resolves it with the recipe above and stops a target that needs it when no mount
+qualifies; export it on a host with more than one large volume, since the recipe picks by free space,
+and on a CI runner whose seeded HF cache must stay put. The compose file falls back to `/mnt`, which is
+**not a guaranteed large volume**: on some hosts it shares the small root device. Confirm with
+`findmnt` / `df -h` before any multi-GB write.
 
 On a host whose docker default runtime rejects `--gpus` (sysbox-runc, for one), set
 `DOCKER_RUNTIME=nvidia` on any `make` target; empty — the default — leaves the host default in place.
@@ -156,7 +160,7 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
     It guards against BuildKit occasionally serving a stale `src/` snapshot. The same value is stamped as
     `org.opencontainers.image.revision` on all four images (the rollout images would otherwise report their
     engine's upstream commit), with `VERSION` and `BUILD_DATE` as `org.opencontainers.image.version` and
-    `.created`; a build that omits them (a raw `docker build`, the compose auto-build) labels `dev` and an
+    `.created`; a build that omits them (a raw `docker build`) labels `dev` and an
     empty date. So after a `make` build
     `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' halo:blackwell`
     reports which commit an image carries.
@@ -232,35 +236,21 @@ unnoticed.
 
 Both training images are EFA-ready as built, and so are the vLLM and SGLang server images.
 `docker/efa/install_efa_userspace.sh` installs the EFA installer 1.46.0's rdma-core (60) and AWS
-libfabric 2.3.1amzn4.0, replacing the NGC base's MOFED rdma-core in the training images and the
-distro rdma-core of the server bases, and builds `aws-ofi-nccl` at one pinned commit against the
-`uv.lock` NCCL, in all three.
+libfabric 2.3.1amzn4.0 (`/opt/amazon/efa`), replacing the NGC base's MOFED rdma-core in the training
+images and the distro rdma-core of the server bases, and builds `aws-ofi-nccl` at one pinned commit
+against the `uv.lock` NCCL, in all three. That plugin is GIN-capable and exposed as `libnccl-gin.so`;
+GDRCopy's `libgdrapi` ships beside it.
 
 One build everywhere is the point, rdma-core included; why both ends of a weight-sync group must match
 down to it: [Rollout Servers → Servers on other nodes](rollout-servers.md#servers-on-other-nodes-efa).
 
-IB works on the baked defaults; **EFA is a per-job opt-in** (its env vars degrade IB clusters, so they
-are not baked). The image matrix keys on GPU arch only: no separate `-efa` tag.
-
-- **InfiniBand / RoCE** (no extra env) — NCCL's built-in IB transport. The OFI plugin also sits under
-  NCCL's default plugin name, so it is tried on every host and yields to the built-in transports
-  where libfabric finds no provider.
-- **AWS EFA** (opt-in) — libfabric (`/opt/amazon/efa`) + a GIN-capable `aws-ofi-nccl` built at the pinned
-  commit (exporting `ncclGinPlugin_v13`; the NGC-bundled 1.17.3 exports no `ncclGin`) exposed as
-  `libnccl-gin.so`, plus GDRCopy `libgdrapi`.
-
-    Select it per job with `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric`
-    ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)). For DeepEP cross-node EP add
-    `NCCL_GIN_TYPE=2` (proxy GIN; EFA has no IBGDA) and `--device /dev/gdrdrv` (host `gdrdrv` module).
-
-Prerequisites and measured EFA ceilings: [DeepEP → EFA](deepep.md#expert-parallelism-over-aws-efa);
-per-fabric launch env: [Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics). A
-rollout server on another node selects EFA through its compose overlay and the trainer through
-`make ... EFA=1`: [Rollout Servers → Servers on other nodes](rollout-servers.md#servers-on-other-nodes-efa).
+InfiniBand and RoCE run on the [baked defaults](#baked-in-environment-variables); EFA is selected per job,
+so the image matrix keys on GPU arch only, with no separate `-efa` tag. The launch env per fabric:
+[Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics).
 
 ## vLLM inference server
 
-`vllm-server:0.32.0` (`make build-vllm`) is upstream `vllm/vllm-openai:v0.32.0` plus the toolkit's
+`halo:vllm-0.32.0` (`make build-vllm`) is upstream `vllm/vllm-openai:v0.32.0` plus the toolkit's
 weight-sync patches; it pins its own torch/transformers stack, so the trainer never imports vLLM. Build
 gates, patches, serving flags, networking and troubleshooting: [Rollout Servers](rollout-servers.md#vllm).
 
@@ -282,6 +272,10 @@ and retagging locally:
 docker pull public.ecr.aws/whitecircle/halo:hopper-1.1.0
 docker tag  public.ecr.aws/whitecircle/halo:hopper-1.1.0 halo:hopper
 ```
+
+The compose files take the server images from `VLLM_IMAGE` / `SGLANG_IMAGE` (default: the local
+`halo:vllm-0.32.0` / `halo:sglang-0.5.22`), so a pulled server image needs no retag:
+`export VLLM_IMAGE=public.ecr.aws/whitecircle/halo:vllm-0.32.0`.
 
 Maintainers publish with `make push-public-all` (`ecr-public-login` + the four `push-public-*`
 targets). To host the images in your own registry, `docker tag` and `docker push` the locally built

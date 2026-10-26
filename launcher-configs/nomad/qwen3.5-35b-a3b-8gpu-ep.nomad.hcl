@@ -1,6 +1,6 @@
 # Qwen3.5-35B-A3B — node-local EP=8 SFT on UltraChat 200K, one 8-GPU Blackwell client.
 # EP=8 (256 routed experts -> 32/rank) comes from the training config; nothing here overrides it.
-# Submit: nomad job run launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
+# Submit: nomad job run -var 'scratch_host_path=<large volume>' launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
 # Creds:  nomad var put nomad/jobs/halo-qwen35-35b-ep WANDB_API_KEY=... HF_TOKEN=...
 
 variable "image" {
@@ -11,8 +11,7 @@ variable "image" {
 
 variable "scratch_host_path" {
   type        = string
-  default     = "/mnt"
-  description = "Host dir bind-mounted at the same path in-container (HF caches, TMPDIR, scratch root, checkpoints). /mnt is a convention, not a capacity guarantee — see agent-docs/infrastructure/nomad.md#scratch-volume."
+  description = "The client's large volume, bind-mounted at the same path in-container (HF caches, TMPDIR, scratch root, checkpoints). Required: a path name proves no capacity — see agent-docs/infrastructure/nomad.md#scratch-volume."
 }
 
 variable "config_path" {

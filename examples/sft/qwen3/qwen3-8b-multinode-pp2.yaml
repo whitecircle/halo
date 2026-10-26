@@ -28,22 +28,15 @@ packing: true
 
 # --- Training schedule ---
 per_device_train_batch_size: 8        # split into the 8 microbatches above
-per_device_eval_batch_size: 8         # must equal the train batch under PP
 num_train_epochs: 1.0
-gradient_checkpointing: true          # memory headroom; where activations fit, false is faster (pipeline-parallelism.md)
 gradient_checkpointing_kwargs:
   use_reentrant: false                # PP refuses reentrant checkpointing
-optim: adamw_torch_fused
 learning_rate: 1.0e-05
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 32
-seed: 42
 
 # --- Checkpointing & evaluation ---
 output_dir: checkpoints/sft-qwen3-8b-pp2
-save_strategy: steps
-save_steps: 500
 eval_strategy: steps
 eval_steps: 500
 save_total_limit: 2

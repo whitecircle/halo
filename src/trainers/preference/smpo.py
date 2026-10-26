@@ -34,7 +34,6 @@ from transformers import (
 )
 from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalLoopOutput
-from trl.trainer.utils import disable_dropout_in_model
 
 from src.callbacks.variable_scheduler import VariableSchedulerCallback
 from src.configs.preference import SmoothMarginPOConfig
@@ -45,8 +44,7 @@ from src.data.turn_markers import resolve_eos_token_ids
 from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_logprobs, token_logprobs
-from src.model_loading.dtype import is_kbit_quantized
-from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
+from src.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.segment_markers import (
@@ -398,27 +396,16 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         parallelism_config: ParallelismConfig | None,
         tokenizer: PreTrainedTokenizerBase,
     ) -> nn.Module:
-        """The loaded policy with its PEFT wrap, input-grad hook and dropout settled; refuses a padding-free run
-        whose kernels cannot keep the flattened rows apart."""
-        model = resolve_trainer_model(
-            model, args, keep_fp32_non_ep=parallelism_config is not None and parallelism_config.fp32_non_ep_params
-        )
+        """The loaded policy with its PEFT wrap and dropout settled; refuses a padding-free run whose kernels
+        cannot keep the flattened rows apart."""
+        model = resolve_trainer_model(model, args, parallelism_config=parallelism_config)
         # After the load: the ctor accepts a model id, and the config is where a family that closes
         # turns with a role marker (GLM-4, Gemma) declares it. Resolved once, because the tokenize map
         # runs in worker processes and fingerprints its fn_kwargs.
         self._eos_token_ids = resolve_eos_token_ids(tokenizer, getattr(model, "config", None))
-        self._peft_has_been_casted_to_bf16 = False
-        # Gradient checkpointing over frozen embeddings needs grad-requiring inputs. The hook must
-        # precede the PEFT wrap, whose k-bit preparation installs its own on a quantized model.
-        if peft_config is not None:
-            if not is_kbit_quantized(model) and args.gradient_checkpointing:
-                model.enable_input_require_grads()
-            model, self._peft_has_been_casted_to_bf16 = build_peft_model(model, peft_config, args)
-        elif args.gradient_checkpointing:
-            model.enable_input_require_grads()
-
-        if args.disable_dropout:
-            disable_dropout_in_model(model)
+        model, self._peft_has_been_casted_to_bf16 = prepare_policy_model(
+            model, peft_config, args, disable_dropout=args.disable_dropout
+        )
 
         if args.padding_free:
             reject_compressed_kv_rows(model.config, "padding_free")

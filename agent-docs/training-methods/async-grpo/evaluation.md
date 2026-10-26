@@ -54,9 +54,11 @@ A message-list `prompt` reaches the environment as its last `user` turn, as in t
 
 ### Grading under a training config
 
-`--training_config <yaml>` parses the YAML with the training script's config classes, adopting its `RolloutConfig` (template variables, stop tokens, thinking and episode output budgets, sampling) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
+`--training_config <yaml>` parses the YAML with the training script's config classes (`scripts/environments/training_contract.py`), adopting its `RolloutConfig` (backend, template variables, stop tokens, thinking and episode output budgets, sampling, request timeout) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
 
+- It refuses what the trainer refuses, through the same resolvers, before any episode: a `rollout_stop_tokens` entry the config's tokenizer does not know (`resolve_rollout_stop_token_ids`), and under vLLM a thinking budget the served model type cannot enforce (Mistral 4), from the run-wide cap or any effort level the environment can draw (`reject_unenforceable_thinking_budget`).
 - The YAML's dataset keys (`dataset`, `prompt_field`, `answer_field`, `context_fields`) are not read: pass the matching flags.
+- A relative path in the YAML, a judge's `context_file` included, resolves against the cwd: run from the repo root, where `halo launch` runs training.
 - The eval joins no process group, so a recipe whose `episode_timeout` needs a raised `DIST_NCCL_TIMEOUT_MINUTES` in training evaluates without it.
 - To compare a checkpoint with its base, serve each under the same `--served-model-name` and rerun the same command.
 

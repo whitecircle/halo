@@ -54,7 +54,7 @@ Both are registry-gated, and Laguna is in neither registry:
 - **CP** needs a Ulysses attention wrapper. `LagunaAttention` is absent from `ULYSSES_ATTENTION_MAP` — the registered wrappers in `src/distributed/context_parallel/families.py` — so CP, and therefore EP+CP, is rejected.
 - **TP** on a MoE model takes the selective attention-only path (HF's `tp_plan="auto"` mis-shards expert weights), gated on `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`). `LagunaAttention` is not listed, so there is nothing for the DTensor path to shard.
 
-ETP is mechanically reachable (the experts use the shared fused-GLU storage, so `_init_fused_glu_params` handles `expert_tp_size > 1`) and tiny-model verified only: pure ETP and EP+ETP train, save and resume (`tests/gpu/trainers/preference/test_preference_precompute_resume_families.py --mode etp2`, `test_preference_precompute_resume_ep_etp.py`); the released checkpoints are not run under ETP.
+ETP is mechanically reachable (the experts use the shared fused-GLU storage, so `_init_fused_glu_params` handles `expert_tp_size > 1`) and tiny-model verified only: pure ETP and EP+ETP train, save and resume (`tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py --family laguna --mode etp2` and `--mode ep2etp2`); the released checkpoints are not run under ETP.
 
 ## Configs
 

@@ -17,6 +17,7 @@ Usage:
 Requirements: 2x GPUs with >=80GB each, DeepEP for the EP modes, unsloth/gpt-oss-20b-BF16.
 """
 
+import argparse
 import os
 from functools import partial
 
@@ -76,7 +77,9 @@ MODES = {
 
 @gpu_test_main(min_world_size=2, prefix="sft_gptoss_modes")
 def run(ctx):
-    return run_sft_suite(ctx, SUITE, MODES, default_mode="ep")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=[*MODES, "all"], default="ep")
+    return run_sft_suite(ctx, SUITE, MODES, parser.parse_args().mode)
 
 
 if __name__ == "__main__":

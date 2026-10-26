@@ -7,6 +7,7 @@ here is generated and graded exactly as one collected by the trainer.
 
 Usage:
     # 1. Start the rollout server
+    make build-vllm   # or set VLLM_IMAGE to the public image
     docker compose -f docker-compose.vllm.yml up vllm-server
 
     # 2. Launch playground

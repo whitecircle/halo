@@ -45,23 +45,17 @@ def tokenize_prompt_completions(
     eos_token_ids: frozenset[int],
 ) -> tuple[list[int], list[list[int]]]:
     """Token ids of a rendered prompt and its completions under the two length budgets (unset or non-positive =
-    no cap). ``joint_boundary`` tokenizes each ``prompt + completion`` whole and splits all at one prompt length,
-    one token earlier when a token merged across the boundary on any side, so a preference pair conditions on one
-    prompt; otherwise each completion tokenizes alone, as a stored rollout was sampled. BOS goes where the
-    post-processor would emit one, before the prompt is cut by ``truncation_mode``; EOS closes a completion that
-    lacks a terminator, before the plain cut at ``max_completion_length``: an EOS where the text went on would teach
-    stopping there."""
-    completion_cap = max_completion_length if is_bounded_length(max_completion_length) else None
-    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    no cap). ``joint_boundary`` splits every completion off at one prompt length (:func:`_split_jointly`);
+    otherwise each completion tokenizes alone, as a stored rollout was sampled. BOS goes where the post-processor
+    would emit one, before the prompt is cut by ``truncation_mode``; completions close as
+    :func:`_close_completions` does."""
     if joint_boundary:
-        full_ids = [tokenizer(prompt + text, add_special_tokens=False)["input_ids"] for text in completions]
-        split = len(prompt_ids)
-        if any(ids[:split] != prompt_ids for ids in full_ids):
-            split -= 1  # a non-merging side still matches the prompt up to here
-        prompt_ids, completion_ids = prompt_ids[:split], [ids[split:] for ids in full_ids]
+        prompt_ids, _, completion_ids = _split_jointly(prompt, completions, tokenizer)
     else:
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
         # Tokenizer-side, so truncation_side holds, and only under a real cap: HF cuts `max_length=None` at
         # model_max_length.
+        completion_cap = max_completion_length if is_bounded_length(max_completion_length) else None
         completion_ids = [
             tokenizer(
                 text, truncation=completion_cap is not None, max_length=completion_cap, add_special_tokens=False
@@ -74,6 +68,48 @@ def tokenize_prompt_completions(
     if is_bounded_length(max_prompt_length):
         keep_start = truncation_mode == "keep_start"
         prompt_ids = prompt_ids[:max_prompt_length] if keep_start else prompt_ids[-max_prompt_length:]
+    return prompt_ids, _close_completions(completion_ids, tokenizer, eos_token_ids, max_completion_length)
+
+
+def tokenize_completions_jointly(
+    prompt: str,
+    completions: Sequence[str],
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    max_completion_length: int | None,
+    eos_token_ids: frozenset[int],
+) -> tuple[list[list[int]], int]:
+    """The completion ids :func:`tokenize_prompt_completions` gives under ``joint_boundary``, for a prompt tokenized
+    elsewhere (a VLM processor expands its images at collation), and how many of the prompt's last tokens the split
+    moved into them: that prompt must end without them, or the sequence repeats their text."""
+    _, overlap, completion_ids = _split_jointly(prompt, completions, tokenizer)
+    return _close_completions(completion_ids, tokenizer, eos_token_ids, max_completion_length), overlap
+
+
+def _split_jointly(
+    prompt: str, completions: Sequence[str], tokenizer: PreTrainedTokenizerBase
+) -> tuple[list[int], int, list[list[int]]]:
+    """Each ``prompt + completion`` tokenized whole and split at one prompt length, one token earlier when a token
+    merged across the boundary on any side, so a preference pair conditions on one prompt: the prompt ids before
+    the split, how many prompt tokens the split moved into every completion, and the completion ids."""
+    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    full_ids = [tokenizer(prompt + text, add_special_tokens=False)["input_ids"] for text in completions]
+    split = len(prompt_ids)
+    if any(ids[:split] != prompt_ids for ids in full_ids):
+        split -= 1  # a non-merging side still matches the prompt up to here
+    return prompt_ids[:split], len(prompt_ids) - split, [ids[split:] for ids in full_ids]
+
+
+def _close_completions(
+    completion_ids: list[list[int]],
+    tokenizer: PreTrainedTokenizerBase,
+    eos_token_ids: frozenset[int],
+    max_completion_length: int | None,
+) -> list[list[int]]:
+    """EOS closes a completion that lacks a terminator, before the plain cut at ``max_completion_length``: an EOS
+    where the text went on would teach stopping there."""
     eos = [tokenizer.eos_token_id]
-    completion_ids = [ids + eos if lacks_terminator(ids, tokenizer, eos_token_ids) else ids for ids in completion_ids]
-    return prompt_ids, [ids[:completion_cap] for ids in completion_ids]
+    closed = [ids + eos if lacks_terminator(ids, tokenizer, eos_token_ids) else ids for ids in completion_ids]
+    if not is_bounded_length(max_completion_length):
+        return closed
+    return [ids[:max_completion_length] for ids in closed]

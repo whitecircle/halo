@@ -1,11 +1,11 @@
-"""Shared body of the LoRA weight-sync exactness suites: the syncs leave the frozen base bit-identical.
+"""Shared body of the LoRA weight-sync exactness suite: the syncs leave the frozen base bit-identical.
 
 Every rollout-engine sync (online GRPO, async GRPO with environments, SDPG; vLLM or SGLang) pushes the
 policy with the PEFT adapters folded into their bf16 base weights, one tensor at a time and out of
 place. Folding in place and unfolding with PEFT's unmerge would not give the base back: ``(w + d) - d``
 misses ``w`` by a rounding step wherever the two roundings do not cancel, and the sync repeats every
-few steps for the whole run. ``test_lora_weight_sync_exact.py`` runs a representative dense and MoE
-family per mode; ``test_lora_weight_sync_exact_families.py`` sweeps every other family the sync serves.
+few steps for the whole run. ``test_lora_weight_sync_exact.py`` runs it on every family the sync serves:
+its core rows a representative dense and MoE family per mode, its full rows every other family.
 
 A row is one tiny random-init family of :mod:`tests.common.tiny_models` (``--family``: a dense one,
 or a MoE one under its ``model_type``) under one sharding (``--mode``: ``fsdp`` for a dense model;
@@ -120,8 +120,6 @@ MODES = {
     "etp2": {"ep_size": 1, "expert_tp_size": 2},
 }
 DENSE_MODES = ("fsdp",)
-# The core-tier rows: one dense and one MoE family; the full tier sweeps the rest.
-REPRESENTATIVE_FAMILIES = ("qwen3", "qwen3_moe")
 
 
 def syncable_ep_classes() -> set[type]:

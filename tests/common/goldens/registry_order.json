@@ -90,28 +90,6 @@
   "step3p7",
   "zaya"
  ],
- "legacy per-layer config keys": {
-  "gemma4": {
-   "global_head_dim": [
-    "full_attention",
-    "head_dim"
-   ],
-   "num_global_key_value_heads": [
-    "full_attention",
-    "num_key_value_heads"
-   ]
-  },
-  "gemma4_text": {
-   "global_head_dim": [
-    "full_attention",
-    "head_dim"
-   ],
-   "num_global_key_value_heads": [
-    "full_attention",
-    "num_key_value_heads"
-   ]
-  }
- },
  "source config schema model types": [
   "step3p5",
   "step3p7"

@@ -1,8 +1,8 @@
 # Padding-Free Flash Attention Collator
 
-Concatenates variable-length sequences into one flattened tensor and emits `cu_seq_lens` so a varlen Flash Attention kernel skips padding compute. These collators are SFT-only: `select_data_collator` (`src/data/collators/factory.py`) picks them when `padding_free: true`. Mutually exclusive with `packing`. Incompatible with Context Parallelism.
+Concatenates variable-length sequences into one flattened tensor and emits `cu_seq_lens` so a varlen Flash Attention kernel skips padding compute. These collators are SFT-only: `select_data_collator` (`src/data/collators/factory.py`) picks them when `padding_free: true`. Mutually exclusive with `packing`. Incompatible with Context and Pipeline Parallelism.
 
-SMPO also supports `padding_free`, but flattens the batch itself in `_forward_padding_free` (`src/trainers/preference/smpo.py`) rather than using these collators. Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline--arithmetic-intensity-and-the-ridge-point).
+SMPO also supports `padding_free` (not under PP), but flattens the batch itself in `_forward_padding_free` (`src/trainers/preference/smpo.py`) rather than using these collators. Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline--arithmetic-intensity-and-the-ridge-point).
 
 SMPO's flattened row isolates its documents too: attention through `position_ids`, and LFM-2 and GatedDeltaNet through `seq_idx` / `cu_seq_lens` segment markers built by the same gate these collators use (`src/models/segment_markers.py`).
 
@@ -73,13 +73,15 @@ The table uses `--attn_implementation flash_attention_2`. FA4 is also valid: FA4
 
 ## Parallelism compatibility
 
-| Collator | EP | TP | CP |
-|----------|-----|-----|-----|
-| `DataCollatorWithFlattening` (+ `…AndCompletionMask`) | Yes | Yes | **No** |
-| `DataCollatorWithPacking` (+ `DataCollatorForCompletionOnlyLMWithPacking`) | Yes | Yes | **No** |
-| `DataCollatorForCausalLMWithPadding` | Yes | Yes | Yes |
+| Collator | EP | TP | CP | PP |
+|----------|-----|-----|-----|-----|
+| `DataCollatorWithFlattening` (+ `…AndCompletionMask`) | Yes | Yes | **No** | **No** |
+| `DataCollatorWithPacking` (+ `DataCollatorForCompletionOnlyLMWithPacking`) | Yes | Yes | **No** | Yes |
+| `DataCollatorForCausalLMWithPadding` | Yes | Yes | Yes | Yes |
 
 CP requires fixed-length sequences for collective synchronization: padding-free (variable-length output) and packing (the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other) are both rejected by `select_data_collator` when `use_context_parallel=True` — use the standard padded collator with `pad_to_multiple_of=cp_size` ([Context Parallelism](../parallelism/context-parallelism.md)).
+
+PP rejects padding-free: its flattened width varies every step, while the pipeline's point-to-point buffers freeze after the first. Packing runs under PP at one packed row per microbatch, except on the GatedDeltaNet families ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
 
 ## When to use each
 

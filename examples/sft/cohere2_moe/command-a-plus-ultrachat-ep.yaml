@@ -12,7 +12,6 @@ model_revision: 5fb6fde5fd12ff89356aae552e11883bc49f069b
 # near-tied top-k picks can flip between trainer and server. Deliberate opt-in; drop this line for
 # unbalanced-but-serve-exact training.
 moe_balancing: bias_update_transient
-router_balancing_rate: 1.0e-3
 
 # --- Dataset ---
 dataset:
@@ -25,11 +24,9 @@ assistant_message_template: "<|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8               # 128 routed experts → 16/rank
-save_sharded_ep: false                # consolidate expert shards into a single checkpoint
 fp32_router: true
 # Experts stay bf16 (AdamWBF16, 6 B/param) — fp32 masters plus moments cost 16 B/param, which over
 # the 206B routed experts (~26B/rank at ep8) does not fit HBM.
-fp32_experts: false
 
 # --- Attention & kernels ---
 attn_implementation: flash_attention_2   # pinned, not auto: Blackwell would take FA4. The family has
@@ -46,17 +43,13 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 16
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 300

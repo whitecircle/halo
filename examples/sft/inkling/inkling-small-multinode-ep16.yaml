@@ -23,7 +23,6 @@ conversation_field: messages
 test_size: 0.01
 dataset_num_proc: 32
 # Model ships its own chat_template.jinja; assistant turns open with <|message_model|>.
-train_on_completions_only: true
 assistant_message_template: "<|message_model|>"
 # The tokenizer ships no pad_token; <|unused|> (id 199998) is a dedicated special token
 # that never appears in text — safer than aliasing EOS.
@@ -32,7 +31,6 @@ pad_token: "<|unused|>"
 # --- Parallelism & MoE ---
 expert_parallel_size: 16              # 256 routed experts → 16/rank across both nodes
 ep_scope: global
-save_sharded_ep: false                # gather to an HF-standard checkpoint on save
 max_concurrent_loading: 4             # 532 GB checkpoint: 4 ranks at a time (~2.1 TB peak CPU RAM)
 
 # --- Kernels / attention ---
@@ -46,22 +44,17 @@ max_length: 4096
 per_device_train_batch_size: 2
 gradient_accumulation_steps: 1
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR ---
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & eval ---
 output_dir: checkpoints/inkling-small-sft-ep16
-save_strategy: steps
 save_steps: 1000
 save_total_limit: 1
 save_only_model: true
 eval_strategy: steps
 eval_steps: 300
 logging_steps: 1
-report_to: none

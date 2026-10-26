@@ -36,8 +36,9 @@ class CheckpointArguments:
         metadata={
             "help": "Save EP checkpoints as per-rank expert shards written in parallel instead of the gathered HF "
             "checkpoint from_pretrained loads. Nothing loads the shards until "
-            "scripts/after_training/merge_ep_shards.py merges them, without optimizer state, so pair it with "
-            "save_only_model. See agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp."
+            "scripts/after_training/merge_ep_shards.py merges them; the merged directory resumes exactly, "
+            "optimizer included, on the save's topology. "
+            "See agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp."
         },
     )
     save_max_shard_size: str = field(

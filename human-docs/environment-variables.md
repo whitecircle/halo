@@ -27,9 +27,11 @@ which is usually too small for real runs:
 - `HALO_DATA_ROOT`: Halo's scratch (S3 dataset cache, profiler output).
 
 On the host, the `make` targets mount the volume named by `HALO_SCRATCH` and
-put all four on it. The compose `training` service uses it for `TMPDIR` and
-`HALO_DATA_ROOT`; its HF cache follows the host's `HF_HOME`. Export
-`HALO_SCRATCH` once on a host whose large disk is not `/mnt`.
+put all four on it; unset, they pick the local mount other than `/` with the
+most free space.
+The compose `training` service uses it for `TMPDIR` and `HALO_DATA_ROOT`
+(falling back to `/mnt`); its HF cache follows the host's `HF_HOME`. Export
+`HALO_SCRATCH` once to choose the volume yourself.
 
 ## Secrets
 

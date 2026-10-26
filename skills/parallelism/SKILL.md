@@ -31,6 +31,8 @@ section before a verdict on any non-trivial combo:
 - `data_parallel_size` — [Stacking the dimensions](../../agent-docs/parallelism/README.md#stacking-the-dimensions);
 - trainer × CP/PP — [Trainer Compatibility](../../agent-docs/reference/trainer-architecture.md#trainer-compatibility);
 - family × axis — [Compatibility matrix](../../agent-docs/models/README.md#compatibility-matrix);
+- PP stage layout, families and refusals —
+  [Pipeline Parallelism](../../agent-docs/parallelism/pipeline-parallelism.md#rejected-combinations);
 - per-axis knob refusals — each axis page's *Limitations*.
 
 The code is the **ultimate** authority: `src/distributed/parallelism_rules.py` (`reject_unsupported_axes`,

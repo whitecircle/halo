@@ -6,10 +6,8 @@ read the same spec by ``config.model_type`` without importing the EP package.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
-from types import MappingProxyType
 
 from src.models.config_access import config_sources
 from src.models.moe.config_fields import has_routed_experts
@@ -39,9 +37,6 @@ class MoEFamilySpec:
     # and sibling spellings that carry it.
     model_types: tuple[str, ...]
     balancing_slot: NativeBalancingSlot | None = None
-    # ``{flat key: (layer_type, per-layer field)}`` the pinned vLLM reads, where transformers re-serializes only
-    # the folded ``per_layer_config``.
-    served_flat_config_keys: Mapping[str, tuple[str, str]] = MappingProxyType({})
     # No pinned engine reads transformers' serialization of this config, so exports carry the source repo's
     # ``config.json`` and ``auto_map`` modules.
     exports_source_config_schema: bool = False
@@ -102,14 +97,6 @@ DEEPSEEK_V4 = MoEFamilySpec(
 GEMMA4 = MoEFamilySpec(
     model_types=("gemma4", "gemma4_text"),
     expert_layout=ExpertLayout(key_prefix=""),
-    # The full-attention layers' geometry, which older vLLM servers read off these flat keys; the pinned
-    # server's transformers folds them back into ``per_layer_config`` at parse.
-    served_flat_config_keys=MappingProxyType(
-        {
-            "global_head_dim": ("full_attention", "head_dim"),
-            "num_global_key_value_heads": ("full_attention", "num_key_value_heads"),
-        }
-    ),
     # Documented to fail at the first dispatch (agent-docs/models/gemma4.md); refused at load instead.
     supports_fp32_non_ep_params=False,
     # The sibling router passes only pre-weighted (indices, weights), with nothing to re-derive.

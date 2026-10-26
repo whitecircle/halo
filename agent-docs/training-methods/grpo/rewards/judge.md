@@ -19,6 +19,7 @@ Shared term fields, `on_error` and the launch probe: [Reward Terms](README.md).
 | `temperature` | unset | Reasoning models refuse an explicit one |
 | `view` | `final` | `final`, `full` or `digest` ([Views](#views)) |
 | `context` | unset | What the episode does not show (how the environment and its limits work) |
+| `context_file` | unset | A UTF-8 text file read into `context` when the config is parsed, so the environments receive the text; absolute or relative to the launch directory, and exclusive with `context` |
 | `include_reference`, `include_reasoning` | `true`, `true` | Show the reference answer (when the sample has one); show the policy's reasoning in the `full` and `digest` views |
 | `on_error` | `invalid`; `neutral` for a veto judge | [Outages](README.md#outages) |
 | `max_tokens`, `request_timeout`, `max_concurrency` | `8192`, `120`, `16` | Per request (`max_tokens` includes reasoning); concurrency per scorer (per rank or actor) |

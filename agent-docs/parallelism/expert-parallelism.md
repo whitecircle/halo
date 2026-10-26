@@ -350,7 +350,7 @@ across domains; on a multi-node NVLink fabric set `NVLINK_DOMAIN_SIZE` to the fa
 `tests/gpu/parallelism/ep/test_ep_deterministic_expert_grads.py` replays a backward under
 `full_determinism` and requires the loss and every gradient bit-identical: GPT-OSS on every two-rank
 layout (ep2 at the model's top-k and at top-1, the per-expert loop, the `legacy` buffer, ep1, pure
-ETP), Qwen3-MoE on ep2, and every other family on ep2 in `..._families.py`.
+ETP), and every other family on ep2.
 
 ## Gradient-checkpoint dispatch replay
 
@@ -369,7 +369,8 @@ cannot reach a scope it did not create. The recompute signal is the scope's pass
 mode, so replay works in both checkpoint modes — but the two modes are still **not**
 interchangeable.
 
-`use_reentrant=True` is **required** — the trainer forces it. Non-reentrant triggers its recompute
+`use_reentrant=True` is **required** — the trainer forces it outside pipeline parallelism, whose stages
+run non-reentrant ([PP + EP](pipeline-parallelism.md#pp--ep-moe)). Non-reentrant triggers its recompute
 lazily, when backward first needs a discarded tensor; nothing imposes a common order across ranks,
 they desynchronize, and DeepEP's barrier times out — `cudaErrorLaunchFailure`, an unrecoverable
 abort, not a raised error. Measured on 2 GPUs: reentrant is grad-exact (worst relative gradient
@@ -441,9 +442,9 @@ The eager fallback replays only selected masters after HF construction, using th
 mapping and expert layout. FP32-stored masters need a **second read**; BF16 safetensors masters
 promote the already-loaded values without rereading their payload. Under `fp32_experts`, FP32 replay
 materializes the **full** expert bank before the EP slice: twice the expert bytes of BF16, plus
-conversion temporaries. Pure EP stages this bank on each admitted CPU rank; eager EP+TP and ETP
-stage it on each GPU before slicing. `max_concurrent_loading` bounds admitted ranks per node;
-the lazy path reads only each rank's expert slice and avoids full-bank staging.
+conversion temporaries. Every eager EP path (EP, EP+CP, EP+TP, ETP) stages this bank on each admitted
+CPU rank and slices it before the move to the GPU. `max_concurrent_loading` bounds admitted ranks per
+node; the lazy path reads only each rank's expert slice and avoids full-bank staging.
 
 Buffers must be real: a config-less rotary derives `inv_freq` from ctor args it never stores, which a
 meta build loses irrecoverably. The `from_pretrained(device_map="meta")` route strands the
@@ -504,9 +505,9 @@ so the pause at each save is bounded by one rank's shard instead of by the whole
 through a single writer. Host memory is not a reason to choose it: a sharded save holds *more* per
 node (every local rank buffers its own slice).
 
-The cost is that nothing loads the result. `merge_ep_shards.py` must run before resume or serving,
-and the merge carries no optimizer state, so a resume from the merged directory warm-restarts. Pair
-it with `save_only_model: true`, as every shipped sharded config does.
+The cost is that nothing loads the result. `merge_ep_shards.py` must run before resume or serving;
+it carries the optimizer shards and their meta, so a resume from the merged directory is exact on the
+save's topology ([Checkpoints & Resume](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)).
 
 `save_max_shard_size` does not apply to these files; a per-rank shard is one file by design. The cap
 bounds the gathered save; the merged artifact takes `merge_ep_shards.py --max_shard_size`.
@@ -578,7 +579,7 @@ on top of it: [Supported combinations](README.md#supported-combinations).
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `load_rules.py`, `reject_accelerate_launch` |
 | `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `reject_unmergeable_ep_sharded_save` |
-| `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`. `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_install_ep_gradient_checkpointing` |
+| `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (non-reentrant under PP). `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_install_ep_gradient_checkpointing` |
 | `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `load_ep_model` (`src/model_loading/parallel/ep.py`) |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the wrappers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `src/model_loading/liger/dispatch.py` |
 | `moe_balancing` | `aux_loss` is inert on families whose EP wrapper severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |

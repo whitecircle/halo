@@ -356,7 +356,7 @@ def _bounded_batch(rank, root, failure, dp_size, writers, buffer_values):
     cache.writers = writers
     rejects = []
     metadata = []
-    original_join = consensus._rank_max
+    original_join = consensus.rank_max
     original_metadata_gather = dist.all_gather_into_tensor
 
     def record_reject(slots):
@@ -373,7 +373,7 @@ def _bounded_batch(rank, root, failure, dp_size, writers, buffer_values):
     def unexpected_broadcast(*args, **kwargs):
         pytest.fail("batch metadata used per-shard broadcasts")
 
-    patch.setattr(consensus, "_rank_max", record_reject)
+    patch.setattr(consensus, "rank_max", record_reject)
     patch.setattr(dist, "all_gather_into_tensor", record_metadata)
     patch.setattr(dist, "broadcast", unexpected_broadcast)
     if failure == "write" and rank == writers[-1]:

@@ -1,7 +1,7 @@
 # Citation metadata — https://citation-file-format.github.io
 cff-version: 1.2.0
 message: "If you use this software, please cite it using these metadata."
-title: "Halo — LLM Alignment Toolkit"
+title: "Halo"
 abstract: >-
   Halo is an open-source framework built by White Circle for training large
   language and multimodal models: pre-training and post-training (SFT, SMPO,

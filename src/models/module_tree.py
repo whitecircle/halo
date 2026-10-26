@@ -12,7 +12,7 @@ import torch
 from src.models.unwrapping import base_transformers_model
 
 # Repo-wide rather than per-family: a backbone spelling missing here is invisible to every consumer.
-DECODER_LAYER_LIST_ATTRS: tuple[str, ...] = ("layers", "h")
+DECODER_LAYER_LIST_ATTRS: tuple[str, ...] = ("layers", "h", "layer")
 # ``<attr>.<N>`` at a name boundary inside a dotted module or parameter name: the decoder-layer index
 # every consumer numbers blocks by (``xlayers.3`` and ``layers.3x`` do not match).
 _DECODER_LAYER_INDEX = re.compile(rf"(?<![^.])(?:{'|'.join(map(re.escape, DECODER_LAYER_LIST_ATTRS))})\.(\d+)(?![^.])")
@@ -34,7 +34,8 @@ def decoder_layers_attr(backbone: torch.nn.Module) -> str:
 
 
 def decoder_layers(module: torch.nn.Module) -> torch.nn.ModuleList | None:
-    """``module``'s own decoder-layer list (``.layers``, or GPT-2-style ``.h``), or None if it has none."""
+    """``module``'s own decoder-layer list (``.layers``, GPT-2-style ``.h`` or BERT-style ``.layer``), or None if
+    it has none."""
     attr = find_attr_name(module, DECODER_LAYER_LIST_ATTRS)
     return getattr(module, attr) if attr is not None else None
 
@@ -61,7 +62,7 @@ def decoder_layer_stack_prefix(name: str) -> str | None:
 
 
 def backbone_with_layers(model: torch.nn.Module) -> torch.nn.Module | None:
-    """The module owning the decoder layer list (``.layers`` or ``.h``), or None if none is reachable.
+    """The module owning the decoder layer list (:data:`DECODER_LAYER_LIST_ATTRS`), or None if none is reachable.
 
     Walks down from ``model`` through ``language_model`` (read first: a multimodal wrapper also has
     ``.model``), else ``.model``, else ``.transformer``. Framework and toolkit wrappers are not peeled;

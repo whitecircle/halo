@@ -20,6 +20,7 @@ Versions compared: TRL 1.14.2 and Accelerate 1.11.0 (the pinned releases), Unslo
 | EP for MoE (no conversion) | **DeepEP** | No | No | No | **DeepEP** (v0.17) | Via Megatron | Via Megatron | MCore format |
 | Context Parallelism | **Ulysses (SFT, SMPO, offline GRPO full-FT)** | SFT-only; needs a newer Accelerate | Yes (FSDP2) | No | Yes (ring/seq) | Via Megatron | Via Megatron | MCore |
 | Tensor Parallelism | Yes (DTensor) | Via Accelerate; needs a newer Accelerate | Yes (ND-parallel) | No | Yes (experimental) | Via Megatron | Via Megatron | MCore |
+| Pipeline Parallelism | **Yes (registered families; EP inside each stage)** | No | Inference only (PiPPy) | No | No | Via Megatron | Via Megatron | MCore |
 | Combined EP+CP / EP+TP / pure ETP | **Yes** | No | No (no EP) | No | Partial (EP×CP and EP×CP×FSDP; EP×TP raises) | Via Megatron | Via Megatron | Yes |
 | Full BF16 (~6 bytes/param) | **AdamWBF16 + SR** | No (FP32 masters) | Plumbing only | No | bf16 MP only | No | No | No |
 | Multi-turn RL | **Async Ray + built-in envs** | Async GRPO + env adapters (OpenEnv, Harbor, OpenReward) | — | Via ART | Async GRPO + NeMo Gym | GYM env | AgentLoop + SGLang | No |
@@ -37,6 +38,7 @@ Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — 
 | EP+TP or pure ETP on MoE | **This Toolkit** | Expert shapes other HF-native tools don't compose |
 | Memory-constrained full fine-tuning | **This Toolkit** | AdamWBF16 — ~6 bytes/param |
 | Long-context training (scales with nGPUs) | **This Toolkit** | CP splits sequences; combines with EP |
+| MoE wider than one NVLink domain, on HF weights | **This Toolkit** | PP across domains, EP inside each stage |
 | SMPO or Offline GRPO | **This Toolkit** | Unique methods |
 | Multi-turn RL with tool environments | **This Toolkit** | Ray actors, NCCL sync, built-in envs |
 | Config-driven SFT/DPO/GRPO over many models (incl. FSDP+EP) | Axolotl | YAML, DeepEP EP (v0.17), s3/GCS data, FA2/3/4 |
@@ -45,7 +47,7 @@ Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — 
 | SFT/DPO on single node, standard models | HF TRL | Simplest setup, largest community |
 | Online PPO/GRPO with many algorithm variants | veRL or MS-SWIFT | Purpose-built for online RL |
 | Broad model coverage + no-code UI | MS-SWIFT | 600+ models, Gradio Web UI |
-| Pre-training at 1000+ GPU scale | Megatron-LM | Pipeline parallelism, peak utilization |
+| Dense pre-training at 1000+ GPU scale | Megatron-LM | TE/FP8 kernels, peak utilization |
 
 Measured throughput against NeMo AutoModel, Megatron-LM, Axolotl, MS-SWIFT, Unsloth and transformers' own
 expert-parallel path: [Throughput Benchmarks](../optimization/throughput-benchmarks.md#published-numbers-in-similar-setups).

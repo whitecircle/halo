@@ -2,7 +2,7 @@
 
 `Mistral4ForCausalLM` is the text side of `Mistral3ForConditionalGeneration` — the LM in `mistralai/Mistral-Small-4-*` and any `mistral3` VLM. It is a DeepSeek-V3 clone: softmax + group-topk routing with an always-on shared expert, MLA (multi-head latent attention) with llama-4 logarithmic position scaling, and YARN RoPE.
 
-Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). The Mistral4 suite runs EP+ETP as `ep_size=2, expert_tp_size=4`; the legal sibling `ep4+etp2` is not in it. EP+CP is a valid shape whose only GPU test on this model is a tiny-model LoRA row: `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py --family mistral4 --cp-size 2` (ep2+cp2).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). The Mistral4 suite runs EP+ETP as `ep_size=2, expert_tp_size=4`; the legal sibling `ep4+etp2` is not in it. EP+CP is a valid shape whose only GPU test on this model is a tiny-model LoRA row: `tests/gpu/trainers/lora/test_lora_merged_save_resume.py --family mistral4 --cp-size 2` (ep2+cp2).
 
 Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family mistral4` (one node per single-node mode under `pytest -m "gpu and mistral4"`; the single-node EP+CP coverage lives in the script's Cohere2 MoE rows); `tests/cpu/parallelism/test_mistral4_registries.py` pins the EP/CP/TP registry claims.
 

@@ -22,6 +22,7 @@ from src.models.config_access import (
     set_config_field_run_scoped,
 )
 from src.models.moe.router_logits import DeclaredRouter, declared_routers, router_logits_forced_off
+from src.runtime.consensus import rank_max
 from src.runtime.ranks import get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -233,15 +234,9 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
         # CUDA device since NCCL rejects CPU tensors.
         active = [c for c in counters if c is not None]
         device = active[0].device if active else current_device()
-        dims = torch.tensor(
-            [len(counters), max((c.shape[0] for c in active), default=0)],
-            device=device,
-            dtype=torch.long,
+        num_layers, max_e = rank_max(
+            [len(counters), max((c.shape[0] for c in active), default=0)], group=self.reduce_group
         )
-        distributed = get_global_world_size() > 1
-        if distributed:
-            dist.all_reduce(dims, op=dist.ReduceOp.MAX, group=self.reduce_group)
-        num_layers, max_e = int(dims[0]), int(dims[1])
 
         if num_layers == 0 or max_e == 0:
             # Only a hooked callback can diagnose an empty capture; when wiring was declined the
@@ -263,7 +258,7 @@ class MoEMetricsCallback(MoELoadMetricsCallback):
             if c is not None:
                 stacked[i, : c.shape[0]] = c
 
-        if distributed:
+        if get_global_world_size() > 1:
             dist.all_reduce(stacked, op=dist.ReduceOp.SUM, group=self.reduce_group)
 
         self._pending = compute_moe_load_metrics(stacked, exclude_last_slot=self.exclude_last_slot)

@@ -3,8 +3,9 @@
 Any HuggingFace `AutoModelForCausalLM` trains on Halo's data-parallel path with
 no extra work: point `model_name_or_path` at it and launch.
 
-The families below also have expert, context or tensor-parallel wrappers, a
-tuned recipe and GPU-validated coverage. Fifteen of them are MoE.
+The families below also have expert, context, tensor or pipeline-parallel
+support ([which, per family](supported-matrix.md#model-families)), a tuned
+recipe and GPU-validated coverage. Fifteen of them are MoE.
 
 | Family | Hub example | Kind | What to know |
 | --- | --- | --- | --- |

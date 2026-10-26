@@ -2,7 +2,7 @@ name: branch-cleanup
 
 # Deletes remote branches whose tip commit is older than 90 days and that have no open PR.
 # The default branch, the `allowlist` branch (the contribution gate reads
-# .github/APPROVED_CONTRIBUTORS from it — see pr-gate.yml), and release-* are never touched.
+# .github/APPROVED_CONTRIBUTORS from it — see pr-gate.yml), and release/* are never touched.
 # Deleting a branch discards its commits once they are garbage-collected, so preview the list with
 # the `workflow_dispatch` dry-run first; the run logs every branch and tip SHA it deletes.
 
@@ -53,7 +53,7 @@ jobs:
             // actually shields from deletion just fails the deleteRef call and is logged below.
             let deleted = 0, kept = 0, failed = 0;
             for (const br of branches) {
-              if (br.name === defaultBranch || br.name === 'allowlist' || br.name === 'gh-pages' || br.name.startsWith('release-')) { kept++; continue; }
+              if (br.name === defaultBranch || br.name === 'allowlist' || br.name.startsWith('release/')) { kept++; continue; }
               if (prRefs.has(br.name)) { kept++; continue; }
               const commit = await github.rest.repos.getCommit({ owner, repo, ref: br.commit.sha });
               const date = new Date(commit.data.commit.committer.date).getTime();

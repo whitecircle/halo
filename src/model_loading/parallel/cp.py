@@ -46,11 +46,9 @@ def load_cp_model(
     model = load_whole_model(
         model_class,
         source,
+        pc,
         load_phase="CP model load",
-        max_concurrent_loading=pc.max_concurrent_loading,
         ep_config=ep_config,
-        keep_fp32_non_ep=pc.fp32_non_ep_params,
-        ep_wrapped=wraps_experts,
         preserve_checkpoint_precision=preserve_checkpoint_precision,
         **kwargs,
     )

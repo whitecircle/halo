@@ -28,7 +28,7 @@ class _RecordingDist:
     """Stands in for ``torch.distributed``, recording every all-reduce payload shape.
 
     ``get_world_size`` also stands in for the callback's world-size read, which goes through
-    :func:`get_global_world_size` rather than this object.
+    :func:`get_global_world_size` rather than this object, and ``rank_max`` for the dims agreement.
     """
 
     ReduceOp = torch.distributed.ReduceOp
@@ -44,10 +44,15 @@ class _RecordingDist:
         self.calls.append(tuple(tensor.shape))
         return None
 
+    def rank_max(self, values, group=None):
+        self.calls.append((len(values),))
+        return list(values)
+
 
 def _install(monkeypatch, stub: _RecordingDist) -> None:
     """Point the callback's collectives AND its world-size read at one stub."""
     monkeypatch.setattr(moe_metrics, "dist", stub)
+    monkeypatch.setattr(moe_metrics, "rank_max", stub.rank_max)
     monkeypatch.setattr(moe_metrics, "get_global_world_size", stub.get_world_size)
 
 

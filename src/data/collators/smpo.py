@@ -3,7 +3,7 @@
 Prompts are left-padded so the completion boundary aligns across a batch; completions are right-padded."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -13,6 +13,7 @@ from trl.trainer.utils import pad
 
 from src.data.completion_spans import completion_labels
 from src.data.pipeline.chat_render import lacks_emitted_bos
+from src.data.pipeline.preferences import PROMPT_OVERLAP_COLUMN
 from src.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS, run_vlm_processor
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 
@@ -53,11 +54,15 @@ class DataCollatorForSMPO(DataCollatorMixin):
 class DataCollatorForVLMSMPO(DataCollatorForSMPO):
     """SMPO collator for VLM rows (templated ``prompt_text`` + ``images``, pre-tokenized completions): the
     images expand here rather than in the Arrow cache, and every extra processor tensor is concatenated
-    row-major. Prompts are never truncated (that desyncs placeholders from pixels): an over-length one raises.
+    row-major. The prompt ends before the tokens its completions start with (``prompt_overlap``). Prompts are
+    never truncated (that desyncs placeholders from pixels): an over-length one raises.
     """
 
     processor: ProcessorMixin | None = None
     max_prompt_length: int | None = None
+
+    # Unioned into HF's signature columns, which the trainer derives without it.
+    required_dataset_columns: ClassVar[tuple[str, ...]] = (PROMPT_OVERLAP_COLUMN,)
 
     def __post_init__(self):
         if self.processor is None:
@@ -71,10 +76,11 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
         for example in examples:
             images = example.get("images") or []
             encoded = run_vlm_processor(self.processor, example["prompt_text"], images)
+            prompt_length = encoded["input_ids"].size(1) - example.get(PROMPT_OVERLAP_COLUMN, 0)
 
             # run_vlm_processor tokenizes with add_special_tokens=False, so the BOS the tokenizer's
             # own post-processor emits is restored here, as on the text path.
-            prompt_ids = encoded["input_ids"][0].tolist()
+            prompt_ids = encoded["input_ids"][0, :prompt_length].tolist()
             bos_prepended = lacks_emitted_bos(prompt_ids, tokenizer)
             if bos_prepended:
                 prompt_ids = [tokenizer.bos_token_id, *prompt_ids]
@@ -91,7 +97,7 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
                 if key in ("input_ids", "attention_mask"):
                     continue
                 if key in SEQUENCE_ALIGNED_VISION_KEYS:
-                    aligned = value[0]
+                    aligned = value[0, :prompt_length]
                     if bos_prepended:  # keep 1:1 with prompt_input_ids (BOS is a text position → 0)
                         aligned = torch.cat([aligned.new_zeros(1), aligned])
                     sequence_features.setdefault(key, []).append(aligned)

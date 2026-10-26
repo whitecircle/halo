@@ -6,6 +6,7 @@ dataset shape is the subject of that test, stays inline in that file.
 """
 
 import random
+from datetime import datetime
 
 from datasets import Dataset, DatasetDict, Sequence
 from datasets import Image as HFImage
@@ -15,6 +16,13 @@ from src.data.preprocessed.metadata import PreprocessingConfig
 from src.data.preprocessed.preparation import preprocess_dataset
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
+
+# The clock every synthetic dataset and fixed batch is rendered against. gpt-oss's harmony template stamps
+# ``strftime_now("%Y-%m-%d")`` into its system message, so an unpinned render, and every loss threshold
+# measured against it, drifts with the calendar date. The value matters: it moves the rotated-expert
+# control's loss shift (``tests/common/ep_reference.py``), which at 2025-01-01 falls under
+# ``control_min_loss_shift``.
+CHAT_TEMPLATE_NOW = datetime(2026, 8, 26)
 
 # Math Templates (shared across SFT and preference datasets)
 
@@ -43,9 +51,16 @@ def _compute_result(a: int, b: int, op: str) -> int:
 
 
 def _apply_chat_template(tokenizer, messages, add_generation_prompt=False):
-    """Apply chat template with fallback for tokenizers without one."""
+    """Apply chat template with fallback for tokenizers without one. The template's clock reads
+    :data:`CHAT_TEMPLATE_NOW`: ``strftime_now`` is a jinja global transformers injects into every chat
+    template, and a same-named render kwarg shadows it, a no-op for templates that never call it."""
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=add_generation_prompt)
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+            strftime_now=CHAT_TEMPLATE_NOW.strftime,
+        )
     sep = "\n"
     parts = []
     for m in messages:

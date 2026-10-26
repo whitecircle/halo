@@ -7,8 +7,8 @@ index, which is a per-rank read on a filesystem that need not be shared: a rank 
 half-populated raises inside ``json.load`` while its peers are already in the next collective, and a
 rank whose cache disagrees takes a different branch entirely. Both hang the job with no diagnostic.
 
-So rank 0 decides for everyone and broadcasts. The PP and EP+TP loaders share the EP loader's gate,
-through the lazy-checkpoint verdict, rather than probing per-rank.
+So rank 0 decides for everyone and broadcasts. The PP loader shares the EP loader's gate through the
+lazy-checkpoint verdict, and the EP+TP loader loads through the EP loader itself; neither probes per-rank.
 
     python tests/cpu/parallelism/test_ep_sharded_probe_gate.py
 """
@@ -28,10 +28,11 @@ from src.model_loading.parallel.model_source import ModelSource, reject_ep_shard
 from tests.common.repo import REPO_ROOT
 from tests.common.utils import imports_name
 
-# The PP stage loader and the EP+TP loader, each a module that could hold a probe of its own.
+# The PP stage loader and the EP+TP loader, each a module that could hold a probe of its own, with the
+# call through which each reaches the shared gate.
 LOADER_MODULES = {
-    "load_pp_stage_model": REPO_ROOT / "src/model_loading/parallel/pp.py",
-    "load_ep_tp_model": REPO_ROOT / "src/model_loading/parallel/tp.py",
+    "load_pp_stage_model": (REPO_ROOT / "src/model_loading/parallel/pp.py", "resolve_lazy_checkpoint"),
+    "load_ep_tp_model": (REPO_ROOT / "src/model_loading/parallel/tp.py", "load_ep_model"),
 }
 
 
@@ -93,14 +94,14 @@ def test_the_lazy_checkpoint_verdict_refuses_a_sharded_checkpoint(tmp_path):
 @pytest.mark.parametrize("loader", sorted(LOADER_MODULES))
 def test_every_loader_that_can_be_handed_a_sharded_dir_runs_the_shared_gate(loader):
     """Drift pin: importing the index predicate is what a re-introduced per-rank probe would need."""
-    module = LOADER_MODULES[loader]
+    module, gate = LOADER_MODULES[loader]
     assert not imports_name(module, "index_declares_ep_shards")
     tree = ast.parse(module.read_text(encoding="utf-8"))
     function = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == loader)
     called = {
         node.func.id for node in ast.walk(function) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert "resolve_lazy_checkpoint" in called, f"{loader} does not refuse an EP-sharded checkpoint"
+    assert gate in called, f"{loader} does not refuse an EP-sharded checkpoint"
 
 
 if __name__ == "__main__":

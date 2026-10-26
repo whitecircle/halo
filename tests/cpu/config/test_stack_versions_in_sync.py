@@ -36,6 +36,7 @@ import pytest
 from tests.common.repo import REPO_ROOT, load_script_module
 
 nccl_pin = load_script_module("docker/nccl_pin.py")
+locked_version = load_script_module(".github/scripts/locked_version.py").locked_version
 
 # Every tree that states a stack version: the root guides, both doc trees, the error strings and
 # docstrings under src/, the pinned-behaviour comments in tests/ and scripts/, the launch comments
@@ -367,25 +368,38 @@ def test_every_exemption_still_describes_something():
 def test_image_tags_agree_with_the_dockerfile_args():
     """Every engine image tag written down — build/push, compose default, doc, test, launch comment
     — names the version its Dockerfile ARG builds, exactly: the scan above reads a tag as a version
-    statement, which accepts the line (``vllm-server:0.26``) where a tag has to be the whole number.
+    statement, which accepts the line (``halo:vllm-0.26``) where a tag has to be the whole number.
     ``Makefile`` is here rather than in the scan because tags are all it states."""
     pins = stack_pins()
     expected = {
-        "vllm-server": _dockerfile_value("Dockerfile.vllm", r"^ARG VLLM_VERSION=(\S+)$"),
-        "sglang-server": _dockerfile_value("Dockerfile.sglang", r"^ARG SGLANG_VERSION=(\S+)$"),
+        "halo:vllm": _dockerfile_value("Dockerfile.vllm", r"^ARG VLLM_VERSION=(\S+)$"),
+        "halo:sglang": _dockerfile_value("Dockerfile.sglang", r"^ARG SGLANG_VERSION=(\S+)$"),
     }
-    assert expected["vllm-server"] in pins["vllm"] and expected["sglang-server"] in pins["sglang"]
+    assert expected["halo:vllm"] in pins["vllm"] and expected["halo:sglang"] in pins["sglang"]
 
     wrong, found = [], {image: 0 for image in expected}
     for path in sorted({REPO_ROOT / "Makefile", *SCANNED_FILES}):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             for image, version in expected.items():
-                for tagged in re.findall(rf"{image}[:-]([\d.]+)", line):
+                for tagged in re.findall(rf"{image}-(\d+(?:\.\d+)*)", line):
                     found[image] += 1
                     if tagged != version:
-                        wrong.append(f"{path}:{number} tags {image}:{tagged}, but the ARG builds {version}")
+                        wrong.append(f"{path}:{number} tags {image}-{tagged}, but the ARG builds {version}")
     assert not wrong, "image tags disagree with the Dockerfile ARG they are built from:\n  " + "\n  ".join(wrong)
     assert all(found.values()), f"no image tag left to check for {sorted(k for k, v in found.items() if not v)}"
+
+
+def test_ruff_is_pinned_once_in_the_lock():
+    """``uv.lock`` is ruff's one pin: CI and ``make lint`` read it, and pre-commit, which takes only a
+    literal ``rev``, is held to it here, so a ruff bump is a ``uv lock`` plus that one line."""
+    locked = locked_version("ruff")
+    pre_commit = (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    revs = re.findall(r"repo: https://github\.com/astral-sh/ruff-pre-commit\n\s+rev: v(\S+)", pre_commit)
+    assert revs == [locked], f"pre-commit runs ruff {revs}, but uv.lock pins {locked}"
+    for name in (".github/workflows/lint.yml", "Makefile"):
+        text = (REPO_ROOT / name).read_text(encoding="utf-8")
+        literal = re.findall(r"(?:ruff==|ruff@|RUFF_VERSION \?= )v?(\d[\w.]*)", text)
+        assert not literal, f"{name} pins ruff {literal} by hand instead of reading uv.lock"
 
 
 def test_the_scan_actually_reads_the_stack():

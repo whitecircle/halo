@@ -108,7 +108,7 @@ pytest tests/cpu/trainers tests/cpu/config/test_embedding_pipeline_alignment.py 
 torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_embedding.py
 ```
 
-The GPU suite trains MNRL and CoSENT plus LoRA and round-trips the gathered save and the LoRA merge on `sentence-transformers/paraphrase-MiniLM-L3-v2`. `tests/gpu/trainers/lora/test_embedding_lora_resume*.py` resume a run from its mid checkpoint against the uninterrupted one per backbone family (BERT, Qwen3, Qwen3.5, Gemma 4, GPT-OSS) and run shape (one GPU, FSDP2, accelerate DDP, pre-sharded data): LoRA on the attention projections, on the input embedding beside them or alone (`--lora`), where TP and EP must refuse the adapters, and a full fine-tune (`--lora off`), which also runs under TP (Qwen3, Qwen3.5, GPT-OSS) and EP (Gemma 4, GPT-OSS) and checks the best-model load wherever the model has no EP layers.
+The GPU suite trains MNRL and CoSENT plus LoRA and round-trips the gathered save and the LoRA merge on `sentence-transformers/paraphrase-MiniLM-L3-v2`. `tests/gpu/trainers/lora/test_embedding_lora_resume.py` resumes a run from its mid checkpoint against the uninterrupted one per backbone family (BERT, Qwen3, Qwen3.5, Gemma 4, GPT-OSS) and run shape (one GPU, FSDP2, accelerate DDP, pre-sharded data): LoRA on the attention projections, on the input embedding beside them or alone (`--lora`), where TP and EP must refuse the adapters, and a full fine-tune (`--lora off`), which also runs under TP (Qwen3, Qwen3.5, GPT-OSS) and EP (Gemma 4, GPT-OSS) and checks the best-model load wherever the model has no EP layers.
 
 ## Related pages
 

@@ -23,7 +23,7 @@ from transformers.trainer_utils import seed_worker
 
 from src.hardware import current_device
 from src.runtime.collectives import all_gather_cat
-from src.runtime.consensus import rank_consensus
+from src.runtime.consensus import rank_consensus, rank_min
 from src.runtime.ranks import get_global_world_size, has_process_group, is_global_main_process, is_multi_rank_run
 from src.trainers.parallelism.trainer_rules import reject_batch_rebalance_on_dp_sharded_loader, reject_dispatch_batches
 
@@ -255,9 +255,7 @@ class DataParallelLoaderMixin:
             n = len(dataset)
         except TypeError:
             return dataset  # IterableDataset
-        t = torch.tensor([n], device=current_device())
-        dist.all_reduce(t, op=dist.ReduceOp.MIN)
-        min_len = int(t.item())
+        (min_len,) = rank_min([n])
         if min_len == 0:
             if split == "train":
                 raise ValueError(

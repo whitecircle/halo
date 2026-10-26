@@ -13,7 +13,9 @@ unpickle. Only a disagreement gathers the objects, to name them. The pins:
 * an abstaining rank leaves the verdict unchanged and learns which rank to read the object from;
 * ``reject_across_ranks`` (and so every ``DeferredRankFailure.reject``) with no failure anywhere is
   one all-reduce of a has-reason flag and no object gather, and one rank's failure still raises on
-  every rank with the gathered message.
+  every rank with the gathered message;
+* ``rank_max`` / ``rank_min`` take each int's world MAX / MIN in one all-reduce per call, and hand a
+  single process its values back.
 
     python tests/cpu/runtime/test_rank_agreement.py
 """
@@ -28,6 +30,8 @@ import torch.distributed as dist
 from src.runtime.consensus import (
     DeferredRankFailure,
     agree_across_ranks,
+    rank_max,
+    rank_min,
     reject_across_ranks,
     reject_divergent_settings,
 )
@@ -126,6 +130,10 @@ def _worker(rank: int, out: str) -> None:
     except RuntimeError as exc:
         results["reject_one_rank"] = str(exc)
 
+    counts = {}
+    with _counted_collectives(counts):
+        results["extremes"] = [rank_max([rank, -rank]), rank_min([10 + rank]), counts]
+
     with open(f"{out}.{rank}", "w") as fh:
         json.dump(results, fh)
 
@@ -194,6 +202,15 @@ def test_one_ranks_failure_raises_on_every_rank_with_the_gathered_message(per_ra
         assert results["reject_one_rank"] == (
             f"checkpoint write failed on 1 of {WORLD} rank(s) [1]. First (rank 1): disk full"
         ), f"rank {rank}: {results['reject_one_rank']}"
+
+
+def test_world_extremes_are_one_all_reduce_each(per_rank):
+    for rank, results in enumerate(per_rank):
+        assert results["extremes"] == [[WORLD - 1, 0], [10], {"all_reduce": 2}], f"rank {rank}: {results['extremes']}"
+
+
+def test_a_single_process_keeps_its_own_values():
+    assert rank_max([5, -3]) == [5, -3] and rank_min([4]) == [4]
 
 
 if __name__ == "__main__":

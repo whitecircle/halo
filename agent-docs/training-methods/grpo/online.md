@@ -76,7 +76,7 @@ All off by default.
 
 The std floor, the drop and RLRR also require `multi_objective_aggregation: sum_then_normalize`.
 
-The `rlrr_*` tunables are range-validated always and refused at a non-default value with `use_rlrr` off. Defaults (recipe: `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml`):
+The `rlrr_*` tunables are range-validated always and refused at a non-default value with `use_rlrr` off. `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml` runs RLRR at these defaults:
 
 ```yaml
 rlrr_mode: hrr                   # or prr
@@ -151,7 +151,7 @@ Before the trainer is built, every rank raises if `max_prompt_length + max_compl
 > [!WARNING]
 > **GPT-OSS: toolkit vLLM image, sinks on**
 >
-> Serve GPT-OSS from the toolkit `vllm-server:0.32.0` image with sinks on (the default) and keep `reset_sinks: false` on the trainer; stock vLLM emits garbage GPT-OSS output on Blackwell ([GPT-OSS](../../models/gpt-oss.md#serving-for-grpo-vllm)).
+> Serve GPT-OSS from the toolkit `halo:vllm-0.32.0` image with sinks on (the default) and keep `reset_sinks: false` on the trainer; stock vLLM emits garbage GPT-OSS output on Blackwell ([GPT-OSS](../../models/gpt-oss.md#serving-for-grpo-vllm)).
 
 ### Weight sync
 
@@ -172,6 +172,7 @@ vLLM must own GPUs **no trainer rank uses**. The compose defaults put the server
 
 ```bash
 # vLLM on GPU 7 (flags: Rollout Servers)
+make build-vllm   # or set VLLM_IMAGE to the public image
 VLLM_MODEL=Qwen/Qwen3-30B-A3B docker compose -f docker-compose.vllm.yml up vllm-server
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \

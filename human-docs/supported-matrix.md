@@ -145,11 +145,11 @@ turns grouped GEMM off under ETP. Online RL per family:
 
 | Feature | Status |
 | --- | --- |
-| LoRA | supported except under TP and EP+TP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1` |
+| LoRA | supported except under TP, EP+TP and PP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1` |
 | QLoRA | DDP, FSDP and CP only, with the 4-bit base replicated rather than sharded; a MoE model also needs `use_grouped_gemm: false`; rejected by both online RL methods and by offline GRPO under CP |
 | Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint; native EP expert LoRA merges at save time instead (`merge_expert_lora_on_save: true`) |
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
-| Muon, FlashAdamW | supported optimizer options |
+| Muon, FlashAdamW | supported optimizer options, except under PP |
 | HuggingFace, local and `s3://` datasets | supported; offline tokenize, pack and shard with `halo run prepare-dataset` |
 | VLM packing / padding-free | unsupported: images cannot be packed, so VLM inputs use standard padding |
 | Streaming an infinite corpus | unsupported: the loaders build a map-style `Dataset`; pre-tokenize and shard offline |

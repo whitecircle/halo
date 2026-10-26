@@ -50,8 +50,8 @@ def saveable_items(
 
 
 def conversion_chunk_key(name: str) -> str:
-    """The group ``name`` must be save-converted with: its decoder-layer prefix (``model.layers.3``, or
-    ``layers.3`` on a bare backbone), else ``""``.
+    """The group ``name`` must be save-converted with: its decoder-layer prefix (``model.layers.3``,
+    ``layers.3`` on a bare backbone, ``encoder.layer.3`` on a BERT-style encoder), else ``""``.
 
     :func:`~src.checkpoint.hub_layout.revert_to_load_layout` cannot take one tensor at a time: a reverse
     fusion (a vision tower's q/k/v into ``in_proj``, a per-expert hub split) needs every source key of

@@ -27,9 +27,11 @@ from scripts.after_training.merge_ep_shards import (
 )
 from src.checkpoint.format import (
     EP_SHARD_KEY_RE,
+    OPTIMIZER_META_FILE,
     REFERENCE_LOGPS_FILE,
     ROUTER_BALANCING_BIASES_FILE,
     SCHEDULER_STATE_FILE,
+    optimizer_shard_filename,
 )
 from src.checkpoint.parallel.resume_source import classify_resume_weights
 from src.checkpoint.writing import StreamingShardWriter
@@ -74,6 +76,8 @@ PREFIX = "model.layers.0"
 # The prefix passed to a transform includes the MoE container: `mlp`, or `feed_forward` for LFM2.
 PREFIX_MLP = f"{PREFIX}.mlp"
 PREFIX_FF = f"{PREFIX}.feed_forward"
+# The payload ``write_optimizer_meta`` writes beside the two ranks' optimizer shards of an ep2 save.
+OPTIMIZER_META = {"num_ranks": 2, "fingerprint": {"world_size": 2, "ep_size": 2, "optimizer_class": "AdamWBF16"}}
 
 
 def test_shared_expert_params_are_not_grouped_as_routed_experts():
@@ -627,31 +631,50 @@ def test_merge_copies_auxiliary_files():
 
 def test_the_merged_directory_is_the_resume_source_the_shards_are_not():
     """A resume refuses the per-rank shards and names this merge as the way back, so the merged
-    directory must carry every resume sidecar byte for byte. Without ``reference_logps.pt`` a
+    directory must carry every resume file byte for byte. Without ``reference_logps.pt`` a
     precompute DPO/KTO resume, whose policy is built from these weights, has no untrained reference
-    left to sweep and raises."""
-    sidecars = (
+    left to sweep and raises; without the optimizer shards and the meta vouching for them, a resume on
+    the very topology that wrote them warm-restarts the optimizer."""
+    resume_files = (
         REFERENCE_LOGPS_FILE,
         SCHEDULER_STATE_FILE,
         ROUTER_BALANCING_BIASES_FILE,
         "rng_state_0.pth",
         "rng_state_1.pth",
+        optimizer_shard_filename(0),
+        optimizer_shard_filename(1),
+        OPTIMIZER_META_FILE,
     )
     with tempfile.TemporaryDirectory() as input_dir, tempfile.TemporaryDirectory() as output_dir:
         _write_ep_checkpoint(input_dir, "gpt_oss", _gptoss_shards(), 2)
-        for name in sidecars:
+        for name in resume_files[:-1]:
             with open(os.path.join(input_dir, name), "wb") as f:
                 f.write(name.encode())
+        torch.save(OPTIMIZER_META, os.path.join(input_dir, OPTIMIZER_META_FILE))
         assert classify_resume_weights(input_dir) == "invalid"
 
         merge_ep_shards(input_dir, output_dir, verbose=False)
 
         assert classify_resume_weights(output_dir) == "full"
-        for name in sidecars:
+        for name in resume_files:
             path = os.path.join(output_dir, name)
             assert os.path.isfile(path), f"{name} was dropped by the merge"
-            with open(path, "rb") as f:
-                assert f.read() == name.encode(), f"{name} changed on its way through the merge"
+            with open(path, "rb") as merged, open(os.path.join(input_dir, name), "rb") as saved:
+                assert merged.read() == saved.read(), f"{name} changed on its way through the merge"
+
+
+def test_a_rank_whose_optimizer_shard_is_missing_fails_the_merge(tmp_path):
+    """The meta vouches for every rank's optimizer shard; a merged directory missing one would load the
+    whole model on resume only for the torn shard set to raise there."""
+    input_dir, output_dir = tmp_path / "save", tmp_path / "merged"
+    os.makedirs(input_dir)
+    _write_ep_checkpoint(str(input_dir), "gpt_oss", _gptoss_shards(), 2)
+    torch.save({"state": {}}, input_dir / optimizer_shard_filename(0))
+    torch.save(OPTIMIZER_META, input_dir / OPTIMIZER_META_FILE)
+
+    with pytest.raises(ValueError, match=r"optimizer shards of ranks \[1\]"):
+        merge_ep_shards(str(input_dir), str(output_dir), verbose=False)
+    assert not output_dir.exists()
 
 
 def _gathered_reference(layer_cls, gate_up, down):

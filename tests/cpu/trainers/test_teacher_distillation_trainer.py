@@ -221,14 +221,16 @@ def test_a_casted_peft_student_forwards_under_bf16_autocast():
     assert seen == [True]
 
 
-def test_the_trainer_wraps_peft_through_build_peft_model_and_keeps_its_cast_flag():
-    """The PEFT wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss."""
+def test_the_trainer_wraps_peft_through_prepare_policy_model_and_keeps_its_cast_flag():
+    """The PEFT wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss; the
+    student keeps its dropout, since the config has no switch for it."""
     peft_config, wrapped = LoraConfig(), nn.Linear(2, 2)
-    with mock.patch.object(teacher_distillation, "build_peft_model", return_value=(wrapped, True)) as prepare:
+    with mock.patch.object(teacher_distillation, "prepare_policy_model", return_value=(wrapped, True)) as prepare:
         trainer = _construct(
             types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False), peft_config=peft_config
         )
     assert prepare.call_args.args[1] is peft_config
+    assert prepare.call_args.kwargs["disable_dropout"] is False
     assert trainer.model is wrapped
     assert trainer._peft_has_been_casted_to_bf16 is True
 

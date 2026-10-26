@@ -1,7 +1,7 @@
 """What an exported ``config.json`` must contain, and the one finalizer every save path ends with.
 
-transformers' serialization is not the artifact contract: a vendor class may drop ``model_type``, a pinned
-rollout server may need flat legacy keys, and a remote-code family may need the source repo's own schema.
+transformers' serialization is not the artifact contract: a vendor class may drop ``model_type``, and a
+remote-code family may need the source repo's own schema.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping
 
 from transformers.dynamic_module_utils import custom_object_save, get_relative_imports
 from transformers.utils import CONFIG_NAME, cached_file
@@ -64,65 +63,6 @@ def restore_model_type(config, output_dir: str) -> None:
         return
     payload["model_type"] = live
     write_config_json(output_dir, payload)
-
-
-def flatten_per_layer_config(section: dict, legacy_keys: Mapping[str, tuple[str, str]]) -> bool:
-    """Rewrite one serialized section's ``per_layer_config`` into the family's flat legacy keys
-    (``MoEFamilySpec.served_flat_config_keys``), in place; return whether it changed.
-
-    Each flat key takes its field's value on the layers of its layer type. ``per_layer_config`` is then
-    dropped, since a 5.14-line reader refuses it and a 5.20 reader rebuilds it; a config the flat keys
-    cannot express is refused.
-    """
-    overrides = section.get("per_layer_config")
-    if overrides is None:
-        return False
-    layer_types = section["layer_types"]
-    overrides = {int(index): fields for index, fields in overrides.items()}
-    for legacy_key, (layer_type, field) in legacy_keys.items():
-        values = {
-            overrides.get(index, {}).get(field, section[field])
-            for index, this_type in enumerate(layer_types)
-            if this_type == layer_type
-        }
-        if len(values) != 1:
-            raise ValueError(
-                f"config field {field!r} takes {sorted(values, key=str)} across the {layer_type!r} layers; "
-                f"the flat {legacy_key!r} key the rollout server reads holds one value, so this "
-                f"per_layer_config cannot be exported losslessly."
-            )
-        section[legacy_key] = values.pop()
-    expressible = set(legacy_keys.values())
-    for index, fields in overrides.items():
-        for field, value in fields.items():
-            if (layer_types[index], field) not in expressible and value != section.get(field):
-                raise ValueError(
-                    f"per_layer_config overrides {field!r} on layer {index} ({layer_types[index]!r}) to "
-                    f"{value!r}, which no flat legacy key of this family expresses; dropping the "
-                    f"override would silently change the served model."
-                )
-    del section["per_layer_config"]
-    return True
-
-
-def export_legacy_per_layer_config(output_dir: str) -> None:
-    """Flatten ``per_layer_config`` in ``output_dir``'s ``config.json`` for every family declaring
-    ``served_flat_config_keys``, per section, so a composite config's text tower rewrites too.
-
-    transformers 5.20 lacks the flat fields older vLLM servers read; the pinned server folds them back into
-    ``per_layer_config`` at parse, so the flat form is lossless there.
-    """
-    payload = read_checkpoint_config(output_dir, missing_ok=True)
-    if payload is None:
-        return
-    sections = [payload, *(v for v in payload.values() if isinstance(v, dict) and "model_type" in v)]
-    changed = False
-    for section in sections:
-        spec = find_moe_family_spec(section.get("model_type"))
-        if spec and spec.served_flat_config_keys:
-            changed |= flatten_per_layer_config(section, spec.served_flat_config_keys)
-    if changed:
-        write_config_json(output_dir, payload)
 
 
 def _source_config_payload(source: str) -> dict | None:
@@ -180,7 +120,6 @@ def _serialized_config(config, output_dir: str) -> dict:
     dict: a skipped rewrite would read as a run-made change."""
     config.save_pretrained(output_dir)
     restore_model_type(config, output_dir)
-    export_legacy_per_layer_config(output_dir)
     payload = read_checkpoint_config(output_dir)
     payload.pop("transformers_version", None)
     return payload
@@ -316,7 +255,6 @@ def finalize_exported_config(config, output_dir: str, *, source: str | None) -> 
     missing one trains normally and fails only in the merge tools or the rollout server.
     """
     restore_model_type(config, output_dir)
-    export_legacy_per_layer_config(output_dir)
     export_source_config_schema(config, output_dir, source=source)
     drop_unshipped_auto_map(output_dir)
     tag_exported_model_card(output_dir)

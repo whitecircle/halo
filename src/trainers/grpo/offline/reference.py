@@ -13,7 +13,6 @@ from enum import Enum
 import numpy as np
 import pyarrow as pa
 import torch
-import torch.distributed as dist
 from accelerate.utils import is_peft_model
 from datasets import Dataset
 from torch import nn
@@ -25,10 +24,15 @@ from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.dtype import resolve_training_dtype
 from src.models.unwrapping import base_transformers_model
-from src.runtime.collectives import collective_device
-from src.runtime.consensus import DeferredRankFailure, rank_consensus, reject_across_ranks, reject_divergent_settings
+from src.runtime.consensus import (
+    DeferredRankFailure,
+    rank_consensus,
+    rank_max,
+    reject_across_ranks,
+    reject_divergent_settings,
+)
 from src.runtime.filesystem import is_fs_save_rank
-from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
+from src.runtime.ranks import get_global_rank, is_global_main_process
 from src.trainers.dataloaders import dp_representative_ranks
 from src.trainers.grpo.offline.reference_cache import (
     REFERENCE_BUFFER_VALUES,
@@ -228,13 +232,10 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
         dp_size, dp_rank = self.dp_shard_geometry()
         loader = self._reference_sweep_loader(dataset, split, dp_size, dp_rank)
         # FSDP and EP peers may span DP shards; every rank must run the same number of forwards.
-        batch_count = torch.tensor([len(loader)], device=collective_device())
-        if get_global_world_size() > 1:
-            dist.all_reduce(batch_count, op=dist.ReduceOp.MAX)
+        (total_batches,) = rank_max([len(loader)])
         representatives = dict(enumerate(dp_representative_ranks(self._data_parallel_rank_by_global_rank())))
         cache = ReferenceScoreCache(self._reference_cache_output_dir(), dp_size=dp_size)
         was_training = self.model.training
-        total_batches = int(batch_count.item())
         if is_global_main_process():
             logger.info(
                 "Preparing run-start KL reference for '%s': %s rows, %s batches before training",

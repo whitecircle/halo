@@ -7,6 +7,7 @@ Usage:
         --model my-model --base_url http://localhost:8000/v1
 
     # Serving the model:
+    make build-vllm   # or set VLLM_IMAGE to the public image
     VLLM_MODEL=Qwen/Qwen3-8B docker compose -f docker-compose.vllm.yml up vllm-server
 """
 

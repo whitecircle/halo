@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """CPU test: every save path finalizes ``config.json`` the same way.
 
-The EP/CP/TP writers run three rewrites transformers does not — the live ``model_type`` restored for
-the vendor classes that declare none (Bailing/Ling), the flat legacy per-layer keys, and the source
-repo's own schema for the families whose serving engines have no config class (Step-3.x). The base
-(single-GPU / DDP / accelerate-FSDP) save path owes the same three: dropping any of them ships, for a
-model trained without parallelism, a directory the merge tools and the pinned server cannot read —
-and nothing at train time says so. These tests fail if that path drops any of them.
+The EP/CP/TP writers run rewrites transformers does not — the live ``model_type`` restored for the
+vendor classes that declare none (Bailing/Ling), and the source repo's own schema for the families
+whose serving engines have no config class (Step-3.x). The base (single-GPU / DDP / accelerate-FSDP)
+save path owes the same ones: dropping any of them ships, for a model trained without parallelism, a
+directory the merge tools and the pinned server cannot read — and nothing at train time says so.
+These tests fail if that path drops any of them.
 
     python tests/cpu/trainers/test_base_save_config_finalization.py
 """
@@ -115,7 +115,7 @@ class _Trainer(CheckpointingMixin, _BaseTrainer):
 
 def test_the_base_save_path_finalizes_the_config_it_just_wrote(tmp_path, monkeypatch):
     """The wiring, end to end: no parallelism strategy claims the save, so the base Trainer writes —
-    and the mixin owes that directory the same three rewrites the parallel writers apply."""
+    and the mixin owes that directory the same rewrites the parallel writers apply."""
     module = "src.trainers.checkpointing"
     # False = no parallelism strategy claimed the write, so the base Trainer's save runs.
     monkeypatch.setattr(f"{module}.save_checkpoint", lambda ctx, output_dir: False)

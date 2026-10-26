@@ -16,7 +16,7 @@ from functools import partial
 import pytest
 import torch
 from safetensors import safe_open
-from transformers import CONFIG_MAPPING, AutoModelForCausalLM
+from transformers import CONFIG_MAPPING, AutoModelForCausalLM, BertConfig, BertModel
 
 import src.checkpoint.parallel.save as checkpoint_save_mod
 import src.checkpoint.parallel.writing as checkpoint_write_mod
@@ -78,6 +78,8 @@ def _stream(model, output_dir, *, is_save_rank=True, max_shard_size=SHARD_SIZE):
         ("model.language_model.layers.2.self_attn.q_proj.weight", "model.language_model.layers.2"),
         ("layers.0.mlp.gate.weight", "layers.0"),
         ("h.3.attn.c_attn.weight", "h.3"),
+        ("encoder.layer.1.attention.self.query.weight", "encoder.layer.1"),
+        ("bert.encoder.layer.0.output.dense.weight", "bert.encoder.layer.0"),
         ("embed_tokens.weight", ""),
         ("model.norm.weight", ""),
         ("model.xlayers.1.weight", ""),
@@ -100,6 +102,19 @@ def test_chunks_partition_the_state_dict_by_layer(bare):
     assert len(chunks) == model.config.num_hidden_layers + 1, "one chunk per layer plus the rest"
     for chunk in chunks:
         assert len({conversion_chunk_key(key) for key in chunk}) == 1, sorted(chunk)
+
+
+def test_a_bert_style_encoder_chunks_per_layer():
+    """An encoder stack under ``encoder.layer`` (BERT and XLM-R embedding backbones) chunks like a decoder's."""
+    model = BertModel(
+        BertConfig(vocab_size=64, hidden_size=32, num_hidden_layers=2, num_attention_heads=2, intermediate_size=64)
+    )
+    chunks = list(chunked_saveable_tensors(model, retain=True))
+    assert [{conversion_chunk_key(key) for key in chunk} for chunk in chunks] == [
+        {""},
+        {"encoder.layer.0"},
+        {"encoder.layer.1"},
+    ]
 
 
 def test_non_writer_ranks_write_nothing(tmp_path):

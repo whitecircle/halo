@@ -79,6 +79,9 @@ GROUP_PORT = weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT")
 # process starts Ray before test_search_qa runs.
 os.environ["HALO_ALLOW_MOCK_SEARCH"] = "1"
 MAX_STEPS = env_int("HALO_TEST_MAX_STEPS", 3)
+# The harness gives every run an empty HF_DATASETS_CACHE, so an offline host reads the four benchmark datasets
+# from a cache prepared beforehand and named here; unset, load_dataset uses that per-run cache.
+DATASETS_CACHE = env_str("HALO_TEST_BENCHMARK_DATASETS_CACHE")
 
 # Sized for ONE vLLM server: batch × grad_accum × num_generations = 16 multi-turn rollouts per step,
 # which is about what a single engine serves concurrently. Scale the workers with the engine count.
@@ -115,7 +118,7 @@ def format_duration(seconds: float) -> str:
 def prepare_gsm8k_dataset(num_samples: int = 200) -> Dataset:
     """Load GSM8K and format for Environmental GRPO (ReAct math)."""
     log(f"Loading GSM8K dataset ({num_samples} samples)...")
-    ds = load_dataset("openai/gsm8k", "main", split=f"train[:{num_samples}]")
+    ds = load_dataset("openai/gsm8k", "main", split=f"train[:{num_samples}]", cache_dir=DATASETS_CACHE)
 
     data = []
     for row in ds:
@@ -138,7 +141,7 @@ def prepare_gsm8k_dataset(num_samples: int = 200) -> Dataset:
 def prepare_simpleqa_dataset(num_samples: int = 200) -> Dataset:
     """Load SimpleQA and format for SearchQA environment."""
     log(f"Loading SimpleQA dataset ({num_samples} samples)...")
-    ds = load_dataset("basicv8vc/SimpleQA", split=f"test[:{num_samples}]")
+    ds = load_dataset("basicv8vc/SimpleQA", split=f"test[:{num_samples}]", cache_dir=DATASETS_CACHE)
 
     data = []
     for row in ds:
@@ -157,7 +160,7 @@ def prepare_simpleqa_dataset(num_samples: int = 200) -> Dataset:
 def prepare_mmlu_pro_dataset(num_samples: int = 200) -> Dataset:
     """Load MMLU-Pro and format for ExamQA environment (multiple choice)."""
     log(f"Loading MMLU-Pro dataset ({num_samples} samples)...")
-    ds = load_dataset("TIGER-Lab/MMLU-Pro", split=f"test[:{num_samples}]")
+    ds = load_dataset("TIGER-Lab/MMLU-Pro", split=f"test[:{num_samples}]", cache_dir=DATASETS_CACHE)
 
     data = []
     choice_letters = "ABCDEFGHIJ"
@@ -185,7 +188,7 @@ def prepare_mmlu_pro_dataset(num_samples: int = 200) -> Dataset:
 def prepare_code_contests_dataset(num_samples: int = 100) -> Dataset:
     """Load Codeforces problems from deepmind/code_contests for CodeContests env."""
     log(f"Loading Codeforces dataset ({num_samples} samples)...")
-    ds = load_dataset("deepmind/code_contests", split="test")
+    ds = load_dataset("deepmind/code_contests", split="test", cache_dir=DATASETS_CACHE)
 
     data = []
     for row in ds:

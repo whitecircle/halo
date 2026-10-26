@@ -609,6 +609,8 @@
       "store set _halo_phase/main_first/ep_lazy_meta_init/shared/p1/done",
       "store add _halo_phase/main_first/ep_lazy_meta_init/shared/p1/exited",
       "all_reduce MAX int64[1] world",
+      "all_reduce MIN float64[1] world",
+      "all_reduce MAX float64[1] world",
       "init_device_mesh cuda (2, 2) ('dp', 'tp')",
       "scatter group_src=0 bfloat16[128, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
@@ -642,8 +644,6 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "all_reduce MIN float64[1] world",
-      "all_reduce MAX float64[1] world",
       "barrier world"
     ],
     "rank 1": [
@@ -666,6 +666,8 @@
       "from_config",
       "store add _halo_phase/main_first/ep_lazy_meta_init/shared/p1/exited",
       "all_reduce MAX int64[1] world",
+      "all_reduce MIN float64[1] world",
+      "all_reduce MAX float64[1] world",
       "init_device_mesh cuda (2, 2) ('dp', 'tp')",
       "scatter group_src=0 bfloat16[128, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
@@ -699,8 +701,6 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "all_reduce MIN float64[1] world",
-      "all_reduce MAX float64[1] world",
       "barrier world"
     ]
   },
@@ -719,7 +719,7 @@
       "broadcast_object_list src=0 world [False]",
       "all_reduce MAX int64[1] world",
       "broadcast_object_list src=0 world [False]",
-      "joined_node_load Model load from <checkpoints>/moe_bin",
+      "joined_node_load EP model load from <checkpoints>/moe_bin",
       "store add _halo_phase/seq_load/model/node0/entered0",
       "from_pretrained device_map=cpu",
       "store set _halo_phase/seq_load/model/node0/p1/rank0_done",
@@ -730,6 +730,8 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
+      "all_reduce MIN float64[1] world",
+      "all_reduce MAX float64[1] world",
       "init_device_mesh cuda (2, 2) ('dp', 'tp')",
       "scatter group_src=0 bfloat16[128, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
@@ -763,8 +765,6 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "all_reduce MIN float64[1] world",
-      "all_reduce MAX float64[1] world",
       "barrier world"
     ],
     "rank 1": [
@@ -781,7 +781,7 @@
       "broadcast_object_list src=0 world [False]",
       "all_reduce MAX int64[1] world",
       "broadcast_object_list src=0 world [False]",
-      "joined_node_load Model load from <checkpoints>/moe_bin",
+      "joined_node_load EP model load from <checkpoints>/moe_bin",
       "store add _halo_phase/seq_load/model/node0/entered1",
       "store wait _halo_phase/seq_load/model/node0/p1/rank0_done",
       "from_pretrained device_map=cpu",
@@ -793,6 +793,8 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
+      "all_reduce MIN float64[1] world",
+      "all_reduce MAX float64[1] world",
       "init_device_mesh cuda (2, 2) ('dp', 'tp')",
       "scatter group_src=0 bfloat16[128, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
@@ -826,8 +828,6 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "all_reduce MIN float64[1] world",
-      "all_reduce MAX float64[1] world",
       "barrier world"
     ]
   },
@@ -845,8 +845,7 @@
       "new_group [0, 1, 2, 3]",
       "broadcast_object_list src=0 world [False]",
       "all_reduce MAX int64[1] world",
-      "broadcast_object_list src=0 world [False]",
-      "joined_node_load Model load from <checkpoints>/moe",
+      "joined_node_load EP model load from <checkpoints>/moe",
       "store add _halo_phase/seq_load/model/node0/entered0",
       "from_pretrained device_map=cpu",
       "store set _halo_phase/seq_load/model/node0/p1/rank0_done",
@@ -857,6 +856,8 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
+      "all_reduce MIN float64[1] world",
+      "all_reduce MAX float64[1] world",
       "init_device_mesh cuda (2, 2) ('dp', 'tp')",
       "scatter group_src=0 bfloat16[128, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
@@ -890,8 +891,6 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "all_reduce MIN float64[1] world",
-      "all_reduce MAX float64[1] world",
       "barrier world"
     ],
     "rank 1": [
@@ -907,8 +906,7 @@
       "new_group [0, 1, 2, 3]",
       "broadcast_object_list src=0 world [False]",
       "all_reduce MAX int64[1] world",
-      "broadcast_object_list src=0 world [False]",
-      "joined_node_load Model load from <checkpoints>/moe",
+      "joined_node_load EP model load from <checkpoints>/moe",
       "store add _halo_phase/seq_load/model/node0/entered1",
       "store wait _halo_phase/seq_load/model/node0/p1/rank0_done",
       "from_pretrained device_map=cpu",
@@ -920,6 +918,8 @@
       "store multi_get _halo_phase/reject/node_load/world/p1/{reason0,reason1,reason2,reason3}",
       "store add _halo_phase/reject/node_load/world/p1/exited",
       "all_reduce MAX int64[1] world",
+      "all_reduce MIN float64[1] world",
+      "all_reduce MAX float64[1] world",
       "init_device_mesh cuda (2, 2) ('dp', 'tp')",
       "scatter group_src=0 bfloat16[128, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
@@ -953,8 +953,6 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "all_reduce MIN float64[1] world",
-      "all_reduce MAX float64[1] world",
       "barrier world"
     ]
   },
@@ -1700,6 +1698,8 @@
       "store set _halo_phase/main_first/ep_lazy_meta_init/shared/p1/done",
       "store add _halo_phase/main_first/ep_lazy_meta_init/shared/p1/exited",
       "all_reduce MAX int64[1] world",
+      "all_reduce MIN float64[1] world",
+      "all_reduce MAX float64[1] world",
       "init_device_mesh cuda (2, 2) ('dp', 'tp')",
       "scatter group_src=0 bfloat16[128, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
@@ -1733,8 +1733,6 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "all_reduce MIN float64[1] world",
-      "all_reduce MAX float64[1] world",
       "barrier world"
     ],
     "rank 1": [
@@ -1759,6 +1757,8 @@
       "from_config",
       "store add _halo_phase/main_first/ep_lazy_meta_init/shared/p1/exited",
       "all_reduce MAX int64[1] world",
+      "all_reduce MIN float64[1] world",
+      "all_reduce MAX float64[1] world",
       "init_device_mesh cuda (2, 2) ('dp', 'tp')",
       "scatter group_src=0 bfloat16[128, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
@@ -1792,8 +1792,6 @@
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[64, 256] [0, 1]",
       "scatter group_src=0 bfloat16[256, 128] [0, 1]",
-      "all_reduce MIN float64[1] world",
-      "all_reduce MAX float64[1] world",
       "barrier world"
     ]
   },

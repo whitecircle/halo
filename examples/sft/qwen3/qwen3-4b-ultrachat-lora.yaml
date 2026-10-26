@@ -17,7 +17,6 @@ test_size: 0.01
 use_peft: true
 lora_r: 64
 lora_alpha: 128
-lora_dropout: 0.05
 lora_target_modules:
 - q_proj
 - k_proj
@@ -26,22 +25,17 @@ lora_target_modules:
 - gate_proj
 - up_proj
 - down_proj
-lora_task_type: CAUSAL_LM
 
 # --- Training ---
 per_device_train_batch_size: 4
 per_device_eval_batch_size: 4
 num_train_epochs: 1.0
 gradient_accumulation_steps: 4
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
-optim: adamw_torch_fused
 learning_rate: 1.0e-04
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 32
-seed: 42
 
 # --- Sequence Length & Packing ---
 max_length: 4096
@@ -49,8 +43,6 @@ packing: true
 
 # --- Output ---
 output_dir: checkpoints/sft-qwen3-4b-ultrachat-lora
-save_strategy: steps
-save_steps: 500
 eval_strategy: steps
 eval_steps: 500
 save_total_limit: 3
@@ -63,4 +55,3 @@ report_to: wandb
 
 # --- Data ---
 dataloader_num_workers: 4
-remove_unused_columns: true

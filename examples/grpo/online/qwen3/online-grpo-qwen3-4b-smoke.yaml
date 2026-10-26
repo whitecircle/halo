@@ -30,14 +30,10 @@ loss_type: grpo
 # --- Training ---
 per_device_train_batch_size: 4
 per_device_eval_batch_size: 4
-num_train_epochs: 1.0
 gradient_accumulation_steps: 1
-gradient_checkpointing: true
 max_steps: 3
 learning_rate: 1.0e-06
 lr_scheduler_type: constant
-warmup_steps: 0
-max_grad_norm: 1.0
 max_prompt_length: 256
 max_completion_length: 128
 
@@ -45,20 +41,15 @@ max_completion_length: 128
 use_vllm: true
 vllm_mode: server
 vllm_server_host: 127.0.0.1
-vllm_server_port: 8000
 
 # --- Output ---
 output_dir: checkpoints/online-grpo-qwen3-4b-smoke
 save_strategy: "no"
-eval_strategy: "no"
 
 # --- Logging ---
 logging_steps: 1
 logging_first_step: true
 report_to: []
-log_completions: false
 
 # --- Data ---
-dataloader_num_workers: 0
-remove_unused_columns: false
 use_peft: false

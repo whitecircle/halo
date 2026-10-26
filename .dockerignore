@@ -33,10 +33,6 @@ env
 *.swo
 *~
 
-# Jupyter
-.ipynb_checkpoints
-*.ipynb
-
 # Testing
 .pytest_cache
 **/.pytest_cache
@@ -76,9 +72,7 @@ checkpoints/
 outputs/
 wandb/
 
-# Local caches / rendered docs / secrets — never build-context material
-.hfcache/
-site/
+# Secrets and local agent state — never build-context material
 keys/
 .claude/
 .agents/

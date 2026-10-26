@@ -367,12 +367,11 @@ host-driven **proxy Gin** (`NCCL_GIN_TYPE=2`), copying completions to GPU memory
 |------|-------------|--------|
 | GIN plugin | **image** | `docker/efa/install_efa_userspace.sh` builds a GIN-capable `aws-ofi-nccl` (exports `ncclGinPlugin_v13`) at one pinned commit into every Halo image — the NGC-bundled 1.17.3 exports no `ncclGin` — and exposes it as `libnccl-gin.so`. NCCL ≥ 2.30.4 is the GIN-API floor. |
 | GDRCopy ≥ 2.5 | **image + host** | `libgdrapi` is built into the image; the `gdrdrv` kernel module + `/dev/gdrdrv` come from the host. Pass `--device /dev/gdrdrv`. |
-| Launch env | **per job** | `NCCL_NET_PLUGIN=ofi`, `NCCL_NET=Libfabric`, `NCCL_GIN_TYPE=2` — the [Launch Recipes](../parallelism/launch-recipes.md#environment-variables) EFA block plus the proxy-GIN type. |
+| Launch env | **per job** | `NCCL_GIN_TYPE=2` on top of the EFA env ([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)). |
 
 Without these, NCCL reports `globalGinSupport 0` / `GIN/Plugin: Failed to initialize any GIN plugin` and
 DeepEP aborts with `NCCL GIN is unavailable`; `Failed to initialize GDRCopy` means the host is missing
-`/dev/gdrdrv`. On AWS p6 instances the Mellanox `mlx5` devices are not a cross-node NCCL path (NCCL falls
-back to TCP sockets) — EFA is the fabric.
+`/dev/gdrdrv`.
 
 Cross-node EP over EFA is bound by **proxy-Gin per-operation latency, not bandwidth**: the dispatch's
 layout-exchange round-trips through a CPU proxy, and the cost scales with the number of cross-node

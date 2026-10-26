@@ -21,7 +21,6 @@ moe_balancing: bias_update_transient  # aux_loss raises here (Qwen3_5MoeForCondi
                                       # reaches the loss) and the architecture has no exportable bias
                                       # slot, so exported checkpoints serve without the trained bias
                                       # (near-tie top-k flips vs training)
-save_sharded_ep: false
 fp32_router: true                     # cheap; stabilizes routing
 fp32_grad_reduce: true                # fp32 grad reduction for many-rank / cross-node EP
 # Experts stay bf16 (AdamWBF16, 6 B/param) — fp32 masters plus moments cost 16 B/param and OOM at 122B.
@@ -38,18 +37,13 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 4.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 50
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
-save_strategy: steps
-save_steps: 500
 eval_strategy: steps
 eval_steps: 300
 save_total_limit: 1

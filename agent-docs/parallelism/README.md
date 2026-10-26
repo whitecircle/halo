@@ -188,7 +188,11 @@ runs which axis: [Compatibility matrix](../models/README.md#compatibility-matrix
 | MoE with neither | EP | EP at max single-GPU seq | pure ETP |
 | VLM without a TP plan (Qwen3-VL) | Standard | Standard, CP on text-only batches | ZeRO-3 FSDP2 (`fsdp_reshard_after_forward: true`) |
 
-A family's CP and TP verdicts, and its qualifiers (Zaya trains without gradient checkpointing in every
+A model too large for one NVLink domain adds PP across domains where its family is
+[PP-registered](pipeline-parallelism.md#model-support), a MoE with EP (or experimental pure ETP) inside
+each stage ([When PP is worth it](#when-pipeline-parallelism-is-worth-it)).
+
+A family's CP, TP and PP verdicts, and its qualifiers (Zaya trains without gradient checkpointing in every
 mode): [Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## Additional guides

@@ -46,7 +46,7 @@ CORRECTNESS_GATES: dict[frozenset[str], tuple[str, ...]] = {
     frozenset({"cp"}): (
         "parallelism/cp/test_cp_correctness.py",
         "parallelism/cp/test_cp_train_correctness.py",
-        "parallelism/cp/test_qwen3_5_cp_correctness.py",
+        "parallelism/cp/test_cp_family_vs_reference.py",
     ),
     frozenset({"pp"}): ("parallelism/pp/test_pp_vs_single_gpu.py",),
     frozenset({"ep", "tp"}): (
@@ -58,7 +58,7 @@ CORRECTNESS_GATES: dict[frozenset[str], tuple[str, ...]] = {
         "parallelism/combined/test_ep_cp_train_correctness.py",
     ),
     frozenset({"ep", "etp"}): (
-        "parallelism/combined/test_ep_etp_inkling.py",
+        "parallelism/ep/test_ep_family_vs_reference.py",
         "parallelism/combined/test_combined_ref_correctness.py",
     ),
     frozenset({"pp", "ep"}): ("parallelism/pp/test_pp_ep_vs_unsplit.py",),

@@ -10,8 +10,8 @@ same targets. The Docker incantation lives once in the `Makefile`; `make help` l
   container (uv installs into the system interpreter — no venv, no Poetry): call `python`,
   `torchrun`, `pytest` directly.
 - **`make lint`, `make format`, `make precommit`, and `make docs` are the only host-runnable gates**
-  (ruff via `uvx ruff@$(RUFF_VERSION)`, `RUFF_VERSION ?= 0.9.10`, falling back to a `ruff` already on
-  `PATH`; the docs target, on stdlib Python 3.12+, checks links, anchors and the code the docs cite).
+  (ruff via `uvx ruff@$(RUFF_VERSION)`, `RUFF_VERSION` read from `uv.lock`, falling back to a `ruff`
+  already on `PATH`; the docs target, on stdlib Python 3.12+, checks links, anchors and the code the docs cite).
   Everything else — tests, benchmarks — runs inside the image.
 - **Credentials live in the repo-root `.env`.** `cp .env.example .env` and fill it in: the GPU
   `make` targets pass `--env-file .env` and fail outright without the file.
@@ -20,8 +20,8 @@ same targets. The Docker incantation lives once in the `Makefile`; `make help` l
   (`README`, `CONTRIBUTING`, `SECURITY`, `CODE_OF_CONDUCT`, `AGENTS.md`, `CLAUDE.md`, `.github/*`)
   are the documented exception; scratch markdown goes to `/tmp`.
 - **Large outputs go to a verified large volume.** The root filesystem is small; the `make` targets
-  put `HF_HOME` and `TMPDIR` under `HALO_SCRATCH` (default `/mnt`) — point it at a volume you have
-  checked with `findmnt` / `df -h`.
+  put `HF_HOME` and `TMPDIR` under `HALO_SCRATCH`, which resolves to the local mount other than `/` with
+  the most free space when unset — confirm it with `findmnt` / `df -h`, or export it to choose the volume.
 
 ## The gate (read first)
 
@@ -41,7 +41,7 @@ cp .env.example .env          # the GPU make targets pass it with --env-file and
 docker pull public.ecr.aws/whitecircle/halo:blackwell && docker tag public.ecr.aws/whitecircle/halo:blackwell halo:blackwell
 # ... or build it: B200 (SM100) / B300 (SM103); build-hopper for H100/H200 (SM90)
 make build-blackwell
-make install                  # check the lock installs into the image (throwaway container)
+make check-lock               # check uv.lock installs into the image
 make seed-hf-cache            # configs + tokenizers the CPU tests read into HF_CACHE (no weights)
 make test-cpu                 # sanity check; needs Docker, not a GPU
 ```
@@ -134,8 +134,7 @@ make train METHOD=preference/smpo CONFIG=<config>    # METHOD defaults to sft
 
 ## AI-assisted contributions
 
-AI-assisted contributions are welcome on the terms in [`CONTRIBUTING.md`](../../CONTRIBUTING.md#the-one-rule)
-(understand and own every line, disclose the scaffold and models, keep a diff under ~2,000 lines);
+AI-assisted contributions are welcome on the terms in [`CONTRIBUTING.md`](../../CONTRIBUTING.md#the-one-rule);
 `CLAUDE.md` and `AGENTS.md` bind agents and humans alike.
 
 ## Tests
@@ -314,8 +313,9 @@ below. The cross-suite ones:
 | `HALO_TEST_ATTN` / `HALO_TEST_GC` / `HALO_TEST_REVISION` | Attention implementation, gradient checkpointing (default **on**), hub revision for the suites that sweep them. The per-family `HALO_TEST_ZAYA_GC` defaults the other way — see the per-suite table. |
 | `HALO_TEST_OFFGRPO_PARALLEL` | `tp` (default, dense Qwen3) or `ep` (gpt-oss MoE) leg of `trainers/grpo/test_offline_grpo_tp_resume.py`. |
 | `HALO_TEST_MAX_STEPS`, `HALO_TEST_BATCH_SIZE`, `HALO_TEST_GRAD_ACCUM`, `HALO_TEST_NUM_GENERATIONS`, `HALO_TEST_NUM_WORKERS`, `HALO_TEST_MAX_CONCURRENT`, `HALO_TEST_ROLLOUT_MAX_TOKENS`, `HALO_TEST_MAX_COMPLETION` | Step count and rollout sizing for `trainers/grpo/test_environmental_grpo_benchmarks.py`, whose defaults are sized for one vLLM server. |
-| `HALO_TEST_VLLM_GROUP_PORT` / `HALO_TEST_SGLANG_GROUP_PORT` | Pins the trainer-side weight-transfer group port the rollout e2e suites bind. Unset, each run draws one with `free_port()` (`tests/common/ports.py`), below the kernel's ephemeral range, so no outbound connection on the host can hold it; the engine learns the port from the trainer's init request, so the server needs no matching setting. The online-GRPO MoE / dense pair offsets a pinned port by the row's index, so back-to-back rows bind different ones. A resume row rebinds its port for phase 2, and both weight-transfer re-init suites rebind it every cycle. |
-| `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated vLLM endpoints of `trainers/grpo/test_online_grpo_vllm_1gpu_e2e.py`, each serving the same checkpoint on its own GPU (default: `HALO_TEST_VLLM_DENSE_SERVER_URL`). Every row drives the first; an `--trainer environmental` row pushes through a `WeightSyncPool` over the first `--servers` of them, which pauses every server together and streams each chunk to all of them, and then asserts the served policy moved on **every** one. The `--servers 2` row skips with fewer URLs. The pool's group ports are the row's `free_port()` (`tests/common/ports.py`) plus each server's index. |
+| `HALO_TEST_BENCHMARK_DATASETS_CACHE` | A datasets cache holding `openai/gsm8k` (`main`), `basicv8vc/SimpleQA`, `TIGER-Lab/MMLU-Pro` and `deepmind/code_contests`, which `trainers/grpo/test_environmental_grpo_benchmarks.py` loads from instead of the empty per-run `HF_DATASETS_CACHE` the harness sets, so the suite can run offline. Prepare it on a connected host with the same `load_dataset` calls and that directory as `HF_DATASETS_CACHE`. It must be writable (datasets takes lock files) and visible in the container: the `make` tiers do not forward it, so pass `EXTRA_DOCKER_ENV="-e HALO_TEST_BENCHMARK_DATASETS_CACHE=..."` with a path under the mounted `$(HALO_SCRATCH)`. |
+| `HALO_TEST_VLLM_GROUP_PORT` / `HALO_TEST_SGLANG_GROUP_PORT` | Pins the trainer-side weight-transfer group port the rollout e2e suites bind. Unset, each run draws one with `free_port()` (`tests/common/ports.py`), below the kernel's ephemeral range, so no outbound connection on the host can hold it; the engine learns the port from the trainer's init request, so the server needs no matching setting. The online-GRPO MoE and dense rows offset a pinned port by the row's index within their policy, so back-to-back rows bind different ones. A resume row rebinds its port for phase 2, and the weight-transfer re-init suite rebinds it every cycle. |
+| `HALO_TEST_VLLM_SERVER_URLS` | Comma-separated vLLM endpoints of the one-process (`*_world1`) rows of `trainers/grpo/test_online_grpo_vllm_e2e.py`, each serving the same checkpoint on its own GPU (default: `HALO_TEST_VLLM_DENSE_SERVER_URL`). Every row drives the first; an `--trainer environmental` row pushes through a `WeightSyncPool` over the first `--servers` of them, which pauses every server together and streams each chunk to all of them, and then asserts the served policy moved on **every** one. The `--servers 2` row skips with fewer URLs. The pool's group ports are the row's `free_port()` (`tests/common/ports.py`) plus each server's index. |
 | `VLLM_MODEL` | Checkpoint the running vLLM server serves, read by the rollout benchmark itself — not by the launcher, and **not** forwarded by the `make` tiers, so put it in `.env` or pass `EXTRA_DOCKER_ENV="-e VLLM_MODEL=…"` (a host export never reaches the container). It must be the model the test trains: unset, the benchmark falls back to Qwen3-0.6B and a MoE-serving tier silently tests the wrong pairing. (`SGLANG_MODEL` is the compose file's server-side spelling; no test reads it.) |
 
 Suites that pin one family or one phase add their own `HALO_TEST_<SUITE>_*` knobs on top; the manifest
@@ -332,15 +332,15 @@ entry and the script name them, and the non-obvious ones are:
 | `HALO_TEST_EP1_KNOB_ATTN` / `HALO_TEST_EP1_KNOB_LAZY` | ep1 `fsdp_shard_ep1_experts` weight-sync suite (`tests/gpu/parallelism/ep/test_ep1_knob_weight_sync.py`): attention impl (default `flash_attention_2`) and `ep_lazy_loading` (default on; `=0` routes the load through `from_pretrained` + EP patching instead). |
 | `HALO_TEST_EP_FORWARD_DELAY_MS` | Milliseconds every EP layer of `tests/gpu/profiling/benchmark_sft_ep.py` holds the GPU idle before each forward, a device synchronize then a host sleep (default `0`): the bench band's negative control ([Golden performance baselines](#golden-performance-baselines)). |
 | `HALO_TEST_RESUME_FSDP_RESHARD` | `fsdp_reshard_after_forward` (default off = ZeRO-2) for the `fsdp`, `fsdp_base` and `cp` modes of `tests/gpu/trainers/sft/test_sft_checkpoint_resume.py`; the `tp` / `ep` modes ignore it (TP+DP+FULL_SHARD is config-rejected). |
-| `HALO_TEST_VLLM_DENSE_SERVER_URL` | Endpoint of the dense half of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_dense_e2e.py`), of the single-process suite (`test_online_grpo_vllm_1gpu_e2e.py`) and of the vLLM weight-transfer re-init and pool-reconnect suites, which serve the same checkpoint. The pair's two files train different checkpoints and each asserts on its own server's logprobs, so one `VLLM_SERVER_URL` cannot carry both; unset, both read `VLLM_SERVER_URL`, then `http://localhost:8010`. |
-| `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of the online-GRPO/SDPG e2e pair (`trainers/grpo/test_online_grpo_vllm_moe_e2e.py` and its dense sibling): the MoE half's default `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP rows) and the dense half's `Qwen/Qwen3-0.6B` (TP and FSDP2-DP rows, and the single-process suite's). Every row asserts on the served logprobs, so the running server must serve the same checkpoint. |
-| `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and step count (default `2`) of the Environmental-GRPO e2e body (`tests/common/env_grpo_e2e.py`), the vLLM 2-GPU leg's; the SGLang and 4-GPU wrappers own their own checkpoint knobs. |
-| `HALO_TEST_ENV_GRPO_SGLANG_MODEL` | Checkpoint of the SGLang Environmental-GRPO e2e wrappers (`trainers/grpo/test_env_grpo_sglang_e2e.py` and its four-rank sibling `test_env_grpo_sglang_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`); a per-family pass points it at the family and serves the same checkpoint. Its own knob because its server and default family differ from the vLLM leg's. |
+| `HALO_TEST_VLLM_DENSE_SERVER_URL` | Endpoint of the dense and one-process rows of the online-GRPO/SDPG e2e (`trainers/grpo/test_online_grpo_vllm_e2e.py`) and of the vLLM weight-transfer re-init and pool-reconnect suites, which serve the same checkpoint. The MoE rows train a different checkpoint and every row asserts on its own server's logprobs, so one `VLLM_SERVER_URL` cannot carry both; unset, it reads `VLLM_SERVER_URL`, then `http://localhost:8010`. |
+| `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of the online-GRPO/SDPG e2e (`trainers/grpo/test_online_grpo_vllm_e2e.py`): the MoE rows' default `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP) and the dense rows' `Qwen/Qwen3-0.6B` (TP, FSDP2-DP and the one-process rows). Every row asserts on the served logprobs, so the running server must serve the same checkpoint. |
+| `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and step count (default `2`) of the Environmental-GRPO e2e body (`tests/common/env_grpo_e2e.py`), the two-rank vLLM rows'; the SGLang and four-rank vLLM rows have their own checkpoint knobs. |
+| `HALO_TEST_ENV_GRPO_SGLANG_MODEL` | Checkpoint of the SGLang rows of `trainers/grpo/test_env_grpo_e2e.py` (`--backend sglang`, default `unsloth/gpt-oss-20b-BF16`); a per-family pass points it at the family and serves the same checkpoint. Its own knob because its server and default family differ from the vLLM rows'. |
 | `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` | Per-family overrides for the Environmental-GRPO e2e body: the policy's `attn_implementation` (unset = the loader's auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset = the attention projections read off the checkpoint's index, which MLA families resolve to their own names; needed where the projections do not end in `_proj`, such as Ling's `query_key_value,dense`). |
-| `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoint of the 4-rank Environmental-GRPO e2e (`trainers/grpo/test_env_grpo_vllm_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`), whose rows hold two parallelism axes at once (EP+ETP, EP+TP, ep4). Its own knob because it shares the 2-GPU file's server but not its default family. |
-| `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` | Checkpoint (default `Qwen/Qwen3-0.6B`, the dense endpoint's) and connect/sync/disconnect cycle count (default `12`) of `trainers/grpo/test_vllm_weight_transfer_reinit.py`; the pool-reconnect suite (`trainers/grpo/test_weight_sync_pool_reconnect.py`) drives the same server and reads the same checkpoint knob. An unreleased communicator strands device memory on every cycle on each end, so twelve cycles of a leak overshoot the suite's 1 GiB growth budget. |
+| `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoint of the four-rank vLLM rows of `trainers/grpo/test_env_grpo_e2e.py` (default `unsloth/gpt-oss-20b-BF16`), which hold two parallelism axes at once (EP+ETP, EP+TP, ep4). Its own knob because they share the two-rank rows' server but not their default family. |
+| `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` | Checkpoint (default `Qwen/Qwen3-0.6B`, the dense endpoint's) and connect/sync/disconnect cycle count (default `12`) of `trainers/grpo/test_weight_transfer_reinit.py --backend vllm`; the pool-reconnect suite (`trainers/grpo/test_weight_sync_pool_reconnect.py`) drives the same server and reads the same checkpoint knob. An unreleased communicator strands device memory on every cycle on each end, so twelve cycles of a leak overshoot the suite's 1 GiB growth budget. |
 | `HALO_TEST_VLLM_SERVER_GPU` | The vLLM server's GPU as `nvidia-smi` indexes it, for the same suite's device-memory read. Unset means "every GPU the trainer does not own", which is exactly the server's on the tier's own topology (`TRAINER_CUDA_DEVICES` covers the rest); set it when another job holds a third GPU. |
-| `HALO_TEST_SGLANG_REINIT_MODEL` / `HALO_TEST_SGLANG_REINIT_CYCLES` / `HALO_TEST_SGLANG_SERVER_GPU` | The same three knobs for the SGLang re-init suite (`trainers/grpo/test_sglang_weight_transfer_reinit.py`), against `SGLANG_SERVER_URL`: checkpoint (default `Qwen/Qwen3-0.6B`, the dense SGLang pass's), cycle count (default `12`) and the server's GPU for the device-memory read. |
+| `HALO_TEST_SGLANG_REINIT_MODEL` / `HALO_TEST_SGLANG_REINIT_CYCLES` / `HALO_TEST_SGLANG_SERVER_GPU` | The same three knobs for the SGLang re-init row (`trainers/grpo/test_weight_transfer_reinit.py --backend sglang`), against `SGLANG_SERVER_URL`: checkpoint (default `Qwen/Qwen3-0.6B`, the dense SGLang pass's), cycle count (default `12`) and the server's GPU for the device-memory read. |
 
 The two local checkpoints the per-suite overrides default to, Gemma4-26B-A4B (`HALO_TEST_GEMMA4_MODEL`,
 `HALO_TEST_EP_RT_MODEL`) and gpt-oss-20b (`HALO_TEST_EP_CP_RT_MODEL`), are
@@ -357,21 +357,23 @@ python scripts/before_training/patch_vocab.py --model_id unsloth/gpt-oss-20b-BF1
     --output_dir "${HALO_DATA_ROOT:?}/models/gpt-oss-20b-BF16-patched"
 ```
 
-**Env knob or `args_matrix` row?** `nproc`, `markers`, `timeout` and the tier are per-`TestSpec`, not
-per-row, so every row of a matrix runs at the same size, under the same marker set, in the same tier.
+**Env knob or `args_matrix` row?** A row launches under its spec's `nproc`, `markers`, `timeout` and
+`flaky`; a `Row` entry sets its own, so one script runs at several widths, tiers or engines, each row
+holding `gpu`, one tier and the `Ngpu` tag of its own `nproc`
+(`tests/cpu/conventions/test_gpu_harness_conventions.py`).
 
-A leg that keeps the model, the GPU count and the cost becomes a CLI flag with one row per leg, so
-each gets its own pytest node and verdict (`--trainer` / `--mode` on `trainers/grpo/test_online_grpo_vllm_1gpu_e2e.py`;
-one `--mode` per parallel shape on `trainers/sft/test_sft_qwen3_dense.py` and
-`trainers/sft/test_sft_gptoss_modes.py`; `--ep-loading lazy` / `eager` on
-`trainers/grpo/test_offline_grpo_ep_reference.py` and `test_offline_grpo_ep_cp.py`, one row per
-`ep_lazy_loading` value, pinned by `tests/cpu/conventions/test_offline_grpo_ep_loading_rows.py`).
-Such an entry's markers are the union over its rows, so `-m "gpu and cp"` also selects its non-CP
-rows.
+A leg the script can name becomes a CLI flag with one row per leg, so each gets its own pytest node and
+verdict (`--trainer` / `--mode` on `trainers/grpo/test_online_grpo_vllm_e2e.py`, whose one-process rows
+run at one rank; `--backend vllm` / `sglang` on `trainers/grpo/test_env_grpo_e2e.py`; one `--mode` per
+parallel shape on `trainers/sft/test_sft_families.py` and `trainers/sft/test_sft_gptoss_modes.py`;
+`--ep-loading lazy` / `eager` on `trainers/grpo/test_offline_grpo_reference.py` and
+`test_offline_grpo_ep_cp.py`, one row per `ep_lazy_loading` value, pinned by
+`tests/cpu/conventions/test_offline_grpo_ep_loading_rows.py`). Rows that keep the spec's markers share
+their union, so `-m "gpu and cp"` also selects the non-CP rows of such an entry.
 
-A leg that changes the model family, the GPU count or the runtime stays an env override:
-registering it as a row would file an EP-on-20B run under a dense entry's markers and its
-neighbor's timeout.
+A leg that only swaps the checkpoint a row loads stays an env override (`HALO_TEST_<SUITE>_MODEL`):
+the row's markers and timeout describe its default checkpoint, and a per-family pass is a run of that
+row with the override set.
 
 `core` is the pre-merge gate, and small-and-fast is its *intent*: ≤2 GPUs, tiny model. Size the host
 from the manifest, not from that intent. Over half of `tests/gpu/manifest.py` carries `core`.
@@ -743,11 +745,11 @@ Update the owning doc page in the same PR when you change `src/` (`skills/docs/d
 follow the anti-slop charter carried by the `/docs` skill: American English, active voice, short
 sentences, tables only for real matrices, no marketing register.
 
-`docs.yml` runs three jobs, and `make docs` runs only the first: the link, anchor and code-reference
-check over `agent-docs/`, `human-docs/`, `skills/` and the root markdown, which blocks a merge; a
-`diagrams` job that re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result against the
-committed PNGs under `agent-docs/assets/` — touch a generator and you owe `make diagrams` plus the
-regenerated figure in the same commit; and `markdownlint`. The last two are advisory.
+`docs.yml` runs two jobs, and `make docs` runs only the first: the link, anchor and code-reference
+check over `agent-docs/`, `human-docs/`, `skills/` and the root markdown, which blocks a merge; and an
+advisory `diagrams` job that re-runs every `scripts/diagrams/gen_*.py` and byte-compares the result
+against the committed PNGs under `agent-docs/assets/` — touch a generator and you owe `make diagrams`
+plus the regenerated figure in the same commit.
 
 ## Proof of Value
 
@@ -762,16 +764,13 @@ first-class content — report it with the reason.
 
 ## Submitting a PR
 
-1. **Get approved first and work from a signed fork branch** — the gate, the fork workflow and the
-   signed-commit setup are in [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+1. **Get approved first and work from a signed fork branch** — the gate, the fork workflow, the
+   signed-commit setup and the secrets rule are in [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
 2. **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
    `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (plus
    `make test-gpu-core` for GPU-affecting changes), `make docs`. The test tiers run locally, so report
    their result in the PR.
 3. **Fill the PR template** — what and why, type of change, Proof-of-Value evidence, checklist.
-4. **No secrets.** Never add `keys/`, `.env`, `*.pem`, or any credential.
-
-Report vulnerabilities **privately** — see `SECURITY.md`, never a public issue.
 
 ## Where to look next
 

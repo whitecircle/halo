@@ -12,7 +12,8 @@ The deadlock needs several steps to surface, so this runs >3 steps through the R
 (FSDP2 + gradient checkpointing) — a single forward/backward does not trigger it. It checks that the
 model's expert bank is split EP-way with each expert FFN sharded ETP-way, and that every step completes
 and logs a finite loss and grad norm; the EP+ETP math against a reference is
-covered by ``test_combined_ref_correctness.py --mode ep_etp`` and ``test_ep_etp_inkling.py``.
+covered by ``test_combined_ref_correctness.py --mode ep_etp`` and
+``test_ep_family_vs_reference.py --family inkling_text --expert-tp-size 2``.
 
 Config: ep_size=2, expert_tp_size=2 (ep_group_size=4) on GptOss-20B → 4 GPUs.
 

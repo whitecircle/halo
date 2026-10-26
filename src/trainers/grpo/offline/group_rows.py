@@ -42,11 +42,8 @@ def tokenize_offline_grpo_rows(
                 f"(silent zip truncation would train on mispaired advantages and record a "
                 f"wrong group_size)."
             )
-        # Exact ties only: every advantage method maps an exactly-tied (or singleton) group to
-        # all-zero advantages, so its rows carry no gradient yet dilute the loss normalizer. A
-        # near-tie still trains with full-scale advantages under the rank methods, so a spread
-        # threshold would change the objective. Dropping at tokenization rather than in the loss also
-        # skips those rows' forwards and holds across every mode, PP's metadata denominators included.
+        # Dropped at tokenization rather than in the loss, which also skips those rows' forwards and holds
+        # across every mode, PP's metadata denominators included.
         if drop_degenerate_groups and (len(rewards_list) < 2 or max(rewards_list) == min(rewards_list)):
             continue
         advantages_list = compute_group_advantages(rewards_list, advantage_method, best_completion_emphasis)

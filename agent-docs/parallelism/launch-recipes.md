@@ -73,31 +73,14 @@ export DIST_SHARED_FILESYSTEM=1      # default; "0" for per-node local storage
 export DIST_NCCL_TIMEOUT_MINUTES=60  # NCCL watchdog; toolkit default 30 (PyTorch's own is 10)
 export DIST_STORE_TIMEOUT_HOURS=4    # default; bounds c10d-store waits (main-first download, load gate)
 export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the ENA iface on AWS
-# The image bakes the InfiniBand / RoCE defaults: NCCL_IB_HCA=mlx5, NCCL_IB_DISABLE=0,
-# NCCL_NET_GDR_LEVEL=2 (GPU Direct RDMA for inter-node EP), NCCL_P2P_LEVEL=NVL (NVLink intra-node P2P),
-# NCCL_DEBUG=WARN, and CUDA_DEVICE_MAX_CONNECTIONS=1 (the setting EP is validated with, no throughput
-# cost — agent-docs/infrastructure/deepep.md#environment-variables; the driver latches it at cuInit,
-# so a launch outside the image must export it before the process starts).
-# On IB, leave NCCL_NET_PLUGIN unset: the OFI plugin yields to NCCL's built-in IB transport. Set
-# NCCL_IB_HCA only for a non-default HCA.
-# AWS EFA: set the plugin explicitly — the base's shinit_v2 sets it only for a shell that sources
-# /etc/shinit_v2 — and name its net so a missing plugin fails instead of falling back to sockets:
-# export NCCL_NET_PLUGIN=ofi
-# export NCCL_NET=Libfabric
-# NCCL_PROTO=simple is optional; if set, set it on every rank of a communicator, a rollout server
-# joining a weight-sync group included (multi-node.md#rdma-fabrics). FI_PROVIDER=efa and
-# FI_EFA_USE_DEVICE_RDMA=1 are the plugin's and libfabric's defaults.
-# Cross-node EP (ep_scope=global) over EFA additionally needs proxy GIN + GDRCopy:
-# export NCCL_GIN_TYPE=2             # proxy GIN (EFA has no IBGDA)
-# and run the container with `--device /dev/gdrdrv` (host loads the gdrdrv module).
-# A rollout server on another node (online / async GRPO): the server under its compose EFA overlay,
-# the trainer with `make ... EFA=1` — agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa.
+# The image bakes the IB/RoCE NCCL defaults and CUDA_DEVICE_MAX_CONNECTIONS=1
+# (agent-docs/infrastructure/docker.md#baked-in-environment-variables); InfiniBand/RoCE needs no fabric env.
 # export NVLINK_DOMAIN_SIZE=72        # GB200/GB300 NVL72 only; leave unset on ≤8-GPU nodes
 # export NCCL_DEBUG=INFO              # optional; overrides the image's WARN
 ```
 
-Per-fabric env and the `aws-ofi-nccl` plugin nuance:
-[Multi-Node → RDMA fabrics](multi-node.md#rdma-fabrics).
+The per-fabric launch env — AWS EFA's plugin variables, the proxy GIN cross-node EP needs over EFA, a rollout
+server on another node: [Multi-Node → RDMA fabrics](multi-node.md#rdma-fabrics).
 
 `init_distributed` pins `DIST_NCCL_TIMEOUT_MINUTES` as the default for every later
 `dist.new_group()`. EP/CP/PP subgroups pass it explicitly; the pin is what carries it onto the
@@ -112,9 +95,6 @@ path. The dispatcher sets `EP_DISABLE_GIN` from the EP topology (honoring an exp
 environment: DeepEP latches it at `import deep_ep`, so a Python-level write is too late, and the
 dispatcher can only warn. Without it DeepEP's duplicate-NCCL guard flags the image's HPC-X transport
 plugin as a second NCCL runtime.
-
-Cross-node EP over EFA also rides the GIN-capable `aws-ofi-nccl` + GDRCopy the image bakes. Full
-prerequisites: [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa).
 
 ## Checkpointing with EP
 

@@ -20,8 +20,8 @@ from transformers.trainer_pt_utils import LengthGroupedSampler
 from trl.trainer.utils import RepeatSampler
 
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.runtime.collectives import barrier, collective_device
-from src.runtime.consensus import rank_consensus
+from src.runtime.collectives import barrier
+from src.runtime.consensus import rank_consensus, rank_max
 from src.runtime.ranks import get_global_world_size, has_process_group, is_global_main_process, is_multi_rank_run
 from src.trainers.dataloaders import dp_representative_ranks, dp_scoped_gather, find_batch_sampler_shard
 
@@ -205,16 +205,11 @@ class EvaluationMixin:
         except TypeError:
             local_batches, measurable = 0, False
 
-        # Agree measurability first: a rank that early-returns leaves peers at the reduces below.
+        # Agree measurability first: a rank that early-returns leaves peers at the reduce below.
         if not rank_consensus(measurable).all_ok:
             return True
-
-        count = torch.tensor([local_batches], device=collective_device(), dtype=torch.long)
-        cmin = count.clone()
-        cmax = count.clone()
-        dist.all_reduce(cmin, op=dist.ReduceOp.MIN)
-        dist.all_reduce(cmax, op=dist.ReduceOp.MAX)
-        return int(cmin.item()) != int(cmax.item())
+        most, negated_fewest = rank_max([local_batches, -local_batches])
+        return most != -negated_fewest
 
     def _install_dp_metric_gather(self) -> None:
         """COLLECTIVE. Point HF's evaluation gather at :meth:`_dp_gather_for_metrics`, DP-scoped where the

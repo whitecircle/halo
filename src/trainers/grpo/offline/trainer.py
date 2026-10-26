@@ -48,7 +48,7 @@ from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds, cp
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 from src.model_loading.parallel.frozen_models import place_and_freeze
-from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
+from src.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.models.context_window import is_bounded_length
 from src.runtime.collectives import all_gather_cat
@@ -169,7 +169,11 @@ class OfflineGRPOTrainer(
         reject_inert_max_length(args, parallelism_config)
         reject_offline_pp_options(args, parallelism_config, peft_config, compute_metrics)
         args.max_length = resolve_pp_max_length(args, parallelism_config)
-        model = self._build_policy_model(model, args, parallelism_config, peft_config)
+        model = resolve_trainer_model(model, args, parallelism_config=parallelism_config)
+        reject_encoder_decoder(model)
+        model, self._peft_has_been_casted_to_bf16 = prepare_policy_model(
+            model, peft_config, args, disable_dropout=args.disable_dropout
+        )
         # The model rides through the distributed seam so PP can split it into this rank's stage.
         dist_kwargs = self._init_distributed_config(
             kwargs,
@@ -245,21 +249,6 @@ class OfflineGRPOTrainer(
         if is_global_main_process():
             logger.info(f"Using loss type: {self.loss_type}")
             logger.info(f"Using PG formulation: {args.policy_gradient_formulation}")
-
-    def _build_policy_model(self, model, args: OfflineGRPOConfig, parallelism_config, peft_config):
-        """The policy loaded, adapted when ``peft_config`` is given, and its dropout disabled on request."""
-        model = resolve_trainer_model(
-            model, args, keep_fp32_non_ep=parallelism_config is not None and parallelism_config.fp32_non_ep_params
-        )
-        # QLoRA's bf16 adapter cast leaves activations fp32, so every adapted linear's forward needs
-        # the autocast region compute_loss opens.
-        self._peft_has_been_casted_to_bf16 = False
-        if peft_config is not None:
-            model, self._peft_has_been_casted_to_bf16 = build_peft_model(model, peft_config, args)
-        reject_encoder_decoder(model)
-        if args.disable_dropout:
-            disable_dropout_in_model(model)
-        return model
 
     @staticmethod
     def _with_min_log_prob_scheduler(args: OfflineGRPOConfig, model, callbacks):

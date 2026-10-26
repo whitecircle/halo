@@ -19,7 +19,6 @@ expert_parallel_size: 8
 fp32_experts: true
 # fp32_non_ep_params omitted: refused at load under EP — Gemma-4's norms re-emit activations at
 # weight dtype, so the upcast would feed fp32 tokens into DeepEP's 2-byte transport.
-fp32_output_conversion: false
 
 # --- Attention & kernels ---
 attn_implementation: sdpa             # only viable backend (global_head_dim=512; mem-efficient SDPA auto-forced)
@@ -31,17 +30,13 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 300

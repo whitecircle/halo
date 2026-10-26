@@ -186,7 +186,7 @@ lowp_keep_last_blocks: 0
 
 Low precision is the fake-quant oracle by default; there is no backend knob. The native DeepGEMM kernel is opt-in via `HALO_DEEPGEMM_NATIVE=1` (never a throughput win). Two env knobs tune the simulated path: `HALO_LOWP_COMPILE=0` runs the weight round-trip eager instead of compiled, `HALO_LOWP_WEIGHT_CACHE=0` disables the per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
 
-Rejected at config/load time, loudly: any trainer but SFT; a `quantization_config` (QLoRA/bitsandbytes — the weights are not plain `nn.Linear`); `fp16: true` masters; and both `lowp_apply_dense_mlp` and `lowp_apply_moe_experts` false, which would apply low precision to nothing.
+Rejected at config/load time, loudly: any trainer but SFT; a `quantization_config` (QLoRA/bitsandbytes — the weights are not plain `nn.Linear`); `fp16: true` masters; both `lowp_apply_dense_mlp` and `lowp_apply_moe_experts` false, which would apply low precision to nothing; and pipeline parallelism, whose stages re-base block indices so the `lowp_keep_*` windows would land on each stage's own ends ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)).
 
 `lowp_apply_moe_experts` reaches the experts only on the grouped-GEMM path (`EPMoELayerBase._grouped_mm`). A layer running the per-expert loop instead (`use_grouped_gemm: false`, e.g. `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml` at ep16, or ETP on gpt-oss) ignores the precision and stays bf16 on its experts. Set `use_grouped_gemm: true` to apply low precision to the experts.
 

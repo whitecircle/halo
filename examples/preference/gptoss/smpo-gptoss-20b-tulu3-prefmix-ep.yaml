@@ -26,15 +26,11 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 num_train_epochs: 2
 gradient_accumulation_steps: 8
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 20
-seed: 42
 
 # --- Sequence Lengths ---
 max_length: 4096
@@ -42,7 +38,6 @@ max_prompt_length: 2048
 
 # --- Output ---
 output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
-save_strategy: steps
 save_steps: 200
 eval_strategy: steps
 eval_steps: 200
@@ -53,11 +48,9 @@ save_only_model: true
 logging_steps: 1
 logging_first_step: true
 report_to: wandb
-generate_eval_examples: true
 
 # --- Data ---
 dataloader_num_workers: 2
-remove_unused_columns: true
 
 # --- PEFT (optional) ---
 use_peft: false

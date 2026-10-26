@@ -3,7 +3,7 @@
 LoRA trains small rank-decomposed adapter matrices while the base model stays frozen, eliminating optimizer
 states for frozen parameters.
 
-It runs under DDP/FSDP, EP, CP and pure ETP; **TP** and **EP+TP** reject it, and QLoRA runs only
+It runs under DDP/FSDP, EP, CP and pure ETP; **TP**, **EP+TP** and **PP** reject it, and QLoRA runs only
 under DDP/FSDP and CP-on-dense (full matrix and reasons: [Parallelism compatibility](#parallelism-compatibility)).
 Under EP, LoRA targets both attention (via PEFT) and the MoE experts (via native grouped adapters).
 
@@ -230,6 +230,7 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 | EP+CP | Yes | No | Attention + experts | Both active |
 | EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `model_has_expert_lora` arm |
 | ETP | Yes | No | Attention only | Expert adapters rejected at config time by `ParallelismConfig` (`expert_tp_size > 1` gives the replicated adapter half a partial, never-synced gradient) |
+| PP | **No** | No | — | Rejected — the adapter save and resume are not stage-aware ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)) |
 
 **EP.** The expert names [above](#moe-models--expert-targets-and-full-trained-modules) route to **native grouped
 LoRA** — grouped `[E_local, K, r]`/`[E_local, r, N]` adapters stored alongside each expert weight, applied in
@@ -510,17 +511,17 @@ torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_modes.py --mod
 # merge_expert_lora_on_save checkpoint: servable, and resumed exactly against an uninterrupted run
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_merged_save_resume.py \
     --family gpt_oss --adapters mixed
-# weight syncs leave the frozen base bit-identical (no server); ..._exact_families.py sweeps every
-# other family the sync serves under the same modes (fsdp dense; ep1 / ep2 / etp2 MoE)
+# weight syncs leave the frozen base bit-identical (no server), on every family the sync serves
+# under each mode (fsdp dense; ep1 / ep2 / etp2 MoE)
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_weight_sync_exact.py \
     --family qwen3_moe --mode ep2 --adapters mixed
 
 # Adapters on an on-policy run, asserted on the SERVED policy (needs a live vLLM server):
 # attention LoRA under EP and pure ETP, native grouped expert LoRA under EP
-torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_online_grpo_vllm_moe_e2e.py \
+torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py \
     --trainer online --mode expert_lora_ep2
 # attention LoRA under FSDP2 DP, and the TP refusal at trainer construction
-torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_online_grpo_vllm_dense_e2e.py \
+torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py \
     --trainer online --mode lora_tp2_rejected
 
 # Dense LoRA/QLoRA benchmark

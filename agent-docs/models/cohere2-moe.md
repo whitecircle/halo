@@ -19,8 +19,8 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family cohere2_moe` (ep8 / cp8 / tp8 /
 ep8+cp2 / ep8+tp2 / etp8 / ep2+etp4 on a tiny synthetic checkpoint), plus EP=2 equivalence, SFT and CPU
 contract suites (`tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family cohere2_moe`,
-`tests/gpu/trainers/sft/test_sft_cohere2_moe.py`, `tests/cpu/models/test_cohere2_moe_support.py`).
-LoRA is tiny-model verified by `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py`
+`tests/gpu/trainers/sft/test_sft_ep_roundtrip.py --family cohere2_moe`, `tests/cpu/models/test_cohere2_moe_support.py`).
+LoRA is tiny-model verified by `tests/gpu/trainers/lora/test_lora_merged_save_resume.py --family cohere2_moe`
 (expert and mixed adapters at ep2 / ep1 / ep2+cp2, merged save and exact resume); no full-scale LoRA
 run.
 

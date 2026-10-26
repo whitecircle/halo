@@ -14,7 +14,7 @@ from src.configs.grpo import (
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from src.environments.rollout_config import ReasoningEffortChoice
 from src.rewards.graders.verifiable import RLVR_REWARD_SOURCES
-from src.rewards.terms import RewardTerm, parse_reward_terms, reject_veto_judges
+from src.rewards.terms import RewardTerm, parse_reward_terms, read_context_files, reject_veto_judges
 
 
 @dataclass
@@ -82,6 +82,10 @@ class RLVROnlineGRPOScriptArguments(
             "False distills on every completion token, negative-advantage ones included."
         },
     )
+
+    def __post_init__(self):
+        self.rewards = read_context_files(self.rewards)
+        super().__post_init__()
 
     def build_sdpg_kwargs(self) -> dict:
         """SDPG trainer kwargs from these args (empty when SDPG is disabled)."""

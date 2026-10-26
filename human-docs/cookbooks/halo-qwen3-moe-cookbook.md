@@ -42,15 +42,12 @@ max_length: 8192
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
-gradient_checkpointing: true
 
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
 num_train_epochs: 1.0
 
-save_strategy: steps
 save_steps: 1000
 save_total_limit: 1
 save_only_model: true

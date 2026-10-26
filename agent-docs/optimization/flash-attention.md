@@ -83,15 +83,8 @@ EP/long-context throughput tables live in [Throughput Benchmarks](throughput-ben
 **GptOss** (attention sinks):
 
 1. Disables transformers' auto-fallback to `vllm-flash-attn3` (`install_local_flash_for_sinks`). transformers reroutes FA2 requests to `kernels-community/vllm-flash-attn3` (SM90-only), which crashes on Blackwell; the attribute is reset to `None` before `from_pretrained`.
-2. Applies the sink policy (`src/models/attention/gpt_oss_sinks.py`). The Blackwell default for GptOss is FA4 under every policy. See [GPT-OSS](../models/gpt-oss.md#attention-sinks).
-
-    **SFT** neutralizes the sinks: FA2 (no `s_aux`) gets `self_attn.sinks = None`; FA3/FA4/flex/eager get `dtype.min`, frozen (preserves shape, ~0 softmax contribution). FA2 then runs end-to-end on B200/B300, equivalent to `flex_attention`.
-
-    **RL** (online/async GRPO, `reset_sinks: false`) keeps the pretrained sinks live and frozen. The rollout engine serves the same sinks, so the trainer reads them via FA4 (`learnable_sink`) to stay on-policy.
-
-    `train_sinks: true` keeps them live and trainable, on FA4 through the sink-gradient rescale or on `eager`; every other implementation raises rather than training nothing. Full fine-tuning only: an adapter run raises (the adapter artifact has no slot for the sinks), and the RL weight sync refuses it.
-
-3. **Variable-length RL (async GRPO) runs FA4 via a per-row dense forward** (`_dense_last_hidden_state`). A padded batch unpads to a `cu_seqlens` **varlen** FA4 call whose cross-row attention would break per-row log-prob identity with the sampling policy.
+2. Applies the run's sink policy (`src/models/attention/gpt_oss_sinks.py`). The policies — neutralized, live and frozen, trainable — and what each refuses are on [GPT-OSS → Attention sinks](../models/gpt-oss.md#attention-sinks).
+3. **Variable-length RL (async GRPO) runs FA4 via a per-row dense forward** (`_dense_last_hidden_state`), for exact RoPE positions and rank-uniform collective counts (`rows_forward_densely`).
 
     The dense kernel is seqlen-invariant, so the path forwards each row on its own, trimmed to its real contiguous span, with `attention_mask=None`: RoPE positions `[0, len)`, log-probs bit-identical to the unpadded forward. FA4 is where the trim is *mandatory*; `rows_forward_densely` also takes it on any attention path at `per_device_train_batch_size: 1`, for the cost alone ([Chunked log-probs](../training-methods/async-grpo/performance.md#chunked-log-probs)).
 
@@ -101,7 +94,7 @@ Fallback chain for sinks models: requested → `flash_attention_4` (added as a c
 
 With sinks reset for SFT (the default), an explicit `attn_implementation='sdpa'` is kept — `install_sdpa_for_reset_sinks` flips `_supports_sdpa` because the dropped sink column is `exp(dtype.min)=0`.
 
-With **live** sinks (`reset_sinks: false`, the RL flow) a sink-dropping impl shifts every logprob by nats against the served policy (measured ~−3 nats on gpt-oss-20b under FA2/SDPA), so `validate_attn_implementation` **raises** on `flash_attention_2` and `sdpa` and only admits sink-carrying impls — FA4 (`learnable_sink`), FA3 with `s_aux` (Hopper), `flex_attention`, `eager`. The Docker Hopper FA3 build exposes no `s_aux`, so live-sinks runs on Hopper use `flex_attention` or `eager`.
+With **live** sinks `validate_attn_implementation` admits only the sink-carrying impls — FA4 (`learnable_sink`), FA3 with `s_aux` (Hopper), `flex_attention`, `eager` — and **raises** on `flash_attention_2` and `sdpa` ([why](../models/gpt-oss.md#attention-sinks)). The Docker Hopper FA3 build exposes no `s_aux`, so live-sinks runs on Hopper use `flex_attention` or `eager`.
 
 Capability is read from the installed kernel's signature (`_attn_impl_handles_sinks`), probing the module transformers actually dispatches (FA3 via `flash_attn_interface` first, then `flash_attn_3`), so a flash-attn upgrade that adds sink support is picked up automatically.
 
@@ -182,7 +175,10 @@ and raises.
 
 EP, CP and every MoE force `use_reentrant=True` (a configured `False` is overridden with a warning; a
 MoE routes in its recompute, and non-reentrant checkpointing rejects the routing shapes that change
-when a nondeterministic attention recompute flips a near-tie pick).
+when a nondeterministic attention recompute flips a near-tie pick). Pipeline parallelism is the
+exception: a reentrant forward runs under `no_grad`, where FSDP2 registers no pre-backward hooks, so PP
+stages run non-reentrant and refuse `use_reentrant: true`
+([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)).
 
 ## Backend benchmark
 

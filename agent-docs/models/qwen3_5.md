@@ -70,7 +70,7 @@ Both classes drop the Hub checkpoints' `mtp.*` MTP head at load, so a run's expo
 
 - **Partial RoPE** — only the first `rotary_dim` channels of Q/K rotate; the rest is concatenated unrotated.
 
-Correctness coverage against a synthetic all-full-attention config: `tests/gpu/parallelism/cp/test_qwen3_5_cp_correctness.py`.
+Correctness coverage against a synthetic all-full-attention config: `tests/gpu/parallelism/cp/test_cp_family_vs_reference.py --family qwen3_5_moe_text`.
 
 ## Why CP is blocked on real checkpoints
 

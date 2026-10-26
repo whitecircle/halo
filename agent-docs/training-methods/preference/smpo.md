@@ -49,7 +49,7 @@ output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 
 `max_length` is the total budget and defaults to `1024`; `null` or a non-positive value resolves it to the context window. An unset `max_prompt_length` takes half of it and `max_completion_length` the remainder. Shares summing past `max_length` are rejected at construction — the two truncate independently. Prompts cut per `truncation_mode` (`keep_end`), completions from the end; a completion cut by `max_completion_length` carries no EOS.
 
-`padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` outside CP included. It is also incompatible with CP and VLM runs.
+`padding_free` needs a varlen Flash Attention kernel and raises on anything else, the `sdpa` the script defaults to under `reset_sinks: true` outside CP included. It is also incompatible with CP, [PP](../../parallelism/pipeline-parallelism.md#rejected-combinations) and VLM runs.
 
 Attention isolates each row of the flattened batch through `position_ids`; the LFM-2 and GatedDeltaNet (Qwen3.5/3.6, Qwen3-Next) conv / linear-attention mixers get the segment markers the SFT collators emit, and a GatedDeltaNet model is refused without the `causal_conv1d` / `fla` kernels that read them. Zaya's CCA has no per-document boundary parameter and carries state from each row into the next, across the chosen / rejected split too, so keep `padding_free` off for Zaya. See [Document isolation under packing](../../data/collators.md#document-isolation-under-packing).
 
@@ -69,7 +69,7 @@ The model class follows the **checkpoint**: a multimodal config loads through `A
 
 A dataset carrying images inside its messages alone reads as text, and the renderer refuses it rather than training on pixel-less placeholders.
 
-A VLM run hands its rows to the trainer untouched: it chat-templates them and selects `DataCollatorForVLMSMPO`, which processes images at collation, keeping pixels out of the Arrow cache. Completions must be text-only, and prompts are never truncated — one expanding past `max_prompt_length` raises, since cutting expanded placeholders desyncs them from `pixel_values`.
+A VLM run hands its rows to the trainer untouched: it chat-templates them and selects `DataCollatorForVLMSMPO`, which processes images at collation, keeping pixels out of the Arrow cache. Completions split off the prompt jointly, as on the text path; when a token merges across the boundary, the row's `prompt_overlap` counts the prompt tokens the completions start with, and the collator ends the prompt before them. Completions must be text-only, and prompts are never truncated — one expanding past `max_prompt_length` raises, since cutting expanded placeholders desyncs them from `pixel_values`.
 
 ## Testing a setup
 

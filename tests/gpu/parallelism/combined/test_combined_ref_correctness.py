@@ -15,8 +15,8 @@ bf16 + grouped-mm + all-reduce reordering tolerance. Because these modes feed th
 sequence to every rank (EP/TP/ETP do not shard the sequence — only CP does), the reduced
 per-rank loss must equal the reference; a sharding/gather/reduce bug moves it far outside
 tolerance. CP is covered separately (``cp/test_cp_train_correctness.py`` on Qwen3,
-``cp/test_glm4_cp_correctness.py``) because its per-rank chunk losses require token-weighted
-aggregation to recover the reference.
+``cp/test_cp_family_vs_reference.py`` on each Ulysses wrapper class) because its per-rank chunk losses
+require token-weighted aggregation to recover the reference.
 
 One shape per ``--mode`` invocation (a runner chains them):
 

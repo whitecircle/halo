@@ -1,10 +1,13 @@
 """The standalone tools' model-directory contract: the source resolver, the input gates, the size preflight,
-the non-weight copy, the fp32 norm cast and the one full-model write every tool owes its output directory."""
+the non-weight copy, the resume state a shard merge carries, the fp32 norm cast and the one full-model write
+every tool owes its output directory."""
 
 import contextlib
 import logging
 import os
 import shutil
+from collections.abc import Sequence
+from fnmatch import fnmatch
 
 import torch
 from accelerate.utils import is_peft_model
@@ -18,12 +21,15 @@ from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_WEIGHT_NAMES,
     FOREIGN_EXPORT_SUFFIXES,
+    OPTIMIZER_META_FILE,
+    OPTIMIZER_SHARD_GLOB,
     RESUME_SIDECAR_FILES,
     RESUME_SIDECAR_PREFIXES,
     RUN_INTERNAL_PREFIX,
     UNSUFFIXED_RESUME_ENTRIES,
     WEIGHT_DUMP_DIRS,
     WEIGHT_FILE_SUFFIXES,
+    optimizer_shard_filename,
 )
 from src.checkpoint.hub_layout import save_pretrained_layout
 from src.checkpoint.model_card import tag_exported_model_card
@@ -86,6 +92,57 @@ def copy_checkpoint_aux_files(
             if verbose:
                 print(f"Copied: {name}")  # noqa: T201 - CLI-facing helper; the merge scripts report via print
     tag_exported_model_card(output_dir, source_dir=input_dir)
+
+
+def first_holder(name: str, input_dirs: Sequence[str]) -> str | None:
+    """The first input holding ``name``, or None; two holding it at different sizes raise (a torn copy)."""
+    holders = [d for d in input_dirs if os.path.isfile(os.path.join(d, name))]
+    if len({os.path.getsize(os.path.join(d, name)) for d in holders}) > 1:
+        raise ValueError(f"{name} differs in size across {holders}: a torn copy. Re-copy that node's directory.")
+    return holders[0] if holders else None
+
+
+def resume_state_sources(input_dirs: Sequence[str]) -> dict[str, str]:
+    """``{filename: input holding it}`` for the resume state a merge of ``input_dirs``, the directories of one
+    save, carries: every per-rank file (optimizer shards, RNG and prefetch states, one per global rank) and,
+    last, the optimizer meta every node writes alike. Carried, they resume the merged directory exactly on the
+    save's topology, behind the save's own fingerprint gates.
+
+    Raises:
+        ValueError: a per-rank file held at different sizes, inputs whose optimizer metas differ, or a rank
+            of the meta whose optimizer shard no input holds.
+    """
+    names = {
+        name
+        for input_dir in input_dirs
+        for name in os.listdir(input_dir)
+        if fnmatch(name, OPTIMIZER_SHARD_GLOB) or name.startswith(RESUME_SIDECAR_PREFIXES)
+    }
+    sources = {name: first_holder(name, input_dirs) for name in sorted(names)}
+    meta_paths = [os.path.join(input_dir, OPTIMIZER_META_FILE) for input_dir in input_dirs]
+    metas = [
+        torch.load(path, map_location="cpu", weights_only=True) if os.path.isfile(path) else None
+        for path in meta_paths
+    ]
+    for input_dir, meta in zip(input_dirs[1:], metas[1:], strict=True):
+        if meta != metas[0]:
+            raise ValueError(
+                f"{input_dir} and {input_dirs[0]} carry different {OPTIMIZER_META_FILE}: they are not node "
+                f"directories of one save, or one node's optimizer save did not complete."
+            )
+    if metas[0] is None:
+        return sources
+    sources[OPTIMIZER_META_FILE] = input_dirs[0]
+    missing = [rank for rank in range(metas[0]["num_ranks"]) if optimizer_shard_filename(rank) not in sources]
+    if missing:
+        raise ValueError(
+            f"{OPTIMIZER_META_FILE} vouches for {metas[0]['num_ranks']} optimizer shards, but no input holds the "
+            f"optimizer shards of ranks {missing}. Bring every rank's {OPTIMIZER_SHARD_GLOB} into the input (a "
+            f"PP save on per-node storage: pass every node's directory), or delete {OPTIMIZER_META_FILE} and "
+            f"every {OPTIMIZER_SHARD_GLOB} from the input to merge the weights without optimizer state (a "
+            f"resume then warm-restarts)."
+        )
+    return sources
 
 
 def _file_versions(directory: str, names: tuple[str, ...]) -> dict[str, tuple[int, int]]:

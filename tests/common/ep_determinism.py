@@ -1,4 +1,4 @@
-"""The ``full_determinism`` backward-replay body the EP determinism GPU suites run.
+"""The ``full_determinism`` backward-replay body the EP determinism GPU suite runs.
 
 DeepEP's default dispatch claims each receive slot with an atomic, so the order an expert's tokens
 arrive in changes from one dispatch to the next, and with it the summation order of that expert's
@@ -23,7 +23,6 @@ or expert-compute shape:
 """
 
 import argparse
-from collections.abc import Iterable
 
 import torch
 from accelerate.state import GradientState
@@ -41,8 +40,6 @@ WORLD_SIZE = 2
 SEED = 1234
 BATCH, SEQ = 2, 1024
 REPEATS = 3
-# The families the representative suite runs; the sweep runs ep2 on every other one.
-REPRESENTATIVE_FAMILIES = ("gpt_oss", "qwen3_moe")
 # ParallelismConfig kwargs and tiny-config overrides per mode.
 MODES = {
     "ep2": ({"ep_size": 2}, {}),
@@ -54,10 +51,10 @@ MODES = {
 }
 
 
-def determinism_parser(families: Iterable[str]) -> argparse.ArgumentParser:
-    """The CLI a determinism suite takes, over the ``families`` it runs."""
+def determinism_parser() -> argparse.ArgumentParser:
+    """The determinism suite's CLI."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--family", choices=sorted(families), required=True)
+    parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
     parser.add_argument("--mode", choices=sorted(MODES), default="ep2")
     return parser
 

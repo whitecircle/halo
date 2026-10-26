@@ -99,8 +99,12 @@ Build checks from these rather than re-deriving them per file:
 
 Run: torchrun --nproc_per_node=2 tests/gpu/<area>/test_<name>.py
 """
+from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
+from tests.common.models import QWEN3_0_6B
 from tests.common.parallel_shape import parallel_shape_checks
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tokenizers import load_cached_tokenizer
 from tests.common.utils import training_run_checks
 
 MAX_STEPS = 5
@@ -109,9 +113,10 @@ MAX_STEPS = 5
 @gpu_test_main(min_world_size=2, prefix="test_sft_ep")
 def run(ctx) -> dict:
     # 1. Build a tiny model + deterministic synthetic dataset (NO Hub download on hot path).
-    #    Load from a cached snapshot or a small local config.
-    model, tokenizer = build_tiny_model(ctx)
-    dataset = make_synthetic_sft_dataset(seed=42)   # same seed on every rank: the SAME data
+    #    The tokenizer comes from the local HF cache; the model is a seeded random-init tiny config.
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    model = tiny_family_model(TINY_MOE_FAMILIES["qwen3_moe"], tokenizer)
+    dataset = create_sft_dataset(64, tokenizer, seed=42)   # same seed on every rank: the SAME data
 
     # 2. Train a few REAL steps (>= 2 so the decrease check has signal).
     #    The body builds its own ParallelismConfig — ctx carries the launch, not the mode.
@@ -162,14 +167,17 @@ MANIFEST: dict[str, TestSpec] = {
 }
 ```
 
-`TestSpec` fields: `nproc` (required), `markers` (by convention `'gpu'` + a tier
-`core` or `full` + a `Ngpu` tag + capability/model tags; only membership in `ALL_MARKERS` is
-enforced, by `tests/cpu/conventions/test_gpu_harness_conventions.py`),
+`TestSpec` fields: `nproc` (required), `markers` (`'gpu'`, exactly one tier `core` or `full`, the
+`Ngpu` tag of the row's `nproc`, plus capability/model tags, all from `ALL_MARKERS`),
 `args_matrix` (default `("",)`; a multi-mode script like `('--mode fsdp', '--mode ep')`
-becomes several nodes), `timeout` (default 1200) and `flaky` (default `False`). World-size
-strictness is **not** a manifest field:
-the script owns it via `gpu_test_main(exact_world_size=N)`, which pins an exact count rather
-than a bool, and the launcher always launches exactly `nproc`.
+becomes several nodes), `timeout` (default 1200) and `flaky` (default `False`). An `args_matrix` entry
+may be a `Row(args, nproc=..., markers=..., timeout=..., flaky=...)` whose set fields replace the spec's
+for that node, so one script runs rows at several widths, tiers or engines. Each row's args must be
+unique within the script; `tests/cpu/conventions/test_gpu_harness_conventions.py` enforces that and the
+marker rules above per resolved row. World-size strictness is **not** a manifest
+field: the script owns it via `gpu_test_main(exact_world_size=N)`, which pins an exact count rather
+than a bool (derived from the row's arguments when its rows run at several widths), and the launcher
+always launches exactly the row's `nproc`.
 
 Drift guards: `unregistered_scripts()` (on-disk `test_*.py` missing from the manifest) and
 `stale_entries()` (manifest rows whose file vanished) both fail collection. Run:
@@ -191,9 +199,9 @@ half — served-policy probe, policy loader, parallelism verdict, the perturb �
 round, the sink round — is `tests/common/on_policy_e2e.py`; the per-flavor bodies are
 `tests/common/env_grpo_e2e.py` (`run_env_grpo_e2e`) and `tests/common/online_grpo_e2e.py`
 (`run_online_grpo_e2e`), with `tests/common/thinking_budget.py` for the live
-`rollout_max_thinking_tokens` check. A new dense/MoE arm is a thin wrapper script over one of
-those, kept separate only so the manifest can attach its family markers, timeout and
-`vllm_server` / `sglang_server` marker per file.
+`rollout_max_thinking_tokens` check. A new dense/MoE arm is a row of the script that drives its
+body (`trainers/grpo/test_env_grpo_e2e.py --backend`, `trainers/grpo/test_online_grpo_vllm_e2e.py
+--mode`), a `Row` carrying its own family markers, timeout and `vllm_server` / `sglang_server` marker.
 
 ## Ports, tolerances, reporting
 

@@ -9,9 +9,9 @@ quietly stop meaning anything, and one test each.
 A family the weight sync ADMITS but no fixture covers is never checked against the server at all,
 though every sync into it starts with the server parsing its config; the roster is therefore derived
 from the EP registry, not listed. A fixture that drifts from what the writer produces today (a tiny
-config edited, a family's legacy keys changed, a rewrite altered) certifies a config the toolkit does
-not write, so the roster fixtures are re-rendered here and compared as parsed payloads — not bytes,
-which would fail on key order or indentation alone. And a fixture pinned to a release is one this
+config edited, a rewrite altered) certifies a config the toolkit does not write, so the roster
+fixtures are re-rendered here and compared as parsed payloads — not bytes, which would fail on key
+order or indentation alone. And a fixture pinned to a release is one this
 offline suite cannot re-render at all, so the pin is confined to the single thing a tiny config
 cannot express: an export that carries its SOURCE checkpoint's schema.
 
@@ -127,19 +127,10 @@ def test_every_hub_fixture_declares_the_family_it_ships(generate):
         assert len(fixture.revision) == 40, f"{fixture.name}: pin a full commit sha, not {fixture.revision!r}"
 
 
-def test_the_gemma4_control_is_the_folded_form_its_rewrite_removes(generate):
-    """The build gate is load-bearing only while the unrewritten Gemma 4 form still carries
-    ``per_layer_config`` and the rewritten one carries the flat keys instead."""
-    (folded,) = (fixture for fixture in generate.UNPARSEABLE if fixture.model_type == "gemma4")
-    unrewritten = _on_disk(generate.fixture_path("unparseable", folded))["text_config"]
-    rewritten = _on_disk(generate.fixture_path("fixtures", folded))["text_config"]
-    assert "per_layer_config" in unrewritten and "per_layer_config" not in rewritten
-    assert {"global_head_dim", "num_global_key_value_heads"} <= set(rewritten)
-
-
 def test_the_step3p7_control_is_the_native_schema_its_carry_replaces(generate):
-    """Same, for the source-schema carry: unrewritten, the export is transformers' own spellings —
-    which the pinned server has no class for — and the carried one is the release's."""
+    """The build gate is load-bearing only while the control differs from its fixture where the carry
+    acts: unrewritten, the export is transformers' own spellings — which the pinned server has no
+    class for — and the carried one is the release's."""
     (native,) = (fixture for fixture in generate.UNPARSEABLE if fixture.model_type == "step3p7")
     unrewritten = _on_disk(generate.fixture_path("unparseable", native))["text_config"]
     carried = _on_disk(generate.fixture_path("fixtures", native))["text_config"]

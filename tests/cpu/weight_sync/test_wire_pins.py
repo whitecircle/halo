@@ -26,6 +26,7 @@ from tests.common.repo import REPO_ROOT
 
 GOLDEN = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 VLLM_DOCKERFILE = REPO_ROOT / "Dockerfile.vllm"
+VLLM_VERIFY_SCRIPT = REPO_ROOT / "docker/vllm/verify_image.py"
 SHIM_ROOT = "/opt/nccl_compat"
 SGLANG_GROUP_TIMEOUT_S = 7.0
 
@@ -63,7 +64,7 @@ def test_the_store_blocks_until_the_engine_joined(record):
 
 def test_the_vllm_image_shims_the_module_the_id_pickles_from():
     """The image writes a shim module re-exporting vLLM's own ``ncclUniqueId`` at the trainer's module path,
-    creates every package above it, and asserts at build that the two classes are one."""
+    creates every package above it, and its build check asserts that the two classes are one."""
     dockerfile = VLLM_DOCKERFILE.read_text(encoding="utf-8")
     module = GOLDEN["unique_id_class"]["module"]
     assert module == ncclUniqueId.__module__
@@ -73,8 +74,11 @@ def test_the_vllm_image_shims_the_module_the_id_pickles_from():
     for depth in range(1, len(packages) + 1):
         init = f"{SHIM_ROOT}/{'/'.join(packages[:depth])}/__init__.py"
         assert init in dockerfile, f"Dockerfile.vllm creates no {init}, so the shim cannot import"
-    asserted = re.findall(r"from (\S+) import ncclUniqueId; from vllm\.\S+ import ncclUniqueId as v", dockerfile)
+    assert str(VLLM_VERIFY_SCRIPT.relative_to(REPO_ROOT)) in dockerfile, "Dockerfile.vllm runs no image build check"
+    check = VLLM_VERIFY_SCRIPT.read_text(encoding="utf-8")
+    asserted = re.findall(r"^from (\S+) import ncclUniqueId as shim_unique_id$", check, re.M)
     assert asserted == [module], f"the image's build assert checks {asserted}, not {module}"
+    assert "assert shim_unique_id is ncclUniqueId" in check, "the build check no longer compares the two classes"
 
 
 def test_the_sglang_store_does_not_wait_for_the_engine(monkeypatch):

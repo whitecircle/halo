@@ -156,11 +156,6 @@ trains and reloads but that the merge tools or the pinned server refuse. It rewr
 - **The `model_type` restore** (`restore_model_type`): puts the live `model_type` back when a vendor
   config class (Bailing/Ling) leaves it undeclared; without it every model-type-keyed reader (the shard
   merge, the hub renames) sees no family.
-- **The flat per-layer form older vLLM servers parse.** A family whose spec declares
-  `served_flat_config_keys` (Gemma 4: `global_head_dim`, `num_global_key_value_heads`) is rewritten to
-  those keys by `export_legacy_per_layer_config`; a 5.20 reload rebuilds `per_layer_config` from them,
-  and a per-layer override the flat keys cannot express is refused
-  ([Config-schema parity](../infrastructure/rollout-servers.md#config-schema-parity)).
 - **The source checkpoint's own schema** for a family whose engines have no config class and read it
   only through its `auto_map` modules (`exports_source_config_schema`, Step-3.7 Flash):
   `export_source_config_schema` writes the run's changed values back under the source's spellings and
@@ -171,6 +166,11 @@ trains and reloads but that the merge tools or the pinned server refuse. It rewr
 - **The `auto_map` trim**: an entry naming a module the directory does not carry is dropped (an
   in-library load serializes the hub's `auto_map` without copying the code — Laguna without
   `trust_remote_code`); a cross-repo `repo--module.Class` reference stays.
+
+Everything else is transformers' own serialization. A Gemma 4 export carries its full-attention
+geometry as `per_layer_config` instead of the hub's flat `global_head_dim` /
+`num_global_key_value_heads`: both pinned engines and transformers 5.16+ read it, and a 5.14-line
+reader refuses it.
 
 The parallel saves (`save_model_config`) and the trainer's base-save fallback serialize the config inside
 `config_export_ready`, which restores the balancing strategy's zeroed `router_aux_loss_coef`, forced
@@ -309,10 +309,12 @@ python scripts/after_training/merge_ep_shards.py \
     --input_dir /path/to/sharded_checkpoint --output_dir /path/to/merged_checkpoint
 ```
 
-The merge copies the resume sidecars, so the merged directory resumes weights, step counters, scheduler,
-balancing biases, reference log-probs and pending prefetch rounds — but **not** the optimizer: the
-per-rank shards are dropped, so a resume from it warm-restarts. A resume pointed at the unmerged directory
-raises the merge-first error.
+The merge carries the resume state with the weights: step counters, scheduler, balancing biases, reference
+log-probs, pending prefetch rounds, RNG states, and every rank's optimizer shard with the `optimizer_meta.pt`
+that vouches for them. The merged directory therefore resumes exactly on the topology that wrote it, and
+under any other meets the same [fingerprint gates](#warm-restart-vs-exact-resume-torchrun) as the save. A
+meta naming a rank whose shard is absent refuses the merge. A resume pointed at the unmerged directory raises
+the merge-first error.
 
 ### Tensor parallelism (TP)
 

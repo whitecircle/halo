@@ -48,7 +48,11 @@ Every recipe runs a [veto judge](../../../../grpo/rewards/judge.md#veto-judge) n
 can judge. It reads the whole episode, reasoning included, beside a `context` that explains the environment and
 its caps. Its checks are the environment's own: `checks: environment` takes the rubric `CodeContestsEnvironment`
 declares (`JUDGE_CHECKS`, built from `AUDIT_CHECKS` in `code_contests_prompts.py`), the run's scratchpad (`python_repl` or `run_code`) named
-in it, so a recipe states only the judge's model, view, price and `context`. The term's `weight` (−0.7) prices the weighted checks by their check weights, each fired one adding its own price.
+in it, so a recipe states only the judge's model, view, price and context. The context comes from a shared
+`context_file` under `examples/grpo/environmental/code-contests-judge/`, one file per chat template, rollout
+backend and scratchpad: `gptoss.txt` (gpt-oss on either engine), `gemma4-vllm.txt`, `gemma4-qwen3.6-sglang.txt`,
+`qwen3.6-vllm.txt`, and `qwen3.6-vllm-run-code.txt` for the Python and C++ stages. The term's `weight` (−0.7) prices
+the weighted checks by their check weights, each fired one adding its own price.
 
 The judge is served through OpenRouter and reads `OPENROUTER_API_KEY`: pass it with `--env-file`, or drop the term
 to run without a judge.
@@ -81,7 +85,7 @@ second step in a row with no valid episode stops the run ([Batch construction](.
 ### Cap context
 
 Where the engine closes reasoning at a one-token marker (Qwen3.6 and Gemma 4 on vLLM), a turn whose reasoning
-reaches the engine's ceiling is marked for the judge. Each recipe's `context` states what the policy sees of its
+reaches the engine's ceiling is marked for the judge. Each context file states what the policy sees of its
 earlier reasoning (`carry_reasoning`) and how its turns are budgeted: a soft budget on vLLM and SGLang, a turn
 limit on gpt-oss, whose template states no budget.
 

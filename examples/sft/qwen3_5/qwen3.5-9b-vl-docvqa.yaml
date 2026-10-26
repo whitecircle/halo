@@ -20,25 +20,19 @@ test_size: 0.05
 max_length: 28672  # zero-shot-exp holds 4-page rows up to ~21k vision tokens; the collator raises on over-length
 
 # --- Training ---
-train_on_completions_only: true
 assistant_message_template: "<|im_start|>assistant\n"
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
-optim: adamw_torch_fused
 learning_rate: 1.0e-05
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 20
-seed: 42
 
 # --- Output ---
 output_dir: checkpoints/qwen3.5-9b-vl-docvqa
-save_strategy: steps
 save_steps: 200
 eval_strategy: steps
 eval_steps: 100

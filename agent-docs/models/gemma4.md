@@ -53,11 +53,9 @@ ETP only shards the expert FFN weights (gate/up/down), leaving attention untouch
 
 ## Export
 
-Every exported `config.json` carries the flat `global_head_dim` / `num_global_key_value_heads` keys
-beside the per-layer fields: transformers 5.20 folds the full-attention layers' geometry into
-`per_layer_config`, which the pinned vLLM server's transformers refuses, so the EP layer declares
-the two keys (the spec's `served_flat_config_keys`) and the export rewrites them back
-([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
+An exported `config.json` states the full-attention layers' geometry as transformers 5.20's
+`per_layer_config` rather than the hub's flat `global_head_dim` / `num_global_key_value_heads`; both
+pinned engines read it ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)).
 
 Both pinned engines read the fused expert pair the gather emits, so RL weight sync runs on either
 `rollout_backend`. On SGLang it needs this repo's image: the router folds `scale` into its norm once

@@ -211,10 +211,7 @@ RUN if [ "$TARGET_GPU" = "hopper" ]; then \
            && echo "flash_attn_3" > "$DIST_INFO/top_level.txt" \
            && touch "$DIST_INFO/INSTALLER" \
            && echo "Created $DIST_INFO"; \
-         fi \
-      && python -c "from flash_attn_3 import flash_attn_func; print('FA3 via flash_attn_3: OK')" \
-      && python -c "from flash_attn_interface import flash_attn_func; print('FA3 via flash_attn_interface: OK')" \
-      && python -c "import importlib.metadata; print(f'FA3 version via metadata: {importlib.metadata.version(\"flash_attn_3\")}')"; \
+         fi; \
     else \
       echo "Skipping FA3 setup (Blackwell target)"; \
     fi
@@ -294,18 +291,7 @@ RUN pip install --force-reinstall --no-deps \
       "nvidia-cutlass-dsl==${CUTLASS_DSL_VERSION}" \
       "nvidia-cutlass-dsl-libs-base==${CUTLASS_DSL_VERSION}" \
       "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}" \
-      "quack-kernels==${QUACK_VERSION}" \
-    && python -c "import cutlass, cutlass.cute.nvgpu, cutlass._mlir; print('cutlass-dsl import OK:', cutlass.__file__)" \
-    && if [ "$TARGET_GPU" = "blackwell" ]; then \
-         python -c "from flash_attn.cute import flash_attn_func; print('FA4 flash_attn.cute import OK')"; \
-       else \
-         echo "FA4 flash_attn.cute assertion skipped (Hopper installs FA2+FA3, not FA4)"; \
-       fi
-
-# The optional extras the locked install carried: FlashAdamW (`flash-optimizers`, pure Triton) and the
-# Gigatoken Rust bulk tokenizer backend (`gigatoken`).
-RUN python -c "from flashoptim import FlashAdamW; print('flashoptim OK')" \
-    && python -c "import gigatoken; print('gigatoken OK')"
+      "quack-kernels==${QUACK_VERSION}"
 
 # Guards against a silent NCCL downgrade above: asserts the DeepEP floor, equality with uv.lock,
 # and that a live process resolves that wheel's libnccl.so.2 rather than the system copy.
@@ -342,22 +328,11 @@ RUN uv pip install --system -e . --no-deps
 # nothing re-pulls it.
 RUN pip uninstall -y transformer_engine || true
 
-# Build-time verification (GPU-dependent packages verify at runtime with --gpus).
+# Build-time verification, on the image that ships: the imports docker/training/verify_image.py lists
+# (GPU-dependent packages verify at runtime with --gpus), the CLI and the bubblewrap jail's id maps.
+COPY docker/training/verify_image.py /tmp/verify_image.py
 RUN echo "=== Verifying Installation (TARGET_GPU=${TARGET_GPU}) ===" \
-    && python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.version.cuda}')" \
-    && python -c "import transformers; print(f'Transformers: {transformers.__version__}')" \
-    && python -c "import trl; print(f'TRL: {trl.__version__}')" \
-    && python -c "import accelerate; print(f'Accelerate: {accelerate.__version__}')" \
-    && python -c "import flash_attn; print(f'Flash Attention 2: {flash_attn.__version__}')" \
-    && python -c "from flash_attn.flash_attn_interface import flash_attn_func; print('  - FA2 flash_attn_func: OK')" \
-    && if [ "$TARGET_GPU" = "hopper" ]; then \
-         python -c "import flash_attn_3; print('Flash Attention 3: OK')" \
-         && python -c "from transformers.utils import is_flash_attn_3_available; print(f'  - transformers FA3 detection: {is_flash_attn_3_available()}')"; \
-       else \
-         echo "  - FA3: skipped (Blackwell target)"; \
-       fi \
-    && python -c "import nvidia.nvshmem; print('NVSHMEM: installed')" \
-    && python -c "from src.weight_sync.clients.vllm import VLLMWeightSyncClient; print('Weight-sync client: OK')" \
+    && python /tmp/verify_image.py "$TARGET_GPU" && rm /tmp/verify_image.py \
     && halo --help >/dev/null && echo "halo CLI: $(command -v halo)" \
     && command -v newuidmap newgidmap >/dev/null && grep -q '^root:' /etc/subuid /etc/subgid \
     && echo "bubblewrap jail ids: $(grep '^root:' /etc/subuid)" \

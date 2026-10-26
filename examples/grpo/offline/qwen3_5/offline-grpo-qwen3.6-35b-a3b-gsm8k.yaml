@@ -24,8 +24,6 @@ test_size: 0.05
 
 # --- Offline GRPO Hyperparameters ---
 loss_type: bnpo                    # global token average
-advantage_method: quantile_norm    # rank-based → normal; handles discrete reward sets
-kl_beta: 0.0                       # no reference model
 initial_min_log_prob: -0.5         # schedules to -3.0
 
 # --- Training ---
@@ -36,13 +34,10 @@ gradient_accumulation_steps: 8
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 weight_decay: 0.01
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 10
-seed: 42
 
 # --- Sequence Lengths ---
 max_prompt_length: 512
@@ -50,7 +45,6 @@ max_completion_length: 6144
 
 # --- Output ---
 output_dir: checkpoints/offline-grpo-qwen3.6-35b-a3b-gsm8k
-save_strategy: steps
 save_steps: 100
 eval_strategy: steps
 eval_steps: 50
@@ -63,7 +57,6 @@ logging_first_step: true
 report_to: wandb
 
 # --- Generation Callback ---
-generate_eval_examples: true
 num_eval_examples: 10
 
 # --- Data ---

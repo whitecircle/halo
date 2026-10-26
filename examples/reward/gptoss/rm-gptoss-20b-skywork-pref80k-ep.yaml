@@ -18,23 +18,17 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 num_train_epochs: 1
 gradient_accumulation_steps: 8
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
-optim: adamw_torch_fused
 learning_rate: 1.0e-05
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 20
-seed: 42
 
 # --- Sequence Length ---
 max_length: 4096
 
 # --- Output ---
 output_dir: checkpoints/rm-gptoss-20b-skywork-pref80k-ep
-save_strategy: steps
-save_steps: 500
 eval_strategy: steps
 eval_steps: 500
 save_total_limit: 3
@@ -47,7 +41,6 @@ report_to: wandb
 
 # --- Data ---
 dataloader_num_workers: 2
-remove_unused_columns: true
 
 # --- PEFT ---
 use_peft: false

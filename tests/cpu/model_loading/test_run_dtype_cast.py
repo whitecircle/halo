@@ -278,7 +278,7 @@ def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_in
     and the pins are unified to it."""
     args = types.SimpleNamespace(model_init_kwargs=dict(model_init_kwargs), gradient_checkpointing=False)
 
-    model = resolve_trainer_model(pinned_checkpoints["deepseek_v4"], args, keep_fp32_non_ep=False)
+    model = resolve_trainer_model(pinned_checkpoints["deepseek_v4"], args, parallelism_config=None)
 
     assert params_off_dtype(model, torch.bfloat16) == []
 
@@ -363,7 +363,12 @@ def _load_with(
     tiny = TINY_MOE_FAMILIES[family]
     if loader == "path_string":
         args = types.SimpleNamespace(model_init_kwargs={"dtype": torch.bfloat16}, gradient_checkpointing=False)
-        model = resolve_trainer_model(path, args, model_class=tiny.load_class, keep_fp32_non_ep=keep_fp32)
+        model = resolve_trainer_model(
+            path,
+            args,
+            parallelism_config=types.SimpleNamespace(fp32_non_ep_params=keep_fp32),
+            model_class=tiny.load_class,
+        )
         return model
     for module in (ep_lazy_loader, pp_lazy_loader):
         monkeypatch.setattr(module, "apply_ep_layers", lambda model, *args, **kwargs: model)

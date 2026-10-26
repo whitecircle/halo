@@ -222,8 +222,8 @@ provider. The image also bakes `NCCL_IB_HCA=mlx5`.
 
 The NGC base's `/etc/shinit_v2` sets `NCCL_NET_PLUGIN=ofi` when it detects EFA hardware, but only
 for a shell that sources it. An EFA job therefore sets the variable itself, and `NCCL_NET=Libfabric`
-with it so a missing plugin fails instead of falling back; that is what every multi-node
-`launcher-configs/skypilot/aws/**` task does.
+with it so a missing plugin fails instead of falling back to sockets; that is what every multi-node
+`launcher-configs/skypilot/aws/**` task does. The images do not bake either: they slow an IB cluster.
 
 | Fabric | Verify (on the host) | Launch env (beyond image defaults) |
 |--------|--------|------------------------------------|
@@ -231,10 +231,10 @@ with it so a missing plugin fails instead of falling back; that is what every mu
 | AWS EFA | `fi_info -p efa` | `NCCL_NET_PLUGIN=ofi`, `NCCL_NET=Libfabric` |
 
 - **InfiniBand and RoCE** share the NCCL IB path and run on the baked defaults.
-- **AWS EFA is libfabric, not Mellanox.** The base bundles `aws-ofi-nccl` 1.17.3, which exports no
-  `ncclGin`; every Halo image builds a GIN-capable plugin from one pinned commit
-  (`docker/efa/install_efa_userspace.sh`) and exposes it as `libnccl-gin.so`. The vLLM and SGLang
-  server images carry the same build.
+- **AWS EFA is libfabric, not Mellanox.** On p6 instances the `mlx5` devices are no cross-node NCCL
+  path (NCCL falls back to TCP sockets). Every Halo image, the vLLM and SGLang servers included,
+  carries one pinned GIN-capable `aws-ofi-nccl` build ([Docker → RDMA](../infrastructure/docker.md#rdma-networking-infiniband-and-efa)).
+  `FI_PROVIDER=efa` and `FI_EFA_USE_DEVICE_RDMA=1` are the plugin's and libfabric's defaults.
 
     `NCCL_PROTO=simple` is optional; if set, set it on every rank of a communicator, a rollout
     server joining a weight-sync group included

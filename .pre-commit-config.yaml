@@ -2,7 +2,8 @@
 # then `pre-commit install`. These mirror the hosted CI gates (.github/workflows/lint.yml),
 # so a clean commit locally is a green gate. The host has no torch, so only the pure-Python /
 # standalone-binary gates run here; CPU/GPU tests run inside the Docker image (see the Makefile).
-# Pins match CI: ruff 0.9.10 (lint.yml).
+# The ruff rev is uv.lock's pin, which CI and `make lint` read; tests/cpu/config/test_stack_versions_in_sync.py
+# holds this literal copy to it.
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.10
@@ -11,18 +12,11 @@ repos:
         args: [--fix]
       - id: ruff-format     # format
 
-  - repo: https://github.com/kynan/nbstripout
-    rev: 0.8.1
-    hooks:
-      - id: nbstripout      # strip notebook outputs before they land in git
-
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: end-of-file-fixer
-        exclude: '\.ipynb'
       - id: trailing-whitespace
-        exclude: '\.ipynb'
       - id: check-merge-conflict
       - id: check-added-large-files
         args: ["--maxkb=1024"]

@@ -94,7 +94,7 @@ sum exactly to the reward the environment settled. The trainer's reasoning-lengt
 ## Config
 
 From `examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml`: four trainer
-GPUs, and one server on the other four.
+GPUs, and one server on the other four at the default `rollout_server_url`, `http://localhost:8000`.
 
 ```yaml
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
@@ -102,8 +102,6 @@ expert_parallel_size: 4
 environment_type: react_math
 max_turns: 10
 num_rollout_workers: 16            # Ray environment actors per training rank
-rollout_server_url: "http://localhost:8000"
-vllm_group_port: 51216             # weight-sync port, bound on the trainer host
 rollout_max_tokens: 8192           # budget for ONE turn, not the trajectory
 enable_prefetch: false             # needs two or more servers
 num_generations: 8                 # episodes per prompt
@@ -191,6 +189,7 @@ way to overlap the two.
 ## Run
 
 ```bash
+make build-vllm   # or set VLLM_IMAGE to the public image
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_TP=4 VLLM_REASONING_PARSER=qwen3 \
 VLLM_TOOL_CALLING_FLAGS= \
     docker compose -f docker-compose.vllm.yml up -d vllm-server

@@ -6,7 +6,8 @@ under ``.shard_N`` suffixes for fast parallel I/O, a layout no loader reads (the
 with these merge instructions). The merge writes each family's ``ExpertLayout`` through the same
 ``to_hub_expert_tensors`` the gathered save applies, so merged-from-sharded equals gathered.
 A gathered save (``save_sharded_ep: false``) needs no merge; it is slower to write but directly
-loadable.
+loadable. The merge carries the save's resume state, optimizer shards included, so the merged directory
+resumes exactly on the topology that wrote it.
 
 The merge is streamed: input shards are opened once and read group by group (one MoE layer's
 experts, or one replicated tensor, at a time), each merged group is transformed and handed straight
@@ -25,6 +26,7 @@ import argparse
 import logging
 import os
 import re
+import shutil
 from collections import defaultdict
 from contextlib import ExitStack
 
@@ -38,6 +40,7 @@ from src.checkpoint.offline_export import (
     preflight_resource_warning,
     reject_in_place_conversion,
     reject_sibling_adapter,
+    resume_state_sources,
 )
 from src.checkpoint.reading import detect_model_type, header_nbytes, is_ep_sharded_checkpoint, read_checkpoint_index
 from src.checkpoint.writing import StreamingShardWriter
@@ -178,6 +181,7 @@ def merge_ep_shards(
         raise FileNotFoundError(f"No EP shards ({ep_shard_filename(0, ep_size)} and siblings) found in {input_dir}")
     if verbose:
         logger.info(f"  Shard files: {shard_files}")
+    resume_files = resume_state_sources([input_dir])
 
     with ExitStack() as stack:
         # Open every input shard once and read tensors lazily: only the group being merged is ever
@@ -246,7 +250,7 @@ def merge_ep_shards(
 
         # Peak RAM is about twice the largest group (the concatenated inputs plus the transform's
         # copies) on top of the writer's pending output shard. On disk the merged artifact is the
-        # input shards' size, since tensors are re-emitted at their stored dtype.
+        # input shards' size, since tensors are re-emitted at their stored dtype, plus the resume state.
         largest_group = max(
             [
                 sum(logical_nbytes(f"{prefix}.{suffix}") for suffix in params)
@@ -258,7 +262,7 @@ def merge_ep_shards(
         preflight_resource_warning(
             "merge_ep_shards",
             output_dir,
-            disk_bytes=sum(os.path.getsize(os.path.join(input_dir, f)) for f in shard_files),
+            disk_bytes=sum(os.path.getsize(os.path.join(input_dir, f)) for f in (*shard_files, *resume_files)),
             ram_bytes=2 * largest_group + writer.max_bytes,
         )
 
@@ -307,6 +311,10 @@ def merge_ep_shards(
     if verbose:
         logger.info(f"Saved merged weights to {output_dir}")
 
+    # The optimizer meta lands after every shard and before the aux copy brings trainer_state.json, so a
+    # merge that died midway leaves a directory the resume refuses rather than one that warm-restarts.
+    for name in resume_files:
+        shutil.copy2(os.path.join(input_dir, name), os.path.join(output_dir, name))
     # The inputs go LAST, once the merged weights and their index are on disk, so a merge that died
     # earlier leaves the only copy of the weights where it found them. generation_config.json rides
     # across verbatim: the format gate admits only this toolkit's sharded writer's output, which

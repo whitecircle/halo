@@ -29,7 +29,7 @@ Prerequisites (the server must own a GPU the trainer does not):
     # all GPUs visible, masked by CUDA_VISIBLE_DEVICES: NCCL P2P to the trainer's GPU needs the peer
     # device present in the server container (``--gpus device=7`` fails init with 'unhandled cuda error')
     docker run -d --gpus all -e CUDA_VISIBLE_DEVICES=7 --network host --ipc host -v $DIR:$DIR \\
-        -e NCCL_IB_DISABLE=1 -e NCCL_P2P_LEVEL=NVL vllm-server:0.32.0 $DIR --port 8000 \\
+        -e NCCL_IB_DISABLE=1 -e NCCL_P2P_LEVEL=NVL halo:vllm-0.32.0 $DIR --port 8000 \\
         --trust-remote-code --moe-backend triton --weight-transfer-config '{"backend": "nccl"}' \\
         --return-tokens-as-token-ids --max-model-len 1024 --gpu-memory-utilization 0.2 \\
         --max-logprobs 64 --enforce-eager

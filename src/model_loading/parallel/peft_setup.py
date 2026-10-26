@@ -14,6 +14,7 @@ from peft.utils.constants import INCLUDE_LINEAR_LAYERS_SHORTHAND
 from torch.distributed.tensor import DTensor
 from transformers import PreTrainedModel
 from trl import get_peft_config
+from trl.trainer.utils import disable_dropout_in_model
 
 from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
@@ -382,6 +383,22 @@ def build_peft_model(model, peft_config, args, *, merge_existing: bool = True):
     casted = bool(getattr(args, "bf16", False) and getattr(model, "is_loaded_in_4bit", False))
     if casted:
         _peft_module_casting_to_bf16(model)
+    return model, casted
+
+
+def prepare_policy_model(model, peft_config, args, *, disable_dropout: bool, merge_existing: bool = True):
+    """A trainer's policy wrapped by ``peft_config`` when one is given (:func:`build_peft_model`), then its
+    dropout disabled when ``disable_dropout`` is set. Returns ``(model, casted_to_bf16)``, the flag
+    :func:`peft_bf16_autocast` takes.
+
+    The input-grad hook gradient checkpointing needs over frozen embeddings is not installed here:
+    ``gradient_checkpointing_enable`` installs it on a model whose main input is ``input_ids``.
+    """
+    casted = False
+    if peft_config is not None:
+        model, casted = build_peft_model(model, peft_config, args, merge_existing=merge_existing)
+    if disable_dropout:
+        disable_dropout_in_model(model)
     return model, casted
 
 

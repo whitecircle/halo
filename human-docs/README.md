@@ -2,7 +2,7 @@
 
 Halo is a distributed training toolkit for large language models, built on the
 HuggingFace stack (Transformers, TRL, Accelerate). It adds expert, context,
-tensor and expert-tensor parallelism to native HuggingFace models.
+tensor, expert-tensor and pipeline parallelism to native HuggingFace models.
 
 It covers supervised fine-tuning through asynchronous multi-turn RL, on dense
 models and fifteen MoE families. A HuggingFace model goes in, and a HuggingFace

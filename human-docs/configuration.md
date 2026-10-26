@@ -35,7 +35,7 @@ router-balancing mode exports.
 | Data | `dataset`, `dataset_ratio`, `test_size`, `max_length`, `packing`, `train_on_completions_only` |
 | Training | `per_device_train_batch_size`, `gradient_accumulation_steps`, `learning_rate`, `num_train_epochs`, `lr_scheduler_type`, `gradient_checkpointing` |
 | Precision and optimizer | `bf16`, `optim`, `bf16_optimizer`, `fp32_grad_reduce`, `fp32_non_ep_params` |
-| Parallelism | `expert_parallel_size`, `context_parallel_size`, `tensor_parallel_size`, `expert_tensor_parallel_size`, `ep_scope` |
+| Parallelism | `expert_parallel_size`, `context_parallel_size`, `tensor_parallel_size`, `expert_tensor_parallel_size`, `pipeline_parallel_size`, `pipeline_microbatches`, `ep_scope` |
 | PEFT | `use_peft`, `lora_r`, `lora_alpha`, `lora_target_modules` |
 | Checkpoint and eval | `output_dir`, `save_strategy`, `save_steps`, `save_only_model`, `eval_strategy`, `eval_steps` |
 | Logging | `report_to`, `project_name`, `run_name`, `logging_steps` |

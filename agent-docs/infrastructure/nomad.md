@@ -29,13 +29,14 @@ The docker driver has **no** `gpus` field; `resources { device "nvidia/gpu" { co
 ## Submit
 
 ```bash
-nomad job run launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
+# scratch_host_path has no default: a verified large volume on the clients (see Scratch volume below)
+nomad job run -var 'scratch_host_path=/path/to/large/volume' \
+  launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
 
-# retarget without editing — every variable takes -var (or NOMAD_VAR_<name>);
-# scratch_host_path must be a verified large volume (see Scratch volume below)
+# retarget without editing — every variable takes -var (or NOMAD_VAR_<name>)
 nomad job run \
-  -var 'scratch_host_path=/mnt/scratch' \
-  -var 'model=/mnt/scratch/checkpoints/<your-stage-1-run>' \
+  -var 'scratch_host_path=/path/to/large/volume' \
+  -var 'model=/path/to/large/volume/checkpoints/<your-stage-1-run>' \
   -var 'image=public.ecr.aws/whitecircle/halo:hopper' \
   launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
 ```
@@ -43,9 +44,9 @@ nomad job run \
 Check a spec before submitting. `nomad fmt -check` and `nomad job validate` both work **without a cluster** — validate falls back to in-process validation and says so. Treat it as a schema check either way: it does not meaningfully verify driver config even against a live server, so a nonsense `shm_size` still passes. `nomad job plan` needs a server and reports whether the placement is actually feasible.
 
 ```bash
-nomad fmt -check launcher-configs/nomad/          # HCL syntax
-nomad job validate <spec>                         # jobspec schema
-nomad job plan <spec>                             # scheduler dry-run, no allocation
+nomad fmt -check launcher-configs/nomad/                                  # HCL syntax
+nomad job validate -var 'scratch_host_path=/path/to/large/volume' <spec>  # jobspec schema
+nomad job plan -var 'scratch_host_path=/path/to/large/volume' <spec>      # scheduler dry-run, no allocation
 ```
 
 ## Available jobs
@@ -109,13 +110,13 @@ Run `nomad job plan` first on a busy cluster: it reports up front whether both g
 
 ## Scratch volume
 
-`scratch_host_path` (default `/mnt`) is bind-mounted at the *same path* inside the container and holds the HF caches, `TMPDIR`, the toolkit scratch root and the checkpoints:
+`scratch_host_path` (required, no default) is bind-mounted at the *same path* inside the container and holds the HF caches, `TMPDIR`, the toolkit scratch root and the checkpoints:
 
 ```hcl
 volumes = ["${var.scratch_host_path}:${var.scratch_host_path}"]
 ```
 
-`/mnt` is a convention, **not a guarantee of capacity** — on many hosts it shares the small root device. Verify with `findmnt` / `df -h` on the target clients and point the variable at the real large volume before submitting.
+A path name is **not a guarantee of capacity** — on many hosts `/mnt` shares the small root device. Verify with `findmnt` / `df -h` on the target clients and pass the real large volume when submitting.
 
 The repo ships the source at `/workspace` inside the image, so no code bind-mount is needed; `work_dir = "/workspace"` is enough.
 

@@ -48,6 +48,7 @@ def _trainer(loss: ClassificationLoss):
     trainer.is_multi_label = loss.multi_label
     trainer.model = types.SimpleNamespace(training=True)  # what eval_split_rows reads: a train step
     trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
+    trainer._peft_has_been_casted_to_bf16 = False
     return trainer
 
 

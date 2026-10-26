@@ -6,15 +6,14 @@ import logging
 import math
 
 import torch
-import torch.distributed as dist
 import torch.nn.functional as F
 from accelerate.utils import gather
 from trl.trainer.utils import pad
 
 from src.environments.episode import RolloutResult
 from src.environments.episode_keys import EPISODE_INVALID_REASON_KEY, solve_verdict
-from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
-from src.runtime.ranks import is_global_main_process, is_multi_rank_run
+from src.runtime.consensus import DeferredRankFailure, rank_max, reject_across_ranks
+from src.runtime.ranks import is_global_main_process
 from src.trainers.grpo.environmental.rollout_metrics import group_solve_counts
 from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow, single_trajectory_row
 from src.trainers.grpo.logprob_scoring import dense_row_spans
@@ -237,11 +236,9 @@ class StepBatchMixin:
         per-turn split gives each rank a variable row count, unequal forwards deadlock, and TRL drops a remainder."""
         num_dummy_rows = 0
         if self.async_config.train_on_sampled_tokens:
-            global_rows = torch.tensor([len(rows)], device=device)
-            if is_multi_rank_run():
-                dist.all_reduce(global_rows, op=dist.ReduceOp.MAX)
+            (global_rows,) = rank_max([len(rows)])
             chunks = self.args.steps_per_generation
-            num_dummy_rows = math.ceil(int(global_rows.item()) / chunks) * chunks - len(rows)
+            num_dummy_rows = math.ceil(global_rows / chunks) * chunks - len(rows)
             # One attended prompt token (no NaN), a fully masked completion (zero loss), natural routing.
             (inert,) = single_trajectory_row(self._masked_trajectory_tensors())
             rows.extend([_row_on_device(inert, device)] * num_dummy_rows)

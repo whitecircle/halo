@@ -47,7 +47,9 @@ def test_the_layer_list_resolves_under_every_spelling(attr):
 
 
 def test_a_backbone_without_a_layer_list_raises_naming_the_candidates_and_the_lenient_probe_returns_none():
-    with pytest.raises(ValueError, match=r"Linear exposes no decoder-layer list under any of \('layers', 'h'\)"):
+    with pytest.raises(
+        ValueError, match=r"Linear exposes no decoder-layer list under any of \('layers', 'h', 'layer'\)"
+    ):
         decoder_layers_attr(nn.Linear(2, 2))
     assert decoder_layers(nn.Linear(2, 2)) is None
 

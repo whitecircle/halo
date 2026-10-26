@@ -9,7 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from datasets import Dataset
 
-from src.hardware import current_device
+from src.runtime.collectives import collective_device
+from src.runtime.consensus import rank_max
 from src.runtime.ranks import has_process_group
 
 
@@ -74,11 +75,9 @@ def balanced_class_weights(train_dataset: Dataset, model: nn.Module | None) -> t
     counts = torch.from_numpy(np.bincount(labels_array)).to(torch.float64)
 
     if has_process_group():
-        counts = counts.to(current_device())
         # Ranks can disagree on the local max label, so pad to a rank-uniform length first.
-        length = torch.tensor(counts.numel(), dtype=torch.int64, device=counts.device)
-        dist.all_reduce(length, op=dist.ReduceOp.MAX)
-        padded = torch.zeros(int(length.item()), dtype=counts.dtype, device=counts.device)
+        (length,) = rank_max([counts.numel()])
+        padded = torch.zeros(length, dtype=counts.dtype, device=collective_device())
         padded[: counts.numel()] = counts
         dist.all_reduce(padded, op=dist.ReduceOp.SUM)
         counts = padded.cpu()

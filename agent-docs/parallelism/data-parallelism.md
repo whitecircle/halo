@@ -88,7 +88,7 @@ Two setups **raise** rather than wrap:
     one rank bailing out would hang its peers and train unsharded with no gradient sync at all.
 
 - A generative decoder whose layer list the backbone probe cannot reach (`DECODER_LAYER_LIST_ATTRS` —
-  `.layers`, `.h`); the message names the class. The fix for a decoder is to add its spelling to
+  `.layers`, `.h`, `.layer`); the message names the class. The fix for a decoder is to add its spelling to
   `DECODER_LAYER_LIST_ATTRS` (`src/models/module_tree.py`).
 
     The alternative is one root shard group all-gathered for the whole forward, the per-rank memory
@@ -352,7 +352,7 @@ MoE.
 - **HuggingFace FSDP fields in the training YAML** (`fsdp`, `fsdp_config`) do nothing for a
   multi-GPU `torchrun` run: the training scripts blank `fsdp`, and the mixin's own accelerator
   carries no HF FSDP plugin. Leave them out and use the knobs on this page.
-- **Gradient checkpointing with EP, CP or a MoE** — the mixin forces `use_reentrant=True` before
+- **Gradient checkpointing with EP, CP or a MoE** (outside PP) — the mixin forces `use_reentrant=True` before
   `super().__init__()`, even when the config sets `false` (several example configs do); the MoE
   mechanism is in [Flash Attention](../optimization/flash-attention.md#usage). The recompute replays
   the checkpoint frame's DeepEP dispatch instead of issuing a second one.

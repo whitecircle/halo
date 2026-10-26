@@ -7,7 +7,6 @@ the ``--mode`` a manifest row names. Each row runs one mode, since a second EP m
 has to rebuild DeepEP's buffers; ``--mode all`` still runs every mode in order for a standalone sweep.
 """
 
-import argparse
 import math
 import os
 from collections.abc import Callable, Mapping
@@ -196,12 +195,8 @@ def load_suite_tokenizer(ctx, model_name: str):
     return tokenizer
 
 
-def run_sft_suite(ctx, suite: SFTSuite, modes: Mapping[str, SFTMode], *, default_mode: str) -> dict:
-    """Run the ``--mode`` the launch names (``all`` runs every mode in order) and return the harness
-    result."""
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=[*modes, "all"], default=default_mode)
-    mode = parser.parse_args().mode
+def run_sft_suite(ctx, suite: SFTSuite, modes: Mapping[str, SFTMode], mode: str) -> dict:
+    """Run ``mode`` of ``modes`` (``all`` runs every mode in order) and return the harness result."""
     selected = list(modes) if mode == "all" else [mode]
     log(f"\nSFT suite: {suite.model_name}, world {ctx.world_size}, {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"Modes: {selected}")

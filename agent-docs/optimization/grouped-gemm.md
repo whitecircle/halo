@@ -114,27 +114,14 @@ At model load the EP MoE layer enables grouped GEMM when `use_grouped_gemm` is `
 
 ## Supported models
 
-All EP MoE families use grouped GEMM. GEMM-call count follows the weight layout:
+Every EP MoE family ([roster](../parallelism/expert-parallelism.md#supported-models)) uses grouped GEMM, and
+the call count follows the stored weight layout. A family keeping the fused `gate_up_proj` pair runs 2 calls
+(gate_up + down). Three store the halves apart and run 3 (gate + up + down): Qwen3 MoE splits its pre-fused
+tensors at init, GPT-OSS de-interleaves its interleaved pair, and Bailing/Ling stacks its per-expert modules.
 
-| Model | Layer Class | Calls | Notes |
-|---|---|---|---|
-| Qwen3 MoE | `EPQwen3MoELayer` | 3 (gate+up+down) | Pre-fused tensors split + transposed at init |
-| Qwen3.5 MoE | `EPQwen3_5MoELayer` | 2 (gate_up+down) | Fused GLU + shared expert, sigmoid gating |
-| GptOss | `EPGptOssMoELayer` | 3 (gate+up+down) | Interleaved weights de-interleaved at init; grouped path uses a fused Triton clamped-SwiGLU (`src/kernels/fused_glu.py`) |
-| GLM4 MoE Lite | `EPGlm4MoELayer` | 2 (gate_up+down) | SwiGLU, shared expert unaffected |
-| Laguna | `EPLagunaMoELayer` | 2 (gate_up+down) | Subclasses the GLM4 layer; differs only in the top-k weight default and export key names |
-| Bailing MoE | `EPBailingMoELayer` | 3 (gate+up+down) | Per-expert modules stacked into 3D tensors at init, shared expert |
-| LFM2 MoE | `EPLfm2MoELayer` | 2 (gate_up+down) | Sigmoid routing, no shared expert |
-| Inkling | `EPInklingMoELayer` | 2 (gate_up+down) | Fused GLU (GLM4 layout); joint routed+shared normalization |
-| Gemma4 MoE | `EPGemma4MoELayer` | 2 (gate_up+down) | Fused Triton tanh-GeGLU; the router is a sibling module outside the wrapper |
-| Mistral4 MoE | `EPMistral4MoELayer` | 2 (gate_up+down) | Fused Triton SwiGLU + group-routed softmax + shared expert |
-| DeepSeek-V4 | `EPDeepseekV4MoELayer` | 2 (gate_up+down) | Fused GLU (clamped SwiGLU) + shared expert; hash + top-k routing |
-| Zaya MoE | `EPZayaMoELayer` | 2 (gate_up+down) | Fused GLU + cross-layer EDA state |
-| Cohere2 MoE | `EPCohere2MoELayer` | 2 (gate_up+down) | Fused GLU, sigmoid/softmax top-k-then-activate gating, averaged shared expert |
-| GLM-5 Next | `EPGlm5NextMoELayer` | 2 (gate_up+down) | Fused `[E, 2M, H]` storage; fused Triton clamped SwiGLU (`swiglu_limit`) overrides the fused-GLU seam; shared expert |
-| Step-3.7 Flash | `EPStep3p7MoELayer` | 2 (gate_up+down) | Fused `[E, 2M, H]` storage; per-layer **post-activation** fused Triton clamped SwiGLU (`swiglu_limits`, layers 43–44 only — unclamped layers take the base fused-SiLU combine); shared expert |
-
-Families whose activation is a standard SiLU gate fuse the activation and the multiply into one Triton kernel, armed by a behavioral probe — see [GLM-4 → Fused SwiGLU](../models/glm4.md#fused-swiglu).
+The GLU activation and multiply run as one fused Triton kernel wherever the family's activation allows
+([GLM-4 → Fused SwiGLU](../models/glm4.md#fused-swiglu) lists who gets which); GPT-OSS's clamped SwiGLU
+has its own kernel (`GluCombine.gptoss`, `src/kernels/fused_glu.py`).
 
 > [!NOTE]
 > **Expert Tensor Parallelism**
@@ -154,7 +141,7 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
 
 The wrapper keeps the packed-3D layout used at EP>1, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: an MoE with `use_grouped_gemm: true` under any `accelerate launch` is rejected at load (the wrappers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`.
 
-Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap is inert under this wrapper (EP=1 included), which replaces the very module the swap targets, and is kept off wherever no wrapper is installed ([Liger Kernels](liger-kernels.md#routed-experts)). Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep--cp--tp-behavior).
+Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap is inert under this wrapper (EP=1 included), which replaces the very module the swap targets, and is kept off wherever no wrapper is installed ([Liger Kernels](liger-kernels.md#routed-experts)). Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep--cp--tp--pp-behavior).
 
 ## Weight layout
 

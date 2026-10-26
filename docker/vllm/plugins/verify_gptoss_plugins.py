@@ -13,18 +13,18 @@ import sys
 
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else "/opt")
 
-import gpt_oss_reasoning_parser as reasoning_plugin  # noqa: E402
-import gpt_oss_text_tool_parser as tool_plugin  # noqa: E402
-import numpy as np  # noqa: E402
-import torch  # noqa: E402
-import vllm.config.reasoning as reasoning_config_module  # noqa: E402
-import vllm.v1.worker.gpu.sample.thinking_budget as thinking_budget  # noqa: E402
-import vllm_reasoning_forced_end_patch as forced_end_patch  # noqa: E402
-import vllm_thinking_budget_completion_patch as completion_patch  # noqa: E402
-from vllm import SamplingParams  # noqa: E402
-from vllm.reasoning import ReasoningParserManager  # noqa: E402
-from vllm.tool_parsers.abstract_tool_parser import ToolParserManager  # noqa: E402
-from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext  # noqa: E402
+import gpt_oss_reasoning_parser as reasoning_plugin
+import gpt_oss_text_tool_parser as tool_plugin
+import numpy as np
+import torch
+import vllm.config.reasoning as reasoning_config_module
+import vllm.v1.worker.gpu.sample.thinking_budget as thinking_budget
+import vllm_reasoning_forced_end_patch as forced_end_patch
+import vllm_thinking_budget_completion_patch as completion_patch
+from vllm import SamplingParams
+from vllm.reasoning import ReasoningParserManager
+from vllm.tool_parsers.abstract_tool_parser import ToolParserManager
+from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
 
 # ``tokenizer.encode(text, add_special_tokens=False)`` on the o200k_harmony vocabulary
 # (``unsloth/gpt-oss-20b-BF16``). Pinned rather than tokenized: the build has no model, and a render

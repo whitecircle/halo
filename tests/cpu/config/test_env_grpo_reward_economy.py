@@ -38,6 +38,7 @@ from src.rewards.terms import (
     JudgeTerm,
     OnError,
     parse_reward_terms,
+    read_context_files,
     resolve_environment_checks,
 )
 from src.trainers.grpo.environmental.reasoning import (
@@ -78,9 +79,10 @@ _REQUIRED_KEYS = ("reasoning_floor", "rollout_max_episode_tokens")
 
 
 def _parsed_terms(terms: list) -> tuple:
-    """A recipe's reward terms as the environment resolves them: a veto judge listing ``checks: environment``
-    audits with the code-contests rubric."""
-    return resolve_environment_checks(parse_reward_terms(terms, ENVIRONMENT_REWARD_SOURCES), AUDIT_CHECKS)
+    """A recipe's reward terms as the trainer resolves them: its config reads a judge's context file, and a veto
+    judge listing ``checks: environment`` audits with the code-contests rubric."""
+    terms = parse_reward_terms(read_context_files(terms), ENVIRONMENT_REWARD_SOURCES)
+    return resolve_environment_checks(terms, AUDIT_CHECKS)
 
 
 def _economy(path: Path) -> dict:

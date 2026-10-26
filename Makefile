@@ -16,7 +16,8 @@ SGLANG_VERSION := $(shell sed -n 's/^ARG SGLANG_VERSION=//p' Dockerfile.sglang)
 NPROC        ?= 8
 # Training method name for `make train` (any `halo launch --list` entry).
 METHOD       ?= sft
-RUFF_VERSION ?= 0.9.10
+# ruff at uv.lock's pin, as CI runs it (pre-commit's literal rev is held to the lock by a test).
+RUFF_VERSION ?= $(shell sed -n '/^name = "ruff"$$/{n;s/^version = "\(.*\)"$$/\1/p;}' uv.lock)
 # Git SHA stamped into the image to bust the source-COPY cache (see the SOURCE_REVISION note in
 # Dockerfile). `dev-nogit` if not in a git checkout.
 SOURCE_REVISION ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev-nogit)
@@ -31,12 +32,19 @@ SGLANG_SERVER_URL ?= http://localhost:$(SGLANG_PORT)
 # Credential + data mounts. Set ENV_FILE= or AWS_DIR= to disable the credential mounts, e.g. for a
 # CI job running contributor code:
 #   make test-gpu-core ENV_FILE= AWS_DIR=      # creds-free (still mounts $(HALO_SCRATCH) read-write)
-# HALO_SCRATCH must point at an existing large host path: the bind mount, the in-container cache and
-# temp env, and the `clean` prune all derive from it.
-HALO_SCRATCH ?= /mnt
+# HALO_SCRATCH is the large host volume the bind mount, the in-container cache and temp env, and the
+# `clean` prune derive from. Unset, it resolves as the docker.md launch recipe does: the local mount other
+# than `/` with the most free space, over 20 GB; a target that needs it stops when none is found.
+ifeq ($(origin HALO_SCRATCH),undefined)
+HALO_SCRATCH := $(shell findmnt -rbno TARGET,AVAIL,FSTYPE 2>/dev/null | \
+  awk '$$1!="/" && $$3!~/tmpfs|overlay|squashfs|nfs|fuse|autofs/ && $$2+0>20e9{print $$2,$$1}' | sort -rn | head -1 | awk '{print $$2}')
+endif
+# Lowercase: make re-exports an environment SCRATCH (common on clusters), which would run this guard
+# in every recipe.
+scratch_dir = $(or $(HALO_SCRATCH),$(error HALO_SCRATCH is empty and no local mount besides / has 20 GB free: set it to a large host path (findmnt / df -h)))
 ENV_FILE  ?= .env
 AWS_DIR   ?= ~/.aws
-MNT_MOUNT ?= -v $(HALO_SCRATCH):$(HALO_SCRATCH)
+MNT_MOUNT ?= -v $(scratch_dir):$(scratch_dir)
 
 # Shared GPU container settings for anything that needs the image. Host networking lets a job reach
 # a rollout server started by docker compose on the same host; $(CURDIR) is the Make builtin for the
@@ -47,8 +55,8 @@ DOCKER_RUNTIME ?=
 DOCKER_RUN = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_RUNTIME),) --gpus all --network host \
   --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
   $(if $(strip $(ENV_FILE)),--env-file $(ENV_FILE),) \
-  -e HF_HOME=$(HALO_SCRATCH)/hf -e HF_DATASETS_CACHE=$(HALO_SCRATCH)/hf/datasets \
-  -e TMPDIR=$(HALO_SCRATCH)/tmp -e HALO_DATA_ROOT=$(HALO_SCRATCH) \
+  -e HF_HOME=$(scratch_dir)/hf -e HF_DATASETS_CACHE=$(scratch_dir)/hf/datasets \
+  -e TMPDIR=$(scratch_dir)/tmp -e HALO_DATA_ROOT=$(scratch_dir) \
   -e PYTHONPATH=/workspace -e CUDA_DEVICE_MAX_CONNECTIONS=1 $(EFA_DOCKER_FLAGS) $(NCCL_PROTO_ENV) \
   $(SERVER_TIER_DOCKER_ENV) $(EQUIVALENCE_DOCKER_FLAGS) $(EXTRA_DOCKER_ENV) \
   -v $(CURDIR):/workspace $(MNT_MOUNT) $(if $(strip $(AWS_DIR)),-v $(AWS_DIR):/root/.aws,) -w /workspace \
@@ -74,10 +82,12 @@ EFA_DOCKER_FLAGS = $(if $(filter 1,$(EFA)),--device=/dev/infiniband -e NCCL_NET=
 NO_FABRIC_ENV = $(if $(filter 1,$(EFA)),,-e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket \
   -e NCCL_SOCKET_IFNAME=$(or $(NCCL_SOCKET_IFNAME),$(NO_FABRIC_SOCKET_IFNAME_DEFAULT)))
 NCCL_PROTO_ENV = $(if $(strip $(NCCL_PROTO)),-e NCCL_PROTO=$(NCCL_PROTO),)
-# CPU-only variant (no --gpus): install, the CPU tier, seed-hf-cache and diagrams. The Hugging Face
+# CPU-only variant (no --gpus): check-lock, the CPU tier, seed-hf-cache and diagrams. The Hugging Face
 # cache is mounted so the tests that load a real tokenizer work without the hub, read-write so
-# seed-hf-cache can fill it; set HF_CACHE= to disable that mount.
-HF_CACHE ?= $(HALO_SCRATCH)/hf
+# seed-hf-cache can fill it; set HF_CACHE= to disable that mount. check-lock and diagrams read no
+# cache, so they run without it and without a scratch volume.
+HF_CACHE ?= $(scratch_dir)/hf
+check-lock diagrams: HF_CACHE =
 DOCKER_RUN_CPU = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_RUNTIME),) \
   $(if $(strip $(HF_CACHE)),-e HF_HOME=$(HF_CACHE) -v $(HF_CACHE):$(HF_CACHE),) \
   -e PYTHONPATH=/workspace $(EQUIVALENCE_DOCKER_FLAGS) $(EXTRA_DOCKER_ENV) -v $(CURDIR):/workspace -w /workspace $(IMAGE)
@@ -85,7 +95,7 @@ DOCKER_RUN_CPU = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOC
 EQUIVALENCE_DOCKER_FLAGS =
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format precommit test-cpu seed-hf-cache test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench bench-band \
+.PHONY: help check-lock lint format precommit test-cpu seed-hf-cache test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench bench-band \
         verify-move verify-artifacts verify-ep verify-cp verify-efficiency docs diagrams build-blackwell build-hopper build-vllm build-sglang build-all \
         ecr-public-login push-public-blackwell push-public-hopper push-public-vllm \
         push-public-sglang push-public-all train clean
@@ -94,7 +104,7 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
 
-install: ## check the lock installs into the image (throwaway container; fails on a stale uv.lock)
+check-lock: ## check uv.lock installs into the image (throwaway container; fails on a stale lock)
 	$(DOCKER_RUN_CPU) bash -lc "set -euo pipefail; \
 	  uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers \
 	    --format requirements-txt -o /tmp/requirements.txt; \
@@ -148,8 +158,8 @@ test-gpu-vllm: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e VLLM_SERVER_URL=$(VLLM_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=vllm
 test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense or a MoE pass, see above; EFA=1 on an EFA host)
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No vLLM server at $(VLLM_SERVER_URL). Start it on a \
-	  GPU the trainer does not use: VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 \
-	  docker compose -f docker-compose.vllm.yml up -d vllm-server \
+	  GPU the trainer does not use: make build-vllm (or set VLLM_IMAGE), then \
+	  VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 docker compose -f docker-compose.vllm.yml up -d vllm-server \
 	  (the benchmarks need the reasoning parser: their per-effort CoT budget draws a 400 without one; \
 	  EFA=1: add -f docker-compose.vllm.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
@@ -159,7 +169,8 @@ test-gpu-sglang: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e SGLANG_SERVER_URL=$(SGLANG_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=sglang
 test-gpu-sglang: ## pytest the SGLang-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense or a MoE pass, see above; EFA=1 on an EFA host)
 	@curl -sf $(SGLANG_SERVER_URL)/health >/dev/null || { echo "No SGLang server at $(SGLANG_SERVER_URL). Start it on a \
-	  GPU the trainer does not use: SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d \
+	  GPU the trainer does not use: make build-sglang (or set SGLANG_IMAGE), then \
+	  SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d \
 	  (EFA=1: add -f docker-compose.sglang.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and sglang_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 
@@ -258,13 +269,13 @@ build-hopper: ## build the Hopper image (TARGET_GPU=hopper is the Dockerfile def
 	  --build-arg TARGET_GPU=hopper --build-arg SOURCE_REVISION=$(SOURCE_REVISION) \
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) .
 
-build-vllm: ## build the vLLM inference image (credential-free; NCCL pinned from uv.lock)
-	docker build -f Dockerfile.vllm -t vllm-server:$(VLLM_VERSION) \
+build-vllm: ## build the vLLM inference image halo:vllm-$(VLLM_VERSION) (credential-free; NCCL pinned from uv.lock)
+	docker build -f Dockerfile.vllm -t halo:vllm-$(VLLM_VERSION) \
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
-build-sglang: ## build the SGLang inference image (NCCL pinned from uv.lock, matching the training images)
-	docker build -f Dockerfile.sglang -t sglang-server:$(SGLANG_VERSION) \
+build-sglang: ## build the SGLang inference image halo:sglang-$(SGLANG_VERSION) (NCCL pinned from uv.lock, matching the training images)
+	docker build -f Dockerfile.sglang -t halo:sglang-$(SGLANG_VERSION) \
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
@@ -294,15 +305,15 @@ push-public-hopper: ecr-public-login ## publish halo:hopper -> ECR Public (hoppe
 	docker push $(ECR_PUBLIC):hopper
 	docker push $(ECR_PUBLIC):hopper-$(VERSION)
 
-push-public-vllm: ecr-public-login ## publish vllm-server:$(VLLM_VERSION) -> ECR Public (vllm-$(VLLM_VERSION) + -$(VERSION))
-	docker tag vllm-server:$(VLLM_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_VERSION)
-	docker tag vllm-server:$(VLLM_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_VERSION)-$(VERSION)
+push-public-vllm: ecr-public-login ## publish halo:vllm-$(VLLM_VERSION) -> ECR Public (vllm-$(VLLM_VERSION) + -$(VERSION))
+	docker tag halo:vllm-$(VLLM_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_VERSION)
+	docker tag halo:vllm-$(VLLM_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_VERSION)-$(VERSION)
 	docker push $(ECR_PUBLIC):vllm-$(VLLM_VERSION)
 	docker push $(ECR_PUBLIC):vllm-$(VLLM_VERSION)-$(VERSION)
 
-push-public-sglang: ecr-public-login ## publish sglang-server:$(SGLANG_VERSION) -> ECR Public (sglang-$(SGLANG_VERSION) + -$(VERSION))
-	docker tag sglang-server:$(SGLANG_VERSION) $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)
-	docker tag sglang-server:$(SGLANG_VERSION) $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)-$(VERSION)
+push-public-sglang: ecr-public-login ## publish halo:sglang-$(SGLANG_VERSION) -> ECR Public (sglang-$(SGLANG_VERSION) + -$(VERSION))
+	docker tag halo:sglang-$(SGLANG_VERSION) $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)
+	docker tag halo:sglang-$(SGLANG_VERSION) $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)-$(VERSION)
 	docker push $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)
 	docker push $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)-$(VERSION)
 
@@ -315,4 +326,4 @@ train: ## run a training config: make train CONFIG=... [METHOD=sft] NPROC=8 EXTR
 # clean does not remove checkpoints/: it is the default output_dir of every shipped example.
 clean: ## prune wandb/, the ruff/pytest caches and $(HALO_SCRATCH) test scratch (leaves checkpoints/)
 	rm -rf wandb/ .ruff_cache .pytest_cache
-	rm -rf $(HALO_SCRATCH)/tmp/halo-test-* 2>/dev/null || true
+	$(if $(HALO_SCRATCH),rm -rf $(HALO_SCRATCH)/tmp/halo-test-* 2>/dev/null || true)

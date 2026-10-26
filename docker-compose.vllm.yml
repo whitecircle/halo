@@ -1,17 +1,12 @@
 # Training + vLLM 0.32.0 rollout server: two containers on one host, HTTP for rollouts and a shared
-# NCCL group for weight sync. `docker compose -f docker-compose.vllm.yml up [vllm-server]` builds
-# `vllm-server:0.32.0` from Dockerfile.vllm when the tag is absent; the trainer image comes from
+# NCCL group for weight sync. The server image is `make build-vllm`'s halo:vllm-0.32.0, or VLLM_IMAGE
+# set to the prebuilt public.ecr.aws/whitecircle/halo:vllm-0.32.0; the trainer image comes from
 # `make build-blackwell` (TRAIN_IMAGE=halo:hopper on Hopper). The sync needs network_mode + ipc host
 # and all GPUs visible, VLLM_ and TRAINER_CUDA_DEVICES disjoint; EFA layers docker-compose.vllm.efa.yml.
 
 services:
   vllm-server:
-    build:
-      context: .
-      dockerfile: Dockerfile.vllm
-      args:
-        VLLM_VERSION: "0.32.0"
-    image: vllm-server:0.32.0
+    image: ${VLLM_IMAGE:-halo:vllm-0.32.0}
     ipc: host
     network_mode: host
     environment:

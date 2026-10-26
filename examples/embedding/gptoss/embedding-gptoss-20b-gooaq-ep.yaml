@@ -17,14 +17,12 @@ test_size: 0.01
 
 # --- Training ---
 per_device_train_batch_size: 8
-per_device_eval_batch_size: 8
 num_train_epochs: 1
 gradient_accumulation_steps: 1
 learning_rate: 2.0e-05
 lr_scheduler_type: cosine
 warmup_steps: 32
 weight_decay: 0.01
-seed: 42
 
 # --- Embedding-specific ---
 loss_type: mnrl
@@ -35,8 +33,6 @@ dataloader_drop_last: true
 
 # --- Output ---
 output_dir: checkpoints/embedding-gptoss-20b-gooaq-ep
-save_strategy: steps
-save_steps: 500
 eval_strategy: steps
 eval_steps: 500
 report_to: wandb

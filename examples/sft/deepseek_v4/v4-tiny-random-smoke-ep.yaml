@@ -29,16 +29,13 @@ gradient_checkpointing: false
 max_length: 512
 packing: false
 
-optim: adamw_torch_fused
 learning_rate: 1.0e-05
 lr_scheduler_type: constant
 warmup_steps: 1
 
 save_strategy: "no"
-eval_strategy: "no"
 output_dir: checkpoints/dsv4-tiny-smoke
 logging_steps: 1
 report_to: []
 remove_unused_columns: false
-dataloader_num_workers: 0
 use_peft: false

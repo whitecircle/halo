@@ -42,17 +42,13 @@ Coding agents working in this repo must respect this gate — see [`AGENTS.md`](
 
 ## If you're approved — the engineering bar
 
-Once your PR path is approved, the normal bar applies; the dev guide
-[`agent-docs/contributing/README.md`](agent-docs/contributing/README.md) owns each part:
+Once your PR path is approved, the normal bar applies:
 
-- **Everything runs in the Docker image** (the host has no usable Python), and the
-  [gates](agent-docs/contributing/README.md#submitting-a-pr) pass before you open the PR. Hosted CI runs
-  only `ruff`, `actionlint`, the convention tests and the docs checks; state the test tiers' result in the
-  PR. A PR that changes a path listed in `.github/sensitive-paths` also needs the `sensitive` label, which
-  a maintainer adds once the change is approved.
-- **Tests ship with behavior and must not be slop** — a test fails when the behavior breaks, and follows
-  the [test conventions](agent-docs/contributing/README.md#tests), which `tests/cpu/conventions/`
-  enforces.
+- **[The gates](agent-docs/contributing/README.md#submitting-a-pr) pass** before you open the PR. A PR
+  that changes a path listed in `.github/sensitive-paths` also needs the `sensitive` label, which a
+  maintainer adds once the change is approved.
+- **Tests ship with behavior and must not be slop**: see the
+  [test conventions](agent-docs/contributing/README.md#tests).
 - **[Proof of value](agent-docs/contributing/README.md#proof-of-value)** for every change; the PR
   template has a checkbox per case.
 - **Keep it focused.** A diff over **~2,000 lines** is hard to review and will be deferred — split it.
@@ -67,12 +63,6 @@ Once your PR path is approved, the normal bar applies; the dev guide
   `git config --global commit.gpgsign true`. Re-sign earlier commits with
   `git rebase --exec 'git commit --amend --no-edit -S' <base>` (the `main` commit the branch starts
   from) and force-push.
-
-## Markdown locations
-
-Source-tree markdown belongs in `agent-docs/` (the reference), `human-docs/` (the user guide), or
-`skills/` (the agent skills). The GitHub-convention root files (`README`, `CONTRIBUTING`, `SECURITY`,
-`CODE_OF_CONDUCT`, `AGENTS.md`, `CLAUDE.md`, `.github/*`) are the documented exception.
 
 ## Security
 

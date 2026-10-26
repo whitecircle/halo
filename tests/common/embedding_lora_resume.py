@@ -45,8 +45,6 @@ tensors), ``presharded`` (FSDP2 over per-rank dataset slices, batched by the too
 ``tpdp`` and ``ep`` only check that the trainer refuses the injected adapters at construction. With ``head`` a row
 only builds the trainer over a pipeline carrying a projection head after the pooling, which the
 sharded and parallel shapes must refuse and a single process or DDP accept.
-
-The scripts stay separate because the manifest launches each at one world size and one tier.
 """
 
 import os
@@ -132,6 +130,7 @@ TRAIN_MODES = ("single", "fsdp", "ddp", "presharded")
 # Refused under LoRA, trained under a full fine-tune. ``tpdp`` is TP over FSDP2 (four ranks: tp 2, dp 2).
 PARALLEL_MODES = {"tp": {"tp_size": 2}, "tpdp": {"tp_size": 2}, "ep": {"ep_size": 2}}
 MODES = TRAIN_MODES + tuple(PARALLEL_MODES)
+WORLD_SIZES = {mode: {"single": 1, "tpdp": 4}.get(mode, 2) for mode in MODES}
 
 SEED = 42
 TOTAL_STEPS = 6

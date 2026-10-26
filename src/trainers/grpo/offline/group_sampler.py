@@ -7,11 +7,10 @@ from functools import partial
 
 import datasets
 import torch
-import torch.distributed as dist
 from torch.utils.data import BatchSampler, DataLoader, Dataset, Sampler
 from transformers.trainer_utils import seed_worker
 
-from src.hardware import current_device
+from src.runtime.consensus import rank_min
 from src.runtime.ranks import get_global_world_size, is_global_main_process
 from src.trainers.dataloaders import resolve_data_seed
 
@@ -148,9 +147,7 @@ class GroupedLoaderMixin:
             )
             if get_global_world_size() > 1:
                 # compute_loss gathers every batch: a rank with an extra batch blocks its peers.
-                t = torch.tensor([len(sampler) // batch_size], device=current_device())
-                dist.all_reduce(t, op=dist.ReduceOp.MIN)
-                min_batches = int(t.item())
+                (min_batches,) = rank_min([len(sampler) // batch_size])
                 if min_batches == 0:
                     raise ValueError(
                         f"Batch-count equalization left 0 full batches on the smallest rank "

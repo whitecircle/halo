@@ -8,68 +8,18 @@ import logging
 import os
 import shutil
 from collections.abc import Sequence
-from fnmatch import fnmatch
 
-import torch
-
-from src.checkpoint.format import (
-    OPTIMIZER_META_FILE,
-    OPTIMIZER_SHARD_GLOB,
-    PP_STAGE_PART_RE,
-    RESUME_SIDECAR_PREFIXES,
-    optimizer_shard_filename,
+from src.checkpoint.format import PP_STAGE_PART_RE
+from src.checkpoint.offline_export import (
+    copy_checkpoint_aux_files,
+    first_holder,
+    reject_in_place_conversion,
+    resume_state_sources,
 )
-from src.checkpoint.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
 from src.checkpoint.reading import read_checkpoint_index, reject_partial_checkpoint
 from src.checkpoint.writing import write_merged_index
 
 logger = logging.getLogger(__name__)
-
-
-def _first_holder(name: str, input_dirs: Sequence[str]) -> str | None:
-    """The first input holding ``name``, or None; two holding it at different sizes raise (a torn copy)."""
-    holders = [d for d in input_dirs if os.path.isfile(os.path.join(d, name))]
-    if len({os.path.getsize(os.path.join(d, name)) for d in holders}) > 1:
-        raise ValueError(f"{name} differs in size across {holders}: a torn copy. Re-copy that node's directory.")
-    return holders[0] if holders else None
-
-
-def _resume_state_sources(input_dirs: Sequence[str]) -> dict[str, str]:
-    """``{filename: input holding it}`` for the per-rank resume files of every input (optimizer shards, RNG and
-    prefetch states, one per global rank) and the optimizer meta every node writes alike.
-
-    Raises:
-        ValueError: a per-rank file held at different sizes, inputs whose optimizer metas differ, or a rank
-            of the meta whose optimizer shard no input holds.
-    """
-    names = {
-        name
-        for input_dir in input_dirs
-        for name in os.listdir(input_dir)
-        if fnmatch(name, OPTIMIZER_SHARD_GLOB) or name.startswith(RESUME_SIDECAR_PREFIXES)
-    }
-    sources = {name: _first_holder(name, input_dirs) for name in sorted(names)}
-    meta_paths = [os.path.join(input_dir, OPTIMIZER_META_FILE) for input_dir in input_dirs]
-    metas = [
-        torch.load(path, map_location="cpu", weights_only=True) if os.path.isfile(path) else None
-        for path in meta_paths
-    ]
-    for input_dir, meta in zip(input_dirs[1:], metas[1:], strict=True):
-        if meta != metas[0]:
-            raise ValueError(
-                f"{input_dir} and {input_dirs[0]} carry different {OPTIMIZER_META_FILE}: they are not node "
-                f"directories of one save, or one node's optimizer save did not complete."
-            )
-    if metas[0] is None:
-        return sources
-    sources[OPTIMIZER_META_FILE] = input_dirs[0]
-    missing = [rank for rank in range(metas[0]["num_ranks"]) if optimizer_shard_filename(rank) not in sources]
-    if missing:
-        raise ValueError(
-            f"No node directory holds the optimizer shards of ranks {missing}. Pass every node's directory of "
-            f"this save; a rank's shard lives only on its own node."
-        )
-    return sources
 
 
 def merge_pp_stage_parts(input_dirs: Sequence[str], output_dir: str) -> None:
@@ -96,7 +46,7 @@ def merge_pp_stage_parts(input_dirs: Sequence[str], output_dir: str) -> None:
     sources: dict[str, str] = {}
     unheld: list[str] = []
     for part in sorted(set(index["weight_map"].values())):
-        source = _first_holder(part, input_dirs)
+        source = first_holder(part, input_dirs)
         if source is None:
             stage = PP_STAGE_PART_RE.match(part)
             unheld.append(f"{part} (stage {int(stage[1])})" if stage else part)
@@ -107,7 +57,7 @@ def merge_pp_stage_parts(input_dirs: Sequence[str], output_dir: str) -> None:
             f"No node directory holds {', '.join(unheld)}. Pass every node's directory of this save; a "
             f"stage's parts live only on the nodes that ran it."
         )
-    resume_sources = _resume_state_sources(input_dirs)
+    resume_sources = resume_state_sources(input_dirs)
 
     os.makedirs(output_dir, exist_ok=True)
     copy_checkpoint_aux_files(input_dirs[0], output_dir)

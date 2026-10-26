@@ -1,7 +1,7 @@
 name: lint
 
 # Hosted gates that run on every PR/push outside the Docker image (the runner has no GPU stack).
-# ruff (lint + format-check) and the conventions job's pytest are pinned.
+# ruff (lint + format-check) and the conventions job's pytest run at uv.lock's pins.
 
 on:
   push:
@@ -27,9 +27,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      # Pinned ruff via pip — ruff is a standalone binary, no project install needed
-      # (host has no torch).
-      - run: pip install ruff==0.9.10
+      # ruff alone, at uv.lock's pin: a standalone binary needs no project install (the runner has no torch).
+      - name: Install ruff at the locked version
+        run: |
+          version=$(python .github/scripts/locked_version.py ruff)
+          pip install "ruff==$version"
       - name: ruff format --check
         run: ruff format --check .
       - name: ruff check

@@ -18,9 +18,7 @@ sides; an overlap fails group formation at its 120 s deadline.
 Build the image from `Dockerfile.vllm`, or pull it:
 
 ```bash
-make build-vllm
-# or: docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
-#     docker tag public.ecr.aws/whitecircle/halo:vllm-0.32.0 vllm-server:0.32.0
+make build-vllm        # or pull public.ecr.aws/whitecircle/halo:vllm-0.32.0 and set VLLM_IMAGE to it
 
 VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
     docker compose -f docker-compose.vllm.yml up -d vllm-server

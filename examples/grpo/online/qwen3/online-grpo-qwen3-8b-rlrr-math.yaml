@@ -35,28 +35,16 @@ loss_type: grpo
 # `scale_rewards_std_floor` and `drop_degenerate_groups` stay unset here — the trainer refuses RLRR
 # together with either of the last two.
 use_rlrr: true
-rlrr_mode: hrr            # hybrid: bounded rank correction on top of the binary rule reward
-rlrr_tau: 0.1             # rank-correction magnitude; too high dilutes the accuracy reward
-rlrr_lambda: 2048.0       # length-bin width for the Eq. 6 tie-break, in tokens
-rlrr_correctness_clip: true
-rlrr_correctness_threshold: 0.5   # reward >= 0.5 counts as correct (accuracy_reward is 0/1)
-rlrr_xi_pos: 1.0e-03      # cap on an incorrect response's advantage (Eq. 5)
-rlrr_xi_neg: -1.0e-03     # floor on a correct response's advantage (Eq. 5)
 
 # --- Training ---
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 8   # global eval batch must divide by num_generations at any world size
 num_train_epochs: 1.0
 gradient_accumulation_steps: 8
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
-optim: adamw_torch_fused
 learning_rate: 1.0e-06
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 20
-seed: 42
 
 # --- Sequence Lengths ---
 max_prompt_length: 1024
@@ -66,11 +54,9 @@ max_completion_length: 4096
 use_vllm: true
 vllm_mode: server
 vllm_server_host: 127.0.0.1
-vllm_server_port: 8000
 
 # --- Output ---
 output_dir: checkpoints/online-grpo-qwen3-8b-rlrr-math
-save_strategy: steps
 save_steps: 200
 eval_strategy: steps
 eval_steps: 200
@@ -84,6 +70,4 @@ report_to: wandb
 log_completions: true
 
 # --- Data ---
-dataloader_num_workers: 0
-remove_unused_columns: false
 use_peft: false

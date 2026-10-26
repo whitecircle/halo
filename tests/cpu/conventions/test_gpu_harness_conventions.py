@@ -2,7 +2,8 @@
 """Conventions a GPU test script must honour, pinned so a new script cannot quietly break them.
 
 Every manifest script runs under ``gpu_test_main`` unless its lifecycle is one the harness cannot
-express, named in ``_OWN_LIFECYCLE`` with the reason, and carries only markers from ``ALL_MARKERS``.
+express, named in ``_OWN_LIFECYCLE`` with the reason. Every row launches under its own node id, with only
+markers from ``ALL_MARKERS``: ``gpu``, one tier and the GPU-count tag of its own ``nproc``.
 
 The rest are about scratch: a GPU test allocates its dirs through the launcher and hands them back.
 
@@ -29,12 +30,13 @@ Run: ``pytest -m cpu tests/cpu/conventions/test_gpu_harness_conventions.py``
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from tests.common.repo import REPO_ROOT
-from tests.gpu.manifest import ALL_MARKERS, MANIFEST, script_path
+from tests.gpu.manifest import ALL_MARKERS, MANIFEST, Row, TestSpec, script_path
 
 _GPU_ROOT = Path(REPO_ROOT) / "tests" / "gpu"
 
@@ -43,6 +45,7 @@ _RECLAIMERS = ("cleanup_dirs", "on_teardown")
 _HARNESS = "gpu_test_main"
 _RMTREE = "rmtree"
 _FORBIDDEN_PATH_PREFIX = "/mnt/"
+_GPU_COUNT_MARKERS = frozenset(marker for marker in ALL_MARKERS if marker[0].isdigit() and marker.endswith("gpu"))
 # Manifest scripts that keep their own lifecycle, each for a reason the harness cannot express.
 _OWN_LIFECYCLE = {
     "kernels/test_deepgemm.py": "prints SKIP: when deep_gemm is absent; the harness has no skip channel",
@@ -177,16 +180,59 @@ def test_every_manifest_script_runs_under_the_harness():
     )
 
 
+def _launches() -> list[tuple[str, str, TestSpec]]:
+    """``(script, args, spec)`` for every manifest row, the spec carrying that row's own launch values."""
+    return [(rel, args, spec) for rel, script_spec in MANIFEST.items() for args, spec in script_spec.launches()]
+
+
 def test_every_manifest_marker_is_registered():
     """``tests/conftest.py`` registers ``ALL_MARKERS`` and nothing else, and pytest only warns on an
     unregistered mark, so a typo would silently drop its row from every selection by that marker."""
     assert MANIFEST, "the manifest is empty, so the marker scan checks nothing"
     unregistered = sorted(
-        f"{rel}: {marker}" for rel, spec in MANIFEST.items() for marker in spec.markers if marker not in ALL_MARKERS
+        f"{rel} [{args}]: {marker}"
+        for rel, args, spec in _launches()
+        for marker in spec.markers
+        if marker not in ALL_MARKERS
     )
     assert not unregistered, (
         "add these markers to ALL_MARKERS in tests/gpu/manifest.py, or fix the typo:\n  " + "\n  ".join(unregistered)
     )
+
+
+def _misfit(spec: TestSpec) -> bool:
+    """Whether a launch lacks ``gpu``, exactly one tier, or the ``Ngpu`` tag of its own ``nproc``."""
+    markers = set(spec.markers)
+    return (
+        "gpu" not in markers
+        or len({"core", "full"} & markers) != 1
+        or markers & _GPU_COUNT_MARKERS != {f"{spec.nproc}gpu"}
+    )
+
+
+def test_every_row_launches_under_its_own_id_tier_and_width():
+    """Rows of one script share its node-id prefix, so two with the same args would collapse into one pytest
+    id; and a row's own ``nproc`` or tier must keep its markers selecting it, since ``-m "gpu and core"`` and
+    the ``Ngpu`` tags are how the tiers and the GPU budget are chosen."""
+    launches = _launches()
+    duplicated = sorted(node for node, count in Counter((rel, args) for rel, args, _ in launches).items() if count > 1)
+    assert not duplicated, f"rows sharing a node id: {duplicated}"
+    misfit = sorted(
+        f"{rel} [{args}]: nproc={spec.nproc} {spec.markers}" for rel, args, spec in launches if _misfit(spec)
+    )
+    assert not misfit, (
+        "each row needs 'gpu', exactly one of 'core'/'full' and the Ngpu tag of its nproc:\n  " + "\n  ".join(misfit)
+    )
+
+
+def test_a_row_launches_with_its_own_values_over_the_spec():
+    """A row's set fields replace the spec's and the rest carry over, so a wider row that keeps the spec's
+    markers is caught by the width check above."""
+    spec = TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), args_matrix=("--a", Row("--b", nproc=4)), timeout=60)
+    (a, a_spec), (b, b_spec) = spec.launches()
+    assert (a, a_spec.nproc, a_spec.markers, a_spec.timeout) == ("--a", 2, ("gpu", "core", "2gpu"), 60)
+    assert (b, b_spec.nproc, b_spec.markers, b_spec.timeout) == ("--b", 4, ("gpu", "core", "2gpu"), 60)
+    assert not _misfit(a_spec) and _misfit(b_spec)
 
 
 def test_a_module_qualified_harness_call_counts(tmp_path):

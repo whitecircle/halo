@@ -34,83 +34,22 @@ Launcher choice: [Two launchers](../parallelism/data-parallelism.md#two-launcher
 
 Every training entry script runs the shared skeleton in `src/entrypoints/`: `parse_script_args` (distributed init, the YAML/CLI parse, the `output_dir` expansion and the `run.log` tee) → `init_training_script` (parallelism config, run setup, resume resolution, returning the run's `ScriptContext`) → DP-shard-aware dataset loading and the modality verdict (`data_setup.py`) → the policy load and window pins (`model_setup.py`) → `configure_balancing_and_build_callbacks` → `run_trainer`, which emits the canonical start log (mode plus EP/CP/TP/ETP/DP sizes) and reorders integration callbacks last so `moe/*` and efficiency keys reach W&B. `with_distributed_teardown(main)()` tears the process group down after a finished or early-stopped run.
 
-### Supervised fine-tuning
+Which parallelism axes each trainer takes: [Trainer compatibility](trainer-architecture.md#trainer-compatibility). Launch commands are on each method's page.
 
-| Script | Description |
-|--------|-------------|
-| `scripts/training/sft.py` | SFT (text or VLM, auto-detected); every available axis — EP/CP/TP/ETP/PP — plus `init_from_scratch` (dense data-parallel only) |
-
-```bash
-python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
-torchrun --nproc_per_node=8 scripts/training/sft.py \
-    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml --expert_parallel_size=8
-```
-
-### Preference optimization
-
-| Script | Description |
-|--------|-------------|
-| `scripts/training/preference/dpo.py` | DPO (text or VLM, auto-detected); EP/TP/ETP; PP with precomputed reference log-probs; TRL `loss_type` variants (`sigmoid`, `hinge`, `ipo`, …) |
-| `scripts/training/preference/kto.py` | KTO (text or VLM, auto-detected; unpaired binary feedback); EP/TP/ETP; PP with precomputed reference log-probs (`apo_zero_unpaired`) |
-| `scripts/training/preference/smpo.py` | Smooth Margin PO (text or VLM, auto-detected; reference-model-free); EP/CP/TP/ETP/PP |
-| `scripts/training/preference/rewards.py` | Bradley-Terry reward model; EP/TP/ETP/PP |
-
-### Online GRPO
-
-| Script | Description |
-|--------|-------------|
-| `scripts/training/online_grpo/rlvr.py` | RLVR: online GRPO scored by the config's reward terms (the `\boxed{}` accuracy and format graders, a judge, a served reward model); EP/TP/ETP, no CP or PP |
-
-Run a vLLM server on a dedicated GPU, then launch training on the rest:
-
-```bash
-# vLLM runs in its own container (the training image has no vllm)
-VLLM_CUDA_DEVICES=7 docker compose -f docker-compose.vllm.yml up vllm-server
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
-    scripts/training/online_grpo/rlvr.py \
-    examples/grpo/online/rlvr-online-grpo-template.yaml
-```
-
-### Offline GRPO
-
-| Script | Description |
-|--------|-------------|
-| `scripts/training/offline_grpo.py` | Group-relative PO with pre-computed rewards; EP/CP/TP/ETP/PP (CP: full fine-tuning only) |
-
-```bash
-torchrun --nproc_per_node=8 scripts/training/offline_grpo.py \
-    examples/grpo/offline/gptoss/offline-grpo-gptoss-20b-gsm8k.yaml --expert_parallel_size=8
-```
-
-### Async GRPO with Environments (multi-turn RL)
-
-| Script | Description |
-|--------|-------------|
-| `scripts/training/environmental_grpo.py` | Multi-turn async GRPO — resolves the environment from `environment_type` in YAML; EP/TP/ETP via `torchrun`, no CP or PP (register custom environments with `register_environment`) |
-
-Benchmark environments available via registry (no dedicated script):
-
-| Registry Name | Environment | Compatible Datasets |
-|---------------|-------------|-------------------|
-| `qa_search` | `NativeToolUseEnvironment` (factory) | SimpleQA, GAIA, TriviaQA, PopQA |
-| `code_contests` / `codeforces` | `CodeContestsEnvironment` | Codeforces, DeepCoder (RL pools); LiveCodeBench, ICPC-Eval, HLCE (benchmarks) |
-| `exam_qa` | `ExamQAEnvironment` | MMLU-Pro, GPQA, MMLU, ARC |
-
-```bash
-# Start vLLM: docker compose -f docker-compose.vllm.yml up vllm-server
-CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 \
-    scripts/training/environmental_grpo.py \
-    examples/grpo/environmental/environmental-grpo-template.yaml
-```
-
-### Other methods
-
-| Script | Description |
-|--------|-------------|
-| `scripts/training/classification.py` | Multi-class/multi-label sequence classification; EP/TP/ETP/PP |
-| `scripts/training/embedding.py` | Embedding fine-tuning with SBERT losses; EP/TP/ETP (no CP, no PP) |
-| `scripts/training/distillation/teacher_distill.py` | Off-policy teacher→student distillation (text or VLM, auto-detected), multiple loss types; EP/TP/ETP (no CP, no PP) |
-| `scripts/training/distillation/self_distill.py` | Offline SDPG privileged-context self-distillation (text or VLM, auto-detected); faithful online SDPG runs via `online_grpo/rlvr.py --use_sdpg=true` |
+| Script | Method |
+|--------|--------|
+| `scripts/training/sft.py` | [SFT](../training-methods/sft.md), text or VLM (auto-detected); `init_from_scratch` for [pre-training](../training-methods/pretraining.md) |
+| `scripts/training/preference/dpo.py` | [DPO](../training-methods/preference/dpo.md), text or VLM; TRL `loss_type` variants |
+| `scripts/training/preference/kto.py` | [KTO](../training-methods/preference/kto.md), text or VLM; unpaired binary feedback |
+| `scripts/training/preference/smpo.py` | [SMPO](../training-methods/preference/smpo.md), text or VLM; reference-free |
+| `scripts/training/preference/rewards.py` | [Bradley-Terry reward model](../training-methods/preference/reward-modeling.md) |
+| `scripts/training/online_grpo/rlvr.py` | [Online GRPO](../training-methods/grpo/online.md) scored by the config's reward terms; [online SDPG](../training-methods/distillation/online-sdpg.md) with `--use_sdpg=true` |
+| `scripts/training/offline_grpo.py` | [Offline GRPO](../training-methods/grpo/offline.md) on pre-scored completions |
+| `scripts/training/environmental_grpo.py` | [Async GRPO with Environments](../training-methods/async-grpo/README.md); `environment_type` picks the [environment](../training-methods/async-grpo/environments/README.md#registry) |
+| `scripts/training/classification.py` | [Sequence classification](../training-methods/classification.md), multi-class or multi-label |
+| `scripts/training/embedding.py` | [Embedding fine-tuning](../training-methods/embedding.md) with SBERT losses |
+| `scripts/training/distillation/teacher_distill.py` | [Teacher distillation](../training-methods/distillation/teacher-distillation.md), off-policy, text or VLM |
+| `scripts/training/distillation/self_distill.py` | [Self-distillation](../training-methods/distillation/self-distillation.md): offline privileged-context SDPG, text or VLM |
 
 ## Inference & generation scripts
 
@@ -122,22 +61,9 @@ CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 torchrun --nproc_per_node=7 \
 | `scripts/inference/reward_model/rm_scoring.py` | Score datasets using reward models. A response cut at `--max_gen_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished. The scored turn is `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`) |
 | `scripts/inference/playground/gradio_openai_chatbot.py` | Chatbot UI (Gradio + OpenAI API). `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder |
 | `scripts/inference/playground/gradio_environment_playground.py` | Environment playground (Gradio) for testing GRPO environments against a rollout server. Episodes run through the shared eval driver (`run_episode` in `src/environments/eval_runner.py`), so a turn the engine cut off at its token cap, or one the model ended on nothing, is recovered here exactly as in training. `--base_url` prefills the rollout server base URL; `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder, and stays server-side; `--host` binds loopback (`127.0.0.1`), so publishing the UI — and that key's spend — takes an explicit `--host 0.0.0.0` |
-| `scripts/environments/inference/run_code_contests.py` | Evaluate on competitive programming: dataset adapter (every `CODE_DATASET_ADAPTERS` entry that scores raw rows: `codeforces`, `deepcoder`, `livecodebench`, `icpc`, `hlce`; `hardtests` is scored from its prepared pool) + language (python/cpp/c, or a comma-separated list the model chooses from per program) + success@k bucketed by adapter group field (rating/difficulty/contest), against vLLM or OpenRouter. `--env_type` picks `codeforces` or `code_contests`, falling back to the training config's `environment_type`, else `codeforces`. `--reasoning_effort` (low/medium/high, or `none` for no level; falls back to the training config's, where a `null` is `none`, else `medium`) sets the template effort and, unless `--max_tokens` or `--training_config` is given, the generation budget: the level's `thinking_tokens` as the built environment binds it (4096/8192/16384 by default, a `reasoning_effort_profiles` override in `--env_kwargs` included) plus 4096 tokens of solution headroom (8192/12288/20480 by default), and 32768 at `none` or for a level with no budget; a soft budget (`enforce_thinking_cap: false`) takes the larger of the two. `--max_turns` falls back to the training config's, else the environment's default (15). `--eval_protocol` (`harness` or `leaderboard`: one submission, no scratchpad; falls back to the training config's value, else `harness`) names the scoring contract ([what `success@k` counts](../training-methods/async-grpo/evaluation.md#the-report)). `--start_date` / `--end_date` (inclusive `YYYY-MM-DD`) and `--platform` select the problems of an adapter that stamps contest dates (`livecodebench`); a problem whose only tests are its statement's examples is left out and counted unless `--include_examples_only`. `--env_kwargs` carries the env/grading knobs without a flag (`max_turns`, `language`, `eval_protocol` and `reasoning_effort` go through their flags); `--save_trajectories <path>` / `--trajectory_dir <folder>` record JSONL |
-| `scripts/environments/inference/run_env.py` | Generic eval runner for every other env (`--env_type qa_search`, `exam_qa`, `swe`, `mcp`, …; optional when `--training_config` names an `environment_type`) over an OpenAI endpoint; reads `--prompt_field` / `--answer_field` / `--context_fields` columns, names examples by `--id_field` (default `id`), exits on a field naming no column (the default answer and id columns may be absent), reports reward and success@k bucketed by `--group_by`; `--env_kwargs` merges per-env settings; `--save_trajectories` / `--trajectory_dir` record JSONL |
-| `scripts/environments/inference/regrade_trajectories.py` | Offline re-grader: replays saved JSONL (`<jsonl...> --workers --output`) through grading only, decoupled from generation. Needs the code-contest meta `run_code_contests.py` stamps (`adapter`/`language` on top of the generic eval meta); a `run_env.py` trajectory is rejected up front. Re-applies the recorded contest selection and protocol, reads each recorded call's arguments as the environment read them, and leaves an episode recorded with a `generation_error` out of `n`, counted in `generation_errors` |
-
-Both `run_*.py` runners in `scripts/environments/inference/` share one dataset/endpoint/trajectory flag block
-(`scripts/environments/eval_arguments.py`). `--training_config <yaml>` points them at an async-GRPO training
-YAML (`scripts/environments/training_contract.py`) and evaluates under that run's contract: its `EnvironmentConfig`, and its rollout settings
-(backend, chat-template variables, stop tokens, thinking budget, temperature, top-p, top-k, min-p,
-repetition penalty, max tokens per turn and per episode, request timeout).
-
-Precedence is explicit flag → `--training_config` → the script's own default, so an eval matches the
-run it is judging unless a flag says otherwise. A `rollout_stop_tokens` entry that the config's
-tokenizer does not know raises here, as it does at trainer construction: both resolve the list through
-`resolve_rollout_stop_token_ids`. A vLLM contract whose run-wide cap, or an effort level the eval's environment
-can draw, sets a thinking budget the served model type cannot enforce (Mistral 4) is refused before any episode,
-as the trainer refuses it (`reject_unenforceable_thinking_budget`).
+| `scripts/environments/inference/run_code_contests.py` | Evaluate a served model on competitive programming, success@k per rating, difficulty or contest: [Code Contests → Evaluation](../training-methods/async-grpo/environments/tasks/code-contests/evaluation.md) |
+| `scripts/environments/inference/run_env.py` | Evaluate a served model on any other environment (`qa_search`, `exam_qa`, `swe`, `mcp`, …): [Evaluation](../training-methods/async-grpo/evaluation.md#running-an-evaluation) |
+| `scripts/environments/inference/regrade_trajectories.py` | Re-grade saved `run_code_contests.py` trajectories in one bounded process, apart from generation: [Re-grading](../training-methods/async-grpo/evaluation.md#re-grading-recorded-trajectories) |
 
 In `openai_batched_generation.py`, `--input_path` / `--output_path` are S3 **keys**, not URIs:
 `build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (required; unset raises) and `--subfolder`
@@ -176,7 +102,7 @@ python scripts/inference/reward_model/rm_scoring.py \
 |--------|-------------|
 | `scripts/after_training/merge_peft_adapters.py` | Merge LoRA/PEFT adapters into the base model, loaded through the class the adapter's keys address (the text-only class after a `text_only_model` run, whose merged checkpoint keeps the text-only `model.*` keys its `*_text` config declares and ships the run's tokenizer with no processor files); refuses a native EP expert-LoRA directory, a per-rank-sharded adapter or base, and an adapter whose keys name no module of the base — PEFT would merge nothing there and the tool would write the bare base. The base path comes from `adapter_config.json`; `--task classification` (with `--num_labels`) merges a reward/classification head, `--dtype` (default `bfloat16`) is the load dtype and `--device_map cpu` fits a model larger than the GPUs. The processing class is the adapter directory's when it saved a full processor, else the base's (a tokenizer-only save would leave an unloadable VLM); a text-only merge ships the run's tokenizer. Re-applies the training sidecars (`apply_training_sidecars`), since the merge rebuilds the base from the hub. Norms stay at `--dtype` except modules a family pins through transformers' `_keep_in_fp32_modules_strict` (GPT-OSS's non-strict `_keep_in_fp32_modules` holds only under `--dtype float16`); `--fp32_norms` writes every normalization leaf in fp32 (`convert_to_bf16.py`'s layout) |
 | `scripts/after_training/merge_models.py` | Merge same-architecture checkpoints in weight space (linear / slerp / task_arithmetic / ties). Streams one tensor at a time across the inputs (each key loaded from every model, merged, written), so peak host memory scales with the largest tensor, never the merged model ([Model Merging](model-merging.md#memory-and-output)) |
-| `scripts/after_training/merge_ep_shards.py` | Merge EP sharded checkpoints into a single model, writing each family's `ExpertLayout` through the same `to_hub_expert_tensors` the gathered save applies (GptOss gate/up re-interleaved) (`--max_shard_size` caps the output shards, default `5GB`). It casts nothing — the sharded writer already applied the save dtype — and needs `ep_size` in the per-rank index metadata, so a gathered or already-merged directory is declined. `--delete_input_shards` frees the per-rank inputs once the merged checkpoint is complete — until then peak disk holds both. Refuses an input holding a PEFT adapter beside the shards: the aux copy would carry `adapter_config.json` but no adapter weights. Which runs may save sharded: [Checkpoints](checkpoints.md#expert-parallelism-ep-eptp-epcp) |
+| `scripts/after_training/merge_ep_shards.py` | Merge EP sharded checkpoints into a single model, writing each family's `ExpertLayout` through the same `to_hub_expert_tensors` the gathered save applies (GptOss gate/up re-interleaved) (`--max_shard_size` caps the output shards, default `5GB`). It casts nothing — the sharded writer already applied the save dtype — and needs `ep_size` in the per-rank index metadata, so a gathered or already-merged directory is declined. It copies the resume state, every rank's optimizer shard and `optimizer_meta.pt` included, so the merged directory resumes exactly on the save's topology; a meta naming a rank with no shard is refused. `--delete_input_shards` frees the per-rank weight shards once the merged checkpoint is complete — until then peak disk holds both. Refuses an input holding a PEFT adapter beside the shards: the aux copy would carry `adapter_config.json` but no adapter weights. Which runs may save sharded: [Checkpoints](checkpoints.md#expert-parallelism-ep-eptp-epcp) |
 | `scripts/after_training/merge_pp_stages.py` | Merge the per-node directories of a pipeline-parallel save (`--input_dir` one directory per node, `--output_dir`) into one `from_pretrained`-loadable checkpoint that resumes exactly on the save's topology: the inputs must carry one index and one `optimizer_meta.pt`, each part the index names is copied from the first input holding it, every input's optimizer shards and RNG states are copied, and a part or a rank's shard no input holds is refused ([Per-node export](../parallelism/pipeline-parallelism.md#per-node-export)) |
 | `scripts/after_training/convert_to_bf16.py` | Convert model weights to BF16, every normalization leaf (a torch norm base, or a class named `*Norm*`) forced back to fp32. Re-applies the source's training sidecars to a full model before saving (neutralized GptOss sinks, balancing tensors re-read from the source shards at their trained fp32) and carries `router_balancing_biases.pt` / `training_provenance.json` into the output either way, so an adapter conversion still hands them to the later merge (`merge_peft_adapters.py`, the one merge tool). `--peft` loads the base through the class the adapter's keys address and ships the processing class the merge would. `--model_type` (`causal_lm` default, `classifier`, `base`) picks the class the checkpoint loads with and gates the PEFT refusal. `--verify` asserts the STORED dtypes read from the saved safetensors headers — never a `from_pretrained` reload, which casts on the way in and so can never fail — weighted by parameter count, not tensor count. A `--peft` save is exempt: PEFT restores LoRA A/B to fp32 as it writes them. `--check_inference` is the separate diagnostic: it reloads the saved checkpoint and prints what it generates, returning no verdict — `--verify` is the gate that raises |
 | `scripts/after_training/quantize_to_lowp.py` | Quantize a bf16/fp32 checkpoint to block-scaled mxfp8/mxfp4/nvfp4 (pairs with QAT — see [Mixed-Precision Training](../optimization/low-precision-moe-kernels.md)). `--format {mxfp8,mxfp4,nvfp4}` is required — the checkpoint names no target. The training run's lowp **scope** is not recorded in the checkpoint either, so four more flags restate it under the `ParallelismConfig` names and defaults — a config's values transfer verbatim: `--lowp_apply_dense_mlp` / `--lowp_apply_moe_experts` (both on; `--no-` prefix to disable) and `--lowp_keep_first_blocks` / `--lowp_keep_last_blocks` (both `0`). It quantizes the dense MLP projections and the declared expert weights, fused 3-D banks included (`experts.gate_up_proj` / `down_proj`), that match `--include` and not `--exclude` (regexes). `--contraction_axis` (default `-1`) applies to 2-D `*.weight` matrices only: a fused 3-D bank uses the `fused_contraction_axis` its family spec declares, and an unresolvable family raises. A sharded input gets a rebuilt index and every non-weight file copied. The output is no `from_pretrained` checkpoint: its `quant_method: block_scaled` is refused by vLLM and SGLang, while plain transformers only warns and random-initializes every quantized weight |
@@ -328,7 +254,7 @@ Throughput benchmarks live under `tests/gpu/profiling/`, grouped by what they me
 
 | Group | Scripts |
 |---|---|
-| Trainer × parallelism throughput | `benchmark_sft_dense`, `benchmark_sft_ep`, `benchmark_smpo_ep`, `benchmark_offline_grpo_ep` — each takes `--model` from the shared roster (`tests/common/models.py`) and its parallel layout as flags (`--ep`, `--cp`, `--tp`, …), so a per-model or per-layout number is a flag, not a script |
+| Trainer × parallelism throughput | `benchmark_sft_dense`, `benchmark_sft_ep`, `benchmark_smpo_ep` — each takes `--model` from the shared roster (`tests/common/models.py`) and its parallel layout as flags (`--ep`, `--cp`, `--tp`, …), so a per-model or per-layout number is a flag, not a script |
 | Kernel / mechanism A/B | `benchmark_attention_implementations` (FA4/FA2 vs flex/sdpa/eager, fwd + bwd), `benchmark_gemma4_attention` (Gemma 4 attention backends per layer type), `benchmark_grouped_mm` (loop vs `grouped_mm`), `benchmark_moe_block` (the Gemma 4 26B-A4B routed-expert block: transformers eager / `grouped_mm` vs Halo's grouped path), `benchmark_torch_compile` (Liger × compile 2×2 on EP), `benchmark_collators` (packing vs padding-free), `benchmark_roofline`, `bench_ep_buffer_backends` (DeepEP V1 Buffer vs V2 ElasticBuffer) |
 | Stock-TRL reference | `benchmark_trl_baseline` (same `EfficiencyCallback` metrics), `benchmark_convergence` (loss curves, same seed + data order) |
 

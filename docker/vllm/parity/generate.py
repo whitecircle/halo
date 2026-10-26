@@ -1,15 +1,14 @@
 """Regenerate the rollout-server config-parity fixtures.
 
 Each fixture under ``fixtures/`` is a ``config.json`` the pinned vLLM server must parse: the one the
-toolkit exports for that family, serialized by this image's transformers and put through every
-export-side rewrite a checkpoint writer applies (``export_legacy_per_layer_config``,
-``export_source_config_schema``). A roster fixture builds it from the family's tiny config in
-``tests/common/models.py``, through the vendor config module the fixture ships where transformers has
-no class for the family. A hub fixture, for a family whose export carries its source checkpoint's
-schema, builds it from the release config at a pinned revision plus the remote-code modules that
-schema names. ``unparseable/`` holds the same configs without the rewrites: the form each rewrite
-exists to avoid, which the server must refuse or read as the same model. ``check.py`` asserts all of
-them against the server image at build time.
+toolkit exports for that family, serialized by this image's transformers and put through the
+export-side rewrite a checkpoint writer applies (``export_source_config_schema``). A roster fixture
+builds it from the family's tiny config in ``tests/common/models.py``, through the vendor config
+module the fixture ships where transformers has no class for the family. A hub fixture, for a family
+whose export carries its source checkpoint's schema, builds it from the release config at a pinned
+revision plus the remote-code modules that schema names. ``unparseable/`` holds the same configs
+without the rewrite: the form it exists to avoid, which the server must refuse. ``check.py`` asserts
+all of them against the server image at build time.
 
 The roster is derived rather than listed: every MoE family whose spec admits weight sync
 (``weight_sync_refusal is None``) needs a fixture here, because the server has to parse that family's
@@ -32,11 +31,7 @@ from transformers import CONFIG_MAPPING, AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import CONFIG_NAME
 
-from src.checkpoint.config_export import (
-    export_legacy_per_layer_config,
-    export_source_config_schema,
-    restore_model_type,
-)
+from src.checkpoint.config_export import export_source_config_schema, restore_model_type
 from src.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, find_moe_family_spec
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.models import (
@@ -157,14 +152,12 @@ FIXTURES = (
     ),
     HubFixture("step3p7", "step3p7", "stepfun-ai/Step-3.7-Flash", "5f6244077ac62e04eec3f320501ff8c2b293373a"),
 )
-# The negative control is every fixture an export rewrite acts on, read off the spec fields the
-# rewrites themselves read, so a family that starts declaring either one gets its control without an
-# edit here.
+# The negative control is every fixture the export rewrite acts on, read off the spec field the
+# rewrite itself reads, so a family that starts declaring it gets its control without an edit here.
 UNPARSEABLE = tuple(
     fixture
     for fixture in FIXTURES
-    if (spec := find_moe_family_spec(fixture.model_type))
-    and (spec.served_flat_config_keys or spec.exports_source_config_schema)
+    if (spec := find_moe_family_spec(fixture.model_type)) and spec.exports_source_config_schema
 )
 
 
@@ -189,14 +182,13 @@ def uncovered_families() -> list[str]:
 
 
 def render(fixture, *, rewrite: bool) -> dict:
-    """The ``config.json`` payload the toolkit writes for ``fixture``: through the export rewrites by
+    """The ``config.json`` payload the toolkit writes for ``fixture``: through the export rewrite by
     default, or the plain transformers serialization for the negative control."""
     with tempfile.TemporaryDirectory() as tmp:
         config = fixture.build()
         config.save_pretrained(tmp)
         restore_model_type(config, tmp)
         if rewrite:
-            export_legacy_per_layer_config(tmp)
             export_source_config_schema(config, tmp, source=fixture.source)
         with open(os.path.join(tmp, CONFIG_NAME)) as f:
             payload = json.load(f)

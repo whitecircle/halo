@@ -56,7 +56,8 @@ serving the same checkpoint on a GPU outside `TRAINER_CUDA_DEVICES`, one pass pe
 What a `make` run differs in from a hand-rolled launch (foreground, `--network host`, no
 `--cap-add=SYS_PTRACE`, conditional `.env`/`~/.aws`) and the one `HALO_SCRATCH` override for the large
 volume: [Docker → Standard training launch](../../agent-docs/infrastructure/docker.md#standard-training-launch).
-`/mnt` is **not** guaranteed large — verify with `findmnt`/`df -h` and pass `HALO_SCRATCH=` when it isn't.
+Unset, `make` resolves `HALO_SCRATCH` to the local mount other than `/` with the most free space — verify the pick with
+`findmnt`/`df -h` and pass `HALO_SCRATCH=<path>` to choose another.
 
 ## 2. Raw detached `docker run` (when `make` doesn't fit)
 

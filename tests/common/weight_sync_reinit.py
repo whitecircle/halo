@@ -1,5 +1,5 @@
 """Repeated trainer connect → sync → close cycles against one live rollout server, rebinding one group
-port each cycle: the body of both engines' weight-transfer re-init suites.
+port each cycle: the body of the weight-transfer re-init suite, on either engine.
 
 A cycle that leaves either end's NCCL communicator alive strands its device memory while ``/health``
 keeps answering 200, until a later init fails outright; the device-memory checks catch that, and the

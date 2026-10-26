@@ -130,39 +130,22 @@ def test_load_ep_cp_model_threads_revision():
     assert seen["load"] == (_SOURCE, _REVISION)
 
 
-def test_ep_tp_lazy_path_reads_pinned_snapshot():
-    """load_ep_tp_model streams the experts from the agreed source's snapshot directory."""
+def test_load_ep_tp_model_threads_revision():
+    """load_ep_tp_model forwards the source and its revision pin into load_ep_model."""
     seen = {}
 
-    def fake_lazy(local_dir, ep_config, config, **kwargs):
-        seen["lazy_dir"] = local_dir
+    def fake_load_ep_model(source, pc, model_class, from_pretrained_kwargs, **kwargs):
+        seen["load"] = (source, from_pretrained_kwargs.get("revision"))
         return nn.Linear(2, 2)
 
-    pc = SimpleNamespace(
-        ep_lazy_loading=True,
-        ep_size=2,
-        tp_size=2,
-        data_parallel_size=1,
-        pp_size=1,
-        fp32_non_ep_params=False,
-        ep_config=_make_ep_config,
-    )
+    pc = _ep_pc(ep_size=2, tp_size=2, data_parallel_size=1)
     with (
-        # The rank-0 verdict, not the probes behind it: this test's subject is the revision pin.
-        patch(f"{_TP_LOADING}.resolve_lazy_checkpoint", return_value=True),
-        patch(f"{_TP_LOADING}.load_ep_model_lazy", fake_lazy),
+        patch(f"{_TP_LOADING}.load_ep_model", fake_load_ep_model),
         patch(f"{_TP_LOADING}._apply_attention_only_tp"),
-        patch(f"{_TP_LOADING}.timed_global_load", lambda tag, method, load_fn: load_fn()),
     ):
-        load_ep_tp_model(
-            _SOURCE,
-            pc,
-            None,
-            {"config": _MODEL_CONFIG, "dtype": None, "trust_remote_code": True, "revision": _REVISION},
-            preserve_checkpoint_precision=False,
-        )
+        load_ep_tp_model(_SOURCE, pc, None, _KWARGS, preserve_checkpoint_precision=False)
 
-    assert seen["lazy_dir"] == "/fake/pinned/snapshot"
+    assert seen["load"] == (_SOURCE, _REVISION)
 
 
 if __name__ == "__main__":

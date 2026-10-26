@@ -8,7 +8,7 @@ import copy
 
 import pytest
 
-from src.data.pipeline.prompt_completion import tokenize_prompt_completions
+from src.data.pipeline.prompt_completion import tokenize_completions_jointly, tokenize_prompt_completions
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -139,6 +139,27 @@ def _tokenize_stub(tokenizer_kwargs, prompt, completions, kwargs):
 )
 def test_stub_fixture(tokenizer_kwargs, prompt, completions, kwargs, expected_prompt, expected_completions):
     assert _tokenize_stub(tokenizer_kwargs, prompt, completions, kwargs) == (expected_prompt, expected_completions)
+
+
+# The joint cases whose boundary merges, so the split moves one prompt token into the completions.
+MERGING_JOINT_CASES = {"joint-merge-one-side", "joint-merge-both-sides-no-eos"}
+
+
+@pytest.mark.parametrize("case", [name for name in CASES if name.startswith("joint-")])
+def test_jointly_tokenized_completions_count_the_moved_prompt_tokens(case):
+    """A prompt tokenized elsewhere (the VLM collator's) gets the joint completions unchanged, and the count of
+    prompt tokens they start with, which that prompt must drop."""
+    tokenizer_kwargs, prompt, completions, kwargs, _, expected_completions = CASES[case].values
+    tokenizer = CharTokenizer(**tokenizer_kwargs)
+    completion_ids, overlap = tokenize_completions_jointly(
+        prompt,
+        completions,
+        tokenizer,
+        max_completion_length=kwargs["max_completion_length"],
+        eos_token_ids=kwargs.get("eos_token_ids", frozenset()),
+    )
+    assert [tokenizer.decode(ids) for ids in completion_ids] == expected_completions
+    assert overlap == int(case in MERGING_JOINT_CASES)
 
 
 QWEN_CASES = {

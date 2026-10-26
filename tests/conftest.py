@@ -2,7 +2,7 @@
 
 - Registers every marker the GPU manifest uses (single source of truth:
   ``tests.gpu.manifest.ALL_MARKERS``) without the list being duplicated in ``pyproject.toml``.
-- Ensures the project root is importable (CPU tests do ``from src. ...``).
+- Ensures the project root is importable (CPU tests do ``from src. ...``) and runs every test from it.
 - Sweeps stale scratch dirs left by crashed test runs out of the launcher's ``TMPDIR``
   (they sit on the volume the training data does, so leaks eat it).
 
@@ -80,6 +80,16 @@ def pytest_sessionstart(session):
                 shutil.rmtree(path, ignore_errors=True)
         except OSError:
             pass
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _run_from_the_project_root():
+    """Run from the project root, as ``halo launch`` runs a recipe: a recipe's relative paths (a judge's
+    ``context_file``, read when the config parses) resolve against it, wherever pytest was started."""
+    started_in = Path.cwd()
+    os.chdir(_PROJECT_ROOT)
+    yield
+    os.chdir(started_in)
 
 
 @pytest.fixture(autouse=True)

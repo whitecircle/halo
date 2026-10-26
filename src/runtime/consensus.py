@@ -1,5 +1,6 @@
 """Cross-rank verdicts, every one COLLECTIVE: raise a rank-local failure on every rank, agree on a value,
-count a per-rank observation, and the c10d-store joins for waits that outlast the NCCL watchdog."""
+count a per-rank observation or take its world MIN/MAX, and the c10d-store joins for waits that outlast the
+NCCL watchdog."""
 
 import datetime
 import hashlib
@@ -82,11 +83,19 @@ def gather_rank_reasons(local_reason: str | None) -> list[str | None]:
     return reasons
 
 
-def _rank_max(slots: list[int], group: dist.ProcessGroup | None = None) -> list[int]:
-    """COLLECTIVE: each int64 slot's MAX across ``group`` in one fixed-size all-reduce."""
-    reduced = torch.tensor(slots, dtype=torch.int64, device=collective_device(group))
+def rank_max(values: list[int], group: dist.ProcessGroup | None = None) -> list[int]:
+    """COLLECTIVE: each int64 value's MAX across ``group`` (default: the world) in one fixed-size all-reduce
+    on the backend's device; ``values`` unchanged without a peer."""
+    if not is_multi_rank_run():
+        return list(values)
+    reduced = torch.tensor(values, dtype=torch.int64, device=collective_device(group))
     dist.all_reduce(reduced, op=dist.ReduceOp.MAX, group=group)
     return reduced.tolist()
+
+
+def rank_min(values: list[int], group: dist.ProcessGroup | None = None) -> list[int]:
+    """COLLECTIVE: each int64 value's MIN across ``group``: :func:`rank_max` of the negated values."""
+    return [-value for value in rank_max([-value for value in values], group)]
 
 
 def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exception] = RuntimeError) -> None:
@@ -99,7 +108,7 @@ def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exce
         if local_reason:
             raise exc_type(local_reason)
         return
-    if not _rank_max([int(bool(local_reason))])[0]:
+    if not rank_max([int(bool(local_reason))])[0]:
         return
     _raise_gathered_reasons(gather_rank_reasons(local_reason), what, exc_type)
 
@@ -138,7 +147,7 @@ def _agreement_digest(obj: object) -> int:
 def agree_across_ranks(obj: object, *, abstain: bool = False, group: dist.ProcessGroup | None = None) -> RankAgreement:
     """COLLECTIVE: whether every rank of ``group`` that holds ``obj`` holds an equal one.
 
-    One :func:`_rank_max` of ``[d, -d, -rank, abstained]`` over the canonical digest ``d``: the ranks
+    One :func:`rank_max` of ``[d, -d, -rank, abstained]`` over the canonical digest ``d``: the ranks
     agree iff ``max(d) == -max(-d)``. An object that cannot be digested forces a mismatch rather than
     raising on one rank inside the collective. ``abstain`` takes a rank out of the comparison;
     ``first_present`` names a rank the abstainers can learn the object from.
@@ -154,7 +163,7 @@ def agree_across_ranks(obj: object, *, abstain: bool = False, group: dist.Proces
         except Exception:  # a rank-local raise here would strand the peers in the reduce
             pair = list(_UNDIGESTIBLE)
         local = [*pair, -dist.get_rank(group), 0]
-    max_digest, max_negated, max_negated_rank, any_abstained = _rank_max(local, group)
+    max_digest, max_negated, max_negated_rank, any_abstained = rank_max(local, group)
     if max_negated_rank == _INT64_MIN:
         return RankAgreement(True, None, True)
     return RankAgreement(max_digest == -max_negated, -max_negated_rank, bool(any_abstained))

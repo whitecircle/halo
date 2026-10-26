@@ -171,12 +171,12 @@ def tier_controls(tier: str) -> Iterator[None]:
         yield
 
 
-def _tiny_model(name: str, tier: str, device) -> torch.nn.Module:
-    """``name``'s seeded tiny model on ``device`` at the tier's dtype, labelled with the attention CP validates,
-    its GPT-OSS sinks neutralized as the CP loaders leave them."""
+def tiny_model(name: str, tier: str, device, **overrides) -> torch.nn.Module:
+    """``name``'s seeded tiny model (with ``overrides`` over its text config) on ``device`` at the tier's dtype,
+    labelled with the attention CP validates, its GPT-OSS sinks neutralized as the CP loaders leave them."""
     family = FAMILIES[name]
     torch.manual_seed(SEED)
-    model = tiny_family_model(family.tiny, overrides=family.overrides)
+    model = tiny_family_model(family.tiny, overrides={**family.overrides, **overrides})
     label = family.tiny.cp_attn_implementation or DEFAULT_ATTN_IMPLEMENTATION
     model.config._attn_implementation = label
     apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED, attn_implementation=label)
@@ -196,9 +196,9 @@ def _nudge(attention: UlyssesAttention) -> None:
         first.add_(first.abs().clamp_min(finfo.tiny) * 4 * finfo.eps)
 
 
-def _decoder_attention_inputs(model: torch.nn.Module, input_ids, position_ids) -> dict:
-    """The keyword inputs the decoder hands its first attention layer on ``input_ids``, the forward stopped
-    there."""
+def decoder_attention_inputs(model: torch.nn.Module, input_ids, position_ids) -> dict:
+    """The keyword inputs the decoder hands its first attention layer on ``input_ids`` without a cache, the
+    forward stopped there."""
     attention = next(module for module in model.modules() if type(module).__name__ in ULYSSES_ATTENTION_MAP)
     captured = {}
 
@@ -209,21 +209,21 @@ def _decoder_attention_inputs(model: torch.nn.Module, input_ids, position_ids) -
     handle = attention.register_forward_pre_hook(capture, with_kwargs=True)
     try:
         with torch.no_grad(), contextlib.suppress(_Captured):
-            model(input_ids=input_ids, position_ids=position_ids)
+            model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
     finally:
         handle.remove()
     return captured
 
 
 def _attention_case(name: str, cp_config, *, tier: str, device, perturb: bool) -> tuple[Tensors, Orders]:
-    model = _tiny_model(name, tier, device)
+    model = tiny_model(name, tier, device)
     hidden_size = model.get_input_embeddings().embedding_dim
     generator = torch.Generator().manual_seed(SEED)
     vocab_size = model.get_input_embeddings().num_embeddings
     input_ids = torch.randint(0, vocab_size, (BATCH, SEQ), generator=generator).to(device)
     positions = torch.arange(SEQ, device=device).unsqueeze(0).expand(BATCH, -1)
     local_positions = split_sequence_for_cp(positions, cp_config)
-    inputs = _decoder_attention_inputs(model, split_sequence_for_cp(input_ids, cp_config), local_positions)
+    inputs = decoder_attention_inputs(model, split_sequence_for_cp(input_ids, cp_config), local_positions)
     attention = _first_attention(UlyssesModel(model, cp_config))
     if perturb:
         _nudge(attention)
@@ -243,7 +243,7 @@ def _attention_case(name: str, cp_config, *, tier: str, device, perturb: bool) -
 
 
 def _model_case(name: str, cp_config, *, tier: str, device, perturb: bool) -> tuple[Tensors, Orders]:
-    model = _tiny_model(name, tier, device)
+    model = tiny_model(name, tier, device)
     if FAMILIES[name].moe:
         apply_ep_layers(model, single_process_ep_config(use_grouped_gemm=tier == "gpu"))
     wrapper = UlyssesModel(model, cp_config).train()

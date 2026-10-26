@@ -15,7 +15,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-import torch
 from datasets import Dataset
 
 from src.trainers.dataloaders import DataParallelLoaderMixin
@@ -101,33 +100,12 @@ def test_eval_no_equalize_when_not_presharded(trainer_cls):
     assert len(calls) == 0, f"{trainer_cls.__name__}: equalized a non-presharded eval dataset"
 
 
-class _FakeAllReduce:
-    """Stand-in for torch.distributed that forces the global-min all_reduce result."""
-
-    def __init__(self, forced_min: int):
-        self.forced_min = forced_min
-        self.ReduceOp = torch.distributed.ReduceOp
-
-    def is_available(self):
-        return True
-
-    def is_initialized(self):
-        return True
-
-    def get_world_size(self):
-        return 2
-
-    def all_reduce(self, tensor, op=None):
-        tensor.fill_(min(self.forced_min, int(tensor.item())))
-
-
 def _equalize_with_forced_min(dataset, forced_min: int, split: str):
-    """Run the real _equalize_presharded_length with a faked distributed MIN reduction."""
+    """Run the real _equalize_presharded_length with the world MIN forced to ``forced_min``."""
     with (
-        patch("src.trainers.dataloaders.dist", _FakeAllReduce(forced_min)),
+        patch("src.trainers.dataloaders.rank_min", lambda values: [min(forced_min, values[0])]),
         # The shared multi-rank probe reads the real torch.distributed, which no CPU test initializes.
         patch("src.trainers.dataloaders.is_multi_rank_run", return_value=True),
-        patch("src.trainers.dataloaders.current_device", return_value=torch.device("cpu")),
     ):
         return DataParallelLoaderMixin._equalize_presharded_length(None, dataset, split=split)
 

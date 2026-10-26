@@ -40,7 +40,7 @@ output_dir: checkpoints/sft-qwen3-4b
 Refused at startup:
 
 - `packing` together with `padding_free`, and `packing` without an explicit `max_length` (the pack size bounds memory).
-- `padding_free` on a non-varlen attention implementation, or under CP (which refuses `packing` too).
+- `padding_free` on a non-varlen attention implementation, under CP (which refuses `packing` too) or under PP (use `packing`; [PP packing](../parallelism/pipeline-parallelism.md#packing)).
 - TRL's `completion_only_loss` / `assistant_only_loss`, and a non-default `dataset_text_field` / `dataset_kwargs`: they act inside the dataset prep and collator this script replaces. The script renders `conversation_field` itself; tokenize a raw-text column offline with `prepare_dataset.py --mode text`.
 
 Per-family configs live under `examples/sft/`; every field's type and default is in [SFTConfig](../reference/configuration-reference.md#trl-trainer-configs) and [SFTScriptArguments](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 ([Flash Attention](../optimization/flash-attention.md)).
@@ -59,7 +59,7 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml --nproc 8
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
 ```
 
-Scalar YAML fields override on the command line (`--learning_rate=1e-5`; container fields such as `dataset` stay in the YAML, [rules](../reference/configuration-reference.md#cli-overrides)); `accelerate launch` with `launcher-configs/accelerate/fsdp2_gradop_config.yaml` stays supported for plain data-parallel. Saves are gathered HF-standard checkpoints by default; per-rank `save_sharded_ep` ones need `scripts/after_training/merge_ep_shards.py` before resume or serving, and that merge drops optimizer state ([Checkpoints](../reference/checkpoints.md)).
+Scalar YAML fields override on the command line (`--learning_rate=1e-5`; container fields such as `dataset` stay in the YAML, [rules](../reference/configuration-reference.md#cli-overrides)); `accelerate launch` with `launcher-configs/accelerate/fsdp2_gradop_config.yaml` stays supported for plain data-parallel. Saves are gathered HF-standard checkpoints by default; per-rank `save_sharded_ep` ones need `scripts/after_training/merge_ep_shards.py` before resume or serving; the merged directory resumes exactly on the save's topology ([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)).
 
 ## Learning rate and global batch size
 

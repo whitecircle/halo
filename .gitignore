@@ -60,13 +60,9 @@ coverage.xml
 .pytest_cache/
 cover/
 .gradio/
-.mergekitenv/
 
 # Logs
 *.log
-
-# Docs build output
-agent-docs/_build/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -78,15 +74,11 @@ ipython_config.py
 # Environments
 .env
 .venv
-.hfcache/
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
-
-# Rendered site output
-/site
 
 # mypy
 .mypy_cache/
@@ -112,7 +104,6 @@ models/
 
 # Run output (training scripts and profiling write these at the repo root)
 out/
-performance_logs/
 trainer_output/
 # Equivalence harness records (make verify-move / verify-artifacts), one per head commit
 /evidence/

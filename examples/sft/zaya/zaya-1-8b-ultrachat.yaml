@@ -20,7 +20,6 @@ train_on_last_assistant_only: true
 # --- Attention & kernels ---
 attn_implementation: flash_attention_2
 packing: true
-padding_free: false
 max_length: 4096
 
 # --- Training schedule ---
@@ -33,14 +32,11 @@ num_train_epochs: 1.0
 gradient_checkpointing: false
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 500
@@ -53,8 +49,6 @@ logging_first_step: true
 report_to: wandb
 remove_unused_columns: false
 dataloader_num_workers: 2
-generate_eval_examples: false
-seed: 42
 
 # --- PEFT ---
 use_peft: false

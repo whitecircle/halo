@@ -333,7 +333,8 @@ torchrun --nnodes=$NNODES --node_rank=$NODE_RANK --nproc_per_node=8 \
 
 ### Environment
 
-The fabric block (EFA vs InfiniBand, proxy GIN, `NCCL_SOCKET_IFNAME`) is the standard one from
+The fabric env (EFA vs InfiniBand, proxy GIN) is the standard one from
+[Multi-Node → RDMA fabrics](multi-node.md#rdma-fabrics), the rest from
 [Launch Recipes](launch-recipes.md#environment-variables). What this model changes:
 
 ```bash

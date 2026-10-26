@@ -27,7 +27,7 @@ halo launch sft examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml -n 2 \
   --output_dir=/data/checkpoints/lfm2.5-8b-a1b-sft
 ```
 
-The recipe sets `report_to: none`. To log to Weights & Biases, copy it and change that line to
+The recipe leaves `report_to` at its default, `none`. To log to Weights & Biases, copy it and add
 `report_to: wandb`; this field can't be overridden on the command line.
 
 LFM2-24B-A2B on four GPUs:

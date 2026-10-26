@@ -68,7 +68,7 @@ def _rung_ep_config(*, wraps_experts: bool) -> object | None:
     )
     seen = {}
 
-    def fake_load(model_class, model_name_or_path, **kwargs):
+    def fake_load(model_class, source, pc, **kwargs):
         seen["ep_config"] = kwargs["ep_config"]
         return SimpleNamespace()
 

@@ -8,7 +8,6 @@ from contextlib import contextmanager
 
 from transformers import DistributedConfig, PreTrainedModel
 
-from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.mesh import build_dp_tp_mesh, tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
@@ -17,12 +16,12 @@ from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_at
 from src.hardware import current_device
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
-from src.model_loading.parallel.ep import load_ep_model_lazy
+from src.model_loading.parallel.ep import load_ep_model
 from src.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
-from src.model_loading.parallel.model_source import ModelSource, resolve_lazy_checkpoint
+from src.model_loading.parallel.model_source import ModelSource
 from src.model_loading.parallel.whole_model import load_whole_model
 from src.runtime.consensus import DeferredRankFailure
-from src.runtime.load_coordination import joined_node_load, timed_global_load
+from src.runtime.load_coordination import joined_node_load
 from src.runtime.ranks import get_global_rank, is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -149,11 +148,9 @@ def load_tp_moe_model(
     model = load_whole_model(
         model_class,
         source,
+        pc,
         load_phase="Model load",
-        max_concurrent_loading=pc.max_concurrent_loading,
         ep_config=ep_config,
-        keep_fp32_non_ep=pc.fp32_non_ep_params,
-        ep_wrapped=wraps_experts,
         preserve_checkpoint_precision=preserve_checkpoint_precision,
         **from_pretrained_kwargs,
     )
@@ -177,52 +174,17 @@ def load_ep_tp_model(
     *,
     preserve_checkpoint_precision: bool,
 ) -> PreTrainedModel:
-    """COLLECTIVE: load a MoE with EP+TP, attention sharded via DTensor and experts distributed via DeepEP.
-
-    ``ep_lazy_loading`` streams the experts through the lazy safetensors loader and applies TP after;
-    otherwise every rank loads the whole model through ``from_pretrained``.
-    """
+    """COLLECTIVE: load a MoE with EP+TP: the experts distributed by :func:`load_ep_model` (each rank holds
+    only its own slice on its device, lazy or eager), then attention sharded via DTensor."""
     rank = get_global_rank()
     if is_global_main_process():
         logger.info(f"[Rank {rank}] Loading model for EP+TP mode...")
         logger.info(f"  EP size: {pc.ep_size}, TP size: {pc.tp_size}, DP size: {pc.data_parallel_size}")
 
-    # Before the lazy gate: ep_config() issues new_group on every rank, so a per-rank
-    # filesystem probe ahead of it would order the groups per rank (deadlock).
-    ep_config = pc.ep_config()
-    use_lazy = resolve_lazy_checkpoint(source, lazy_requested=pc.ep_lazy_loading, layout_supported=is_lazy_loadable)
-    if is_global_main_process():
-        if use_lazy:
-            logger.info(f"[Rank {rank}] Using lazy safetensors loader for EP+TP")
-        elif pc.ep_lazy_loading:
-            logger.info(f"[Rank {rank}] Lazy path unavailable, falling back to sequential loading")
-
-    def load() -> PreTrainedModel:
-        if use_lazy:
-            model = load_ep_model_lazy(
-                source.local_dir,
-                ep_config,
-                model_class=model_class,
-                keep_fp32_params=pc.fp32_non_ep_params,
-                preserve_checkpoint_precision=preserve_checkpoint_precision,
-                **from_pretrained_kwargs,
-            )
-        else:
-            model = load_whole_model(
-                model_class,
-                source,
-                load_phase="Model load",
-                max_concurrent_loading=pc.max_concurrent_loading,
-                ep_config=ep_config,
-                keep_fp32_non_ep=pc.fp32_non_ep_params,
-                ep_wrapped=True,
-                preserve_checkpoint_precision=preserve_checkpoint_precision,
-                **from_pretrained_kwargs,
-            )
-        _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
-        return model if use_lazy else apply_ep_layers(model, ep_config)
-
-    model = timed_global_load("EP+TP", "ep_tp_lazy" if use_lazy else "ep_tp_huggingface", load)
+    model = load_ep_model(
+        source, pc, model_class, from_pretrained_kwargs, preserve_checkpoint_precision=preserve_checkpoint_precision
+    )
+    _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
     if is_global_main_process():
         logger.info(f"Model loaded with EP+TP (tp={pc.tp_size}, ep={pc.ep_size}, dp={pc.data_parallel_size})")
     return model

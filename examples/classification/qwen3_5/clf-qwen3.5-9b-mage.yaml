@@ -22,21 +22,16 @@ gradient_accumulation_steps: 8
 gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
-optim: adamw_torch_fused
 learning_rate: 2.0e-05
 weight_decay: 0.05
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 32
-seed: 42
 
 # --- Sequence Length ---
 max_length: 2048
 
 # --- Output ---
 output_dir: checkpoints/clf-qwen3.5-9b-mage
-save_strategy: steps
-save_steps: 500
 eval_strategy: steps
 eval_steps: 500
 save_total_limit: 3

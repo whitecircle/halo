@@ -25,9 +25,6 @@ max_turns: 5
 # --- Ray Workers ---
 num_rollout_workers: 16
 
-# --- vLLM Server ---
-rollout_server_url: "http://localhost:8000"
-
 # --- Rollout Generation ---
 rollout_temperature: 0.7
 rollout_max_tokens: 8192
@@ -61,19 +58,15 @@ per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
 learning_rate: 1.0e-06
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 20
 
 # --- Optimization ---
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: true   # a MoE runs reentrant GC (the trainer force-promotes false)
-optim: adamw_torch_fused
 
 # --- Output ---
 output_dir: checkpoints/env-grpo-qwen3.6-35b-a3b-exam-qa-full-ep4
-save_strategy: steps
 save_steps: 100
 save_total_limit: 3
 save_only_model: true
@@ -81,15 +74,8 @@ save_only_model: true
 # --- Logging ---
 logging_steps: 1
 logging_first_step: true
-report_to: none
 log_completions: true        # per-sample console table
-save_completions: true       # trajectories → <output_dir>/completions/*.parquet
 num_completions_to_print: 3
-
-# --- Data ---
-dataloader_num_workers: 0
-remove_unused_columns: false
-seed: 42
 
 # --- PEFT ---
 use_peft: false

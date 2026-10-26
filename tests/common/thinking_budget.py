@@ -12,6 +12,8 @@ request carrying the field with a 400. The vLLM image pins Model Runner V2, the 
 budget patches target.
 """
 
+from collections.abc import Callable
+
 import requests
 
 from src.inference.response import get_reasoning_text
@@ -67,20 +69,35 @@ def _cot(server_url: str, model_name: str, budget: int | None, seed: int) -> str
     return get_reasoning_text(_chat(server_url, model_name, budget, seed).json()["choices"][0]["message"])
 
 
+def record_budget_acceptance(server_url: str, model_name: str, budget: int, checks: dict) -> bool:
+    """RANK 0: whether the server takes the field at all; a refusal also fails enforcement.
+
+    Runs before the load: a server without a reasoning parser 400s every request carrying the field, and the
+    run would otherwise train on all-masked batches with a moving loss. An accepted field leaves
+    ``thinking_budget_probe_ran`` failed until the enforcement A/B completes, so a run that never measures
+    enforcement cannot pass on acceptance alone.
+    """
+    probe = _chat(server_url, model_name, budget, seed=0)
+    accepted = probe.status_code == requests.codes.ok
+    checks["server_accepts_the_thinking_budget"] = accepted
+    if accepted:
+        checks["thinking_budget_probe_ran"] = False
+    else:
+        checks["server_enforced_the_thinking_budget"] = False
+        log(f"  thinking_token_budget={budget} refused: HTTP {probe.status_code} {probe.text[:_DETAIL_CHARS]}")
+    return accepted
+
+
 def record_budget_enforcement(server_url: str, model_name: str, budget: int, tokenizer, checks: dict) -> None:
-    """RANK 0: the server takes the field, and the SAME prompt reasons less with it than without.
+    """RANK 0: the SAME prompt reasons less with the field than without it, on the policy the server serves.
 
     An acceptance check alone would pass on an engine that parses the field and ignores it, since the
     arithmetic prompts a rollout runs answer well under any sane budget. The A/B measures enforcement
     directly and needs no rollout; its unbudgeted arm is also what proves this checkpoint opens a
-    reasoning channel at all.
+    reasoning channel at all. It must read the checkpoint's own policy (:class:`ReasoningTurnRecorder`
+    runs it once the trainer has pushed its weights): a trained gpt-oss policy writes turns with no
+    analysis channel, which the engine's budget has nothing to cap.
     """
-    probe = _chat(server_url, model_name, budget, seed=0)
-    checks["server_accepts_the_thinking_budget"] = probe.status_code == requests.codes.ok
-    if probe.status_code != requests.codes.ok:
-        log(f"  thinking_token_budget={budget} refused: HTTP {probe.status_code} {probe.text[:_DETAIL_CHARS]}")
-        checks["server_enforced_the_thinking_budget"] = False
-        return
     # Elicitation and enforcement are separate verdicts: an attempt set whose free arm never overran
     # measured nothing, and folding that into "not enforced" would blame the engine for the probe.
     for attempt in range(_PROBE_ATTEMPTS):
@@ -112,6 +129,16 @@ class ReasoningTurnRecorder(DistributedAsyncEnvironmentalGRPOTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.sampled_reasoning_tokens: list[int] = []
+        # Rank 0's enforcement A/B, set by the e2e; it runs once, right after the first push.
+        self.budget_probe: Callable[[], None] | None = None
+
+    def _start_rollout_generation(self):
+        """Probe the budget once the engine serves this checkpoint: the server outlives the rows of a tier and
+        serves the previous row's trained policy until the trainer's first push."""
+        first_push = not self._rollout_generation_started
+        super()._start_rollout_generation()
+        if first_push and self.budget_probe is not None:
+            self.budget_probe()
 
     def _log_rollout_metrics(self, results, mode: str, reasoning_tokens):
         if self.state.global_step == 0:

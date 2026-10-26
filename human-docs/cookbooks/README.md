@@ -74,8 +74,8 @@ cd halo
 export HALO_SCRATCH=/path/to/large/volume   # the volume the training container mounts
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22
 docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
-docker tag public.ecr.aws/whitecircle/halo:vllm-0.32.0 vllm-server:0.32.0
 export SGLANG_IMAGE=public.ecr.aws/whitecircle/halo:sglang-0.5.22
+export VLLM_IMAGE=public.ecr.aws/whitecircle/halo:vllm-0.32.0
 export SGLANG_MODEL_DIR="$HALO_SCRATCH"   # SGLang mounts it read-only at the same path
 export HF_HOME="$HALO_SCRATCH/hf"         # both servers share the training container's hub cache
 ```

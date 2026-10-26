@@ -14,7 +14,6 @@ test_size: 0.01
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8               # 64 routed experts → 8/rank
-save_sharded_ep: false                # consolidate expert shards into a single checkpoint
 fp32_router: true
 fp32_experts: true
 fp32_non_ep_params: true              # fp32 attention/embeddings/lm_head
@@ -29,17 +28,13 @@ per_device_train_batch_size: 2
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 300
@@ -60,7 +55,6 @@ use_peft: false
 # --- Tokens & chat template ---
 # Role token alone matches both thinking and non-thinking renders.
 assistant_message_template: "<|assistant|>"
-train_on_completions_only: true       # required under pad==eos (plain-LM path would mask the real EOS)
 pad_token: <|endoftext|>
 eos_token: <|endoftext|>
 # Multi-turn data needs glm-chat.jinja — glm-instruct.jinja raises on >1 assistant turn.

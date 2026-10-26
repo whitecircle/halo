@@ -35,14 +35,13 @@ from transformers import DataCollator, PreTrainedModel, PreTrainedTokenizerBase,
 from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_pt_utils import nested_detach
 from transformers.trainer_utils import EvalPrediction
-from trl.trainer import disable_dropout_in_model
 
 from src.configs.classification import ClassificationConfig
 from src.data.collators.classification import ClassificationDataCollatorWithPadding
 from src.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rejected_rows import report_rejected_rows
 from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
+from src.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.parallelism.pipeline_loss_adapter import (
@@ -166,8 +165,6 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
     LOSS_IS_OWN_MEAN = True
 
     _pp_pool_pad_id: int | None = None
-    # Set from build_peft_model's result; False whenever no PEFT config was passed.
-    _peft_has_been_casted_to_bf16: bool = False
 
     def __init__(
         self,
@@ -203,12 +200,9 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
         )
         model = dist_kwargs.pop("model")
         peft_config = dist_kwargs.pop("peft_config")
-        if peft_config is not None:
-            model, self._peft_has_been_casted_to_bf16 = build_peft_model(
-                model, peft_config, args, merge_existing=False
-            )
-        if args.disable_dropout:
-            disable_dropout_in_model(model)
+        model, self._peft_has_been_casted_to_bf16 = prepare_policy_model(
+            model, peft_config, args, disable_dropout=args.disable_dropout, merge_existing=False
+        )
 
         reject_unsupported_classification_args(args, default_metrics=compute_metrics is None)
         if compute_metrics is None:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """A tiny ``TINY_MOE_FAMILIES`` model under EP=2 against the stock model it was copied from: loss, and every
 gradient of every MoE block, the experts through the export's own gather and layout transform.
+``--expert-tp-size 2`` splits each expert FFN two ways as well (ep2 x etp2 on four ranks, pure ETP on two).
 
     torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family qwen3_moe
 """
@@ -42,7 +43,7 @@ from tests.common.utils import cos_sim, log
 SEED = 42
 BATCH, SEQ = 2, 64
 # The gradient-direction floor the Inkling EP and Bailing V3 block comparisons hold: bf16 gradients of a tiny model,
-# where fp32 EP routing against bf16 stock scoring flips occasional near-ties.
+# where fp32 EP routing against bf16 stock scoring flips occasional near-ties. Expert TP keeps the default floor.
 TIGHT_GRAD_COS_MIN = 0.97
 GRAD_COS_MIN = {"inkling_text": TIGHT_GRAD_COS_MIN}
 # Knobs each EP layer must adopt from its block rather than default, as the tiny configs set them; Cohere2's
@@ -262,12 +263,19 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
     return {"checks": checks, "metrics": metrics}
 
 
-@gpu_test_main(exact_world_size=2, prefix="ep_family_vs_reference")
+parser = argparse.ArgumentParser()
+parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
+parser.add_argument("--expert-tp-size", type=int, choices=(1, 2), default=1)
+ARGS = parser.parse_args()
+
+
+@gpu_test_main(
+    min_world_size=2, exact_world_size=2 if ARGS.expert_tp_size == 1 else None, prefix="ep_family_vs_reference"
+)
 def run(ctx):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
-    family = parser.parse_args().family
-    return run_family(ctx, family, GRAD_COS_MIN.get(family, TOL.ep_grad_cosine_min))
+    default = TOL.ep_grad_cosine_min
+    cos_min = GRAD_COS_MIN.get(ARGS.family, default) if ARGS.expert_tp_size == 1 else default
+    return run_family(ctx, ARGS.family, cos_min, expert_tp_size=ARGS.expert_tp_size)
 
 
 if __name__ == "__main__":

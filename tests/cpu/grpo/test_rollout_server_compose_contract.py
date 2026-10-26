@@ -19,6 +19,7 @@ VLLM_COMPOSE = REPO_ROOT / "docker-compose.vllm.yml"
 SGLANG_COMPOSE = REPO_ROOT / "docker-compose.sglang.yml"
 VLLM_EFA_OVERLAY = REPO_ROOT / "docker-compose.vllm.efa.yml"
 SGLANG_EFA_OVERLAY = REPO_ROOT / "docker-compose.sglang.efa.yml"
+MAKEFILE = REPO_ROOT / "Makefile"
 
 
 def _services(compose_path: str) -> dict:
@@ -38,6 +39,38 @@ def _environment(service: dict) -> dict[str, str]:
         key, _, value = entry.partition("=")
         env[key] = value
     return env
+
+
+def _make_build_tag(target: str, dockerfile: str) -> str:
+    """The ``-t`` tag of a ``make`` build target, each ``$(NAME)`` in it filled from the Dockerfile's
+    ``ARG NAME``, which is where the Makefile reads it from."""
+    recipe = re.search(rf"^{re.escape(target)}:.*\n((?:\t.*\n)+)", MAKEFILE.read_text(encoding="utf-8"), re.MULTILINE)
+    assert recipe, f"Makefile has no {target} recipe"
+    tag = re.search(r"\s-t\s+(\S+)", recipe.group(1))
+    assert tag, f"Makefile {target} tags no image"
+    args = dict(re.findall(r"^ARG (\w+)=(\S+)$", (REPO_ROOT / dockerfile).read_text(encoding="utf-8"), re.MULTILINE))
+    return re.sub(r"\$\((\w+)\)", lambda name: args[name.group(1)], tag.group(1))
+
+
+@pytest.mark.parametrize(
+    ("compose_path", "service", "target", "dockerfile"),
+    [
+        (VLLM_COMPOSE, "vllm-server", "build-vllm", "Dockerfile.vllm"),
+        (SGLANG_COMPOSE, "sglang-server", "build-sglang", "Dockerfile.sglang"),
+        (VLLM_COMPOSE, "training", "build-blackwell", "Dockerfile"),
+    ],
+)
+def test_compose_runs_the_image_make_builds(compose_path, service, target, dockerfile):
+    """``make`` is the one build path, so ``up`` finds a locally built image only under the tag ``make``
+    gives it; a rename on either side sends compose to pull a name no registry serves."""
+    spec = _services(compose_path)[service]
+    assert "build" not in spec, f"{compose_path.name} {service} builds its own image; make {target} is the build path"
+    default = re.fullmatch(r"\$\{\w+:-(\S+)\}", spec["image"])
+    assert default, f"{compose_path.name} {service} must take its image as ${{VAR:-default}}, got {spec['image']!r}"
+    built = _make_build_tag(target, dockerfile)
+    assert default.group(1) == built, (
+        f"{compose_path.name} {service} runs {default.group(1)}, make {target} tags {built}"
+    )
 
 
 def test_vllm_compose_requests_token_ids_that_train_on_sampled_tokens_needs():

@@ -61,4 +61,7 @@ def resolve_retained(items: Iterable[tuple[str, torch.Tensor]], *, retain: bool)
             resolved[name] = full_cpu_tensor(tensor)
         else:
             materialize_dtensor(tensor)
+        # Released before ``items`` makes the next one: a derived item (a LoRA fold) would otherwise
+        # live beside its successor.
+        del tensor
     return resolved

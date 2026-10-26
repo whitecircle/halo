@@ -48,7 +48,6 @@ LOADER_LOGGER = "src.distributed.expert_parallel.lazy_plan"
 _LAZY_GATE_CALL_SITES = (
     REPO_ROOT / "src/model_loading/parallel/ep.py",
     REPO_ROOT / "src/model_loading/parallel/pp.py",
-    REPO_ROOT / "src/model_loading/parallel/tp.py",
 )
 
 

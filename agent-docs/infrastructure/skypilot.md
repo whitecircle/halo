@@ -62,17 +62,9 @@ domain, while cross-node dispatch is capped at 8192 tokens/rank
 
 ### RDMA fabric: AWS EFA vs Nebius InfiniBand
 
-The fabric env differs by cloud. The Nebius (IB) tasks keep the image's InfiniBand defaults.
-
-A multi-node AWS (EFA) run sets `NCCL_NET_PLUGIN=ofi` explicitly (`crossnode-ep` in its `envs`; AWS
-`nodelocal-ep` exports it in its `run:` block when `SKYPILOT_NUM_NODES > 1`, so one node stays
-NVLink-only), because the NGC base's `shinit_v2` sets it only for a shell that sources it. It also
-sets `NCCL_NET=Libfabric` so a missing plugin fails the launch instead of falling back to sockets.
-That fallback is silent for a multi-node `nodelocal-ep`'s cross-node DP gradient sync, and surfaces
-as "NCCL GIN is unavailable" for `crossnode-ep` once the cluster is already up.
-
-`NCCL_PROTO` is left to the plugin's own probe
-([Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics)).
+The Nebius (IB) tasks keep the image's InfiniBand defaults. A multi-node AWS (EFA) run sets the EFA
+launch env: `crossnode-ep` in its `envs`, AWS `nodelocal-ep` in its `run:` block only when
+`SKYPILOT_NUM_NODES > 1`, so one node stays NVLink-only. `NCCL_PROTO` is left to the plugin's own probe.
 
 ```yaml
 envs:                       # AWS crossnode-ep; nodelocal-ep exports the first two on >1 node
@@ -85,7 +77,9 @@ Every task sets `config.docker.run_options: ["--ipc=host", "--ulimit", "memlock=
 "stack=67108864", "--shm-size=128g"]`; only AWS `crossnode-ep` prepends
 `"--device", "/dev/gdrdrv"` — node-local EP needs neither proxy GIN nor GDRCopy.
 
-`crossnode-ep` sets `resources.network_tier: best` so SkyPilot provisions the EFA/InfiniBand interfaces; `nodelocal-ep` omits it, so a multi-node `nodelocal-ep` launch passes `--network-tier best`. The host supplies the EFA driver and devices; the image bundles the GIN-capable `aws-ofi-nccl` + GDRCopy that standard NCCL collectives and DeepEP cross-node EP both run on.
+`crossnode-ep` sets `resources.network_tier: best` so SkyPilot provisions the EFA/InfiniBand interfaces; `nodelocal-ep` omits it, so a multi-node `nodelocal-ep` launch passes `--network-tier best`.
+
+On Nebius that flag is the only fabric guard: its tasks name no `NCCL_NET`, so a multi-node `nodelocal-ep` launched without it runs the cross-node gradient sync over TCP sockets with no error (AWS's `NCCL_NET=Libfabric` fails the launch instead).
 
 GIN-plugin prerequisites and the measured B300 EFA numbers: [DeepEP → Expert parallelism over AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa). Per-fabric env and verification (`fi_info -p efa` vs `ibstat`): [Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics).
 

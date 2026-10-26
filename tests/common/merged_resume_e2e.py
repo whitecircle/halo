@@ -1,4 +1,4 @@
-"""The ``merge_expert_lora_on_save`` serve-and-resume body the merged-resume GPU suites run.
+"""The ``merge_expert_lora_on_save`` serve-and-resume body the merged-resume GPU suite runs.
 
 A merge-on-save checkpoint holds merged bf16 weights for serving. Resuming from those weights builds
 the policy on a fold that lost part of the delta to bf16 rounding, re-creates the adapters fresh
@@ -44,7 +44,6 @@ import argparse
 import os
 import re
 import shutil
-from collections.abc import Iterable
 from types import SimpleNamespace
 
 import torch
@@ -112,10 +111,10 @@ class _MergedResumeParser(argparse.ArgumentParser):
         return parsed
 
 
-def merged_resume_parser(families: Iterable[str]) -> argparse.ArgumentParser:
-    """The CLI a merged-resume suite takes, over the ``families`` it runs."""
+def merged_resume_parser() -> argparse.ArgumentParser:
+    """The merged-resume suite's CLI."""
     parser = _MergedResumeParser()
-    parser.add_argument("--family", choices=sorted(families), required=True)
+    parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
     parser.add_argument("--adapters", choices=sorted(ADAPTER_MODES), default="mixed")
     parser.add_argument("--ep-size", type=int, choices=sorted({ep for ep, _ in LAYOUTS}), default=2)
     parser.add_argument("--cp-size", type=int, choices=sorted({cp for _, cp in LAYOUTS}), default=1)

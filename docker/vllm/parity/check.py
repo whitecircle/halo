@@ -2,13 +2,13 @@
 
 The server parses every checkpoint it serves with its own transformers, behind the training image's
 line (``Dockerfile.vllm``). Each directory under ``fixtures/`` holds the ``config.json`` the toolkit
-exports for one served family, written by the training image's transformers through every
-export-side rewrite a checkpoint writer applies, plus the remote-code config module the export ships
-where the family is parsed through ``auto_map`` (see ``generate.py``). It must resolve through vLLM's
-own ``ModelConfig`` to a per-layer attention geometry, the reads every vLLM model loader makes, and
-its ``architectures`` must be registered in this vLLM. A directory under ``unparseable/`` is the same
-config without the rewrite: it must be refused, or resolve to exactly the geometry of its rewritten
-fixture, in which case the rewrite is lossless here and only kept for older readers.
+exports for one served family, written by the training image's transformers through the export-side
+rewrite a checkpoint writer applies, plus the remote-code config module the export ships where the
+family is parsed through ``auto_map`` (see ``generate.py``). It must resolve through vLLM's own
+``ModelConfig`` to a per-layer attention geometry, the reads every vLLM model loader makes, and its
+``architectures`` must be registered in this vLLM. A directory under ``unparseable/`` is the same
+config without the rewrite, and it must be refused: one this server reads means the rewrite is no
+longer needed here.
 
 No test suite can run this: it needs the server's transformers and vLLM, which the training image
 does not have (ABI-incompatible stacks). Run against a checkout's fixtures:
@@ -86,11 +86,12 @@ def main(parity_root: str) -> int:
             # The expected outcome; its type is the report.
             check(f"{label} is refused ({type(error).__name__})", True)
             continue
-        check(
-            f"{label} resolves to its rewritten fixture's geometry",
-            geometry == geometries.get(name),
-            "it parsed to a different model than the export serves — the export rewrite is due for review",
+        detail = (
+            "it reads as the same model as its rewritten fixture, so the rewrite is redundant on this server: delete it"
+            if geometry == geometries.get(name)
+            else "it parsed to a different model than the export serves — the export rewrite is due for review"
         )
+        check(f"{label} is refused", False, detail)
 
     if failures:
         print(f"\n{len(failures)} config-parity check(s) failed:\n  " + "\n  ".join(failures))

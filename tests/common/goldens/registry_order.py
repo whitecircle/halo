@@ -59,12 +59,6 @@ def registry_order() -> dict[str, object]:
         "ep moe block claims": _claims(MOE_LAYER_MAP),
         "ep model_type claims": _claims(ep_layer_class_by_model_type()),
         "ep-wrapped model types": sorted(moe_model_types()),
-        "legacy per-layer config keys": {
-            mt: dict(spec.served_flat_config_keys)
-            for spec in MOE_FAMILY_SPECS
-            if spec.served_flat_config_keys
-            for mt in spec.model_types
-        },
         "source config schema model types": sorted(
             mt for spec in MOE_FAMILY_SPECS if spec.exports_source_config_schema for mt in spec.model_types
         ),

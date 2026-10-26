@@ -73,10 +73,10 @@ InfiniBand and RoCE run on the NCCL defaults in the image. Only EFA is validated
 by real multi-node runs. Three setups need extra environment:
 
 - **AWS EFA.** Set `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` and pass `--device
-  /dev/infiniband`. Cross-node expert parallelism also needs `NCCL_GIN_TYPE=2`
-  and `--device /dev/gdrdrv`. `NCCL_PROTO=simple` is optional; if you set it,
-  set it on every rank, including a rollout server on another node. Do not set
-  these variables on an InfiniBand cluster: they make it slower.
+  /dev/infiniband`; cross-node expert parallelism also needs `NCCL_GIN_TYPE=2`
+  and `--device /dev/gdrdrv`. Don't set them on an InfiniBand cluster: they
+  slow it down. Details:
+  [RDMA fabrics](../agent-docs/parallelism/multi-node.md#rdma-fabrics) ↗.
 - **Multiple NICs.** Point `NCCL_SOCKET_IFNAME` at the fast interface so NCCL's
   bootstrap stays off the management network.
 - **Rollout server on another node** (RL). The server needs the same fabric:
@@ -173,8 +173,9 @@ provisions nothing (GPU clients, the NVIDIA device plugin and the scratch disk
 are yours), so these are closer to raw `docker run` than the SkyPilot tasks.
 
 ```bash
-nomad job plan launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl   # dry run
-nomad job run  launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
+# scratch_host_path: the clients' large volume (no default)
+nomad job plan -var 'scratch_host_path=/path/to/large/volume' launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
+nomad job run  -var 'scratch_host_path=/path/to/large/volume' launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
 ```
 
 Nomad has no gang scheduling, so a two-node job can half-place: rank 0 holds 8

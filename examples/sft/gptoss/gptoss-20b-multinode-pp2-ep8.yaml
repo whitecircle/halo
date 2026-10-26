@@ -40,22 +40,17 @@ packing: true
 
 # --- Training schedule ---
 per_device_train_batch_size: 8        # split into the 8 microbatches above: one 8192-token row each
-per_device_eval_batch_size: 8         # must equal the train batch under PP
 num_train_epochs: 1.0
-gradient_checkpointing: true          # memory headroom; where activations fit, false is faster (pipeline-parallelism.md)
 gradient_checkpointing_kwargs:
   use_reentrant: false                # PP refuses reentrant checkpointing
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
 output_dir: checkpoints/oss-20b-pp2-ep8
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 300

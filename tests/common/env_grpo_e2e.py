@@ -6,6 +6,7 @@ Environmental GRPO alone needs (Ray rollout actors, multi-turn trajectories, per
 
 import math
 import os
+from functools import partial
 from types import SimpleNamespace
 
 import torch
@@ -20,6 +21,7 @@ from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmenta
 from src.trainers.grpo.environmental.trajectory_tokenize import SAMPLED_IDS_MISSING_WARNING
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
+from tests.common.harness import record_check
 from tests.common.models import QWEN3_30B_A3B
 from tests.common.on_policy_e2e import (
     RESUME_MAX_STEPS,
@@ -47,6 +49,7 @@ from tests.common.on_policy_e2e import (
 from tests.common.peft_helpers import assert_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.thinking_budget import (
     ReasoningTurnRecorder,
+    record_budget_acceptance,
     record_budget_enforcement,
     record_thinking_budget_checks,
 )
@@ -215,9 +218,7 @@ def run_env_grpo_e2e(
         log(f"  backend: {backend}")
         record_served_baseline(server_url, model_name, checks)
         if thinking_budget is not None:
-            # Before the load: without a reasoning parser the server 400s every request carrying the
-            # field, and the run would train on all-masked batches with a moving loss.
-            record_budget_enforcement(server_url, model_name, thinking_budget, tokenizer, checks)
+            record_budget_acceptance(server_url, model_name, thinking_budget, checks)
     ctx.barrier()
 
     # ── 2. train ──────────────────────────────────────────────────────────────────────────────
@@ -288,6 +289,10 @@ def run_env_grpo_e2e(
 
     trainer = _make_trainer(**trainer_kwargs)
     live["trainer"] = trainer
+    if thinking_budget is not None and ctx.rank == 0 and checks["server_accepts_the_thinking_budget"]:
+        # Recorded, not raised: rank 0 runs it alone while its peers wait in their first collective.
+        enforcement = partial(record_budget_enforcement, server_url, model_name, thinking_budget, tokenizer, checks)
+        trainer.budget_probe = partial(record_check, checks, "thinking_budget_probe_ran", enforcement)
     saved_state = RestorePointSnapshot("save", trainer, capture_optimizer=peft is not None)
     if resume:
         trainer.add_callback(saved_state)

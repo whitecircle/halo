@@ -24,8 +24,8 @@ class _RoleTokenizer:
 
     chat_template = "role-prefixed"
 
-    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
-        del tokenize, add_generation_prompt
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **template_kwargs):
+        del tokenize, add_generation_prompt, template_kwargs
         return "\n".join(f"{m['role']}: {m['content']}" for m in messages)
 
 

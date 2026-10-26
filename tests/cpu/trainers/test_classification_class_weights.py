@@ -11,6 +11,8 @@ IDENTICAL weights equal to the global-count-derived ("balanced") weights.
 Run: python tests/cpu/trainers/test_classification_class_weights.py
 """
 
+import contextlib
+from collections.abc import Iterator
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -26,15 +28,14 @@ _MODULE = "src.trainers.reward.classification_loss"
 
 
 class _FakeDist:
-    """Fake of the ``torch.distributed`` surface used by balanced_class_weights.
+    """Fake of the collectives balanced_class_weights issues.
 
     Emulates one rank of a world where ``other_ranks_labels`` are the label shards held
-    by the OTHER ranks: MAX all-reduce over the count-vector length, SUM all-reduce over
+    by the OTHER ranks: ``rank_max`` over the count-vector length, SUM all-reduce over
     the padded counts.
     """
 
     class ReduceOp:
-        MAX = "max"
         SUM = "sum"
 
     def __init__(self, other_ranks_labels: list[list[int]]):
@@ -43,26 +44,33 @@ class _FakeDist:
             for labels in other_ranks_labels
         ]
 
+    def rank_max(self, values: list[int]) -> list[int]:
+        return [max(values[0], *(counts.numel() for counts in self._other_counts))]
+
     def all_reduce(self, tensor: torch.Tensor, op) -> None:
-        if op == self.ReduceOp.MAX:
-            for counts in self._other_counts:
-                tensor.copy_(torch.maximum(tensor, torch.tensor(counts.numel(), dtype=tensor.dtype)))
-        elif op == self.ReduceOp.SUM:
-            for counts in self._other_counts:
-                padded = torch.zeros_like(tensor)
-                padded[: counts.numel()] = counts.to(tensor.dtype)
-                tensor.add_(padded)
-        else:
+        if op != self.ReduceOp.SUM:
             raise AssertionError(f"unexpected reduce op: {op}")
+        for counts in self._other_counts:
+            padded = torch.zeros_like(tensor)
+            padded[: counts.numel()] = counts.to(tensor.dtype)
+            tensor.add_(padded)
+
+
+@contextlib.contextmanager
+def _fake_world(other_ranks_labels: list[list[int]]) -> Iterator[None]:
+    """One simulated rank of a world whose other ranks hold ``other_ranks_labels``."""
+    fake = _FakeDist(other_ranks_labels)
+    with (
+        patch(f"{_MODULE}.dist", fake),
+        patch(f"{_MODULE}.rank_max", fake.rank_max),
+        patch(f"{_MODULE}.has_process_group", return_value=True),
+    ):
+        yield
 
 
 def _weights_on_rank(rank_labels: list[int], other_ranks_labels: list[list[int]], model=None) -> torch.Tensor:
     """Run balanced_class_weights as one simulated rank of a fake world."""
-    with (
-        patch(f"{_MODULE}.dist", _FakeDist(other_ranks_labels)),
-        patch(f"{_MODULE}.current_device", return_value=torch.device("cpu")),
-        patch(f"{_MODULE}.has_process_group", return_value=True),
-    ):
+    with _fake_world(other_ranks_labels):
         return balanced_class_weights({"labels": rank_labels}, model)
 
 
@@ -99,11 +107,7 @@ def test_build_classification_loss_uses_global_counts():
         loss_type="cross_entropy", class_weights=None, derive_class_weights=True, label_smoothing=0.0
     )
 
-    with (
-        patch(f"{_MODULE}.dist", _FakeDist([RANK1_LABELS])),
-        patch(f"{_MODULE}.current_device", return_value=torch.device("cpu")),
-        patch(f"{_MODULE}.has_process_group", return_value=True),
-    ):
+    with _fake_world([RANK1_LABELS]):
         loss = build_classification_loss(
             args, SimpleNamespace(config=SimpleNamespace(num_labels=3)), {"labels": RANK0_LABELS}, multi_label=False
         )

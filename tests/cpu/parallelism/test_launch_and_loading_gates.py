@@ -594,7 +594,7 @@ def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
     """
     seen = {}
 
-    def fake_load_whole_model(model_class, path, **kwargs):
+    def fake_load_whole_model(model_class, source, pc, **kwargs):
         seen.update(kwargs)
         return torch.nn.Linear(2, 2)
 

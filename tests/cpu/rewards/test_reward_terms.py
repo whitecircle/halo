@@ -387,5 +387,26 @@ def test_environment_checks_defer_a_veto_judge_s_checks_to_its_environment():
         RewardComposer([EnvironmentTerm(), term])
 
 
+def test_a_judge_context_file_is_read_into_its_context_when_a_config_parses(tmp_path):
+    """Both arms read a judge's ``context_file`` into its ``context`` at parse time, so what the environment config
+    forwards to the actors holds the text, never a path another node or directory cannot resolve. Setting both, a
+    missing file and the key on another source are refused."""
+    setting = tmp_path / "setting.txt"
+    setting.write_text("The policy has a scratchpad.\n", encoding="utf-8")
+    spec = {**JUDGE_SPEC, "context_file": str(setting)}
+    env_config = EnvironmentConfig(rewards=[{"source": "environment"}, spec])
+    forwarded = env_config.to_env_config()["reward_terms"][1]
+    assert forwarded["context"] == "The policy has a scratchpad.\n" and "context_file" not in forwarded
+    assert env_config.reward_terms[1].context == "The policy has a scratchpad.\n"
+    online = RLVROnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, spec])
+    assert online.reward_terms[1].context == "The policy has a scratchpad.\n"
+    with pytest.raises(ValueError, match="not both"):
+        EnvironmentConfig(rewards=[{"source": "environment"}, {**spec, "context": "inline"}])
+    with pytest.raises(ValueError, match="is not a file"):
+        EnvironmentConfig(rewards=[{"source": "environment"}, {**spec, "context_file": str(tmp_path / "missing.txt")}])
+    with pytest.raises(ValueError, match=r"unknown option\(s\) \['context_file'\]"):
+        EnvironmentConfig(rewards=[{"source": "environment"}, {**RM_SPEC, "context_file": str(setting)}])
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

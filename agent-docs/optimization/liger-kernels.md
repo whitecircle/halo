@@ -183,12 +183,12 @@ The force-off keys on the config having experts, not on what upstream's flag pat
 whole: Llama 4's upstream `swiglu`, which fuses only its dense and shared-expert MLP, goes too, and GLM-4V MoE
 loses upstream's dense, shared-expert and vision-MLP SwiGLU along with its `LigerExperts` swap. An applier
 whose own `swiglu` default is off (GptOss, whose upstream flag patches nothing) is left alone. Under an EP
-wrapper the upstream swap is inert and the [soft EP gate](#ep--cp--tp-behavior) decides instead.
+wrapper the upstream swap is inert and the [soft EP gate](#ep--cp--tp--pp-behavior) decides instead.
 
 Both rules hold at both application sites, so a model loaded outside Halo's loaders is covered too. The
 trainer's re-sanitization of `liger_kernel_config` runs the load's sanitizer, then turns off the roles a
 delegating spec takes over from upstream: HF Trainer re-applies upstream's applier alone, which would
-otherwise get the withheld `swiglu` back ([below](#ep--cp--tp-behavior)).
+otherwise get the withheld `swiglu` back ([below](#ep--cp--tp--pp-behavior)).
 
 `tests/gpu/kernels/test_liger_routed_experts.py` checks the unwrapped path against fp32 eager experts.
 
@@ -228,11 +228,11 @@ resolved applier's signature does not accept is dropped, with a warning naming i
 | `rms_norm` | On | Fused RMS normalization. Also covers a family's gated (GDN) norm where its spec declares one — one knob, both norm kernels |
 | `swiglu` | On | Auto-off where the applier's own default is `False` (GptOss, whose upstream applier has no SwiGLU patch block; Qwen3-VL), and where an **upstream** applier's expert-FFN swap is replaced by an EP wrapper, which runs Halo's own fused GLU combine instead. A toolkit spec patches the dense and shared-expert MLPs, which survive EP — see below. Forced off, even when requested, wherever upstream's swap would reach [routed experts Halo does not wrap](#routed-experts) |
 | `geglu` | On | Gemma 4. Served by the toolkit's spec on the always-on dense `Gemma4TextMLP`, which survives the EP wrapper, so it is **not** forced off under EP |
-| `cross_entropy` | On | Keeps logits for metrics. Always the toolkit's scoped patch. Force-off under TP and CP, and defaulted off when the config explicitly requests `fused_linear_cross_entropy` (the two are mutually exclusive; setting both explicitly raises) |
-| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP and CP, and [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper) |
+| `cross_entropy` | On | Keeps logits for metrics. Always the toolkit's scoped patch. Force-off under TP, CP and PP, and defaulted off when the config explicitly requests `fused_linear_cross_entropy` (the two are mutually exclusive; setting both explicitly raises) |
+| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP, CP and PP, and [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper) |
 
 Precedence is generic defaults < per-model defaults < user keys, and user keys win **except** the TP/CP
-force-offs ([below](#ep--cp--tp-behavior)), the wrapper force-off and the [routed-experts](#routed-experts)
+force-offs ([below](#ep--cp--tp--pp-behavior)), the wrapper force-off and the [routed-experts](#routed-experts)
 force-off, which overwrite an explicit `true`.
 
 Per-model defaults are read off each applier's own signature (`_PER_MODEL_DEFAULTS`), derived from the spec's
@@ -261,7 +261,7 @@ saving](#benchmarks)). Trade-offs: `outputs.logits` is `None` (entropy logging d
 unless something still needs real logits: CP mode, a subclass loss that reads `outputs.logits`, or a forward
 with no `skip_logits` parameter.
 
-## EP / CP / TP behavior
+## EP / CP / TP / PP behavior
 
 **SwiGLU / GeGLU on MoE under EP wrappers.** Liger's MoE appliers set a class-level fused expert FFN (e.g.
 `Qwen3MoeExperts = LigerExperts`) holding every expert on one rank, while `apply_ep_layers`
@@ -282,15 +282,16 @@ This is a soft gate: an explicit `swiglu`/`geglu` in `liger_kernel_config` survi
 under the wrapper. RoPE, RMSNorm and CE/FLCE stay active under EP — FLCE touches only `lm_head` + the loss,
 which EP does not wrap.
 
-**TP and CP force `cross_entropy` and `fused_linear_cross_entropy` off**, at one decision site,
+**TP, CP and PP force `cross_entropy` and `fused_linear_cross_entropy` off**, at one decision site,
 `liger_parallelism_overrides`, logged as a warning when either was explicitly enabled.
 
 Under **TP**, `lm_head` is `ColwiseParallel`-sharded into DTensor logits split over the vocab dim, where a
 fused CE would softmax a partial vocab slice and produce a wrong loss.
 
-**CP** computes its loss *outside* the model's forward and never passes labels into it: the Ulysses
-wrapper calls the model with `labels=None` and computes a boundary-aware fp32 CE itself. Liger's
-`skip_logits` gate never fires, and FLCE would report as applied while the full logits plane
+**CP** and **PP** compute the loss *outside* the model's forward and never pass labels into it: the
+Ulysses wrapper calls the model with `labels=None` and computes a boundary-aware fp32 CE itself, and
+PP's last stage chunks its own fp32 CE ([PP fused head](../parallelism/pipeline-parallelism.md#fused-head-and-loss-on-the-last-stage)).
+Liger's `skip_logits` gate never fires, and FLCE would report as applied while the full logits plane
 materializes anyway.
 
 `cross_entropy` goes with it because upstream Liger's appliers install it by rebinding

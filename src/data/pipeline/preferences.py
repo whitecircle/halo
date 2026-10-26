@@ -10,7 +10,11 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase, Processor
 
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, reject_image_content
 from src.data.pipeline.coordinated_map import DATASET_NUM_PROC, coordinated_map
-from src.data.pipeline.prompt_completion import render_prompt_completions, tokenize_prompt_completions
+from src.data.pipeline.prompt_completion import (
+    render_prompt_completions,
+    tokenize_completions_jointly,
+    tokenize_prompt_completions,
+)
 from src.data.pipeline.text_rows import prepare_generative_row
 from src.data.pipeline.vlm_rows import normalize_vlm_conversation
 from src.data.vlm_render import extract_conversation_images, render_vlm_text
@@ -22,6 +26,10 @@ VLM_PREFERENCE_COLUMNS = ("chosen_text", "rejected_text", "images")
 
 # TRL's optional per-pair margin, carried through the map unchanged (its collator reads this name).
 MARGIN_COLUMN = "margin"
+
+# How many of a VLM SMPO row's last prompt tokens its completions start with (:func:`tokenize_completions_jointly`):
+# the collator drops them from the prompt it tokenizes. An int, so an all-zero writer batch still types the column.
+PROMPT_OVERLAP_COLUMN = "prompt_overlap"
 
 
 def _shared_message_prefix_len(a: list[dict[str, Any]], b: list[dict[str, Any]]) -> int:
@@ -144,23 +152,22 @@ def tokenize_vlm_preference_row(
 ) -> dict[str, Any]:
     """Prepare one raw VLM (prompt, chosen, rejected[, images]) example for SMPO: completions split off by the
     text pipeline's prefix strip and tokenized as :func:`tokenize_preference_row` does; the prompt stays text plus
-    PIL images for the collator to expand."""
+    PIL images for the collator to expand. The prompt budget is the collator's, which refuses an over-length VLM
+    prompt rather than cut it, so ``max_prompt_length`` and ``truncation_mode`` bound nothing here."""
     prompt_history, pil_images, completions = split_vlm_preference_row(features, "VLM SMPO row")
     prompt_text, completion_texts = render_prompt_completions(
         partial(render_vlm_text, processing_class), prompt_history, completions.items()
     )
-    _, (chosen_ids, rejected_ids) = tokenize_prompt_completions(
+    (chosen_ids, rejected_ids), prompt_overlap = tokenize_completions_jointly(
         prompt_text,
         completion_texts,
         resolve_tokenizer(processing_class),
-        max_prompt_length=max_prompt_length,
         max_completion_length=max_completion_length,
-        truncation_mode=truncation_mode,
-        joint_boundary=True,
         eos_token_ids=eos_token_ids,
     )
     return {
         "prompt_text": prompt_text,
+        PROMPT_OVERLAP_COLUMN: prompt_overlap,
         "images": pil_images,
         "chosen_input_ids": chosen_ids,
         "rejected_input_ids": rejected_ids,

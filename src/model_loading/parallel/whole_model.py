@@ -13,6 +13,7 @@ from transformers import PreTrainedModel
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
+from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import current_device
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
@@ -58,38 +59,40 @@ def move_model_to_local_device(model: torch.nn.Module) -> torch.nn.Module:
 def load_whole_model(
     model_class,
     source: ModelSource,
+    pc: ParallelismConfig,
     *,
     load_phase: str,
-    max_concurrent_loading: int | None,
     ep_config: EPConfig | None,
-    keep_fp32_non_ep: bool,
-    ep_wrapped: bool,
     preserve_checkpoint_precision: bool = False,
     place_on_device: bool = True,
     before_move: Callable[[torch.nn.Module], torch.nn.Module] | None = None,
     **from_pretrained_kwargs,
 ) -> torch.nn.Module:
-    """COLLECTIVE: ``from_pretrained`` a node's ranks at a time, cast to the run dtype with the FP32
-    masters restored.
+    """COLLECTIVE: ``from_pretrained`` a node's ranks at a time (``pc.max_concurrent_loading``), cast to the
+    run dtype with the FP32 masters restored.
 
-    Loads on CPU unless ``from_pretrained_kwargs`` names a ``device_map``; with ``place_on_device`` the
-    model then moves onto this rank's device after ``before_move`` (the EP patch). A failed restore
-    raises on every rank only once all have left the node-serialized region, where a world collective
-    would wait on queued ranks.
+    ``ep_config`` is the EP wrappers' config when they will take the MoE blocks, else None. Loads on CPU
+    unless ``from_pretrained_kwargs`` names a ``device_map``; with ``place_on_device`` the model then moves
+    onto this rank's device after ``before_move`` (the EP patch). A failed restore raises on every rank
+    only once all have left the node-serialized region, where a world collective would wait on queued
+    ranks.
     """
     from_pretrained_kwargs.setdefault("device_map", "cpu")
     precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {source.name}")
-    with joined_node_load(f"{load_phase} from {source.name}", max_concurrent_loading):
+    with joined_node_load(f"{load_phase} from {source.name}", pc.max_concurrent_loading):
         model = from_pretrained_verified(model_class, source.name, **from_pretrained_kwargs)
         cast_loaded_parameters(
-            model, from_pretrained_kwargs.get("dtype"), keep_fp32=keep_fp32_non_ep, ep_wrapped=ep_wrapped
+            model,
+            from_pretrained_kwargs.get("dtype"),
+            keep_fp32=pc.fp32_non_ep_params,
+            ep_wrapped=ep_config is not None,
         )
         precision_guard.run(
             lambda: restore_fp32_master_parameters(
                 model,
                 source.local_dir,
                 ep_config,
-                keep_non_ep=keep_fp32_non_ep,
+                keep_non_ep=pc.fp32_non_ep_params,
                 strict=preserve_checkpoint_precision,
             )
         )
@@ -102,12 +105,13 @@ def load_whole_model(
     return model
 
 
-def resolve_trainer_model(model, args, *, model_class=None, keep_fp32_non_ep: bool):
+def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig | None, model_class=None):
     """COLLECTIVE-EQUIVALENT for a path string: the model a trainer constructor was handed, loaded from
     the agreed source and cast when it is a path.
 
-    ``model_class`` None takes the widest Auto class. An instantiated model must come without
-    ``model_init_kwargs``.
+    The cast keeps stored fp32 values where ``parallelism_config`` (None without one) sets
+    ``fp32_non_ep_params``. ``model_class`` None takes the widest Auto class. An instantiated model must
+    come without ``model_init_kwargs``.
     """
     if not isinstance(model, str):
         if args is not None and getattr(args, "model_init_kwargs", None) is not None:
@@ -136,7 +140,7 @@ def resolve_trainer_model(model, args, *, model_class=None, keep_fp32_non_ep: bo
     cast_parameters_to_run_dtype(
         model,
         requested if isinstance(requested, torch.dtype) else model.config.dtype,
-        keep_fp32=keep_fp32_non_ep,
+        keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params,
     )
     finalize_loaded_model(model)
     if run_scoped_cache_off:

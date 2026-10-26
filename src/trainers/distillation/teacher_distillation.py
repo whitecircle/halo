@@ -21,7 +21,7 @@ from transformers.trainer_callback import TrainerCallback
 from src.configs.distillation import DistillationConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
+from src.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.runtime.ranks import is_global_main_process
@@ -108,11 +108,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
             )
 
         # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.
-        student_model = resolve_trainer_model(
-            student_model,
-            args,
-            keep_fp32_non_ep=parallelism_config is not None and parallelism_config.fp32_non_ep_params,
-        )
+        student_model = resolve_trainer_model(student_model, args, parallelism_config=parallelism_config)
         dist_kwargs = self._init_distributed_config(
             kwargs,
             training_args=args,
@@ -123,9 +119,9 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
         )
         student_model = dist_kwargs.pop("model")
 
-        self._peft_has_been_casted_to_bf16 = False
-        if peft_config is not None:
-            student_model, self._peft_has_been_casted_to_bf16 = build_peft_model(student_model, peft_config, args)
+        student_model, self._peft_has_been_casted_to_bf16 = prepare_policy_model(
+            student_model, peft_config, args, disable_dropout=False
+        )
 
         # The method knobs live on ``args`` (DistillationConfig) and are read there; only the
         # resolved loss callable is worth holding.

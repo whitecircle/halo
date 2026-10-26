@@ -3,12 +3,12 @@
 
 A release bumps the same number in files that do not refer to one another: the package metadata and
 its ``uv.lock`` entry, the ``Makefile`` default every image build and push passes on, each
-Dockerfile's ``ARG VERSION`` default (the label a bare ``docker build`` or a compose-triggered build
-stamps), the citation metadata, the README's newest release entry, and every documented ``-X.Y.Z``
-image pin a reader copies into ``docker pull``. A bump that misses one labels an image, cites a
-release, or points a reader at a pin that disagrees with what was published. This gate reads each
-statement and fails on any that disagrees with ``[project] version``, and on a newest release entry
-whose date is not the citation's ``date-released``.
+Dockerfile's ``ARG VERSION`` default (the label a bare ``docker build`` stamps), the citation
+metadata, the README's newest release entry, and every documented ``-X.Y.Z`` image pin a reader
+copies into ``docker pull``. A bump that misses one labels an image, cites a release, or points a
+reader at a pin that disagrees with what was published. This gate reads each statement and fails on
+any that disagrees with ``[project] version``, and on a newest release entry whose date is not the
+citation's ``date-released``.
 
     python tests/cpu/config/test_release_version_in_sync.py
 """

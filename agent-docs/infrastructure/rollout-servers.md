@@ -218,11 +218,10 @@ Stock vLLM 0.32.0 drops the previous communicator on re-init without destroying 
 `PyNcclCommunicator` has no `__del__`, so each connection strands a live communicator, holding device
 memory on every engine-core worker, until `ncclCommInitRank` fails while `/health` still answers `200`.
 The trainer half is symmetric: `close_communicator()` aborts its own communicator instead of dropping it. Both
-halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit.py`. On SGLang the
+halves are asserted by `tests/gpu/trainers/grpo/test_weight_transfer_reinit.py --backend vllm`. On SGLang the
 client releases the engine's half itself: `close_communicator()` asks the engine to destroy the group
 by name (`/destroy_weights_update_group`) while it destroys its own, and every join clears a stale
-registration first; `tests/gpu/trainers/grpo/test_sglang_weight_transfer_reinit.py` runs the same
-cycles there.
+registration first; `--backend sglang` runs the same cycles there.
 
 **The two thinking-budget patches** (`vllm_reasoning_forced_end_patch.py`,
 `vllm_thinking_budget_completion_patch.py`) let the gpt-oss parser force its whole move into the
@@ -248,8 +247,9 @@ garbage while sampling stays correct ([vllm#53488](https://github.com/vllm-proje
 The `isr_engine_reference` startup probe refuses a server whose prompt log-probs do not follow from its
 tokens, whatever the cause ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
-**Build gates.** Besides the patch targets, the build asserts that the weight-transfer wire (init and
-update request fields, the packed chunk boundary, the routes) matches the client's; that `/pause` still
+**Build gates.** Besides the patch targets, the build asserts (`docker/vllm/verify_image.py`,
+`docker/vllm/patches/verify_topp_split_guard.py`) that the weight-transfer wire (init and update request
+fields, the packed chunk boundary, the routes) matches the client's; that `/pause` still
 accepts `mode=keep` and resets the prefix cache under it; that the split top-p guard keeps a budget-cut
 row whole while masking an ordinary row as upstream does; that `verify_gptoss_plugins.py` drives the
 gpt-oss parser plugins and Model Runner V2's budget, which no test suite can reach; that `EngineArgs`
@@ -369,7 +369,7 @@ DeepEP's.
 
 ## vLLM
 
-`Dockerfile.vllm` builds `vllm-server:0.32.0` from upstream `vllm/vllm-openai:v0.32.0` (the CUDA 13
+`Dockerfile.vllm` builds `halo:vllm-0.32.0` from upstream `vllm/vllm-openai:v0.32.0` (the CUDA 13
 build) with the native NCCL weight-transfer engine (`VLLM_SERVER_DEV_MODE=1`), the patches above, R3
 routed-experts capture (base64-npy `routed_experts` per completion choice), and `nvidia-nccl-cu13`
 installed at `uv.lock`'s exact pin, the same NCCL the training images run. The build asserts the
@@ -397,15 +397,12 @@ The server parses every checkpoint with **its** transformers: the vLLM base imag
 line below the training image's 5.20 (`Dockerfile.vllm` asserts it sits inside vLLM's declared
 range).
 
-Toolkit Gemma 4 exports are written in the flat form older vLLM releases required (`global_head_dim` /
-`num_global_key_value_heads`). The server's transformers folds those keys into `per_layer_config` at
-parse and vLLM 0.32.0's Gemma 4 code reads that, so the flat form is lossless here.
-
-**Step-3.7 is a different constraint**, not a dialect: the server's transformers has a native
-`step3p7` class, but vLLM's config parsing raises `AmbiguousGlobalPerLayerAttributeError` on it, so
-the server reads the family only through the release's `auto_map` modules, which load its
-vendor-keyed config cleanly. Its exports therefore carry the source repo's own config schema and
-those modules ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)).
+**Step-3.7 is the one family whose export is not transformers' own serialization**: the server's
+transformers has a native `step3p7` class, but vLLM's config parsing raises
+`AmbiguousGlobalPerLayerAttributeError` on it, so the server reads the family only through the
+release's `auto_map` modules, which load its vendor-keyed config cleanly. Its exports therefore carry
+the source repo's own config schema and those modules
+([Exported `config.json`](../reference/checkpoints.md#exported-configjson)).
 
 `docker/vllm/parity/check.py` runs at image build: vLLM's own `ModelConfig` must resolve what the
 toolkit exports, to a per-layer attention geometry, for every family whose EP layer admits weight sync
@@ -413,8 +410,8 @@ and the vLLM client does not list as unservable, since the server loads that
 checkpoint before a single tensor can be synced into it. One `config.json` fixture per family,
 rendered offline from the tiny roster config in `tests/common/models.py` (only the source-schema
 carry is pinned to a release config at a fixed revision, the one thing a tiny config cannot express),
-plus a control under `unparseable/` (the folded Gemma 4 form, the native-schema Step-3.7 export) that
-must be refused or resolve to the same geometry as its rewritten fixture.
+plus a control under `unparseable/` (the native-schema Step-3.7 export) that must be refused: a
+control the server reads fails the build, since its rewrite is then redundant there.
 
 A transformers bump on either side then fails the build rather than the first live sync, and a family
 no pinned engine can load (Mistral4) surfaces as a refusal rather than a dead sync.
@@ -426,12 +423,12 @@ trainer port, neither of which a bridge network publishes, so group formation ti
 "1/2 clients joined".
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0` (anonymous, no AWS account), then
-`docker tag public.ecr.aws/whitecircle/halo:vllm-0.32.0 vllm-server:0.32.0` — compose names that tag. The
-healthcheck calls `python3` (the base ships no bare `python`; an exit-127 healthcheck would wedge the
-training service's `service_healthy` gate).
+set `VLLM_IMAGE` to that tag (it defaults to the locally built `halo:vllm-0.32.0`). The healthcheck
+calls `python3` (the base ships no bare `python`; an exit-127 healthcheck would wedge the training
+service's `service_healthy` gate).
 
 ```bash
-make build-vllm                        # or the pull + tag above
+make build-vllm                        # or the pull above
 VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 TRAINER_CUDA_DEVICES=0,1,2,3,4,5 \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
@@ -448,7 +445,7 @@ expert-corrupting auto MoE backend:
 
 ```bash
 docker run --gpus all --network=host --ipc=host \
-  vllm-server:0.32.0 Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
+  halo:vllm-0.32.0 Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
   --weight-transfer-config '{"backend": "nccl"}' --moe-backend triton \
   --return-tokens-as-token-ids --logprobs-mode processed_logprobs \
   --enable-auto-tool-choice --tool-call-parser hermes
@@ -456,6 +453,7 @@ docker run --gpus all --network=host --ipc=host \
 
 | Variable | Default | Purpose |
 |---|---|---|
+| `VLLM_IMAGE` | `halo:vllm-0.32.0` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:vllm-0.32.0` |
 | `VLLM_MODEL` | `Qwen/Qwen3-0.6B` | Hub id or local checkpoint |
 | `VLLM_PORT` | `8000` | Bound on the host (`network_mode: host`). One knob for the whole stack: it drives the serve command, the healthcheck, the container's `VLLM_SERVER_URL` and the readiness banner, and the Makefile derives its own `VLLM_SERVER_URL` from it (`SGLANG_PORT` is the SGLang equivalent) |
 | `VLLM_CUDA_DEVICES` | `7` | Server GPUs; must exclude the trainer's (a rank cannot broadcast to itself). Selects via `CUDA_VISIBLE_DEVICES` inside a container that sees every GPU: hiding devices from the container instead (`--gpus device=N`) breaks the cross-container NCCL P2P import of the trainer's buffers, and `/init_weight_transfer_engine` fails with `unhandled cuda error` on the first connection (the stranded-communicator case under [Troubleshooting](#troubleshooting) fails only after several) |
@@ -560,14 +558,14 @@ needs no value ([Group rendezvous](#group-rendezvous)). `NCCL_SOCKET_IFNAME` is 
 
 ## SGLang
 
-`Dockerfile.sglang` builds `sglang-server:0.5.22` to align NCCL: upstream's wheel trails `uv.lock`'s
+`Dockerfile.sglang` builds `halo:sglang-0.5.22` to align NCCL: upstream's wheel trails `uv.lock`'s
 exact pin (what the training images run), and weight sync needs both ends on one runtime.
 
 The build bumps the NCCL wheel, installs the EFA userspace the training image runs
 (`docker/efa/install_efa_userspace.sh`), and applies the loader patches an online update needs
 (`docker/sglang/patches/`, [Which families each engine serves](#which-families-each-engine-serves)).
-It asserts that the weight-sync routes, request schemas and rendezvous convention still exist, so an
-upstream refactor fails the build instead of a training run.
+It asserts that the weight-sync routes, request schemas and rendezvous convention still exist
+(`docker/sglang/verify_image.py`), so an upstream refactor fails the build instead of a training run.
 
 The patches also make the prefill result loop step its log-prob offset over a request retracted
 while its prefill ran. Upstream leaves the offset behind, so each later request in that batch reads
@@ -582,7 +580,7 @@ installs over newer SGLang bases as well, and no newer release is validated end 
 model allowlist; no online update into that runner is validated.
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22`, then set
-`SGLANG_IMAGE` to that tag (it defaults to the locally built `sglang-server:0.5.22`).
+`SGLANG_IMAGE` to that tag (it defaults to the locally built `halo:sglang-0.5.22`).
 
 ```bash
 make build-sglang                      # or the pull above
@@ -592,7 +590,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up
 | Variable | Default | Purpose |
 |---|---|---|
 | `SGLANG_MODEL` | *(required)* | Hub id or local checkpoint directory |
-| `SGLANG_IMAGE` | `sglang-server:0.5.22` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:sglang-0.5.22`, or to `lmsysorg/sglang:v0.5.22` for serving-only use |
+| `SGLANG_IMAGE` | `halo:sglang-0.5.22` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:sglang-0.5.22`, or to `lmsysorg/sglang:v0.5.22` for serving-only use |
 | `SGLANG_MODEL_DIR` | `/mnt/models` | Host dir mounted read-only, at the same path inside — point it at wherever your checkpoints live when `SGLANG_MODEL` is a path |
 | `SGLANG_PORT` | `30000` | Bound on the host (`network_mode: host`) |
 | `SGLANG_TP` | `1` | Tensor-parallel size; pair with `SGLANG_CUDA_DEVICES` |
@@ -730,8 +728,7 @@ Trainer side, the same env: `make ... EFA=1` adds `--device=/dev/infiniband` and
 every `DOCKER_RUN` (and drops the socket forcing from `test-gpu-vllm` / `test-gpu-sglang`); a
 hand-written `docker run` passes them itself. The trainer sets no NCCL env in code, and `NCCL_NET` /
 `NCCL_NET_PLUGIN` are process-global, shared by the sync group and every trainer collective, so this
-is the env the [multi-node recipes](../parallelism/launch-recipes.md#environment-variables) already
-use.
+is the env [multi-node training](../parallelism/multi-node.md#rdma-fabrics) already uses.
 
 GPUDirect RDMA runs through dmabuf with no `nvidia_peermem`; `/dev/gdrdrv` is a cross-node DeepEP
 GIN requirement, not a sync one. Name the trainer address the server dials back to with the entry's
@@ -868,5 +865,5 @@ SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooting.md#symp
 | 400 on every rollout (vLLM) | a thinking budget the server cannot take: set `VLLM_REASONING_PARSER` (vLLM refuses `thinking_token_budget` without a reasoning parser). Rollouts otherwise return zero tokens and the run trains on all-masked batches |
 | Run completes with flat zero gradient | Missing/wrong tool parser on a native-tool env: calls stay text, no `tool_calls`, every episode reward 0 (parser table above; ReAct envs parse text and are immune to a *mismatch*) |
 | Log-ratio drifts on SGLang while the server log stays clean | No server-side signal exists: the MoE loaders skip unmapped expert names before their `not found in params_dict` warning → do not read a clean log as proof of a landed sync; the construction gates are the guard |
-| `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild `vllm-server` |
-| `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → the engine strands a communicator per trainer connection until the GPU runs out; rebuild `vllm-server` and recreate the server container |
+| `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild the server image (`make build-vllm`) |
+| `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → the engine strands a communicator per trainer connection until the GPU runs out; rebuild the server image (`make build-vllm`) and recreate the server container |

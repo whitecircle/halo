@@ -1,4 +1,4 @@
-"""The DPO / KTO ``precompute_ref_log_probs`` resume body the precompute-resume GPU suites run.
+"""The DPO / KTO ``precompute_ref_log_probs`` resume body the precompute-resume GPU suite runs.
 
 TRL computes the reference log-probs inside ``__init__`` over ``self.ref_model or self.model``, and a
 Path-B resume (EP, TP, ETP, and FSDP2 under the default ``use_grouped_gemm``) builds the policy from
@@ -8,8 +8,8 @@ columns (``reference_logps.pt``), per split, and a trainer handed the resume che
 construction attaches them instead of sweeping. A LoRA resume builds the policy from the base, so
 there the sweep scores untrained weights and stays correct. The policy is a family's tiny model
 (:data:`~tests.common.tiny_models.TINY_MOE_FAMILIES`, or the dense
-:data:`~tests.common.tiny_models.TINY_DENSE_FAMILY`) on a two-rank layout (``MODES``), and the
-train split rides with two named eval splits, which TRL precomputes under their ``eval_dataset`` keys.
+:data:`~tests.common.tiny_models.TINY_DENSE_FAMILY`) on a layout of ``MODES`` (two ranks, four for the
+expert group of ``ep2etp2``), and the train split rides with two named eval splits, which TRL precomputes under their ``eval_dataset`` keys.
 
 One checkpoint, four phases, the resume taken the production way (the policy source from
 ``resolve_resume_weights_source``, the trainer told the checkpoint and whether the policy came from it):
@@ -30,7 +30,6 @@ import argparse
 import math
 import os
 import shutil
-from collections.abc import Iterable
 from types import SimpleNamespace
 
 import torch
@@ -87,13 +86,12 @@ def world_size(mode: str) -> int:
     return max(2, layout.get("ep_size", 1) * layout.get("expert_tp_size", 1))
 
 
-def precompute_resume_parser(families: Iterable[str], *, world: int = 2) -> argparse.ArgumentParser:
-    """The CLI a precompute-resume suite takes, over the ``families`` and the layouts of ``world`` ranks it runs."""
-    modes = sorted(mode for mode in MODES if world_size(mode) == world)
+def precompute_resume_parser() -> argparse.ArgumentParser:
+    """The precompute-resume suite's CLI."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--trainer", choices=sorted(TRAINERS), default="dpo")
-    parser.add_argument("--family", choices=sorted(families), required=True)
-    parser.add_argument("--mode", choices=modes, default="ep2" if "ep2" in modes else modes[0])
+    parser.add_argument("--family", choices=sorted((DENSE, *TINY_MOE_FAMILIES)), required=True)
+    parser.add_argument("--mode", choices=sorted(MODES), default="ep2")
     parser.add_argument("--peft", action="store_true")
     parser.add_argument("--kto-loss", choices=KTO_LOSSES, default="kto")
     return parser

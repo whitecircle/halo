@@ -5,7 +5,7 @@ A ``pip install`` in the training image that resolves dependencies for a package
 whatever PyPI serves that day. Ahead of the locked install, that install replaces only the packages the
 lock names, so every other package the resolve brought in stays in the image, unlocked; after it, a
 resolve moves locked packages off their pins. Each such install must pass ``--no-deps``, however it
-spells the requirement, and the optional extras come from the lock export itself, which ``make install``
+spells the requirement, and the optional extras come from the lock export itself, which ``make check-lock``
 exports the same way.
 
 Each image labels itself with the Halo commit, version and build date it was built from. Without
@@ -152,7 +152,7 @@ def test_the_scan_flags_a_resolving_install():
 
 def test_the_image_installs_every_optional_extra_from_the_lock():
     """An extra installed by its own ``pip install`` resolves its dependencies outside the lock, and
-    ``make install`` would then check a different requirement set than the image builds from."""
+    ``make check-lock`` would then check a different requirement set than the image builds from."""
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     extras = set(pyproject["project"]["optional-dependencies"])
     assert extras, "pyproject.toml declares no optional extras: the scan lost its root"

@@ -7,7 +7,8 @@ renamed/removed knob left behind in a config, a typo that would otherwise be sil
 value outside a ``Literal``'s choices, and any ``__post_init__`` guard the config now violates.
 Each config is parsed with the *imported* entry-script module so import-time registrations the real
 run depends on are in place (``optim: flash_adamw`` is only valid because importing the trainer
-extends HF's ``OptimizerNames``).
+extends HF's ``OptimizerNames``). A config also sets no key the parser would give the same value anyway, since a
+reader takes every line for a choice.
 
 Run: pytest tests/cpu/config/test_examples_parse.py
 """
@@ -20,7 +21,7 @@ import pytest
 import transformers.training_args
 import yaml
 
-from src.configs.parser import HaloArgumentParser
+from src.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, _load_yaml
 from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
 from tests.common.repo import REPO_ROOT, load_script_module
 
@@ -47,6 +48,39 @@ _SCRIPT_RULES = (
 )
 
 _EXAMPLES = sorted(EXAMPLES_ROOT.rglob("*.yaml"))
+
+# The keys a config may set to their default, because the line states the run's intent: what it trains on, adapter or
+# full fine-tune, the parallel layout, step size, batch shape and length budget, and the objective and sampling knobs,
+# whose defaults TRL owns or a GRPO arm sets for itself.
+_INTENT_KEYS = frozenset(
+    {
+        "environment_type",
+        "rewards",
+        "use_peft",
+        "expert_parallel_size",
+        "fsdp_reshard_after_forward",
+        "learning_rate",
+        "per_device_train_batch_size",
+        "gradient_accumulation_steps",
+        "max_length",
+        "max_prompt_length",
+        "packing",
+        "beta",
+        "loss_type",
+        "epsilon",
+        "num_generations",
+        "num_iterations",
+        "scale_rewards",
+        "drop_degenerate_groups",
+        "top_entropy_quantile",
+        "mask_truncated_completions",
+        "enable_prefetch",
+        "desirable_weight",
+        "undesirable_weight",
+        "temperature",
+        "rollout_temperature",
+    }
+)
 
 
 def declares_cross_node_ep(config: Path) -> bool:
@@ -107,6 +141,34 @@ def parser_for(script: str) -> HaloArgumentParser:
     raise AssertionError(f"{script} calls no parse_script_args")
 
 
+def _unset_values(parser: HaloArgumentParser, name: str, values: dict) -> list:
+    """What each dataclass declaring ``name`` takes when ``values`` leave it unset: the toolkit default where its
+    guard holds, else the field's own default (``MISSING`` for a required field)."""
+    toolkit = _TOOLKIT_DEFAULTS.get(name)
+    if toolkit is not None and (toolkit[1] is None or toolkit[1](values)):
+        return [toolkit[0]]
+    return [
+        field.default_factory() if field.default_factory is not dataclasses.MISSING else field.default
+        for dataclass_type in parser.dataclass_types
+        for field in dataclasses.fields(dataclass_type)
+        if field.init and field.name == name
+    ]
+
+
+def noop_keys(parser: HaloArgumentParser, values: dict) -> list[str]:
+    """The keys of config ``values`` that change nothing: each set to what every declaring field takes unset, plus
+    ``num_train_epochs`` beside a positive ``max_steps``, where the Trainer derives the epochs from the steps."""
+    keys = []
+    for name, value in values.items():
+        rest = {key: other for key, other in values.items() if key != name}
+        unset = _unset_values(parser, name, rest)
+        if unset and all(default is not dataclasses.MISSING and value == default for default in unset):
+            keys.append(name)
+    if "num_train_epochs" in values and (values.get("max_steps") or -1) > 0:
+        keys.append("num_train_epochs")
+    return keys
+
+
 @pytest.fixture(autouse=True)
 def _bf16_capable(monkeypatch):
     """The CPU test container exposes no GPU, and ``bf16`` (a toolkit default) is checked against
@@ -145,6 +207,18 @@ def test_example_output_dir_is_repo_relative(config):
     output_dir = yaml.safe_load(config.read_text(encoding="utf-8"))["output_dir"]
     assert not output_dir.startswith("/"), (
         f"{config.name}: output_dir={output_dir!r} hardcodes an absolute host path — ship checkpoints/<run>"
+    )
+
+
+@pytest.mark.parametrize("config", _EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
+def test_example_sets_no_key_that_changes_nothing(config):
+    """A line restating the parser's default reads as a deliberate choice, and goes stale silently when the default
+    moves; only a key in ``_INTENT_KEYS`` may stand at its default."""
+    noop = noop_keys(parser_for(script_for(config)), _load_yaml(str(config)))
+    idle = [key for key in noop if key not in _INTENT_KEYS]
+    assert not idle, (
+        f"{config.name} sets {idle} to what the parser gives them anyway: drop the lines, or add a key that states "
+        "the run's intent to _INTENT_KEYS"
     )
 
 
@@ -192,6 +266,22 @@ def test_an_unknown_key_is_rejected(tmp_path):
     config.write_text("model_name_or_path: gpt2\noutput_dir: /tmp/x\nbogus_typo_key: 3\n")
     with pytest.raises(ValueError, match="bogus_typo_key"):
         parser.parse_yaml_file(str(config))
+
+
+def test_a_key_that_changes_nothing_is_caught():
+    """Pins what the sweep relies on: a field default, a guarded toolkit default and an epoch count under max_steps
+    are found; a value off its default is not."""
+    values = {
+        "model_name_or_path": "gpt2",
+        "output_dir": "checkpoints/x",
+        "seed": 42,
+        "bf16": True,
+        "learning_rate": 3.0e-4,
+        "max_steps": 5,
+        "num_train_epochs": 1,
+    }
+    assert noop_keys(parser_for("sft.py"), values) == ["seed", "bf16", "num_train_epochs"]
+    assert noop_keys(parser_for("sft.py"), {**values, "fp16": True}) == ["seed", "num_train_epochs"]
 
 
 if __name__ == "__main__":

@@ -33,7 +33,8 @@ from datasets import Dataset
 from PIL import Image
 
 from src.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
-from src.data.pipeline.preferences import tokenize_vlm_preference_row
+from src.data.pipeline.preferences import PROMPT_OVERLAP_COLUMN, tokenize_vlm_preference_row
+from src.data.vlm_render import run_vlm_processor
 from src.trainers.preference.preference_rules import reject_smpo_vlm_options
 from tests.common.models import QWEN3_5_9B
 from tests.common.smpo_trainer import smpo_trainer
@@ -374,6 +375,61 @@ def test_collator_no_bos_for_nominal_only_bos_token():
     batch = make_collator(processor)([row])
 
     assert batch["prompt_input_ids"][0, 0] != 1, "a nominal-only bos_token must not be prepended"
+
+
+class JoinedTurnsTokenizer(StubTokenizer):
+    """Renders turns back to back, so the prompt's closing ``[end]`` and a reply's opening ``[assistant]`` tokenize
+    as one whitespace word: the merge a byte-level tokenizer makes of a prompt's last ``\\n`` and a reply's first."""
+
+    def apply_chat_template(self, messages, tokenize=False, **kwargs):
+        return super().apply_chat_template(messages, tokenize=tokenize, **kwargs).replace("\n", "")
+
+
+class TokenTypeStubProcessor(StubProcessor):
+    """Also emits ``mm_token_type_ids`` (1 on image patches), a sequence-aligned key the collator trims and pads
+    with the prompt."""
+
+    def __call__(self, text, images=None, **kwargs):
+        out = super().__call__(text, images=images, **kwargs)
+        out["mm_token_type_ids"] = (out["input_ids"] == self.tokenizer.vocab[IMAGE_PAD_TOKEN]).long()
+        return out
+
+
+@pytest.mark.parametrize(
+    ("tokenizer_cls", "overlap"), [(StubTokenizer, 0), (JoinedTurnsTokenizer, 1)], ids=["clean", "merged"]
+)
+def test_collated_pair_is_the_conversation_tokenized_whole(tokenizer_cls, overlap):
+    """Prompt ⧺ completion after collation is the processor's own tokenization of the rendered conversation, EOS
+    closed. When a token merges across the boundary, the completions start one prompt token early, and the
+    collator's prompt must end before it, or that token's text appears twice."""
+    tokenizer = tokenizer_cls()
+    processor = TokenTypeStubProcessor(tokenizer)
+    features = make_features()
+    row = prep_row(make_trainer(), features, processor)
+    assert row[PROMPT_OVERLAP_COLUMN] == overlap
+
+    batch = make_collator(processor)([row])
+
+    prompt_ids = batch["prompt_input_ids"][0].tolist()
+    image_pad_id = tokenizer.vocab[IMAGE_PAD_TOKEN]
+    assert batch["mm_token_type_ids"][0].tolist() == [int(token == image_pad_id) for token in prompt_ids]
+    for side in ("chosen", "rejected"):
+        # The stub renders turn by turn, so the conversation is the prompt's render plus the reply's.
+        conversation = row["prompt_text"] + tokenizer.apply_chat_template(features[side])
+        expected = run_vlm_processor(processor, conversation, features["images"])["input_ids"][0].tolist()
+        assert prompt_ids + batch[f"{side}_input_ids"][0].tolist() == [*expected, EOS_ID], side
+
+
+def test_prompt_overlap_column_survives_signature_pruning():
+    """HF prunes every dataset column outside the signature set; a pruned overlap would silently bring the
+    repeated boundary token back."""
+    trainer = make_trainer()
+    trainer.data_collator = make_collator(StubProcessor(StubTokenizer()))
+    trainer._signature_columns = None
+
+    trainer._set_signature_columns_if_needed()
+
+    assert PROMPT_OVERLAP_COLUMN in trainer._signature_columns
 
 
 def test_collator_requires_processor():

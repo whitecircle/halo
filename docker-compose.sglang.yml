@@ -1,12 +1,13 @@
 # SGLang server — plain serving, and the rollout/weight-sync pairing for env-GRPO. The default image
-# is the NCCL-aligned Dockerfile.sglang build: upstream's NCCL does not match uv.lock's pin, and a
+# is the NCCL-aligned Dockerfile.sglang build (`make build-sglang`, or SGLANG_IMAGE set to the prebuilt
+# public.ecr.aws/whitecircle/halo:sglang-0.5.22): upstream's NCCL does not match uv.lock's pin, and a
 # skew hangs the sync group. Host networking; SGLANG_CUDA_DEVICES must not overlap the trainer's.
 #   SGLANG_MODEL=<hub id|local dir> docker compose -f docker-compose.sglang.yml up   # `down` needs it too
 #   (add -f docker-compose.sglang.efa.yml on an EFA host)
 
 services:
   sglang-server:
-    image: ${SGLANG_IMAGE:-sglang-server:0.5.22}
+    image: ${SGLANG_IMAGE:-halo:sglang-0.5.22}
     ipc: host
     network_mode: host
     environment:

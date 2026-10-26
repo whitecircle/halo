@@ -7,6 +7,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from enum import StrEnum
+from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from src.config_validation import present, require_bool, require_finite, require_int, require_text
@@ -428,6 +429,33 @@ def sources_of(*term_types: type[RewardTerm]) -> dict[str, type[RewardTerm]]:
 
 # The sources an environment's reward admits: its own grade plus the externally scored terms.
 ENVIRONMENT_REWARD_SOURCES = sources_of(EnvironmentTerm, JudgeTerm, RewardModelTerm)
+
+
+def read_context_files(raw: Any) -> Any:
+    """``raw``, a ``rewards:`` list, with each judge term's ``context_file`` (a UTF-8 text file, absolute or relative
+    to the launch directory) read into its ``context``. A config reads it at parse time, so what it forwards (to the
+    environments' actors, on any node) carries the text. Anything but a list is left for :func:`parse_reward_terms`
+    to refuse."""
+    if isinstance(raw, Mapping | str) or not isinstance(raw, Sequence):
+        return raw
+    resolved = []
+    for item in raw:
+        if isinstance(item, Mapping) and item.get("source") == JudgeTerm.source and "context_file" in item:
+            spec = dict(item)
+            path = spec.pop("context_file")
+            owner = f"{JudgeTerm.source} reward term {spec.get('name')!r}"
+            require_text(owner, context_file=path)
+            if spec.get("context") is not None:
+                raise ValueError(f"{owner}: set 'context' or 'context_file', not both")
+            if not Path(path).is_file():
+                raise ValueError(
+                    f"{owner}: context_file {path!r} is not a file (a relative path reads from the launch directory, "
+                    f"{Path.cwd()})"
+                )
+            spec["context"] = Path(path).read_text(encoding="utf-8")
+            item = spec
+        resolved.append(item)
+    return resolved
 
 
 def parse_reward_terms(

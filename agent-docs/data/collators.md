@@ -109,6 +109,8 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 | Configuration | Collator |
 |---------------|----------|
 | CP + packing | **rejected** — the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other |
+| PP + padding_free | **rejected** — the flattened width varies per step while the pipeline's P2P buffers are frozen after the first |
+| PP + packing on the GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) | **rejected** — the kept `[B, L]` rows carry no per-row `cu_seq_lens` for the delta rule ([PP packing](../parallelism/pipeline-parallelism.md#packing)) |
 | CP + completion masking | `DataCollatorForCompletionOnlyLM` (CP mode) |
 | CP | `DataCollatorForCausalLMWithPadding` (a label-preserving `DataCollatorForLanguageModeling` subclass in `padded.py`) |
 | padding_free + completion masking | `DataCollatorWithFlatteningAndCompletionMask` |

@@ -1,8 +1,8 @@
 """pytest launcher for the manifest-driven GPU test suite.
 
 GPU tests are torchrun scripts, so this conftest does not import them. It reads
-:data:`tests.gpu.manifest.MANIFEST`, generates one pytest node per ``(script, args)``,
-and each node shells out::
+:data:`tests.gpu.manifest.MANIFEST`, generates one pytest node per ``(script, args)`` row
+under that row's own process count, markers and timeout, and each node shells out::
 
     python -m torch.distributed.run --nproc_per_node=<nproc> --master_port=<free> <script> <args>
 
@@ -70,18 +70,20 @@ _PASSES_PER_SURVEY = 2
 # A worker that still holds the stdout pipe would block the drain forever; bound it.
 _OUTPUT_DRAIN_TIMEOUT = 30
 
-# Marker → (env var holding the base URL, default URL, compose command). Raw os.environ rather than
+# Marker → (env var holding the base URL, default URL, start command). Raw os.environ rather than
 # src.env: importing src pulls torch+transformers (~4s, ~500MB) and a root logging handler into the
 # launcher process.
 _SERVER_TIERS = {
     "vllm_server": (
         "VLLM_SERVER_URL",
         "http://localhost:8000",
+        "make build-vllm (or set VLLM_IMAGE), then "
         "VLLM_CUDA_DEVICES=7 docker compose -f docker-compose.vllm.yml up -d vllm-server",
     ),
     "sglang_server": (
         "SGLANG_SERVER_URL",
         "http://localhost:30000",
+        "make build-sglang (or set SGLANG_IMAGE), then "
         "SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=<hub id> docker compose -f docker-compose.sglang.yml up -d",
     ),
 }
@@ -348,10 +350,10 @@ def pytest_generate_tests(metafunc):
     if "gpu_case" not in metafunc.fixturenames:
         return
     params = []
-    for rel, spec in MANIFEST.items():
-        marks = [getattr(pytest.mark, m) for m in spec.markers]
-        for args in spec.args_matrix:
+    for rel, script_spec in MANIFEST.items():
+        for args, spec in script_spec.launches():
             node_id = rel if not args else f"{rel}[{args}]"
+            marks = [getattr(pytest.mark, m) for m in spec.markers]
             params.append(pytest.param(GPUCase(rel, spec, args), marks=marks, id=node_id))
     metafunc.parametrize("gpu_case", params)
 

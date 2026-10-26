@@ -267,7 +267,7 @@ def test_a_trainer_model_path_loads_the_agreed_commit_inside_the_joined_load(tmp
     monkeypatch.setattr(whole_model, "auto_load_model", recording_auto_load)
     args = SimpleNamespace(model_init_kwargs={"revision": "v1", "dtype": torch.float32})
 
-    whole_model.resolve_trainer_model(str(checkpoint), args, model_class=Qwen3ForCausalLM, keep_fp32_non_ep=False)
+    whole_model.resolve_trainer_model(str(checkpoint), args, parallelism_config=None, model_class=Qwen3ForCausalLM)
 
     assert events == [
         ("agree", str(checkpoint), "v1", "trainer_model"),

@@ -51,10 +51,11 @@ resolves `flash_attn` / `deep_ep` and the integrated terminal runs `torchrun` / 
 `--cap-add=SYS_PTRACE` (py-spy attaches) and `--env-file .env` — so **`cp .env.example .env` before
 first open**, or Docker refuses to start the container.
 
-The host scratch volume mounts at `/scratch`, from `$HALO_SCRATCH` (default `/mnt`). Export it in
-your local shell to point elsewhere, after confirming with `findmnt` / `df -h` that the target really
-is a large device. `make` and the `training` service of `docker-compose.vllm.yml` read the same knob,
-so one export points them at that volume too.
+The host scratch volume mounts at `/scratch`, from `$HALO_SCRATCH`, which the container refuses to
+start without: export it in your local shell after confirming with `findmnt` / `df -h` that the target
+really is a large device. `make` (which resolves it when unset) and the `training` service of
+`docker-compose.vllm.yml` (which falls back to `/mnt`) read the same knob, so one export points them at
+that volume too.
 
 `containerEnv` then pins `HF_HOME`, `HF_DATASETS_CACHE`, `TMPDIR` and `HALO_DATA_ROOT` under it, so HF
 caches, temp files, the S3 dataset cache and profiler traces all stay off the small in-container root FS.
@@ -69,11 +70,11 @@ back to the host `.venv`. For Hopper, change `"image"` to `halo:hopper`.
 
 The code does not auto-load `.env` — it is passed with `docker run --env-file .env`. Only the GPU
 `make` targets do this (`DOCKER_RUN`, and only when `ENV_FILE` is non-empty); the CPU targets
-(`install`, `test-cpu`, `seed-hf-cache`, `diagrams`, `verify-move`, `verify-artifacts`, `verify-efficiency`,
+(`check-lock`, `test-cpu`, `seed-hf-cache`, `diagrams`, `verify-move`, `verify-artifacts`, `verify-efficiency`,
 `verify-ep` and `verify-cp` at `TIER=cpu`, and `make bench`'s band step) pass no credentials
 at all; `docs` runs on the host.
 
-The CPU targets mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
+The CPU targets other than `check-lock` and `diagrams` mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
 read-write, because many CPU tests load a real tokenizer. A test calling `from_pretrained` directly
 hard-fails when the cache is missing and the Hub is unreachable; one going through
 `tests/common/tokenizers.py` skips instead, or fails under `HALO_TEST_REQUIRE_HUB_CACHE=1`.
@@ -96,7 +97,7 @@ and the toolkit and cache variables are catalogued in
 | Path | Role |
 |---|---|
 | `/workspace` | Repo bind-mount and working dir in the image (`-v $(pwd):/workspace -w /workspace`); also `PYTHONPATH` |
-| scratch volume (`HALO_SCRATCH`, default `/mnt`) | Checkpoints, logs, HF cache, temp — verify its capacity before a large write |
+| scratch volume (`HALO_SCRATCH`) | Checkpoints, logs, HF cache, temp — verify its capacity before a large write |
 | `.env` (repo root) | Secrets, passed via `--env-file .env` |
 | `/root/.aws` | AWS credentials, bind-mounted for S3 / ECR |
 | `.venv/` (repo root) | Host-side uv environment for the IDE (git-ignored) |

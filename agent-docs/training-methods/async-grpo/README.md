@@ -61,6 +61,7 @@ launch. The template runs a ReAct environment, which is served without a tool-ca
 (`VLLM_TOOL_CALLING_FLAGS=`):
 
 ```bash
+make build-vllm   # or set VLLM_IMAGE to the public image
 VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_CUDA_DEVICES=7 VLLM_TOOL_CALLING_FLAGS= \
     docker compose -f docker-compose.vllm.yml up -d vllm-server
 
