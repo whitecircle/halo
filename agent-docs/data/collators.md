@@ -1,10 +1,10 @@
 # Collators
 
 Collators turn tokenized samples into batches: padding, sequence packing, completion-only label
-masking, and per-sequence position IDs. They live in `src/data/collators/`. `factory.py` selects
+masking, and per-sequence position IDs. They live in `halo/data/collators/`. `factory.py` selects
 among the SFT collators of `padded.py` and `packing.py` after `collator_rules.py` refuses the option
 combinations none can serve; all of them share the span resolver and label rule in
-`src/data/completion_spans.py` and the turn terminators in `src/data/turn_markers.py`.
+`halo/data/completion_spans.py` and the turn terminators in `halo/data/turn_markers.py`.
 
 The per-method leaves (`smpo.py`, `vlm.py`, `self_distill.py`, `classification.py`,
 `offline_grpo.py`, `vlm_preference.py`) are built by their own trainers and scripts.
@@ -80,10 +80,10 @@ by the trainer, not this factory: [Offline GRPO](../training-methods/grpo/offlin
 
 ## Factory: `select_data_collator()`
 
-`src/data/collators/factory.py` picks the collator from config flags and validates compatibility:
+`halo/data/collators/factory.py` picks the collator from config flags and validates compatibility:
 
 ```python
-from src.data.collators.factory import select_data_collator
+from halo.data.collators.factory import select_data_collator
 
 collator = select_data_collator(
     tokenizer=tokenizer,
@@ -120,7 +120,7 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 | completion masking only | `DataCollatorForCompletionOnlyLM` |
 | none | `None` (default TRL behavior) |
 
-YAML fields (`packing`, `packing_strategy`, `padding_free`, `eval_packing` come from TRL's `SFTConfig`; `train_on_completions_only` and `assistant_message_template` from `ConversationRenderArguments`, `train_on_last_assistant_only` from `SFTScriptArguments`, both in `src/configs/sft.py`):
+YAML fields (`packing`, `packing_strategy`, `padding_free`, `eval_packing` come from TRL's `SFTConfig`; `train_on_completions_only` and `assistant_message_template` from `ConversationRenderArguments`, `train_on_last_assistant_only` from `SFTScriptArguments`, both in `halo/configs/sft.py`):
 
 ```yaml
 padding_free: false
@@ -134,7 +134,7 @@ The SFT script defaults `train_on_completions_only: true`; `assistant_message_te
 
 For a pre-processed dataset the SFT script derives the flags from the data, not the config: `packing` follows `metadata.packed` (offline-packed chunks still need the packing collator's per-document position IDs), and completion masking is disabled at runtime because the baked `labels` are authoritative — see [SFT Dataset Pre-Processing](dataset-preparation.md).
 
-After building its collator a script calls `disable_trl_dataset_prep` (`src/entrypoints/data_setup.py`): it sets `dataset_kwargs: {skip_prepare_dataset: true}` and clears `packing` and `padding_free` on the TRL config, since TRL reads both again at collator selection and would swap its own collator in over rows it never tokenized. A custom script must call it too; a user `dataset_kwargs` or `dataset_text_field` is refused at startup (`reject_trl_dataset_prep_args`).
+After building its collator a script calls `disable_trl_dataset_prep` (`halo/entrypoints/data_setup.py`): it sets `dataset_kwargs: {skip_prepare_dataset: true}` and clears `packing` and `padding_free` on the TRL config, since TRL reads both again at collator selection and would swap its own collator in over rows it never tokenized. A custom script must call it too; a user `dataset_kwargs` or `dataset_text_field` is refused at startup (`reject_trl_dataset_prep_args`).
 
 ## Document isolation under packing
 
@@ -161,10 +161,10 @@ non-attention mixer carries state along the sequence regardless of any mask.
 Two families are refused outright in `select_data_collator`. Both checks read the text sub-config
 too, so a composite (VLM) wrapper is covered:
 
-- **GPT-OSS** (`DENSE_PACKING_LEAK_MODEL_TYPES` in `src/models/segment_markers.py`): packing on a
+- **GPT-OSS** (`DENSE_PACKING_LEAK_MODEL_TYPES` in `halo/models/segment_markers.py`): packing on a
   non-varlen backend raises. Pin `flash_attention_2` or turn packing off.
 - **DeepSeek-V4**, or any model whose `layer_types` declare a compressed-KV layer (the
-  `"compressed"` kind in `src/models/attention/layout.py`: `compressed_sparse_attention`,
+  `"compressed"` kind in `halo/models/attention/layout.py`: `compressed_sparse_attention`,
   `heavily_compressed_attention`): `packing` and `padding_free` raise on every backend
   (`reject_compressed_kv_rows`). Positions restart per document but the compressor windows are cut
   at row indices, so a later document reads another document's compressed KV as its own context.
@@ -174,7 +174,7 @@ too, so a composite (VLM) wrapper is covered:
   the same two collator roots as the CP gate), as does SMPO for its `padding_free` forward.
 
 Which families get which segment markers, and the kernel refusal below, live in
-`src/models/segment_markers.py`, shared by the collators and SMPO's padding-free forward.
+`halo/models/segment_markers.py`, shared by the collators and SMPO's padding-free forward.
 
 The GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) carry one more refusal, about markers that
 would be emitted but not read. transformers selects their segment-aware linear-attention kernels at
@@ -201,7 +201,7 @@ they score packed rows under the same masks the student does.
 
 - **Both want a varlen Flash Attention backend.** The gate is the model's **resolved**
   `_attn_implementation` against `VARLEN_ATTN_IMPLEMENTATIONS` (`flash_attention_2/3/4`,
-  `src/models/attention/selection.py`), not a model-family list.
+  `halo/models/attention/selection.py`), not a model-family list.
 
     Off it, `padding_free` **raises** (its `cu_seq_lens` kwargs have no consumer) and `packing`
     **warns** (it pays a dense `[L, L]` mask per layer). A family whose dense path leaks documents
@@ -225,7 +225,7 @@ they score packed rows under the same masks the student does.
 **The turn terminator is the resolved terminator set, not just `tokenizer.eos_token_id`.** A turn
 ends at the first token in the union of the model config's `eos_token_id` (scalar or list;
 `text_config.eos_token_id` for VLM/composite configs) and the tokenizer's EOS
-(`resolve_eos_token_ids`, `src/data/turn_markers.py`). This is required for templates that delimit
+(`resolve_eos_token_ids`, `halo/data/turn_markers.py`). This is required for templates that delimit
 turns with role markers instead of a per-turn `<|endoftext|>` — GLM-4 ends an assistant turn with
 `<|user|>` or `<|observation|>` and lists both in `config.eos_token_id`.
 
@@ -248,7 +248,7 @@ substitutes only when the sequence has **no** terminator at all. The padded rout
 a padded row the last position is pad, so a terminator-less turn is masked out entirely.
 
 **One span resolver, three named policies.** Every completion mask locates its spans with
-`resolve_completion_spans` in `src/data/completion_spans.py`, under one of three declared policies:
+`resolve_completion_spans` in `halo/data/completion_spans.py`, under one of three declared policies:
 `COLLATOR_SPAN_POLICY` (the padded route, described above), `PACKED_SPAN_POLICY` (the same plus the
 global end-of-sequence fallback the packed and padding-free routes take) and
 `SELF_DISTILL_SPAN_POLICY` (the span starts after the marker and runs to the first terminator

@@ -21,7 +21,7 @@ import time
 import torch
 from transformers import AutoModelForCausalLM
 
-from src.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.adamw_bf16 import AdamWBF16
 from tests.common.models import GPT_OSS_20B
 
 MODEL_PATH = GPT_OSS_20B

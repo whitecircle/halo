@@ -48,9 +48,9 @@ import torch
 import torch.distributed as dist
 from accelerate import PartialState
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.hardware import is_blackwell_gpu
-from src.log import configure_training_logging
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.hardware import is_blackwell_gpu
+from halo.log import configure_training_logging
 from tests.common.distributed import (
     cleanup_dirs,
     init_distributed,

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests: a scorer that cannot build its request books a verdict-less result, it does not raise.
 
-:class:`src.rewards.scorers.base.Scorer` promises that ``score`` never raises for a sample — "one bad
+:class:`halo.rewards.scorers.base.Scorer` promises that ``score`` never raises for a sample — "one bad
 call cannot take a rollout batch down with it". That covers the work before the request too: the
 reward model's chat-template render (under ``view: full`` the messages carry tool turns and
 ``tool_calls``, which a reward model's template may refuse) and the judge's prompt build (which
@@ -17,10 +17,10 @@ import asyncio
 
 import pytest
 
-from src.rewards.samples import ScoringSample
-from src.rewards.scorers.judge import GenerativeJudge
-from src.rewards.scorers.reward_model import ServedRewardModel
-from src.rewards.terms import JudgeTerm, Requirement, RewardModelTerm
+from halo.rewards.samples import ScoringSample
+from halo.rewards.scorers.judge import GenerativeJudge
+from halo.rewards.scorers.reward_model import ServedRewardModel
+from halo.rewards.terms import JudgeTerm, Requirement, RewardModelTerm
 
 REQUIREMENTS = (Requirement(name="correctness", description="The answer is right."),)
 

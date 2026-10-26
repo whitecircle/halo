@@ -38,12 +38,12 @@ from datasets import Dataset
 from transformers import CONFIG_MAPPING
 from trl import GRPOConfig, GRPOTrainer
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.reasoning_effort import has_thinking_budget
-from src.environments.registry import build_environment
-from src.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND, resolve_reasoning_end_token_id
-from src.trainers.grpo.environmental import reasoning
-from src.trainers.grpo.environmental.environmental_rules import (
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.reasoning_effort import has_thinking_budget
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND, resolve_reasoning_end_token_id
+from halo.trainers.grpo.environmental import reasoning
+from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
@@ -52,11 +52,11 @@ from src.trainers.grpo.environmental.environmental_rules import (
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
 )
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
-from src.trainers.training_args_overrides import keep_all_dataset_columns
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
+from halo.trainers.training_args_overrides import keep_all_dataset_columns
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 
 def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
@@ -432,7 +432,7 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
     """Nothing else reads the marker, so a family whose reasoning ends otherwise still runs, told that
     its forced closes stay in the loss."""
     host = _close_host({"high": 16384}, knows_close=False)
-    with caplog.at_level(logging.WARNING, logger="src.trainers.grpo.environmental.reasoning"):
+    with caplog.at_level(logging.WARNING, logger="halo.trainers.grpo.environmental.reasoning"):
         assert _forced_close_ids(host) is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
@@ -448,7 +448,7 @@ def test_the_marker_warning_is_logged_once_by_the_main_process_under_the_trainer
         with caplog.at_level(logging.WARNING):
             assert _forced_close_ids(_close_host({"high": 16384}, knows_close=False)) is None
         warnings = [r.name for r in caplog.records if r.levelno == logging.WARNING]
-        assert warnings == ["src.trainers.grpo.environmental.reasoning"] * expected, (is_main, warnings)
+        assert warnings == ["halo.trainers.grpo.environmental.reasoning"] * expected, (is_main, warnings)
 
 
 def _count_end_id(budgets: dict, knows_close: bool = True, **config) -> int | None:

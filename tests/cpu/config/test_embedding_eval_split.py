@@ -54,7 +54,7 @@ def _eval_dataset_handed_to_the_trainer(tmp_path, dataset: DatasetDict):
         mock.patch.object(module, "barrier"),
         mock.patch.object(module, "configure_balancing_and_build_callbacks", return_value=[]),
         mock.patch.object(module, "EmbeddingTrainer", side_effect=build_trainer),
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
     for patch in patches:

@@ -14,12 +14,12 @@ import pytest
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from src.subclass_registry import iter_subclasses
-from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
-from src.weight_sync.clients import base as client_base
-from src.weight_sync.clients.base import WeightSyncClientBase
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.subclass_registry import iter_subclasses
+from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
+from halo.weight_sync.clients import base as client_base
+from halo.weight_sync.clients.base import WeightSyncClientBase
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.goldens.weight_sync_transcript import ENGINES, GOLDEN_PATH, SCENARIOS, scenario_record
 
 GOLDEN = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
@@ -106,7 +106,7 @@ def test_no_client_overrides_the_chunk_accounting():
     """Every chunk is counted, and its failure judged, in ``WeightSyncClientBase._transmit_chunk``: the
     count behind ``can_replay_sync`` and the verdict that keeps a partly written engine paused. A client
     overriding it would bypass both while every transcript above still passes."""
-    clients = [cls for cls in iter_subclasses(WeightSyncClientBase) if cls.__module__.startswith("src.")]
+    clients = [cls for cls in iter_subclasses(WeightSyncClientBase) if cls.__module__.startswith("halo.")]
     assert {VLLMWeightSyncClient, SGLangWeightSyncClient, TrlVLLMClient} <= set(clients)
     assert [cls.__qualname__ for cls in clients if "_transmit_chunk" in vars(cls)] == []
 

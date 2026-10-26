@@ -39,16 +39,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.environments.sandbox import bubblewrap as _bubblewrap
-from src.environments.sandbox import languages as _languages
-from src.environments.sandbox import local as local_sandbox
-from src.environments.sandbox.bubblewrap import BubblewrapSandbox
-from src.environments.sandbox.factory import build_sandbox
-from src.environments.sandbox.languages import LANGUAGES, find_language
-from src.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
-from src.environments.sandbox.remote import RemoteSandbox
-from src.environments.sandbox.results import SandboxInfraError
-from src.environments.tools.toolsets import build_session_bash_tools
+from halo.environments.sandbox import bubblewrap as _bubblewrap
+from halo.environments.sandbox import languages as _languages
+from halo.environments.sandbox import local as local_sandbox
+from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
+from halo.environments.sandbox.factory import build_sandbox
+from halo.environments.sandbox.languages import LANGUAGES, find_language
+from halo.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
+from halo.environments.sandbox.remote import RemoteSandbox
+from halo.environments.sandbox.results import SandboxInfraError
+from halo.environments.tools.toolsets import build_session_bash_tools
 from tests.common.code_contests import RecordingSandboxSession
 from tests.common.repo import probe_findings
 
@@ -743,7 +743,7 @@ _JAILED_RUNS = [
     ("int main() { return 0; }", "cpp", 10.0),
 ]
 _JAILED_HOST = f"""
-from src.environments.sandbox.bubblewrap import BubblewrapSandbox
+from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
 sandbox = BubblewrapSandbox()
 for code, language, timeout in {_JAILED_RUNS!r} * 2:
     sandbox.run(code, language=language, timeout=timeout)
@@ -807,8 +807,8 @@ _STAND_IN_HOST = """
 import os, signal, threading
 from concurrent.futures import ThreadPoolExecutor
 os.environ["PATH"] = {bin_dir!r} + os.pathsep + os.environ["PATH"]
-from src.environments.sandbox import bubblewrap
-from src.environments.sandbox.bubblewrap import BubblewrapSandbox, _is_child_subreaper, _set_child_subreaper
+from halo.environments.sandbox import bubblewrap
+from halo.environments.sandbox.bubblewrap import BubblewrapSandbox, _is_child_subreaper, _set_child_subreaper
 
 bubblewrap._SUBORDINATE_ID_FILES = {subids!r}
 sandbox = BubblewrapSandbox()

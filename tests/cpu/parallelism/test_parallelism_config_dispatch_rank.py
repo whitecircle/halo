@@ -17,9 +17,9 @@ shapes across both layouts, and asserts the two agree.
 
 import pytest
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.group_layout import ep_layout
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.group_layout import ep_layout
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.parallelism import make_parallelism_config, stubbed_process_groups
 
 # (world_size, domain, ep_size, expert_tp_size, node_local) — shapes BOTH classes accept.

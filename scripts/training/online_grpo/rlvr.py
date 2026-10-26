@@ -14,25 +14,25 @@ Usage:
 
 from trl import GRPOConfig
 
-from src.config_validation import reject_non_default_args, reject_unsupported_args
-from src.configs.grpo import RLRRArguments
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import ModelArguments
-from src.data.pipeline.chat_render import render_generation_prompt
-from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
-from src.data.pipeline.coordinated_map import coordinated_map_and_filter
-from src.data.pipeline.rejected_rows import blank_conversation
-from src.data.render_columns import reject_missing_render_column
-from src.data.vlm_routing import reject_image_columns
-from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
-from src.entrypoints.model_setup import (
+from halo.config_validation import reject_non_default_args, reject_unsupported_args
+from halo.configs.grpo import RLRRArguments
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.pipeline.chat_render import render_generation_prompt
+from halo.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
+from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
+from halo.data.pipeline.rejected_rows import blank_conversation
+from halo.data.render_columns import reject_missing_render_column
+from halo.data.vlm_routing import reject_image_columns
+from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from halo.entrypoints.model_setup import (
     apply_prompt_completion_window,
     default_padded_attn_implementation,
     load_model_and_tokenizer,
     log_model_info,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -41,16 +41,16 @@ from src.entrypoints.script import (
     verify_backend_on_rank0,
     with_distributed_teardown,
 )
-from src.environments.reasoning_effort import resolve_reasoning_effort
-from src.environments.rollout_config import VLLM_BACKEND
-from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.rewards.graders.verifiable import RLVR_GRADERS
-from src.rewards.trl_reward_functions import ScorerRewardFunction, build_trl_reward_functions
-from src.runtime.collectives import barrier
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.engine_preflight import verify_context_window, verify_sampler_logprob_reference
+from halo.environments.reasoning_effort import resolve_reasoning_effort
+from halo.environments.rollout_config import VLLM_BACKEND
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.rewards.graders.verifiable import RLVR_GRADERS
+from halo.rewards.trl_reward_functions import ScorerRewardFunction, build_trl_reward_functions
+from halo.runtime.collectives import barrier
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.rollout.engine_preflight import verify_context_window, verify_sampler_logprob_reference
 
 
 def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
@@ -71,7 +71,7 @@ def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
 
         template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=args.tools_field)
         # Reasoning-effort steer ("random" → a level sampled per prompt). Single-turn, so per-prompt is
-        # the per-episode analogue of the env-GRPO rollout (src/environments/reasoning_effort.py).
+        # the per-episode analogue of the env-GRPO rollout (halo/environments/reasoning_effort.py).
         effort = resolve_reasoning_effort(args.reasoning_effort)
         if effort is not None:
             template_kwargs["reasoning_effort"] = effort

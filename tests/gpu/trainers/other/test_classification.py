@@ -34,12 +34,12 @@ import torch.nn.functional as F
 from datasets import Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from src.configs.classification import ClassificationConfig
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from src.model_loading.tokenizer_setup import configure_run_tokenizer
-from src.trainers.reward.classification import ClassificationTrainer
+from halo.configs.classification import ClassificationConfig
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_any, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B

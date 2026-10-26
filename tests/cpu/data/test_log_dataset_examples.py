@@ -19,9 +19,9 @@ import tempfile
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.configs.script_arguments import CommonScriptArguments
-from src.entrypoints import data_setup
-from src.entrypoints.data_setup import log_dataset_examples
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.entrypoints import data_setup
+from halo.entrypoints.data_setup import log_dataset_examples
 
 
 class FakeTokenizer:

@@ -74,31 +74,31 @@ from transformers import (
 )
 from transformers.trainer_utils import rotate_checkpoints
 
-import src.checkpoint.parallel.adapters as peft_mod
-import src.trainers.checkpointing as checkpointing_mod
-import src.trainers.embedding.trainer as embedding_module
-from scripts.after_training.convert_to_bf16 import convert_to_bf16
-from scripts.after_training.merge_models import merge_models
-from scripts.after_training.merge_peft_adapters import merge_peft_adapter
-from scripts.training.embedding import inject_lora
-from src.checkpoint.adapters import resume_adapter_dir
-from src.checkpoint.format import (
+import halo.checkpoint.parallel.adapters as peft_mod
+import halo.trainers.checkpointing as checkpointing_mod
+import halo.trainers.embedding.trainer as embedding_module
+from halo.checkpoint.adapters import resume_adapter_dir
+from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
 )
-from src.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
-from src.checkpoint.parallel.resume_weights import resume_numel_coverage
-from src.checkpoint.reading import resolve_checkpoint_weights
-from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
-from src.configs.script_arguments import ModelArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.peft_adapters import lora_fold_targets
-from src.runtime import filesystem
-from src.trainers.embedding.embedding_rules import reject_modules_outside_backbone
-from src.trainers.embedding.injected_lora import folded_backbone_chunks, has_injected_lora
-from src.trainers.embedding.trainer import EmbeddingTrainer
+from halo.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
+from halo.checkpoint.parallel.resume_weights import resume_numel_coverage
+from halo.checkpoint.reading import resolve_checkpoint_weights
+from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.peft_adapters import lora_fold_targets
+from halo.runtime import filesystem
+from halo.trainers.embedding.embedding_rules import reject_modules_outside_backbone
+from halo.trainers.embedding.injected_lora import folded_backbone_chunks, has_injected_lora
+from halo.trainers.embedding.trainer import EmbeddingTrainer
+from scripts.after_training.convert_to_bf16 import convert_to_bf16
+from scripts.after_training.merge_models import merge_models
+from scripts.after_training.merge_peft_adapters import merge_peft_adapter
+from scripts.training.embedding import inject_lora
 from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import fake_process_group_mesh, reset_shared_filesystem_consensus
 from tests.common.embedding_lora_resume import backbone_prefix

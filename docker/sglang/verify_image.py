@@ -61,7 +61,7 @@ def check_request_fields() -> None:
 
 
 def check_rendezvous_convention() -> None:
-    """The trainer vendors SGLang's rendezvous convention (src/weight_sync/transport/c10d_group.py): a
+    """The trainer vendors SGLang's rendezvous convention (halo/weight_sync/transport/c10d_group.py): a
     group_name-prefixed store joined via ``_new_process_group_helper``, trainer at rank 0. A change
     upstream would hang the group with no error."""
     source = inspect.getsource(init_custom_process_group)

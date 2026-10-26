@@ -31,7 +31,7 @@ from transformers import CONFIG_MAPPING, Gemma3Config, Qwen3Config, Qwen3ForCaus
 from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
 from transformers.trainer import SCHEDULER_NAME, TRAINER_STATE_NAME
 
-from src.checkpoint.format import (
+from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     REFERENCE_LOGPS_FILE,
@@ -40,7 +40,7 @@ from src.checkpoint.format import (
     ROUTER_BALANCING_BIASES_FILE,
     prefetch_pending_filename,
 )
-from src.checkpoint.reading import iter_checkpoint_shard_entries
+from halo.checkpoint.reading import iter_checkpoint_shard_entries
 from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import load_script_module

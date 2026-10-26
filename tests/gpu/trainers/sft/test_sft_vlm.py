@@ -27,10 +27,10 @@ from types import SimpleNamespace
 import torch
 from trl import SFTConfig
 
-from src.configs.script_arguments import CommonScriptArguments, ModelArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints.model_setup import load_policy_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.script_arguments import CommonScriptArguments, ModelArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.model_setup import load_policy_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B

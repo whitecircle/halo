@@ -20,21 +20,21 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.episode import RolloutResult
-from src.environments.episode_keys import EPISODE_INVALID_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
-from src.environments.messages import Message, Trajectory
-from src.environments.reasoning_effort import has_thinking_budget
-from src.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm
-from src.trainers.grpo.environmental.environmental_rules import reject_inert_reasoning_terms
-from src.trainers.grpo.environmental.reasoning import (
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.episode import RolloutResult
+from halo.environments.episode_keys import EPISODE_INVALID_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
+from halo.environments.messages import Message, Trajectory
+from halo.environments.reasoning_effort import has_thinking_budget
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm
+from halo.trainers.grpo.environmental.environmental_rules import reject_inert_reasoning_terms
+from halo.trainers.grpo.environmental.reasoning import (
     failed_group_mask,
     reasoning_floor_term,
     reasoning_price_term,
     reasoning_token_counts,
 )
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 PRICE = {"low": 0.01, "medium": 0.005, "high": 0.001}

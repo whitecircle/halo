@@ -40,7 +40,7 @@ Put it under `tests/cpu/<area>/`: module-level `def test_*()` functions with pla
 
 ```python
 import pytest
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 
 def test_ep_tp_etp_combo_rejected():
     """EP+TP+ETP is unsupported and must raise at config time."""
@@ -95,7 +95,7 @@ python tests/cpu/parallelism/test_matrix_correctness_coverage.py # renaming a pa
 ## Sources of truth
 
 `agent-docs/contributing/README.md#tests` + `harness.md` / `matrix.md` document the conventions. The code
-is the **ultimate** authority: `tests/common/harness.py`, `tests/gpu/manifest.py`, and the `src/` behavior
+is the **ultimate** authority: `tests/common/harness.py`, `tests/gpu/manifest.py`, and the `halo/` behavior
 you are testing are what actually hold — when a doc, this skill, or memory disagrees, or you are unsure,
 read the real file before writing the assertion. (`CLAUDE.md`: docs-first, the code wins.) Related
 skill: `data` (the dataset format your fixtures must mimic).

@@ -15,13 +15,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.model_loading.liger.dispatch import warn_if_flce_unreachable
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.model_loading.liger.dispatch import warn_if_flce_unreachable
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
-_LOGGER_NAME = "src.model_loading.liger.dispatch"
+_LOGGER_NAME = "halo.model_loading.liger.dispatch"
 
 
 def _config(applied):

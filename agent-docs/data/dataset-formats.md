@@ -37,7 +37,7 @@ corpus test split comes from the sources that ship one, and only a corpus where 
 to a placeholder cut from its own train rows (set `test_size` to carve a held-out split from every
 source instead).
 
-`_normalize_dataset_schema` (`src/data/sources/corpus.py`) keeps the intersection over train and
+`_normalize_dataset_schema` (`halo/data/sources/corpus.py`) keeps the intersection over train and
 test together: a column missing from any dataset, or whose feature type differs across them, is
 dropped, with no fixed allowlist.
 
@@ -127,7 +127,7 @@ The `image` field accepts: base64 data URI (`data:image/png;base64,...`), file p
 
 Hub datasets that store images in a separate column instead train via `images_field` (the column is injected into the first user turn), and the paired `{user, assistant}` turn shape used by the HuggingFaceM4 `texts` column is normalized to role/content messages — see [SFT — Vision-language models](../training-methods/sft.md#vision-language-models).
 
-A run takes the VLM data path only when **both** halves agree (`is_vlm_run`, `src/data/vlm_routing.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
+A run takes the VLM data path only when **both** halves agree (`is_vlm_run`, `halo/data/vlm_routing.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
 
 A run declares images three ways, any one of which is enough: `images_field` names the column; the dataset carries an `images`, `image` or `pixel_values` column; or the `conversation_field` column embeds `{"type": "image"}` content parts. The preference scripts have no `conversation_field`, so DPO declares by column only.
 
@@ -135,7 +135,7 @@ The embedded-parts declaration is read from the column's **Arrow schema**: the p
 
 The verdict is **agreed across ranks** (all-reduce MAX — any image-declaring rank wins), because on a pre-sharded corpus every rank probes a disjoint slice: its own first row, and the Arrow schema `datasets` inferred for its own shard set. A split verdict would pair one arm's barrier against the other's store wait, so the probe spends one collective per call whatever the answer.
 
-The checkpoint half is `is_vlm_model` (`src/models/modality.py`), judged on the config that `probe_checkpoint` (`src/model_loading/parallel/model_source.py`) reads once, on every rank, at the pinned revision: a `model_type` registered under `AutoModelForImageTextToText` **whose mapped class does not end in `ForCausalLM`** (mistral4 and fuyu are registered there but decode text), or a config carrying a `vision_config`. This covers natively-multimodal models (Qwen3.5/3.6, Gemma3/4, Mistral3) with no name list. A config transformers **knows** decides both ways: a `model_type` present in `CONFIG_MAPPING` that matches neither test is text-only, and the name is never consulted.
+The checkpoint half is `is_vlm_model` (`halo/models/modality.py`), judged on the config that `probe_checkpoint` (`halo/model_loading/parallel/model_source.py`) reads once, on every rank, at the pinned revision: a `model_type` registered under `AutoModelForImageTextToText` **whose mapped class does not end in `ForCausalLM`** (mistral4 and fuyu are registered there but decode text), or a config carrying a `vision_config`. This covers natively-multimodal models (Qwen3.5/3.6, Gemma3/4, Mistral3) with no name list. A config transformers **knows** decides both ways: a `model_type` present in `CONFIG_MAPPING` that matches neither test is text-only, and the name is never consulted.
 
 The name-substring heuristic (`-vl`, `vl-`, `vl2`, `llava`, `vision`, `pixtral`, `molmo`, `idefics`, `paligemma`, `cogvlm`, `minicpm-v`, `qwen3.5-`, `qwen3.6-`) runs only when the config cannot load (offline, or a raw weights dir without `config.json`) or its `model_type` is unregistered (remote code). The hints match mid-word — a path containing `revision` reads as a VLM — so pass an explicit config where the path is uncontrolled.
 
@@ -153,7 +153,7 @@ DPO and SMPO share the format below; full history goes in `prompt`.
 {"prompt": [{"role": "user", "content": "Capital of France?"}], "chosen": [{"role": "assistant", "content": "Paris, the largest city in France..."}], "rejected": [{"role": "assistant", "content": "France capital is Paris I think."}]}
 ```
 
-Hub shape variants normalize to this contract automatically (`normalize_preference_row`, `src/data/pipeline/preferences.py`): a plain-string `prompt` becomes a user turn; chosen/rejected that repeat the prompt turns (ultrafeedback_binarized, the Tulu-3 mixtures) have that prefix stripped; a missing `prompt` column (Skywork-Reward style) is extracted as the shared leading span of chosen/rejected.
+Hub shape variants normalize to this contract automatically (`normalize_preference_row`, `halo/data/pipeline/preferences.py`): a plain-string `prompt` becomes a user turn; chosen/rejected that repeat the prompt turns (ultrafeedback_binarized, the Tulu-3 mixtures) have that prefix stripped; a missing `prompt` column (Skywork-Reward style) is extracted as the shared leading span of chosen/rejected.
 
 Completions are rendered as `template(prompt + completion)` minus the rendered-prompt prefix, so strict chat templates (Qwen3.5) work and `prompt + chosen` always reconstructs the full conversation exactly.
 
@@ -180,7 +180,7 @@ Reference-model shapes for vision rows: [DPO → Vision-language](../training-me
 - Provide one reward per completion. A length mismatch raises `ValueError` naming the offending row, rather than silently truncating to the shorter list.
 - Each group's rewards become group-relative advantages via `advantage_method` (default `quantile_norm`).
 
-Config in `OfflineGRPOConfig` (`src/configs/grpo_offline.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline.md#configuration).
+Config in `OfflineGRPOConfig` (`halo/configs/grpo_offline.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline.md#configuration).
 
 Full-fine-tune KL runs need a finite, unsharded dataset ([Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model)).
 
@@ -227,7 +227,7 @@ DeepEP/NCCL process groups (unpicklable, so the map dies mid-pass).
 tunables through `fn_kwargs` also puts them in the cache key, which values read off `self` never
 reach.
 
-The key (`src/data/pipeline/map_cache_key.py`) hashes the callable's source plus the source of every
+The key (`halo/data/pipeline/map_cache_key.py`) hashes the callable's source plus the source of every
 first-party module-level function it calls by bare name, so editing such a helper re-maps. A helper
 reached as a module attribute or a method stays out of the key, and editing it reuses stale rows: call
 helpers by bare name from a mapped function, a `functools.partial` of one, or a builder closure.
@@ -265,7 +265,7 @@ holds for `prepare_dataset.py --is_vlm` and `patch_vocab.py --chat_template`.
 ### Special-token ownership
 
 Rendered chat-template text tokenizes through `tokenize_rendered`
-(`src/data/pipeline/chat_render.py`), which probes each tokenizer once — tokenizing `""` with
+(`halo/data/pipeline/chat_render.py`), which probes each tokenizer once — tokenizing `""` with
 `add_special_tokens=True` — to learn what its post-processor actually adds. `bos_token` alone is
 unreliable: gpt-oss and Bailing declare a nominal BOS their post-processor never emits, and Zaya
 appends a trailing `<|im_end|>` instead of prepending BOS.

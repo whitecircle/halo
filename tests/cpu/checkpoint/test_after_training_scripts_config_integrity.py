@@ -31,7 +31,7 @@ from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint import offline_export
+from halo.checkpoint import offline_export
 from tests.common.checkpoint_io import weight_files
 from tests.common.repo import load_script_module
 from tests.common.tiny_models import word_level_tokenizer

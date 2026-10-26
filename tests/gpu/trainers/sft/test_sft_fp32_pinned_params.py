@@ -27,7 +27,7 @@ Run with 2 GPUs:
 
 import argparse
 
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
 from tests.common.pinned_params import MODES, run_pinned_family_row
 from tests.common.tiny_models import PINNED_FP32_FAMILIES

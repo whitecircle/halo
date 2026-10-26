@@ -35,6 +35,7 @@ from pathlib import Path
 import pandas as pd
 from tqdm import tqdm
 
+from halo.inference.response import ENGINE_CUT_FINISH_REASONS
 from scripts.inference.inference_arguments import reject_empty_results, run_async_cli
 from scripts.inference.reward_model.reward_model_arguments import (
     OverlongConversationError,
@@ -50,7 +51,6 @@ from scripts.inference.reward_model.reward_model_arguments import (
     resolve_correct_answer,
     score_conversations_offloaded,
 )
-from src.inference.response import ENGINE_CUT_FINISH_REASONS
 
 
 def parse_args():

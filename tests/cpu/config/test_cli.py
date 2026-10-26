@@ -7,7 +7,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from src.cli import app, build_launch_command, resolve_config, tool_commands, training_methods
+from halo.cli import app, build_launch_command, resolve_config, tool_commands, training_methods
 
 runner = CliRunner()
 

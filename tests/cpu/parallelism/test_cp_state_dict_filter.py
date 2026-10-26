@@ -18,8 +18,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.context_parallel.ulysses_model import UlyssesModel, stale_dense_mlp_keys
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel, stale_dense_mlp_keys
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k

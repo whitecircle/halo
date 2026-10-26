@@ -33,11 +33,11 @@ from liger_kernel.ops.geglu import LigerGELUMulFunction
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 
-from src.distributed.expert_parallel.moe_layer import compute
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.kernels.expert_gemm import expert_gemm
-from src.kernels.fused_glu import GluCombine
-from src.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
+from halo.distributed.expert_parallel.moe_layer import compute
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.kernels.expert_gemm import expert_gemm
+from halo.kernels.fused_glu import GluCombine
+from halo.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
 
 HIDDEN, INTERMEDIATE, EXPERTS, TOP_K = 2816, 704, 128, 8
 

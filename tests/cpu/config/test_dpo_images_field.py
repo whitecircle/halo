@@ -21,7 +21,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.entrypoints.model_setup import PolicyLoad
+from halo.entrypoints.model_setup import PolicyLoad
 from tests.common.repo import load_script_module
 
 # The name heuristic reads this as multimodal, so the checkpoint verdict holds offline too.
@@ -99,9 +99,9 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         # Both live in the shared data_setup helper the script calls — patch its globals.
-        mock.patch("src.entrypoints.data_setup.prepare_preference_datasets", side_effect=_TextPathReached),
-        mock.patch("src.entrypoints.data_setup.log_dataset_examples", side_effect=capture),
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.data_setup.prepare_preference_datasets", side_effect=_TextPathReached),
+        mock.patch("halo.entrypoints.data_setup.log_dataset_examples", side_effect=capture),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
 

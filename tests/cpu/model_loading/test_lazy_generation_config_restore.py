@@ -13,7 +13,7 @@ import pytest
 import torch.nn as nn
 from transformers import GenerationConfig
 
-from src.model_loading.lazy_safetensors.meta_shell import _restore_checkpoint_generation_config
+from halo.model_loading.lazy_safetensors.meta_shell import _restore_checkpoint_generation_config
 
 
 def _raising_from_pretrained(*args, **kwargs):

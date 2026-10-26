@@ -19,10 +19,10 @@ from pathlib import Path
 
 import pytest
 
-from src.config_validation import reject_non_default_args
-from src.configs.grpo import RLRRArguments, RLRRConfig, rlrr_arg_name
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.configs.parser import HaloArgumentParser
+from halo.config_validation import reject_non_default_args
+from halo.configs.grpo import RLRRArguments, RLRRConfig, rlrr_arg_name
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.parser import HaloArgumentParser
 from tests.common.repo import REPO_ROOT
 
 RLVR_SCRIPT = REPO_ROOT / "scripts/training/online_grpo/rlvr.py"

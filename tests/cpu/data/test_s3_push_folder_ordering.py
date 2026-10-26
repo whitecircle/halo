@@ -11,7 +11,7 @@ completes.
 
 import pytest
 
-from src.data.sources.s3_client import S3Client
+from halo.data.sources.s3_client import S3Client
 
 
 class _FakePaginator:

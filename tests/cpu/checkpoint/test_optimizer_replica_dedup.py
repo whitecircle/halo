@@ -22,10 +22,10 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimizer_state_dict
 
-import src.checkpoint.parallel.optimizer as optimizer_mod
-from src.checkpoint.parallel.optimizer import OptimizerShardStore, expert_replica_writer
-from src.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+import halo.checkpoint.parallel.optimizer as optimizer_mod
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore, expert_replica_writer
+from halo.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from tests.common.checkpoint_io import load_context
 from tests.common.parallelism import make_parallelism_config
 

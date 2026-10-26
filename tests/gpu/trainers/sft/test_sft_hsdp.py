@@ -30,9 +30,9 @@ import torch
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import group_max_abs_diff
 from tests.common.harness import gpu_test_main

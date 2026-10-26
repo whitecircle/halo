@@ -28,7 +28,7 @@ the fused Qwen3.5/3.6 hub.
 
 # The device-aware kernel-dispatch shim must land before the modeling modules bind transformers'
 # hub-kernel fallback at import, or a CPU forward of a conv / linear-attention family reaches CUDA.
-import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
+import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 import itertools
 import os
@@ -42,15 +42,15 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from transformers import Trainer, TrainingArguments
 
+from halo.checkpoint.parallel.context import CheckpointLoadContext
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.checkpoint.parallel.resume_weights import load_resume_weights
+from halo.checkpoint.parallel.save import save_fsdp2_checkpoint
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.param_roles import persistent_buffers
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
-from src.checkpoint.parallel.context import CheckpointLoadContext
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.checkpoint.parallel.resume_weights import load_resume_weights
-from src.checkpoint.parallel.save import save_fsdp2_checkpoint
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.param_roles import persistent_buffers
 from tests.common.checkpoint_io import load_context, save_context, written_keys
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.tiny_models import (

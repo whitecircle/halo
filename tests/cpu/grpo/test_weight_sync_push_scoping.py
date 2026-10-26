@@ -24,13 +24,13 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.weight_sync.clients.base as base_module
-import src.weight_sync.pool as pool_module
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.pool import WeightSyncPool
+import halo.weight_sync.clients.base as base_module
+import halo.weight_sync.pool as pool_module
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.pool import WeightSyncPool
 from tests.common.weight_sync import ServerlessSGLangClient, Wire, offline_client
 
 # Each projection is a 2x2 bf16 weight, 8 bytes: a 16-byte budget holds two, so the cut falls between

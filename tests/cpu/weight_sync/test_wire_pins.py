@@ -17,10 +17,10 @@ from datetime import timedelta
 import pytest
 import torch
 
-from src.distributed.nccl._nccl_wrapper import ncclUniqueId
-from src.weight_sync.transport import rendezvous
-from src.weight_sync.transport.c10d_group import build_weight_update_group
-from src.weight_sync.transport.rendezvous import RendezvousListener
+from halo.weight_sync.transport import rendezvous
+from halo.weight_sync.transport.c10d_group import build_weight_update_group
+from halo.weight_sync.transport.nccl_library import ncclUniqueId
+from halo.weight_sync.transport.rendezvous import RendezvousListener
 from tests.common.goldens.weight_sync_wire import GOLDEN_PATH, PINNED_ID_BYTES, WORLD_SIZE, bootstrap_record
 from tests.common.repo import REPO_ROOT
 

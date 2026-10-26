@@ -11,9 +11,9 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
-from src.trainers.grpo.objective.offline_loss import offline_token_objective
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.world_metrics import WorldMetrics
+from halo.trainers.grpo.objective.offline_loss import offline_token_objective
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.world_metrics import WorldMetrics
 from tests.common.gloo import run_gloo_ranks
 
 
@@ -46,7 +46,7 @@ def _diagnostics_worker(rank, cp_size, training):
     actual = _trainer(cp_size=cp_size, cp_rank=rank, training=training)
     actual._record_sign_metrics(shards, advantages, mask[:, start:end])
     broken = _trainer(cp_size=cp_size, cp_rank=rank, training=training)
-    with patch("src.trainers.grpo.offline.trainer.cp_sum_rows", side_effect=lambda totals, _config: totals):
+    with patch("halo.trainers.grpo.offline.trainer.cp_sum_rows", side_effect=lambda totals, _config: totals):
         broken._record_sign_metrics(shards, advantages, mask[:, start:end])
     for trainer in (expected, actual, broken):
         trainer._sign_metrics[mode].flush(trainer._metrics[mode])

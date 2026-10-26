@@ -33,20 +33,20 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from typing import Any
 
-from src.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
-from src.environments.registry import build_environment
-from src.environments.tasks.coding.code_contests import (
+from halo.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
+from halo.environments.registry import build_environment
+from halo.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,
     CodeContestsEnvironment,
 )
-from src.environments.tasks.coding.code_contests_prompts import SUBMIT_TOOL
-from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, ContestSelection
-from src.environments.tasks.coding.grading import grade_solution
-from src.environments.tasks.coding.program_source import normalized_program
-from src.environments.tasks.coding.verdicts import FloatTolerance, find_stated_float_tolerance
-from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
-from src.environments.tools.definitions import NativeToolCall, ToolArgumentError
+from halo.environments.tasks.coding.code_contests_prompts import SUBMIT_TOOL
+from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, ContestSelection
+from halo.environments.tasks.coding.grading import grade_solution
+from halo.environments.tasks.coding.program_source import normalized_program
+from halo.environments.tasks.coding.verdicts import FloatTolerance, find_stated_float_tolerance
+from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
+from halo.environments.tools.definitions import NativeToolCall, ToolArgumentError
 
 # Meta keys a re-grade needs: env_type/adapter/dataset/split select the environment and rebuild the
 # hidden tests, model/language name the row of the report. Only run_code_contests.py stamps the full

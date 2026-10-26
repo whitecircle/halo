@@ -14,7 +14,7 @@ import statistics
 import pytest
 import torch
 
-from src.trainers.grpo.objective.advantages import STD_EPS, compute_group_advantages, group_relative_advantages
+from halo.trainers.grpo.objective.advantages import STD_EPS, compute_group_advantages, group_relative_advantages
 
 METHODS = ["z_norm", "minmax", "quantile_norm", "quantile_uniform", "robust"]
 

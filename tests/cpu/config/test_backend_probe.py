@@ -15,8 +15,8 @@ import ast
 
 import pytest
 
-from src.entrypoints.script import verify_backend_on_rank0
-from src.runtime import consensus
+from halo.entrypoints.script import verify_backend_on_rank0
+from halo.runtime import consensus
 from tests.common.repo import REPO_ROOT
 
 _PROBING_SCRIPTS = ("scripts/training/online_grpo/rlvr.py", "scripts/training/environmental_grpo.py")

@@ -10,8 +10,8 @@ Test-only. The tool never calls this; a second in-tool path holding the whole mo
 defeat the streaming the tool exists for.
 """
 
+from halo.models.moe.expert_layout import to_hub_expert_tensors
 from scripts.after_training.merge_ep_shards import _group_expert_weights, _resolve_merge_transform
-from src.models.moe.expert_layout import to_hub_expert_tensors
 
 
 def post_process_merged_weights(

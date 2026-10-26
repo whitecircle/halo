@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from transformers.core_model_loading import PrefixChange
 
-from src.checkpoint.hub_layout import revert_to_load_layout
+from halo.checkpoint.hub_layout import revert_to_load_layout
 
 
 class _Inner(nn.Module):

@@ -15,11 +15,11 @@ from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM
 
-import src.trainers.grpo.offline.trainer as offline_module
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.grpo.offline.reference import ReferenceMode
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+import halo.trainers.grpo.offline.trainer as offline_module
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.grpo.offline.reference import ReferenceMode
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 
 PartialState()

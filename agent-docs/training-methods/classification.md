@@ -1,6 +1,6 @@
 # Classification
 
-Sequence classification — single-label (multi-class) and multi-label — on `AutoModelForSequenceClassification`. Trainer `ClassificationTrainer` (`src/trainers/reward/classification.py`), script `scripts/training/classification.py`. Text-only. For a scalar preference score on the same architecture use [Reward Modeling](preference/reward-modeling.md).
+Sequence classification — single-label (multi-class) and multi-label — on `AutoModelForSequenceClassification`. Trainer `ClassificationTrainer` (`halo/trainers/reward/classification.py`), script `scripts/training/classification.py`. Text-only. For a scalar preference score on the same architecture use [Reward Modeling](preference/reward-modeling.md).
 
 EP, TP, ETP, EP+TP and EP+ETP run, as does plain FSDP2 data parallelism. CP does not — the head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)).
 
@@ -35,7 +35,7 @@ output_dir: checkpoints/clf-qwen3.5-9b-mage
 
 `loss_type` picks `cross_entropy`, `focal` or `label_smoothing_ce`; every field's type and default, and which apply to single- or multi-label heads, is in [ClassificationConfig](../reference/configuration-reference.md#classificationconfig).
 
-`class_weights` and `derive_class_weights` are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own `ClassificationLoss` (`src/trainers/reward/classification_loss.py`), evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
+`class_weights` and `derive_class_weights` are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own `ClassificationLoss` (`halo/trainers/reward/classification_loss.py`), evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
 
 The script defaults `attn_implementation` to `sdpa` when the YAML pins none, because batches are right-padded and the auto-selected FA4 would take its slow varlen path. Under `reset_sinks: false` it requests nothing and lets the resolver auto-select, which there accepts only a sink-carrying backend.
 

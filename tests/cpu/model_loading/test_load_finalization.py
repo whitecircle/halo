@@ -5,7 +5,7 @@ transformers 5 builds every model on meta and re-materializes each non-persisten
 ``torch.empty_like`` (uninitialized); the only upstream repair is ``_init_weights``' RotaryEmbedding
 branch, which a remote-code family overriding ``_init_weights`` without ``super()`` (Bailing/Ling V3)
 never runs — a zero/garbage ``inv_freq`` degenerates RoPE to NoPE and trains with a plausible loss.
-``finalize_loaded_model`` (src/model_loading/buffer_repair.py) is the single post-load seam:
+``finalize_loaded_model`` (halo/model_loading/buffer_repair.py) is the single post-load seam:
 buffer recompute + re-tie, run by EVERY load path once weights sit on their device.
 
 These tests pin (1) the seam's three legs — a seam that drops one silently breaks every path that
@@ -29,8 +29,8 @@ import torch.nn as nn
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
-from src.model_loading.buffer_repair import finalize_loaded_model
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.repo import REPO_ROOT
 from tests.common.source_sweep import (
     TOOLKIT_LOAD_CALLS,
@@ -43,9 +43,9 @@ from tests.common.source_sweep import (
 
 SEAM = finalize_loaded_model.__name__
 
-DISPATCHER = "src/model_loading/parallel/loader.py"
-# The sharding-agnostic model-construction package, swept whole beside src/distributed.
-LOADING_PACKAGE = "src/model_loading"
+DISPATCHER = "halo/model_loading/parallel/loader.py"
+# The sharding-agnostic model-construction package, swept whole beside halo/distributed.
+LOADING_PACKAGE = "halo/model_loading"
 
 # The per-mode loaders the dispatcher calls. Discovered by the sweep below; pinned here as an exact set
 # so a renamed, removed or added loader is a deliberate edit rather than a silently shrunk sweep.
@@ -68,12 +68,12 @@ DISPATCHED_LOADERS = frozenset(
 # a new terminal loader belongs here, and the reachability sweep is what catches one that is missing.
 TERMINAL_LOADERS = (
     (DISPATCHER, "_build_random_init"),
-    ("src/model_loading/parallel/tp.py", "load_tp_model"),
-    ("src/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
-    ("src/model_loading/parallel/whole_model.py", "resolve_trainer_model"),
-    ("src/model_loading/parallel/whole_model.py", "load_whole_model"),
-    ("src/model_loading/parallel/ep.py", "load_ep_model_lazy"),
-    ("src/model_loading/parallel/pp.py", "_load_stage_lazy"),
+    ("halo/model_loading/parallel/tp.py", "load_tp_model"),
+    ("halo/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
+    ("halo/model_loading/parallel/whole_model.py", "resolve_trainer_model"),
+    ("halo/model_loading/parallel/whole_model.py", "load_whole_model"),
+    ("halo/model_loading/parallel/ep.py", "load_ep_model_lazy"),
+    ("halo/model_loading/parallel/pp.py", "_load_stage_lazy"),
 )
 
 # Tool loaders whose model is handed to a FORWARD — reward scores, dedup embeddings, the
@@ -172,16 +172,18 @@ def test_seam_reties_shared_weights():
 
 
 def _graph_modules() -> list[str]:
-    """Every module the sweep must see, DERIVED: the loading package, all of ``src/distributed`` (the
-    EP/PP/CP loaders and the load core they delegate to) and every other ``src`` module naming the seam.
+    """Every module the sweep must see, DERIVED: the loading package, all of ``halo/distributed`` (the
+    EP/PP/CP loaders and the load core they delegate to) and every other ``halo`` module naming the seam.
 
     A loader that delegates across modules is followed to wherever the load happens; one that never
     finalizes is in the graph without reaching the seam, so the sweep below fails — the failure
     direction this test exists for.
     """
+    roots = (REPO_ROOT / LOADING_PACKAGE, REPO_ROOT / "halo/distributed")
+    assert all(root.is_dir() for root in roots), f"the sweep lost a root: {roots}"
     package = (REPO_ROOT / LOADING_PACKAGE).rglob("*.py")
-    distributed = (REPO_ROOT / "src/distributed").rglob("*.py")
-    callers = (path for path in (REPO_ROOT / "src").rglob("*.py") if SEAM in path.read_text(encoding="utf-8"))
+    distributed = (REPO_ROOT / "halo/distributed").rglob("*.py")
+    callers = (path for path in (REPO_ROOT / "halo").rglob("*.py") if SEAM in path.read_text(encoding="utf-8"))
     return sorted({path.relative_to(REPO_ROOT).as_posix() for path in (*package, *distributed, *callers)})
 
 
@@ -305,9 +307,9 @@ def test_conversion_tools_still_run_no_forward():
 def test_no_trainer_loads_a_model_itself():
     """A trainer holds the models its caller loaded: the policy through the distributed loaders or
     ``resolve_trainer_model``, a frozen reference or teacher through ``load_frozen_auxiliary_model``
-    in its script. A load inside ``src/trainers`` skips the buffer repair, the sinks policy and the
+    in its script. A load inside ``halo/trainers`` skips the buffer repair, the sinks policy and the
     family attention patches those loaders own, and takes none of the run's load flags."""
-    offenders = sorted(f"{rel}:{name}" for rel, name in functions_calling(("src/trainers",), builds_a_model))
+    offenders = sorted(f"{rel}:{name}" for rel, name in functions_calling(("halo/trainers",), builds_a_model))
     assert not offenders, (
         f"{offenders} load a model inside a trainer. Load it in the entry script through the loader "
         f"that owns its kind ({SEAM} runs there) and pass it to the trainer."

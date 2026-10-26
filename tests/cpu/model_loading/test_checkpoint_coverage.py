@@ -3,7 +3,7 @@
 ``from_pretrained`` re-initializes every key it cannot find and reports it through the transformers
 logger only — which ``configure_training_run`` silences on every non-logging rank. A truncated or
 wrong-architecture directory therefore trains half a model of random weights with no exception and no
-output. :mod:`src.model_loading.checkpoint_coverage` turns that into a raise.
+output. :mod:`halo.model_loading.checkpoint_coverage` turns that into a raise.
 
 Both directions are pinned here, because a gate that over-rejects is as bad as one that never fires:
 
@@ -26,14 +26,14 @@ import torch.nn as nn
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceClassification, Qwen3ForCausalLM
 
-from src.model_loading.checkpoint_coverage import (
+from halo.model_loading.checkpoint_coverage import (
     ALLOW_MISSING_CHECKPOINT_KEYS_ENV,
     from_pretrained_verified,
     unexpected_missing_keys,
     verify_checkpoint_coverage,
 )
-from src.model_loading.model_preparation import auto_load_model
-from src.model_loading.remote_code import TIED_KEYS_WERE_LIST_ATTR, _fix_legacy_tied_weights_keys
+from halo.model_loading.model_preparation import auto_load_model
+from halo.model_loading.remote_code import TIED_KEYS_WERE_LIST_ATTR, _fix_legacy_tied_weights_keys
 from tests.common.repo import probe_findings
 
 
@@ -241,7 +241,7 @@ def test_importing_the_gate_makes_module_cache_copies_whole():
     """Every tool loading through ``from_pretrained_verified`` gets transformers' module-cache copies made whole."""
     script = """
 import transformers.dynamic_module_utils as dynamic_module_utils
-import src.model_loading.checkpoint_coverage
+import halo.model_loading.checkpoint_coverage
 print("FINDINGS:" + ("" if getattr(dynamic_module_utils.shutil, "_halo_whole_copy", False) else "copies not whole"))
 """
     assert not probe_findings(script, "FINDINGS:")

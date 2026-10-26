@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from trl.trainer.utils import RepeatSampler
 
-from src.trainers.grpo.on_policy import GenerationRoundMixin
+from halo.trainers.grpo.on_policy import GenerationRoundMixin
 
 
 class _TrlWorldRateBase:

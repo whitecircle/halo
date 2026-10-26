@@ -13,7 +13,7 @@ Run with 1 GPU:
 
 import torch
 
-from src.kernels.head_logprobs import VOCAB_TILE, _logprobs_backward, _logprobs_forward, chunked_head_logprobs
+from halo.kernels.head_logprobs import VOCAB_TILE, _logprobs_backward, _logprobs_forward, chunked_head_logprobs
 from tests.common.harness import gpu_test_main
 from tests.common.utils import fro_rel_err
 

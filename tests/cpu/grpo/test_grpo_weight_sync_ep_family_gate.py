@@ -15,10 +15,10 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.models.moe.family_specs import MoEFamilySpec
-from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.models.moe.family_specs import MoEFamilySpec
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 # Families refused on every engine; each reason is stated at the class declaration. What one engine
 # alone cannot serve is that engine client's ``UNSERVABLE_MODEL_TYPES``

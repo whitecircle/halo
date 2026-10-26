@@ -15,9 +15,9 @@ import textwrap
 
 import pytest
 
-from src.configs.embedding import EmbeddingConfig
-from src.trainers.embedding.embedding_rules import reject_batch_sampler_on_toolkit_loader
-from src.trainers.embedding.trainer import EmbeddingTrainer
+from halo.configs.embedding import EmbeddingConfig
+from halo.trainers.embedding.embedding_rules import reject_batch_sampler_on_toolkit_loader
+from halo.trainers.embedding.trainer import EmbeddingTrainer
 
 
 def _check(batch_sampler: str, *, toolkit_loader: bool, tmp_path) -> None:

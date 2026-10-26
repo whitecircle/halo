@@ -27,14 +27,14 @@ import pytest
 import torch
 from torch import nn
 
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.parallelism.mode_setup import reject_unsynced_trainable_params
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.parallelism.mode_setup import reject_unsynced_trainable_params
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
 
 E, H, M = 2, 4, 8
-_FABRIC_PROBE = "src.distributed.parallelism_config.validate_nvlink_domain_against_fabric"
-_RANK_UNIFORM_ENV = "src.trainers.distributed_trainer.agree_rank_uniform_env"
+_FABRIC_PROBE = "halo.distributed.parallelism_config.validate_nvlink_domain_against_fabric"
+_RANK_UNIFORM_ENV = "halo.trainers.distributed_trainer.agree_rank_uniform_env"
 
 # Every axis set whose wrap leaves EP layers out of FSDP2, paired with the wrap _wrap_for_parallel_mode
 # dispatches it to: ep_group_size > 1, or plain DP with fsdp_shard_ep1_experts off. CP and TP refuse that

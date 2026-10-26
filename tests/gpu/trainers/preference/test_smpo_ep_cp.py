@@ -35,10 +35,10 @@ Note:
 import torch
 from transformers import AutoTokenizer
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.first_step import FirstStep, first_step_checks, score_first_step, train_recording_first_step

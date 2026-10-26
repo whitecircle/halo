@@ -25,19 +25,19 @@ from transformers import (
 )
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 
-from src.distributed.pipeline_parallel import model_rules
-from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
-from src.distributed.pipeline_parallel.partition import (
+from halo.distributed.pipeline_parallel import model_rules
+from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
+from halo.distributed.pipeline_parallel.partition import (
     compute_layer_partition,
     head_cost_layer_equivalents,
     layer_types_period,
     validate_partition,
 )
-from src.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
-from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
-from src.models.moe.config_fields import ROUTER_TOPK_FIELDS
-from src.models.param_roles import persistent_buffers
+from halo.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
+from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
+from halo.models.moe.config_fields import ROUTER_TOPK_FIELDS
+from halo.models.param_roles import persistent_buffers
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_INKLING_PP_OVERRIDES, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
 from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.tiny_models import (

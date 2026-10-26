@@ -29,25 +29,25 @@ import torch.nn as nn
 from safetensors.torch import save_file
 from transformers import AutoConfig, GptOssConfig, GptOssForCausalLM
 
-import src.model_loading.parallel.ep as ep_lazy_loader
-import src.model_loading.parallel.model_source as model_source
-from src.checkpoint.reading import resolve_checkpoint_weights
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.expert_fuser import ExpertFuser
-from src.distributed.expert_parallel.lazy_plan import WeightPlanner
-from src.model_loading.lazy_safetensors.materialization import SafetensorsWeightLoader, WeightAction, WeightPlan
-from src.model_loading.parallel.ep import load_ep_model_lazy
-from src.runtime import consensus
+import halo.model_loading.parallel.ep as ep_lazy_loader
+import halo.model_loading.parallel.model_source as model_source
+from halo.checkpoint.reading import resolve_checkpoint_weights
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.expert_fuser import ExpertFuser
+from halo.distributed.expert_parallel.lazy_plan import WeightPlanner
+from halo.model_loading.lazy_safetensors.materialization import SafetensorsWeightLoader, WeightAction, WeightPlan
+from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.runtime import consensus
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.repo import REPO_ROOT
 
 E_GLOBAL, M, H = 8, 6, 4
-LOADER_LOGGER = "src.distributed.expert_parallel.lazy_plan"
+LOADER_LOGGER = "halo.distributed.expert_parallel.lazy_plan"
 
 # Loaders that open the lazy safetensors path and must reach it through the shared rank-0 gate.
 _LAZY_GATE_CALL_SITES = (
-    REPO_ROOT / "src/model_loading/parallel/ep.py",
-    REPO_ROOT / "src/model_loading/parallel/pp.py",
+    REPO_ROOT / "halo/model_loading/parallel/ep.py",
+    REPO_ROOT / "halo/model_loading/parallel/pp.py",
 )
 
 

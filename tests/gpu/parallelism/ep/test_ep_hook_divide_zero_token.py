@@ -24,9 +24,9 @@ from accelerate.state import GradientState
 from transformers import AutoModelForCausalLM
 from transformers.models.qwen3_moe import Qwen3MoeConfig
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.utils import cleanup_memory, log, log_all, max_or_nan

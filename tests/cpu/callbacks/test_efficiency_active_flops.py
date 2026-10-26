@@ -10,8 +10,8 @@ import pytest
 import torch
 from torch import nn
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.callbacks.model_flops import estimate_rank_flops
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.callbacks.model_flops import estimate_rank_flops
 from tests.common.parallelism import make_parallelism_config
 
 # Warmup accounting reads no axis size; a single-process config keeps those tests topology-free.

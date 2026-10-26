@@ -30,11 +30,11 @@ Requirements:
 
 import gc
 
-from src.distributed.expert_parallel.deepep import backends as backends_mod
-from src.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
-from src.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
-from src.distributed.parallelism_config import ParallelismConfig
-from src.runtime.collectives import barrier
+from halo.distributed.expert_parallel.deepep import backends as backends_mod
+from halo.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
+from halo.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log
 

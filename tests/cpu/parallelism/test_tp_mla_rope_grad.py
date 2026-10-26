@@ -28,7 +28,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

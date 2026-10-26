@@ -21,7 +21,7 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.optimizers.muon import build_muon_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_5_2B
 

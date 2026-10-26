@@ -15,10 +15,10 @@ import pytest
 from tokenizers import Tokenizer, pre_tokenizers
 from tokenizers.models import WordLevel
 
-from src.data.pipeline import map_cache_key
-from src.data.pipeline.map_cache_key import _tokenizer_content_sig, kwargs_fingerprint
+from halo.data.pipeline import map_cache_key
+from halo.data.pipeline.map_cache_key import _tokenizer_content_sig, kwargs_fingerprint
 
-_LOGGER = "src.data.pipeline.map_cache_key"
+_LOGGER = "halo.data.pipeline.map_cache_key"
 _WARNING_TEXT = "cannot hash the content of tokenizer"
 
 

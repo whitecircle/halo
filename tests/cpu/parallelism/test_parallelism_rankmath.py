@@ -23,7 +23,7 @@ import pytest
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from src.trainers.parallelism.ep_layers import EPLayersMixin
+from halo.trainers.parallelism.ep_layers import EPLayersMixin
 from tests.common.parallelism import create_config
 
 
@@ -82,7 +82,7 @@ def _run_ep_gc_guard(config):
     stub._top_level_model = lambda: stub.model
     stub._ep_layers = lambda: [SimpleNamespace(FAMILY=SimpleNamespace(supports_gradient_checkpointing=True))]
 
-    with patch("src.trainers.parallelism.ep_layers.is_global_main_process", return_value=True):
+    with patch("halo.trainers.parallelism.ep_layers.is_global_main_process", return_value=True):
         EPLayersMixin._install_ep_gradient_checkpointing(stub)
 
 

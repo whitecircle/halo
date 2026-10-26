@@ -19,9 +19,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.context_parallel import ulysses_attention
-from src.distributed.context_parallel.families import Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention
-from src.distributed.context_parallel.ulysses_attention import MLAUlyssesAttention
+from halo.distributed.context_parallel import ulysses_attention
+from halo.distributed.context_parallel.families import Glm4MoeLiteUlyssesAttention, Mistral4UlyssesAttention
+from halo.distributed.context_parallel.ulysses_attention import MLAUlyssesAttention
 
 HIDDEN = 32
 NUM_Q_HEADS = 4

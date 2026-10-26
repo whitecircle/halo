@@ -35,8 +35,8 @@ from transformers.models.laguna.modeling_laguna import LagunaRMSNorm
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeMLP
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeRMSNorm
 
-from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from src.model_loading.liger.fused_modules import (
+from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.model_loading.liger.fused_modules import (
     _fused_glu_forward,
     _native_rms_norm_class,
     apply_fused_modules,

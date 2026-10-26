@@ -23,7 +23,7 @@ For exact means, make `len(split) × num_generations_eval` a multiple of `eval_r
 
 ## Running an evaluation
 
-Two CLIs drive training's own episode loop (`play_episode`, through `src/environments/eval_runner.py`) against an OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter): `run_env.py` for generic environments, `run_code_contests.py` for code contests. Replies are read by the training rollout's own parser (`turn_from_chat_completion`).
+Two CLIs drive training's own episode loop (`play_episode`, through `halo/environments/eval_runner.py`) against an OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter): `run_env.py` for generic environments, `run_code_contests.py` for code contests. Replies are read by the training rollout's own parser (`turn_from_chat_completion`).
 
 ```bash
 python scripts/environments/inference/run_env.py --env_type qa_search \

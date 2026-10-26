@@ -14,13 +14,13 @@ from collections import defaultdict
 
 import pytest
 
-from src.environments.episode import RolloutResult
-from src.environments.episode_keys import EPISODE_SLICES_KEY
-from src.environments.messages import Trajectory
-from src.rewards.terms import REWARD_COMPONENT_PREFIX
-from src.trainers import world_metrics
-from src.trainers.grpo.environmental import rollout_metrics
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.environments.episode import RolloutResult
+from halo.environments.episode_keys import EPISODE_SLICES_KEY
+from halo.environments.messages import Trajectory
+from halo.rewards.terms import REWARD_COMPONENT_PREFIX
+from halo.trainers import world_metrics
+from halo.trainers.grpo.environmental import rollout_metrics
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 
 def _host():

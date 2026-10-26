@@ -13,7 +13,7 @@ import weakref
 import pytest
 import torch
 
-from src.runtime.dtensor import resolve_retained
+from halo.runtime.dtensor import resolve_retained
 
 ITEMS = 4
 

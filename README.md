@@ -197,7 +197,7 @@ A map of the repository:
 
 | Path | What's inside |
 |---|---|
-| **`src/`** | Trainers, parallelism, optimizers, kernels, collators, and callbacks |
+| **`halo/`** | Trainers, parallelism, optimizers, kernels, collators, and callbacks |
 | **`scripts/`** | Training entry points, inference, data-prep, and checkpoint tools |
 | **`examples/`** | Ready-to-run YAML configs, grouped by method and model |
 | **`launcher-configs/`** | Accelerate, SkyPilot, and Nomad launch configs |

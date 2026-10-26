@@ -19,9 +19,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.data.collators.factory import select_data_collator
-from src.data.collators.packing import DataCollatorWithPacking
-from src.subclass_registry import iter_subclasses
+from halo.data.collators.factory import select_data_collator
+from halo.data.collators.packing import DataCollatorWithPacking
+from halo.subclass_registry import iter_subclasses
 
 # Constructor arguments the subclasses add on top of ``tokenizer``. Only values needed to reach the
 # guard; a subclass introducing a new REQUIRED argument fails

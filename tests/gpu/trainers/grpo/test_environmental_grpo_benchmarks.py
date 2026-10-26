@@ -50,15 +50,15 @@ from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig
 
-from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int, env_str
-from src.environments.protocols.react import ReActEnvironment
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.qa import ExamQAEnvironment
-from src.environments.tools.toolsets import build_math_tools, build_python_tools
-from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int, env_str
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.qa import ExamQAEnvironment
+from halo.environments.tools.toolsets import build_math_tools, build_python_tools
+from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory, step_losses

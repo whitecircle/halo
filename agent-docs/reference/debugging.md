@@ -16,11 +16,11 @@ Every helper here is opt-in and costs nothing when disabled.
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
 | Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
 
-The consistency check is `assert_rank_uniform` in `src/runtime/consensus.py`. It is **manual
+The consistency check is `assert_rank_uniform` in `halo/runtime/consensus.py`. It is **manual
 instrumentation** — the toolkit ships no call sites for it, so the env flag does nothing until you
 add the call to the code you are investigating. The profiler session and CUDA-memory helpers live in
-`src/diagnostics/profiling.py`, the py-spy captures behind `py_spy_diag.py` in
-`src/diagnostics/py_spy.py`, and the in-loop callbacks in `src/callbacks/`.
+`halo/diagnostics/profiling.py`, the py-spy captures behind `py_spy_diag.py` in
+`halo/diagnostics/py_spy.py`, and the in-loop callbacks in `halo/callbacks/`.
 
 ## 1. Flame graphs
 
@@ -67,7 +67,7 @@ rest of training runs at full speed. On a large multi-GPU MoE, CPU per-op tracin
 at the cost of host-side op attribution and the TraceLens report (§1b). Profile an arbitrary region the same way:
 
 ```python
-from src.diagnostics.profiling import torch_profiler_session
+from halo.diagnostics.profiling import torch_profiler_session
 
 with torch_profiler_session("/mnt/profiling/gen", label="generate", ranks="0"):
     out = model.generate(**inputs)
@@ -154,7 +154,7 @@ collective report (`scripts/profiling/trace_report.py`), which attributes wait t
 per rank without a code change.
 
 **Fine-grained op timing** — `get_ep_span_timer().time_operation(name)`
-(`src/diagnostics/ep_span_timing.py`) times a span on CUDA events where available, else the
+(`halo/diagnostics/ep_span_timing.py`) times a span on CUDA events where available, else the
 wall clock, and accumulates it into the timer's `.stats` map: one `TimingStats` (`count`,
 `total_time`, `.avg_time`) per operation name.
 
@@ -178,7 +178,7 @@ one after.
 Or wrap any region manually:
 
 ```python
-from src.diagnostics.profiling import cuda_memory_history
+from halo.diagnostics.profiling import cuda_memory_history
 
 with cuda_memory_history(ranks="all"):  # → $HALO_DATA_ROOT/profiling/memory/snapshot-rankNN.pickle
     trainer.train()      # or the step that OOMs
@@ -187,7 +187,7 @@ with cuda_memory_history(ranks="all"):  # → $HALO_DATA_ROOT/profiling/memory/s
 Drag the `.pickle` onto <https://pytorch.org/memory_viz> for the allocation timeline and
 per-allocation flame graph, each block traced to its Python call site — the fastest way to find an
 OOM source or a leak. For a quick textual check, `log_cuda_memory("after forward")` in
-`src.diagnostics.profiling` logs this rank's allocated, reserved and peak memory
+`halo.diagnostics.profiling` logs this rank's allocated, reserved and peak memory
 (`read_cuda_memory()` returns them as GiB); `torch.cuda.reset_peak_memory_stats()` scopes the peaks to
 a region. `EfficiencyCallback` already reports peak memory per step.
 
@@ -233,7 +233,7 @@ python scripts/profiling/py_spy_diag.py dump   # → $TMPDIR/halo_diag_stacks/<t
 
 It attaches to every training process on the node, so it needs ptrace access to each ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)).
 The rank *not* in a collective (still in the dataloader, or a different `if` branch) is the culprit.
-In-script, `dump_distributed_stacks` (`src/diagnostics/py_spy.py`) takes the same snapshot.
+In-script, `dump_distributed_stacks` (`halo/diagnostics/py_spy.py`) takes the same snapshot.
 
 ### Catch divergence before it deadlocks
 
@@ -249,7 +249,7 @@ export HALO_TP_CONSISTENCY_CHECK=1   # make assert_rank_uniform raise instead of
 `strict=True`/`False` overrides the variable per call, and `group=None` or a one-rank group is a no-op.
 
 ```python
-from src.runtime.consensus import assert_rank_uniform
+from halo.runtime.consensus import assert_rank_uniform
 assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in")
 ```
 

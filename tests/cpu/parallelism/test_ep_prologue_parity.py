@@ -53,13 +53,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.families.roster import ep_layer_classes
-from src.models.moe.balancing import resolve_balancing_slot
-from src.models.moe.config_fields import ROUTER_TOPK_FIELDS
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes
+from halo.models.moe.balancing import resolve_balancing_slot
+from halo.models.moe.config_fields import ROUTER_TOPK_FIELDS
 from tests.common.parallelism import single_process_ep_config
 
 # The real transformers blocks, built once per family and already parameterized with NON-neutral

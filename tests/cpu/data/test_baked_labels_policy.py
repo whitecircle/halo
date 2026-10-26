@@ -16,13 +16,13 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from src.data.collators.packing import DataCollatorWithFlatteningAndCompletionMask
-from src.data.completion_spans import (
+from halo.data.collators.packing import DataCollatorWithFlatteningAndCompletionMask
+from halo.data.completion_spans import (
     COLLATOR_SPAN_POLICY,
     build_completion_only_labels,
     mask_batch_to_completion_spans,
 )
-from src.data.preprocessed.tokenization import _completion_only_labels
+from halo.data.preprocessed.tokenization import _completion_only_labels
 
 PAD = 0
 EOS = 1

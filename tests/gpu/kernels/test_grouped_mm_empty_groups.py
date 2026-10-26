@@ -17,7 +17,7 @@ weights, no crash, no NaN.
 Also pinned here: the wrapper's int32 offset normalization. ``torch.cumsum`` returns int64 and the
 production router builds ``offs`` with it; ``F.grouped_mm`` rejects int64 outright
 (``RuntimeError: Offsets have to be int32``), so dropping the cast in
-``src.kernels.grouped_mm._GroupedMMFunction.forward`` takes every MoE forward down.
+``halo.kernels.grouped_mm._GroupedMMFunction.forward`` takes every MoE forward down.
 
 Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_grouped_mm_empty_groups.py
 """
@@ -25,8 +25,8 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_grouped_mm_empty_groups.
 import torch
 import torch.nn.functional as F
 
-from src.kernels.expert_gemm import expert_gemm
-from src.kernels.grouped_mm import grouped_mm
+from halo.kernels.expert_gemm import expert_gemm
+from halo.kernels.grouped_mm import grouped_mm
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import fro_rel_err, log
 

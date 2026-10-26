@@ -11,8 +11,8 @@ import subprocess
 
 import pytest
 
-import src.hardware as hardware
-from src.hardware import GPU_PEAK_FLOPS, GpuPeak, _classify_gpu_name, detect_gpu_model, get_gpu_peak_flops
+import halo.hardware as hardware
+from halo.hardware import GPU_PEAK_FLOPS, GpuPeak, _classify_gpu_name, detect_gpu_model, get_gpu_peak_flops
 
 # Dense bf16/fp16 tensor-core FLOPs per SM per clock, by architecture. Blackwell doubles Hopper's
 # per-SM rate; GA102 (workstation) ships a lower per-SM tensor rate than GA100.

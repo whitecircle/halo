@@ -6,11 +6,11 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
 ## EP wrapper
 
-`EPGemma4MoELayer` (`src/distributed/expert_parallel/families/gemma4.py`) replaces `Gemma4TextExperts`.
+`EPGemma4MoELayer` (`halo/distributed/expert_parallel/families/gemma4.py`) replaces `Gemma4TextExperts`.
 
 - **Router is a sibling**, not a child — `Gemma4TextRouter` lives in `Gemma4TextDecoderLayer` next to the experts. The wrapper only replaces the experts; the router stays FSDP-managed.
 - Routing input: pre-normalized weights from the sibling router (per-expert-scaled, not raw logits).
-- Activation: tanh-GeGLU (fused gate_up), run through the fused Triton kernel (`src/kernels/fused_glu.py`) when the activation is the genuine `gelu_pytorch_tanh`; logged as `glu_combine=gelu_tanh`.
+- Activation: tanh-GeGLU (fused gate_up), run through the fused Triton kernel (`halo/kernels/fused_glu.py`) when the activation is the genuine `gelu_pytorch_tanh`; logged as `glu_combine=gelu_tanh`.
 - Norms: `Gemma4RMSNorm` (scaled and weightless) runs torch's fused `F.rms_norm`, which normalizes and multiplies the weight in fp32 and casts once — Gemma's own order. The Liger spec takes the norm role from upstream with `rms_norm_kernel="native"` and `rms_norm_casting_mode="gemma"`.
 - Liger: every decoder layer keeps a dense `Gemma4TextMLP` beside its experts, which the wrapper never touches. The toolkit's delegating spec fuses it (`geglu`, probing the activation the same way) so it stays fused under EP, and takes the norms as above; upstream's `gemma4_text` applier serves the fused loss.
 
@@ -24,7 +24,7 @@ The router-outside-wrapper layout changes how the precision flags behave:
 
 - `fp32_router` is a no-op — it controls the EP wrapper's internal router, and Gemma 4's lives outside it. Harmless, but it buys nothing: the shipped configs leave it unset and say why.
 - `fp32_experts: true` upcasts the precision-sensitive expert weights — use it.
-- `fp32_non_ep_params: true` is **refused at model load** under EP, off `config.json` and before the process groups (`reject_unsupported_model` in `src/model_loading/parallel/load_rules.py`, driven by the family spec's `supports_fp32_non_ep_params`). Train Gemma 4 experts-distributed in plain bf16.
+- `fp32_non_ep_params: true` is **refused at model load** under EP, off `config.json` and before the process groups (`reject_unsupported_model` in `halo/model_loading/parallel/load_rules.py`, driven by the family spec's `supports_fp32_non_ep_params`). Train Gemma 4 experts-distributed in plain bf16.
 
     Gemma 4's norms re-emit activations at weight dtype, so the upcast feeds fp32 tokens into DeepEP's 2-byte transport. Without the gate it surfaces as a raw C++ assert at the first dispatch, after the whole multi-GPU load. See [Precision control](../parallelism/expert-parallelism.md#precision-control).
 
@@ -41,7 +41,7 @@ Gemma 4 attention uses two patterns that need bespoke wrappers:
 - **KV-shared layers** — the trailing `num_kv_shared_layers` decoder layers reuse an earlier layer's K/V. Naive TP would clone the cache; a CP wrapper would have to track the shared-from layer's sequence slice.
 - **`attention_k_eq_v`** — when set, the K projection is reused as V (one linear), incompatible with the standard ColwiseParallel-on-Q/K/V plan.
 
-No Gemma 4 attention class appears in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`) or in the CP wrapper registry (`src/distributed/context_parallel/families.py`), so neither mode patches Gemma 4 attention.
+No Gemma 4 attention class appears in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`) or in the CP wrapper registry (`halo/distributed/context_parallel/families.py`), so neither mode patches Gemma 4 attention.
 
 Pipeline parallelism refuses Gemma 4 (`GEMMA4_PP`): the per-layer embeddings are sliced by enumerate position, which a sliced layer list re-bases, and the KV-shared layers read an earlier layer's K/V through a forward-threaded dict a stage boundary breaks ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
@@ -49,7 +49,7 @@ ETP only shards the expert FFN weights (gate/up/down), leaving attention untouch
 
 ## Buffer fixes
 
-`finalize_loaded_model()` (`src/model_loading/buffer_repair.py`), run by every load path, restores two buffers that meta-device init drops: a `_NON_PERSISTENT_FIXERS` fixer restores `embed_scale` (the `sqrt(hidden_dim)` scaled-word-embedding factor) from the `scalar_embed_scale` the embedding keeps beside it; the `_ROTARY_FIXERS` chain recomputes the per-layer-type RoPE `inv_freq` buffers (`full_attention_inv_freq` + `sliding_attention_inv_freq`) in FP32.
+`finalize_loaded_model()` (`halo/model_loading/buffer_repair.py`), run by every load path, restores two buffers that meta-device init drops: a `_NON_PERSISTENT_FIXERS` fixer restores `embed_scale` (the `sqrt(hidden_dim)` scaled-word-embedding factor) from the `scalar_embed_scale` the embedding keeps beside it; the `_ROTARY_FIXERS` chain recomputes the per-layer-type RoPE `inv_freq` buffers (`full_attention_inv_freq` + `sliding_attention_inv_freq`) in FP32.
 
 ## Export
 

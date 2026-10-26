@@ -38,10 +38,10 @@ Requirements:
 
 import torch
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.hardware import supports_grouped_mm
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main

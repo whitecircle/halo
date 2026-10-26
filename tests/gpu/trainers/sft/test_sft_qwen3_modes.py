@@ -26,14 +26,14 @@ import torch
 from transformers import AutoTokenizer
 from trl import SFTConfig, get_quantization_config
 
-from src.configs.script_arguments import ModelArguments
-from src.data.collators.factory import select_data_collator
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import is_accelerate_fsdp_launch
-from src.model_loading.parallel.loader import load_distributed_model
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.runtime.collectives import barrier
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.script_arguments import ModelArguments
+from halo.data.collators.factory import select_data_collator
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import is_accelerate_fsdp_launch
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main

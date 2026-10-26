@@ -32,14 +32,14 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.ep import load_ep_model
-from src.model_loading.parallel.model_source import resolve_model_source
-from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.runtime.ranks import get_global_world_size, get_local_world_size
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.ep import load_ep_model
+from halo.model_loading.parallel.model_source import resolve_model_source
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.runtime.ranks import get_global_world_size, get_local_world_size
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B

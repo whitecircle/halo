@@ -13,7 +13,7 @@
   with the attention delta already folded into the base weights being gathered. This is what makes
   "re-save with ``merge_expert_lora_on_save=True``" a real export route for the mixed shape rather
   than an adapter file no tool folds, and it is the behavior
-  ``src.checkpoint.adapters.assert_no_expert_lora_adapter`` points users at.
+  ``halo.checkpoint.adapters.assert_no_expert_lora_adapter`` points users at.
 * the QLoRA post-backward sweep — it must honor
   ``parallelism_config.fp32_grad_reduce`` (the QLoRA path bypasses FSDP2's ``reduce_dtype``, so
   dropping the flag silently reduces adapter grads in bf16).
@@ -31,15 +31,15 @@ import torch
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
-import src.checkpoint.parallel.ep as ep_mod
-import src.checkpoint.parallel.save as save_mod
-import src.trainers.checkpointing as checkpointing_mod
-import src.trainers.parallelism.adapter_rules as adapter_rules
-import src.trainers.parallelism.grad_sync as grad_sync_mod
-import src.trainers.parallelism.mode_setup as mode_setup_mod
-from src.checkpoint.reading import load_full_state_dict
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.parallelism.adapter_rules import reject_unmergeable_expert_lora_save
+import halo.checkpoint.parallel.ep as ep_mod
+import halo.checkpoint.parallel.save as save_mod
+import halo.trainers.checkpointing as checkpointing_mod
+import halo.trainers.parallelism.adapter_rules as adapter_rules
+import halo.trainers.parallelism.grad_sync as grad_sync_mod
+import halo.trainers.parallelism.mode_setup as mode_setup_mod
+from halo.checkpoint.reading import load_full_state_dict
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.parallelism.adapter_rules import reject_unmergeable_expert_lora_save
 from tests.common.peft_helpers import randomize_adapters
 
 

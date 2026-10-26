@@ -15,7 +15,7 @@ import inspect
 
 import pytest
 
-from src.checkpoint import fp8_dequant
+from halo.checkpoint import fp8_dequant
 
 _RULE_FIELDS = {field.name for field in dataclasses.fields(fp8_dequant.DequantRules)}
 

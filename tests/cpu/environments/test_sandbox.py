@@ -24,20 +24,20 @@ import time
 import pytest
 import requests
 
-from src.environments.sandbox.factory import build_sandbox
-from src.environments.sandbox.local import (
+from halo.environments.sandbox.factory import build_sandbox
+from halo.environments.sandbox.local import (
     LOCAL_NPROC_LIMIT,
     SANDBOX_DEFAULT_MEMORY_MB,
     ExecutionGate,
     LocalSubprocessSandbox,
     _resolve_execution_slots,
 )
-from src.environments.sandbox.remote import RemoteSandbox
-from src.environments.sandbox.repl import format_sandbox_repl_output, run_code_via_sandbox
-from src.environments.sandbox.results import SandboxInfraError, SandboxResult
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.grading import run_solution_against_tests
-from src.environments.tasks.coding.swe import SweEnvironment
+from halo.environments.sandbox.remote import RemoteSandbox
+from halo.environments.sandbox.repl import format_sandbox_repl_output, run_code_via_sandbox
+from halo.environments.sandbox.results import SandboxInfraError, SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.grading import run_solution_against_tests
+from halo.environments.tasks.coding.swe import SweEnvironment
 from tests.common.code_contests import RecordingSandboxSession
 
 _NUMPY_MATMUL = "import numpy as np\na = np.arange(64.0).reshape(8, 8)\nprint(int((a @ a).trace()))"
@@ -202,7 +202,7 @@ def test_execution_gate_caps_concurrency():
 
 
 def test_execution_slots_env_override_via_env_int():
-    """HALO_SANDBOX_MAX_CONCURRENCY parses through src.env.env_int (single home for env parsing):
+    """HALO_SANDBOX_MAX_CONCURRENCY parses through halo.env.env_int (single home for env parsing):
     a valid override wins (clamped to >=1), a malformed value warns inside env_int and falls back
     to the usable-CPU default instead of raising mid-run."""
     default_slots = max(1, len(os.sched_getaffinity(0)))

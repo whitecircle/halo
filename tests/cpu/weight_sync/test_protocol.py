@@ -38,20 +38,20 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
-from src.distributed.nccl._nccl_wrapper import ncclUniqueId
-from src.trainers.grpo.rollout.engine_preflight import (
+from halo.trainers.grpo.rollout.engine_preflight import (
     _verify_context_window_on_rank0,
     _verify_sampler_logprob_reference_on_rank0,
     probe_sampler_logprob_semantics,
 )
-from src.weight_sync.clients import base as client_base
-from src.weight_sync.clients import vllm as wsc
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-from src.weight_sync.transport import pynccl
-from src.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES, PACKED_NUM_BUFFERS
-from src.weight_sync.transport.pynccl import PyNcclCommunicator, UniqueIdStore
-from src.weight_sync.transport.rendezvous import RendezvousListener
+from halo.weight_sync.clients import base as client_base
+from halo.weight_sync.clients import vllm as wsc
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.transport import pynccl
+from halo.weight_sync.transport.nccl_library import ncclUniqueId
+from halo.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES, PACKED_NUM_BUFFERS
+from halo.weight_sync.transport.pynccl import PyNcclCommunicator, UniqueIdStore
+from halo.weight_sync.transport.rendezvous import RendezvousListener
 from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer, fake_server_class
 from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client, push
@@ -280,7 +280,7 @@ def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(s
     serves exactly that, behind a 200 ``/health``.
     """
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
+    monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):  # 1 KiB each: the second crosses the budget, so the first chunk goes out
         client.update_named_param(name, torch.zeros(512, dtype=torch.bfloat16))
@@ -310,7 +310,7 @@ def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client,
     the engine back on the wire.
     """
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
+    monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):
         client.update_named_param(name, torch.zeros(512, dtype=torch.bfloat16))
@@ -332,7 +332,7 @@ def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, c
     serving, so the phase must be closed and the pause lifted — left quiesced it refuses every later
     sync and queues every rollout."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
+    monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
     server.status["/update_weights"] = 500
 
     client.update_named_param("a", torch.zeros(512, dtype=torch.bfloat16))
@@ -373,7 +373,7 @@ def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, mo
     sent. The engine then holds the earlier chunks and its old weights for the rest — the same mixed
     model, so the close must still refuse to resume it."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
-    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
+    monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):
         client.update_named_param(name, torch.zeros(512, dtype=torch.bfloat16))

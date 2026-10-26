@@ -34,26 +34,26 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, TrainerState
 
-import src.checkpoint.parallel.adapters as peft_mod
-import src.checkpoint.parallel.ep as saving_mod
-import src.checkpoint.parallel.resume_weights as loader_mod
-import src.checkpoint.parallel.save as save_mod
-import src.trainers.checkpointing as checkpointing_mod
-from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE, resume_adapter_dir
-from src.checkpoint.format import (
+import halo.checkpoint.parallel.adapters as peft_mod
+import halo.checkpoint.parallel.ep as saving_mod
+import halo.checkpoint.parallel.resume_weights as loader_mod
+import halo.checkpoint.parallel.save as save_mod
+import halo.trainers.checkpointing as checkpointing_mod
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE, resume_adapter_dir
+from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     SAFETENSORS_WEIGHTS_FILE,
 )
-from src.checkpoint.parallel.adapters import restore_adapters, save_resume_adapter
-from src.checkpoint.parallel.context import CheckpointLoadContext
-from src.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
-from src.checkpoint.parallel.resume_weights import load_resume_weights
-from src.checkpoint.reading import load_full_state_dict
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.checkpoint.parallel.adapters import restore_adapters, save_resume_adapter
+from halo.checkpoint.parallel.context import CheckpointLoadContext
+from halo.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
+from halo.checkpoint.parallel.resume_weights import load_resume_weights
+from halo.checkpoint.reading import load_full_state_dict
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.checkpoint_io import load_context, mark_resume_adapter, save_context
 from tests.common.ep_stubs import StubEPLayerBase

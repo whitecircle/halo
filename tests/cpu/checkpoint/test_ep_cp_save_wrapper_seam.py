@@ -22,10 +22,10 @@ import torch
 import torch.nn as nn
 from safetensors import safe_open
 
-from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save, save_ep_gathered_checkpoint
-from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.models.unwrapping import unwrap_toolkit_wrappers
+from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save, save_ep_gathered_checkpoint
+from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.models.unwrapping import unwrap_toolkit_wrappers
 from tests.common.checkpoint_io import save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config

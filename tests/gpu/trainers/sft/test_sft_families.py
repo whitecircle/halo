@@ -48,8 +48,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 
-from src.env import env_int, env_str
-from src.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.env import env_int, env_str
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from tests.common.datasets import VERBOSE_MATH_TEMPLATES, create_single_turn_sft_dataset
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.models import (

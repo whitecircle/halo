@@ -13,7 +13,7 @@ Both phases of a resume row run in one process against one server on the same we
 port: a second ``init_communicator`` after ``close_communicator`` succeeds and its sync lands. The
 trainer-side close is what allows that: it aborts an interrupted update, lifts the pause
 so the server generates again, and frees the group port
-(``src/weight_sync/clients/vllm.py``), without reaching into the server's engine. The server's
+(``halo/weight_sync/clients/vllm.py``), without reaching into the server's engine. The server's
 previous communicator is destroyed by the next ``/init_weight_transfer_engine``, before that call
 builds the new one (``docker/vllm/patches/vllm_weight_transfer_reinit_patch.py``). A leg that never
 closes holds its trainer-side port for the life of the process.
@@ -28,12 +28,12 @@ from datasets import Dataset
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.attention.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_reference import ep_layers
 from tests.common.peft_helpers import (
     LORA_ALPHA,

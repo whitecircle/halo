@@ -8,14 +8,14 @@ from datasets import Dataset, IterableDataset
 from peft import LoraConfig
 from transformers import LlamaConfig, LlamaForCausalLM
 
-import src.trainers.grpo.offline.trainer as offline_mod
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
-from src.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+import halo.trainers.grpo.offline.trainer as offline_mod
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
+from halo.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 

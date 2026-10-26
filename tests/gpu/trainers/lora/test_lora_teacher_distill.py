@@ -22,10 +22,10 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling
 
-from src.configs.distillation import DistillationConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.runtime.collectives import barrier
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.configs.distillation import DistillationConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.runtime.collectives import barrier
+from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import (
     assert_adapter_checkpoint,

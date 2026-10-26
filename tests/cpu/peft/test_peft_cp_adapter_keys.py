@@ -27,12 +27,12 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.checkpoint.parallel.adapters import remap_cp_adapter_keys_to_live
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.models.param_roles import persistent_buffers
-from src.models.unwrapping import plain_adapter_key
+from halo.checkpoint.parallel.adapters import remap_cp_adapter_keys_to_live
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.models.param_roles import persistent_buffers
+from halo.models.unwrapping import plain_adapter_key
 
 _LORA_KWARGS = {"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], "bias": "none"}
 

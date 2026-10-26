@@ -12,24 +12,24 @@ import re
 import pytest
 from trl import DPOConfig, GRPOConfig, KTOConfig, RewardConfig, SFTConfig
 
-import src.configs
+import halo.configs
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.lowp.spec import LowpSpec
 from scripts.docs.markdown import parse_tables
-from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.lowp.spec import LowpSpec
 from tests.common.repo import REPO_ROOT
 
 REFERENCE = "agent-docs/reference/configuration-reference.md"
 
 
 def _config_field_names() -> frozenset[str]:
-    """Every field a training script parses: those of the dataclasses ``src.configs`` defines (their
+    """Every field a training script parses: those of the dataclasses ``halo.configs`` defines (their
     transformers, TRL and sentence-transformers bases included), the TRL trainer configs the scripts take
     as-is, and ``ParallelismConfig``'s."""
     classes = {
         obj
-        for module in pkgutil.iter_modules(src.configs.__path__)
-        for obj in vars(importlib.import_module(f"src.configs.{module.name}")).values()
-        if isinstance(obj, type) and dataclasses.is_dataclass(obj) and obj.__module__.startswith("src.configs.")
+        for module in pkgutil.iter_modules(halo.configs.__path__)
+        for obj in vars(importlib.import_module(f"halo.configs.{module.name}")).values()
+        if isinstance(obj, type) and dataclasses.is_dataclass(obj) and obj.__module__.startswith("halo.configs.")
     }
     classes |= {ParallelismConfig, LowpSpec, SFTConfig, DPOConfig, KTOConfig, GRPOConfig, RewardConfig}
     return frozenset(field.name for cls in classes for field in dataclasses.fields(cls))

@@ -16,9 +16,9 @@ import inspect
 import pytest
 from trl import GRPOTrainer
 
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 TRAINERS = [DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer, DistributedSDPGTrainer]
 

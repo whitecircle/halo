@@ -18,10 +18,10 @@ import torch
 import torch.nn as nn
 from torch.distributed.checkpoint.state_dict import _init_optim_state
 
-from src.kernels.lowp.quantization import cached_fake_quant
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import build_flash_adamw_optimizer
-from src.optimizers.muon import build_muon_optimizer
+from halo.kernels.lowp.quantization import cached_fake_quant
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import assert_optimizer_state_bit_exact
 

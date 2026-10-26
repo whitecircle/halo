@@ -2,7 +2,7 @@
 """
 Grouped MM backward correctness on B300 (SM100+).
 
-``src.kernels.grouped_mm.grouped_mm`` must carry the broadcast-gradient case,
+``halo.kernels.grouped_mm.grouped_mm`` must carry the broadcast-gradient case,
 where the bare Blackwell path fails ``out.sum().backward()`` with
 ``"Invalid strides/sizes, got [0, 0, 0]"``.
 
@@ -24,7 +24,7 @@ Requirements:
 import torch
 import torch.nn as nn
 
-from src.kernels.grouped_mm import grouped_mm
+from halo.kernels.grouped_mm import grouped_mm
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
 

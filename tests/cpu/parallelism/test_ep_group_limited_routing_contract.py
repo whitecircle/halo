@@ -25,12 +25,12 @@ from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteMoE
 from transformers.models.mistral4.modeling_mistral4 import Mistral4MoE
 
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.families.roster import ep_layer_classes
-from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
-from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
-from src.models.moe.family_specs import MoEFamilySpec
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes
+from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
+from halo.models.moe.family_specs import MoEFamilySpec
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k

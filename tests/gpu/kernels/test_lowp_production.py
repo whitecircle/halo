@@ -11,9 +11,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.kernels.lowp.linear import LowPrecisionLinear
-from src.kernels.lowp.spec import LowpSpec
-from src.model_loading.parallel.lowp_compute import apply_lowp_compute
+from halo.kernels.lowp.linear import LowPrecisionLinear
+from halo.kernels.lowp.spec import LowpSpec
+from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
 from tests.common.harness import gpu_test_main, record_check
 
 DEV = "cuda"

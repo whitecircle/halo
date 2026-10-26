@@ -25,9 +25,9 @@ import time
 import pytest
 import torch.distributed as dist
 
-from src.env import DEFAULT_STORE_TIMEOUT_HOURS, store_timeout
-from src.runtime import consensus, filesystem
-from src.runtime.filesystem import fs_aware_main_first
+from halo.env import DEFAULT_STORE_TIMEOUT_HOURS, store_timeout
+from halo.runtime import consensus, filesystem
+from halo.runtime.filesystem import fs_aware_main_first
 from tests.common.distributed import FakeStore, reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 

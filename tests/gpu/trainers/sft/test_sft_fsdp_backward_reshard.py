@@ -34,10 +34,10 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B

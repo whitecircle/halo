@@ -28,7 +28,7 @@ from transformers import (
     Glm5NextForConditionalGeneration,
 )
 
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_min
 from tests.common.harness import gpu_test_main

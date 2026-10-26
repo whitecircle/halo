@@ -27,9 +27,9 @@ import json
 import sys
 from dataclasses import asdict
 
-from src.log import configure_cli_logging
-from src.weight_sync.registry import rollout_backends
-from src.weight_sync.transport_check import TRANSPORT_PREFIXES, format_report, run_transport_check
+from halo.log import configure_cli_logging
+from halo.weight_sync.registry import rollout_backends
+from halo.weight_sync.transport_check import TRANSPORT_PREFIXES, format_report, run_transport_check
 
 DEFAULT_CONNECTION_TIMEOUT_S = 120.0
 

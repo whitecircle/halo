@@ -16,13 +16,13 @@ from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.ulysses_attention import _flash_attn_func
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.fsdp import apply_fsdp2_for_dp, reshard_fsdp2_modules
-from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
-from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
-from src.trainers.grpo.objective.offline_loss import offline_loss
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.ulysses_attention import _flash_attn_func
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.fsdp import apply_fsdp2_for_dp, reshard_fsdp2_modules
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import (
     boundary_loss_negative_control,
     full_row_loss,

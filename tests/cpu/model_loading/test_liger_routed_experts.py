@@ -33,9 +33,9 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.liger import dispatch
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.liger import dispatch
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG, TINY_QWEN35_MOE_CONFIG
 from tests.common.repo import probe_findings
 
@@ -99,7 +99,7 @@ from liger_kernel.transformers.swiglu import LigerExperts
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.model_loading.liger import dispatch
+from halo.model_loading.liger import dispatch
 
 model_type, overrides, needs_ep_wrappers, toolkit_glu = json.loads(PAYLOAD)
 config = CONFIG_MAPPING[model_type](**{**overrides, "attn_implementation": "eager"})
@@ -150,8 +150,8 @@ from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_qwen3_m
 from liger_kernel.transformers.swiglu import LigerExperts
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.model_loading.liger import dispatch
-from src.models.moe.config_fields import has_routed_experts
+from halo.model_loading.liger import dispatch
+from halo.models.moe.config_fields import has_routed_experts
 
 
 def liger_experts_bindings():
@@ -354,7 +354,7 @@ def test_an_explicit_swiglu_request_cannot_bring_liger_experts_back(monkeypatch,
     """
     applier = _stub_upstream(monkeypatch, "qwen3_moe")
     config = _moe_config("qwen3_moe")
-    with caplog.at_level(logging.WARNING, logger="src.model_loading.liger.dispatch"):
+    with caplog.at_level(logging.WARNING, logger="halo.model_loading.liger.dispatch"):
         applied = dispatch.apply_liger_kernel(config, {"swiglu": True}, needs_ep_wrappers=False)
     assert applied["swiglu"] is False
     assert applier.calls[-1]["swiglu"] is False
@@ -423,7 +423,7 @@ def test_an_applier_with_no_swiglu_patch_is_left_alone(monkeypatch, caplog):
     monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "family_with_swiglu_off", applier)
     config = _moe_config("family_with_swiglu_off")
     assert dispatch.liger_routed_expert_overrides(False, config) == {}
-    with caplog.at_level(logging.WARNING, logger="src.model_loading.liger.dispatch"):
+    with caplog.at_level(logging.WARNING, logger="halo.model_loading.liger.dispatch"):
         assert dispatch.apply_liger_kernel(config, {"swiglu": True}, needs_ep_wrappers=False)["swiglu"] is True
     assert applier.calls[-1]["swiglu"] is True
     assert not [record for record in caplog.records if "LigerExperts" in record.getMessage()]

@@ -6,8 +6,8 @@ import logging
 import pytest
 import torch
 
-import src.callbacks.parameter_stats as mod
-from src.callbacks.parameter_stats import (
+import halo.callbacks.parameter_stats as mod
+from halo.callbacks.parameter_stats import (
     ParameterStatsCallback,
     _dtype_stats,
     _format_memory_size,

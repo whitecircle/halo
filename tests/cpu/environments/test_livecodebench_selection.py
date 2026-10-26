@@ -18,11 +18,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from halo.environments.registry import build_environment
+from halo.environments.tasks.coding import contest_datasets as coding_datasets
+from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 from scripts.environments.inference import regrade_trajectories
 from scripts.environments.inference.run_code_contests import build_examples, contest_meta, resolve_selection
-from src.environments.registry import build_environment
-from src.environments.tasks.coding import contest_datasets as coding_datasets
-from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
 
 _DATASET = "livecodebench/code_generation_lite"
 _LCB = CODE_DATASET_ADAPTERS["livecodebench"]

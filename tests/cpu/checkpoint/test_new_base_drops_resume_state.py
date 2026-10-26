@@ -22,15 +22,15 @@ from safetensors.torch import save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.trainer import TRAINER_STATE_NAME
 
-from scripts.after_training.merge_peft_adapters import merge_peft_adapter
-from src.checkpoint.format import (
+from halo.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     REFERENCE_LOGPS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     SCHEDULER_STATE_FILE,
 )
-from src.checkpoint.parallel.resume_source import classify_resume_weights
+from halo.checkpoint.parallel.resume_source import classify_resume_weights
+from scripts.after_training.merge_peft_adapters import merge_peft_adapter
 from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import load_script_module

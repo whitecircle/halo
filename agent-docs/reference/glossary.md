@@ -1,7 +1,7 @@
 # Glossary
 
 Parallelism, kernel, optimizer, and method terms. Sizes and flags anchor to the
-config field in `ParallelismConfig` (`src/distributed/parallelism_config.py`) or
+config field in `ParallelismConfig` (`halo/distributed/parallelism_config.py`) or
 the YAML key that sets it. Legal combinations:
 [parallelism mode matrix](../parallelism/README.md). Per-trainer support:
 [Trainer Compatibility](trainer-architecture.md#trainer-compatibility).

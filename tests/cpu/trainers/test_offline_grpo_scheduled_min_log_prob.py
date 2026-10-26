@@ -16,8 +16,8 @@ import types
 import pytest
 import torch
 
-from src.callbacks.variable_scheduler import VariableSchedulerCallback
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.callbacks.variable_scheduler import VariableSchedulerCallback
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 _CONFIG_START = -2.3
 _SCHEDULED = -0.5

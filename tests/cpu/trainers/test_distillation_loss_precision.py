@@ -11,7 +11,7 @@ like its fp32 copy, and the non-negativity a bf16 evaluation breaks survives.
 import pytest
 import torch
 
-from src.trainers.distillation.divergences import (
+from halo.trainers.distillation.divergences import (
     DIVERGENCES,
     call_divergence,
     forward_kl_loss,

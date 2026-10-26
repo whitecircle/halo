@@ -22,30 +22,30 @@ import sys
 import pytest
 from datasets import Dataset
 
-import src.data.sources.dataset_cache
-import src.data.sources.loading
-import src.data.sources.s3_client
-import src.data.sources.s3_dataset_store
-import src.data.sources.sharded_dataset  # noqa: F401  each module sets its logger level at import
-from src.data.sources.corpus import _normalize_dataset_schema
+import halo.data.sources.dataset_cache
+import halo.data.sources.loading
+import halo.data.sources.s3_client
+import halo.data.sources.s3_dataset_store
+import halo.data.sources.sharded_dataset  # noqa: F401  each module sets its logger level at import
+from halo.data.sources.corpus import _normalize_dataset_schema
 from tests.common.repo import REPO_ROOT
 
-_CORPUS_LOGGER = "src.data.sources.corpus"
+_CORPUS_LOGGER = "halo.data.sources.corpus"
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        "src.data.sources.loading",
+        "halo.data.sources.loading",
         _CORPUS_LOGGER,
-        "src.data.sources.dataset_cache",
-        "src.data.sources.s3_client",
-        "src.data.sources.s3_dataset_store",
-        "src.data.sources.sharded_dataset",
+        "halo.data.sources.dataset_cache",
+        "halo.data.sources.s3_client",
+        "halo.data.sources.s3_dataset_store",
+        "halo.data.sources.sharded_dataset",
     ],
 )
 def test_data_source_loggers_are_pinned_at_info(name):
-    """``src`` pins the root to WARNING, so a module logger left unset silences the column-drop
+    """``halo`` pins the root to WARNING, so a module logger left unset silences the column-drop
     notice, the cache and transfer records and each rank's loaded-split size — the run's only record
     of what data actually trained.
 
@@ -121,7 +121,7 @@ def test_no_schema_warning_when_nothing_is_lost(caplog):
 _COLUMN_ORDER_PROBE = """
 import json
 from datasets import Dataset
-from src.data.sources.corpus import _normalize_dataset_schema
+from halo.data.sources.corpus import _normalize_dataset_schema
 columns = ["prompt", "messages", "source", "id", "tools", "label", "score"]
 first = Dataset.from_dict({c: ["x"] for c in columns})
 second = Dataset.from_dict({c: ["y"] for c in reversed(columns)} | {"extra": ["z"]})

@@ -27,10 +27,10 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from src.checkpoint import reading
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.checkpoint.parallel.ep import save_ep_sharded_checkpoint
-from src.checkpoint.reading import checkpoint_shard_files, header_nbytes, reject_partial_checkpoint
+from halo.checkpoint import reading
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.checkpoint.parallel.ep import save_ep_sharded_checkpoint
+from halo.checkpoint.reading import checkpoint_shard_files, header_nbytes, reject_partial_checkpoint
 from tests.common.checkpoint_io import save_context
 from tests.common.ep_stubs import StubEPLayerBase
 
@@ -102,7 +102,7 @@ def test_a_per_rank_shard_is_one_file_and_the_save_says_so(tmp_path, caplog):
     user believing a cap applied. The save writes one file and reports the knob it does not read."""
     model = _stub_model()
 
-    with caplog.at_level(logging.INFO, logger="src.checkpoint.parallel.ep"):
+    with caplog.at_level(logging.INFO, logger="halo.checkpoint.parallel.ep"):
         save_ep_sharded_checkpoint(save_context(model, is_save_rank=True, max_shard_size="1KB"), str(tmp_path))
 
     assert _shard_files(tmp_path) == ["model-00000-of-00001.safetensors"], "one shard per rank, cap or no cap"

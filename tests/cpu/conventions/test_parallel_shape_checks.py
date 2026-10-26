@@ -17,9 +17,9 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig
 
-from src.distributed.context_parallel.ulysses_model import apply_ulysses_attention
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.mesh import MeshDim
+from halo.distributed.context_parallel.ulysses_model import apply_ulysses_attention
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.mesh import MeshDim
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallel_shape import parallel_shape_checks

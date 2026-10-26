@@ -19,12 +19,12 @@ from unittest import mock
 
 import pytest
 
-import src.environments.tasks.coding.grading as grading_module
-from src.environments.episode_keys import EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
-from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.grading import (
+import halo.environments.tasks.coding.grading as grading_module
+from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.grading import (
     _MAX_FAILURE_DETAILS,
     _STDERR_EXCERPT_CHARS,
     OUTPUT_CAP_EXPECTED_MULTIPLE,
@@ -33,9 +33,9 @@ from src.environments.tasks.coding.grading import (
     grade_solution,
     run_solution_against_tests,
 )
-from src.environments.tasks.coding.program_source import python_syntax_error
-from src.environments.tasks.coding.verdicts import CheckerInfraError, CheckerVerdict, build_verdict
-from src.rewards.terms import OBJECTIVE_REWARD_KEY
+from halo.environments.tasks.coding.program_source import python_syntax_error
+from halo.environments.tasks.coding.verdicts import CheckerInfraError, CheckerVerdict, build_verdict
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox
 
 

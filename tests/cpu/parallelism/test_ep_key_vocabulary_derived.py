@@ -18,18 +18,24 @@ from unittest.mock import patch
 
 import pytest
 
-from src.distributed.expert_parallel import lazy_plan
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.lazy_plan import (
+from halo.distributed.expert_parallel import lazy_plan
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from halo.distributed.expert_parallel.lazy_plan import (
     FUSED_EXPERT_KEY_PATTERN,
     PER_EXPERT_KEY_PATTERN,
     ExpertKeyLayout,
     is_lazy_loadable,
 )
-from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS, to_hub_expert_tensors
-from src.models.moe.family_specs import GLU_PROJECTIONS, MOE_FAMILY_SPECS, ZAYA, MoEFamilySpec, experts_container_attrs
+from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS, to_hub_expert_tensors
+from halo.models.moe.family_specs import (
+    GLU_PROJECTIONS,
+    MOE_FAMILY_SPECS,
+    ZAYA,
+    MoEFamilySpec,
+    experts_container_attrs,
+)
 
 
 def test_every_declared_container_is_matched_by_both_patterns():

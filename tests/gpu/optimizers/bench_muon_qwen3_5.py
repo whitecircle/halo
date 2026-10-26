@@ -18,9 +18,9 @@ import time
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import build_flash_adamw_optimizer
-from src.optimizers.muon import build_muon_optimizer
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 from tests.common.models import QWEN3_5_2B
 
 

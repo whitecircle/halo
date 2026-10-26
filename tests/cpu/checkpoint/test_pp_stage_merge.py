@@ -17,15 +17,15 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint.format import (
+from halo.checkpoint.format import (
     OPTIMIZER_META_FILE,
     PP_STAGE_PART_RE,
     SAFETENSORS_INDEX_FILE,
     optimizer_shard_filename,
     pp_stage_part_prefix,
 )
-from src.checkpoint.pp_stage_merge import merge_pp_stage_parts
-from src.checkpoint.writing import StreamingShardWriter, write_merged_index
+from halo.checkpoint.pp_stage_merge import merge_pp_stage_parts
+from halo.checkpoint.writing import StreamingShardWriter, write_merged_index
 from tests.common.models import TINY_QWEN3_CONFIG
 
 PP_SIZE = 2

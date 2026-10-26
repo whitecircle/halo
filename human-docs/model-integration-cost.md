@@ -17,9 +17,9 @@ HuggingFace model load
 
 ## What a wrapper costs
 
-Each MoE family adds one file under `src/distributed/expert_parallel/families/`
+Each MoE family adds one file under `halo/distributed/expert_parallel/families/`
 naming the HF MoE class it claims, one frozen `MoEFamilySpec` holding its config
-`model_type` spellings and capabilities (`src/models/moe/family_specs.py`), and
+`model_type` spellings and capabilities (`halo/models/moe/family_specs.py`), and
 one import line in the family roster.
 
 - Wrappers subclass a shared base. A family whose expert-weight layout matches
@@ -29,7 +29,7 @@ one import line in the family roster.
   weights and its own clamped SwiGLU compute.
 
 Context parallelism works the same way: one `UlyssesAttention` subclass in
-`src/distributed/context_parallel/families.py` that declares the attention classes it
+`halo/distributed/context_parallel/families.py` that declares the attention classes it
 wraps. Both registries are built from the subclass tree, so a wrapper that exists
 gets used.
 
@@ -40,11 +40,11 @@ On a MoE model it shards attention only, and the one list to edit is
 ## Vendoring
 
 A model that transformers doesn't ship yet can be vendored under
-`src/models/<name>/`: its `configuration_*.py` and `modeling_*.py`, registered on
+`halo/models/<name>/`: its `configuration_*.py` and `modeling_*.py`, registered on
 import, with a CPU test that proves the registration. Remove the copy once
 upstream ships the model.
 
-No model is vendored. The only model code under `src/models/` is the
+No model is vendored. The only model code under `halo/models/` is the
 sequence-classification heads transformers doesn't ship, for Gemma 4 and
 Qwen3.5/3.6 MoE.
 

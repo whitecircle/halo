@@ -21,18 +21,18 @@ import pathlib
 
 import pytest
 
-import src.model_loading.parallel.model_source as model_source
-import src.runtime.consensus as consensus
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint, resolve_lazy_checkpoint
+import halo.model_loading.parallel.model_source as model_source
+import halo.runtime.consensus as consensus
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint, resolve_lazy_checkpoint
 from tests.common.repo import REPO_ROOT
 from tests.common.utils import imports_name
 
 # The PP stage loader and the EP+TP loader, each a module that could hold a probe of its own, with the
 # call through which each reaches the shared gate.
 LOADER_MODULES = {
-    "load_pp_stage_model": (REPO_ROOT / "src/model_loading/parallel/pp.py", "resolve_lazy_checkpoint"),
-    "load_ep_tp_model": (REPO_ROOT / "src/model_loading/parallel/tp.py", "load_ep_model"),
+    "load_pp_stage_model": (REPO_ROOT / "halo/model_loading/parallel/pp.py", "resolve_lazy_checkpoint"),
+    "load_ep_tp_model": (REPO_ROOT / "halo/model_loading/parallel/tp.py", "load_ep_model"),
 }
 
 

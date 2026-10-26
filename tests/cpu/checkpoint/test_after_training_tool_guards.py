@@ -24,9 +24,9 @@ import numpy as np
 import pytest
 from datasets import Dataset
 
+from halo.checkpoint import adapter_merge
 from scripts.after_training import merge_models, merge_peft_adapters, reset_sinks
 from scripts.inference.generation import dataset_deduplication
-from src.checkpoint import adapter_merge
 
 # --- merge_models: a tokenizer-less artifact is not a deliverable ---------------------------------
 

@@ -22,11 +22,11 @@ import threading
 
 import pytest
 
-import src.weight_sync.clients.base as base_module
-import src.weight_sync.clients.sglang as sglang_module
-import src.weight_sync.clients.vllm as vllm_module
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+import halo.weight_sync.clients.base as base_module
+import halo.weight_sync.clients.sglang as sglang_module
+import halo.weight_sync.clients.vllm as vllm_module
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 

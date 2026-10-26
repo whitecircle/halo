@@ -42,8 +42,8 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 from trl import KTOConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.distributed import snapshot_full_weights, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
@@ -112,7 +112,7 @@ def build_dataset() -> Dataset:
 def sequence_logprobs(model, input_ids: torch.Tensor, attention_mask: torch.Tensor, mask: torch.Tensor):
     """TRL's per-sequence completion log-prob: shift by one, score where the mask is 1, sum.
 
-    Independent of ``src/`` and of TRL's own helper — a plain fp32 log-softmax. Differentiable: the
+    Independent of ``halo/`` and of TRL's own helper — a plain fp32 log-softmax. Differentiable: the
     gradient reference below backprops through it; callers that only want a value wrap it in
     ``torch.no_grad()``.
     """

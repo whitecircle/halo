@@ -28,10 +28,10 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from src.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
-from src.distributed.context_parallel.ulysses_model import _reject_left_padding
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
+from halo.distributed.context_parallel.ulysses_model import _reject_left_padding
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.first_step import AUTOGRAD_FALLBACK_WARNING
 from tests.common.gloo import run_gloo_ranks
 from tests.common.smpo_trainer import smpo_trainer

@@ -23,7 +23,7 @@ Run: pytest tests/cpu/runtime/test_launcher_env.py
 import pytest
 import torch
 
-from src.runtime import process_group, ranks
+from halo.runtime import process_group, ranks
 
 _LAUNCHER_VARS = (
     "RANK",

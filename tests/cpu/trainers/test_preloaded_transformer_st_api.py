@@ -26,7 +26,7 @@ from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 
 from tests.common.models import TINY_QWEN3_CONFIG
 
-_MODULE = "src.trainers.embedding.preloaded_transformer"
+_MODULE = "halo.trainers.embedding.preloaded_transformer"
 
 
 def _reimport_under_deprecation_errors():

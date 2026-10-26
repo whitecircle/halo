@@ -16,18 +16,18 @@ import types
 import pytest
 import torch.nn as nn
 
-import src.trainers.distributed_trainer as validation_module
-from src.models.moe.router_logits import router_logits_forced_off
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-from src.trainers.sft import DistributedSFTTrainer
-from src.trainers.training_args_overrides import resolve_active_router_aux_loss_coef
+import halo.trainers.distributed_trainer as validation_module
+from halo.models.moe.router_logits import router_logits_forced_off
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.training_args_overrides import resolve_active_router_aux_loss_coef
 
 
 class _Cfg:

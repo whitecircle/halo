@@ -15,10 +15,10 @@ import numpy as np
 import pytest
 import torch
 
-from src.configs.grpo import RLRRConfig
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.configs.grpo import RLRRConfig
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 
 def _fake_self(rlrr_config, rewards_per_func, num_generations):

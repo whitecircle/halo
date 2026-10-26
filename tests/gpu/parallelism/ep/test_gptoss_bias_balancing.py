@@ -37,14 +37,14 @@ from types import SimpleNamespace
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
-from src.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe.balancing import iter_balancing_routers, resolve_balancing_mode
+from halo.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.moe.balancing import iter_balancing_routers, resolve_balancing_mode
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log
 

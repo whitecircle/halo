@@ -16,7 +16,7 @@ from typing import NoReturn
 import pytest
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 
-from src.env import env_flag
+from halo.env import env_flag
 from tests.common.hub_seed import GATED_REPOS, is_hub_repo, seed
 
 REQUIRE_HUB_CACHE = "HALO_TEST_REQUIRE_HUB_CACHE"

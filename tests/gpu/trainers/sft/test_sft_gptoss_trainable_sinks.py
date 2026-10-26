@@ -25,13 +25,13 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
-from src.hardware import supports_grouped_mm
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
-from src.runtime.dtensor import materialize_dtensor
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
+from halo.runtime.dtensor import materialize_dtensor
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main

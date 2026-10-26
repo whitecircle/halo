@@ -31,11 +31,11 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.mesh import tp_group
-from src.distributed.parallelism_config import ParallelismConfig
-from src.hardware import supports_grouped_mm
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.mesh import tp_group
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff
 from tests.common.harness import gpu_test_main

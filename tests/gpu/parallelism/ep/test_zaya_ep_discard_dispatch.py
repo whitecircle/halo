@@ -29,9 +29,9 @@ import torch.distributed as dist
 import torch.nn as nn
 from transformers.models.zaya.modeling_zaya import ZayaRouter
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model

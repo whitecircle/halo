@@ -25,10 +25,10 @@ import pytest
 from datasets import Dataset, Features, Value
 from PIL import Image
 
-from src.data.collators.vlm import VLMDataCollator
-from src.data.pipeline.vlm_rows import _VLM_SIGNATURE_COLUMNS, build_vlm_row_processor, vlm_map_features
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.preprocessed.tokenization import tokenize_vlm_dataset
+from halo.data.collators.vlm import VLMDataCollator
+from halo.data.pipeline.vlm_rows import _VLM_SIGNATURE_COLUMNS, build_vlm_row_processor, vlm_map_features
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
 from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_VL_2B
 from tests.common.tokenizers import load_cached_processor
 

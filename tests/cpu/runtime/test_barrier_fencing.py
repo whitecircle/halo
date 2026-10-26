@@ -18,10 +18,10 @@ from unittest.mock import patch
 
 import pytest
 
-from src.runtime import ranks
-from src.runtime.collectives import barrier_on_exit
+from halo.runtime import ranks
+from halo.runtime.collectives import barrier_on_exit
 
-_MOD = "src.runtime.collectives"
+_MOD = "halo.runtime.collectives"
 
 
 def test_barrier_runs_when_the_body_raises():

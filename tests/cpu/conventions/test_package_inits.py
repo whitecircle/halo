@@ -1,5 +1,5 @@
-"""Every package init under ``src/`` re-exports nothing: a symbol has one import path, the module that
-defines it, and importing a leaf never pays for a package's whole tree. ``src/__init__.py`` is the
+"""Every package init under ``halo/`` re-exports nothing: a symbol has one import path, the module that
+defines it, and importing a leaf never pays for a package's whole tree. ``halo/__init__.py`` is the
 process bootstrap and the one exception."""
 
 import ast
@@ -8,13 +8,13 @@ import pytest
 
 from tests.common.repo import REPO_ROOT
 
-_SRC = REPO_ROOT / "src"
+_SRC = REPO_ROOT / "halo"
 _BOOTSTRAP = _SRC / "__init__.py"
 _INITS = sorted(p for p in _SRC.rglob("__init__.py") if p != _BOOTSTRAP)
 
 
 def test_the_sweep_sees_the_package_tree():
-    assert len(_INITS) > 45, "the sweep lost the src/ package tree"
+    assert len(_INITS) > 45, "the sweep lost the halo/ package tree"
 
 
 @pytest.mark.parametrize("init", _INITS, ids=lambda p: str(p.relative_to(_SRC.parent)))

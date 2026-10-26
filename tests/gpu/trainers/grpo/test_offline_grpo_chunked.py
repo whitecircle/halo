@@ -23,9 +23,9 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import (
     RESUME_PROBE_TEXT,
     RestorePointSnapshot,

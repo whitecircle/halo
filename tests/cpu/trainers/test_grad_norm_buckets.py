@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The one grad-norm accumulation the mixin's EP/TP norm and the PP clip share.
 
-``local_grad_norm_sq`` (``src/trainers/parallelism/grad_clipping.py``), applied per bucket, serves
+``local_grad_norm_sq`` (``halo/trainers/parallelism/grad_clipping.py``), applied per bucket, serves
 every norm path, so two properties have to hold or a clip threshold silently drifts between
 topologies:
 
@@ -20,7 +20,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.trainers.parallelism.grad_clipping import local_grad_norm_sq
+from halo.trainers.parallelism.grad_clipping import local_grad_norm_sq
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

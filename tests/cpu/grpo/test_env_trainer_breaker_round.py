@@ -17,8 +17,8 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 
 class _TrainerStandIn(types.SimpleNamespace):

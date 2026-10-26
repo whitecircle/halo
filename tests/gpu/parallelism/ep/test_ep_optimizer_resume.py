@@ -52,14 +52,14 @@ from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
-import src.checkpoint.parallel.optimizer as optimizer_store_mod
-from src.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
-from src.checkpoint.reading import load_full_state_dict
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.sft import DistributedSFTTrainer
+import halo.checkpoint.parallel.optimizer as optimizer_store_mod
+from halo.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
+from halo.checkpoint.reading import load_full_state_dict
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
 from tests.common.harness import gpu_test_main

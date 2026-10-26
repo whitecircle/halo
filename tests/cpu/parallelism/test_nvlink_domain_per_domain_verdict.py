@@ -19,9 +19,9 @@ from unittest.mock import patch
 
 import pytest
 
-from src.distributed.nvlink import NO_FABRIC, validate_nvlink_domain_against_fabric
+from halo.distributed.nvlink import NO_FABRIC, validate_nvlink_domain_against_fabric
 
-_MOD = "src.distributed.nvlink"
+_MOD = "halo.distributed.nvlink"
 
 
 def _run(domain: int, world: int, cliques: list[int], node_widths: list[int], local: int = 0):

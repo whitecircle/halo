@@ -24,13 +24,13 @@ Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the sa
 
 from trl import DPOConfig
 
-from src.config_validation import reject_unsupported_args
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.preference import DPOScriptArguments
-from src.configs.script_arguments import ModelArguments
-from src.data.render_columns import alias_images_column
-from src.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
-from src.entrypoints.model_setup import (
+from halo.config_validation import reject_unsupported_args
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.preference import DPOScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.render_columns import alias_images_column
+from halo.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
+from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
     default_padded_attn_implementation,
@@ -38,7 +38,7 @@ from src.entrypoints.model_setup import (
     load_policy_model,
     log_model_info,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -46,10 +46,10 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.runtime.collectives import barrier
-from src.trainers.preference.dpo import DistributedDPOTrainer
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.trainers.preference.dpo import DistributedDPOTrainer
 
 
 def main():

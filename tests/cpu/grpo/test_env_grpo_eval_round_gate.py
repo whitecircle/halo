@@ -13,8 +13,8 @@ Run: pytest tests/cpu/grpo/test_env_grpo_eval_round_gate.py
 import pytest
 from trl import GRPOConfig
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.trainers.grpo.environmental.environmental_rules import validate_eval_round
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.trainers.grpo.environmental.environmental_rules import validate_eval_round
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
     EXAMPLES_ROOT,

@@ -23,8 +23,8 @@ from types import SimpleNamespace
 import pytest
 from torch import nn
 
-from src.callbacks.model_flops import RankFlopsModel, estimate_rank_flops
-from src.distributed.pipeline_parallel.partition import (
+from halo.callbacks.model_flops import RankFlopsModel, estimate_rank_flops
+from halo.distributed.pipeline_parallel.partition import (
     compute_layer_partition,
     head_cost_layer_equivalents,
     layer_types_period,

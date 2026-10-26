@@ -13,8 +13,8 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_expert_gemm.py
 
 import torch
 
-from src.kernels.expert_gemm import expert_gemm
-from src.kernels.lowp.deepgemm import deepgemm_available
+from halo.kernels.expert_gemm import expert_gemm
+from halo.kernels.lowp.deepgemm import deepgemm_available
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import fro_rel_err, log
 

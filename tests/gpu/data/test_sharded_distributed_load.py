@@ -29,11 +29,11 @@ from collections import Counter
 import torch.distributed as dist
 from datasets import Dataset
 
-from src.data.preprocessed.preparation import shard_dataset
-from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
-from src.data.sources.loading import is_sharded_dataset_across_ranks
-from src.data.sources.sharded_dataset import ShardedDatasetLoader
-from src.trainers.dataloaders import DataParallelLoaderMixin
+from halo.data.preprocessed.preparation import shard_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from halo.data.sources.loading import is_sharded_dataset_across_ranks
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
+from halo.trainers.dataloaders import DataParallelLoaderMixin
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log

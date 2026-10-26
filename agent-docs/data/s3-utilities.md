@@ -7,15 +7,15 @@ dependency it needs:
 
 | File | Holds |
 |---|---|
-| `src/data/sources/paths.py` | source/destination classification — pure string rules, no boto3 |
-| `src/data/sources/dataset_cache.py` | the local cache-publish protocol — `os`/`shutil`/`filelock`, the fetch injected |
-| `src/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool, the default-bucket helpers |
-| `src/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load, the mirrored control-file reads |
+| `halo/data/sources/paths.py` | source/destination classification — pure string rules, no boto3 |
+| `halo/data/sources/dataset_cache.py` | the local cache-publish protocol — `os`/`shutil`/`filelock`, the fetch injected |
+| `halo/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool, the default-bucket helpers |
+| `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load, the mirrored control-file reads |
 | `scripts/before_training/s3_datasets.py` | the CLI |
 
 ## Dataset path formats
 
-`parse_dataset_source` (`src/data/sources/paths.py` — pure string rules, no boto3, so the
+`parse_dataset_source` (`halo/data/sources/paths.py` — pure string rules, no boto3, so the
 loader and the scripts classify a path without an S3 stack) sorts a path into
 `('s3' | 'hf_hub' | 'local', bucket, key)`:
 
@@ -60,7 +60,7 @@ How it works:
 
     Preprocessed/sharded classification therefore survives an outage too, not just the dataset bytes. Live wins; a live 404 drops the mirror, so a re-pushed raw dataset cannot keep its old classification offline.
 
-The per-shard cache used by sharded pre-processed datasets (`src/data/sources/sharded_dataset.py`) uses the same marker + fingerprint scheme. The first probe that finds S3 unreachable logs a warning and skips the remaining shard probes, so a fully cached offline run pays a few control-read timeouts (the sharded probe and per-split index each try live first), not one per shard.
+The per-shard cache used by sharded pre-processed datasets (`halo/data/sources/sharded_dataset.py`) uses the same marker + fingerprint scheme. The first probe that finds S3 unreachable logs a warning and skips the remaining shard probes, so a fully cached offline run pays a few control-read timeouts (the sharded probe and per-split index each try live first), not one per shard.
 
 An empty prefix listing is a real absence, not a transport fault, and does not disarm the probes.
 
@@ -79,7 +79,7 @@ service or non-default bucket, pass `aws_access_key_id` / `aws_secret_access_key
 
 ## Python API
 
-Dataset trees go through `src.data.sources.s3_dataset_store`; everything else is `src.data.sources.s3_client`
+Dataset trees go through `halo.data.sources.s3_dataset_store`; everything else is `halo.data.sources.s3_client`
 (see the modules for full signatures and defaults):
 
 | Function | Purpose |
@@ -97,8 +97,8 @@ deletes — is an `S3Client` method, called on a client built for the bucket in 
 For a non-default bucket or an S3-compatible service:
 
 ```python
-from src.data.sources.s3_client import S3Client
-from src.data.sources.s3_dataset_store import push_dataset
+from halo.data.sources.s3_client import S3Client
+from halo.data.sources.s3_dataset_store import push_dataset
 
 client = S3Client(bucket="<bucket>")
 push_dataset(client, dataset, "data")

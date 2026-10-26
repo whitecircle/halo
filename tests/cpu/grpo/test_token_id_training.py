@@ -18,11 +18,11 @@ import types
 import pytest
 import torch
 
-from src.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
-from src.environments.episode import RolloutResult
-from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from halo.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.models import GPT_OSS_20B
 from tests.common.tokenizers import load_cached_tokenizer
 

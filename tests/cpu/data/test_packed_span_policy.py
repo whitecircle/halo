@@ -18,14 +18,14 @@ import pytest
 import torch
 from datasets import Dataset
 
-from src.data.collators.packing import (
+from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlatteningAndCompletionMask,
 )
-from src.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, mask_batch_to_completion_spans
-from src.data.preprocessed import tokenization as tokenization_mod
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.preprocessed.tokenization import _completion_only_labels, tokenize_dataset
+from halo.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, mask_batch_to_completion_spans
+from halo.data.preprocessed import tokenization as tokenization_mod
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.tokenization import _completion_only_labels, tokenize_dataset
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 

@@ -2,9 +2,9 @@
 
 from types import SimpleNamespace
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.preference.smpo_objective import SMPOObjective
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo_objective import SMPOObjective
 
 # The SmoothMarginPOConfig fields those paths read, at values a test overrides per case.
 _ARGS = {

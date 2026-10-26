@@ -6,12 +6,12 @@ Every axis runs on both sizes ([Compatibility matrix](README.md#compatibility-ma
 
 ## EP wrapper
 
-`EPGptOssMoELayer` (`src/distributed/expert_parallel/families/gpt_oss.py`) replaces `GptOssMLP`.
+`EPGptOssMoELayer` (`halo/distributed/expert_parallel/families/gpt_oss.py`) replaces `GptOssMLP`.
 
 - Routing: custom router returning `(logits, weights, experts)`; softmax top-k with FP32 weights for DeepEP.
 - Storage: interleaved `gate_up_proj [E, H, 2M]` (`[g0, u0, g1, u1, …]`), `down_proj [E, M, H]`, plus the optional expert biases `gate_up_proj_bias [E, 2M]` (interleaved the same way) and `down_proj_bias [E, H]`.
 - Compute: **Grouped GEMM** (default on SM90+) reads de-interleaved `gate_proj_gmm` / `up_proj_gmm` stored as separate contiguous tensors at init, avoiding NaN gradients on the stride-2 slice. The **loop fallback** iterates per expert with `index_add_`.
-- Activation: clamped SwiGLU, `(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`. Every path — grouped GEMM, ETP and the per-expert loop — runs the same fused Triton kernel (`GluCombine.gptoss`, latched once per layer and logged as `glu_combine=gptoss`, `src/kernels/fused_glu.py`, forward + backward, fp32 accumulation).
+- Activation: clamped SwiGLU, `(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`. Every path — grouped GEMM, ETP and the per-expert loop — runs the same fused Triton kernel (`GluCombine.gptoss`, latched once per layer and logged as `glu_combine=gptoss`, `halo/kernels/fused_glu.py`, forward + backward, fp32 accumulation).
 
     The kernel replaces `torch.compile`, whose recompiles would storm on the varying per-step routed-token count and whose float arguments go stale once shapes are dynamic. The loop path splits the halves out of its interleaved projection output first.
 
@@ -33,9 +33,9 @@ share a prefix store it once.
 
 GptOss attention adds a per-head learnable scalar to the attention logits before softmax, with two parallelism consequences.
 
-**TP sharding.** `shard_sinks_param()` (`src/distributed/tensor_parallel/parallelize_attention.py`) shards sinks per rank as plain tensors, not DTensors — the forward concatenates sinks with locally-sharded logits, and a DTensor would dimension-mismatch on the concat. The slice is recorded through `register_hand_sliced` so `gather_hand_sliced_params()` all-gathers it at save time.
+**TP sharding.** `shard_sinks_param()` (`halo/distributed/tensor_parallel/parallelize_attention.py`) shards sinks per rank as plain tensors, not DTensors — the forward concatenates sinks with locally-sharded logits, and a DTensor would dimension-mismatch on the concat. The slice is recorded through `register_hand_sliced` so `gather_hand_sliced_params()` all-gathers it at save time.
 
-**Sink handling** (`src/models/attention/gpt_oss_sinks.py`). One `SinksPolicy` per run, resolved from `reset_sinks` / `train_sinks` at load, stamped on the model for the trainer gates, and recorded in a LoRA run's `training_provenance.json` so the merge tools re-apply it (a merge rebuilds the base from the hub, whose sinks are always live).
+**Sink handling** (`halo/models/attention/gpt_oss_sinks.py`). One `SinksPolicy` per run, resolved from `reset_sinks` / `train_sinks` at load, stamped on the model for the trainer gates, and recorded in a LoRA run's `training_provenance.json` so the merge tools re-apply it (a merge rebuilds the base from the hub, whose sinks are always live).
 
 - **Neutralized** (`reset_sinks: true`, the SFT default): `None` under FA2 (its kernel takes no sink argument), `dtype.min` and frozen everywhere else (~0 softmax mass, zero gradient). Every checkpoint writer re-emits the FA2-removed sinks as `dtype.min`.
 - **Live, frozen** (`reset_sinks: false`): the pretrained sinks stay in every softmax, `requires_grad=False`. This is the RL setting — the trainer scores with the sinks the rollout engine serves — and the only live policy an adapter run or weight-sync trainer accepts.
@@ -52,7 +52,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
 ## CP, TP, ETP
 
-- **CP** — `GptOssAttention` → `GptOssUlyssesAttention` (`src/distributed/context_parallel/families.py`), RoPE before all-to-all and native GQA. Needs `reset_sinks: true`: the CP kernels drop the sink column, so the wrapper raises at the first forward on live sinks rather than normalizing every softmax wrongly.
+- **CP** — `GptOssAttention` → `GptOssUlyssesAttention` (`halo/distributed/context_parallel/families.py`), RoPE before all-to-all and native GQA. Needs `reset_sinks: true`: the CP kernels drop the sink column, so the wrapper raises at the first forward on live sinks rather than normalizing every softmax wrongly.
 - **TP** — a DTensor plan on attention only; `embed_tokens`/`lm_head` stay replicated (sharding them faults with a cuBLAS illegal-memory error under EP+TP), MoE experts belong to EP. See [the selective-TP plan](../parallelism/tensor-parallelism.md#the-selective-tp-plan).
 - **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Expert compute drops to the per-expert loop at `expert_tp_size > 1`: ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads (`_grouped_mm_enabled`).
 

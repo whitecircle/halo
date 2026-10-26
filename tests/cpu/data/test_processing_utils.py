@@ -12,12 +12,12 @@ import json
 
 import pytest
 
-from src.data.pipeline import vlm_rows
-from src.data.pipeline.conversation import resolve_json_value
-from src.data.pipeline.map_cache_key import function_cache_id, kwargs_fingerprint, map_cache_file_name
-from src.data.pipeline.preferences import render_preference_row
-from src.data.pipeline.text_rows import build_chat_row_processor, prepare_generative_row, render_row_conversation
-from src.data.pipeline.vlm_rows import build_vlm_row_processor
+from halo.data.pipeline import vlm_rows
+from halo.data.pipeline.conversation import resolve_json_value
+from halo.data.pipeline.map_cache_key import function_cache_id, kwargs_fingerprint, map_cache_file_name
+from halo.data.pipeline.preferences import render_preference_row
+from halo.data.pipeline.text_rows import build_chat_row_processor, prepare_generative_row, render_row_conversation
+from halo.data.pipeline.vlm_rows import build_vlm_row_processor
 
 # function_cache_id tests
 

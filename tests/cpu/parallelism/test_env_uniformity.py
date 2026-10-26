@@ -23,13 +23,13 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.distributed import rank_uniform_env
-from src.distributed.expert_parallel.deepep import settings as settings_mod
-from src.model_loading.parallel import loader as model_loading
-from src.runtime.consensus import divergent_settings, reject_divergent_settings
+from halo.distributed import rank_uniform_env
+from halo.distributed.expert_parallel.deepep import settings as settings_mod
+from halo.model_loading.parallel import loader as model_loading
+from halo.runtime.consensus import divergent_settings, reject_divergent_settings
 from tests.common.parallelism import make_parallelism_config
 
-_MOD = "src.runtime.consensus"
+_MOD = "halo.runtime.consensus"
 
 
 def test_an_aligned_world_reports_nothing():

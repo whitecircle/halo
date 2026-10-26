@@ -27,10 +27,10 @@ import pytest
 import torch.nn as nn
 from transformers import TrainerState
 
-import src.checkpoint.parallel.save as save_mod
-import src.trainers.checkpointing as checkpointing_mod
-from src.runtime.consensus import DeferredRankFailure
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+import halo.checkpoint.parallel.save as save_mod
+import halo.trainers.checkpointing as checkpointing_mod
+from halo.runtime.consensus import DeferredRankFailure
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.checkpoint_io import save_context
 from tests.common.repo import REPO_ROOT
@@ -174,7 +174,7 @@ def test_every_save_model_marks_its_collectives_done():
     """Structural, over the whole trainer tree: a ``save_model`` that replaces the mixin's still
     gathers, and an unmarked one silently downgrades every deferred tail failure of that trainer to a
     rank-local raise."""
-    trainers = REPO_ROOT / "src" / "trainers"
+    trainers = REPO_ROOT / "halo" / "trainers"
     assert trainers.is_dir(), f"premise: {trainers} must exist, else this test scans nothing"
     unmarked = []
     for path in trainers.rglob("*.py"):

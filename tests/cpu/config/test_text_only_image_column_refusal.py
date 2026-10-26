@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.vlm_routing import VLM_IMAGE_COLUMNS
+from halo.data.vlm_routing import VLM_IMAGE_COLUMNS
 from tests.common.repo import load_script_module
 
 _MODEL_ID = "stub/qwen3-4b"
@@ -72,7 +72,7 @@ def _run(module, tmp_path, config_body: str, patches: list) -> None:
     )
     patches = [
         *patches,
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
     with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):

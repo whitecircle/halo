@@ -13,7 +13,7 @@ import torch
 from torch import nn
 from transformers import CONFIG_MAPPING
 
-from src.models.attention.layout import (
+from halo.models.attention.layout import (
     INDEX_PASSES,
     LAYER_TYPE_KINDS,
     SCORE_PASSES,

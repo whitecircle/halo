@@ -48,14 +48,14 @@ RUN test -f "$VLLM_NCCL_SO_PATH"
 COPY docker/efa/install_efa_userspace.sh /tmp/install_efa_userspace.sh
 RUN /tmp/install_efa_userspace.sh && rm /tmp/install_efa_userspace.sh
 
-# Pickle shim: the trainer sends ncclUniqueId as src.distributed.nccl._nccl_wrapper's type, which
-# vLLM must unpickle as its own.
-RUN mkdir -p /opt/nccl_compat/src/distributed/nccl \
-    && touch /opt/nccl_compat/src/__init__.py \
-    && touch /opt/nccl_compat/src/distributed/__init__.py \
-    && touch /opt/nccl_compat/src/distributed/nccl/__init__.py \
+# Pickle shim: the trainer sends ncclUniqueId as halo.weight_sync.transport.nccl_library's type,
+# which vLLM must unpickle as its own.
+RUN mkdir -p /opt/nccl_compat/halo/weight_sync/transport \
+    && touch /opt/nccl_compat/halo/__init__.py \
+    && touch /opt/nccl_compat/halo/weight_sync/__init__.py \
+    && touch /opt/nccl_compat/halo/weight_sync/transport/__init__.py \
     && echo 'from vllm.distributed.device_communicators.pynccl_wrapper import *' \
-       > /opt/nccl_compat/src/distributed/nccl/_nccl_wrapper.py
+       > /opt/nccl_compat/halo/weight_sync/transport/nccl_library.py
 # Every patch is required: vLLM's layerwise reload puts each layer's tensors on the meta device, so
 # layers that write weights with a direct `param.copy_()` revert on every /update_weights; the re-init
 # patch destroys the NCCL communicator the engine would otherwise leak per trainer that reconnects

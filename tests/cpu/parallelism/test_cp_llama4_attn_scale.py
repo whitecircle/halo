@@ -22,8 +22,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.context_parallel import families as cp_mistral4
-from src.distributed.context_parallel.families import Mistral4UlyssesAttention
+from halo.distributed.context_parallel import families as cp_mistral4
+from halo.distributed.context_parallel.families import Mistral4UlyssesAttention
 
 HIDDEN = 32
 NUM_Q_HEADS = 4

@@ -32,8 +32,8 @@ from safetensors.torch import load_file
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import GptOssConfig, GptOssForCausalLM
 
-from src.checkpoint.parallel.ep import save_ep_sharded_checkpoint
-from src.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
+from halo.checkpoint.parallel.ep import save_ep_sharded_checkpoint
+from halo.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
 from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main

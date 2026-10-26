@@ -18,7 +18,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from src.cli import app
+from halo.cli import app
 from tests.common.repo import REPO_ROOT
 
 DOC_TREES = ("README.md", "CLAUDE.md", "human-docs", "agent-docs", "skills")

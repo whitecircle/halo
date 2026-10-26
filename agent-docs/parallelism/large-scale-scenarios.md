@@ -22,7 +22,7 @@ boundary.
 `nvlink_domain_size` (auto = `gpus_per_node`; set `NVLINK_DOMAIN_SIZE` on NVL72) is the locality unit
 every validator divides by, and it decides which axis is allowed onto RDMA. The dispatcher keys the
 decision off topology alone: `EPConfig.spans_domains = num_domains > 1 and not node_local`
-(`src/distributed/expert_parallel/config.py`), on which the elastic backend sets `EP_DISABLE_GIN=0`, Gin on.
+(`halo/distributed/expert_parallel/config.py`), on which the elastic backend sets `EP_DISABLE_GIN=0`, Gin on.
 
 `num_domains` counts NVLink **domains**, not OS nodes, so a group inside one NVL72 rack stays on NVLink
 even though it spans ~18 hosts.
@@ -32,7 +32,7 @@ MoE layers, is **240** all-to-alls over the EP group: forward dispatch + combine
 their backward mirrors — arithmetic from the layer count and the autograd graph, not a benchmark.
 
 Four per layer, not two, because `DeepEPDispatchFunction.backward` *is* a combine and
-`DeepEPCombineFunction.backward` *is* a dispatch (`src/distributed/expert_parallel/deepep/dispatcher.py`).
+`DeepEPCombineFunction.backward` *is* a dispatch (`halo/distributed/expert_parallel/deepep/dispatcher.py`).
 Gradient checkpointing does not multiply the count — recompute replays cached results rather than
 re-issuing the collective.
 
@@ -121,7 +121,7 @@ post-backward sweep ([Multi-Node](multi-node.md#deferred-cross-replica-sync)).
 | Activations, GC on | `(2·L·H + 6·k·I_moe)·b·S` | **4.5 GB** at `b1 s8192`, **18.1 GB** at `b1 s32768` |
 | Load-time peak (separate) | `2·(P_ne + P_e/ep_size)` | see the `Load` column |
 
-`8 B/param` = 2 weights + 2 grads + 4 optimizer state; `AdamWBF16` (`src/optimizers/adamw_bf16.py`)
+`8 B/param` = 2 weights + 2 grads + 4 optimizer state; `AdamWBF16` (`halo/optimizers/adamw_bf16.py`)
 allocates `exp_avg` and `exp_avg_sq` with `zeros_like(p)`, so both are bf16 and there is no master
 copy and no error-feedback buffer. `fp32_grad_reduce` upcasts only inside the reduce — no storage.
 The stock AdamW is refused under EP unless `fp32_non_ep_params` is set ([why](../optimization/bf16-optimizer.md#usage)),
@@ -156,8 +156,8 @@ forward**, after the whole model has loaded, with nothing in the message naming 
 ## What loads at all
 
 Only two loaders shard at load time: `WeightAction.EXPERT_SHARD`
-(`src/model_loading/lazy_safetensors/`, planned by `WeightPlanner` in
-`src/distributed/expert_parallel/lazy_plan.py`) and HF `tp_plan="auto"` for **dense** models.
+(`halo/model_loading/lazy_safetensors/`, planned by `WeightPlanner` in
+`halo/distributed/expert_parallel/lazy_plan.py`) and HF `tp_plan="auto"` for **dense** models.
 
 Every other branch of `_dispatch_model_loading` materializes all 396.8 B on one GPU: **794 GB, never
 starts**. That kills plain FSDP2, pure TP (MoE TP has no shard-aware load), pure ETP (`ep_size == 1`
@@ -167,7 +167,7 @@ memory argument.
 The EP lazy loader slices by **`ep_size`, not `X`** — ETP partners share `dispatch_ep_rank` and load
 the same experts at full intermediate width. The intermediate dim is split later, at EP patching
 (`_init_fused_glu_params` / `_store_separate_glu_params`,
-`src/distributed/expert_parallel/moe_layer/layer.py`), which also holds one layer's transposed full-width
+`halo/distributed/expert_parallel/moe_layer/layer.py`), which also holds one layer's transposed full-width
 copy alongside the new shard. So `ep2 + etp8` has the same steady state as `ep16` and a **407 GB**
 load peak.
 
@@ -234,7 +234,7 @@ What TP does do is divide `data_parallel_size`, which divides `F`, so it *raises
 term.
 
 **CP is rejected outright.** `reject_unsupported_ulysses_model`
-(`src/distributed/context_parallel/model_rules.py`) raises on `Qwen3_5MoeGatedDeltaNet` and, on a meta
+(`halo/distributed/context_parallel/model_rules.py`) raises on `Qwen3_5MoeGatedDeltaNet` and, on a meta
 shell, on any `linear_attention` entry in `layer_types`: `causal_conv1d_fn` needs a cross-rank halo
 and `chunk_gated_delta_rule` is a recurrent scan. Long context comes from the activation headroom at
 4–8 nodes, not from CP.

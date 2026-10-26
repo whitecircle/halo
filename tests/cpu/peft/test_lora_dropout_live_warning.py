@@ -14,9 +14,9 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from trl.trainer.utils import disable_dropout_in_model
 
-import src.trainers.distributed_trainer as spine
-from src.configs.script_arguments import ModelArguments
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+import halo.trainers.distributed_trainer as spine
+from halo.configs.script_arguments import ModelArguments
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 class _Base(nn.Module):

@@ -25,15 +25,15 @@ from PIL import Image
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
-from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.preprocessed.preparation import preprocess_dataset
-from src.data.preprocessed.tokenization import tokenize_vlm_dataset
-from src.data.vlm_render import VLM_OUTPUT_FEATURES
-from src.data.vlm_routing import VLM_IMAGE_COLUMNS
-from src.model_loading.parallel import model_source
-from src.model_loading.parallel.model_source import probe_checkpoint
-from src.models.modality import is_vlm_model
+from halo.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.preparation import preprocess_dataset
+from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
+from halo.data.vlm_render import VLM_OUTPUT_FEATURES
+from halo.data.vlm_routing import VLM_IMAGE_COLUMNS
+from halo.model_loading.parallel import model_source
+from halo.model_loading.parallel.model_source import probe_checkpoint
+from halo.models.modality import is_vlm_model
 from tests.common.models import QWEN2_5_VL_3B
 from tests.common.tokenizers import load_cached_processor
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer

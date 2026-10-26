@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.distributed.expert_parallel.families.roster import ep_layer_classes
-from src.models.moe.family_specs import find_moe_family_spec
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes
+from halo.models.moe.family_specs import find_moe_family_spec
 from tests.common.rosters import ep_layer_class_by_model_type
 
 # class name -> the ``model_type`` spellings the class declares ITSELF, in declaration order.

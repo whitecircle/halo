@@ -15,10 +15,10 @@ from unittest import mock
 import pytest
 from trl import GRPOTrainer
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.trainers.dataloaders import DataParallelLoaderMixin
-from src.trainers.grpo.environmental.environmental_rules import validate_eval_round
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.grpo.environmental.environmental_rules import validate_eval_round
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 SENTINEL = object()
 

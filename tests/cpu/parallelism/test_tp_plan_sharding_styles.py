@@ -28,8 +28,8 @@ from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextCo
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 
-from src.distributed.tensor_parallel.hf_plan import plan_shards_param, reject_plan_sharded_plain_params
-from src.distributed.tensor_parallel.plain_params import register_hand_sliced
+from halo.distributed.tensor_parallel.hf_plan import plan_shards_param, reject_plan_sharded_plain_params
+from halo.distributed.tensor_parallel.plain_params import register_hand_sliced
 from tests.common.distributed import fake_process_group_mesh
 
 TP_SIZE = 4

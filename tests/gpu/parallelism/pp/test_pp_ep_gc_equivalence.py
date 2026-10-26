@@ -27,7 +27,7 @@ import sys
 
 import torch
 
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.tolerances import TOL

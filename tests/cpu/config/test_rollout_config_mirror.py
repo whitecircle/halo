@@ -14,8 +14,8 @@ from dataclasses import fields
 
 import pytest
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.rollout_config import RolloutConfig
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.rollout_config import RolloutConfig
 
 # RolloutConfig field -> the AsyncTrainingConfig field that supplies it, read from the builder's own
 # mapping rather than restated: the map has to exist exactly once to be worth testing.

@@ -15,7 +15,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 
-from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
+from halo.optimizers.param_groups import build_tensor_type_grouped_optimizer
 
 
 def test_groups_split_by_tensor_type_and_dtype(tmp_path):

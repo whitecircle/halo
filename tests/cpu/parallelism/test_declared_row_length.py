@@ -2,10 +2,10 @@
 
 import pytest
 
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
-from src.models.context_window import bounded_row_length
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from halo.models.context_window import bounded_row_length
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.parallelism import simulated_world
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed contract of ``dataset_ratio`` subsetting in ``src/data/sources/loading.py``.
+"""Seed contract of ``dataset_ratio`` subsetting in ``halo/data/sources/loading.py``.
 
 Which rows a fractional ``dataset_ratio`` keeps is part of a run's training signal, but the dataset
 fingerprint stamps only the seed and the resulting split sizes — never the row set. A change in the
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.sources.loading import _DEFAULT_DATA_SEED, load_datasets
+from halo.data.sources.loading import _DEFAULT_DATA_SEED, load_datasets
 
 # Rows kept from a 20-row split at ratio 0.5. Train draws with ``_DEFAULT_DATA_SEED``, test with
 # ``+ 1`` so the two subsets are not the same row positions.

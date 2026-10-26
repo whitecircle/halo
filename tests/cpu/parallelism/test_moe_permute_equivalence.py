@@ -1,6 +1,6 @@
 """Numerical-equivalence test for the atomic-free MoE permute (the production scatter-back).
 
-`MoEGatherPermute` and `MoEWeightedUnpermute` (src/kernels/moe_permute.py) replace the bf16-atomic
+`MoEGatherPermute` and `MoEWeightedUnpermute` (halo/kernels/moe_permute.py) replace the bf16-atomic
 `index_add_` expert scatter-back with an atomic-free gather+sum via a precomputed `inv_map`
 (`build_inv_map`); the unpermute also
 folds in the routing-weight multiply. They are the production permute for every grouped-GEMM MoE family
@@ -15,7 +15,7 @@ This is a CPU test (pure torch); run it inside the container:
 import pytest
 import torch
 
-from src.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map
+from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map
 from tests.common.ep_stubs import StubEPLayerBase
 
 

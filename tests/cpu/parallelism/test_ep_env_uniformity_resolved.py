@@ -2,7 +2,7 @@
 """The cross-rank DeepEP env check compares RESOLVED settings, not raw strings.
 
 ``agree_rank_uniform_env`` refuses a job whose ranks disagree on a knob that changes how many
-collectives a rank runs. Every ``HALO_*`` knob in that set is consumed through :mod:`src.env`, where
+collectives a rank runs. Every ``HALO_*`` knob in that set is consumed through :mod:`halo.env`, where
 an ABSENT variable and the variable set to its default are the same behaviour. Comparing the raw
 strings instead would reject the ordinary multi-node shape — a launcher or per-node ``--env-file``
 exporting a default on the head node only — killing a correctly configured job and naming variables
@@ -18,12 +18,12 @@ import importlib
 
 import pytest
 
-from src.distributed import grad_reduce as grad_reduce_mod
-from src.distributed import rank_uniform_env
-from src.distributed.expert_parallel.deepep import capacity as capacity_mod
-from src.distributed.expert_parallel.deepep import settings as settings_mod
+from halo.distributed import grad_reduce as grad_reduce_mod
+from halo.distributed import rank_uniform_env
+from halo.distributed.expert_parallel.deepep import capacity as capacity_mod
+from halo.distributed.expert_parallel.deepep import settings as settings_mod
 
-# Knob -> the string spelling of its own default, per src/env.py resolution.
+# Knob -> the string spelling of its own default, per halo/env.py resolution.
 _KNOBS_AT_DEFAULT = {
     "HALO_EP_CAPACITY_DEDUP": "1",
     "HALO_DEEPEP_GPU_TIMEOUT_SECONDS": "100",

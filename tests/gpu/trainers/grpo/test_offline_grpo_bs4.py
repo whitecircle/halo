@@ -26,9 +26,9 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory, log, step_losses

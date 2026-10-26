@@ -17,7 +17,7 @@ import inspect
 
 import pytest
 
-from src.environments.registry import _environment_registry
+from halo.environments.registry import _environment_registry
 
 
 @pytest.fixture

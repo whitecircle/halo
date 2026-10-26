@@ -320,7 +320,7 @@ push-public-sglang: ecr-public-login ## publish halo:sglang-$(SGLANG_VERSION) ->
 push-public-all: push-public-blackwell push-public-hopper push-public-vllm push-public-sglang ## publish all four to ECR Public
 
 train: ## run a training config: make train CONFIG=... [METHOD=sft] NPROC=8 EXTRA="--expert_parallel_size=8"
-	$(DOCKER_RUN) bash -lc "python -m src.cli launch $(strip $(METHOD)) $(CONFIG) \
+	$(DOCKER_RUN) bash -lc "python -m halo.cli launch $(strip $(METHOD)) $(CONFIG) \
 	  --nproc $(NPROC) -- $(EXTRA)"
 
 # clean does not remove checkpoints/: it is the default output_dir of every shipped example.

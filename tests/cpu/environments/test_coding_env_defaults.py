@@ -23,21 +23,21 @@ import sys
 import pytest
 from datasets import Dataset
 
+from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.eval_runner import reject_answerless_examples
+from halo.environments.registry import build_environment
+from halo.environments.sandbox import factory as factory_module
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
+from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.remote import RemoteSandbox
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
+from halo.environments.tasks.coding.swe import SweEnvironment
+from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 from scripts.environments.inference import run_env
-from src.environments.episode_keys import REWARD_COMPONENTS_KEY
-from src.environments.eval_runner import reject_answerless_examples
-from src.environments.registry import build_environment
-from src.environments.sandbox import factory as factory_module
-from src.environments.sandbox.base import SandboxExecutor
-from src.environments.sandbox.bubblewrap import BubblewrapSandbox
-from src.environments.sandbox.local import LocalSubprocessSandbox
-from src.environments.sandbox.remote import RemoteSandbox
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
-from src.environments.tasks.coding.swe import SweEnvironment
-from src.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME
-from src.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
 
 _JUDGE = {"source": "judge", "name": "quality", "requirements": [{"name": "done", "description": "Done."}]}

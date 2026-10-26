@@ -27,8 +27,8 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-import src.distributed.fsdp as fsdp
-from src.distributed.fsdp import IdentityParamSet
+import halo.distributed.fsdp as fsdp
+from halo.distributed.fsdp import IdentityParamSet
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 
 BF16, FP32 = torch.bfloat16, torch.float32

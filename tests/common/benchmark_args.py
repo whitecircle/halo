@@ -9,8 +9,8 @@ import argparse
 import torch
 from transformers import AutoConfig
 
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.attention.selection import resolve_attn_implementation
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.selection import resolve_attn_implementation
 from tests.common.models import DEFAULT_MODEL, MODEL_CONFIGS
 
 

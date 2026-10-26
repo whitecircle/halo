@@ -1,4 +1,4 @@
-"""Repo pin: every module in src/ and scripts/ logs through one stdlib logger form.
+"""Repo pin: every module in halo/ and scripts/ logs through one stdlib logger form.
 
 The module logger is ``logger = logging.getLogger(__name__)``, or ``info_logger(__name__)`` where it needs
 its INFO pin. accelerate's adapter drops every level off global rank 0 and raises before its state exists,
@@ -11,7 +11,7 @@ import pytest
 
 from tests.common.repo import REPO_ROOT
 
-_SWEPT_ROOTS = ("src", "scripts")
+_SWEPT_ROOTS = ("halo", "scripts")
 _FOREIGN_LOGGING_MODULES = frozenset({"accelerate.logging", "transformers.utils.logging"})
 _LOGGER_FORMS = frozenset({"logging.getLogger(__name__)", "info_logger(__name__)"})
 _LOGGER_FACTORIES = frozenset({"getLogger", "get_logger", "info_logger"})
@@ -51,7 +51,8 @@ def _logger_form_offences(tree: ast.Module) -> list[str]:
 
 
 def _sweep() -> tuple[dict[str, list[str]], int]:
-    """Parse src/ and scripts/ once: each offending file's offences, and how many files bind a module logger."""
+    """Parse halo/ and scripts/ once: each offending file's offences, and how many files bind a module logger."""
+    assert all((REPO_ROOT / root).is_dir() for root in _SWEPT_ROOTS), f"the sweep lost a root: {_SWEPT_ROOTS}"
     offences, bound = {}, 0
     for path in sorted(path for root in _SWEPT_ROOTS for path in (REPO_ROOT / root).rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -67,7 +68,7 @@ _OFFENCES, _MODULE_LOGGER_COUNT = _sweep()
 def test_every_module_uses_the_stdlib_logger_form():
     assert not _OFFENCES, (
         "bind `logger = logging.getLogger(__name__)` and guard a rank-0-only line with "
-        f"`if is_global_main_process():` (src.runtime.ranks): {_OFFENCES}"
+        f"`if is_global_main_process():` (halo.runtime.ranks): {_OFFENCES}"
     )
 
 
@@ -93,7 +94,7 @@ def test_each_break_of_the_logger_form_is_flagged(source, offence):
 
 
 def test_the_stdlib_forms_pass():
-    source = "import logging\n\nfrom src.log import info_logger\n\nlogger = logging.getLogger(__name__)\n"
+    source = "import logging\n\nfrom halo.log import info_logger\n\nlogger = logging.getLogger(__name__)\n"
     assert _logger_form_offences(ast.parse(source)) == []
     assert _logger_form_offences(ast.parse("logger = info_logger(__name__)\n")) == []
 

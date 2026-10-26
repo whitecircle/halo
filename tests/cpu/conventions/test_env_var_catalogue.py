@@ -1,7 +1,7 @@
 """The environment-variable catalogue and the code agree in both directions.
 
 ``agent-docs/reference/configuration-reference.md`` is the only place a user learns a toolkit env var
-exists, so the two drift failures are symmetric and both silent: a knob added to ``src/`` that no
+exists, so the two drift failures are symmetric and both silent: a knob added to ``halo/`` that no
 row announces is unreachable in practice, and a row for a variable nothing reads is a promise the
 run does not keep. This sweep fails on either.
 
@@ -68,7 +68,8 @@ def _string_constants_in_value_position(tree: ast.AST):
 def _env_names_read_by_the_toolkit() -> dict[str, str]:
     """Every candidate env-var name the shipped code names, mapped to its first ``file:line``."""
     found: dict[str, str] = {}
-    for package in ("src", "scripts"):
+    for package in ("halo", "scripts"):
+        assert (REPO_ROOT / package).is_dir(), f"the sweep lost its {package}/ root"
         for path in sorted((REPO_ROOT / package).rglob("*.py")):
             if "__pycache__" in path.parts:
                 continue
@@ -109,7 +110,7 @@ def test_every_catalogued_variable_has_a_reader(variable):
     if variable in THIRD_PARTY_ROWS:
         pytest.skip(f"{variable}: {THIRD_PARTY_ROWS[variable]}")
     assert variable in _READ, (
-        f"`{variable}` has a row in {CATALOGUE.name} but no module under src/ or scripts/ names it. "
+        f"`{variable}` has a row in {CATALOGUE.name} but no module under halo/ or scripts/ names it. "
         "Delete the row, or add it to THIRD_PARTY_ROWS with the reader that consumes it."
     )
 

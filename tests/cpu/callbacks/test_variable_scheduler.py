@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from src.callbacks.variable_scheduler import VariableSchedulerCallback
+from halo.callbacks.variable_scheduler import VariableSchedulerCallback
 
 # Mock helpers
 

@@ -16,16 +16,16 @@ from transformers import AutoModelForCausalLM
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Experts
 
-from src.data.collators.factory import select_data_collator
-from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.kernels.fused_glu import GluCombine, clamped_silu_mul_eager, resolve_clamped_glu_mul
-from src.model_loading.buffer_repair import finalize_loaded_model
-from src.models.attention.selection import _model_is_deepseek_v4
-from src.models.moe.balancing import resolve_balancing_mode
-from src.models.moe.expert_layout import ExpertLayout
-from src.models.moe.family_specs import find_moe_family_spec
-from src.models.segment_markers import reject_compressed_kv_rows
+from halo.data.collators.factory import select_data_collator
+from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.kernels.fused_glu import GluCombine, clamped_silu_mul_eager, resolve_clamped_glu_mul
+from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.models.attention.selection import _model_is_deepseek_v4
+from halo.models.moe.balancing import resolve_balancing_mode
+from halo.models.moe.expert_layout import ExpertLayout
+from halo.models.moe.family_specs import find_moe_family_spec
+from halo.models.segment_markers import reject_compressed_kv_rows
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import randomize_tid2eid

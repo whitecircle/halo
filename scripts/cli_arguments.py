@@ -2,13 +2,13 @@
 and device-map pair, the remote-code switch and the OpenAI-compatible endpoint block.
 
 Defined once so the checkpoint tools chained over one artifact, and every CLI driving a served model, accept one
-spelling and one set of defaults. Flags only; the drivers they feed live in ``src/``."""
+spelling and one set of defaults. Flags only; the drivers they feed live in ``halo/``."""
 
 import argparse
 
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
-from src.model_loading.dtype import DTYPE_BY_NAME
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
+from halo.model_loading.dtype import DTYPE_BY_NAME
 
 # What ``--model_id`` accepts; kept in step with ``resolve_checkpoint_source``.
 HUB_SOURCE_HELP = "Hub repo id or a local checkpoint directory"
@@ -17,7 +17,7 @@ HUB_SOURCE_HELP = "Hub repo id or a local checkpoint directory"
 def add_max_shard_size_arg(parser: argparse.ArgumentParser, *, note: str = "") -> argparse.ArgumentParser:
     """Add the ``--max_shard_size`` flag for a tool that writes a safetensors checkpoint.
 
-    Defaults to :data:`~src.checkpoint.format.DEFAULT_MAX_SHARD_SIZE`. ``note`` appends a caveat for
+    Defaults to :data:`~halo.checkpoint.format.DEFAULT_MAX_SHARD_SIZE`. ``note`` appends a caveat for
     outputs that ignore the cap (adapter files, single-file checkpoints rewritten in place).
     """
     parser.add_argument(

@@ -12,14 +12,14 @@ import torch.distributed as dist
 from accelerate import PartialState
 from datasets import Dataset
 
-from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.runtime.consensus import DeferredRankFailure
-from src.runtime.filesystem import is_fs_save_rank
-from src.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
-from src.trainers.grpo.offline.reference_cache import ReferenceScoreCache
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.filesystem import is_fs_save_rank
+from halo.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
+from halo.trainers.grpo.offline.reference_cache import ReferenceScoreCache
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import shared_output_dir
 from tests.common.offline_grpo import (

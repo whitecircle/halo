@@ -14,8 +14,8 @@ import os
 
 import pytest
 
-from src.data.sources import dataset_cache
-from src.data.sources.dataset_cache import DOWNLOAD_COMPLETE_MARKER, _write_download_marker, publish_cached_download
+from halo.data.sources import dataset_cache
+from halo.data.sources.dataset_cache import DOWNLOAD_COMPLETE_MARKER, _write_download_marker, publish_cached_download
 
 
 def _write_tree(path: str, payload: str) -> None:

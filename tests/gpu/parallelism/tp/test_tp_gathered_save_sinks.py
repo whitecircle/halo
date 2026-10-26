@@ -37,10 +37,10 @@ from transformers import GptOssConfig, GptOssForCausalLM
 
 # Registers the EP export roster the config writer at the end of every gathered save demands —
 # a hand-built model reaches save_tp_checkpoint without the load path that pulls this in.
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.checkpoint.parallel.save import save_tp_checkpoint
-from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
-from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.checkpoint.parallel.save import save_tp_checkpoint
+from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from tests.common.checkpoint_io import save_context, weight_files
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main

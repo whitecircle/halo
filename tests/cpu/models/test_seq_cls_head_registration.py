@@ -8,7 +8,7 @@ text-only artifact writes. Reward modeling and classification both resolve the m
 ``AutoModelForSequenceClassification``, so a missing spelling is a hard failure
 ("Unrecognized configuration class") at load, on a checkpoint that trained fine.
 
-All four go through ``src.models.seq_cls_heads``, which writes the auto mapping's ``_extra_content``
+All four go through ``halo.models.seq_cls_heads``, which writes the auto mapping's ``_extra_content``
 directly rather than calling ``register()``: transformers >= 5.12 silently no-ops ``register()`` for
 a config class living under ``transformers.*``, so the shim would appear to apply and then fail far
 away.
@@ -39,7 +39,7 @@ from transformers.models.gemma4.configuration_gemma4 import Gemma4Config, Gemma4
 from transformers.models.qwen3_5_moe import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
 
 # Importing IS the registration under test.
-from src.models.seq_cls_heads import (
+from halo.models.seq_cls_heads import (
     Gemma4ForSequenceClassification,
     Gemma4TextForSequenceClassification,
     Qwen3_5MoeForSequenceClassification,
@@ -114,7 +114,7 @@ def test_the_production_import_path_pulls_in_every_registration():
     because this file imports the heads itself — in-process the chain could be severed and every
     other test here would still pass."""
     probe = (
-        "import src.model_loading.parallel.loader\n"
+        "import halo.model_loading.parallel.loader\n"
         "from transformers import AutoModelForSequenceClassification as A\n"
         "print(sorted(c.model_type for c in A._model_mapping._extra_content))\n"
     )

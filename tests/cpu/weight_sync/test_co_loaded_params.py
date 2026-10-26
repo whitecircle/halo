@@ -15,9 +15,9 @@ fuses nothing where a half does not exist.
 import pytest
 import torch
 
-import src.weight_sync.clients.base as base_module
-from src.weight_sync.chunking import declared_co_load_groups, split_co_loaded
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+import halo.weight_sync.clients.base as base_module
+from halo.weight_sync.chunking import declared_co_load_groups, split_co_loaded
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.weight_sync import Wire, offline_client, push
 
 GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)

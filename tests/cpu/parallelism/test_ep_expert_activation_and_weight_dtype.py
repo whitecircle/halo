@@ -52,18 +52,18 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSpars
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
-from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
-from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.kernels.fused_glu import GluCombine, is_silu_activation, silu_mul_eager
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
+from halo.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.kernels.fused_glu import GluCombine, is_silu_activation, silu_mul_eager
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 16, 32, 2  # experts, hidden, moe intermediate, top_k

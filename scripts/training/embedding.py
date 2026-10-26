@@ -14,15 +14,15 @@ from sentence_transformers.models import Normalize, Pooling
 from transformers import AutoModel
 from trl import get_quantization_config
 
-from src.checkpoint.model_card import HUB_TAGS
-from src.config_validation import reject_non_default_args, reject_unsupported_args
-from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import ModelArguments
-from src.data.vlm_routing import reject_image_columns
-from src.entrypoints.data_setup import load_script_datasets
-from src.entrypoints.model_setup import load_model_and_tokenizer
-from src.entrypoints.script import (
+from halo.checkpoint.model_card import HUB_TAGS
+from halo.config_validation import reject_non_default_args, reject_unsupported_args
+from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.vlm_routing import reject_image_columns
+from halo.entrypoints.data_setup import load_script_datasets
+from halo.entrypoints.model_setup import load_model_and_tokenizer
+from halo.entrypoints.script import (
     ScriptContext,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
@@ -31,22 +31,22 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.buffer_repair import finalize_loaded_model
-from src.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
-from src.model_loading.model_preparation import apply_run_model_policies
-from src.model_loading.parallel.model_source import resolve_model_source
-from src.model_loading.parallel.peft_setup import build_peft_config
-from src.model_loading.remote_code import apply_remote_code_compat_shims
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.context_window import resolve_length_to_context
-from src.models.peft_adapters import tuner_adapter_param_ids
-from src.runtime.collectives import barrier
-from src.runtime.load_coordination import joined_node_load
-from src.runtime.ranks import is_global_main_process
-from src.trainers.dataloaders import uses_dp_sharded_loader
-from src.trainers.embedding.embedding_rules import reject_uneven_sentence_transformers_batches
-from src.trainers.embedding.preloaded_transformer import PreloadedTransformer
-from src.trainers.embedding.trainer import EmbeddingTrainer
+from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
+from halo.model_loading.model_preparation import apply_run_model_policies
+from halo.model_loading.parallel.model_source import resolve_model_source
+from halo.model_loading.parallel.peft_setup import build_peft_config
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.context_window import resolve_length_to_context
+from halo.models.peft_adapters import tuner_adapter_param_ids
+from halo.runtime.collectives import barrier
+from halo.runtime.load_coordination import joined_node_load
+from halo.runtime.ranks import is_global_main_process
+from halo.trainers.dataloaders import uses_dp_sharded_loader
+from halo.trainers.embedding.embedding_rules import reject_uneven_sentence_transformers_batches
+from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
+from halo.trainers.embedding.trainer import EmbeddingTrainer
 
 logger = logging.getLogger(__name__)
 

@@ -1,4 +1,4 @@
-"""CPU tests for the torch-free env-var helpers in :mod:`src.env`.
+"""CPU tests for the torch-free env-var helpers in :mod:`halo.env`.
 
 Covers the truthiness/parse-and-fallback contract every HALO_/DIST_ knob relies on, and pins the
 :func:`env_str` fallback-chain semantics.
@@ -9,8 +9,8 @@ import os
 
 import pytest
 
-import src.env as env_mod
-from src.env import env_flag, env_float, env_int, env_positive_float, env_positive_int, env_str
+import halo.env as env_mod
+from halo.env import env_flag, env_float, env_int, env_positive_float, env_positive_int, env_str
 
 _VARS = ("HALO_TEST_A", "HALO_TEST_B")
 

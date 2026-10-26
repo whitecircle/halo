@@ -15,8 +15,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import src.callbacks.balancing as balancing
-from src.callbacks.balancing import BalancingBiasCallback
+import halo.callbacks.balancing as balancing
+from halo.callbacks.balancing import BalancingBiasCallback
 
 
 class _Router(torch.nn.Module):

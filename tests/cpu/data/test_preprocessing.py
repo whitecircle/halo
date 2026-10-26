@@ -19,23 +19,23 @@ import pytest
 from datasets import Dataset, load_from_disk
 from huggingface_hub.errors import EntryNotFoundError
 
-from src.data.preprocessed import metadata as mod
-from src.data.preprocessed.metadata import (
+from halo.data.preprocessed import metadata as mod
+from halo.data.preprocessed.metadata import (
     _RENDER_CHECKED_FIELDS,
     PreprocessedDatasetMetadata,
     PreprocessingConfig,
     verify_preprocessed_dataset,
 )
-from src.data.preprocessed.preparation import _warn_on_shard_count_ceiling, shard_dataset
-from src.data.preprocessed.shard_index import (
+from halo.data.preprocessed.preparation import _warn_on_shard_count_ceiling, shard_dataset
+from halo.data.preprocessed.shard_index import (
     SHARD_INDEX_FILE,
     IncompatiblePreprocessedDataset,
     ShardIndex,
     ShardInfo,
     write_stamped_sidecar,
 )
-from src.data.preprocessed.tokenization import tokenize_dataset
-from src.data.sources.paths import hub_repo_id
+from halo.data.preprocessed.tokenization import tokenize_dataset
+from halo.data.sources.paths import hub_repo_id
 from tests.common.tokenizers import load_cached_tokenizer
 
 

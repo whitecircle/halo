@@ -14,8 +14,8 @@ import json
 import pytest
 from datasets import Dataset
 
-from src.data.sources.loading import load_dataset_from_source
-from src.data.sources.paths import parse_dataset_source
+from halo.data.sources.loading import load_dataset_from_source
+from halo.data.sources.paths import parse_dataset_source
 
 ROWS = [{"prompt": "a", "label": 0}, {"prompt": "b", "label": 1}, {"prompt": "c", "label": 2}]
 

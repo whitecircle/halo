@@ -28,8 +28,8 @@ import sys
 import torch
 import torch.distributed as dist
 
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_all
 from tests.common.harness import gpu_test_main

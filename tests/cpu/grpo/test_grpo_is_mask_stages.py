@@ -7,8 +7,8 @@ OPSM). They must be exact no-ops at their defaults — the default path is the r
 import pytest
 import torch
 
-from src.configs.grpo_environmental import ISMaskConfig
-from src.trainers.grpo.objective.logratio import apply_is_masks, apply_opsm, compute_is_ratio
+from halo.configs.grpo_environmental import ISMaskConfig
+from halo.trainers.grpo.objective.logratio import apply_is_masks, apply_opsm, compute_is_ratio
 
 
 def _counts(stats: dict, key: str) -> tuple[float, float]:

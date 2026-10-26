@@ -13,9 +13,9 @@ Run: pytest tests/cpu/callbacks/test_moe_metrics_router_logits_guard.py
 import pytest
 import torch
 
-from src.callbacks.balancing import apply_balancing_mode
-from src.callbacks.moe_metrics import MoEMetricsCallback
-from src.models.moe.router_logits import mark_router_logits_forced_off, router_logits_forced_off
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.callbacks.moe_metrics import MoEMetricsCallback
+from halo.models.moe.router_logits import mark_router_logits_forced_off, router_logits_forced_off
 
 
 class _Cfg:

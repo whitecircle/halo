@@ -26,9 +26,9 @@ import torch.nn.functional as F
 from datasets import Dataset
 from sklearn.metrics import accuracy_score
 
-from src.configs.classification import ClassificationConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.reward.classification import ClassificationTrainer
+from halo.configs.classification import ClassificationConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG

@@ -22,8 +22,8 @@ from unittest import mock
 import pytest
 from datasets import Dataset
 
-import src.model_loading.parallel.model_source as model_source
-from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
+import halo.model_loading.parallel.model_source as model_source
+from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 
 _VLM_REJECTION = "Vision-language training is not supported under pipeline parallelism"
 

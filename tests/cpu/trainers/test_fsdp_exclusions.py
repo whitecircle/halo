@@ -16,7 +16,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 class _ForgetGate(nn.Module):

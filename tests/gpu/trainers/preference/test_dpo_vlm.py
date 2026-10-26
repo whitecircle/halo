@@ -15,8 +15,8 @@ from peft import LoraConfig
 from transformers import AutoModelForImageTextToText, AutoProcessor
 from trl import DPOConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.dpo import DistributedDPOTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.datasets import create_vlm_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B

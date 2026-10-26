@@ -15,8 +15,8 @@ from accelerate import Accelerator
 from datasets import Dataset
 from trl import SFTConfig
 
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.sft import DistributedSFTTrainer
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.offline_grpo import make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model

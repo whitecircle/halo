@@ -48,9 +48,9 @@ from transformers import (
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main

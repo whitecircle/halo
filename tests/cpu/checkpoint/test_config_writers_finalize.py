@@ -8,7 +8,7 @@ directory ships. Running a subset is not running the contract: the artifact load
 fails later in the merge tools or the server on a family the run never mentioned. The trainer's writers reach it
 through ``save_model_config`` and the tools through ``save_full_checkpoint``; a bare
 ``save_pretrained`` on a model or config object owes the call itself. This walks every function
-under ``src/`` and ``scripts/`` that calls ``save_pretrained`` on something other than a tokenizer /
+under ``halo/`` and ``scripts/`` that calls ``save_pretrained`` on something other than a tokenizer /
 processor / adapter config and requires the finalizer (or one of the two writers carrying it) in the
 same function.
 
@@ -24,7 +24,7 @@ import pytest
 
 from tests.common.repo import REPO_ROOT
 
-_ROOTS = ("src", "scripts")
+_ROOTS = ("halo", "scripts")
 # Receivers whose save_pretrained writes no model config.json: tokenizers, processors, generation
 # configs, PEFT adapter configs and adapter-only PeftModel saves.
 _EXEMPT_RECEIVER_MARKERS = (
@@ -40,7 +40,7 @@ _EXEMPT_RECEIVER_MARKERS = (
 # carry differences against, which runs the finalizer's first step and cannot call the finalizer
 # itself without recursing into it.
 _EXEMPT_FUNCTIONS = {
-    ("src/checkpoint/config_export.py", "_serialized_config"),
+    ("halo/checkpoint/config_export.py", "_serialized_config"),
 }
 _FINALIZERS = {"finalize_exported_config", "save_full_checkpoint", "save_model_config"}
 
@@ -77,6 +77,7 @@ def _config_writers(path: pathlib.Path) -> list[tuple[str, bool]]:
 
 def _python_files():
     for root in _ROOTS:
+        assert (REPO_ROOT / root).is_dir(), f"the sweep lost its {root}/ root"
         yield from sorted((REPO_ROOT / root).rglob("*.py"))
 
 
@@ -106,7 +107,7 @@ def test_every_exemption_names_an_unfinalized_writer(relative, name):
 
 def test_the_roster_is_not_vacuous():
     writers = {(str(p.relative_to(REPO_ROOT)), name) for p in _python_files() for name, _ in _config_writers(p)}
-    assert ("src/checkpoint/offline_export.py", "save_full_checkpoint") in writers
+    assert ("halo/checkpoint/offline_export.py", "save_full_checkpoint") in writers
     assert ("scripts/after_training/reattach_vision_tower.py", "main") in writers or any(
         path.endswith("reattach_vision_tower.py") for path, _ in writers
     )

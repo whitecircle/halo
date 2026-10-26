@@ -26,14 +26,14 @@ from peft import LoraConfig, get_peft_model
 from torch.distributed.device_mesh import init_device_mesh
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
-from src.distributed.mesh import build_dp_tp_mesh, tp_submesh
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
-from src.kernels.lowp.spec import LowpSpec
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
+from halo.distributed.mesh import build_dp_tp_mesh, tp_submesh
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from halo.kernels.lowp.spec import LowpSpec
 from tests.common.distributed import fake_process_group
 from tests.common.equivalence.revisions import (
     RAISED,

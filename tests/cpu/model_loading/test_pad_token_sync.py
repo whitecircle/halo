@@ -29,10 +29,10 @@ import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 from transformers.trainer_utils import align_special_tokens
 
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from src.model_loading.tokenizer_setup import configure_run_tokenizer, sync_special_token_id
-from src.trainers.parallelism.pipeline_rules import require_pooling_pad_id
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer, sync_special_token_id
+from halo.trainers.parallelism.pipeline_rules import require_pooling_pad_id
 from tests.common.models import TINY_QWEN3_CONFIG
 
 MAX_LENGTH = 128
@@ -233,7 +233,7 @@ def test_an_eos_pad_states_the_cost_it_carries(caplog):
     """Recording is right, but silence is not: from the next load on, the eos row's input-embedding
     gradient is masked, so the line has to name both the cost and the way out."""
     model = _seq_cls_model()
-    with caplog.at_level(logging.INFO, logger="src.model_loading.tokenizer_setup"):
+    with caplog.at_level(logging.INFO, logger="halo.model_loading.tokenizer_setup"):
         configure_run_tokenizer(
             CommonScriptArguments(),
             model,
@@ -251,7 +251,7 @@ def test_an_eos_pad_states_the_cost_it_carries(caplog):
 def test_a_real_pad_token_says_nothing_about_eos(caplog):
     """Anti-noise, and the control for the test above: the ordinary case must not emit that line."""
     model = _seq_cls_model()
-    with caplog.at_level(logging.INFO, logger="src.model_loading.tokenizer_setup"):
+    with caplog.at_level(logging.INFO, logger="halo.model_loading.tokenizer_setup"):
         configure_run_tokenizer(
             CommonScriptArguments(), model, _Tokenizer(), MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded
         )

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """CPU tests for the block-scale quantizers (MXFP8 / MXFP4 / NVFP4) in
-``src/kernels/lowp/quantization.py``.
+``halo/kernels/lowp/quantization.py``.
 
 Validates storage shapes/dtypes, quantize->dequantize round-trip error within each
 format's tolerance, axis handling, divisibility guards, NVFP4's outlier handling, the
@@ -14,8 +14,8 @@ import pytest
 import torch
 from torch._dynamo.exc import TorchDynamoException
 
-from src.kernels.lowp import quantization
-from src.kernels.lowp.quantization import (
+from halo.kernels.lowp import quantization
+from halo.kernels.lowp.quantization import (
     E2M1_MAX,
     cached_fake_quant,
     dequantize,

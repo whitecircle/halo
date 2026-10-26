@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for ``reduce_grads_bucketed`` (``src/distributed/grad_reduce.py``) on a one-rank gloo group.
+"""CPU tests for ``reduce_grads_bucketed`` (``halo/distributed/grad_reduce.py``) on a one-rank gloo group.
 
 A one-rank all-reduce is the identity, so the numerics pin the framing around the collective: the
 chunking, the divisor, the fp32 upcast + write-back, and the scatter-back into every gradient in
@@ -14,8 +14,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed import grad_reduce
-from src.distributed.grad_reduce import _launch_flat_chunk, reduce_grads_bucketed
+from halo.distributed import grad_reduce
+from halo.distributed.grad_reduce import _launch_flat_chunk, reduce_grads_bucketed
 
 
 @pytest.fixture

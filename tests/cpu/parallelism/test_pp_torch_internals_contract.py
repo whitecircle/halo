@@ -23,11 +23,11 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.pipelining import Schedule1F1B, ScheduleGPipe
 
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_rules import PPSchedule
-from src.distributed.pipeline_parallel import runner
-from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss, causal_lm_token_loss
-from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_rules import PPSchedule
+from halo.distributed.pipeline_parallel import runner
+from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss, causal_lm_token_loss
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 
 VOCAB = 16
 HIDDEN = 8

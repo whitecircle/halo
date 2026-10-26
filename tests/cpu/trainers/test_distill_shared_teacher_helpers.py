@@ -20,13 +20,13 @@ import torch.nn as nn
 from torch.nn.functional import log_softmax
 from trl import SFTTrainer
 
-import src.trainers.distillation.self_distillation as self_distillation
-from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.distillation.divergences import place_frozen_scorer, shifted_token_cross_entropy
-from src.trainers.distillation.opd_term import privileged_teacher_pass
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.sft import DistributedSFTTrainer
+import halo.trainers.distillation.self_distillation as self_distillation
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.distillation.divergences import place_frozen_scorer, shifted_token_cross_entropy
+from halo.trainers.distillation.opd_term import privileged_teacher_pass
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.sft import DistributedSFTTrainer
 
 _TEACHER_BRANCH_COLLATOR = types.SimpleNamespace(builds_teacher_branch=True)
 

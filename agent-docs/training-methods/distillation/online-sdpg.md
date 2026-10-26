@@ -1,6 +1,6 @@
 # Online SDPG
 
-Self-Distilled Policy Gradient ([arXiv:2606.04036](https://arxiv.org/abs/2606.04036)) is [Online GRPO (RLVR)](../grpo/online.md) plus a privileged-teacher distillation term. Each step, the same policy is re-run under `no_grad` in eval mode with a hint revealing the gold answer, and the student is distilled toward that teacher's next-token distribution: `L = L_GRPO + beta(k)·L_OPD`. `DistributedSDPGTrainer` (`src/trainers/distillation/sdpg.py`) subclasses the online trainer, so vLLM server rollouts, NCCL weight sync, EP/TP/ETP and the LoRA rules carry over unchanged.
+Self-Distilled Policy Gradient ([arXiv:2606.04036](https://arxiv.org/abs/2606.04036)) is [Online GRPO (RLVR)](../grpo/online.md) plus a privileged-teacher distillation term. Each step, the same policy is re-run under `no_grad` in eval mode with a hint revealing the gold answer, and the student is distilled toward that teacher's next-token distribution: `L = L_GRPO + beta(k)·L_OPD`. `DistributedSDPGTrainer` (`halo/trainers/distillation/sdpg.py`) subclasses the online trainer, so vLLM server rollouts, NCCL weight sync, EP/TP/ETP and the LoRA rules carry over unchanged.
 
 Use it when a verifiable answer exists and the policy solves too few prompts for GRPO's group signal alone. At `sdpg_beta_base: 0` the trainer is plain online GRPO. For a fixed dataset instead of live rollouts use [self-distillation](self-distillation.md).
 

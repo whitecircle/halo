@@ -32,21 +32,21 @@ import os
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, FineGrainedFP8Config
 
-from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.offline_export import (
+from halo.checkpoint.offline_export import (
     preflight_resource_warning,
     reject_in_place_conversion,
     resolve_checkpoint_source,
     save_full_checkpoint,
 )
-from src.checkpoint.reading import (
+from halo.checkpoint.reading import (
     FP8_HEADER_DTYPE,
     checkpoint_shard_files,
     iter_checkpoint_shard_entries,
     reject_partial_checkpoint,
 )
-from src.log import configure_cli_logging
-from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from halo.log import configure_cli_logging
+from halo.model_loading.checkpoint_coverage import from_pretrained_verified
+from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

@@ -10,7 +10,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP and
 
 ## EP wrapper
 
-`EPInklingMoELayer` (`src/distributed/expert_parallel/families/inkling.py`) claims `InklingMoE` / `model_type: inkling_mm_model`, `inkling_text`. Fused `gate_up_proj`/`down_proj` routed experts in the GLM-4 layout, so the base fused-GLU storage, gather, and sharded merge apply unchanged.
+`EPInklingMoELayer` (`halo/distributed/expert_parallel/families/inkling.py`) claims `InklingMoE` / `model_type: inkling_mm_model`, `inkling_text`. Fused `gate_up_proj`/`down_proj` routed experts in the GLM-4 layout, so the base fused-GLU storage, gather, and sharded merge apply unchanged.
 
 That includes ETP, whose split-shard path and token-space partial-sum reduce are validated by `tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family inkling_text --expert-tp-size 2` (registered as EP+ETP on 4 GPUs; launched by hand at `--nproc_per_node=2` it runs pure ETP; the 2 shared experts stay replicated on every ETP rank). Two family quirks force a standalone wrapper rather than a GLM-4 subclass:
 
@@ -74,7 +74,7 @@ multimodal is EP/ETP-only.
 
 Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP and head stay eager: `InklingMLP` scales its output by a trained `global_scale`, and the head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` before the loss. There is no rotary to fuse: position enters as a learned relative-logit bias.
 
-That division and cut are the family's declared head transform (`src/models/head_transform.py`), so offline GRPO's `use_chunked_grpo_logprobs` sweep applies them too.
+That division and cut are the family's declared head transform (`halo/models/head_transform.py`), so offline GRPO's `use_chunked_grpo_logprobs` sweep applies them too.
 
 Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: text-only SFT rows take the text pipeline, so `packing` is available here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
 

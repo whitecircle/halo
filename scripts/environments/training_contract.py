@@ -5,20 +5,20 @@ from dataclasses import dataclass, replace
 
 from transformers import AutoConfig, AutoTokenizer
 
-from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
-from src.configs.parser import HaloArgumentParser
-from src.configs.script_arguments import ModelArguments
-from src.environments.engine_wire import reject_unenforceable_thinking_budget
-from src.environments.environment_base import EnvironmentBase
-from src.environments.reasoning_effort import efforts_by_level, has_thinking_budget
-from src.environments.rollout_config import (
+from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.configs.parser import HaloArgumentParser
+from halo.configs.script_arguments import ModelArguments
+from halo.environments.engine_wire import reject_unenforceable_thinking_budget
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.reasoning_effort import efforts_by_level, has_thinking_budget
+from halo.environments.rollout_config import (
     VLLM_BACKEND,
     RolloutConfig,
     find_reasoning_end_ids,
     resolve_reasoning_end_token_id,
     resolve_rollout_stop_token_ids,
 )
-from src.models.config_access import config_model_types
+from halo.models.config_access import config_model_types
 
 # The training script's config classes an eval reads its contract from: the environment's, the rollout's, and the
 # model's (its tokenizer resolves the stop tokens and the reasoning close). The YAML's other keys (training

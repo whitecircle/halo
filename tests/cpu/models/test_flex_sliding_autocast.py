@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.models.attention import sdpa_flex_sliding
+from halo.models.attention import sdpa_flex_sliding
 
 HEADS, KV_HEADS, SEQ = 4, 2, 200
 

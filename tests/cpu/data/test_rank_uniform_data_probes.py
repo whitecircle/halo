@@ -26,12 +26,12 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.data.preprocessed.preparation import shard_dataset
-from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
-from src.data.sources.sharded_dataset import ShardedDatasetLoader
-from src.data.vlm_routing import dataset_declares_images, is_vlm_run
-from src.runtime import consensus
-from src.runtime.consensus import RankConsensus
+from halo.data.preprocessed.preparation import shard_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
+from halo.data.vlm_routing import dataset_declares_images, is_vlm_run
+from halo.runtime import consensus
+from halo.runtime.consensus import RankConsensus
 from tests.common.repo import load_script_module
 
 VLM_CONFIG = CONFIG_MAPPING["gemma3"]()

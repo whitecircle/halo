@@ -3,7 +3,7 @@
 
 Context parallelism respells every adapter key: the Ulysses wrapper adds a ``model.`` level and an
 ``.original_attention.`` segment, so the tensors a CP run holds are not the tensors stock PEFT
-resolves. :func:`~src.models.unwrapping.plain_adapter_key` exists to undo that; unit coverage of
+resolves. :func:`~halo.models.unwrapping.plain_adapter_key` exists to undo that; unit coverage of
 the normalization alone does not reach the claim it is FOR — that
 ``scripts/after_training/merge_peft_adapters.py`` can take the written directory and produce a
 loadable, actually-adapted HF checkpoint. Every intermediate step can be individually correct while
@@ -39,15 +39,15 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 
-from src.checkpoint.format import ADAPTER_CONFIG_FILE, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
-from src.checkpoint.parallel.adapters import _cp_normalized_config, save_peft_adapters
-from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars
-from src.configs.script_arguments import ModelArguments
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.model_loading.parallel.peft_setup import build_peft_config
-from src.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
+from halo.checkpoint.parallel.adapters import _cp_normalized_config, save_peft_adapters
+from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.model_loading.parallel.peft_setup import build_peft_config
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import load_script_module

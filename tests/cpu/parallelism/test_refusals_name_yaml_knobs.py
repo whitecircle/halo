@@ -16,13 +16,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds
-from src.distributed.parallelism_rules import reject_accelerate_launch
-from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
-from src.model_loading.parallel.load_rules import reject_unsupported_model
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.moe.expert_lora_spec import reject_expert_lora_with_expert_tp
-from src.trainers.parallelism.trainer_rules import reject_stock_adamw_on_mixed_params
+from halo.distributed.context_parallel.sequence_chunks import cp_chunk_bounds
+from halo.distributed.parallelism_rules import reject_accelerate_launch
+from halo.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
+from halo.model_loading.parallel.load_rules import reject_unsupported_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.moe.expert_lora_spec import reject_expert_lora_with_expert_tp
+from halo.trainers.parallelism.trainer_rules import reject_stock_adamw_on_mixed_params
 from tests.common.parallelism import make_parallelism_config
 
 INTERNAL_FIELD = re.compile(

@@ -25,14 +25,14 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.configs.script_arguments import ModelArguments
-from src.distributed.fsdp import (
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.fsdp import (
     IdentityParamSet,
     apply_fsdp2_per_layer,
     install_fsdp2_safe_disable_adapter,
     reshard_fsdp2_modules,
 )
-from src.model_loading.parallel.peft_setup import build_peft_config
+from halo.model_loading.parallel.peft_setup import build_peft_config
 from tests.common.models import TINY_QWEN3_CONFIG
 
 TOKENS = torch.tensor([[6, 7, 8, 9, 10, 11]])

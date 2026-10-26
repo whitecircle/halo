@@ -71,7 +71,7 @@ _PASSES_PER_SURVEY = 2
 _OUTPUT_DRAIN_TIMEOUT = 30
 
 # Marker → (env var holding the base URL, default URL, start command). Raw os.environ rather than
-# src.env: importing src pulls torch+transformers (~4s, ~500MB) and a root logging handler into the
+# halo.env: importing halo pulls torch+transformers (~4s, ~500MB) and a root logging handler into the
 # launcher process.
 _SERVER_TIERS = {
     "vllm_server": (

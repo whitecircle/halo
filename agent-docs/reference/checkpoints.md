@@ -1,6 +1,6 @@
 # Checkpoints and Training Resume
 
-Saving and resuming live in `src/checkpoint/parallel/`. The trainer's `save_model()` hands a
+Saving and resuming live in `halo/checkpoint/parallel/`. The trainer's `save_model()` hands a
 `CheckpointContext` (built from explicit trainer fields by `CheckpointingMixin._checkpoint_context`) to
 `save_checkpoint()`, which writes the tokenizer, then runs the first saver its `select_checkpoint_saver()`
 ladder matches. Every saver takes `(ctx, output_dir)`. On resume `load_resume_weights()` restores the
@@ -132,7 +132,7 @@ immutable file (a copy where links are unavailable), and write failures rendezvo
 rotation can remove the previous complete checkpoint. Offline GRPO's ragged payload and its recovery:
 [reference contract](../training-methods/grpo/offline.md#reference-model).
 
-Staging and durable publication live in `src/checkpoint/atomic.py` (`staged_file` for one file). Every
+Staging and durable publication live in `halo/checkpoint/atomic.py` (`staged_file` for one file). Every
 file Halo's writers create gets `0o666` under the process umask; a file copied from a source keeps that
 file's mode. safetensors creates its files `0600`, so every safetensors writer goes through
 `save_safetensors_file`, and a `save_pretrained` writer is followed by `apply_umask_mode` on its weight
@@ -147,7 +147,7 @@ in safetensors.
 
 ### Exported `config.json`
 
-One step, `finalize_exported_config` (`src/checkpoint/config_export.py`, which owns the whole contract),
+One step, `finalize_exported_config` (`halo/checkpoint/config_export.py`, which owns the whole contract),
 ends every config write — the parallel saves through `save_model_config`, `save_full_checkpoint`, and the
 single-GPU/DDP/accelerate-FSDP fallback in the trainer. A path running a subset ships a directory that
 trains and reloads but that the merge tools or the pinned server refuse. It rewrites the written
@@ -186,7 +186,7 @@ level that declares it (`untie_word_embeddings`) and the trained `lm_head` is ho
 ## Hub model card
 
 Every checkpoint Halo writes, tool conversions included, carries a `README.md` card tagged `halo`
-(`HUB_TAGS` in `src/checkpoint/model_card.py`). The tag lands in `finalize_exported_config` (full-model
+(`HUB_TAGS` in `halo/checkpoint/model_card.py`). The tag lands in `finalize_exported_config` (full-model
 writes), `copy_checkpoint_aux_files` (exports built from a source directory), `save_peft_adapters` /
 `save_expert_lora_adapters`, the checkpointing mixin's `create_model_card` (TRL's per-checkpoint card) and
 the SentenceTransformer's `model_card_data`; a new writer ends in one of the first two or calls a tagger
@@ -214,7 +214,7 @@ converted. transformers reads several hubs through renames its module tree drops
 `vision_model` level (Command A+, LFM2-VL), a vendor namespace (Inkling's `model.llm.*`, GLM-5 Next's
 `hc_attn_*`, Step-3.7's `moe.*`, DeepSeek-V4's `attn`/`ffn` names), Mistral 3's legacy llava prefixes.
 Each writer reverts the conversions the load recorded (`conversions_to_revert`,
-`src/checkpoint/hub_layout.py`); a model with no record (built from its config, or by the lazy loader), or
+`halo/checkpoint/hub_layout.py`); a model with no record (built from its config, or by the lazy loader), or
 whose load dequantized fp8/MXFP4 weights, reverts the family's registered mapping. The EP-gathered save
 and the RL weight sync leave out only the per-expert merges (`export_conversions`), since the gather owns
 the expert layout. vLLM 0.32.0 raises on a SigLIP tower key that lacks its `vision_model` level.
@@ -260,10 +260,10 @@ layout ([Qwen3.5/3.6](../models/qwen3_5.md)).
 
 ### Expert parallelism (EP, EP+TP, EP+CP)
 
-`save_ep_gathered_checkpoint()` (`src/checkpoint/parallel/ep.py`) owns all three, over three param
+`save_ep_gathered_checkpoint()` (`halo/checkpoint/parallel/ep.py`) owns all three, over three param
 classes: EP expert weights, gathered by each layer's `gather_layer_state_dict()` into the full runtime
 tensors and written in the family's `ExpertLayout` through `to_hub_expert_tensors`
-(`src/models/moe/expert_layout.py`); DTensor params (EP+TP attention, embeddings, `lm_head`, FSDP2-sharded
+(`halo/models/moe/expert_layout.py`); DTensor params (EP+TP attention, embeddings, `lm_head`, FSDP2-sharded
 params such as the router under ep1 sharding), resolved via `full_tensor()`; and the hand-sliced GptOss
 `sinks`, all-gathered by `gather_hand_sliced_params`. Under EP+CP the iteration runs on the unwrapped model
 with an explicit CP-prefix strip; experts are replicated per CP rank, so any rank holds the complete set.
@@ -275,7 +275,7 @@ spells it. No reverse entry fuses tensors across two chunks, which
 live names differ from its hub's declares the pairs in its spec's `export_key_renames` (Laguna), which the
 gather and `merge_ep_shards.py` apply; the lazy loader reads the hub spelling through transformers' own
 Laguna renamings. Every lazy build plans its keys with the family's whole transformers conversion mapping,
-as `from_pretrained` does (`src/model_loading/checkpoint_keys.py`), a SigLIP tower's `vision_model` level
+as `from_pretrained` does (`halo/model_loading/checkpoint_keys.py`), a SigLIP tower's `vision_model` level
 included. Four families declare the mapping their hub checkpoints need (`hub_conversion_keys`: Inkling,
 DeepSeek-V4, GLM-5 Next, Step-3.7 Flash); each declared key must resolve in the installed transformers, and
 a text-only class with no mapping of its own (Inkling's text artifact) plans with those entries. A key stays
@@ -328,7 +328,7 @@ single `embed_tokens.weight` and `tie_word_embeddings: true`, as a single-GPU sa
 
 ### Context parallelism (CP)
 
-`UlyssesModel.state_dict()` (`src/distributed/context_parallel/ulysses_model.py`) strips the
+`UlyssesModel.state_dict()` (`halo/distributed/context_parallel/ulysses_model.py`) strips the
 `.original_attention.` segment the patcher introduces. It drops the stale duplicate dense
 `.mlp.{gate,up,down}_proj` keys **per layer, only on layers that carry routed experts**, so a hybrid
 model's genuinely-dense layers (GLM-4 MoE Lite, Mistral4 `first_k_dense_replace`) keep their MLP weights.
@@ -338,7 +338,7 @@ write.
 
 ## PEFT (LoRA) saving
 
-`save_peft_adapters` (`src/checkpoint/parallel/adapters.py`) is the ladder's first rung except under
+`save_peft_adapters` (`halo/checkpoint/parallel/adapters.py`) is the ladder's first rung except under
 accelerate-managed FSDP (the base Trainer's save owns the flat-param layout) and
 `merge_expert_lora_on_save` (which takes the mode's saver for a merged base). Only adapter weights are
 saved: `adapter_config.json`, `adapter_model.safetensors` (`adapter_model.bin` on a safetensors write
@@ -365,7 +365,7 @@ branch. Resume reads the adapter file present on **every** rank (safetensors or 
 reading different files would order the per-key DTensor loads differently.
 
 A GptOss run also writes `training_provenance.json` (`write_training_provenance`,
-`src/checkpoint/sidecars.py`) recording whether attention sinks were live or neutralized. The export tools
+`halo/checkpoint/sidecars.py`) recording whether attention sinks were live or neutralized. The export tools
 re-apply it through `apply_training_sidecars`, because a merge rebuilds the base from the hub, whose sinks
 are always live. It is a separate sidecar, so stock PEFT keeps loading the adapter unchanged.
 
@@ -417,7 +417,7 @@ FSDP2 (`fully_shard`) itself.
 transformers logger, which non-logging ranks silence — a truncated or wrong-architecture directory would
 train from random weights with no output. Every toolkit load path (the per-mode loaders, the lazy EP
 loader, the reference/teacher loads) routes its absent set through `verify_checkpoint_coverage`
-(`src/model_loading/checkpoint_coverage.py`) and **raises**; a new loader calls `from_pretrained_verified`.
+(`halo/model_loading/checkpoint_coverage.py`) and **raises**; a new loader calls `from_pretrained_verified`.
 
 Legitimate absences are read off the model class: a task head outside `base_model_prefix` (`score`,
 `classifier`, an untied `lm_head` — what makes reward / classification training on a base checkpoint
@@ -437,7 +437,7 @@ Set `resume_from_checkpoint: true` (or a `checkpoint-N` path) and re-run the sam
 torchrun --nproc_per_node=8 scripts/training/sft.py config.yaml --resume_from_checkpoint=true
 ```
 
-Resume is resolved once in `init_training_script` (`src/entrypoints/script.py`): it picks the checkpoint
+Resume is resolved once in `init_training_script` (`halo/entrypoints/script.py`): it picks the checkpoint
 ([Checkpoint detection](#checkpoint-detection)), then `resolve_resume_weights_source()` decides the weights
 source. Modes that transform the model at construction (EP fuses experts into 3-D tensors, CP wraps attention)
 cannot load the gathered HF checkpoint back through the Trainer, so it repoints to the **checkpoint
@@ -468,18 +468,18 @@ optimizer and LR scheduler. WandB does **not** continue the same run on its own 
 | **[PP / PP+EP](../parallelism/pipeline-parallelism.md)** | B at the default `use_grouped_gemm`, else stage-aware A | Path B: the stage loader read the trained tensors at construction. Path A (and a best-model load): each rank maps the merged index's hub names onto the unsplit model's (`ModuleLayoutView`, with the conversions the stage snapshotted), then onto its stage's through `global_parameter_name`, and reads only those; a missing stage-retained tensor raises, and so does a stage shard absent from this node's copy. On per-node output storage the locally-absent cross-stage tensors are skipped | Per-rank shards, gated on the fingerprint **and** `pp_stage_partition` | Any topology drift **raises** (no warm-restart fallback). PP+EP expert weights load at construction only, so a stage not built from the resume directory raises, on every rank at once |
 
 Every whole-weight read into an already-built model (Path A, and every best-model load) first maps the
-checkpoint onto the live names through `ModuleLayoutView` (`src/checkpoint/hub_layout.py`), replaying the
+checkpoint onto the live names through `ModuleLayoutView` (`halo/checkpoint/hub_layout.py`), replaying the
 conversions the save reverted, so a per-expert checkpoint lands in fused experts. It plans the keys with the
-lazy loaders' planner (`src/model_loading/checkpoint_keys.py`), so a resume and a lazy build read a
+lazy loaders' planner (`halo/model_loading/checkpoint_keys.py`), so a resume and a lazy build read a
 checkpoint the same way. Where the tensors live is
-resolved by `resolve_checkpoint_weights()` (`src/checkpoint/reading.py`): the index first (read as the map
+resolved by `resolve_checkpoint_weights()` (`halo/checkpoint/reading.py`): the index first (read as the map
 itself, so a key-set read opens no shard), then a single `model.safetensors`, then a legacy
 `pytorch_model.bin`; each reader keeps its own verdict on an empty, per-rank or torn directory. Whether the
 checkpoint is readable is decided on global rank 0 and broadcast, so a torn file sends all ranks to the
 base-Trainer fallback together; a rank-local read failure after a positive verdict raises.
 
 Because the Path-B base is rebuilt fresh, `load_resume_weights` restores adapters separately
-(`restore_adapters`, `src/checkpoint/parallel/adapters.py`): native EP expert adapters sliced per rank, PEFT
+(`restore_adapters`, `halo/checkpoint/parallel/adapters.py`): native EP expert adapters sliced per rank, PEFT
 attention adapters via `set_peft_model_state_dict`, from the checkpoint root or `resume_adapter/`. It warns
 on partial matches and raises if *every* saved key is unmatched, if no EP layer can receive the expert
 adapters, or if the LoRA scaling differs from the saved `adapter_config.json`'s
@@ -496,13 +496,13 @@ source that carries weights.
 
 ### Checkpoint detection
 
-`resume_checkpoint_from_config()` (`src/entrypoints/run_setup.py`): `true` auto-detects the newest
+`resume_checkpoint_from_config()` (`halo/entrypoints/run_setup.py`): `true` auto-detects the newest
 `checkpoint-N` in `output_dir` whose `trainer_state.json` exists on every rank, passing over newer step
 directories a save never completed and raising when only incomplete ones exist; an explicit path must exist
 with its trainer state on every rank; unset / `false` returns `None`. When auto-detection finds nothing the
 run is fresh and the non-empty-`output_dir` guard applies (`overwrite_output_dir: true` bypasses it).
 
-The pick is `resolve_resume_checkpoint()` (`src/checkpoint/parallel/resume_source.py`), which
+The pick is `resolve_resume_checkpoint()` (`halo/checkpoint/parallel/resume_source.py`), which
 `trainer.train(resume_from_checkpoint=True)` calls too, so a Python-API resume takes the same checkpoint (the
 base Trainer would take the highest-numbered directory, complete or not). Every FS-aware save rank lists its
 own `output_dir`; rank 0 merges and broadcasts the lists, and each candidate's completeness is one
@@ -634,7 +634,7 @@ disk, so for 100B+ models size `DIST_NCCL_TIMEOUT_MINUTES` to checkpoint size ÷
 margin.
 
 A write that fails on any rank — ENOSPC, EIO, a stale NFS handle — stops the whole job at the next collective
-with that rank's real error. `DeferredRankFailure` (`src/runtime/consensus.py`) records the local failure,
+with that rank's real error. `DeferredRankFailure` (`halo/runtime/consensus.py`) records the local failure,
 lets every rank finish the collectives, then raises everywhere.
 
 ## Troubleshooting
@@ -653,7 +653,7 @@ Checkpoint-specific; the rest of the toolkit's symptoms are in [Troubleshooting]
   `tp_size`, or give the node more host RAM.
 - **A re-saved VLM fails to reload as a VLM:** the save kept only the tokenizer, dropping
   `preprocessor_config.json` / `processor_config.json` / `chat_template`. The tools save the full
-  processor through `load_processing_class` (`src/model_loading/tokenizer_setup.py`); an adapter from a
+  processor through `load_processing_class` (`halo/model_loading/tokenizer_setup.py`); an adapter from a
   `text_only_model` run is the exception, merged or converted with the run's tokenizer and no processor
   files, which `reattach_vision_tower.py` restores for serving.
 - **An export serves different routing or sinks than training:** the router-balancing biases

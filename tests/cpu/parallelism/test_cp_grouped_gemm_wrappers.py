@@ -22,9 +22,9 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3MoeConfig
 
-import src.model_loading.parallel.cp as cp_loading
-import src.model_loading.parallel.loader as loading
-from src.model_loading.parallel.model_source import ModelSource
+import halo.model_loading.parallel.cp as cp_loading
+import halo.model_loading.parallel.loader as loading
+from halo.model_loading.parallel.model_source import ModelSource
 from tests.common.parallelism import make_parallelism_config
 
 _SENTINEL_EP_CONFIG = object()

@@ -28,10 +28,10 @@ import sys
 import torch
 from transformers import AutoTokenizer
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.distributed import hf_eval_loss_reference, shared_output_dir, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
@@ -73,7 +73,7 @@ def offline_grpo_kl_reference(
     min_log_prob,
     beta,
 ) -> float:
-    """The exact offline-GRPO objective with the k3 KL term on an unsplit model, fp32, independent of src/.
+    """The exact offline-GRPO objective with the k3 KL term on an unsplit model, fp32, independent of halo/.
 
     ``ref_logps`` is on the shifted ``[B, S-1]`` grid (the extra target the step receives).
     """

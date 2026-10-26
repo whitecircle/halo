@@ -9,8 +9,8 @@ is refused before it reaches the wire.
 import pytest
 import torch
 
-from src.distributed.nccl import _nccl_wrapper
-from src.distributed.nccl._nccl_wrapper import NCCLLibrary, nccl_data_type
+from halo.weight_sync.transport import nccl_library
+from halo.weight_sync.transport.nccl_library import NCCLLibrary, nccl_data_type
 
 _NCCL_INVALID_ARGUMENT = 4
 
@@ -50,11 +50,11 @@ def loaded(monkeypatch) -> list[tuple[str, _FakeLibrary]]:
         loads.append((path, library))
         return library
 
-    monkeypatch.setattr(_nccl_wrapper.ctypes, "CDLL", cdll)
+    monkeypatch.setattr(nccl_library.ctypes, "CDLL", cdll)
     monkeypatch.delenv("VLLM_NCCL_SO_PATH", raising=False)
-    _nccl_wrapper._bind_functions.cache_clear()
+    nccl_library._bind_functions.cache_clear()
     yield loads
-    _nccl_wrapper._bind_functions.cache_clear()
+    nccl_library._bind_functions.cache_clear()
 
 
 def test_each_library_path_is_loaded_and_typed_once(loaded, monkeypatch):
@@ -67,7 +67,7 @@ def test_each_library_path_is_loaded_and_typed_once(loaded, monkeypatch):
         "the library must load once per path, and VLLM_NCCL_SO_PATH must pick the path"
     )
     _, library = loaded[0]
-    for name, restype, argtypes in _nccl_wrapper._FUNCTIONS:
+    for name, restype, argtypes in nccl_library._FUNCTIONS:
         function = getattr(library, name)
         assert (function.restype, function.argtypes) == (restype, argtypes), f"{name} was bound untyped"
 
@@ -85,7 +85,7 @@ def test_a_failed_call_raises_with_the_nccl_error_string(loaded):
 def test_init_rank_passes_the_arguments_in_nccl_order(loaded):
     """``ncclCommInitRank(comm*, nranks, id, rank)``: a swapped count and rank still type-checks in ctypes."""
     library = NCCLLibrary()
-    unique_id = _nccl_wrapper.ncclUniqueId()
+    unique_id = nccl_library.ncclUniqueId()
 
     library.ncclCommInitRank(2, unique_id, 0)
 

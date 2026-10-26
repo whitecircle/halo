@@ -35,9 +35,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.parallelism.grad_clipping import pp_clip_grad_norm
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.parallelism.grad_clipping import pp_clip_grad_norm
 from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_min
 from tests.common.harness import gpu_test_main

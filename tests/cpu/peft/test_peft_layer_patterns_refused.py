@@ -14,9 +14,9 @@ from unittest.mock import patch
 import pytest
 import torch.nn as nn
 
-from src.configs.script_arguments import ModelArguments
-from src.model_loading.parallel import peft_setup
-from src.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.configs.script_arguments import ModelArguments
+from halo.model_loading.parallel import peft_setup
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
 
 _PATTERN_ARGS = ("unfreeze_layers_patterns", "freeze_layers_patterns")
 

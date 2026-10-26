@@ -14,9 +14,9 @@ import types
 
 import pytest
 
-import src.trainers.parallelism.mode_setup as mode_setup
-from src.distributed.context_parallel.config import CPConfigError
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+import halo.trainers.parallelism.mode_setup as mode_setup
+from halo.distributed.context_parallel.config import CPConfigError
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 _configure_cp = DistributedTrainerMixin._adopt_cp_wrapper
 

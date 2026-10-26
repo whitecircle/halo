@@ -21,9 +21,9 @@ import types
 import pytest
 import torch.nn as nn
 
-from src.distributed.fsdp import fsdp2_modules
-from src.trainers.parallelism import grad_sync
-from src.trainers.parallelism.grad_sync import GradientSyncMixin
+from halo.distributed.fsdp import fsdp2_modules
+from halo.trainers.parallelism import grad_sync
+from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 
 GRAD_ACCUM = 3
 RESHARD = "set_reshard_after_backward"

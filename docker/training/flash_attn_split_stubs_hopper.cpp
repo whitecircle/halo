@@ -20,7 +20,7 @@
 // and batch*heads*ceil(seq_q/64) < 0.8*2*SMs — i.e. small batch/head/seq shapes, not
 // just decode. mha_varlen_fwd gates the same call behind seqlenq_ngroups_swapped, so
 // packed/padding-free training never reaches it. Callers that use the non-varlen
-// entry point must therefore prefer FA3 on sm_90; src/distributed/context_parallel/
+// entry point must therefore prefer FA3 on sm_90; halo/distributed/context_parallel/
 // ulysses_attention.py does exactly that.
 //
 // If/when CUDA 13.3+ fixes the ptxas regression, drop this file and restore

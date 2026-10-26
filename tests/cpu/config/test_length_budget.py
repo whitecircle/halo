@@ -27,14 +27,14 @@ from types import SimpleNamespace
 import pytest
 from transformers import PretrainedConfig
 
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.configs.parser import HaloArgumentParser
-from src.configs.preference import SmoothMarginPOConfig
-from src.entrypoints.model_setup import apply_max_length, apply_prompt_completion_window, apply_tokenizer_window
-from src.models.context_window import get_model_context_window, resolve_length_to_context
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.offline.offline_rules import reject_inert_max_length
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.configs.parser import HaloArgumentParser
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.entrypoints.model_setup import apply_max_length, apply_prompt_completion_window, apply_tokenizer_window
+from halo.models.context_window import get_model_context_window, resolve_length_to_context
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.offline.offline_rules import reject_inert_max_length
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 _CPU_OK = {"output_dir": "/tmp/test_length_budget", "bf16": False, "use_cpu": True}
 

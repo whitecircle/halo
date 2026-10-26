@@ -5,10 +5,10 @@ from unittest.mock import patch
 import torch
 from torch.distributed.tensor import DTensor, distribute_tensor
 
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row, next_token_targets
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.grpo.objective.offline_loss import offline_loss
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row, next_token_targets
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.tolerances import TOL
 
 
@@ -154,7 +154,7 @@ def boundary_loss_negative_control(scorer, model, ids, mask, advantages, group_s
 
     with torch.no_grad():
         correct = score_loss()
-        with patch("src.distributed.context_parallel.sequence_chunks.next_token_targets", side_effect=drop_boundary):
+        with patch("halo.distributed.context_parallel.sequence_chunks.next_token_targets", side_effect=drop_boundary):
             broken = score_loss()
     correct_error = abs((correct - expected).item())
     broken_error = abs((broken - expected).item())

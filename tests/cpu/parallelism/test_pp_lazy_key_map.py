@@ -23,9 +23,9 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 
-from src.distributed.pipeline_parallel.partition import resolve_layer_partition
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage, slice_backbone_to_stage
-from src.model_loading.parallel.pp import StageKeyFilter
+from halo.distributed.pipeline_parallel.partition import resolve_layer_partition
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage, slice_backbone_to_stage
+from halo.model_loading.parallel.pp import StageKeyFilter
 from tests.common.models import TINY_QWEN3_CONFIG
 
 # 8 tiny layers: pp2 is the uniform split (as pp4 would be), pp3 the uneven one.

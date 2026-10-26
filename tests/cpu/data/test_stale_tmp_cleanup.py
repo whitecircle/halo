@@ -16,11 +16,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from datasets import Dataset
 
-from src.data.preprocessed.shard_index import ShardInfo
-from src.data.sources import s3_dataset_store
-from src.data.sources.dataset_cache import _cleanup_stale_publish_tmp_dirs, _write_download_marker
-from src.data.sources.s3_client import S3Client
-from src.data.sources.sharded_dataset import ShardedDatasetLoader
+from halo.data.preprocessed.shard_index import ShardInfo
+from halo.data.sources import s3_dataset_store
+from halo.data.sources.dataset_cache import _cleanup_stale_publish_tmp_dirs, _write_download_marker
+from halo.data.sources.s3_client import S3Client
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 
 _DAY = 24 * 60 * 60
 
@@ -109,8 +109,8 @@ def test_s3_load_dataset_reclaims_stale_temp(tmp_path):
     stale = _make_tmp_dir(cache_path, age_seconds=2 * _DAY)
     fresh = _make_tmp_dir(cache_path, age_seconds=60)
 
-    with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-        with patch("src.data.sources.s3_dataset_store.load_from_disk", return_value=ds):
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
+        with patch("halo.data.sources.s3_dataset_store.load_from_disk", return_value=ds):
             s3_dataset_store.load_dataset(client, "my/dataset")
 
     assert not os.path.exists(stale)
@@ -132,8 +132,8 @@ def test_sharded_shard_load_reclaims_stale_temp(tmp_path, monkeypatch):
     stale = _make_tmp_dir(cache_path, age_seconds=2 * _DAY)
     fresh = _make_tmp_dir(cache_path, age_seconds=60)
 
-    monkeypatch.setattr("src.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(tmp_path))
-    with patch("src.data.sources.sharded_dataset.load_from_disk", return_value=ds) as mock_load:
+    monkeypatch.setattr("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(tmp_path))
+    with patch("halo.data.sources.sharded_dataset.load_from_disk", return_value=ds) as mock_load:
         loaded = loader._load_shard_from_s3(shard)
 
     assert len(loaded) == 1

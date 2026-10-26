@@ -19,9 +19,8 @@ import torch
 from safetensors.torch import save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from scripts.after_training.convert_to_bf16 import convert_to_bf16
-from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE
-from src.checkpoint.format import (
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE
+from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     REFERENCE_LOGPS_FILE,
@@ -29,8 +28,9 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_MARKER_FILE,
     SCHEDULER_STATE_FILE,
 )
-from src.checkpoint.parallel.resume_source import classify_resume_weights
-from src.checkpoint.reading import resolve_checkpoint_weights
+from halo.checkpoint.parallel.resume_source import classify_resume_weights
+from halo.checkpoint.reading import resolve_checkpoint_weights
+from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 

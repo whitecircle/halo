@@ -16,8 +16,8 @@ NVLink domain spans nine OS nodes, and launch nodes running several stages.
 
 import pytest
 
-from src.checkpoint.parallel import pp as pp_mod
-from src.checkpoint.parallel.pp import is_pp_shard_writer
+from halo.checkpoint.parallel import pp as pp_mod
+from halo.checkpoint.parallel.pp import is_pp_shard_writer
 from tests.common.parallelism import make_parallelism_config
 
 

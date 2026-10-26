@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.adamw_bf16 import AdamWBF16
 from tests.common.cp_grpo import optimizer_step_agreement, same_layout_optimizer_step
 
 

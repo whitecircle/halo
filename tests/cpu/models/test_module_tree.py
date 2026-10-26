@@ -4,7 +4,7 @@ its candidates, and a module path is strict or lenient by name."""
 import pytest
 import torch.nn as nn
 
-from src.models.module_tree import (
+from halo.models.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
     decoder_layers,
     decoder_layers_attr,

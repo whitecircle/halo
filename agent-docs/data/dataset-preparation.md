@@ -5,7 +5,7 @@
 Only SFT (text and VLM) supports offline pre-processing. DPO, SMPO, GRPO, and Classification use
 different data formats and tokenize during training. The script is **single-process** — run it with
 plain `python`, not `torchrun`; `--num_proc` sets HF `map` workers, not ranks. Its flags are the
-`PreprocessingConfig` fields (`src/data/preprocessed/metadata.py`) plus the tool's own
+`PreprocessingConfig` fields (`halo/data/preprocessed/metadata.py`) plus the tool's own
 `PrepareDatasetArguments`, spelled like the training YAML keys; a YAML file of them works as the first
 argument, with `--key=value` overrides after it.
 
@@ -55,7 +55,7 @@ assistant turn) rather than `--max_length`. The same two causes are caught again
 bake: a probe of the first and last 64 rows raises when every label is `-100`, rather than shipping a
 dataset that trains zero tokens.
 
-`--tokenizer_backend gigatoken` (optional extra `halo[gigatoken]`) encodes text→ids with the [gigatoken](https://github.com/marcelroed/gigatoken) Rust encoder — ~6× faster tokenization on UltraChat 200K with Qwen3-0.6B — while chat templating and decoding stay on the model's tokenizer (`src/model_loading/tokenizer_backend.py`). Token IDs are verified against the HF tokenizer at startup; any divergence raises. VLM mode swaps the processor's inner tokenizer the same way, but image processing dominates there, so the win is small.
+`--tokenizer_backend gigatoken` (optional extra `halo[gigatoken]`) encodes text→ids with the [gigatoken](https://github.com/marcelroed/gigatoken) Rust encoder — ~6× faster tokenization on UltraChat 200K with Qwen3-0.6B — while chat templating and decoding stay on the model's tokenizer (`halo/model_loading/tokenizer_backend.py`). Token IDs are verified against the HF tokenizer at startup; any divergence raises. VLM mode swaps the processor's inner tokenizer the same way, but image processing dominates there, so the win is small.
 
 The same two values are also a **training** config field, `tokenizer_backend` (default `hf`). It resolves in `configure_run_tokenizer`, so every training method that tokenizes rows honors it with no preparation pass; embedding training rejects a non-`hf` value, since SentenceTransformer owns its own tokenization.
 
@@ -190,7 +190,7 @@ s3://bucket/preprocessed/dataset/
 ```
 
 `metadata.json` records the preprocessing config and stats; the authoritative field list is the
-`PreprocessedDatasetMetadata` dataclass in `src/data/preprocessed/metadata.py`.
+`PreprocessedDatasetMetadata` dataclass in `halo/data/preprocessed/metadata.py`.
 
 Its `version` stamp is compared on load: a stamp this build does not read raises
 `IncompatiblePreprocessedDataset` naming the version, rather than being swallowed into a silent
@@ -204,7 +204,7 @@ it). A stamp that does not parse or a Hub it cannot reach raises on every rank i
 tolerated failure is an S3 outage with no local mirror of the stamp, read as raw with a warning: an
 absence is never mirrored, and a warm-cache raw dataset loads without S3.
 
-Each split's `shard_index.json` (`ShardIndex`, `src/data/preprocessed/shard_index.py`) carries the same
+Each split's `shard_index.json` (`ShardIndex`, `halo/data/preprocessed/shard_index.py`) carries the same
 `version` stamp and is held to it the same way: a stamp this build does not read, or a field it does
 not know, raises the same `IncompatiblePreprocessedDataset` (defined in that leaf, so a loader can
 refuse without importing the writer).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU test for the parameter split :func:`src.optimizers.muon.muon_optimizer_from_args` reports.
+"""CPU test for the parameter split :func:`halo.optimizers.muon.muon_optimizer_from_args` reports.
 
 The token embedding and output head are 2D yet routed to Muon's internal scalar AdamW, so a summary
 counted by ``ndim`` reports them under Newton-Schulz. The logged split must match the routing the
@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from transformers import TrainingArguments
 
-from src.optimizers.muon import muon_optimizer_from_args
+from halo.optimizers.muon import muon_optimizer_from_args
 
 _VOCAB = 1000
 _HIDDEN = 1024
@@ -33,7 +33,7 @@ class _TinyModel(nn.Module):
 
 def test_summary_counts_the_embedding_and_head_under_the_scalar_optimizer(tmp_path, caplog):
     model = _TinyModel()
-    with caplog.at_level(logging.INFO, logger="src.optimizers.muon"):
+    with caplog.at_level(logging.INFO, logger="halo.optimizers.muon"):
         optimizer = muon_optimizer_from_args(model, TrainingArguments(output_dir=str(tmp_path)), decay_parameters=[])
 
     scalar_ids = {id(p) for g in optimizer.scalar_optimizer.param_groups for p in g["params"]}

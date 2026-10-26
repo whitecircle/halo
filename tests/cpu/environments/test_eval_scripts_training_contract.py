@@ -16,8 +16,12 @@ from types import SimpleNamespace
 import pytest
 from transformers import CONFIG_MAPPING
 
+import halo.environments.rollout_config as rollout_config
 import scripts.environments.training_contract as training_contract
-import src.environments.rollout_config as rollout_config
+from halo.env import nccl_timeout
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from scripts.environments.eval_arguments import (
     EVAL_REQUEST_TIMEOUT_SECONDS,
     rollout_config_from_args,
@@ -25,10 +29,6 @@ from scripts.environments.eval_arguments import (
 )
 from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, resolve_env_config
 from scripts.environments.training_contract import TrainingContract, load_training_contract
-from src.env import nccl_timeout
-from src.environments.registry import build_environment
-from src.environments.rollout_config import RolloutConfig
-from src.environments.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
 from tests.common.code_contests import StubSandbox
 from tests.common.repo import REPO_ROOT
 

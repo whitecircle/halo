@@ -4,7 +4,7 @@ transformers 5 keeps ``rope_theta``, ``partial_rotary_factor`` and the scaling s
 ``config.rope_parameters``, and from 5.20 it moves them there for remote-code configs written against
 v4 as well, so ``config.partial_rotary_factor`` raises ``AttributeError`` on every config the toolkit
 loads. The GPU scripts are never imported on CPU, so a flat read there surfaces only on a GPU run; this
-sweep finds one statically in every Python file under ``src/``, ``scripts/`` and ``tests/``.
+sweep finds one statically in every Python file under ``halo/``, ``scripts/`` and ``tests/``.
 """
 
 import ast
@@ -14,7 +14,7 @@ import pytest
 from tests.common.repo import REPO_ROOT
 
 FLAT_ROPE_ATTRIBUTES = frozenset({"rope_theta", "partial_rotary_factor", "rope_scaling"})
-SCANNED_TREES = ("src", "scripts", "tests")
+SCANNED_TREES = ("halo", "scripts", "tests")
 
 
 def _flat_reads(path) -> list[str]:
@@ -27,6 +27,7 @@ def _flat_reads(path) -> list[str]:
 
 
 def test_no_flat_rope_attribute_reads():
+    assert all((REPO_ROOT / tree).is_dir() for tree in SCANNED_TREES), f"the sweep lost a root: {SCANNED_TREES}"
     reads = [
         read
         for tree in SCANNED_TREES

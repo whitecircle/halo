@@ -26,11 +26,11 @@ from accelerate.data_loader import prepare_data_loader
 from accelerate.state import GradientState
 from torch.utils.data import DataLoader
 
-from src.environments.episode import RolloutResult
-from src.environments.episode_keys import SOLVE_RATE_KEY
-from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence, BatchRows
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.environments.episode import RolloutResult
+from halo.environments.episode_keys import SOLVE_RATE_KEY
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, BatchRows
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.env_grpo_batch import batch_host, row
 
 

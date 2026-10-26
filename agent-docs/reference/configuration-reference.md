@@ -7,7 +7,7 @@ python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
     --learning_rate=0.00001 --num_train_epochs=2 --per_device_train_batch_size=2
 ```
 
-A guard's refusal names the config class and the field in one form, `<Config>: <field> must be [an integer ]<bounds>[ (<why>)], got <value>` (`src/config_validation.py`).
+A guard's refusal names the config class and the field in one form, `<Config>: <field> must be [an integer ]<bounds>[ (<why>)], got <value>` (`halo/config_validation.py`).
 
 Working configs per method and model family live under `examples/`.
 
@@ -48,7 +48,7 @@ Two knobs are *not* a plain cap:
 
 ### The tokenizer's window
 
-Every training script but embedding routes its `tokenizer.model_max_length` write through one of three seams in `src/entrypoints/model_setup.py`, each pinning its window through `apply_tokenizer_window`:
+Every training script but embedding routes its `tokenizer.model_max_length` write through one of three seams in `halo/entrypoints/model_setup.py`, each pinning its window through `apply_tokenizer_window`:
 
 - `apply_max_length` — every single-budget script (SFT, DPO, KTO, SMPO, reward, classification, distillation). It resolves `max_length` against the context window, writes the resolved number back onto the config, and pins the same number, so collators, length filters and packers all read one already-resolved value.
 - `apply_prompt_completion_window` — offline and online GRPO, which have no single `max_length`. The window is `max_prompt_length + max_completion_length`, pinned **only when both halves are bounded**.
@@ -67,7 +67,7 @@ The YAML parser migrates no spelling: `max_seq_length` is a field of no config, 
 
 ## Performance & balancing flags
 
-Every standard training script inherits these from `CommonScriptArguments`; `configure_moe_balancing` (`src/callbacks/balancing.py`) applies the balancing mode and `build_run_callbacks` (`src/callbacks/factory.py`) builds the observability and balancing callbacks.
+Every standard training script inherits these from `CommonScriptArguments`; `configure_moe_balancing` (`halo/callbacks/balancing.py`) applies the balancing mode and `build_run_callbacks` (`halo/callbacks/factory.py`) builds the observability and balancing callbacks.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -86,7 +86,7 @@ Every standard training script inherits these from `CommonScriptArguments`; `con
 
 ## Optimizer selection
 
-`optim` is HuggingFace's field, extended at import time with two toolkit values (`src/optimizers/registry.py` registers everything in `NAMED_OPTIMIZER_BUILDERS`) so they pass `TrainingArguments` validation.
+`optim` is HuggingFace's field, extended at import time with two toolkit values (`halo/optimizers/registry.py` registers everything in `NAMED_OPTIMIZER_BUILDERS`) so they pass `TrainingArguments` validation.
 
 | `optim` | Optimizer | Notes |
 |---|---|---|
@@ -100,7 +100,7 @@ Every standard training script inherits these from `CommonScriptArguments`; `con
 
 ## Model, checkpoint and from-scratch flags
 
-Every training script parses these. `reset_sinks`, `train_sinks` and `text_only_model` (`ModelLoadArguments`) and the four checkpoint flags (`CheckpointArguments`) are on every script's `CommonScriptArguments` (`src/configs/script_arguments.py`); `init_from_scratch` and `merge_expert_lora_on_save` are `ParallelismArguments` flags (`src/configs/parallelism_arguments.py`, whose parallelism sizes are under [ParallelismConfig](#parallelismconfig)).
+Every training script parses these. `reset_sinks`, `train_sinks` and `text_only_model` (`ModelLoadArguments`) and the four checkpoint flags (`CheckpointArguments`) are on every script's `CommonScriptArguments` (`halo/configs/script_arguments.py`); `init_from_scratch` and `merge_expert_lora_on_save` are `ParallelismArguments` flags (`halo/configs/parallelism_arguments.py`, whose parallelism sizes are under [ParallelismConfig](#parallelismconfig)).
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -125,8 +125,8 @@ Read from the environment (not the YAML); set in the launch command / `.env`. To
 | `DIST_SHARED_FILESYSTEM` | `1` | Umbrella for both sides: `1` = shared FS (only global rank 0 writes downloads/checkpoints); `0` = per-node local disk (each node's local rank 0 writes). Must be identical on every rank — the flags select the coordination scope, so `init_distributed()` broadcasts rank 0's *resolved* values for all three and warns any rank whose env disagreed. See [Filesystem Handling](../data/filesystem-handling.md). |
 | `DIST_INPUT_SHARED_FILESYSTEM` | umbrella | Read side only (model/dataset downloads, dataset map/pack, HF caches): picks the `fs_aware_main_first` coordination scope and `is_fs_load_rank()`. Falls back to the umbrella while unset, and wins over it once set. Set `0` with a shared umbrella when a multi-node NFS/EFS mount returns stale file handles on cross-node cache reads. |
 | `DIST_OUTPUT_SHARED_FILESYSTEM` | umbrella | Write side only (checkpoints, `run.log`, dumped artifacts): picks `is_fs_save_rank()`. Falls back to the umbrella while unset, and wins over it once set. Non-shared forces `save_on_each_node` on and rejects a multi-node sharded-EP save (per-rank shards scatter across nodes with no gather path); shared forces it off across nodes, where every node's local rank 0 would write and rotate the same files. Multi-node runs probe the declaration against the filesystem at startup and raise on a contradiction in either direction. |
-| `DIST_NCCL_TIMEOUT_MINUTES` | `30` | NCCL collective-watchdog timeout, read as `nccl_timeout()` (`src/env.py`), applied by `init_distributed` (PyTorch's own default is 10) and pinned as the default for every later `dist.new_group()`, so EP/CP/TP subgroup collectives inherit it. **Does not bound DeepEP V2's dispatch/combine** (its own `ElasticBuffer` barrier over the NCCL Gin backend). Raise for slow cross-node all-to-all or large gathered saves. Must be `>= 1` — a non-positive value warns and falls back to the default. Rank-uniform (`agree_rank_uniform_env`): a node left at a smaller budget aborts its process group first, and the survivors then die on the *next* collective and blame it. |
-| `DIST_STORE_TIMEOUT_HOURS` | `4` | Wall-clock bound for the c10d-store coordination waits, read as `store_timeout()` (`src/env.py`) — `fs_aware_main_first` (main-first downloads), `run_load_rank_first` (dataset load, map/filter, packing, TRL dataset preparation), `store_reject_across_ranks` (the joins behind it, the sharded-load join, the model-source agreement), and `sequential_load_within_node` (the `max_concurrent_loading` throttle, joined world-wide by `joined_node_load`). These wait out ONE rank's work rather than a collective, so they are hours-scale and independent of `DIST_NCCL_TIMEOUT_MINUTES`. Must be `>= 1` (same fallback rule) and rank-uniform — the rank with the smaller budget gives up on a join its peers are still serving. See [Filesystem Handling](../data/filesystem-handling.md). |
+| `DIST_NCCL_TIMEOUT_MINUTES` | `30` | NCCL collective-watchdog timeout, read as `nccl_timeout()` (`halo/env.py`), applied by `init_distributed` (PyTorch's own default is 10) and pinned as the default for every later `dist.new_group()`, so EP/CP/TP subgroup collectives inherit it. **Does not bound DeepEP V2's dispatch/combine** (its own `ElasticBuffer` barrier over the NCCL Gin backend). Raise for slow cross-node all-to-all or large gathered saves. Must be `>= 1` — a non-positive value warns and falls back to the default. Rank-uniform (`agree_rank_uniform_env`): a node left at a smaller budget aborts its process group first, and the survivors then die on the *next* collective and blame it. |
+| `DIST_STORE_TIMEOUT_HOURS` | `4` | Wall-clock bound for the c10d-store coordination waits, read as `store_timeout()` (`halo/env.py`) — `fs_aware_main_first` (main-first downloads), `run_load_rank_first` (dataset load, map/filter, packing, TRL dataset preparation), `store_reject_across_ranks` (the joins behind it, the sharded-load join, the model-source agreement), and `sequential_load_within_node` (the `max_concurrent_loading` throttle, joined world-wide by `joined_node_load`). These wait out ONE rank's work rather than a collective, so they are hours-scale and independent of `DIST_NCCL_TIMEOUT_MINUTES`. Must be `>= 1` (same fallback rule) and rank-uniform — the rank with the smaller budget gives up on a join its peers are still serving. See [Filesystem Handling](../data/filesystem-handling.md). |
 | `NVLINK_DOMAIN_SIZE` | `gpus_per_node` | The **locality unit** for node-local EP/CP/TP/ETP grouping — validation checks NVLink-locality against this, not `gpus_per_node`. Set to `72` on GB200/GB300 NVL72 to run NVLink-wide across OS nodes; leave unset on ≤8-GPU nodes. Also settable as `--nvlink_domain_size`. Rank-uniform, refused at startup when ranks differ. See [NVL72](../parallelism/multi-node.md#gb200gb300-nvl72-multi-node-nvlink). |
 | `VLLM_GROUP_HOST` | loopback (local server) / default-route NIC | Trainer interface advertised to vLLM workers for the NCCL weight-sync group, and the one address its rendezvous store listens on unless `HALO_WEIGHT_SYNC_BIND_ALL` is set. Set on multi-homed hosts where the default-route NIC is unreachable from a remote vLLM. Resolution order and the multi-homed cases: [Online GRPO → Multi-homed nodes](../training-methods/grpo/online.md#multi-homed-nodes-vllm_group_host) (async GRPO also takes a per-server `group_host` in `rollout_server_configs`; Online GRPO has only the env var). |
 | `SGLANG_GROUP_HOST` | loopback (local server) / default-route NIC | Trainer interface advertised to SGLang workers for the NCCL weight-sync group, and the one address its rendezvous store listens on unless `HALO_WEIGHT_SYNC_BIND_ALL` is set: the `VLLM_GROUP_HOST` equivalent for `rollout_backend: sglang`. Separate per engine because the two servers can sit on different hosts. |
@@ -143,11 +143,11 @@ Read from the environment (not the YAML); set in the launch command / `.env`. To
 | `HALO_EP_PERF_PROFILE` | off | Benchmark switch that times the EP dispatch/expert-compute/combine phases for `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile`; a training run with it on pays two syncs per phase and reports nothing ([Debugging](debugging.md#2-finding-throughput-bottlenecks)). |
 | `HALO_FUSED_GLU` | on | `0` runs every GLU combine (expert and dense MLP) through its eager form on CUDA instead of the fused Triton kernels, and each EP layer's construction line then reads `glu_combine=eager`. The switch for a GPU where a GLU kernel fails to compile or launch ([Troubleshooting](troubleshooting.md#turning-off-a-fused-kernel)). |
 | `HALO_EP_SHARED_OVERLAP` | off | `1` runs the shared-expert FFN on a side stream concurrent with the routed dispatch all-to-all (shared-expert families only; GPT-OSS, Qwen3 MoE, LFM-2, Gemma 4 and Zaya have none). See [DeepEP](../infrastructure/deepep.md). |
-| `HALO_EP_CAPACITY_DEDUP` | `1` | `0` restores the per-MoE-layer DeepEP buffer-capacity all-reduce instead of reusing the first layer's capacity for the whole forward. One capacity per forward is also what lets every MoE layer share one `ElasticBuffer`, so `0` additionally gives each layer its own arena — multiplying it by the MoE layer count ([DeepEP](../infrastructure/deepep.md)). Rank-uniform, refused at startup when ranks differ. Read once at import, with the other DeepEP knobs, in `src/distributed/expert_parallel/deepep/settings.py`. |
+| `HALO_EP_CAPACITY_DEDUP` | `1` | `0` restores the per-MoE-layer DeepEP buffer-capacity all-reduce instead of reusing the first layer's capacity for the whole forward. One capacity per forward is also what lets every MoE layer share one `ElasticBuffer`, so `0` additionally gives each layer its own arena — multiplying it by the MoE layer count ([DeepEP](../infrastructure/deepep.md)). Rank-uniform, refused at startup when ranks differ. Read once at import, with the other DeepEP knobs, in `halo/distributed/expert_parallel/deepep/settings.py`. |
 | `HALO_GRAD_BUCKET_MB` / `HALO_GRAD_BUCKET_MAX_INFLIGHT` | `256` / `2` | Flat-buffer size and concurrency of the bucketed gradient reduction — the deferred cross-replica EP sweep, the TP replicated / per-head-norm sweep, and the QLoRA sweep. (The per-parameter EP grad hooks reduce one tensor at a time and ignore both.) `HALO_GRAD_BUCKET_MB` sets the chunk boundaries every rank must agree on, so it belongs to the rank-uniform set verified in distributed setup ([DeepEP](../infrastructure/deepep.md)); `MAX_INFLIGHT` is rank-local and sets how many bucket collectives run at once, so each one's latency covers the next bucket's flatten. Peak transient is that many flat buffers, and under `fp32_grad_reduce` each also holds an fp32 copy — ~3× the bucket size from bf16. |
 | `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` | `100` | Device-side spin budget for the DeepEP dispatch/combine NVLink barrier (DeepEP's own default). The clock starts when a rank **enters** the barrier, so it bounds rank **skew**, not idle time between steps — a rank traps if a peer is still this far behind when it arrives. Save paths fence with a host-side barrier first, which absorbs skew under `DIST_NCCL_TIMEOUT_MINUTES` instead. Raising it also delays how fast a real hang surfaces. Elastic backend only — the `legacy` V1 buffer takes no timeout and warns when the parsed value is not the default (an explicit `100`, or an empty pass-through, is not a request). Rank-uniform, refused at startup when ranks differ. See [DeepEP](../infrastructure/deepep.md). |
 | `HALO_DEEPEP_NUM_SMS` / `HALO_DEEPEP_NUM_QPS` | auto | Pin the DeepEP dispatch/combine SM count (else `get_theoretical_num_sms`) and RDMA queue-pair count. `NUM_SMS` applies to both buffer backends (legacy needs an even count); `NUM_QPS` is elastic-only and also sizes the buffer's QP allocation. On EFA proxy Gin more QPs can raise the latency-bound internode all-to-all parallelism — A/B them. Rank-uniform, refused at startup when ranks differ; see [DeepEP](../infrastructure/deepep.md). |
-| `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` | `8192` | Cross-node (Gin) dispatch payload ceiling, tokens/rank. Above the measured ~8k boundary an EFA proxy-GIN dispatch wedges instead of erroring (receive counts never arrive; Xid 109→43), so `ParallelismConfig` refuses a declared budget above it at config time and the dispatcher re-checks at buffer sizing. `0` disables; raise only after validating end-to-end on your fabric. Intra-node dispatch is unaffected. Rank-uniform, refused at startup when ranks differ. Read in `src/distributed/expert_parallel/deepep/capacity.py`. See [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa). |
+| `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` | `8192` | Cross-node (Gin) dispatch payload ceiling, tokens/rank. Above the measured ~8k boundary an EFA proxy-GIN dispatch wedges instead of erroring (receive counts never arrive; Xid 109→43), so `ParallelismConfig` refuses a declared budget above it at config time and the dispatcher re-checks at buffer sizing. `0` disables; raise only after validating end-to-end on your fabric. Intra-node dispatch is unaffected. Rank-uniform, refused at startup when ranks differ. Read in `halo/distributed/expert_parallel/deepep/capacity.py`. See [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa). |
 | `HALO_PP_FUSED_HEAD_LOSS` | `1` | Fold `lm_head` + cross-entropy into the last pipeline stage's forward in token chunks, so the `[microbatch, seq, vocab]` logits plane never exists. Applies only to the causal-LM pipeline contract; `0` restores the logits path. Read only under [pipeline parallelism](../parallelism/pipeline-parallelism.md). |
 | `EP_DISABLE_GIN` / `EP_SUPPRESS_NCCL_CHECK` | backend-set / `1` | DeepEP-owned. The elastic backend sets `EP_DISABLE_GIN` once per process before its first buffer build (`0` across NVLink domains, `1` within one) and honors an explicit value. `EP_SUPPRESS_NCCL_CHECK` is latched at `import deep_ep`, so it must be in the process environment (both images bake it), and suppresses DeepEP's duplicate-NCCL-runtime guard, which the NGC image's HPC-X `libnccl-net` transport plugin trips; the backend can only warn when it is not `1`. Documented in [DeepEP](../infrastructure/deepep.md). |
 | `HALO_DEEPGEMM_NATIVE` / `HALO_DEEPGEMM_MIN_TOKENS_PER_EXPERT` / `HALO_DEEPGEMM_MIN_N` | off / `1024` / `4096` | Opt into the native DeepGEMM fp8/fp4 grouped kernel above a shape floor (tokens per expert, output width). The `deep_gemm` wheel is built into the Blackwell image only (its kernels are SM100 block-scaled), so on Hopper the flag warns once and stays inert — and where it does run it measured net-slower than bf16 at the toolkit's MoE shapes ([Low-Precision MoE](../optimization/low-precision-moe-kernels.md)). |
@@ -171,14 +171,14 @@ Read from the environment (not the YAML); set in the launch command / `.env`. To
 | `WANDB_PROJECT` | `project_name` arg | Overwritten unconditionally by the trainer setup before wandb initializes (an exported value does not survive). The run NAME does not travel through `WANDB_NAME`: transformers passes `run_name` straight to `wandb.init`, which wins over the environment, so the setup shortens `run_name` to its last path segment (else `<method>-<mode>-<output_dir basename>`, e.g. `sft-ep-<run dir>`) and writes it back onto the training config instead. |
 | `WANDB_RUN_ID` | `md5(output_dir:launch_time)[:8]` | Resume identity. An exported value is honored on global rank 0 and broadcast to every rank, so export it on the whole job (or nowhere) and reuse it to continue the same wandb run across restarts. |
 | `WANDB_RESUME` | unset | Consumed by the wandb SDK, not by this toolkit: set `allow` alongside a fixed `WANDB_RUN_ID` to append to that run instead of starting a new one. |
-| `TOKENIZERS_PARALLELISM` | `false` | Set with `setdefault` at package import (`src/__init__.py`), before tokenizers loads: the Rust tokenizer's thread pool deadlocks against the dataset-map worker processes that fork around it. An exported value wins, so a single-process tool can opt back into parallel encoding. |
+| `TOKENIZERS_PARALLELISM` | `false` | Set with `setdefault` at package import (`halo/__init__.py`), before tokenizers loads: the Rust tokenizer's thread pool deadlocks against the dataset-map worker processes that fork around it. An exported value wins, so a single-process tool can opt back into parallel encoding. |
 | `CLEARML_PROJECT` / `CLEARML_TASK` | `project_name` arg / `run_name` basename | Set by the same trainer setup, same unconditional overwrite, and read by the transformers ClearML integration when `report_to` includes `clearml` — which is why the task name IS an env var here and is not one for wandb. |
 
 ---
 
 ## Trainer-to-config quick reference
 
-Each trainer combines a **trainer config** (hyperparameters) with **script arguments** (dataset, tokenizer, infra). All configs also accept standard `TrainingArguments` fields. Every script additionally parses `ModelArguments` (`src/configs/script_arguments.py`: TRL's `ModelConfig` plus `trust_remote_code`, which TRL moved onto its own trainer configs) — `model_name_or_path`, `model_revision`, `dtype`, `attn_implementation`, `trust_remote_code` and the LoRA fields ([PEFT](../optimization/peft.md)) — and `ParallelismArguments` (the [ParallelismConfig](#parallelismconfig) knobs); all four dataclasses draw from the one YAML.
+Each trainer combines a **trainer config** (hyperparameters) with **script arguments** (dataset, tokenizer, infra). All configs also accept standard `TrainingArguments` fields. Every script additionally parses `ModelArguments` (`halo/configs/script_arguments.py`: TRL's `ModelConfig` plus `trust_remote_code`, which TRL moved onto its own trainer configs) — `model_name_or_path`, `model_revision`, `dtype`, `attn_implementation`, `trust_remote_code` and the LoRA fields ([PEFT](../optimization/peft.md)) — and `ParallelismArguments` (the [ParallelismConfig](#parallelismconfig) knobs); all four dataclasses draw from the one YAML.
 
 | Trainer | Config Class | Script Arguments | Source |
 |---------|-------------|-----------------|--------|
@@ -283,7 +283,7 @@ Both on-policy trainers force `use_liger_kernel` off at construction: TRL's Lige
 
 ## ParallelismConfig
 
-Unified config for Expert (EP), Context (CP), Tensor (TP), Expert-Tensor (ETP), and Pipeline (PP) Parallelism. See [Pipeline Parallelism](../parallelism/pipeline-parallelism.md) for the `pp_*` fields. The class itself is built at construction; users set it through `ParallelismArguments` (`src/configs/parallelism_arguments.py`), whose names go in the YAML or on the CLI and differ from the field names below.
+Unified config for Expert (EP), Context (CP), Tensor (TP), Expert-Tensor (ETP), and Pipeline (PP) Parallelism. See [Pipeline Parallelism](../parallelism/pipeline-parallelism.md) for the `pp_*` fields. The class itself is built at construction; users set it through `ParallelismArguments` (`halo/configs/parallelism_arguments.py`), whose names go in the YAML or on the CLI and differ from the field names below.
 
 | `ParallelismConfig` field | `ParallelismArguments` name |
 |---|---|
@@ -300,7 +300,7 @@ Unified config for Expert (EP), Context (CP), Tensor (TP), Expert-Tensor (ETP), 
 
 Every other field below keeps its name, except `world_size` / `gpus_per_node` (auto-detected, not settable), `expert_lora` (built from the PEFT `LoraConfig`, so it has no flag; row below) and `merge_expert_lora_on_save` (a `ParallelismArguments` flag, documented above).
 
-**Source:** `src/distributed/parallelism_config.py`
+**Source:** `halo/distributed/parallelism_config.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -339,7 +339,7 @@ Every other field below keeps its name, except `world_size` / `gpus_per_node` (a
 
 Besides these, `num_nodes`, `num_nvlink_domains`, `ep_group_size`, `data_parallel_size`, `stage_world_size`, `pp_rank`, and the stage-local rank coordinates are computed in `__post_init__`.
 
-Two more carry no `ParallelismArguments` spelling and are derived from the training config by `parallelism_config_from_args` (`src/configs/parallelism_arguments.py`): `ep_rows_per_device` (the rows one MoE forward carries per device — the trainer's rows-per-example × `per_device_train_batch_size`) and `ep_declared_max_length`, which the config-time dispatch-ceiling gate multiplies out into a per-rank token budget before any weight is read.
+Two more carry no `ParallelismArguments` spelling and are derived from the training config by `parallelism_config_from_args` (`halo/configs/parallelism_arguments.py`): `ep_rows_per_device` (the rows one MoE forward carries per device — the trainer's rows-per-example × `per_device_train_batch_size`) and `ep_declared_max_length`, which the config-time dispatch-ceiling gate multiplies out into a per-rank token budget before any weight is read.
 
 A trainer whose config declares no `max_length` field stamps neither and leaves the ceiling to the dispatcher's runtime backstop. `max_length: null` still stamps the rows; the gate then takes `max_prompt_length + max_completion_length` where the config bounds both (offline GRPO, or SMPO with both shares set), else the model's context window.
 
@@ -349,7 +349,7 @@ Five knobs are implemented inside the mixin's own FSDP2 wrap and are therefore *
 
 ## OfflineGRPOConfig
 
-`OfflineGRPOTrainer`: group-relative policy optimization on pre-computed rewards. **Source:** `src/configs/grpo_offline.py`
+`OfflineGRPOTrainer`: group-relative policy optimization on pre-computed rewards. **Source:** `halo/configs/grpo_offline.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -374,7 +374,7 @@ Five knobs are implemented inside the mixin's own FSDP2 wrap and are therefore *
 
 ## SmoothMarginPOConfig
 
-`SmoothMarginPOTrainer` (SMPO) — reference-model-free, margin-based preference optimization. **Source:** `src/configs/preference.py`
+`SmoothMarginPOTrainer` (SMPO) — reference-model-free, margin-based preference optimization. **Source:** `halo/configs/preference.py`
 
 The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`, `logging_steps=10`, `gradient_checkpointing=True`, and `bf16` (declared `bool | None`, resolved in `__post_init__` to `not fp16`).
 
@@ -402,7 +402,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ## DistillationConfig
 
-`DistributedDistillationTrainer`. **Source:** `src/configs/distillation.py`. The teacher and the conversation-rendering fields live in `TeacherDistillScriptArguments` below.
+`DistributedDistillationTrainer`. **Source:** `halo/configs/distillation.py`. The teacher and the conversation-rendering fields live in `TeacherDistillScriptArguments` below.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -415,7 +415,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ### TeacherDistillScriptArguments
 
-**Source:** `src/configs/distillation.py`
+**Source:** `halo/configs/distillation.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -433,7 +433,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ## ClassificationConfig
 
-`ClassificationTrainer`. **Source:** `src/configs/classification.py`
+`ClassificationTrainer`. **Source:** `halo/configs/classification.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -456,7 +456,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ## EmbeddingConfig
 
-`EmbeddingTrainer`; extends sentence-transformers' `SentenceTransformerTrainingArguments`. **Source:** `src/configs/embedding.py`
+`EmbeddingTrainer`; extends sentence-transformers' `SentenceTransformerTrainingArguments`. **Source:** `halo/configs/embedding.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -476,7 +476,7 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ## EnvironmentConfig
 
-Environment selection, reward terms and turn budget for Async GRPO with Environments. **Source:** `src/configs/grpo_environmental.py`
+Environment selection, reward terms and turn budget for Async GRPO with Environments. **Source:** `halo/configs/grpo_environmental.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -498,7 +498,7 @@ environment_kwargs:
 
 ## AsyncTrainingConfig
 
-`DistributedAsyncEnvironmentalGRPOTrainer`: Ray workers, rollout-server connections, weight sync, rollout generation, async prefetch. **Source:** `src/configs/grpo_environmental.py`, where the IS-correction and reasoning-cost fields come from the `ISCorrectionArguments` and `ReasoningCostArguments` bundles it mixes in, and the sampling and budget fields from `RolloutSamplingArguments` and `RolloutBudgetArguments` in `src/configs/rollout_arguments.py`. A field it copies into the actors' `RolloutConfig` (`src/environments/rollout_config.py`) defaults to `RolloutConfig`'s own value. Every numeric field also refuses a bool (`true` would read as 1) and a non-finite value, beside its own range.
+`DistributedAsyncEnvironmentalGRPOTrainer`: Ray workers, rollout-server connections, weight sync, rollout generation, async prefetch. **Source:** `halo/configs/grpo_environmental.py`, where the IS-correction and reasoning-cost fields come from the `ISCorrectionArguments` and `ReasoningCostArguments` bundles it mixes in, and the sampling and budget fields from `RolloutSamplingArguments` and `RolloutBudgetArguments` in `halo/configs/rollout_arguments.py`. A field it copies into the actors' `RolloutConfig` (`halo/environments/rollout_config.py`) defaults to `RolloutConfig`'s own value. Every numeric field also refuses a bool (`true` would read as 1) and a non-finite value, beside its own range.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -558,7 +558,7 @@ environment_kwargs:
 
 ### CommonScriptArguments
 
-Base shared by all training scripts, mixing in `TorchProfilerArguments` (`enable_torch_profiler`, `profiler_*`), `CheckpointArguments` and `ModelLoadArguments` ([their flags](#model-checkpoint-and-from-scratch-flags)). **Source:** `src/configs/script_arguments.py`
+Base shared by all training scripts, mixing in `TorchProfilerArguments` (`enable_torch_profiler`, `profiler_*`), `CheckpointArguments` and `ModelLoadArguments` ([their flags](#model-checkpoint-and-from-scratch-flags)). **Source:** `halo/configs/script_arguments.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -580,7 +580,7 @@ Base shared by all training scripts, mixing in `TorchProfilerArguments` (`enable
 
 ### SFTScriptArguments
 
-**Source:** `src/configs/sft.py`
+**Source:** `halo/configs/sft.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -602,7 +602,7 @@ Base shared by all training scripts, mixing in `TorchProfilerArguments` (`enable
 
 ### RLVROnlineGRPOScriptArguments
 
-RLVR Online GRPO. **Source:** `src/configs/grpo_online.py`
+RLVR Online GRPO. **Source:** `halo/configs/grpo_online.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -617,15 +617,15 @@ RLVR Online GRPO. **Source:** `src/configs/grpo_online.py`
 | `use_sdpg` | `bool` | `False` | Swap in `DistributedSDPGTrainer`: the GRPO loss plus a privileged-teacher reverse-KL OPD term. Text-only. See [SDPG](../training-methods/distillation/online-sdpg.md). |
 | `opd_positive_advantage_only` | `bool` | `True` | Charge the OPD term on positive-advantage tokens only. `false` with `use_sdpg: false` is refused. |
 
-The tuning fields behind the two toggles — `rlrr_*` (`RLRRArguments`, `src/configs/grpo.py`) and the SDPG set (`SDPGArguments` plus `opd_positive_advantage_only`) — are **refused** at a non-default value when their toggle is off rather than ignored; both sets are additionally range-validated whether or not their toggle is on (their bounds: [RLRRArguments](#rlrrarguments), [SDPGArguments](#sdpgarguments)).
+The tuning fields behind the two toggles — `rlrr_*` (`RLRRArguments`, `halo/configs/grpo.py`) and the SDPG set (`SDPGArguments` plus `opd_positive_advantage_only`) — are **refused** at a non-default value when their toggle is off rather than ignored; both sets are additionally range-validated whether or not their toggle is on (their bounds: [RLRRArguments](#rlrrarguments), [SDPGArguments](#sdpgarguments)).
 
-It also inherits `AdvantageShapingArguments` (`src/configs/grpo.py`): `scale_rewards_std_floor`, `drop_degenerate_groups` and `balance_token_mass`, with the same semantics as the [AsyncTrainingConfig](#asynctrainingconfig) rows, except that `drop_degenerate_groups` defaults **`false`** here (it is `true` in async GRPO, whose sparse verifiable reward makes dead groups dominate the batch) and judges a group on the total weighted reward, since this arm's terms carry no shaping.
+It also inherits `AdvantageShapingArguments` (`halo/configs/grpo.py`): `scale_rewards_std_floor`, `drop_degenerate_groups` and `balance_token_mass`, with the same semantics as the [AsyncTrainingConfig](#asynctrainingconfig) rows, except that `drop_degenerate_groups` defaults **`false`** here (it is `true` in async GRPO, whose sparse verifiable reward makes dead groups dominate the batch) and judges a group on the total weighted reward, since this arm's terms carry no shaping.
 
 It inherits `GRPOEarlyStopArguments` as well: `early_stop_entropy_band`, `early_stop_logratio_gap` and `early_stop_patience`, as in the AsyncTrainingConfig rows, with the gap read from TRL's `sampling/sampling_logp_difference/mean` (refused without `vllm_importance_sampling_correction`). The skipped-update condition is async-only: this trainer has no trust-region breaker.
 
 ### RLRRArguments
 
-The `rlrr_*` tunables of RLRR relative-reward shaping ([arXiv:2601.23058](https://arxiv.org/abs/2601.23058)), read under `use_rlrr: true`. **Source:** `src/configs/grpo.py`
+The `rlrr_*` tunables of RLRR relative-reward shaping ([arXiv:2601.23058](https://arxiv.org/abs/2601.23058)), read under `use_rlrr: true`. **Source:** `halo/configs/grpo.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -640,7 +640,7 @@ The `rlrr_*` tunables of RLRR relative-reward shaping ([arXiv:2601.23058](https:
 
 ### SDPGArguments
 
-The privileged-teacher OPD term, shared by [online SDPG](../training-methods/distillation/online-sdpg.md) (on `RLVROnlineGRPOScriptArguments`, read only under `use_sdpg: true`) and [self-distillation](../training-methods/distillation/self-distillation.md). **Source:** `src/configs/distillation.py`
+The privileged-teacher OPD term, shared by [online SDPG](../training-methods/distillation/online-sdpg.md) (on `RLVROnlineGRPOScriptArguments`, read only under `use_sdpg: true`) and [self-distillation](../training-methods/distillation/self-distillation.md). **Source:** `halo/configs/distillation.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -652,7 +652,7 @@ The privileged-teacher OPD term, shared by [online SDPG](../training-methods/dis
 
 ### SelfDistillScriptArguments
 
-`SFTScriptArguments` plus [SDPGArguments](#sdpgarguments) and the fields below. **Source:** `src/configs/distillation.py`
+`SFTScriptArguments` plus [SDPGArguments](#sdpgarguments) and the fields below. **Source:** `halo/configs/distillation.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -666,7 +666,7 @@ The privileged-teacher OPD term, shared by [online SDPG](../training-methods/dis
 
 ### EnvironmentalGRPOScriptArguments
 
-**Source:** `src/configs/grpo_environmental.py`
+**Source:** `halo/configs/grpo_environmental.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -683,13 +683,13 @@ These extend `CommonScriptArguments` with minimal additions:
 
 | Class | Source | Extra Fields |
 |-------|--------|-------------|
-| `SMPOScriptArguments` | `src/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
-| `DPOScriptArguments` | `src/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`), `generation_max_prompt_length` (`512`) — bounds the eval-time generation dataset only; DPO has no training-side prompt cap — and `images_field` (`None`) — VLM only: image column renamed to the `images` spelling TRL's vision probe reads, ahead of the dispatch |
-| `OfflineGRPOScriptArguments` | `src/configs/grpo_offline.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
-| `KTOScriptArguments` | `src/configs/preference.py` | `completion_field` (`"completion"`), `label_field` (`"label"`) — KTO uses an *unpaired* `{prompt, completion, label}` dataset — and `images_field` (`None`) — VLM only: renamed to TRL's `images` spelling; the vision path refuses `precompute_ref_log_probs` and paired columns |
-| `RewardScriptArguments` | `src/configs/reward.py` | `images_field` (`None`) — VLM only: image column, renamed to `images` and merged into the shared prompt conversation; declares the run VLM on a score-headed multimodal checkpoint ([reward VLMs](../training-methods/preference/reward-modeling.md#vision-language)) |
-| `ClassificationScriptArguments` | `src/configs/classification.py` | `text_field` (`None`) — raw-text column wrapped as one user turn when the dataset has no `prompt` conversation (e.g. text/label sets like imdb) |
-| `EmbeddingScriptArguments` | `src/configs/embedding.py` | *None (inherits only)* |
+| `SMPOScriptArguments` | `halo/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
+| `DPOScriptArguments` | `halo/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`), `generation_max_prompt_length` (`512`) — bounds the eval-time generation dataset only; DPO has no training-side prompt cap — and `images_field` (`None`) — VLM only: image column renamed to the `images` spelling TRL's vision probe reads, ahead of the dispatch |
+| `OfflineGRPOScriptArguments` | `halo/configs/grpo_offline.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
+| `KTOScriptArguments` | `halo/configs/preference.py` | `completion_field` (`"completion"`), `label_field` (`"label"`) — KTO uses an *unpaired* `{prompt, completion, label}` dataset — and `images_field` (`None`) — VLM only: renamed to TRL's `images` spelling; the vision path refuses `precompute_ref_log_probs` and paired columns |
+| `RewardScriptArguments` | `halo/configs/reward.py` | `images_field` (`None`) — VLM only: image column, renamed to `images` and merged into the shared prompt conversation; declares the run VLM on a score-headed multimodal checkpoint ([reward VLMs](../training-methods/preference/reward-modeling.md#vision-language)) |
+| `ClassificationScriptArguments` | `halo/configs/classification.py` | `text_field` (`None`) — raw-text column wrapped as one user turn when the dataset has no `prompt` conversation (e.g. text/label sets like imdb) |
+| `EmbeddingScriptArguments` | `halo/configs/embedding.py` | *None (inherits only)* |
 
 ---
 
@@ -718,14 +718,14 @@ method page links its own.
 
 ### Parsing
 
-`HaloArgumentParser` (`src/configs/parser.py`) reads the YAML (`argv[0]` when it ends in `.yaml`/`.yml`) or a flags-only command line, casts the `--key=value` overrides, applies the toolkit defaults above, then builds each config dataclass once from the merged values. Every `__post_init__` (transformers', TRL's, the toolkit's) therefore derives its state from, and validates, the final configuration: `--gradient_accumulation_steps=1` over a YAML's `8` also re-derives GRPO's `steps_per_generation` and `generation_batch_size`.
+`HaloArgumentParser` (`halo/configs/parser.py`) reads the YAML (`argv[0]` when it ends in `.yaml`/`.yml`) or a flags-only command line, casts the `--key=value` overrides, applies the toolkit defaults above, then builds each config dataclass once from the merged values. Every `__post_init__` (transformers', TRL's, the toolkit's) therefore derives its state from, and validates, the final configuration: `--gradient_accumulation_steps=1` over a YAML's `8` also re-derives GRPO's `steps_per_generation` and `generation_batch_size`.
 
 - A toolkit default applies only where neither the YAML nor the CLI wrote the field, and reaches every config declaring it before that config is built, so `TrainingArguments` derives `mixed_precision` from `bf16`. The `bf16` default yields to an explicitly-enabled `fp16`.
 - Every key no config declares raises and names the field. Nothing is migrated or stripped, ecosystem spellings included.
 - A `Literal[...]` field rejects an out-of-set value (`advantage_method`), in YAML and on the CLI alike. Mixed unions (`float | Literal["auto"]`) are not validated.
 - A string on a bool field is rejected: YAML 1.2 reads the 1.1 spellings `yes`/`no`/`on`/`off` as truthy strings, which would silently invert `packing: no`.
 
-Every training script parses through `parse_script_args` (`src/entrypoints/script.py`), which adds three effects around the pure parser:
+Every training script parses through `parse_script_args` (`halo/entrypoints/script.py`), which adds three effects around the pure parser:
 
 - `init_distributed()` runs before any dataclass is built. Constructing `TrainingArguments` touches `self.device`, which would let accelerate create the default process group without `device_id`; that binding lost costs a `new_group` per mesh dimension instead of one `ncclCommSplit`.
 - `output_dir` expands strftime directives (`checkpoints/sft-%Y-%m-%dT%H-%M-%S`) from one timestamp, broadcast from rank 0 so every node agrees. `%%` collapses to `%`; any other `%` (`sft-100%-data`) survives byte-identical. No other field expands them.

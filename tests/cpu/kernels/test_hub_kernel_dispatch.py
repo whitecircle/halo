@@ -14,8 +14,8 @@ import pytest
 import torch
 from transformers.integrations import hub_kernels
 
-from src.kernels import hub_kernel_dispatch
-from src.kernels.hub_kernel_dispatch import ensure_device_aware_kernel_dispatch
+from halo.kernels import hub_kernel_dispatch
+from halo.kernels.hub_kernel_dispatch import ensure_device_aware_kernel_dispatch
 from tests.common.repo import REPO_ROOT
 
 
@@ -146,7 +146,7 @@ def test_a_kernel_package_that_fails_its_own_import_raises(tmp_path, monkeypatch
 
 
 def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
-    """The install has to happen on ``src`` import, not on first use.
+    """The install has to happen on ``halo`` import, not on first use.
 
     Modeling modules capture the fallback factory AT IMPORT, so a shim installed later decorates
     nothing they already bound. Every test above calls ``ensure_device_aware_kernel_dispatch()``
@@ -154,7 +154,7 @@ def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
     pins the other order. A fresh interpreter is required: this process installed the shim long ago.
     """
     probe = (
-        "import src;"
+        "import halo;"
         "from transformers.integrations import hub_kernels;"
         "print('INSTALLED', getattr(hub_kernels, '_halo_device_aware_kernel_dispatch', False))"
     )
@@ -166,9 +166,9 @@ def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
         env={"PATH": os.environ["PATH"], "PYTHONPATH": str(REPO_ROOT), "HF_HUB_OFFLINE": "1"},
         timeout=600,
     )
-    assert result.returncode == 0, f"importing src failed:\n{result.stderr[-2000:]}"
+    assert result.returncode == 0, f"importing halo failed:\n{result.stderr[-2000:]}"
     assert "INSTALLED True" in result.stdout, (
-        "importing `src` no longer installs the device-aware kernel dispatch — every modeling module "
+        "importing `halo` no longer installs the device-aware kernel dispatch — every modeling module "
         f"imported afterwards binds the CUDA-only kernel. stdout={result.stdout[-500:]!r}"
     )
 

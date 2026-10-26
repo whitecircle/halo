@@ -3,7 +3,7 @@ move must not carry.
 
 A scratch repository commits a small package as the base; each case commits one change on top and runs the kit
 from git, as ``make verify-move`` does. The kit also passes the real tree against itself, and a real module move
-and a real package move with every reference rewritten across ``src/``, ``scripts/`` and ``tests/``.
+and a real package move with every reference rewritten across ``halo/``, ``scripts/`` and ``tests/``.
 
 Run: python tests/cpu/conventions/test_move_kit.py
 """

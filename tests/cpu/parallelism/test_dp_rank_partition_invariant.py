@@ -25,9 +25,9 @@ from collections import Counter
 
 import pytest
 
-from src.distributed.group_layout import NodeLocalLayout
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.parallelism_rules import SUPPORTED_AXIS_SETS
+from halo.distributed.group_layout import NodeLocalLayout
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_rules import SUPPORTED_AXIS_SETS
 from tests.common.parallelism import make_parallelism_config
 
 # (world_size, gpus_per_node); the 2-GPU-node boxes make PP and multi-domain layouts reachable.

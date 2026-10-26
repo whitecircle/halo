@@ -19,8 +19,8 @@ Usage:
 
 import pytest
 
-from src.data.pipeline.chat_render import probe_tokenizer_specials, tokenize_rendered
-from src.data.pipeline.text_rows import build_chat_row_processor
+from halo.data.pipeline.chat_render import probe_tokenizer_specials, tokenize_rendered
+from halo.data.pipeline.text_rows import build_chat_row_processor
 from tests.common.models import GEMMA3_4B_IT, GEMMA4_31B_QAT, GLM4_FLASH, GPT_OSS_20B_OPENAI, QWEN3_0_6B, ZAYA_8B
 from tests.common.tokenizers import load_cached_tokenizer
 

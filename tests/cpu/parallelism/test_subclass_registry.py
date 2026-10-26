@@ -13,10 +13,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP, ep_layer_classes
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.models.head_transform import build_head_transform_spec_map
-from src.subclass_registry import build_class_claim_map, iter_subclasses
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP, ep_layer_classes
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.models.head_transform import build_head_transform_spec_map
+from halo.subclass_registry import build_class_claim_map, iter_subclasses
 
 
 def test_walks_the_whole_subclass_tree_and_ignores_inherited_names():
@@ -91,7 +91,7 @@ def test_each_real_registry_names_its_clash(monkeypatch, build, noun):
     def walk_with_impostor(base):
         return [*iter_subclasses(base), impostor]
 
-    monkeypatch.setattr("src.subclass_registry.iter_subclasses", walk_with_impostor)
+    monkeypatch.setattr("halo.subclass_registry.iter_subclasses", walk_with_impostor)
 
     with pytest.raises(ValueError) as raised:
         build()

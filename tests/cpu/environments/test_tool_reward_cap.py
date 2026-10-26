@@ -11,13 +11,13 @@ Run: python tests/cpu/environments/test_tool_reward_cap.py
 
 import pytest
 
-from src.environments.protocols.mcp import NativeMCPClientEnvironment
-from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from src.environments.protocols.react import ReActEnvironment
-from src.environments.registry import build_environment
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tool_accounting import TOOL_REWARD_PAID_KEY
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.protocols.mcp import NativeMCPClientEnvironment
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.registry import build_environment
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tool_accounting import TOOL_REWARD_PAID_KEY
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 
 def _echo_registry():

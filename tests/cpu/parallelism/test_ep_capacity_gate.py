@@ -31,12 +31,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
-from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.load_rules import reject_unsupported_model
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from halo.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.load_rules import reject_unsupported_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.rosters import distributed_trainer_classes
 

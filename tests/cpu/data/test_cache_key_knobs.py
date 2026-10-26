@@ -19,8 +19,8 @@ Run: pytest tests/cpu/data/test_cache_key_knobs.py
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline.map_cache_key import _closure_fingerprint, map_cache_file_name
-from src.data.pipeline.text_rows import build_chat_row_processor
+from halo.data.pipeline.map_cache_key import _closure_fingerprint, map_cache_file_name
+from halo.data.pipeline.text_rows import build_chat_row_processor
 
 
 class _MockTokenizer:

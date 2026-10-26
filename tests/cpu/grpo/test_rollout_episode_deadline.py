@@ -9,9 +9,9 @@ from dataclasses import fields
 
 import pytest
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.ray_actors import _await_with_deadline
-from src.environments.rollout_config import RolloutConfig
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.ray_actors import _await_with_deadline
+from halo.environments.rollout_config import RolloutConfig
 
 
 class _SlowRef:

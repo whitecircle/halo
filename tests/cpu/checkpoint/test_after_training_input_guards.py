@@ -36,6 +36,15 @@ import torch
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.checkpoint.reading import (
+    checkpoint_shard_files,
+    detect_model_type,
+    is_ep_sharded_checkpoint,
+    reject_partial_checkpoint,
+)
+from halo.checkpoint.writing import StreamingShardWriter
+from halo.models.moe.family_specs import per_expert_hub_model_types
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.merge_ep_shards import merge_ep_shards
 from scripts.after_training.merge_models import merge_models
@@ -44,15 +53,6 @@ from scripts.after_training.quantize_to_lowp import quantize_checkpoint
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
 from scripts.before_training import convert_deepseek_v4_bf16, convert_glm5_bf16, convert_mistral4_bf16, patch_vocab
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.checkpoint.reading import (
-    checkpoint_shard_files,
-    detect_model_type,
-    is_ep_sharded_checkpoint,
-    reject_partial_checkpoint,
-)
-from src.checkpoint.writing import StreamingShardWriter
-from src.models.moe.family_specs import per_expert_hub_model_types
 from tests.common.repo import REPO_ROOT
 
 
@@ -626,13 +626,13 @@ def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monk
     ("module", "progress_logger"),
     [
         # The shared FP8 driver logs the per-shard progress of the converters that delegate to it.
-        ("scripts.before_training.convert_mistral4_bf16", "src.checkpoint.fp8_dequant"),
+        ("scripts.before_training.convert_mistral4_bf16", "halo.checkpoint.fp8_dequant"),
         ("scripts.before_training.convert_deepseek_v4_bf16", "scripts.before_training.convert_deepseek_v4_bf16"),
-        ("scripts.before_training.convert_glm5_bf16", "src.checkpoint.fp8_dequant"),
+        ("scripts.before_training.convert_glm5_bf16", "halo.checkpoint.fp8_dequant"),
     ],
 )
 def test_converter_progress_lines_survive_the_src_root_handler(module, progress_logger):
-    """Importing anything under ``src`` installs a root handler at WARNING, and ``basicConfig`` is a
+    """Importing anything under ``halo`` installs a root handler at WARNING, and ``basicConfig`` is a
     no-op once the root has handlers — so an unforced call leaves these converters mute for the whole
     of a multi-hour, 100+ GiB run, with no way to tell progress from a hang.
 
@@ -640,7 +640,7 @@ def test_converter_progress_lines_survive_the_src_root_handler(module, progress_
     whatever an earlier test left behind.
     """
     probe = (
-        "import importlib, logging; import src; "
+        "import importlib, logging; import halo; "
         f"importlib.import_module({module!r}); "
         f"print('INFO_ENABLED', logging.getLogger({progress_logger!r}).isEnabledFor(logging.INFO))"
     )

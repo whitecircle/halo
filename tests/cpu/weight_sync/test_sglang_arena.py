@@ -29,9 +29,9 @@ import contextlib
 import pytest
 import torch
 
-import src.weight_sync.clients.sglang as sglang_module
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.transport import c10d_group
+import halo.weight_sync.clients.sglang as sglang_module
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.transport import c10d_group
 from tests.common.weight_sync import offline_client
 
 _BUDGET = 4096

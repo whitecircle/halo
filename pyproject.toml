@@ -23,7 +23,7 @@ dependencies = [
     "boto3>=1.35.0,<2.0.0",
     "causal-conv1d>=1.6.0,<2.0.0",
     "clearml>=2.0.2,<3.0.0",
-    "click>=8.1.0,<9.0.0",  # typer's CLI engine; src/cli.py raises click.UsageError directly
+    "click>=8.1.0,<9.0.0",  # typer's CLI engine; halo/cli.py raises click.UsageError directly
     "datasets>=4.8.5,<5.0.0",
     "ddgs>=9.10.0,<10.0.0",
     "faiss-cpu>=1.10.0,<2.0.0",
@@ -59,7 +59,7 @@ Repository = "https://github.com/whitecircle/halo"
 Issues = "https://github.com/whitecircle/halo/issues"
 
 [project.scripts]
-halo = "src.cli:main"
+halo = "halo.cli:main"
 
 # vllm/sglang run in separate Docker containers (they carry their own torch/transformers stacks).
 # See: Dockerfile.vllm, docker-compose.vllm.yml
@@ -101,7 +101,7 @@ test = [
     "pillow>=12.3,<13.0",
     "pytest-xdist>=3.8,<4",
 ]
-# Trace analysis + CPU flame graphs (scripts/profiling/, src/diagnostics/py_spy.py).
+# Trace analysis + CPU flame graphs (scripts/profiling/, halo/diagnostics/py_spy.py).
 # TraceLens is git-only — the PyPI name `tracelens` is an unrelated project; openpyxl backs its
 # .xlsx reports; py-spy backs the stack dumps / CPU flame graphs.
 profiling = [
@@ -143,7 +143,7 @@ extend-exclude = ["docker/vllm/parity/fixtures"]
 
 [tool.ruff.lint]
 # E,F,W,I = pycodestyle/pyflakes/isort; UP = pyupgrade; B = bugbear; C4 = comprehensions;
-# SIM = simplify; T20 = no stray print() in src/; PLC0415 = no inline imports.
+# SIM = simplify; T20 = no stray print() in halo/; PLC0415 = no inline imports.
 # The whole set is a blocking CI gate (.github/workflows/lint.yml) — `ruff check .` must stay clean.
 # PLC0415 is a preview rule: `preview` + `explicit-preview-rules` arm it WITHOUT pulling in every
 # other preview rule (without them it is selected but silently does nothing).
@@ -157,7 +157,7 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # Tests: module-level setup imports (E402), asserts (S101) and prints are fine; imports stay at
-# module top as in src/. E741 (`l`/`I`/`O` names — `for l in losses` is idiomatic here), B007
+# module top as in halo/. E741 (`l`/`I`/`O` names — `for l in losses` is idiomatic here), B007
 # (unused loop var) and B023 (loop var captured in a closure — the closures are consumed within the
 # same iteration in these test helpers) and SIM117 (nested `with patch(...)` is the idiomatic
 # mock-stack form) are accepted in tests rather than churned across the suite.
@@ -180,7 +180,7 @@ ignore = [
 # Pin import grouping (I001) so it is deterministic regardless of stray directories at the repo root:
 # a gitignored `wandb/` run dir and the tracked `launcher-configs/accelerate/` config dir would otherwise make ruff
 # infer those third-party packages as first-party locally but not in CI.
-known-first-party = ["src", "tests"]
+known-first-party = ["halo", "tests"]
 known-third-party = ["wandb", "accelerate"]
 
 [tool.pyright]
@@ -210,4 +210,4 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["halo"]

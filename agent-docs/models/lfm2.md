@@ -6,7 +6,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 
 ## EP wrapper
 
-`EPLfm2MoELayer` (`src/distributed/expert_parallel/families/lfm2.py`) replaces `Lfm2MoeSparseMoeBlock`.
+`EPLfm2MoELayer` (`halo/distributed/expert_parallel/families/lfm2.py`) replaces `Lfm2MoeSparseMoeBlock`.
 
 - Routing: sigmoid scores, plus optional `expert_bias` for top-k selection only; the selected weights come from the unbiased scores, normalized to sum 1 when `norm_topk_prob` (default), then scaled by `routed_scaling_factor`. `expert_bias` is a buffer (not trainable), so it affects selection but doesn't appear in gradients and needs no grad-sync hook.
 - Storage: fused `gate_up_proj` and `down_proj` as 3D tensors. Compute via Grouped GEMM (fused-GLU path).
@@ -15,7 +15,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 
 ## TP and ETP
 
-Selective attention-only TP — `Lfm2MoeAttention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`); `Lfm2MoeSparseMoeBlock` is skipped (handled by EP). Only the full-attention layers shard — the short-conv layers stay replicated, so the per-rank footprint falls by far less than `1/tp_size`.
+Selective attention-only TP — `Lfm2MoeAttention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`); `Lfm2MoeSparseMoeBlock` is skipped (handled by EP). Only the full-attention layers shard — the short-conv layers stay replicated, so the per-rank footprint falls by far less than `1/tp_size`.
 
 LFM-2 uses the [fused contiguous-halves ETP layout](../parallelism/expert-tensor-parallelism.md#weight-sharding): `_init_fused_glu_params` splits the `[gate(M) | up(M)]` halves and stores `gate_proj` / `up_proj` / `down_proj` separately when `expert_tp_size > 1`. The non-trainable `expert_bias` buffer is replicated across ETP ranks.
 
@@ -23,7 +23,7 @@ LFM-2 uses the [fused contiguous-halves ETP layout](../parallelism/expert-tensor
 
 Documents stay isolated in both halves of the hybrid stack. The attention layers key on the packed
 `position_ids`; for the `Lfm2MoeShortConv` layers the collators and SMPO's padding-free forward
-additionally emit `seq_idx` for this family (`segment_markers_for` in `src/models/segment_markers.py`
+additionally emit `seq_idx` for this family (`segment_markers_for` in `halo/models/segment_markers.py`
 turns it on by model type) and both conv paths honor it, which zeroes the cross-document term exactly
 rather than approximately.
 

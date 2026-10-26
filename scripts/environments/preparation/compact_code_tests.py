@@ -33,9 +33,9 @@ from typing import NamedTuple
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from halo.environments.tasks.coding.contest_datasets import decode_test_payload
+from halo.log import configure_cli_logging
 from scripts.environments.preparation.parquet_parts import parquet_parts
-from src.environments.tasks.coding.contest_datasets import decode_test_payload
-from src.log import configure_cli_logging
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

@@ -15,9 +15,9 @@ import types
 
 import pytest
 
-import src.trainers.accelerator as mixin_module
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+import halo.trainers.accelerator as mixin_module
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 _configure = DistributedTrainerMixin._configure_fp32_output_conversion
 _warn_unapplied = DistributedTrainerMixin._warn_knobs_unapplied_under_accelerate

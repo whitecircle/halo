@@ -14,9 +14,9 @@ way ``MergeModulelist(dim=0) + Concatenate(dim=1)`` builds it. A fused family ge
 import pytest
 import torch
 
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from tests.common.ep_stubs import bare_ep_layer
 
 E, H, M = 4, 8, 16

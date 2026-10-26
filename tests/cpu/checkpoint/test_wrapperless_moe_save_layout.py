@@ -32,9 +32,9 @@ from transformers import (
     Qwen3_5MoeForConditionalGeneration,
 )
 
-from src.checkpoint.hub_layout import save_pretrained_layout
-from src.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint
-from src.checkpoint.reading import load_full_state_dict
+from halo.checkpoint.hub_layout import save_pretrained_layout
+from halo.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint
+from halo.checkpoint.reading import load_full_state_dict
 from tests.common.checkpoint_io import save_context, written_keys
 from tests.common.models import TINY_QWEN35_MOE_CONFIG
 

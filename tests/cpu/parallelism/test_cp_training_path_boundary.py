@@ -13,8 +13,8 @@ import torch.nn.functional as F
 from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from src.distributed.context_parallel.config import CPConfig
-from src.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_logprobs
+from halo.distributed.context_parallel.config import CPConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_logprobs
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 from tests.common.gloo import run_gloo_ranks
 from tests.common.smpo_trainer import smpo_trainer
@@ -69,7 +69,7 @@ def _sft_worker(rank, cp_size):
         model.zero_grad()
         wrapper = unpatched_cp_wrapper(model, cp_config=config)
         if mutated:
-            with patch("src.distributed.context_parallel.ulysses_model.cp_shift_against_full_labels", _drop_boundary):
+            with patch("halo.distributed.context_parallel.ulysses_model.cp_shift_against_full_labels", _drop_boundary):
                 loss = wrapper(ids, attention_mask=mask, labels=labels).loss
         else:
             loss = wrapper(ids, attention_mask=mask, labels=labels).loss
@@ -119,7 +119,7 @@ def _smpo_worker(rank, cp_size):
         wrapper = unpatched_cp_wrapper(model, cp_config=config)
         host = _smpo_host(config)
         if mutated:
-            with patch("src.trainers.preference.smpo.next_token_logprobs", _drop_boundary_logprobs):
+            with patch("halo.trainers.preference.smpo.next_token_logprobs", _drop_boundary_logprobs):
                 actual = host.concatenated_forward(wrapper, batch)
         else:
             actual = host.concatenated_forward(wrapper, batch)

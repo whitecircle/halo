@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the block-scaled quantization oracle (src/kernels/lowp/quantization.py).
+"""CPU tests for the block-scaled quantization oracle (halo/kernels/lowp/quantization.py).
 
 Pins the MX / NVFP4 quant math against an INDEPENDENT first-principles reference
 (not by re-calling the module's own helpers):
@@ -25,7 +25,7 @@ import os
 import pytest
 import torch
 
-import src.kernels.lowp.quantization as q
+import halo.kernels.lowp.quantization as q
 
 E2M1_MAX = 6.0
 E4M3_MAX = 448.0
@@ -209,7 +209,7 @@ def test_mxfp4_round_trip_compile_bit_identical():
         os.environ["HALO_LOWP_COMPILE"] = flag
         # Reset the module's compile caches for this flag. Do NOT importlib.reload:
         # reloading re-executes the module in its shared dict, rebinding its classes
-        # and poisoning every earlier ``from src.kernels.lowp.quantization import ...``
+        # and poisoning every earlier ``from halo.kernels.lowp.quantization import ...``
         # (isinstance checks in sibling tests then fail order-dependently).
         q._compiled_round_trip = None
         q._compile_failed = False

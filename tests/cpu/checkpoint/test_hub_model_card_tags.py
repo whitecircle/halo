@@ -34,23 +34,23 @@ from transformers import GptOssConfig, GptOssForCausalLM, Qwen3Config, Qwen3ForC
 from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
 
-import src.checkpoint.parallel.adapters as peft_saver
+import halo.checkpoint.parallel.adapters as peft_saver
+from halo.checkpoint import model_card
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
+from halo.checkpoint.config_export import finalize_exported_config, save_model_config
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
+from halo.checkpoint.model_card import MalformedModelCardError, tag_model_card
+from halo.checkpoint.offline_export import copy_checkpoint_aux_files
+from halo.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
+from halo.configs.embedding import EmbeddingConfig
+from halo.configs.script_arguments import ModelArguments
+from halo.model_loading.model_preparation import apply_run_model_policies
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.trainers.sft import DistributedSFTTrainer
 from scripts.after_training import merge_models as merge_models_script
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.training.embedding import build_sentence_transformer
-from src.checkpoint import model_card
-from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
-from src.checkpoint.config_export import finalize_exported_config, save_model_config
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.checkpoint.model_card import MalformedModelCardError, tag_model_card
-from src.checkpoint.offline_export import copy_checkpoint_aux_files
-from src.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
-from src.configs.embedding import EmbeddingConfig
-from src.configs.script_arguments import ModelArguments
-from src.model_loading.model_preparation import apply_run_model_policies
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import word_level_tokenizer

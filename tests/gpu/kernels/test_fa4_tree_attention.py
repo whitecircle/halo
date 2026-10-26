@@ -28,11 +28,11 @@ import functools
 import torch
 from transformers import modeling_flash_attention_utils as flash_utils
 
-from src.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN
-from src.kernels.jit_cache import ensure_fa4_kernel_cache_env
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.models.attention.backend_setup import patch_transformers_flash_varlen_int_seqlen
-from src.models.attention.tree import (
+from halo.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN
+from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models.attention.backend_setup import patch_transformers_flash_varlen_int_seqlen
+from halo.models.attention.tree import (
     TREE_ATTN_IMPLEMENTATIONS,
     TREE_FAMILIES,
     TreeFamily,
@@ -43,7 +43,7 @@ from src.models.attention.tree import (
     warm_recurrent_mixer_kernels,
     warm_split_form_kernels,
 )
-from src.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
+from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
 from tests.common.harness import gpu_test_main
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.trees import concat_columns, example_rows, randomize_sinks, reference_varlen, tree_columns

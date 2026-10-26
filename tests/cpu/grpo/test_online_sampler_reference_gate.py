@@ -21,14 +21,14 @@ import pytest
 import torch
 from trl import GRPOTrainer
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout import engine_preflight
-from src.trainers.grpo.rollout.engine_preflight import (
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.rollout import engine_preflight
+from halo.trainers.grpo.rollout.engine_preflight import (
     _verify_sampler_logprob_reference_on_rank0,
     verify_sampler_logprob_reference,
 )
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeVLLMServer
 from tests.common.repo import REPO_ROOT
 

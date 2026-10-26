@@ -98,7 +98,7 @@ cython_debug/
 .idea/
 
 models/
-!src/models/
+!halo/models/
 !agent-docs/models/
 !tests/cpu/models/
 

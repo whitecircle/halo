@@ -5,7 +5,7 @@ The stack lives in four images built from three Dockerfiles and one lock, and ea
 pinned in exactly one place: ``pyproject.toml`` for the training dependencies, ``uv.lock`` (through
 ``docker/nccl_pin.py``) for the NCCL runtime every image shares, and a ``Dockerfile`` ``ARG`` for
 each engine and the NGC base. Prose and error strings across the root guides, ``agent-docs/``,
-``human-docs/``, ``src/``, ``tests/``, ``scripts/``, ``examples/`` and the agent skills restate
+``human-docs/``, ``halo/``, ``tests/``, ``scripts/``, ``examples/`` and the agent skills restate
 those numbers hundreds of times, and a bump that updates the pin and misses one of them points a
 reader — or a refusal message — at a version nobody runs. This gate reads each pin from its single
 source and fails on any stated number that disagrees.
@@ -39,7 +39,7 @@ nccl_pin = load_script_module("docker/nccl_pin.py")
 locked_version = load_script_module(".github/scripts/locked_version.py").locked_version
 
 # Every tree that states a stack version: the root guides, both doc trees, the error strings and
-# docstrings under src/, the pinned-behaviour comments in tests/ and scripts/, the launch comments
+# docstrings under halo/, the pinned-behaviour comments in tests/ and scripts/, the launch comments
 # in examples/, the agent skills, and the pin sources themselves — a Dockerfile's ``ARG`` agrees
 # with itself, but the paragraph of comment explaining why it says that number does not. Left out:
 # ``uv.lock`` (generated) and ``Makefile`` (tags only — checked below). Data files under
@@ -52,7 +52,7 @@ SCANNED_TREES = (
     "docker-compose*.yml",
     "agent-docs/**/*.md",
     "human-docs/**/*.md",
-    "src/**/*.py",
+    "halo/**/*.py",
     "tests/**/*.py",
     "scripts/**/*.py",
     "docker/**/*.py",

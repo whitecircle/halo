@@ -17,7 +17,7 @@ from itertools import accumulate
 import pytest
 import torch
 
-from src.data.tree_layout import (
+from halo.data.tree_layout import (
     DEPTH_COLUMN,
     POSITION_COLUMN,
     TRAINED_COLUMN,
@@ -26,8 +26,8 @@ from src.data.tree_layout import (
     share_limit,
     split_to_budget,
 )
-from src.models.attention import tree_plan
-from src.models.attention.tree_plan import build_node_table, build_tree_attention_plan
+from halo.models.attention import tree_plan
+from halo.models.attention.tree_plan import build_node_table, build_tree_attention_plan
 from tests.common.trees import leaf_chains, tree_attention_masks
 
 VOCAB = 50

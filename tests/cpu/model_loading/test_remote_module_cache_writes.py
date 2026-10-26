@@ -4,7 +4,7 @@
 A node's ranks share the dynamic-module cache, and transformers copies a module into it by truncating
 and rewriting the file under a lock that is per process. A rank that finds the file present
 mid-copy imports the cut module, and a config cut mid-``__init__`` loads with no error but without
-its later attributes. ``src.model_loading.remote_code`` makes the copies land whole; here one
+its later attributes. ``halo.model_loading.remote_code`` makes the copies land whole; here one
 process's copy stops halfway while a second process resolves the same remote config into the same
 cold cache.
 
@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 from transformers import AutoConfig
 
-from src.checkpoint.atomic import is_atomic_staging_file
-from src.model_loading import remote_code
+from halo.checkpoint.atomic import is_atomic_staging_file
+from halo.model_loading import remote_code
 from tests.common.models import BAILING_MOE_LING_MINI
 from tests.common.tokenizers import load_cached_config
 

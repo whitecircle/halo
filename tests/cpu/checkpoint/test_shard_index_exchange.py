@@ -20,8 +20,8 @@ Run: pytest tests/cpu/checkpoint/test_shard_index_exchange.py
 import pytest
 import torch.distributed as dist
 
-from src.checkpoint.writing import merge_shard_index
-from src.runtime.collectives import combine_across_ranks
+from halo.checkpoint.writing import merge_shard_index
+from halo.runtime.collectives import combine_across_ranks
 
 WORLD_SIZE = 4
 

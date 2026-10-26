@@ -10,8 +10,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.trainers.preference.smpo_objective import MARGIN_LOSSES, SMPOObjective
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.trainers.preference.smpo_objective import MARGIN_LOSSES, SMPOObjective
 
 BETA = 1.5
 TARGET_MARGIN = 0.3

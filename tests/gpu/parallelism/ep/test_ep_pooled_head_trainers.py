@@ -35,12 +35,12 @@ from datasets import Dataset
 from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForSequenceClassification
 from trl import RewardConfig
 
-from src.configs.classification import ClassificationConfig
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-from src.trainers.reward.classification import ClassificationTrainer
+from halo.configs.classification import ClassificationConfig
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG

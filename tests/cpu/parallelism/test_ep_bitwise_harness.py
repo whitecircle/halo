@@ -8,11 +8,11 @@ Run: python tests/cpu/parallelism/test_ep_bitwise_harness.py
 import pytest
 import torch
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer import grad_sync
-from src.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.models.moe.family_specs import find_moe_family_spec
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer import grad_sync
+from halo.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.models.moe.family_specs import find_moe_family_spec
 from tests.common.equivalence import ep_bitwise
 from tests.common.equivalence.ep_bitwise import (
     CONSTRUCTION_VARIANTS,

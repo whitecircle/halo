@@ -16,10 +16,10 @@ import pytest
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
 
 
 class _SetupReached(Exception):

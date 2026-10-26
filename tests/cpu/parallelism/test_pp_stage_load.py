@@ -1,7 +1,7 @@
 """CPU tests for the stage-aware pipeline loader against a REAL safetensors checkpoint.
 
 ``tests/cpu/parallelism/test_pp_lazy_key_map.py`` pins the key algebra; this file runs
-:func:`~src.model_loading.parallel.pp._load_stage_lazy` end to end on a tiny
+:func:`~halo.model_loading.parallel.pp._load_stage_lazy` end to end on a tiny
 checkpoint written to disk, which is the only way to catch what the key map cannot:
 
   * every stage's tensors carry the VALUES of the global layers it claims (a correct-looking
@@ -31,9 +31,9 @@ from transformers import (
     Qwen3MoeForCausalLM,
 )
 
-from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
-from src.model_loading.parallel import pp
-from src.model_loading.parallel.pp import _load_stage_lazy
+from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
+from halo.model_loading.parallel import pp
+from halo.model_loading.parallel.pp import _load_stage_lazy
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.pp_fakes import registered_pp_backbones
 

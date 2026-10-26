@@ -1,4 +1,4 @@
-"""CPU test for the ``liger_cross_entropy`` CPU fallback (``src/model_loading/liger/cross_entropy.py``).
+"""CPU test for the ``liger_cross_entropy`` CPU fallback (``halo/model_loading/liger/cross_entropy.py``).
 
 Every toolkit applier routes ``transformers.loss.loss_utils``' cross-entropy through
 ``liger_cross_entropy``; Liger's kernel is Triton/CUDA-only, so a CPU-side CE call on that path must
@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.model_loading.liger.cross_entropy import liger_cross_entropy
+from halo.model_loading.liger.cross_entropy import liger_cross_entropy
 
 
 def test_cpu_tensors_fall_back_to_torch():

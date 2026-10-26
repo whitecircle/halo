@@ -1,6 +1,6 @@
 # MCP Environment
 
-`NativeMCPClientEnvironment` (`src/environments/protocols/mcp.py`, registry name `mcp`) connects to a [Model Context Protocol](https://modelcontextprotocol.io/) server and exposes its tools as native function calls.
+`NativeMCPClientEnvironment` (`halo/environments/protocols/mcp.py`, registry name `mcp`) connects to a [Model Context Protocol](https://modelcontextprotocol.io/) server and exposes its tools as native function calls.
 
 It extends `AsyncNativeToolUseEnvironment`, so the [native protocol's](native-tool-use.md) turn budget and reward apply, with `tool_success_reward` raised to `0.1`. The MCP SDK ships in the image; the server does not, so its launcher must be on the actor's `PATH`.
 
@@ -52,7 +52,7 @@ Flags and the `--training_config` contract: [Evaluation](../../evaluation.md).
 A stdio server outside the presets is launched from the constructor:
 
 ```python
-from src.environments.protocols.mcp import NativeMCPClientEnvironment
+from halo.environments.protocols.mcp import NativeMCPClientEnvironment
 
 env = NativeMCPClientEnvironment(
     server_command="npx",

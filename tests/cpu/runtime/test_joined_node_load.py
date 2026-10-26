@@ -24,7 +24,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.runtime.load_coordination import joined_node_load
+from halo.runtime.load_coordination import joined_node_load
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

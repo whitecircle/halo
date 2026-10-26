@@ -28,9 +28,9 @@ import torch
 from accelerate.state import GradientState
 from transformers.trainer_utils import enable_full_determinism
 
-from src.distributed.expert_parallel.deepep.backends import _ElasticBackend
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.deepep.backends import _ElasticBackend
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_all
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model

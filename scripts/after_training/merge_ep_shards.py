@@ -33,26 +33,26 @@ from contextlib import ExitStack
 import torch
 from safetensors import safe_open
 
-from scripts.cli_arguments import add_max_shard_size_arg
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, EP_SHARD_KEY_RE, ep_shard_filename, is_ep_shard
-from src.checkpoint.offline_export import (
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, EP_SHARD_KEY_RE, ep_shard_filename, is_ep_shard
+from halo.checkpoint.offline_export import (
     copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
     reject_sibling_adapter,
     resume_state_sources,
 )
-from src.checkpoint.reading import detect_model_type, header_nbytes, is_ep_sharded_checkpoint, read_checkpoint_index
-from src.checkpoint.writing import StreamingShardWriter
-from src.log import configure_cli_logging
-from src.models.moe.expert_layout import to_hub_expert_tensors
-from src.models.moe.family_specs import (
+from halo.checkpoint.reading import detect_model_type, header_nbytes, is_ep_sharded_checkpoint, read_checkpoint_index
+from halo.checkpoint.writing import StreamingShardWriter
+from halo.log import configure_cli_logging
+from halo.models.moe.expert_layout import to_hub_expert_tensors
+from halo.models.moe.family_specs import (
     MoEFamilySpec,
     expert_weight_roots,
     find_moe_family_spec,
     moe_model_types,
     shared_expert_attrs,
 )
+from scripts.cli_arguments import add_max_shard_size_arg
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ def _group_expert_weights(merged_weights: dict) -> tuple[dict, dict]:
 
     Values pass through untouched, so this classifies tensors and read plans alike (the streaming
     merge groups keys before any tensor is materialized). A declared shared-expert container
-    (:func:`~src.models.moe.family_specs.shared_expert_attrs`) is not an expert group,
+    (:func:`~halo.models.moe.family_specs.shared_expert_attrs`) is not an expert group,
     whatever its parameters are called.
 
     Returns:

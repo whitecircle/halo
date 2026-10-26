@@ -28,7 +28,7 @@ code — is padding. Delete it.
   pages fit in 150–300 lines; a page past ~400 is almost always carrying
   redundancy or content that belongs on another page.
 - **Cite sparingly — only where it helps the reader act.** Anchor a claim to a
-  `src/` path, config field, or class name **only when the reader needs to find or
+  `halo/` path, config field, or class name **only when the reader needs to find or
   set that thing**. One or two pointers to the owning code per topic is enough. Do
   not append a path to every sentence, and do not enumerate every method of a
   module — that "Implementation" dump is noise that drifts out of date. Name the

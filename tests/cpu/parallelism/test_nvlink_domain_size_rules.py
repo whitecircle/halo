@@ -25,7 +25,7 @@ from unittest.mock import patch
 
 import pytest
 
-import src.distributed.parallelism_config as parallelism_config_module
+import halo.distributed.parallelism_config as parallelism_config_module
 from tests.common.parallelism import create_config
 
 # ── A rack-wide domain on a MULTI-NODE sub-job must raise, never clamp ──────────

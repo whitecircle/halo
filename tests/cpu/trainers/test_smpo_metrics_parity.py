@@ -18,9 +18,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.preference.smpo_objective import SMPOStepConstants, metric_sums, metrics_from_sums
-from src.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo_objective import SMPOStepConstants, metric_sums, metrics_from_sums
+from halo.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
 from tests.common.smpo_trainer import smpo_trainer
 
 BETA = 0.5

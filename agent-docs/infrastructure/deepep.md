@@ -86,7 +86,7 @@ The two coordination timeouts decide which rank gives up on a join first. A node
 aborts its process group while its peers still hold budget, and the survivors then die on the *next*
 collective and blame it. The rest are wire parameters both ends of the all-to-all share.
 
-`agree_rank_uniform_env` (`src/distributed/rank_uniform_env.py`) gathers them in distributed setup,
+`agree_rank_uniform_env` (`halo/distributed/rank_uniform_env.py`) gathers them in distributed setup,
 **before the weight load**, so a mismatch fails at startup rather than at the first EP collective;
 `load_distributed_model` repeats it first thing as a latched backstop. It refuses a job whose ranks disagree
 (`Rank-uniform toolkit environment differs across ranks`, naming rank 0's values).
@@ -157,7 +157,7 @@ the NVLink barrier alone on its garbage collector's schedule burns the whole
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` budget and aborts the job with `cudaErrorLaunchFailure`. A dropped
 dispatcher only relinquishes its claim, so which claims remain differs between ranks until each has
 collected, and no free is decided from them alone: `destroy_all_dispatchers()`
-(`src/distributed/expert_parallel/deepep/dispatcher.py`) drops every live claim and then frees every
+(`halo/distributed/expert_parallel/deepep/dispatcher.py`) drops every live claim and then frees every
 buffer in the order it was built, claimed or not (`free_all_ep_buffers()`), and every other free (the
 `free_unclaimed_ep_buffers()` sweep in `deepep/backends.py`, a
 layer's `destroy()` as `cleanup_ep` calls it, a top-k or determinism change moving a layer to a new
@@ -191,7 +191,7 @@ rank-local. The rank that outgrows the arena raises while its peers reach the di
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS` bounds that wait rather than hanging the job.
 
 The same raise fires when the per-forward generation that scopes the cache (`capacity_scope`, a
-`CapacityScope` in `src/distributed/expert_parallel/deepep/capacity.py`) stops advancing. A forward
+`CapacityScope` in `halo/distributed/expert_parallel/deepep/capacity.py`) stops advancing. A forward
 pre-hook bumps it, so it must sit on the **outermost** module the loop calls. The trainer
 re-registers it after PEFT wrapping: a task-typed `PeftModel` reaches the
 model it wraps through `.forward()`, which runs no pre-hook on it.
@@ -208,7 +208,7 @@ time; the race, both transports' failures and the safe shapes:
 ## Transport backend
 
 `ep_buffer_backend` selects the transport for the EP all-to-all. The dispatcher hides the choice behind one
-interface (`DeepEPBackend`, built by `build_ep_backend` in `src/distributed/expert_parallel/deepep/backends.py`),
+interface (`DeepEPBackend`, built by `build_ep_backend` in `halo/distributed/expert_parallel/deepep/backends.py`),
 so it is transparent to the MoE layer and the autograd path.
 
 | `ep_buffer_backend` | Buffer | Transport | Dispatch limit | Cross-node |
@@ -305,7 +305,7 @@ training config with no `max_length` field (online and async GRPO), which declar
 the Gin ceiling applies is decided by the NVLink **domain**: a rack-wide NVL72 group is not bound by it.
 
 There is **no lower "symmetric-window" ceiling.** What carries long-context ep8 is the int64 program
-offset in the fused GptOss SwiGLU kernel (`src/kernels/fused_glu.py`): the grouped expert activation
+offset in the fused GptOss SwiGLU kernel (`halo/kernels/fused_glu.py`): the grouped expert activation
 crosses `2³¹` elements when a skewed router piles >745k tokens onto one rank (gpt-oss-20b ep8 at 64k),
 and an int32 offset there illegal-accesses.
 
@@ -315,7 +315,7 @@ sequence means the activation kernel or an OOM, not the all-to-all.
 
 ## How the toolkit drives it
 
-The toolkit uses `DeepEPDispatcher` (`src/distributed/expert_parallel/deepep/dispatcher.py`), not the raw
+The toolkit uses `DeepEPDispatcher` (`halo/distributed/expert_parallel/deepep/dispatcher.py`), not the raw
 buffer. It claims a shared buffer through its backend, which selects the Gin / non-Gin path from topology,
 lazily sizes the buffer and pads hidden for the combine kernel. `dispatch` / `combine` are autograd-aware
 (the functions beside the dispatcher): the

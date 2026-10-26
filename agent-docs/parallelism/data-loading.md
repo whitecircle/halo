@@ -12,7 +12,7 @@ the *same* batch.
 | Expert TP | Ranks in an expert-TP group get the **same** data | Expert FFN is sharded across the group |
 
 Every rank reads its own copy of the source — a per-node S3 cache, a pre-staged directory, a cached
-hub revision — so the load agrees the rows before any rank trains on them (`src/data/sources/replica_identity.py`).
+hub revision — so the load agrees the rows before any rank trains on them (`halo/data/sources/replica_identity.py`).
 A replicated load compares each split's row count, schema and a digest of 16 evenly spaced rows across
 the world (media columns excluded, decoded or not and at any depth: their stored paths can name a
 node's own cache). A sharded load
@@ -28,14 +28,14 @@ node trains other rows.
 [Stacking the dimensions](README.md#stacking-the-dimensions) and listed per mode in
 [Supported combinations](README.md#supported-combinations).
 
-Computed once in `ParallelismConfig.__post_init__` (`src/distributed/parallelism_config.py`).
+Computed once in `ParallelismConfig.__post_init__` (`halo/distributed/parallelism_config.py`).
 `get_data_parallel_rank()` derives the shard index per mode — TP/CP take `rank // group_size`,
 expert-TP reads its sub-group membership (strided under node-local
 EP, contiguous under cross-node EP), so partners sharing a dispatch rank process the same batch.
 
 ## How the DataLoader is built
 
-`DataParallelLoaderMixin` (`src/trainers/dataloaders.py`, composed into
+`DataParallelLoaderMixin` (`halo/trainers/dataloaders.py`, composed into
 `DistributedTrainerMixin`) takes the custom path when `uses_dp_sharded_loader` sees
 `non_dp_replication_factor > 1` (more than one rank sees each batch: TP, CP or ETP) or a
 pre-sharded dataset; otherwise (DDP / EP-only / HSDP, not presharded) it uses the base Trainer flow.
@@ -106,7 +106,7 @@ TRL's default `scale_rewards="group"`). When TP or ETP reduces DP, `_prepare_dat
 prompts across DP groups while all ranks within a TP group share the same prompts.
 
 On that custom-dataloader path the trainers override `_get_train_sampler`
-(`GenerationRoundMixin` in `src/trainers/grpo/on_policy.py`) to size the sampler at the
+(`GenerationRoundMixin` in `halo/trainers/grpo/on_policy.py`) to size the sampler at the
 loader's real DP consumption rate. TRL's world-rate geometry would re-roll part of every prompt
 block and silently skip the rest.
 
@@ -116,7 +116,7 @@ too, because TP siblings inject duplicate blocks into TRL's world-order reward g
 per-rank groups regroup correctly. Pre-sharded datasets consume per DP rank, so the rate is one
 rank's.
 
-**Offline GRPO** uses `MultiGroupSampler` (`src/trainers/grpo/offline/group_sampler.py`). Advantages are
+**Offline GRPO** uses `MultiGroupSampler` (`halo/trainers/grpo/offline/group_sampler.py`). Advantages are
 pre-computed per example at tokenization time (`compute_group_advantages` normalizes a group's
 rewards via `advantage_method`, default `quantile_norm`), so the sampler does not pack a group into
 one batch. It emits each group's indices in group-appearance order, shards the sequence across DP
@@ -131,15 +131,15 @@ minimum, keeping every rank's optimizer-step count equal; a global minimum of 0 
 
 A sharded dataset (a `train/shard_index.json` layout) loads at the **shard level** before the
 DataLoader is built. Every training script passes DP rank/size (not global rank/world_size) to its
-loader (`load_script_datasets`, `src/entrypoints/data_setup.py`), so CP/TP/ETP group members load the
+loader (`load_script_datasets`, `halo/entrypoints/data_setup.py`), so CP/TP/ETP group members load the
 same shards; SFT additionally detects a pre-processed (tokenized) dataset via `load_datasets_auto()`.
 Each DP rank takes a **contiguous** range of shards, remainder to the first ranks — 10 shards over 3
-ranks gives `[4, 3, 3]` (`ShardedDatasetLoader`, `src/data/sources/sharded_dataset.py`).
+ranks gives `[4, 3, 3]` (`ShardedDatasetLoader`, `halo/data/sources/sharded_dataset.py`).
 
 **Hard requirement:** `num_shards >= data_parallel_size`. A train split with fewer shards **raises**
 at load time, since ranks with index `>= num_shards` would get zero examples; any other split warns.
 A missing `train`/`test` split, or one empty on every rank, is rejected at load
-(`src/data/sources/loading.py`) — the sharded loader skips a split with no shard index, so the check
+(`halo/data/sources/loading.py`) — the sharded loader skips a split with no shard index, so the check
 is what turns that into a failure.
 
 The length-equalizer (`_equalize_presharded_length`, collective — every rank must reach it) runs for
@@ -152,7 +152,7 @@ split (sharding skips empty shards) must still yield at least `data_parallel_siz
 or evaluation must be disabled.
 
 Downstream map/filter caches key on a forced deterministic fingerprint (`load_datasets` in
-`src/data/sources/loading.py`) that folds in a content signature of the freshly loaded data, so
+`halo/data/sources/loading.py`) that folds in a content signature of the freshly loaded data, so
 an in-place re-push cannot serve stale mapped rows.
 
 A tokenizer or processor in the map's `fn_kwargs` keys by **content**, not by path: the fast

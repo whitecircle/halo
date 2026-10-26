@@ -20,17 +20,17 @@ import pytest
 import torch
 from transformers import Gemma4TextConfig
 
-from src.model_loading import model_preparation
-from src.model_loading.parallel import frozen_models
-from src.model_loading.parallel import loader as model_loading
-from src.model_loading.parallel.model_source import ModelSource
-from src.models.attention.sdpa_flex_sliding import SDPA_FLEX_SLIDING
+from halo.model_loading import model_preparation
+from halo.model_loading.parallel import frozen_models
+from halo.model_loading.parallel import loader as model_loading
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.models.attention.sdpa_flex_sliding import SDPA_FLEX_SLIDING
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 
 VARIANT_RESOLVER = "resolve_flex_sliding_attn_implementation"
-SEAM_MODULE = "src/model_loading/model_preparation.py"
+SEAM_MODULE = "halo/model_loading/model_preparation.py"
 
 
 def _wide_gemma4_config() -> Gemma4TextConfig:
@@ -122,7 +122,7 @@ def test_no_loader_resolves_the_variant_itself():
     """Only the seam calls the variant resolver: a loader binding it again holds a second copy of the
     backend-to-variant step, free to drift from the seam."""
     binders = set()
-    for path in (*REPO_ROOT.glob("src/**/*.py"), *REPO_ROOT.glob("scripts/**/*.py")):
+    for path in (*REPO_ROOT.glob("halo/**/*.py"), *REPO_ROOT.glob("scripts/**/*.py")):
         for node in ast.walk(ast.parse(path.read_text(), filename=str(path))):
             names = [alias.name for alias in node.names] if isinstance(node, ast.ImportFrom) else []
             names += [getattr(node, "id", None), getattr(node, "attr", None)]

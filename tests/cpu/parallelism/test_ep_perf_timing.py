@@ -23,10 +23,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import src.distributed.expert_parallel.moe_layer.layer as layer_module
-from src.diagnostics import ep_span_timing
-from src.diagnostics.ep_span_timing import get_ep_span_timer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+import halo.distributed.expert_parallel.moe_layer.layer as layer_module
+from halo.diagnostics import ep_span_timing
+from halo.diagnostics.ep_span_timing import get_ep_span_timer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class _PerfProbeLayer(EPMoELayerBase):

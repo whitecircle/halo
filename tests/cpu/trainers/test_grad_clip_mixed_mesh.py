@@ -17,7 +17,7 @@ import torch
 import transformers.trainer
 from transformers import Trainer
 
-from src.trainers.parallelism.grad_clipping import GradientClippingMixin
+from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
 
 
 class _Accelerator:

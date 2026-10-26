@@ -16,8 +16,8 @@ import logging
 import pytest
 from transformers import TrainingArguments
 
-from src.entrypoints import script
-from src.entrypoints.script import _pin_single_process_to_bound_gpu, init_training_script
+from halo.entrypoints import script
+from halo.entrypoints.script import _pin_single_process_to_bound_gpu, init_training_script
 
 
 def _training_args(tmp_path, visible_gpus: int) -> TrainingArguments:

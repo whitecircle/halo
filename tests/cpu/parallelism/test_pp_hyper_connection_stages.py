@@ -26,10 +26,10 @@ from transformers import (
     Glm5NextForConditionalGeneration,
 )
 
-from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
-from src.distributed.pipeline_parallel.partition import validate_partition
-from src.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
+from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
+from halo.distributed.pipeline_parallel.partition import validate_partition
+from halo.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
 from tests.common.models import TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
 
 # Kept verbatim — including the metadata-only ``num_nextn_predict_layers: 1`` the hub checkpoints

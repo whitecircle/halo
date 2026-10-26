@@ -9,7 +9,7 @@ but nothing prevents one), so these tests count gather calls on both sides of ``
 waiting for a live hang to prove it.
 
 Counting is done by replacing the gather primitives where every branch reads them — the pair
-``src.runtime.dtensor.resolve_retained`` reads (``full_cpu_tensor`` / ``materialize_dtensor``). The
+``halo.runtime.dtensor.resolve_retained`` reads (``full_cpu_tensor`` / ``materialize_dtensor``). The
 tensors themselves stay plain, since a real DTensor needs an initialized process group.
 """
 
@@ -17,8 +17,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.runtime.dtensor as dtensor_mod
-from src.checkpoint.parallel.writing import chunked_saveable_tensors
+import halo.runtime.dtensor as dtensor_mod
+from halo.checkpoint.parallel.writing import chunked_saveable_tensors
 
 
 class _BufferModel(nn.Module):

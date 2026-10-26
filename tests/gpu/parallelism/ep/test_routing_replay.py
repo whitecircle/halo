@@ -21,11 +21,11 @@ Run with 2 GPUs:
 import torch
 from transformers import AutoTokenizer
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main

@@ -22,11 +22,11 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers import PretrainedConfig
 
-from src.callbacks.balancing import apply_balancing_mode
-from src.model_loading.liger.cross_entropy import build_lce_forward
-from src.models.moe.balancing import _warned_unservable_auto, resolve_balancing_mode
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.model_loading.liger.cross_entropy import build_lce_forward
+from halo.models.moe.balancing import _warned_unservable_auto, resolve_balancing_mode
 
-_RESOLVER_LOGGER = "src.models.moe.balancing"
+_RESOLVER_LOGGER = "halo.models.moe.balancing"
 
 
 class _MoEProbeConfig(PretrainedConfig):

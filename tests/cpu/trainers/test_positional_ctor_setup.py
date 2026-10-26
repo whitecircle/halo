@@ -19,17 +19,17 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.trainers.sft import DistributedSFTTrainer
 
 # (trainer, the positional slot of its config); the model is slot 0 on every one.
 TRAINERS = [

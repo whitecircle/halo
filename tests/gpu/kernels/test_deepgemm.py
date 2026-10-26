@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""GPU test for the native DeepGEMM fp8 / fp4 grouped MoE path (src/kernels/lowp/deepgemm.py).
+"""GPU test for the native DeepGEMM fp8 / fp4 grouped MoE path (halo/kernels/lowp/deepgemm.py).
 
 This is the opt-in native low-precision capability: it runs on Blackwell's fp8/fp4 tensor cores and
 converges, but is net-slower than bf16 at every training shape (so it is never auto-selected — see
-:func:`~src.kernels.lowp.deepgemm.use_deepgemm`). The test validates *correctness*, not speed. ``deep_gemm``
+:func:`~halo.kernels.lowp.deepgemm.use_deepgemm`). The test validates *correctness*, not speed. ``deep_gemm``
 is an opt-in install, so the fp8/fp4 kernel checks only run where it is present — but "not present" and
 "present and broken" are separated first (``test_availability_gate_is_honest``), because
 ``deepgemm_available`` swallows every import error and would otherwise let a broken install delete both
@@ -27,7 +27,7 @@ import sys
 import torch
 import torch.nn.functional as F
 
-from src.kernels.lowp.deepgemm import deepgemm_available, deepgemm_grouped_gemm, use_deepgemm
+from halo.kernels.lowp.deepgemm import deepgemm_available, deepgemm_grouped_gemm, use_deepgemm
 from tests.common.tolerances import TOL
 from tests.common.utils import fro_rel_err
 

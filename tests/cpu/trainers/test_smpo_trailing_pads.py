@@ -30,8 +30,8 @@ import torch.nn as nn
 from transformers import Gemma4Config, Gemma4ForConditionalGeneration
 from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
 
-from src.data.collators.smpo import concatenate_pairs
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.data.collators.smpo import concatenate_pairs
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG, TINY_MISTRAL4_CONFIG
 from tests.common.smpo_trainer import smpo_trainer
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model

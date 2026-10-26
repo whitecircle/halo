@@ -23,9 +23,9 @@ import tempfile
 
 import pytest
 
-from src.entrypoints.run_setup import configure_training_run
-from src.kernels import jit_cache
-from src.kernels.jit_cache import anchor_jit_cache_dir
+from halo.entrypoints.run_setup import configure_training_run
+from halo.kernels import jit_cache
+from halo.kernels.jit_cache import anchor_jit_cache_dir
 
 _TRITON_VAR = "TRITON_CACHE_DIR"
 _TRITON_SUBDIR = "triton_cache"

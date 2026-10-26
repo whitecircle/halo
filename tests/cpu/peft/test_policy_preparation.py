@@ -18,7 +18,7 @@ import torch.nn as nn
 from peft import LoraConfig, PeftModel
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.model_loading.parallel.peft_setup import prepare_policy_model
+from halo.model_loading.parallel.peft_setup import prepare_policy_model
 from tests.common.models import TINY_QWEN3_CONFIG
 
 LORA_DROPOUT = 0.1

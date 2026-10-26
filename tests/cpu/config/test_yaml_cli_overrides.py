@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CLI-override casting/dispatch tests for HaloArgumentParser (src/configs/parser.py).
+"""CLI-override casting/dispatch tests for HaloArgumentParser (halo/configs/parser.py).
 
 Pins the Optional cast — Optional-typed numeric fields are cast, not left as raw strings —
 plus bool override parsing (truthy/falsey accepted, garbage rejected) and the ``--key=value``
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.configs.parser import HaloArgumentParser
+from halo.configs.parser import HaloArgumentParser
 from tests.common.repo import REPO_ROOT
 
 

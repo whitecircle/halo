@@ -18,12 +18,12 @@ import pytest
 from trl import KTOTrainer
 from trl.trainer.kto_trainer import DataCollatorForUnpairedPreference
 
-from src.configs.preference import KTOScriptArguments
-from src.data.collators.fixed_shape import FixedShapeCollator
-from src.distributed.pipeline_parallel.runner import resolve_batch_pad_values
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.configs.preference import KTOScriptArguments
+from halo.data.collators.fixed_shape import FixedShapeCollator
+from halo.distributed.pipeline_parallel.runner import resolve_batch_pad_values
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.preference.kto import DistributedKTOTrainer
 
 
 def test_kto_trainer_mro_and_flags():

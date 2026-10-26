@@ -30,12 +30,12 @@ import torch
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from src.checkpoint.parallel.save import save_tokenizer
-from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_str
-from src.model_loading.parallel.loader import load_distributed_model
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.parallel.save import save_tokenizer
+from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_str
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.checkpoint_io import save_context
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B

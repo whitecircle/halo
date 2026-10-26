@@ -32,10 +32,10 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from src.model_loading.tokenizer_setup import configure_run_tokenizer, pristine_model_max_length
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer, pristine_model_max_length
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
@@ -248,7 +248,8 @@ def test_every_production_caller_passes_the_sharding_predicate():
     suite names such a call site first.
     """
     calls, missing = 0, []
-    for path in sorted((*(REPO_ROOT / "src").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"))):
+    assert (REPO_ROOT / "halo").is_dir() and (REPO_ROOT / "scripts").is_dir(), "the sweep lost a root"
+    for path in sorted((*(REPO_ROOT / "halo").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"))):
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == configure_run_tokenizer.__name__:

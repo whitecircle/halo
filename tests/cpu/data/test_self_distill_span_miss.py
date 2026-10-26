@@ -2,7 +2,7 @@
 """Completion-span misses in the self-distill label builder: warn, never crash, never train pad.
 
 ``build_completion_only_labels`` is shared by the SDPG text collator and by every VLM collator
-(:class:`~src.data.collators.vlm.VLMDataCollator` passes the COLLATOR span policy through
+(:class:`~halo.data.collators.vlm.VLMDataCollator` passes the COLLATOR span policy through
 ``span_policy``). Two defects, both silent or fatal at collate time:
 
 1. Under a policy that bounds a turn by the next marker start with no end-of-sequence fallback —
@@ -21,9 +21,9 @@ import warnings
 import pytest
 import torch
 
-from src.data.collators.vlm import VLMDataCollator
-from src.data.completion_spans import build_completion_only_labels, resolve_completion_spans
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.data.collators.vlm import VLMDataCollator
+from halo.data.completion_spans import build_completion_only_labels, resolve_completion_spans
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 
 MARKER_IDS = [7, 7]
 EOS_ID = 2

@@ -21,9 +21,9 @@ import torch
 from torch import nn
 from torch.nn.functional import cross_entropy
 
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.distillation.divergences import reverse_kl_loss, unnormalized_kl_loss
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.distillation.divergences import reverse_kl_loss, unnormalized_kl_loss
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 
 VOCAB = 13
 EOS = 2

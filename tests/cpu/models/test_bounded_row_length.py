@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.models.context_window import bounded_row_length
+from halo.models.context_window import bounded_row_length
 
 _UNSET = (None, 0, -1)
 

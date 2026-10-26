@@ -15,72 +15,72 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 
 | Layer | Owns | Source | Deeper page |
 |---|---|---|---|
-| Config | YAML parse, toolkit defaults, strict rejection of unknown or retired keys; env knobs read through one seam; the per-method argument/config dataclasses and the field guards and argument refusals they share | `src/configs/` (`parser.py` among them), `src/env.py`, `src/config_validation.py` | [Configuration](configuration-reference.md#parsing) |
-| Trainers | Training loop, loss, gradient clipping, saving | `src/trainers/` (the spine is `distributed_trainer.py`) | [Trainer Architecture](trainer-architecture.md) |
-| Runtime | Process plumbing every layer above shares: rank and node math, process-group construction and timeouts, barriers and broadcasts, cross-rank verdicts and the c10d-store joins, the shared-filesystem scope and main-first ordering, the per-node load throttle, DTensor access | `src/runtime/` | [Multi-Node](../parallelism/multi-node.md) |
-| Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `src/distributed/parallelism_config.py`, `src/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
-| Data | Dataset loading, sharding, collators | `src/data/`, `src/data/collators/` | [Dataset Formats](../data/dataset-formats.md) |
-| Callbacks | Throughput, MoE load, router-bias balancing | `src/callbacks/`, `src/hardware.py` (GPU detection + peak-FLOPs table) | [Callbacks](../training-methods/callbacks.md) |
-| Diagnostics | Opt-in and off by default: py-spy capture, torch-profiler traces, CUDA memory snapshots, EP span timing | `src/diagnostics/` | [Debugging](debugging.md) |
-| Kernels | Grouped GEMM, the fused GLU and MoE permute kernels, chunked fp32 log-probs, Flash Attention and FlexAttention on sliding-window layers, low-precision quantization | `src/kernels/`, `src/models/attention/selection.py`, `src/models/attention/sdpa_flex_sliding.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
-| Checkpoints | The flat saver ladder and its rungs (PEFT and expert-LoRA adapters, PP, EP, CP, TP, FSDP2), weight resume, per-rank optimizer shards + LR scheduler, load-coverage gate — over the sharding-agnostic on-disk layer | `src/checkpoint/parallel/`, `src/checkpoint/`, `src/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
-| Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `src/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
-| Models | The sharding-agnostic model side: module-tree introspection, composite-config access, the context window, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, and the sequence-classification heads transformers does not ship (`src/models/seq_cls_heads.py`, registered by an import in `src/model_loading/model_preparation.py`) | `src/models/` | [Adding a Model](../models/adding-a-model.md) |
-| Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the family patches and run policies every loaded model takes, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, remote-code compatibility, the post-load buffer repair, Liger applied at load (`liger/`), and the lazy safetensors core the EP and PP loaders share. Above it, `parallel/` holds the parallelism-aware loads: the `load_distributed_model` dispatcher (`loader.py`), the refusals it runs before any weight (`load_rules.py`), the `ModelSource` every rank agrees on (`model_source.py`), the whole-model load core (`whole_model.py`), the TP and CP loaders (`tp.py`, `cp.py`), the frozen reference and teacher loads, and the PEFT and freeze-pattern setup | `src/model_loading/` | [Models](../models/README.md) |
-| Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model), the scorer catalog and the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`trl_reward_functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards/README.md) |
-| Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/async-grpo/environments/README.md) |
-| Weight sync | Trainer-to-rollout-engine weight sync: one client per engine (`VLLMWeightSyncClient`, `SGLangWeightSyncClient`) and the backend registry, the chunking (the chunk budget, the co-load groups, the snapshots on the sync device), and the NCCL transport — the rendezvous listener and the group-address policy, the bounded broadcast waits, the vLLM pynccl communicator and packed broadcast, the SGLang c10d weight-update group, the send-stream buffers; and the transport preflight (`transport_check.py`) | `src/weight_sync/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
-| Entry-script plumbing | The `scripts/training/**` backbone (`parse_script_args`, `ScriptContext`, the run lifecycle and teardown), run setup (output dir, HF caches, seed, resume detection, the `run.log` tee), the policy load and window pins, script dataset loading; root/CLI logging and the `halo launch` / `halo run` surface | `src/entrypoints/`, `src/cli.py`, `src/log.py` | [Scripts](scripts-reference.md) |
-| Served endpoints | The OpenAI-compatible client every rollout, judge and batch-generation script talks through: endpoint defaults, key resolution and the loopback test (`endpoints.py`), the async client, one request with the upstream retry and the single-request helper that normalizes a reply (`openai_client.py`), the parallel resumable batch with its JSONL resume store (`batch_requests.py`), and the response record with its finish-reason contract (`response.py`) | `src/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
+| Config | YAML parse, toolkit defaults, strict rejection of unknown or retired keys; env knobs read through one seam; the per-method argument/config dataclasses and the field guards and argument refusals they share | `halo/configs/` (`parser.py` among them), `halo/env.py`, `halo/config_validation.py` | [Configuration](configuration-reference.md#parsing) |
+| Trainers | Training loop, loss, gradient clipping, saving | `halo/trainers/` (the spine is `distributed_trainer.py`) | [Trainer Architecture](trainer-architecture.md) |
+| Runtime | Process plumbing every layer above shares: rank and node math, process-group construction and timeouts, barriers and broadcasts, cross-rank verdicts and the c10d-store joins, the shared-filesystem scope and main-first ordering, the per-node load throttle, DTensor access | `halo/runtime/` | [Multi-Node](../parallelism/multi-node.md) |
+| Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `halo/distributed/parallelism_config.py`, `halo/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
+| Data | Dataset loading, sharding, collators | `halo/data/`, `halo/data/collators/` | [Dataset Formats](../data/dataset-formats.md) |
+| Callbacks | Throughput, MoE load, router-bias balancing | `halo/callbacks/`, `halo/hardware.py` (GPU detection + peak-FLOPs table) | [Callbacks](../training-methods/callbacks.md) |
+| Diagnostics | Opt-in and off by default: py-spy capture, torch-profiler traces, CUDA memory snapshots, EP span timing | `halo/diagnostics/` | [Debugging](debugging.md) |
+| Kernels | Grouped GEMM, the fused GLU and MoE permute kernels, chunked fp32 log-probs, Flash Attention and FlexAttention on sliding-window layers, low-precision quantization | `halo/kernels/`, `halo/models/attention/selection.py`, `halo/models/attention/sdpa_flex_sliding.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
+| Checkpoints | The flat saver ladder and its rungs (PEFT and expert-LoRA adapters, PP, EP, CP, TP, FSDP2), weight resume, per-rank optimizer shards + LR scheduler, load-coverage gate — over the sharding-agnostic on-disk layer | `halo/checkpoint/parallel/`, `halo/checkpoint/`, `halo/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
+| Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `halo/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
+| Models | The sharding-agnostic model side: module-tree introspection, composite-config access, the context window, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, and the sequence-classification heads transformers does not ship (`halo/models/seq_cls_heads.py`, registered by an import in `halo/model_loading/model_preparation.py`) | `halo/models/` | [Adding a Model](../models/adding-a-model.md) |
+| Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the family patches and run policies every loaded model takes, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, remote-code compatibility, the post-load buffer repair, Liger applied at load (`liger/`), and the lazy safetensors core the EP and PP loaders share. Above it, `parallel/` holds the parallelism-aware loads: the `load_distributed_model` dispatcher (`loader.py`), the refusals it runs before any weight (`load_rules.py`), the `ModelSource` every rank agrees on (`model_source.py`), the whole-model load core (`whole_model.py`), the TP and CP loaders (`tp.py`, `cp.py`), the frozen reference and teacher loads, and the PEFT and freeze-pattern setup | `halo/model_loading/` | [Models](../models/README.md) |
+| Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model), the scorer catalog and the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`trl_reward_functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `halo/rewards/` | [Reward Terms](../training-methods/grpo/rewards/README.md) |
+| Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `halo/environments/` | [Environments](../training-methods/async-grpo/environments/README.md) |
+| Weight sync | Trainer-to-rollout-engine weight sync: one client per engine (`VLLMWeightSyncClient`, `SGLangWeightSyncClient`) and the backend registry, the chunking (the chunk budget, the co-load groups, the snapshots on the sync device), and the NCCL transport — the rendezvous listener and the group-address policy, the bounded broadcast waits, the vLLM pynccl communicator and packed broadcast, the SGLang c10d weight-update group, the send-stream buffers; and the transport preflight (`transport_check.py`) | `halo/weight_sync/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
+| Entry-script plumbing | The `scripts/training/**` backbone (`parse_script_args`, `ScriptContext`, the run lifecycle and teardown), run setup (output dir, HF caches, seed, resume detection, the `run.log` tee), the policy load and window pins, script dataset loading; root/CLI logging and the `halo launch` / `halo run` surface | `halo/entrypoints/`, `halo/cli.py`, `halo/log.py` | [Scripts](scripts-reference.md) |
+| Served endpoints | The OpenAI-compatible client every rollout, judge and batch-generation script talks through: endpoint defaults, key resolution and the loopback test (`endpoints.py`), the async client, one request with the upstream retry and the single-request helper that normalizes a reply (`openai_client.py`), the parallel resumable batch with its JSONL resume store (`batch_requests.py`), and the response record with its finish-reason contract (`response.py`) | `halo/inference/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
 
 Leaf modules keep those imports one-way, each holding a contract several layers share:
 
 | Leaf | Holds |
 |---|---|
-| `src/data/turn_markers.py` | what delimits an assistant turn: the response marker, the terminator set, and the construction-time marker refusals |
-| `src/data/completion_spans.py` | the named span policies, the span search, the one span-to-labels rule (`build_span_labels`) and the completion-only label builders over it |
-| `src/models/unwrapping.py` | wrapper peeling (framework, toolkit, PEFT) and the plain hub spelling of a name read off a wrapped tree |
-| `src/models/module_tree.py` | module-tree lookups: the decoder-layer list and the layer index in a dotted name, the backbone owning the list, the module consuming the input embedding, the embedding modules, module paths by identity, the attribute probe |
-| `src/models/param_roles.py` | parameter roles: embedding/head markers, normalization modules, persistent buffers, fp32 pins |
-| `src/models/peft_adapters.py` | PEFT adapter parameters and the out-of-place LoRA fold, the value PEFT's merge would write |
-| `src/models/gradient_checkpointing.py` | the recompute scope both passes of one checkpoint invocation share, expert-load counting off it, and the scoped gradient-checkpointing enable |
-| `src/models/modality.py` | the multimodal verdict off a config in hand or a name; no hub read, no collective (the collective probe is `probe_checkpoint` in `src/model_loading/parallel/model_source.py`) |
-| `src/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` |
-| `src/models/attention/layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term |
-| `src/models/attention/tree_plan.py` | the tree-attention plan of a tree-packed row: node recovery from the per-token columns, the index tensors each sequence mixer reads and their batch key |
-| `src/models/moe/family_specs.py` | every MoE family's facts, one frozen `MoEFamilySpec` each (model types, balancing slot, export renames and config rewrites, expert-weight roots, capability flags), indexed by `model_type`, so no reader imports the EP package for a family fact |
-| `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell |
-| `src/checkpoint/atomic.py` | exclusive staging with ordinary umask permissions (safetensors files included), atomic Torch-file publication, directory fsync — no rank coordination |
-| `src/checkpoint/format.py` | every on-disk checkpoint name two modules share, and the builders that spell them — no model |
-| `src/checkpoint/reading.py` | raw checkpoint reads: the layout cascade, the JSON configs, the streaming reader, the partial-checkpoint refusals, the tools' shard walks and header sizing — no model |
-| `src/model_loading/checkpoint_keys.py` | where each checkpoint key lands on the live names, planned once on transformers' rename rules from key names alone (no shard read, no collective), and the conversion mapping it plans with, so a lazy build and a resume read the same keys |
-| `src/checkpoint/hub_layout.py` | the transformers load conversions a save reverts to write the hub's tensor names, and `ModuleLayoutView`, which reads a saved layout under the live names |
-| `src/checkpoint/writing.py` | save-dtype casts, the stale-file sweep, the merged index, the streaming shard writer, the tied-embedding reconcile |
-| `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules, with no boto3 import |
-| `src/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected; one protocol for both dataset caches, so their crash and staleness semantics cannot drift |
-| `src/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool and the default-bucket helpers |
-| `src/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load and the mirrored control-file reads |
-| `src/checkpoint/parallel/writing.py` | the collective half of a gathered write: retain-gated DTensor resolve of params AND buffers (with the neutralized GptOss sinks), the conversion-closed chunks and the streamed writer they feed — a leg every gathered writer runs symmetrically or hangs |
-| `src/checkpoint/parallel/reading.py` | the two reads a resume shares: one file every rank agrees on (`consensus_read`), and a checkpoint's shards opened on every rank (`joined_streaming_reader`) |
-| `src/checkpoint/parallel/resume_source.py` | which checkpoint a run resumes from (the newest complete on every rank, incomplete ones moved out of rotation's sight) and which weights its policy is built from |
-| `src/data/preprocessed/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use |
-| `src/data/vlm_render.py` | the VLM chat render, the processor call, the over-length refusal, image decoding and the placeholder token ids; one render for the batch and the offline bake, so both tokenize a row identically |
-| `src/data/vlm_routing.py` | whether a run takes the VLM data path: the image-column spellings, a dataset's image evidence and the cross-rank verdicts and refusals off them |
-| `src/data/preprocessed/metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts, readable without importing the bake that wrote the rows |
-| `src/environments/rollout_config.py` | `RolloutConfig`, the rollout defaults `AsyncTrainingConfig` reads, the reasoning-effort levels, and the stop-token and reasoning-end id resolvers; pickled to the Ray rollout actors, which keeps the Ray import out of `src.configs` |
-| `src/config_validation.py` | the bounds guards, the validation base, the declared-default comparison and the argument refusals — standard library only |
-| `src/subclass_registry.py` | the subclass-tree walk, the class-claim maps (a key claimed twice raises), the swap of claimed modules and the package import that registers every family — torch only, so a family registers by subclassing, with no list to edit |
-| `src/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `src/config_validation.py` guards are its only first-party imports, so `rewards:` parses at config time without the scorers' SDK client |
-| `src/inference/endpoints.py` | the OpenAI-compatible endpoint defaults, key resolution and the loopback test (`is_loopback`) — `src/env.py` only, so no reader imports the SDK |
+| `halo/data/turn_markers.py` | what delimits an assistant turn: the response marker, the terminator set, and the construction-time marker refusals |
+| `halo/data/completion_spans.py` | the named span policies, the span search, the one span-to-labels rule (`build_span_labels`) and the completion-only label builders over it |
+| `halo/models/unwrapping.py` | wrapper peeling (framework, toolkit, PEFT) and the plain hub spelling of a name read off a wrapped tree |
+| `halo/models/module_tree.py` | module-tree lookups: the decoder-layer list and the layer index in a dotted name, the backbone owning the list, the module consuming the input embedding, the embedding modules, module paths by identity, the attribute probe |
+| `halo/models/param_roles.py` | parameter roles: embedding/head markers, normalization modules, persistent buffers, fp32 pins |
+| `halo/models/peft_adapters.py` | PEFT adapter parameters and the out-of-place LoRA fold, the value PEFT's merge would write |
+| `halo/models/gradient_checkpointing.py` | the recompute scope both passes of one checkpoint invocation share, expert-load counting off it, and the scoped gradient-checkpointing enable |
+| `halo/models/modality.py` | the multimodal verdict off a config in hand or a name; no hub read, no collective (the collective probe is `probe_checkpoint` in `halo/model_loading/parallel/model_source.py`) |
+| `halo/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` |
+| `halo/models/attention/layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term |
+| `halo/models/attention/tree_plan.py` | the tree-attention plan of a tree-packed row: node recovery from the per-token columns, the index tensors each sequence mixer reads and their batch key |
+| `halo/models/moe/family_specs.py` | every MoE family's facts, one frozen `MoEFamilySpec` each (model types, balancing slot, export renames and config rewrites, expert-weight roots, capability flags), indexed by `model_type`, so no reader imports the EP package for a family fact |
+| `halo/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell |
+| `halo/checkpoint/atomic.py` | exclusive staging with ordinary umask permissions (safetensors files included), atomic Torch-file publication, directory fsync — no rank coordination |
+| `halo/checkpoint/format.py` | every on-disk checkpoint name two modules share, and the builders that spell them — no model |
+| `halo/checkpoint/reading.py` | raw checkpoint reads: the layout cascade, the JSON configs, the streaming reader, the partial-checkpoint refusals, the tools' shard walks and header sizing — no model |
+| `halo/model_loading/checkpoint_keys.py` | where each checkpoint key lands on the live names, planned once on transformers' rename rules from key names alone (no shard read, no collective), and the conversion mapping it plans with, so a lazy build and a resume read the same keys |
+| `halo/checkpoint/hub_layout.py` | the transformers load conversions a save reverts to write the hub's tensor names, and `ModuleLayoutView`, which reads a saved layout under the live names |
+| `halo/checkpoint/writing.py` | save-dtype casts, the stale-file sweep, the merged index, the streaming shard writer, the tied-embedding reconcile |
+| `halo/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules, with no boto3 import |
+| `halo/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected; one protocol for both dataset caches, so their crash and staleness semantics cannot drift |
+| `halo/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool and the default-bucket helpers |
+| `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load and the mirrored control-file reads |
+| `halo/checkpoint/parallel/writing.py` | the collective half of a gathered write: retain-gated DTensor resolve of params AND buffers (with the neutralized GptOss sinks), the conversion-closed chunks and the streamed writer they feed — a leg every gathered writer runs symmetrically or hangs |
+| `halo/checkpoint/parallel/reading.py` | the two reads a resume shares: one file every rank agrees on (`consensus_read`), and a checkpoint's shards opened on every rank (`joined_streaming_reader`) |
+| `halo/checkpoint/parallel/resume_source.py` | which checkpoint a run resumes from (the newest complete on every rank, incomplete ones moved out of rotation's sight) and which weights its policy is built from |
+| `halo/data/preprocessed/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use |
+| `halo/data/vlm_render.py` | the VLM chat render, the processor call, the over-length refusal, image decoding and the placeholder token ids; one render for the batch and the offline bake, so both tokenize a row identically |
+| `halo/data/vlm_routing.py` | whether a run takes the VLM data path: the image-column spellings, a dataset's image evidence and the cross-rank verdicts and refusals off them |
+| `halo/data/preprocessed/metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts, readable without importing the bake that wrote the rows |
+| `halo/environments/rollout_config.py` | `RolloutConfig`, the rollout defaults `AsyncTrainingConfig` reads, the reasoning-effort levels, and the stop-token and reasoning-end id resolvers; pickled to the Ray rollout actors, which keeps the Ray import out of `halo.configs` |
+| `halo/config_validation.py` | the bounds guards, the validation base, the declared-default comparison and the argument refusals — standard library only |
+| `halo/subclass_registry.py` | the subclass-tree walk, the class-claim maps (a key claimed twice raises), the swap of claimed modules and the package import that registers every family — torch only, so a family registers by subclassing, with no list to edit |
+| `halo/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `halo/config_validation.py` guards are its only first-party imports, so `rewards:` parses at config time without the scorers' SDK client |
+| `halo/inference/endpoints.py` | the OpenAI-compatible endpoint defaults, key resolution and the loopback test (`is_loopback`) — `halo/env.py` only, so no reader imports the SDK |
 
-`src/runtime/` therefore holds only what needs a process group or the launcher: rank and node math
+`halo/runtime/` therefore holds only what needs a process group or the launcher: rank and node math
 (`ranks.py`), `init_distributed` and the subgroup timeout pin (`process_group.py`), barriers,
 broadcasts and fixed-order group creation (`collectives.py`), the cross-rank rejection/consensus seams
 and the c10d-store joins (`consensus.py`), the shared-filesystem scope, FS-aware writer ranks,
 main-first ordering and the output-FS probe (`filesystem.py`), the per-node load throttle
 (`load_coordination.py`) and DTensor access (`dtensor.py`); anything a single rank can compute alone
-lives in the leaves above. It imports only `src.env`, `src.log` and `src.hardware`, and the
-parallelism strategies in `src/distributed/` import it, never the reverse.
+lives in the leaves above. It imports only `halo.env`, `halo.log` and `halo.hardware`, and the
+parallelism strategies in `halo/distributed/` import it, never the reverse.
 
 ## Layer table
 
@@ -101,14 +101,14 @@ L9  trainers
 L10 entrypoints
 ```
 
-`checkpoint.model_free` is the `src/checkpoint/` modules that read no model (`format`, `atomic`,
-`reading`, `model_card`); the rest of `src/checkpoint/` outside `parallel/` is `checkpoint.model_aware`.
+`checkpoint.model_free` is the `halo/checkpoint/` modules that read no model (`format`, `atomic`,
+`reading`, `model_card`); the rest of `halo/checkpoint/` outside `parallel/` is `checkpoint.model_aware`.
 
 ## Trainers
 
 Every distributed trainer uses multiple inheritance: a base trainer (`trl.SFTTrainer`,
 `transformers.Trainer`, `trl.GRPOTrainer`, …) plus `DistributedTrainerMixin`
-(`src/trainers/distributed_trainer.py`), which composes the concern mixins listed in
+(`halo/trainers/distributed_trainer.py`), which composes the concern mixins listed in
 [Trainer Architecture](trainer-architecture.md). The mixin overrides the parallelism-sensitive
 methods (accelerator creation, dataloader sharding, gradient clipping, model saving) and delegates
 the rest.
@@ -116,20 +116,20 @@ the rest.
 Thirteen trainers share this shape; which parallelism axes each supports, and why, is in
 [Trainer Architecture](trainer-architecture.md#trainer-compatibility).
 
-Offline GRPO's frozen-reference scores span three modules: `src/trainers/grpo/offline/reference_cache.py`
+Offline GRPO's frozen-reference scores span three modules: `halo/trainers/grpo/offline/reference_cache.py`
 (bounded, filesystem-aware score storage and the memory-mapped token buffers),
-`src/trainers/grpo/offline/reference.py` (the run-start sweep, the ragged payload, the training-checkpoint
-contract and evaluation's original-reference scores), and the shared `src/trainers/reference_logps.py` (checkpoint identity and
+`halo/trainers/grpo/offline/reference.py` (the run-start sweep, the ragged payload, the training-checkpoint
+contract and evaluation's original-reference scores), and the shared `halo/trainers/reference_logps.py` (checkpoint identity and
 persistence, which DPO/KTO precompute also use). Storage, resume and recovery:
 [Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model).
 
 ## Distributed layer
 
-`ParallelismConfig` (`src/distributed/parallelism_config.py`) is the single source of truth: it
+`ParallelismConfig` (`halo/distributed/parallelism_config.py`) is the single source of truth: it
 validates the requested combination against the allowlist and refusals in
-`src/distributed/parallelism_rules.py`, computes `data_parallel_size`, and builds the `EPConfig` /
-`CPConfig` process groups, whose membership comes from the layouts in `src/distributed/group_layout.py`; the DeviceMeshes come from
-`src/distributed/mesh.py`. The trainer reads mode flags (`has_ep_group`, `is_cp_mode`, …) off it and
+`halo/distributed/parallelism_rules.py`, computes `data_parallel_size`, and builds the `EPConfig` /
+`CPConfig` process groups, whose membership comes from the layouts in `halo/distributed/group_layout.py`; the DeviceMeshes come from
+`halo/distributed/mesh.py`. The trainer reads mode flags (`has_ep_group`, `is_cp_mode`, …) off it and
 never re-derives them.
 
 What each mode shards and its backend: [Parallelism → Parallelism modes](../parallelism/README.md#parallelism-modes);
@@ -144,15 +144,15 @@ one mixin per concern; its `compute`, `routing`, `grad_sync` and `balancing_bias
 from inside `expert_parallel/`, and everything else reaches them through layer instances
 (`named_ep_layers`).
 
-`src/model_loading/parallel/` sits above all four: `load_distributed_model` picks the per-mode loader
+`halo/model_loading/parallel/` sits above all four: `load_distributed_model` picks the per-mode loader
 off a `ParallelismConfig`, so it is the one place that reaches into every implementation, and the rest
-of `src/model_loading/` stays sharding-agnostic. The collective checkpoint half, `src/checkpoint/parallel/`
+of `halo/model_loading/` stays sharding-agnostic. The collective checkpoint half, `halo/checkpoint/parallel/`
 (the saver ladder in `save.py`, the EP saves in `ep.py`, the PP saves in `pp.py`, the adapter saves in
 `adapters.py`, and the resume beside them), sits above them too: it gathers through each implementation.
 These packages import each other acyclically
 (`tests/cpu/conventions/test_import_layering.py`).
 
-No parallelism package imports `src/model_loading/parallel/`, so what both sides need sits in the
+No parallelism package imports `halo/model_loading/parallel/`, so what both sides need sits in the
 parallelism packages: `expert_parallel/lazy_plan.py` holds the expert-key vocabulary, the lazy gate, the
 per-key weight planner and the prologue both lazy loaders share, and
 `expert_parallel/expert_fuser.py` stacks a per-expert checkpoint's local experts. The loaders themselves
@@ -164,15 +164,15 @@ layer registry and streams their stored values back for eager construction
 The machinery both lazy loaders share — the conversion-op vocabulary and the key plan translated into it
 (`conversion.py`), which transformers conversions a load plans with (`conversion_selection.py`), per-key
 weight plans and the shared stream tail (`materialization.py`), meta-shell instantiation (`meta_shell.py`) —
-lives in `src/model_loading/lazy_safetensors/`, with no parallelism knowledge.
+lives in `halo/model_loading/lazy_safetensors/`, with no parallelism knowledge.
 
-The FSDP2, HSDP, and TP axes ride a torch `DeviceMesh` (`src/distributed/mesh.py`); EP and CP use
+The FSDP2, HSDP, and TP axes ride a torch `DeviceMesh` (`halo/distributed/mesh.py`); EP and CP use
 hand-built `dist.new_group` groups whose all-to-all patterns do not map to a mesh. The trainer reads
 the mesh groups (DP, TP) through the mesh accessors (`dp_group`, `tp_group`) and the expert
 groups (dispatch, expert-TP, expert-replica) off `EPConfig`. The bucketed
 gradient all-reduce and the grad-presence agreement every post-backward sweep shares — deferred EP
-cross-replica, TP replicated, QLoRA — live in a leaf (`src/distributed/grad_reduce.py`) that
-imports torch, `src.env` and `src.runtime`, and no parallelism implementation.
+cross-replica, TP replicated, QLoRA — live in a leaf (`halo/distributed/grad_reduce.py`) that
+imports torch, `halo.env` and `halo.runtime`, and no parallelism implementation.
 
 Which axis combinations may run is an allowlist, not a denylist — see
 [Parallelism](../parallelism/README.md#supported-combinations).
@@ -186,7 +186,7 @@ YAML config
 ParallelismConfig  ── validate mode, build process groups
    │
    ▼
-load_distributed_model            src/model_loading/parallel/loader.py
+load_distributed_model            halo/model_loading/parallel/loader.py
    │  • resolve_attn_implementation → FA4 (SM100+) / FA3 (SM90) / FA2; per-model SDPA/eager overrides
    │  • apply_ep_layers → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
    │  • UlyssesModel (when cp_size > 1)
@@ -203,7 +203,7 @@ trainer.train()  ── HF training loop, DDP wrapping skipped
    │  • callbacks: EfficiencyCallback (tokens/s/GPU), MoEMetricsCallback,
    │               BalancingBiasCallback
    ▼
-trainer.save_model  ── save_checkpoint (src/checkpoint/parallel/) gathers shards → HF checkpoint
+trainer.save_model  ── save_checkpoint (halo/checkpoint/parallel/) gathers shards → HF checkpoint
 ```
 
 The backend choice and its per-model redirects are on [Flash Attention](../optimization/flash-attention.md);
@@ -215,9 +215,9 @@ gathered save on [Checkpoints & Resume](checkpoints.md).
 Online and async GRPO generate on a rollout engine (vLLM 0.32.0, or SGLang under async GRPO's
 `rollout_backend: sglang`) that runs in its own container and is never imported into the training
 environment, since it pins its own torch/transformers stack. The trainer talks to it over HTTP for
-generation and through an NCCL weight-sync client (`src/weight_sync/`) for weights, which it gathers
+generation and through an NCCL weight-sync client (`halo/weight_sync/`) for weights, which it gathers
 from every parallel layout before each generation round that follows an update. Online GRPO hands TRL
-`TrlVLLMClient` (`src/trainers/grpo/rollout/`) in place of TRL's `VLLMClient`, which would import the vLLM
+`TrlVLLMClient` (`halo/trainers/grpo/rollout/`) in place of TRL's `VLLMClient`, which would import the vLLM
 package. Images, patches, the
 families each engine serves and the sync itself: [Rollout Servers](../infrastructure/rollout-servers.md);
 the trainers: [Online GRPO](../training-methods/grpo/online.md), [Async GRPO](../training-methods/async-grpo/README.md).

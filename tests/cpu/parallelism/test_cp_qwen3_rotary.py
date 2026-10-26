@@ -18,13 +18,13 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.context_parallel import ulysses_attention
-from src.distributed.context_parallel.families import (
+from halo.distributed.context_parallel import ulysses_attention
+from halo.distributed.context_parallel.families import (
     BailingMoeV2UlyssesAttention,
     Qwen3_5MoeUlyssesAttention,
     Qwen3MoeUlyssesAttention,
 )
-from src.distributed.context_parallel.ulysses_attention import UlyssesAttention, rotate_half
+from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention, rotate_half
 
 # The families whose rotary IS the base default — each one that re-declares the hook is a fork.
 ROTATE_HALF_FAMILIES = (Qwen3MoeUlyssesAttention, Qwen3_5MoeUlyssesAttention, BailingMoeV2UlyssesAttention)

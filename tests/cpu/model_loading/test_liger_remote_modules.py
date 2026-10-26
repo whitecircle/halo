@@ -3,7 +3,7 @@
 
 A ``trust_remote_code`` family's modeling module does not exist when Liger is applied, so its patch
 is armed on the shared ``get_class_in_module`` funnel hook and fires later
-(:func:`src.model_loading.liger.applier.patch_remote_modules`). It is the ONLY path by which Ling/Ring get any fused kernel
+(:func:`halo.model_loading.liger.applier.patch_remote_modules`). It is the ONLY path by which Ling/Ring get any fused kernel
 and the one Laguna's released repos load through. Three silent failure modes are worth pinning: the
 hook never firing, a revision that renamed one of the spec's classes being skipped without a word, and
 a native family's spec patching only the in-library module its hub code bypasses.
@@ -24,12 +24,12 @@ from pathlib import Path
 import pytest
 import transformers.dynamic_module_utils
 
-from src.model_loading.liger import applier
-from src.model_loading.liger.family_specs import LigerFamilySpec
-from src.model_loading.liger.fused_modules import _PATCHED_MARKER
+from halo.model_loading.liger import applier
+from halo.model_loading.liger.family_specs import LigerFamilySpec
+from halo.model_loading.liger.fused_modules import _PATCHED_MARKER
 from tests.common.repo import probe_findings
 
-_LOGGER_NAME = "src.model_loading.liger.applier"
+_LOGGER_NAME = "halo.model_loading.liger.applier"
 
 _MODULE_SOURCE = textwrap.dedent(
     """
@@ -159,7 +159,7 @@ def test_lagunas_hub_modeling_code_takes_the_library_swaps(tmp_path):
 import inspect, sys, types
 import transformers.dynamic_module_utils as dmu
 from transformers.models.laguna import modeling_laguna
-from src.model_loading.liger.dispatch import resolve_liger_applier
+from halo.model_loading.liger.dispatch import resolve_liger_applier
 
 applier = resolve_liger_applier("laguna")
 requested = {{"rms_norm", "swiglu", "fused_linear_cross_entropy"}}
@@ -171,7 +171,7 @@ for origin, module in (("library", modeling_laguna), ("hub", hub)):
     for name, role in (("LagunaRMSNorm", "rms_norm"), ("LagunaMLP", "glu_mlp")):
         if getattr(getattr(module, name), {_PATCHED_MARKER!r}, None) != role:
             problems.append(f"{{origin}} {{name}} kept its eager forward")
-    if module.LagunaForCausalLM.forward.__module__ != "src.model_loading.liger.cross_entropy":
+    if module.LagunaForCausalLM.forward.__module__ != "halo.model_loading.liger.cross_entropy":
         problems.append(f"{{origin}} LagunaForCausalLM kept its unfused head")
 mlp = hub.LagunaMLP(types.SimpleNamespace(hidden_size=8, intermediate_size=16, hidden_act="silu"))
 if getattr(mlp, "_halo_glu_mul", None) is None:
@@ -210,10 +210,10 @@ def test_the_hook_composes_with_the_remote_code_compat_shims(liger_first):
     """
     script = f"""
 import transformers.dynamic_module_utils as dmu
-from src.model_loading.liger.applier import _fire, patch_remote_modules
-from src.model_loading import remote_code
-from src.model_loading.remote_code import apply_remote_code_compat_shims
-from src.model_loading.remote_code import _hooks
+from halo.model_loading.liger.applier import _fire, patch_remote_modules
+from halo.model_loading import remote_code
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.model_loading.remote_code import _hooks
 
 stock = dmu.get_class_in_module
 installers = {{

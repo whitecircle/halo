@@ -20,10 +20,10 @@ import weakref
 import pytest
 import torch
 
-from src.weight_sync.chunking import declared_co_load_groups, resolve_sync_device
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-from src.weight_sync.pool import WeightSyncPool
+from halo.weight_sync.chunking import declared_co_load_groups, resolve_sync_device
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.pool import WeightSyncPool
 from tests.common.weight_sync import ServerlessSGLangClient, Wire, offline_client
 
 _BUDGET = 4096
@@ -129,7 +129,7 @@ def test_pool_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
         staged_on.append(device)
         return weights.detach().clone()
 
-    monkeypatch.setattr("src.weight_sync.pool.snapshot_to_sync_device", fake_snapshot)
+    monkeypatch.setattr("halo.weight_sync.pool.snapshot_to_sync_device", fake_snapshot)
     pool.update_named_param("w", torch.zeros(4))
     assert staged_on == [torch.device("cuda", 0)], "the shared snapshot was not staged on the sync device"
 
@@ -154,7 +154,7 @@ def test_pool_releases_a_chunks_snapshots_once_every_server_sent_it(monkeypatch)
     """Multi-server: a shared snapshot must die once the chunk holding it went out everywhere — the
     pool keeps no store of its own, so a reference kept anywhere would grow the staged footprint with
     the model rather than the chunk."""
-    monkeypatch.setattr("src.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     pool, clients = _bare_pool(2, wires=[Wire(retain=False), Wire(retain=False)])
     refs: list[weakref.ref] = []
 
@@ -174,7 +174,7 @@ def test_no_server_is_quiesced_until_a_chunk_is_ready_to_send(monkeypatch):
     Every server stops serving for as long as its update is open, so the update must not be opened
     while the gather is still assembling the first chunk's worth of weights.
     """
-    monkeypatch.setattr("src.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     wires = [Wire(), Wire()]
     pool, _clients = _bare_pool(2, wires=wires)
 
@@ -192,7 +192,7 @@ def test_no_server_is_quiesced_until_a_chunk_is_ready_to_send(monkeypatch):
 def test_the_pool_refuses_an_unsyncable_param_before_any_server_gets_the_pending_chunk(monkeypatch):
     """The pool snapshots for its clients, so their own check never runs: with a full chunk pending, a
     0-dim param must be refused before that chunk quiesces a server for a sync that cannot complete."""
-    monkeypatch.setattr("src.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
+    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
     wires = [Wire(), Wire()]
     pool, clients = _bare_pool(2, wires=wires)
     pool.update_named_param("w", torch.zeros(_BUDGET // 4, dtype=torch.float32))
@@ -235,7 +235,7 @@ def test_a_server_that_already_streamed_a_chunk_is_not_retried(monkeypatch):
     fresh engine the tail alone — a model that is part old and part new, serving happily and
     answering /health. The failure has to reach the caller with that reason instead.
     """
-    monkeypatch.setattr("src.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     wire = Wire()
     pool, clients = _bare_pool(1, wires=[wire])
     reconnects = []

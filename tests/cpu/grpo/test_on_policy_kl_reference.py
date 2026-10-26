@@ -28,18 +28,18 @@ from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from trl import GRPOConfig, GRPOTrainer
 
-import src.model_loading.parallel.frozen_models as frozen_models
-from src.configs.script_arguments import ModelArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.frozen_models import (
+import halo.model_loading.parallel.frozen_models as frozen_models
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.frozen_models import (
     PREFERENCE_REFERENCE_ALTERNATIVES,
     load_reference_model_for_on_policy_grpo,
 )
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.trainers.grpo import online
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.trainers.grpo import online
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.frozen_loader import captured_load, stub_frozen_loader
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.offline_grpo import make_offline_tokenizer

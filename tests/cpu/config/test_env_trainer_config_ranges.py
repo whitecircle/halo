@@ -29,7 +29,7 @@ from typing import Union, get_args, get_origin, get_type_hints
 import pytest
 from transformers import TrainingArguments
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncTrainingConfig
 from tests.common.repo import REPO_ROOT
 
 # Keeps a TrainingArguments subclass constructible on a GPU-less runner, so a raise can only come from
@@ -58,7 +58,7 @@ def _parse_targets() -> list[type]:
         imported = {
             alias.asname or alias.name: node.module
             for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("src.")
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("halo.")
             for alias in node.names
         }
         for node in ast.walk(tree):
@@ -83,7 +83,7 @@ def _numeric_knobs(config: type) -> list[tuple[type, str, bool]]:
         if not {int, float} & set(members):
             continue
         owner = next(cls for cls in config.__mro__ if f.name in vars(cls).get("__annotations__", {}))
-        if owner.__module__.startswith("src."):
+        if owner.__module__.startswith("halo."):
             knobs.append((owner, f.name, float not in members))
     return knobs
 

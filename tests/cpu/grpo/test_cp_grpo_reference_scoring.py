@@ -9,10 +9,10 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from src.data.collators.offline_grpo import OfflineGRPOCPDataCollatorWithPadding
-from src.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.data.collators.offline_grpo import OfflineGRPOCPDataCollatorWithPadding
+from halo.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 

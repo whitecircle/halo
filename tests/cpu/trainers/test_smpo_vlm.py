@@ -32,10 +32,10 @@ import torch.nn as nn
 from datasets import Dataset
 from PIL import Image
 
-from src.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
-from src.data.pipeline.preferences import PROMPT_OVERLAP_COLUMN, tokenize_vlm_preference_row
-from src.data.vlm_render import run_vlm_processor
-from src.trainers.preference.preference_rules import reject_smpo_vlm_options
+from halo.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
+from halo.data.pipeline.preferences import PROMPT_OVERLAP_COLUMN, tokenize_vlm_preference_row
+from halo.data.vlm_render import run_vlm_processor
+from halo.trainers.preference.preference_rules import reject_smpo_vlm_options
 from tests.common.models import QWEN3_5_9B
 from tests.common.smpo_trainer import smpo_trainer
 from tests.common.tokenizers import load_cached_processor

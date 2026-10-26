@@ -10,13 +10,13 @@ from collections import defaultdict
 
 import torch
 
-from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
-from src.environments.episode import RolloutResult
-from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
-from src.trainers.grpo.rollout.completions_logging import unbounded_completion_logs
+from halo.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
+from halo.trainers.grpo.rollout.completions_logging import unbounded_completion_logs
 from tests.common.world_metrics import attach_world_metrics
 
 

@@ -23,10 +23,10 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.trainers.grpo.environmental.step_batch import BatchRows, rollout_valid_mask
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.objective.loss_inputs import expand_traj_to_rows
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.environmental.step_batch import BatchRows, rollout_valid_mask
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.objective.loss_inputs import expand_traj_to_rows
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 # --- Online trainer: fake-self driving the real _apply_degenerate_group_drop hook ---

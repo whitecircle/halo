@@ -15,7 +15,7 @@ These tests pin the on-disk keys to what a fresh model of the saved config write
 from __future__ import annotations
 
 # Ahead of the Qwen3.5 modeling modules, which bind transformers' hub-kernel fallback at import.
-import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
+import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 from pathlib import Path
 
@@ -25,9 +25,9 @@ from datasets import Dataset
 from transformers import AutoConfig
 from trl import SFTConfig
 
-from src.checkpoint.parallel.save import select_checkpoint_saver
-from src.model_loading.model_preparation import auto_load_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.checkpoint.parallel.save import select_checkpoint_saver
+from halo.model_loading.model_preparation import auto_load_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import word_level_tokenizer
 from tests.cpu.checkpoint.test_merge_text_only_adapter_e2e import (

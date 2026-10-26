@@ -31,8 +31,8 @@ import tempfile
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.sources.loading import load_preprocessed_dataset
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.sources.loading import load_preprocessed_dataset
 from tests.common.repo import REPO_ROOT, load_script_module
 from tests.common.tiny_models import word_level_tokenizer
 

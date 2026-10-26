@@ -10,10 +10,10 @@ import argparse
 
 import torch
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B

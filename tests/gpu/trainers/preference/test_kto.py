@@ -36,9 +36,9 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import KTOConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int
+from halo.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.distributed import snapshot_full_weights
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B

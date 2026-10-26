@@ -11,8 +11,8 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_moe_permute.py
 
 import torch
 
-from src.kernels import moe_permute
-from src.kernels.moe_permute import MoEWeightedUnpermute, build_inv_map, gather_reduce_rows
+from halo.kernels import moe_permute
+from halo.kernels.moe_permute import MoEWeightedUnpermute, build_inv_map, gather_reduce_rows
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import fro_rel_err, max_abs_rel_err
 

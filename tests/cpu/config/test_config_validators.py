@@ -15,12 +15,12 @@ Run: pytest tests/cpu/config/test_config_validators.py
 
 import pytest
 
-from src.configs.classification import ClassificationConfig
-from src.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
-from src.configs.embedding import EmbeddingConfig
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.configs.parser import HaloArgumentParser
-from src.configs.preference import SmoothMarginPOConfig
+from halo.configs.classification import ClassificationConfig
+from halo.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
+from halo.configs.embedding import EmbeddingConfig
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.parser import HaloArgumentParser
+from halo.configs.preference import SmoothMarginPOConfig
 
 OUTPUT_DIR = "/tmp/test_config_validators"
 # Clears the bf16/GPU tail check for configs expected to construct successfully.

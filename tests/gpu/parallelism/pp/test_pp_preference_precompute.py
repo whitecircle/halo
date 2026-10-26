@@ -18,9 +18,9 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 from trl import DPOConfig, KTOConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.distributed import eval_loss_over_examples, hf_eval_loss_reference, world_any, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
@@ -82,7 +82,7 @@ def build_rows(
 
 
 def completion_logps(model, batch: dict) -> torch.Tensor:
-    """Each row's summed log-prob of its supervised tokens under ``model``, fp32, independent of src/."""
+    """Each row's summed log-prob of its supervised tokens under ``model``, fp32, independent of halo/."""
     with torch.no_grad():
         logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]).logits.float()
     shift_labels = batch["labels"][:, 1:]

@@ -34,10 +34,10 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-import src.checkpoint.parallel.optimizer as optimizer_mod
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.runtime.filesystem import fs_aware_makedirs
-from src.trainers.checkpointing import CheckpointingMixin
+import halo.checkpoint.parallel.optimizer as optimizer_mod
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.runtime.filesystem import fs_aware_makedirs
+from halo.trainers.checkpointing import CheckpointingMixin
 from tests.common.checkpoint_io import (
     OPTIMIZER_SHARD_FILE,
     SHARD_ROUND_TRIP_LR,

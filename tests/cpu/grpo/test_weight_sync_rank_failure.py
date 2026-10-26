@@ -34,8 +34,8 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
-from src.runtime.consensus import DeferredRankFailure
-from src.trainers.grpo.rollout.weight_push import _send_ep_expert_weights, sync_weights_to_client
+from halo.runtime.consensus import DeferredRankFailure
+from halo.trainers.grpo.rollout.weight_push import _send_ep_expert_weights, sync_weights_to_client
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

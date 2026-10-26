@@ -12,17 +12,17 @@ import pytest
 from datasets import Dataset
 from PIL import Image
 
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.preprocessed.tokenization import tokenize_dataset
-from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from src.model_loading import tokenizer_backend as tb
-from src.model_loading.tokenizer_backend import (
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.tokenization import tokenize_dataset
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading import tokenizer_backend as tb
+from halo.model_loading.tokenizer_backend import (
     TOKENIZER_BACKENDS,
     GigatokenTokenizerProxy,
     resolve_processor_backend,
     resolve_tokenizer_backend,
 )
-from src.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_0_6B
 from tests.common.tokenizers import load_cached_processor, load_cached_tokenizer
 

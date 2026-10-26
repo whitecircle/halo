@@ -11,30 +11,30 @@ import asyncio
 
 import pytest
 
-from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments import environment_base as base_module
-from src.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
-from src.environments.episode import EpisodeDispatcher, TurnGeneration, step_context_from_generation
-from src.environments.episode_keys import (
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments import environment_base as base_module
+from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
+from halo.environments.episode import EpisodeDispatcher, TurnGeneration, step_context_from_generation
+from halo.environments.episode_keys import (
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
     REWARD_DETAILS_KEY,
 )
-from src.environments.episode_scoring import REWARD_ERRORS_KEY, REWARD_PENDING_KEY, EpisodeGrade
-from src.environments.messages import Message, Trajectory
-from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from src.environments.registry import build_environment
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
-from src.environments.tools.definitions import NativeToolRegistry
-from src.inference.response import FINISH_REASON_LENGTH
-from src.rewards import composer as scorers_module
-from src.rewards.samples import CUT_CALL_NOTE, CUT_TOOL_CALLS_KEY, render_transcript
-from src.rewards.scorers.base import Scorer, ScoreResult
-from src.rewards.scorers.judge import action_text, grading_prompt
-from src.rewards.terms import OBJECTIVE_REWARD_KEY, JudgeTerm, OnError
+from halo.environments.episode_scoring import REWARD_ERRORS_KEY, REWARD_PENDING_KEY, EpisodeGrade
+from halo.environments.messages import Message, Trajectory
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.registry import build_environment
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
+from halo.environments.tools.definitions import NativeToolRegistry
+from halo.inference.response import FINISH_REASON_LENGTH
+from halo.rewards import composer as scorers_module
+from halo.rewards.samples import CUT_CALL_NOTE, CUT_TOOL_CALLS_KEY, render_transcript
+from halo.rewards.scorers.base import Scorer, ScoreResult
+from halo.rewards.scorers.judge import action_text, grading_prompt
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY, JudgeTerm, OnError
 
 JUDGE = {
     "source": "judge",

@@ -16,9 +16,9 @@ Usage:
 
 import pytest
 
-from src.data.pipeline.conversation import fold_system_into_conversation
-from src.data.pipeline.text_rows import render_row_conversation
-from src.data.vlm_render import extract_conversation_images
+from halo.data.pipeline.conversation import fold_system_into_conversation
+from halo.data.pipeline.text_rows import render_row_conversation
+from halo.data.vlm_render import extract_conversation_images
 
 
 def _msgs(*pairs):

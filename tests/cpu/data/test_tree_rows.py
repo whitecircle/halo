@@ -25,12 +25,10 @@ import torch
 from datasets import Dataset, DatasetDict
 from transformers import GptOssConfig, Qwen3Config
 
-from scripts.training import sft as sft_script
-from scripts.training.sft import _prepare_text_data
-from src.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking
-from src.data.collators.tree_packing import DataCollatorWithTreePacking
-from src.data.pipeline.text_rows import build_chat_row_processor
-from src.data.pipeline.tree_rows import (
+from halo.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking
+from halo.data.collators.tree_packing import DataCollatorWithTreePacking
+from halo.data.pipeline.text_rows import build_chat_row_processor
+from halo.data.pipeline.tree_rows import (
     SHARE_KEY_COLUMN,
     TREE_ROW_FEATURES,
     _trained_tokens,
@@ -40,7 +38,7 @@ from src.data.pipeline.tree_rows import (
     prepare_tree_dataset,
     share_key,
 )
-from src.data.tree_layout import (
+from halo.data.tree_layout import (
     DEPTH_COLUMN,
     POSITION_COLUMN,
     TRAINED_COLUMN,
@@ -48,10 +46,12 @@ from src.data.tree_layout import (
     serialize_tree,
     share_limit,
 )
-from src.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.models.attention import selection
-from src.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table
+from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models.attention import selection
+from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table
+from scripts.training import sft as sft_script
+from scripts.training.sft import _prepare_text_data
 from tests.common.models import GPT_OSS_20B
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_tokenizer
@@ -235,7 +235,7 @@ def _run_sft_main(tmp_path, yaml_body: str) -> None:
         f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\nbf16: false\nuse_cpu: true\n"
         "packing: true\nmax_length: 64\ntree_packing: true\ntree_share_markers: ['x']\n" + yaml_body
     )
-    with mock.patch("src.entrypoints.script.install_log_tee"), mock.patch.object(sys, "argv", ["prog", str(config)]):
+    with mock.patch("halo.entrypoints.script.install_log_tee"), mock.patch.object(sys, "argv", ["prog", str(config)]):
         sft_script.main()
 
 
@@ -419,7 +419,7 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
 
     reports = []
     monkeypatch.setattr(
-        "src.data.pipeline.tree_rows.report_rejected_rows", lambda total, kept, context: reports.append((total, kept))
+        "halo.data.pipeline.tree_rows.report_rejected_rows", lambda total, kept, context: reports.append((total, kept))
     )
 
     def prepare(tree_packing: bool, template: str = RESPONSE):

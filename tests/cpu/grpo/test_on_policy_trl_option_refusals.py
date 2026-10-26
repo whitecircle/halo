@@ -15,11 +15,11 @@ from types import SimpleNamespace
 import pytest
 from datasets import Dataset, IterableDataset
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 _ROWS = [{"prompt": "p"}] * 4
 

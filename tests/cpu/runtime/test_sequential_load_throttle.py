@@ -1,4 +1,4 @@
-"""CPU tests for ``sequential_load_within_node`` (``src/runtime/load_coordination.py``).
+"""CPU tests for ``sequential_load_within_node`` (``halo/runtime/load_coordination.py``).
 
 The throttle coordinates via done-keys in the torch.distributed store. Repeated uses of one tag
 must stay isolated — otherwise the second use sees the first call's done-keys and runs completely
@@ -17,8 +17,8 @@ simulated rank's call count advances exactly as its own process's would.
 import pytest
 import torch.distributed as dist
 
-from src.env import store_timeout
-from src.runtime import consensus, load_coordination
+from halo.env import store_timeout
+from halo.runtime import consensus, load_coordination
 from tests.common.distributed import FakeStore
 
 

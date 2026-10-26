@@ -18,8 +18,8 @@ import pytest
 import torch
 from transformers import AutoModelForCausalLM, GptOssConfig, GptOssForCausalLM, LlamaConfig, LlamaForCausalLM
 
-from src.model_loading.lazy_safetensors import meta_shell
-from src.model_loading.lazy_safetensors.meta_shell import _instantiate_from_config_on_meta, instantiate_on_meta
+from halo.model_loading.lazy_safetensors import meta_shell
+from halo.model_loading.lazy_safetensors.meta_shell import _instantiate_from_config_on_meta, instantiate_on_meta
 from tests.common.models import TINY_GPTOSS_CONFIG
 
 NO_SUCH_CHECKPOINT = "/nonexistent/checkpoint-the-fallback-must-never-read"

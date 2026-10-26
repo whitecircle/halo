@@ -8,7 +8,7 @@ is recoverable from a checkpoint, so ``quantize_to_lowp.py`` takes the four valu
 quantizing by name-regex alone ships protected blocks quantized while its docstring promises an
 exact reproduction of the QAT forward.
 
-The block window itself lives in one place (``src.kernels.lowp.spec.kept_block_indices``),
+The block window itself lives in one place (``halo.kernels.lowp.spec.kept_block_indices``),
 read by the training conversion and the export alike, so the two cannot drift.
 
 Run: python tests/cpu/checkpoint/test_lowp_export_scope.py
@@ -22,8 +22,8 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from src.kernels.lowp.spec import kept_block_indices
-from src.models.module_tree import decoder_layer_index
+from halo.kernels.lowp.spec import kept_block_indices
+from halo.models.module_tree import decoder_layer_index
 from tests.common.repo import load_script_module
 
 quantize_checkpoint = load_script_module("scripts/after_training/quantize_to_lowp.py").quantize_checkpoint

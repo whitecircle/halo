@@ -4,7 +4,7 @@ AWS is entirely optional. Halo defaults to the HuggingFace Hub and local paths f
 
 ## Credential resolution
 
-The S3 utilities in `src/data/sources/s3_client.py` build a `boto3.Session` with no explicit keys unless `aws_access_key_id` / `aws_secret_access_key` are passed, so credentials resolve through the standard boto3 chain: environment variables (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) → `~/.aws/credentials` → `~/.aws/config` (an SSO session) → an instance/role profile. No region is hardcoded in Python.
+The S3 utilities in `halo/data/sources/s3_client.py` build a `boto3.Session` with no explicit keys unless `aws_access_key_id` / `aws_secret_access_key` are passed, so credentials resolve through the standard boto3 chain: environment variables (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) → `~/.aws/credentials` → `~/.aws/config` (an SSO session) → an instance/role profile. No region is hardcoded in Python.
 
 Any standard AWS setup works. The two common ones:
 

@@ -9,10 +9,10 @@ checkpoint's weights into a base-loaded TP model; the checks are
 import torch
 from transformers import AutoTokenizer
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.checkpoint_io import RESUME_PROBE_TEXT, fixed_text_batch, run_two_phase_resume
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import shared_output_dir

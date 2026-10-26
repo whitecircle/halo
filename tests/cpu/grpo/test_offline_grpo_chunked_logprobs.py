@@ -20,8 +20,8 @@ from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows, verify_degenerate_drop
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows, verify_degenerate_drop
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
 
 SEED = 17

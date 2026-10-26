@@ -8,7 +8,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
 ## EP wrapper
 
-`EPLagunaMoELayer` (`src/distributed/expert_parallel/families/laguna.py`) subclasses GLM-4 MoE Lite's `EPGlm4MoELayer` and claims `LagunaSparseMoeBlock` / `model_type: laguna`. The two families share the whole contract (sigmoid routing, fused `gate_up_proj`/`down_proj` 3D storage, a shared expert on every token, and the per-expert hub checkpoint layout), so the gather and the sharded merge are inherited unchanged.
+`EPLagunaMoELayer` (`halo/distributed/expert_parallel/families/laguna.py`) subclasses GLM-4 MoE Lite's `EPGlm4MoELayer` and claims `LagunaSparseMoeBlock` / `model_type: laguna`. The two families share the whole contract (sigmoid routing, fused `gate_up_proj`/`down_proj` 3D storage, a shared expert on every token, and the per-expert hub checkpoint layout), so the gather and the sharded merge are inherited unchanged.
 
 `EPLagunaMoELayer` declares four deltas of its own: the top-k weight default, the optional-routing-knob opt-out, the served-bias warning, and the hub↔module key renames. Those, plus the two inherited GLM-4 behaviors that decide a Laguna load:
 
@@ -51,8 +51,8 @@ Laguna's experts use a standard SwiGLU, so the base combine latch runs the fused
 
 Both are registry-gated, and Laguna is in neither registry:
 
-- **CP** needs a Ulysses attention wrapper. `LagunaAttention` is absent from `ULYSSES_ATTENTION_MAP` — the registered wrappers in `src/distributed/context_parallel/families.py` — so CP, and therefore EP+CP, is rejected.
-- **TP** on a MoE model takes the selective attention-only path (HF's `tp_plan="auto"` mis-shards expert weights), gated on `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`). `LagunaAttention` is not listed, so there is nothing for the DTensor path to shard.
+- **CP** needs a Ulysses attention wrapper. `LagunaAttention` is absent from `ULYSSES_ATTENTION_MAP` — the registered wrappers in `halo/distributed/context_parallel/families.py` — so CP, and therefore EP+CP, is rejected.
+- **TP** on a MoE model takes the selective attention-only path (HF's `tp_plan="auto"` mis-shards expert weights), gated on `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`). `LagunaAttention` is not listed, so there is nothing for the DTensor path to shard.
 
 ETP is mechanically reachable (the experts use the shared fused-GLU storage, so `_init_fused_glu_params` handles `expert_tp_size > 1`) and tiny-model verified only: pure ETP and EP+ETP train, save and resume (`tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py --family laguna --mode etp2` and `--mode ep2etp2`); the released checkpoints are not run under ETP.
 

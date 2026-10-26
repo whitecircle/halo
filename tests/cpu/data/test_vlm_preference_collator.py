@@ -29,8 +29,8 @@ from datasets import Dataset
 from PIL import Image
 from trl.trainer.reward_trainer import DataCollatorForPreference
 
-from src.data.collators.vlm_preference import DataCollatorForVLMPreference
-from src.data.pipeline.preferences import render_vlm_preference_row, vlm_preference_features
+from halo.data.collators.vlm_preference import DataCollatorForVLMPreference
+from halo.data.pipeline.preferences import render_vlm_preference_row, vlm_preference_features
 
 IMAGE_TOKEN = "<image>"
 IMAGE_PAD_TOKEN = "<imgpad>"

@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import src.trainers.training_args_overrides as base_mod
-from src.trainers.training_args_overrides import align_save_on_each_node
+import halo.trainers.training_args_overrides as base_mod
+from halo.trainers.training_args_overrides import align_save_on_each_node
 
 
 @pytest.mark.parametrize(

@@ -1,9 +1,9 @@
 # Multi-Node Parallelism
 
 Multi-node training spans EP, CP, TP, and DP across machines connected by InfiniBand/RDMA.
-`ParallelismConfig` (`src/distributed/parallelism_config.py`) validates every combination against
+`ParallelismConfig` (`halo/distributed/parallelism_config.py`) validates every combination against
 the [supported-axis allowlist](README.md#supported-combinations) and the refusals in
-`src/distributed/parallelism_rules.py`; this page adds the locality rules —
+`halo/distributed/parallelism_rules.py`; this page adds the locality rules —
 which dimensions must stay NVLink-local and which may span domains.
 
 Runnable launches, SLURM, and troubleshooting live in [Launch Recipes](launch-recipes.md).
@@ -44,7 +44,7 @@ Gradient-sync scope follows the mode — the world or the EP group
 | Node-local (`ep_scope="node"`) | Within each NVLink domain (consecutive ranks) | NVLink |
 | Cross-node (`ep_scope="global"`) | Span every NVLink domain, contiguous block per domain | NVLink + RDMA |
 
-Cross-node EP uses the **column-block** layout (`CrossNodeLayout`, `src/distributed/group_layout.py`): each group spans
+Cross-node EP uses the **column-block** layout (`CrossNodeLayout`, `halo/distributed/group_layout.py`): each group spans
 every domain with a contiguous device block per domain, and the group-relative rank is
 `rdma_rank * members_per_domain + nvl_rank` — what DeepEP's internode transport expects. Contiguity
 is mandatory because DeepEP's intranode P2P kernel addresses CUDA IPC peers by device offset.
@@ -165,7 +165,7 @@ group only. The clip runs the deferred sweep first, so every replica already hol
 expert grads and no `expert_replica_group` reduce runs. Non-expert DTensor shards (TP) and
 full-world FSDP shards are reduced over their own tiling group and counted once. The global norm is
 `sqrt(expert² + non_expert²)`, computed in `_compute_global_grad_norm`
-(`src/trainers/parallelism/grad_clipping.py`).
+(`halo/trainers/parallelism/grad_clipping.py`).
 
 ## EP+TP mode
 
@@ -184,7 +184,7 @@ or `tp2` (DP 8). At DP=1 there is no inter-node FSDP sync.
 ## ParallelismConfig
 
 ```python
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 
 config = ParallelismConfig(ep_size=8, tp_size=8, ep_scope="node")
 ```
@@ -198,7 +198,7 @@ YAML-built one. Derived fields: `data_parallel_size`,
 
 ## DeepEP inter-node communication
 
-`DeepEPDispatcher` (`src/distributed/expert_parallel/deepep/dispatcher.py`) shares one lazily built
+`DeepEPDispatcher` (`halo/distributed/expert_parallel/deepep/dispatcher.py`) shares one lazily built
 `deep_ep.ElasticBuffer` across every MoE layer on an EP group (`HALO_EP_CAPACITY_DEDUP=0` gives each
 layer its own) and selects the transport from the EP topology: within one NVLink domain it uses the
 NVLink (non-Gin) path; across domains (`requires_rdma=True`, `EPConfig.spans_domains`) the NCCL Gin
@@ -262,7 +262,7 @@ with it so a missing plugin fails instead of falling back to sockets; that is wh
 Every rank reads the checkpoint itself, so every rank must find the same one. Before the first weight
 read, the policy load (the embedding backbone and the model-id load of SMPO, offline GRPO and the
 teacher-distillation student included) and every frozen reference or teacher load run
-`resolve_model_source` (`src/model_loading/parallel/model_source.py`):
+`resolve_model_source` (`halo/model_loading/parallel/model_source.py`):
 
 - The fetch runs main-rank-first under the input-filesystem scope: global rank 0 on a shared input
   filesystem, each node's local rank 0 under `DIST_INPUT_SHARED_FILESYSTEM=0`. It takes the
@@ -306,7 +306,7 @@ per rank, and the ranks of a node that read the same shard share its page cache,
 serves each page once per node.
 
 For remote-code families, the lazy meta shell fetches the modeling file at the commit its config was
-read from. transformers' copies into `HF_MODULES_CACHE` land whole (`src/model_loading/remote_code.py`),
+read from. transformers' copies into `HF_MODULES_CACHE` land whole (`halo/model_loading/remote_code.py`),
 so ranks sharing that cache never import a half-written module.
 
 ## Verified topologies
@@ -346,7 +346,7 @@ export NVLINK_DOMAIN_SIZE=72
 The toolkit then builds node-local EP/CP groups as contiguous blocks across the domain and sets
 `requires_rdma=False` for EP within the domain. Leaving it unset caps node-local TP/CP/EP at
 `gpus_per_node=4`, and warns if it detects an NVLink fabric anyway. `requested_nvlink_domain_size`
-(`src/distributed/nvlink.py`) is the variable's one reader: a malformed value warns, a non-positive
+(`halo/distributed/nvlink.py`) is the variable's one reader: a malformed value warns, a non-positive
 one warns once, and either reads as unset.
 
 **The domain is the tiling unit, so every node-local width must divide it.** `tp_size`, `cp_size`,
@@ -366,7 +366,7 @@ idle.
 
 Ranks disagreeing on `NVLINK_DOMAIN_SIZE` (a per-node drift builds different groups on different
 ranks) are rejected by `ParallelismConfig` itself, before any fabric read.
-`validate_nvlink_domain_against_fabric` (`src/distributed/nvlink.py`) then cross-checks
+`validate_nvlink_domain_against_fabric` (`halo/distributed/nvlink.py`) then cross-checks
 the declaration against hardware at config time.
 
 Both verdicts are per **domain**, taken from the gathered clique ids and node widths so every rank

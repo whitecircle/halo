@@ -23,14 +23,14 @@ from accelerate.state import GradientState
 from peft import LoraConfig, get_peft_model
 from transformers.trainer_utils import enable_full_determinism
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.models.moe.family_specs import find_moe_family_spec
-from src.optimizers.param_groups import decay_groups
-from src.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.family_specs import find_moe_family_spec
+from halo.optimizers.param_groups import decay_groups
+from halo.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
 from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.ep_reference import random_token_batch, roll_expert_banks
 from tests.common.equivalence.revisions import (

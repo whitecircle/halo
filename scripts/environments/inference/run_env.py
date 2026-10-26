@@ -6,7 +6,7 @@ endpoint, reading prompts/answers from dataset columns.
 This is the **generic** eval runner. It reads `--prompt_field` / `--answer_field` columns and runs the
 env's `reset`/`step` rollout against `--base_url` + `--api_key` (vLLM *or* OpenRouter), reporting
 mean reward and success@k. The rollout loop and reporting are shared via
-:mod:`src.environments.eval_runner`.
+:mod:`halo.environments.eval_runner`.
 
 For competitive programming (`code_contests` / `codeforces`) use
 `scripts/environments/inference/run_code_contests.py` instead; it carries the dataset adapters,
@@ -44,6 +44,13 @@ import json
 import logging
 from typing import Any
 
+from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
+from halo.environments.episode_keys import ANSWER_KEY
+from halo.environments.eval_runner import collect_results, load_hf_split, reject_answerless_examples, report
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.inference.openai_client import build_openai_client
+from halo.log import configure_cli_logging
 from scripts.environments.eval_arguments import (
     DEFAULT_SPLIT,
     add_endpoint_args,
@@ -53,13 +60,6 @@ from scripts.environments.eval_arguments import (
     write_eval_outputs,
 )
 from scripts.environments.training_contract import load_training_contract
-from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
-from src.environments.episode_keys import ANSWER_KEY
-from src.environments.eval_runner import collect_results, load_hf_split, reject_answerless_examples, report
-from src.environments.registry import build_environment
-from src.environments.rollout_config import RolloutConfig
-from src.inference.openai_client import build_openai_client
-from src.log import configure_cli_logging
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

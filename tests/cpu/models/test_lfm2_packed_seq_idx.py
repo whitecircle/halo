@@ -10,11 +10,11 @@ attention itself correctly isolated.
     python tests/cpu/models/test_lfm2_packed_seq_idx.py
 """
 
-# The device-aware kernel-dispatch shim installs on `src` import and must land BEFORE the lfm2
+# The device-aware kernel-dispatch shim installs on `halo` import and must land BEFORE the lfm2
 # modeling module below, which binds transformers' hub-kernel fallback factory at import. Ordered
 # after it (where isort puts first-party), this file's CPU forward reaches the CUDA-only
 # causal_conv1d kernel and dies with `Expected x.is_cuda()` on a standalone run.
-import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
+import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 from unittest.mock import MagicMock
 
@@ -24,7 +24,7 @@ from transformers.models.lfm2_moe import Lfm2MoeConfig
 from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeForCausalLM
 from transformers.models.qwen3 import Qwen3Config
 
-from src.data.collators.factory import select_data_collator
+from halo.data.collators.factory import select_data_collator
 
 SEED = 1234
 

@@ -14,10 +14,10 @@ from unittest.mock import patch
 
 import pytest
 
-from src.model_loading.parallel import model_source
-from src.model_loading.parallel import peft_setup as model_info
-from src.model_loading.parallel.peft_setup import split_expert_lora_targets
-from src.models.moe.expert_lora_spec import LORA_PROJECTION_COVERAGE, ExpertLoraSpec, expert_target_projections
+from halo.model_loading.parallel import model_source
+from halo.model_loading.parallel import peft_setup as model_info
+from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
+from halo.models.moe.expert_lora_spec import LORA_PROJECTION_COVERAGE, ExpertLoraSpec, expert_target_projections
 
 
 @dataclass

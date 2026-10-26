@@ -26,10 +26,10 @@ from datasets import Dataset, DatasetDict
 from sentence_transformers.base.sampler import DefaultBatchSampler
 from torch.utils.data import DataLoader, SequentialSampler
 
-from src.configs.embedding import EmbeddingConfig
-from src.trainers.embedding import embedding_rules
-from src.trainers.embedding.embedding_rules import reject_uneven_sentence_transformers_batches
-from src.trainers.embedding.trainer import EmbeddingTrainer
+from halo.configs.embedding import EmbeddingConfig
+from halo.trainers.embedding import embedding_rules
+from halo.trainers.embedding.embedding_rules import reject_uneven_sentence_transformers_batches
+from halo.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.repo import REPO_ROOT
 
 _ROWS = Dataset.from_dict({"anchor": ["a", "b", "c"], "positive": ["x", "y", "z"]})

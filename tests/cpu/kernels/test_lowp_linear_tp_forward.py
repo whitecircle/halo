@@ -25,11 +25,11 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
-from src.distributed.mesh import MeshDim
-from src.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
-from src.kernels.lowp.quantization import QUANTIZERS, fake_quant
-from src.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
-from src.model_loading.parallel.lowp_compute import apply_lowp_compute
+from halo.distributed.mesh import MeshDim
+from halo.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
+from halo.kernels.lowp.quantization import QUANTIZERS, fake_quant
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
+from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
 from tests.common.distributed import fake_process_group_mesh
 
 WIDTH = 64  # a multiple of every block size (32 mx, 16 nvfp4)

@@ -3,7 +3,7 @@
 ``LORA_PROJECTION_COVERAGE`` entry.
 
 ``ExpertLoraSpec.adapts`` resolves ``lora_target_modules`` projections against
-:data:`~src.models.moe.expert_lora_spec.LORA_PROJECTION_COVERAGE`; a family adding a new
+:data:`~halo.models.moe.expert_lora_spec.LORA_PROJECTION_COVERAGE`; a family adding a new
 expert-weight root (``expert_weight_roots``) without a coverage entry would make expert-LoRA
 on that weight a SILENT no-op (``adapts`` returns False, no adapter built, no error). This test
 fails the moment such a root appears. Bias roots (``*_bias``) are 2-D and never adapted —
@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.models.moe.expert_lora_spec import LORA_PROJECTION_COVERAGE
-from src.models.moe.family_specs import expert_weight_roots
+from halo.models.moe.expert_lora_spec import LORA_PROJECTION_COVERAGE
+from halo.models.moe.family_specs import expert_weight_roots
 
 
 def test_every_non_bias_expert_root_has_lora_coverage():
@@ -27,7 +27,7 @@ def test_every_non_bias_expert_root_has_lora_coverage():
     assert not missing, (
         f"expert-weight roots {missing} have no LORA_PROJECTION_COVERAGE entry — expert-LoRA on "
         f"them would be a silent no-op. Add the root → logical-projection mapping in "
-        f"src/distributed/expert_parallel/config.py."
+        f"halo/distributed/expert_parallel/config.py."
     )
 
 

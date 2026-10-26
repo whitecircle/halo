@@ -25,14 +25,14 @@ from torch import nn
 from torch.nn.functional import cross_entropy, log_softmax, softmax
 from transformers import Trainer
 
+import halo.trainers.distillation.teacher_distillation as teacher_distillation
 import scripts.training.distillation.teacher_distill as teacher_distill_script
-import src.trainers.distillation.teacher_distillation as teacher_distillation
-from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints.model_setup import PolicyLoad
-from src.entrypoints.script import ScriptContext
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.distillation.divergences import place_frozen_scorer, require_divergence
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.model_setup import PolicyLoad
+from halo.entrypoints.script import ScriptContext
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.distillation.divergences import place_frozen_scorer, require_divergence
+from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -312,7 +312,7 @@ def _run_teacher_script(tmp_path, teacher_tokens):
         f"output_dir: {tmp_path / 'out'}\nbf16: false\nuse_cpu: true\n"
     )
     with (
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         contextlib.ExitStack() as stack,
     ):

@@ -14,10 +14,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.inference import openai_client as client_module
-from src.rewards.samples import NO_FINAL_ANSWER, ScoringSample
-from src.rewards.scorers import judge as judge_module
-from src.rewards.scorers.judge import (
+from halo.inference import openai_client as client_module
+from halo.rewards.samples import NO_FINAL_ANSWER, ScoringSample
+from halo.rewards.scorers import judge as judge_module
+from halo.rewards.scorers.judge import (
     MAX_EVIDENCE_CHARS,
     MAX_EVIDENCE_QUOTES,
     GenerativeJudge,
@@ -29,7 +29,7 @@ from src.rewards.scorers.judge import (
     response_schema,
     scorer_api_key,
 )
-from src.rewards.terms import Check, JudgeTerm, Requirement
+from halo.rewards.terms import Check, JudgeTerm, Requirement
 
 REQUIREMENTS = (
     Requirement(name="correctness", description="The final answer is correct."),

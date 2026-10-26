@@ -38,8 +38,8 @@ import sys
 import torch
 import torch.distributed as dist
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG

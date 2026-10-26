@@ -28,10 +28,10 @@ import urllib.request
 import torch
 from transformers import AutoModelForCausalLM
 
-from src.environments.engine_wire import capture_generation_tokens
-from src.environments.ray_actors import EnvironmentActor
-from src.environments.rollout_config import RolloutConfig
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.environments.engine_wire import capture_generation_tokens
+from halo.environments.ray_actors import EnvironmentActor
+from halo.environments.rollout_config import RolloutConfig
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log

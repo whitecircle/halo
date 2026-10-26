@@ -1,6 +1,6 @@
 """``AsyncOpenAI`` stand-ins for the chat path: a minimal completion, the client wiring every fake shares, a
 client that records what it was asked, and scripted replies in the shape the SDK's ``model_dump()`` hands
-:func:`~src.environments.engine_wire.turn_from_chat_completion`."""
+:func:`~halo.environments.engine_wire.turn_from_chat_completion`."""
 
 import copy
 import types

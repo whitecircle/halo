@@ -22,24 +22,24 @@ from peft import PeftConfig, PeftModel
 from safetensors import safe_open
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
-from scripts.cli_arguments import add_device_map_arg, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.adapter_merge import adapter_input_gates, load_base_for_adapter
-from src.checkpoint.atomic import apply_umask_mode
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
-from src.checkpoint.model_card import tag_model_card
-from src.checkpoint.offline_export import (
+from halo.checkpoint.adapter_merge import adapter_input_gates, load_base_for_adapter
+from halo.checkpoint.atomic import apply_umask_mode
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
+from halo.checkpoint.model_card import tag_model_card
+from halo.checkpoint.offline_export import (
     cast_norms_to_fp32,
     preflight_model_load_resources,
     reject_in_place_conversion,
     save_full_checkpoint,
 )
-from src.checkpoint.reading import header_numel, iter_checkpoint_shard_entries, reject_partial_checkpoint
-from src.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
-from src.log import configure_cli_logging
-from src.model_loading.buffer_repair import finalize_loaded_model
-from src.model_loading.checkpoint_coverage import from_pretrained_verified
-from src.model_loading.model_preparation import auto_load_model, sanitize_generation_config
-from src.model_loading.tokenizer_setup import load_processing_class, resolve_peft_processing_class
+from halo.checkpoint.reading import header_numel, iter_checkpoint_shard_entries, reject_partial_checkpoint
+from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
+from halo.log import configure_cli_logging
+from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.checkpoint_coverage import from_pretrained_verified
+from halo.model_loading.model_preparation import auto_load_model, sanitize_generation_config
+from halo.model_loading.tokenizer_setup import load_processing_class, resolve_peft_processing_class
+from scripts.cli_arguments import add_device_map_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

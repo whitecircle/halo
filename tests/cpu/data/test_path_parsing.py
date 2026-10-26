@@ -11,7 +11,7 @@ Usage:
 
 import pytest
 
-from src.data.sources.paths import (
+from halo.data.sources.paths import (
     hub_repo_id,
     parse_dataset_destination,
     parse_dataset_source,

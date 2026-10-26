@@ -18,8 +18,8 @@ Run: python tests/cpu/data/test_vlm_render_seam.py  (or pytest)
 import pytest
 from PIL import Image
 
-from src.data.pipeline.preferences import render_vlm_preference_row, tokenize_vlm_preference_row
-from src.data.vlm_render import render_vlm_text
+from halo.data.pipeline.preferences import render_vlm_preference_row, tokenize_vlm_preference_row
+from halo.data.vlm_render import render_vlm_text
 
 IMAGE_TOKEN = "<image>"
 
@@ -95,7 +95,7 @@ def test_the_smpo_vlm_row_renders_through_the_seam(monkeypatch):
     its prefix-strip invariant compares two dialects of the same conversation."""
     processor = _RecordingProcessor()
     contract = _seam_contract(processor)
-    monkeypatch.setattr("src.data.pipeline.preferences.resolve_tokenizer", lambda _p: _RecordingTokenizer())
+    monkeypatch.setattr("halo.data.pipeline.preferences.resolve_tokenizer", lambda _p: _RecordingTokenizer())
 
     processor.calls.clear()
     tokenize_vlm_preference_row(

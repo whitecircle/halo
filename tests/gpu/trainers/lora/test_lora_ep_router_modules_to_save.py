@@ -35,14 +35,14 @@ import torch.distributed as dist
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.configs.script_arguments import ModelArguments
-from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int, env_str
-from src.model_loading.parallel.loader import load_distributed_model
-from src.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
-from src.runtime.collectives import barrier
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers

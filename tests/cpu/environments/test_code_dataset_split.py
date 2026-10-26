@@ -9,9 +9,9 @@ import sys
 
 import pytest
 
+from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS
 from scripts.environments.eval_arguments import DEFAULT_SPLIT
 from scripts.environments.inference import run_code_contests, run_env
-from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS
 
 
 @pytest.mark.parametrize(("adapter", "shipped"), [("livecodebench", "test"), ("hlce", "train")])

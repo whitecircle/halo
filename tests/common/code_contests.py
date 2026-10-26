@@ -5,10 +5,10 @@ protocol's own dispatch without a subprocess or a network."""
 import re
 from typing import Any, NamedTuple
 
-from src.environments.messages import Trajectory
-from src.environments.sandbox.base import SandboxExecutor
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tools.definitions import NativeToolCall
+from halo.environments.messages import Trajectory
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tools.definitions import NativeToolCall
 
 # One hidden test that the default stub run's ``X`` passes, as the env's ``answer`` context.
 SINGLE_TEST_ANSWER = {"answer": {"tests": [{"input": "", "output": "X"}]}}

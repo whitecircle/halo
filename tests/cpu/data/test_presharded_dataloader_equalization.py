@@ -17,12 +17,12 @@ from unittest.mock import patch
 import pytest
 from datasets import Dataset
 
-from src.trainers.dataloaders import DataParallelLoaderMixin
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.on_policy import GenerationRoundMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.reward.classification import ClassificationTrainer
+from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.on_policy import GenerationRoundMixin
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.reward.classification import ClassificationTrainer
 
 
 class _StopAfterEqualize(Exception):
@@ -103,9 +103,9 @@ def test_eval_no_equalize_when_not_presharded(trainer_cls):
 def _equalize_with_forced_min(dataset, forced_min: int, split: str):
     """Run the real _equalize_presharded_length with the world MIN forced to ``forced_min``."""
     with (
-        patch("src.trainers.dataloaders.rank_min", lambda values: [min(forced_min, values[0])]),
+        patch("halo.trainers.dataloaders.rank_min", lambda values: [min(forced_min, values[0])]),
         # The shared multi-rank probe reads the real torch.distributed, which no CPU test initializes.
-        patch("src.trainers.dataloaders.is_multi_rank_run", return_value=True),
+        patch("halo.trainers.dataloaders.is_multi_rank_run", return_value=True),
     ):
         return DataParallelLoaderMixin._equalize_presharded_length(None, dataset, split=split)
 

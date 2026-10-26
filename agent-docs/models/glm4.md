@@ -8,7 +8,7 @@ Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAtt
 
 ## EP wrapper
 
-`EPGlm4MoELayer` (`src/distributed/expert_parallel/families/glm4.py`) replaces `Glm4MoeLiteMoE`. Laguna shares the shape and subclasses this wrapper — see [Laguna](laguna.md).
+`EPGlm4MoELayer` (`halo/distributed/expert_parallel/families/glm4.py`) replaces `Glm4MoeLiteMoE`. Laguna shares the shape and subclasses this wrapper — see [Laguna](laguna.md).
 
 - Routing: sigmoid + group mask + top-k. `topk_group` selects eligible expert *groups*, then `top_k` (=4) experts are chosen across them. `route_tokens_to_experts()` runs this before DeepEP dispatch.
 - Routed experts: `Glm4MoeLiteExperts`, fused `gate_up_proj` and `down_proj` 3D tensors.
@@ -17,7 +17,7 @@ Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAtt
 
 ## Fused SwiGLU
 
-The `_fused_glu_mul` latch replaces the activation and the multiply with one Triton kernel on every base compute path, the ETP-sharded one included: the packed `[gate | up]` path runs it through `GluCombine.packed`, split halves through `_glu_combine`. It is a **roster-wide** seam, not a GLM-4 one: `_resolve_activation` latches whatever `resolve_fused_glu_mul` (`src/kernels/fused_glu.py`) returns for the resolved activation — `GluCombine.silu()` for a SiLU gate (GLM-4 Lite, Laguna, Qwen3, Qwen3.5/3.6, Bailing, LFM-2, Mistral4, Cohere2 MoE, Inkling, Zaya, and Step-3.7's unclamped layers), `GluCombine.gelu_tanh()` for a tanh-GELU one (Gemma 4), `None` otherwise.
+The `_fused_glu_mul` latch replaces the activation and the multiply with one Triton kernel on every base compute path, the ETP-sharded one included: the packed `[gate | up]` path runs it through `GluCombine.packed`, split halves through `_glu_combine`. It is a **roster-wide** seam, not a GLM-4 one: `_resolve_activation` latches whatever `resolve_fused_glu_mul` (`halo/kernels/fused_glu.py`) returns for the resolved activation — `GluCombine.silu()` for a SiLU gate (GLM-4 Lite, Laguna, Qwen3, Qwen3.5/3.6, Bailing, LFM-2, Mistral4, Cohere2 MoE, Inkling, Zaya, and Step-3.7's unclamped layers), `GluCombine.gelu_tanh()` for a tanh-GELU one (Gemma 4), `None` otherwise.
 
 A family opts in by *having* a gate the kernels implement, not by setting a flag. A family whose combine is a variant rebinds the same seam: DeepSeek-V4 (clamp before the activation) and Step-3.7 (its two clamped layers clamp after it) arm their kernels off the same SiLU probe.
 
@@ -31,7 +31,7 @@ The probe fails closed: an activation it cannot vouch for runs eager rather than
 
 ## CP wrapper
 
-`Glm4MoeLiteAttention` → `Glm4MoeLiteUlyssesAttention` (`src/distributed/context_parallel/families.py`), which declares only its HF class name. Everything below lives on the shared `MLAUlyssesAttention`, which runs the DeepSeek-V3 MLA geometry on the one Ulysses path. Two MLA-specific bits:
+`Glm4MoeLiteAttention` → `Glm4MoeLiteUlyssesAttention` (`halo/distributed/context_parallel/families.py`), which declares only its HF class name. Everything below lives on the shared `MLAUlyssesAttention`, which runs the DeepSeek-V3 MLA geometry on the one Ulysses path. Two MLA-specific bits:
 
 - **Head dims** — `kv_b_proj` expands the compressed KV into `qk_nope_head_dim + v_head_dim`. Where `v_head_dim` is narrower than `qk_head_dim` the base pads V for the flash kernel and crops the output back.
 
@@ -72,7 +72,7 @@ Three templates under `jinja-templates/glm/`. The first two render the native no
   when the training render must match native serving byte-for-byte (tool data, RL); tool-call
   `arguments` must be a parsed mapping, not the OpenAI JSON-string form.
 
-Neither injects a per-turn `<|endoftext|>` mid-conversation, matching native serving where an assistant turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in `config.eos_token_id`). Completion masking stops each turn at that terminator (`src/data/turn_markers.py`). The final assistant turn ends with an explicit `<|endoftext|>` so it carries an in-document terminator under packing.
+Neither injects a per-turn `<|endoftext|>` mid-conversation, matching native serving where an assistant turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in `config.eos_token_id`). Completion masking stops each turn at that terminator (`halo/data/turn_markers.py`). The final assistant turn ends with an explicit `<|endoftext|>` so it carries an in-document terminator under packing.
 
 Pair them with `assistant_message_template: "<|assistant|>"` — the role token alone marks every assistant turn and matches both the thinking and non-thinking renders, where `<|assistant|></think>` would silently miss a thinking turn. See [Collators](../data/collators.md).
 

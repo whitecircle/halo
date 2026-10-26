@@ -25,9 +25,9 @@ Usage:
 import argparse
 import math
 
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.runtime.collectives import barrier
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.runtime.collectives import barrier
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import (

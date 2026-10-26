@@ -19,17 +19,17 @@ import pytest
 from botocore.exceptions import ClientError, NoCredentialsError
 from datasets import Dataset, DatasetDict, load_from_disk
 
-import src.data.sources.loading as loading
-from src.data.preprocessed.preparation import shard_dataset
-from src.data.preprocessed.shard_index import (
+import halo.data.sources.loading as loading
+from halo.data.preprocessed.preparation import shard_dataset
+from halo.data.preprocessed.shard_index import (
     SHARD_INDEX_FILE,
     IncompatiblePreprocessedDataset,
     ShardIndex,
     ShardInfo,
     write_stamped_sidecar,
 )
-from src.data.sources.loading import load_datasets, load_preprocessed_dataset
-from src.data.sources.sharded_dataset import ShardedDatasetLoader
+from halo.data.sources.loading import load_datasets, load_preprocessed_dataset
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 
 
 def create_test_sharded_dataset(num_examples: int, num_shards: int, temp_dir: str) -> str:
@@ -233,8 +233,8 @@ def test_is_sharded_dataset_s3_probe_failure_returns_false(tmp_path):
         ClientError({"Error": {"Code": "SlowDown", "Message": "throttled"}}, "HeadObject"),
         OSError("connection reset"),
     ):
-        with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-            with patch("src.data.sources.s3_dataset_store.read_json_from_s3", side_effect=error):
+        with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
+            with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=error):
                 assert ShardedDatasetLoader.is_sharded_dataset("s3://bucket/dataset") is False, (
                     f"probe must err toward non-sharded on {type(error).__name__}, not raise"
                 )
@@ -498,9 +498,9 @@ def test_warm_shard_cache_serves_without_aws_credentials(tmp_path):
         return real_load_from_disk(str(source)) if str(path).startswith("s3://") else real_load_from_disk(path)
 
     with (
-        patch("src.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(tmp_path / "cache")),
-        patch("src.data.sources.sharded_dataset.load_from_disk", side_effect=_load),
-        patch("src.data.sources.sharded_dataset.S3Client", side_effect=NoCredentialsError()),
+        patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(tmp_path / "cache")),
+        patch("halo.data.sources.sharded_dataset.load_from_disk", side_effect=_load),
+        patch("halo.data.sources.sharded_dataset.S3Client", side_effect=NoCredentialsError()),
     ):
         ShardedDatasetLoader("s3://bucket/dataset", dp_rank=0, dp_size=1)._load_shard_from_s3(shard)
         # A fresh loader is the relaunch: the first one has already latched the probe off.

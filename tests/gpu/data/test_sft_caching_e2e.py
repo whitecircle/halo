@@ -25,9 +25,9 @@ import torch.distributed as dist
 from datasets import Dataset, DatasetDict
 from transformers import AutoTokenizer
 
-from src.data.pipeline.coordinated_map import coordinated_map_and_filter
-from src.data.pipeline.text_rows import build_chat_row_processor
-from src.runtime.collectives import barrier
+from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
+from halo.data.pipeline.text_rows import build_chat_row_processor
+from halo.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log

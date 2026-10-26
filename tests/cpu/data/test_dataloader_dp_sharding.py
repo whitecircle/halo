@@ -17,8 +17,8 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 # prepare_data_loader resolves its defaults through the accelerate state.
 PartialState()
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.dataloaders import (
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.dataloaders import (
     DataParallelLoaderMixin,
     _select_gathered_chunks,
     dp_representative_ranks,

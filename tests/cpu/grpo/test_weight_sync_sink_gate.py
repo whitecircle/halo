@@ -17,8 +17,8 @@ import torch
 import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 NUM_HEADS = 4
 

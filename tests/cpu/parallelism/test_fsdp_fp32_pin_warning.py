@@ -1,4 +1,4 @@
-"""CPU tests for the FSDP2 fp32-pin cast warning (``src/distributed/fsdp.py``).
+"""CPU tests for the FSDP2 fp32-pin cast warning (``halo/distributed/fsdp.py``).
 
 FSDP2's ``MixedPrecisionPolicy`` casts per fully_shard group and has no per-parameter dtype
 mechanism, so params pinned fp32 via transformers' ``_keep_in_fp32_modules(_strict)`` class
@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.fsdp import MixedPrecisionPolicy
 
-from src.distributed.fsdp import _warn_fp32_pins_cast_by_policy
+from halo.distributed.fsdp import _warn_fp32_pins_cast_by_policy
 
 
 class _PinnedModel(nn.Module):
@@ -48,7 +48,7 @@ def _bf16_policy():
 def _warning_text(caplog, model, mp_policy) -> str:
     """The wrap-time warning the policy produces for ``model``, or ``""`` when it stays silent."""
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="src.distributed.fsdp"):
+    with caplog.at_level(logging.WARNING, logger="halo.distributed.fsdp"):
         _warn_fp32_pins_cast_by_policy(model, mp_policy)
     return " ".join(record.message for record in caplog.records)
 

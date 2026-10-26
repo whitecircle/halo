@@ -23,12 +23,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.checkpoint.parallel.optimizer as optimizer_mod
-import src.checkpoint.parallel.reading as coordination_mod
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
-from src.checkpoint.parallel.sidecars import restore_lr_scheduler
-from src.runtime.consensus import RankConsensus
+import halo.checkpoint.parallel.optimizer as optimizer_mod
+import halo.checkpoint.parallel.reading as coordination_mod
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
+from halo.checkpoint.parallel.sidecars import restore_lr_scheduler
+from halo.runtime.consensus import RankConsensus
 from tests.common.checkpoint_io import load_context
 
 # What a 1.1.0 save wrote to optimizer_meta.pt, verbatim: one rank, AdamW, no parallelism.

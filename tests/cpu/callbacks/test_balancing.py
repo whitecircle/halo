@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run-level MoE balancing (:mod:`src.callbacks.balancing`): what :func:`apply_balancing_mode` writes to
+"""Run-level MoE balancing (:mod:`halo.callbacks.balancing`): what :func:`apply_balancing_mode` writes to
 ``model.config`` and the live routers, its refusals, the cross-rank agreement, and what
 :func:`configure_moe_balancing` resolves end to end, emphasizing the silent-failure guards:
 
@@ -13,7 +13,7 @@
   exists, and a config-gated slot mirrors its flag (LFM-2 ``use_expert_bias``) into ``model.config``.
 * weight-sync RL downgrades both bias modes to ``none``.
 
-Plus :func:`~src.models.moe.config_fields.resolve_moe_routing`'s discard slot, read off the router
+Plus :func:`~halo.models.moe.config_fields.resolve_moe_routing`'s discard slot, read off the router
 CLASS attribute ``_has_discard_expert_slot`` alone (the hub-native Zaya modeling gets it from its load
 patch), never off a model_type list.
 
@@ -31,24 +31,24 @@ import torch
 from peft.utils import ModulesToSaveWrapper
 from transformers.models.zaya import modeling_zaya
 
-import src.callbacks.balancing as balancing
-import src.callbacks.factory as factory
-import src.models.moe.balancing as moe_balancing
-from src.callbacks.balancing import apply_balancing_mode
-from src.models.config_access import (
+import halo.callbacks.balancing as balancing
+import halo.callbacks.factory as factory
+import halo.models.moe.balancing as moe_balancing
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.models.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )
-from src.models.moe.balancing import (
+from halo.models.moe.balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     _warned_transient_only_auto,
     is_transient_balancing_router,
 )
-from src.models.moe.config_fields import resolve_moe_routing
-from src.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
-from src.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
-from src.models.zaya import patch_zaya_router_load_recording
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.models.moe.config_fields import resolve_moe_routing
+from halo.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
+from halo.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
+from halo.models.zaya import patch_zaya_router_load_recording
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 
 class _Cfg:

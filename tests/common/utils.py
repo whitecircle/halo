@@ -18,8 +18,8 @@ from safetensors import safe_open
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimizer_state_dict
 from torch.distributed.tensor import DTensor
 
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.models.unwrapping import unwrap_toolkit_wrappers
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.models.unwrapping import unwrap_toolkit_wrappers
 from tests.common.tolerances import TOL
 
 # Where a trained causal-LM loss lands: the floor catches a collapsed or masked-away objective, the ceiling

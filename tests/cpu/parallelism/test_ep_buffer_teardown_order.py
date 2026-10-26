@@ -35,10 +35,10 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed.expert_parallel.deepep import backends as backends_mod
-from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
-from src.distributed.expert_parallel.deepep.capacity import capacity_scope
-from src.runtime.consensus import RankConsensus
+from halo.distributed.expert_parallel.deepep import backends as backends_mod
+from halo.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
+from halo.distributed.expert_parallel.deepep.capacity import capacity_scope
+from halo.runtime.consensus import RankConsensus
 from tests.common.gloo import new_groups, run_gloo_ranks
 
 # One EP group per model, each serving its own buffer, built in this order on every rank.

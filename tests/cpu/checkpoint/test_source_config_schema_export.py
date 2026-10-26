@@ -29,11 +29,11 @@ from transformers import AutoConfig
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-from src.checkpoint import config_export
-from src.checkpoint.config_export import save_model_config
-from src.checkpoint.offline_export import save_full_checkpoint
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from halo.checkpoint import config_export
+from halo.checkpoint.config_export import save_model_config
+from halo.checkpoint.offline_export import save_full_checkpoint
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 from tests.common.rosters import ep_layer_class_by_model_type
 

@@ -2,7 +2,7 @@
 
 - Registers every marker the GPU manifest uses (single source of truth:
   ``tests.gpu.manifest.ALL_MARKERS``) without the list being duplicated in ``pyproject.toml``.
-- Ensures the project root is importable (CPU tests do ``from src. ...``) and runs every test from it.
+- Ensures the project root is importable (CPU tests do ``from halo. ...``) and runs every test from it.
 - Sweeps stale scratch dirs left by crashed test runs out of the launcher's ``TMPDIR``
   (they sit on the volume the training data does, so leaks eat it).
 
@@ -102,6 +102,6 @@ def _reset_shared_filesystem_consensus():
     the filesystem module was actually imported — no torch import for tests that never touched it.
     """
     yield
-    filesystem = sys.modules.get("src.runtime.filesystem")
+    filesystem = sys.modules.get("halo.runtime.filesystem")
     if filesystem is not None:
         filesystem._shared_filesystem_consensus = None

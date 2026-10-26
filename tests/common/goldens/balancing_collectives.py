@@ -20,12 +20,12 @@ from types import SimpleNamespace
 import torch
 from transformers import TrainerCallback
 
-import src.models.moe.balancing as moe_balancing
-from src.callbacks.balancing import configure_moe_balancing
-from src.callbacks.factory import build_run_callbacks
-from src.callbacks.moe_metrics import MoELoadMetricsCallback
-from src.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
-from src.models.moe.router_logits import router_logits_forced_off
+import halo.models.moe.balancing as moe_balancing
+from halo.callbacks.balancing import configure_moe_balancing
+from halo.callbacks.factory import build_run_callbacks
+from halo.callbacks.moe_metrics import MoELoadMetricsCallback
+from halo.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
+from halo.models.moe.router_logits import router_logits_forced_off
 from tests.common.collective_recorder import CollectiveTrace, recording_rank
 from tests.common.goldens import regen_main
 from tests.common.parallelism import make_parallelism_config
@@ -135,7 +135,7 @@ class _TracedRecords(logging.Handler):
         self.trace = trace
 
     def emit(self, record: logging.LogRecord) -> None:
-        if record.name.startswith("src."):
+        if record.name.startswith("halo."):
             self.trace.record("log", record.levelname, record.getMessage())
 
 

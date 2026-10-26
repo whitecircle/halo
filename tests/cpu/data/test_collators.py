@@ -15,19 +15,19 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from src.data.collators.packing import (
+from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlattening,
     DataCollatorWithFlatteningAndCompletionMask,
     DataCollatorWithPacking,
 )
-from src.data.collators.padded import DataCollatorForCompletionOnlyLM
-from src.data.completion_spans import (
+from halo.data.collators.padded import DataCollatorForCompletionOnlyLM
+from halo.data.completion_spans import (
     build_completion_only_labels,
     filter_eos_after_responses,
     find_terminator_positions,
 )
-from src.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
+from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
 
 PAD = 0
 EOS = 1

@@ -21,10 +21,10 @@ import re
 
 import pytest
 
-from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.protocols.react import ReActEnvironment
-from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 # The generic refusal, as the protocol prefixes it: the tool's name and the fact, no cap and no count.
 _ECHO_SPENT = "Error: Not executed: this task's budget for echo is spent."

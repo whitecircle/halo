@@ -2,11 +2,11 @@
 """Adversarial / edge-case tests for rule-based rewards and RLRR advantage shaping.
 
 Covers three modules:
-  * src/rewards/graders/matching.py — numeric and exact matching against crafted distractor inputs, and
+  * halo/rewards/graders/matching.py — numeric and exact matching against crafted distractor inputs, and
     the empty-answer floor of the validation chain.
-  * src/environments/tasks/qa.py — multiple-choice letter extraction, which lives with the
+  * halo/environments/tasks/qa.py — multiple-choice letter extraction, which lives with the
     only environment that grades by letter.
-  * src/trainers/grpo/objective/relative_rewards.py — RLRR degenerate-group handling
+  * halo/trainers/grpo/objective/relative_rewards.py — RLRR degenerate-group handling
     (all-tied, single-element, empty) must produce finite, sane advantages.
 
 Run: python tests/cpu/environments/test_rewards_adversarial.py  (or pytest)
@@ -18,16 +18,16 @@ import time
 import numpy as np
 import pytest
 
-from src.configs.grpo import RLRRConfig
-from src.environments.tasks.qa import MULTIPLE_CHOICE_LETTERS, ExamQAEnvironment, multiple_choice_match
-from src.rewards.graders.matching import (
+from halo.configs.grpo import RLRRConfig
+from halo.environments.tasks.qa import MULTIPLE_CHOICE_LETTERS, ExamQAEnvironment, multiple_choice_match
+from halo.rewards.graders.matching import (
     exact_match,
     extract_last_boxed,
     is_correct_answer,
     normalize_text,
     numeric_match,
 )
-from src.trainers.grpo.objective.relative_rewards import relative_advantages
+from halo.trainers.grpo.objective.relative_rewards import relative_advantages
 
 # extract_last_boxed — brace-balanced, or every nested LaTeX answer scores 0
 

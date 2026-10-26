@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The head-path transform contract (``src/models/head_transform.py``) across the supported roster.
+"""The head-path transform contract (``halo/models/head_transform.py``) across the supported roster.
 
 The chunked GRPO log-prob sweep and the last pipeline stage compute logits from the backbone's last
 hidden state instead of through the model's forward. A family whose forward transforms that path —
@@ -25,9 +25,9 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto import modeling_auto
 from trl.trainer.utils import selective_log_softmax
 
-from src.model_loading.remote_code import apply_remote_code_compat_shims
-from src.models import head_transform
-from src.models.head_transform import (
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.models import head_transform
+from halo.models.head_transform import (
     IDENTITY_HEAD_TRANSFORM,
     GraniteHeadTransform,
     HeadTransform,
@@ -35,8 +35,8 @@ from src.models.head_transform import (
     resolve_head_transform_spec,
     verify_head_transform,
 )
-from src.models.moe.family_specs import moe_model_types
-from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.models.moe.family_specs import moe_model_types
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from tests.common.models import (
     BAILING_MOE_LING_MINI,
     BAILING_MOE_RING_MINI,
@@ -105,7 +105,7 @@ def _roster_classes() -> list[tuple[str, str]]:
 
 
 def _model(class_name: str, config_class_name: str, **config) -> torch.nn.Module:
-    """A seeded fp32 tiny model; classes are resolved by name at build time, after ``src`` installed
+    """A seeded fp32 tiny model; classes are resolved by name at build time, after ``halo`` installed
     its device-aware kernel dispatch, so the linear-attention families run their CPU paths."""
     torch.manual_seed(0)
     model_class = getattr(transformers, class_name)

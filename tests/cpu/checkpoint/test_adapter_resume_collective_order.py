@@ -26,14 +26,14 @@ from peft import LoraConfig, get_peft_model
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 
-import src.checkpoint.parallel.adapters as peft_mod
-import src.checkpoint.parallel.reading as coordination
-from src.checkpoint.adapters import adapter_weight_paths
-from src.checkpoint.format import ADAPTER_WEIGHT_NAMES
-from src.checkpoint.parallel.adapters import _load_peft_adapter_state, restore_adapters
-from src.checkpoint.parallel.reading import consensus_read
-from src.runtime import dtensor
-from src.runtime.consensus import RankConsensus
+import halo.checkpoint.parallel.adapters as peft_mod
+import halo.checkpoint.parallel.reading as coordination
+from halo.checkpoint.adapters import adapter_weight_paths
+from halo.checkpoint.format import ADAPTER_WEIGHT_NAMES
+from halo.checkpoint.parallel.adapters import _load_peft_adapter_state, restore_adapters
+from halo.checkpoint.parallel.reading import consensus_read
+from halo.runtime import dtensor
+from halo.runtime.consensus import RankConsensus
 from tests.common.gloo import run_gloo_ranks
 
 # Deliberately NOT sorted: a dict preserves insertion order, which is the adapter file's order.

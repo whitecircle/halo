@@ -18,20 +18,20 @@ import shutil
 
 import pytest
 
-from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from src.environments.sandbox.base import SandboxExecutor
-from src.environments.sandbox.local import LocalSubprocessSandbox
-from src.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE, run_code_via_sandbox
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.code_contests_prompts import (
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE, run_code_via_sandbox
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.code_contests_prompts import (
     NO_STDIN_NOTE,
     SCRATCHPAD_BUDGET_SPENT_REPLY,
     SCRATCHPAD_TIME_LIMIT_NOTE,
     SUBMIT_TOOL,
 )
-from src.environments.tasks.coding.grading import run_solution_against_tests
-from src.environments.tools.definitions import NativeToolCall
+from halo.environments.tasks.coding.grading import run_solution_against_tests
+from halo.environments.tools.definitions import NativeToolCall
 from tests.common.code_contests import counts_beside_budget_words, retired_budget_phrases
 
 needs_gpp = pytest.mark.skipif(shutil.which("g++") is None, reason="g++ not installed")

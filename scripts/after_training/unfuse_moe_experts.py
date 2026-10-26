@@ -32,14 +32,13 @@ from functools import lru_cache
 import torch
 from transformers.utils import CONFIG_NAME
 
-from scripts.cli_arguments import add_max_shard_size_arg
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from src.checkpoint.offline_export import (
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from halo.checkpoint.offline_export import (
     copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
 )
-from src.checkpoint.reading import (
+from halo.checkpoint.reading import (
     checkpoint_shard_files,
     detect_model_type,
     header_nbytes,
@@ -47,15 +46,16 @@ from src.checkpoint.reading import (
     iter_checkpoint_tensors,
     read_checkpoint_config,
 )
-from src.checkpoint.writing import StreamingShardWriter
-from src.log import configure_cli_logging
-from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS, iter_per_expert_split
-from src.models.moe.family_specs import (
+from halo.checkpoint.writing import StreamingShardWriter
+from halo.log import configure_cli_logging
+from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS, iter_per_expert_split
+from halo.models.moe.family_specs import (
     experts_container_attrs,
     find_moe_family_spec,
     per_expert_hub_model_types,
     per_expert_layouts,
 )
+from scripts.cli_arguments import add_max_shard_size_arg
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

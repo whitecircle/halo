@@ -24,11 +24,11 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from src.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
-from src.distributed.tensor_parallel.plain_params import hand_sliced_dims, register_hand_sliced
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.parallelism import grad_clipping as grad_clipping_module
-from src.trainers.parallelism import grad_sync as grad_sync_module
+from halo.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
+from halo.distributed.tensor_parallel.plain_params import hand_sliced_dims, register_hand_sliced
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.parallelism import grad_clipping as grad_clipping_module
+from halo.trainers.parallelism import grad_sync as grad_sync_module
 
 TP_SIZE = 2
 SINKS_SUFFIX = "self_attn.sinks"

@@ -10,8 +10,8 @@ from unittest import mock
 
 import pytest
 
-import src.trainers.training_args_overrides as overrides
-from src.trainers.training_args_overrides import keep_all_dataset_columns
+import halo.trainers.training_args_overrides as overrides
+from halo.trainers.training_args_overrides import keep_all_dataset_columns
 
 
 def test_the_flag_is_cleared_and_the_reason_said_once():

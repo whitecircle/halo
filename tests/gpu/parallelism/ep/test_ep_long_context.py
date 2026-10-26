@@ -4,7 +4,7 @@
 The apparent ceiling at `num_max_tokens_per_rank × ep_size × hidden ≈ 2³⁰` (~46.6k tokens/rank at
 ep8) is not a DeepEP limit: it is the GptOss GLU kernel's int32 program offset overflowing on the
 skewed grouped activation (>2³¹ elements), which async-reports on peer ranks as DeepEP's
-`symmetric.hpp 719`. The int64 offset (`src/kernels/fused_glu.py`) lets elastic stream arbitrary
+`symmetric.hpp 719`. The int64 offset (`halo/kernels/fused_glu.py`) lets elastic stream arbitrary
 sequence length.
 
 Sweeps one no_grad forward per seq ∈ {45056 (below the 2³⁰ ep8 arena bound), 47104 (just above), 65536 (well
@@ -28,9 +28,9 @@ import math
 
 import torch
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.hardware import supports_grouped_mm
-from src.model_loading.parallel.loader import load_distributed_model
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B

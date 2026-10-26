@@ -8,7 +8,7 @@ reads from kwargs. So every document's mean log-prob from that one forward must 
 document run alone, and a family that reads no marker must get exactly the base kwargs.
 
 The CPU forward runs the torch fallbacks, which honor the markers through the device-aware dispatch
-fixups (``src/kernels/hub_kernel_dispatch.py``); the CUDA kernels are covered by
+fixups (``halo/kernels/hub_kernel_dispatch.py``); the CUDA kernels are covered by
 ``tests/gpu/trainers/preference/test_smpo_padding_free_segments.py``.
 
     python tests/cpu/trainers/test_smpo_padding_free_segments.py
@@ -20,11 +20,11 @@ import pytest
 import torch
 from transformers.models.deepseek_v4 import DeepseekV4Config, DeepseekV4ForCausalLM
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.models import segment_markers
-from src.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarkers, segment_markers_for
-from src.trainers.preference.preference_rules import reject_padding_free_without_varlen
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.models import segment_markers
+from halo.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarkers, segment_markers_for
+from halo.trainers.preference.preference_rules import reject_padding_free_without_varlen
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.segment_isolation import (
     FAMILIES,

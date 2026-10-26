@@ -21,7 +21,7 @@ import logging
 import pytest
 import torch
 
-from src.runtime import ranks
+from halo.runtime import ranks
 
 _RANK_ENV_VARS = ("LOCAL_RANK", "SLURM_LOCALID", "LOCAL_WORLD_SIZE", "SLURM_NTASKS_PER_NODE", "RANK", "WORLD_SIZE")
 

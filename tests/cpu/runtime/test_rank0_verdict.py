@@ -6,7 +6,7 @@ Run: python tests/cpu/runtime/test_rank0_verdict.py
 
 import pytest
 
-from src.runtime.consensus import rank0_verdict
+from halo.runtime.consensus import rank0_verdict
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

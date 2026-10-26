@@ -34,13 +34,13 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.model_loading.liger.cross_entropy import build_lce_forward
-from src.model_loading.liger.dispatch import resolve_liger_applier
-from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from src.model_loading.liger.fused_modules import _bridge_gated_norm
-from src.models.head_transform import resolve_head_transform_spec
-from src.models.moe.family_specs import moe_model_types
-from src.models.moe.router_logits import honors_router_logits_flag
+from halo.model_loading.liger.cross_entropy import build_lce_forward
+from halo.model_loading.liger.dispatch import resolve_liger_applier
+from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.model_loading.liger.fused_modules import _bridge_gated_norm
+from halo.models.head_transform import resolve_head_transform_spec
+from halo.models.moe.family_specs import moe_model_types
+from halo.models.moe.router_logits import honors_router_logits_flag
 from tests.common.repo import probe_findings
 
 NATIVE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.modeling_module]
@@ -501,7 +501,7 @@ import inspect, sys, torch
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.model_loading.liger.dispatch import resolve_liger_applier
+from halo.model_loading.liger.dispatch import resolve_liger_applier
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG
 
 failures = []

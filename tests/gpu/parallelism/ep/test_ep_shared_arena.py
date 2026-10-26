@@ -23,9 +23,9 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from src.distributed.expert_parallel.deepep import backends as backends_mod
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
+from halo.distributed.expert_parallel.deepep import backends as backends_mod
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main

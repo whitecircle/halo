@@ -15,15 +15,15 @@ from unittest.mock import patch
 import pytest
 import torch.nn as nn
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.model_loading.parallel.cp import load_ep_cp_model
-from src.model_loading.parallel.ep import load_ep_model
-from src.model_loading.parallel.model_source import ModelSource
-from src.model_loading.parallel.tp import load_ep_tp_model
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.model_loading.parallel.cp import load_ep_cp_model
+from halo.model_loading.parallel.ep import load_ep_model
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.model_loading.parallel.tp import load_ep_tp_model
 
-_EP_LOADING = "src.model_loading.parallel.ep"
-_CP_LOADING = "src.model_loading.parallel.cp"
-_TP_LOADING = "src.model_loading.parallel.tp"
+_EP_LOADING = "halo.model_loading.parallel.ep"
+_CP_LOADING = "halo.model_loading.parallel.cp"
+_TP_LOADING = "halo.model_loading.parallel.tp"
 
 _REVISION = "970cfc9f5e7e5a4f5f6f0645955928a9b6a98415"
 _SOURCE = ModelSource("org/repo", _REVISION, "/fake/pinned/snapshot")

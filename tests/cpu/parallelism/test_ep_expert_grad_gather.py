@@ -19,10 +19,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from src.runtime import collectives
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.runtime import collectives
 from tests.common.pp_equivalence import gather_expert_grads
 
 EP_SIZE = 2

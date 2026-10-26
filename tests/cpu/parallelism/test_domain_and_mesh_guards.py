@@ -24,9 +24,9 @@ from unittest.mock import patch
 import pytest
 import torch.distributed as dist
 
-import src.distributed.mesh as mesh_mod
-import src.distributed.nvlink as nvlink_mod
-from src.distributed.nvlink import requested_nvlink_domain_size
+import halo.distributed.mesh as mesh_mod
+import halo.distributed.nvlink as nvlink_mod
+from halo.distributed.nvlink import requested_nvlink_domain_size
 
 
 @pytest.mark.parametrize("bad", ["0", "-4", "seventy-two"])

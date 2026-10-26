@@ -20,10 +20,10 @@ import torch
 from transformers import Trainer
 from trl.trainer.utils import entropy_from_logits
 
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers import world_metrics
-from src.trainers.sft import DistributedSFTTrainer
-from src.trainers.world_metrics import WorldMetrics
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers import world_metrics
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.world_metrics import WorldMetrics
 from tests.common.world_metrics import fake_world
 
 CP_SIZE = 2

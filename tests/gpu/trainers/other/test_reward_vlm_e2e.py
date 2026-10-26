@@ -23,11 +23,11 @@ from datasets import Image as HFImage
 from transformers import AutoModelForSequenceClassification, AutoProcessor
 from trl import RewardConfig
 
-from src.data.collators.vlm_preference import DataCollatorForVLMPreference
-from src.data.pipeline.preferences import render_vlm_preference_row
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.tokenizer_setup import sync_special_token_id
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.data.collators.vlm_preference import DataCollatorForVLMPreference
+from halo.data.pipeline.preferences import render_vlm_preference_row
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.tokenizer_setup import sync_special_token_id
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.datasets import digit_image
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main

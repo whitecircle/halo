@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.lazy_plan import WeightPlanner
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.lazy_plan import WeightPlanner
 
 
 def _config(ep_size: int, **kwargs) -> EPConfig:

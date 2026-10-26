@@ -1,6 +1,6 @@
 # Reward Terms
 
-A GRPO reward is a sum of **terms**. Each term names a source of a score in `[0, 1]` and prices it as `weight × score ^ exponent`. Terms are listed under `rewards:` and parsed at config time (`src/rewards/terms.py`), so a bad term fails before any server is contacted.
+A GRPO reward is a sum of **terms**. Each term names a source of a score in `[0, 1]` and prices it as `weight × score ^ exponent`. Terms are listed under `rewards:` and parsed at config time (`halo/rewards/terms.py`), so a bad term fails before any server is contacted.
 
 The [online arm](../online.md#rewards) turns each term into one TRL reward function; the [environment arm](#environment-arm) composes them into the episode reward.
 
@@ -62,7 +62,7 @@ Two configuration faults raise instead of booking an outage: a reward model whos
 
 At launch, rank 0 probes every external term with a one-line sample in the run's exact request shape, so a bad URL, key, model or parameter fails the launch, not every episode. The environment arm probes through the environment's `verify_backend`.
 
-Judge requests retry (`src/inference/openai_client.py`):
+Judge requests retry (`halo/inference/openai_client.py`):
 
 - up to four times, with `request_timeout` bounding each attempt, not the whole call;
 - four more times, at 2, 4, 8 and 16 s, on a reply with no choices that carries a 408, 429, 500, 502, 503 or 504 error code (how OpenRouter reports a rate-limited model).

@@ -52,11 +52,11 @@ import tempfile
 import torch
 from safetensors.torch import save_file
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.model_loading.liger.dispatch import apply_liger_kernel
-from src.models.config_access import text_config
-from src.models.moe.config_fields import require_expert_count
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.model_loading.liger.dispatch import apply_liger_kernel
+from halo.models.config_access import text_config
+from halo.models.moe.config_fields import require_expert_count
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.parallelism import single_process_ep_config

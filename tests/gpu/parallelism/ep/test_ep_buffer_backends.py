@@ -24,11 +24,11 @@ Requirements:
 import torch
 from transformers import AutoTokenizer
 
-from src.distributed.expert_parallel.deepep.backends import _ElasticBackend, _LegacyBackend
-from src.distributed.parallelism_config import ParallelismConfig
-from src.hardware import supports_grouped_mm
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
+from halo.distributed.expert_parallel.deepep.backends import _ElasticBackend, _LegacyBackend
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers, find_router_weight, fixed_chat_batch, full_grad
 from tests.common.harness import gpu_test_main

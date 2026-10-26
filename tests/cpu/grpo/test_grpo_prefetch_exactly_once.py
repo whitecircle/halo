@@ -35,13 +35,13 @@ from collections import deque
 import pytest
 import torch
 
-import src.trainers.checkpointing as checkpointing_mod
-import src.trainers.grpo.environmental.async_rollouts as async_mod
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.trainers.checkpointing import CheckpointingMixin
-from src.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as _T
+import halo.trainers.checkpointing as checkpointing_mod
+import halo.trainers.grpo.environmental.async_rollouts as async_mod
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from tests.common.repo import load_script_module
 
 

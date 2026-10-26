@@ -1,4 +1,4 @@
-"""CPU tests for ``src/diagnostics/profiling.py``: artifact export, profiler construction, the CUDA
+"""CPU tests for ``halo/diagnostics/profiling.py``: artifact export, profiler construction, the CUDA
 memory read and the allocation-history region.
 
 ``torch.profiler.profile.export_stacks`` writes an empty file and returns successfully when no
@@ -18,7 +18,7 @@ import pytest
 import torch
 from torch.profiler import ProfilerActivity
 
-from src.diagnostics.profiling import (
+from halo.diagnostics.profiling import (
     CudaMemoryGiB,
     build_profiler,
     cuda_memory_history,
@@ -68,7 +68,7 @@ def _written_list(log: str) -> str:
 
 
 def _export(tmp_path, caplog, *, stacks_payload):
-    with caplog.at_level(logging.INFO, logger="src.diagnostics.profiling"):
+    with caplog.at_level(logging.INFO, logger="halo.diagnostics.profiling"):
         export_profiler_artifacts(
             _FakeProfile(stacks_payload=stacks_payload),
             str(tmp_path),
@@ -122,7 +122,7 @@ def test_the_session_builds_its_profiler_from_its_settings(tmp_path, monkeypatch
         built.append(settings)
         return build_profiler(output_dir, **settings)
 
-    monkeypatch.setattr("src.diagnostics.profiling.build_profiler", recording_build_profiler)
+    monkeypatch.setattr("halo.diagnostics.profiling.build_profiler", recording_build_profiler)
     with torch_profiler_session(
         str(tmp_path),
         ranks="0",
@@ -194,7 +194,7 @@ def test_read_cuda_memory_reports_each_counter_in_gib(monkeypatch):
 
 def test_log_cuda_memory_logs_this_ranks_counters(monkeypatch, caplog):
     _fake_cuda_counters(monkeypatch)
-    with caplog.at_level(logging.INFO, logger="src.diagnostics.profiling"):
+    with caplog.at_level(logging.INFO, logger="halo.diagnostics.profiling"):
         log_cuda_memory("after forward")
     assert caplog.messages == [
         "[mem rank00] after forward: allocated=1.00 reserved=2.50 peak_alloc=3.00 peak_reserved=4.50 GiB"
@@ -203,7 +203,7 @@ def test_log_cuda_memory_logs_this_ranks_counters(monkeypatch, caplog):
 
 def test_without_cuda_there_is_no_reading_and_no_log_line(monkeypatch, caplog):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    with caplog.at_level(logging.INFO, logger="src.diagnostics.profiling"):
+    with caplog.at_level(logging.INFO, logger="halo.diagnostics.profiling"):
         assert read_cuda_memory() is None
         log_cuda_memory("after forward")
     assert caplog.messages == []
@@ -214,13 +214,13 @@ def _record_memory_history(monkeypatch) -> list[tuple]:
     events: list[tuple] = []
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(
-        "src.diagnostics.profiling.start_memory_history",
+        "halo.diagnostics.profiling.start_memory_history",
         lambda max_entries: events.append(("start", max_entries)) or True,
     )
     monkeypatch.setattr(
-        "src.diagnostics.profiling.dump_memory_snapshot", lambda path: events.append(("dump", path)) or path
+        "halo.diagnostics.profiling.dump_memory_snapshot", lambda path: events.append(("dump", path)) or path
     )
-    monkeypatch.setattr("src.diagnostics.profiling.stop_memory_history", lambda: events.append(("stop",)))
+    monkeypatch.setattr("halo.diagnostics.profiling.stop_memory_history", lambda: events.append(("stop",)))
     return events
 
 

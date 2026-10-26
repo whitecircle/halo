@@ -17,8 +17,8 @@ from typing import Literal
 
 import pytest
 
-from src.configs.classification import ClassificationConfig
-from src.configs.parser import HaloArgumentParser
+from halo.configs.classification import ClassificationConfig
+from halo.configs.parser import HaloArgumentParser
 
 
 @dataclass

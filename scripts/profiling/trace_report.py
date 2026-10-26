@@ -32,13 +32,13 @@ import re
 import tempfile
 from pathlib import Path
 
-from src.env import torch_trace_dir
-from src.log import configure_cli_logging
+from halo.env import torch_trace_dir
+from halo.log import configure_cli_logging
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
 
-# Artifact naming contract of src/diagnostics/profiling.py::export_profiler_artifacts:
+# Artifact naming contract of halo/diagnostics/profiling.py::export_profiler_artifacts:
 # "<label>-rank<NN>.trace.json[.gz]" with the rank zero-padded to the world-size width.
 _TRACE_NAME_RE = re.compile(r"^(?P<label>.+)-rank(?P<rank>\d+)\.trace(?P<suffix>\.json(?:\.gz)?)$")
 

@@ -1,4 +1,4 @@
-"""CPU tests for text-backbone scoping in ``src/model_loading/parallel/lowp_compute.py``.
+"""CPU tests for text-backbone scoping in ``halo/model_loading/parallel/lowp_compute.py``.
 
 ``keep_first/last_blocks`` is an NVFP4 recipe about the TEXT decoder's precision-sensitive end
 blocks. Block indices must therefore come from the model's own decoder (``get_decoder()``), never
@@ -12,9 +12,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.kernels.lowp.linear import LowPrecisionLinear
-from src.kernels.lowp.spec import LowpSpec
-from src.model_loading.parallel.lowp_compute import apply_lowp_compute
+from halo.kernels.lowp.linear import LowPrecisionLinear
+from halo.kernels.lowp.spec import LowpSpec
+from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
 
 
 class _MLPBlock(nn.Module):

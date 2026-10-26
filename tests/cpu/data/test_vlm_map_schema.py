@@ -17,9 +17,9 @@ import pytest
 from datasets import Dataset
 from PIL import Image
 
-from src.data.pipeline import map_cache_key
-from src.data.pipeline.map_cache_key import _closure_fingerprint, function_cache_id
-from src.data.pipeline.vlm_rows import build_vlm_row_processor, vlm_map_features
+from halo.data.pipeline import map_cache_key
+from halo.data.pipeline.map_cache_key import _closure_fingerprint, function_cache_id
+from halo.data.pipeline.vlm_rows import build_vlm_row_processor, vlm_map_features
 
 
 def _image(color: int) -> Image.Image:

@@ -21,14 +21,14 @@ import torch.distributed as dist
 from accelerate import PartialState
 from transformers.trainer_utils import enable_full_determinism
 
-from src.distributed.context_parallel import ulysses_attention as cp_attention
-from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
-from src.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
-from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
+from halo.distributed.context_parallel import ulysses_attention as cp_attention
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
+from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.ep_reference import random_token_batch
 from tests.common.equivalence.revisions import (

@@ -29,17 +29,17 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from transformers import Qwen3MoeConfig
 
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraMixin
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.fused_glu import GluCombine
-from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.models.moe.family_specs import MoEFamilySpec
-from src.trainers.parallelism.ep_layers import EPLayersMixin
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from halo.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraMixin
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.fused_glu import GluCombine
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.moe.family_specs import MoEFamilySpec
+from halo.trainers.parallelism.ep_layers import EPLayersMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 
@@ -120,7 +120,7 @@ def test_gc_disabled_skips_the_contract_check():
 
 def test_gc_on_supporting_layer_passes():
     trainer = _Trainer(_EPStub(), gradient_checkpointing=True)
-    with patch("src.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+    with patch("halo.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
         trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is True
@@ -134,7 +134,7 @@ def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
     trainer.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2)
     trainer.model.config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
     assert not trainer.parallelism_config.has_ep_group, "fixture must leave only the config to decide"
-    with patch("src.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+    with patch("halo.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
         trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
@@ -142,7 +142,7 @@ def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
 def test_gc_under_pp_is_non_reentrant():
     # PP needs non-reentrant GC: a reentrant forward runs under no_grad, so FSDP2 registers no pre-backward hooks.
     trainer = _Trainer(_EPStub(), gradient_checkpointing=True, world=4, gpus_per_node=2, pp_size=2)
-    with patch("src.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+    with patch("halo.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
         trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": False})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is False
@@ -297,7 +297,7 @@ def test_init_summary_is_rank_gated(caplog, is_main):
     layer.fp32_router = layer.fp32_experts = False
 
     with (
-        patch("src.distributed.expert_parallel.moe_layer.layer.is_global_main_process", return_value=is_main),
+        patch("halo.distributed.expert_parallel.moe_layer.layer.is_global_main_process", return_value=is_main),
         caplog.at_level(logging.INFO, logger=EPMoELayerBase.__module__),
     ):
         layer._log_init_summary()
@@ -316,7 +316,7 @@ def test_every_rank_debug_logs_the_expert_range_it_owns(caplog, is_main):
     layer.fp32_router = layer.fp32_experts = False
 
     with (
-        patch("src.distributed.expert_parallel.moe_layer.layer.is_global_main_process", return_value=is_main),
+        patch("halo.distributed.expert_parallel.moe_layer.layer.is_global_main_process", return_value=is_main),
         caplog.at_level(logging.DEBUG, logger=EPMoELayerBase.__module__),
     ):
         layer._log_init_summary()

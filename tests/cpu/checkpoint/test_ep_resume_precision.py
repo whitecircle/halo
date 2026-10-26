@@ -25,30 +25,30 @@ from safetensors.torch import save_file
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, Qwen3MoeForSequenceClassification
 
-import src.model_loading.parallel.cp as cp_loading
-import src.model_loading.parallel.loader as model_loading
-import src.model_loading.parallel.tp as tp_loading
-import src.model_loading.parallel.whole_model as whole_model
-from src.checkpoint.parallel.resume_weights import load_resume_weights
-from src.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
-from src.checkpoint.reading import StreamingCheckpointReader, load_full_state_dict
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, built_from_checkpoint, weights_read_from
-from src.checkpoint.writing import normalize_gathered_state_dict
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
-from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
-from src.distributed.mesh import build_dp_tp_mesh
-from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
-from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
-from src.model_loading.parallel.cp import load_ep_cp_model
-from src.model_loading.parallel.ep import load_ep_model
-from src.model_loading.parallel.loader import _load_undistributed_model
-from src.model_loading.parallel.model_source import ModelSource
-from src.model_loading.parallel.pp import load_pp_stage_model
-from src.model_loading.parallel.tp import load_ep_tp_model, load_tp_moe_model
-from src.trainers.parallelism.mode_setup import ModeSetupMixin
+import halo.model_loading.parallel.cp as cp_loading
+import halo.model_loading.parallel.loader as model_loading
+import halo.model_loading.parallel.tp as tp_loading
+import halo.model_loading.parallel.whole_model as whole_model
+from halo.checkpoint.parallel.resume_weights import load_resume_weights
+from halo.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
+from halo.checkpoint.reading import StreamingCheckpointReader, load_full_state_dict
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, built_from_checkpoint, weights_read_from
+from halo.checkpoint.writing import normalize_gathered_state_dict
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
+from halo.distributed.mesh import build_dp_tp_mesh
+from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
+from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
+from halo.model_loading.parallel.cp import load_ep_cp_model
+from halo.model_loading.parallel.ep import load_ep_model
+from halo.model_loading.parallel.loader import _load_undistributed_model
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.model_loading.parallel.pp import load_pp_stage_model
+from halo.model_loading.parallel.tp import load_ep_tp_model, load_tp_moe_model
+from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.pp_fakes import registered_pp_backbones

@@ -18,9 +18,9 @@ from collections import Counter
 import pytest
 from datasets import Dataset
 
-from src.data.preprocessed.preparation import shard_dataset
-from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
-from src.data.sources.sharded_dataset import ShardedDatasetLoader
+from halo.data.preprocessed.preparation import shard_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 
 
 def _assignment(num_shards: int, world_size: int, rank: int) -> tuple[int, int]:

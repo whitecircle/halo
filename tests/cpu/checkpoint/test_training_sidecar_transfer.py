@@ -21,9 +21,9 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from src.checkpoint import sidecars
-from src.checkpoint.format import EXPORT_SIDECAR_FILES, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
-from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars, copy_training_sidecars
+from halo.checkpoint import sidecars
+from halo.checkpoint.format import EXPORT_SIDECAR_FILES, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
+from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars, copy_training_sidecars
 
 # One of the registry-declared native slots (DeepSeek-V3-style ALF), so the key predicate under test
 # is the shipped one rather than a spelling invented here.

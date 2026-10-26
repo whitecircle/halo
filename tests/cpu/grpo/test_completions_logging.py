@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Unit tests for :func:`src.trainers.grpo.rollout.completions_logging.emit_completion_artifacts`.
+"""Unit tests for :func:`halo.trainers.grpo.rollout.completions_logging.emit_completion_artifacts`.
 
 Locks the decoupling contract used by the online + env GRPO trainers: the durable parquet record is
 gated by ``save`` (CommonScriptArguments.save_completions) and the rich console table by ``console``
@@ -30,17 +30,17 @@ import pandas as pd
 import pytest
 import torch
 
-import src.trainers.grpo.environmental.rollout_metrics as rm
-import src.trainers.grpo.rollout.completions_logging as cl
-from src.environments.episode_keys import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY
-from src.environments.messages import Message, Trajectory
-from src.rewards.samples import CUT_CALL_NOTE
-from src.runtime import filesystem, ranks
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
+import halo.trainers.grpo.environmental.rollout_metrics as rm
+import halo.trainers.grpo.rollout.completions_logging as cl
+from halo.environments.episode_keys import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY
+from halo.environments.messages import Message, Trajectory
+from halo.rewards.samples import CUT_CALL_NOTE
+from halo.runtime import filesystem, ranks
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 from tests.common.distributed import reset_shared_filesystem_consensus
 
 

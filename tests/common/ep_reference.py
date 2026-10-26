@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from tests.common.datasets import CHAT_TEMPLATE_NOW
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, cos_sim, log_all

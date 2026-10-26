@@ -157,7 +157,7 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
   code-only change reruns only the COPY + editable reinstall while every heavy dep layer stays cached.
   Pass it explicitly on a raw `docker build`.
 
-    It guards against BuildKit occasionally serving a stale `src/` snapshot. The same value is stamped as
+    It guards against BuildKit occasionally serving a stale `halo/` snapshot. The same value is stamped as
     `org.opencontainers.image.revision` on all four images (the rollout images would otherwise report their
     engine's upstream commit), with `VERSION` and `BUILD_DATE` as `org.opencontainers.image.version` and
     `.created`; a build that omits them (a raw `docker build`) labels `dev` and an
@@ -185,7 +185,7 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
 
     Split-K is unreachable from the varlen forward and the whole backward, but the **non-varlen** forward
     sets `num_splits=0` and can select it by occupancy heuristic at small batch/head/seq. A non-varlen
-    caller must therefore prefer FA3 on sm_90, which `src/distributed/context_parallel/ulysses_attention.py` does.
+    caller must therefore prefer FA3 on sm_90, which `halo/distributed/context_parallel/ulysses_attention.py` does.
 
 Rebuild when `pyproject.toml`/`uv.lock` change (run `uv lock` first), or when Flash Attention / DeepEP / the
 base NGC image need updating.

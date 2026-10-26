@@ -15,7 +15,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 from transformers import DistributedConfig, Qwen3Config, Qwen3ForCausalLM
 
-from src.model_loading.parallel import tp as tp_loading
+from halo.model_loading.parallel import tp as tp_loading
 from tests.common.gloo import run_gloo_ranks
 
 WORLD, TP, DP = 4, 2, 2

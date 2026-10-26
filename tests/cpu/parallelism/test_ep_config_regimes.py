@@ -12,10 +12,10 @@ property that drifts from its reader syncs experts twice or not at all, or sizes
 
 import pytest
 
-from src.distributed.expert_parallel import config as ep_config_mod
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.expert_parallel import config as ep_config_mod
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config, stubbed_process_groups
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 

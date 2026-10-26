@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The last pipeline stage applies the family's head transform (``src/models/head_transform.py``).
+"""The last pipeline stage applies the family's head transform (``halo/models/head_transform.py``).
 
 A stage replaces the ``*ForCausalLM`` forward with its own head call, so whatever that forward
 applies around the output embedding — Cohere's ``logit_scale``, Granite's ``logits_scaling``
@@ -14,10 +14,10 @@ import pytest
 import torch
 import transformers
 
-from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss, fused_causal_lm_token_loss
-from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
+from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss, fused_causal_lm_token_loss
+from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from tests.common.models import (
     TINY_COHERE2_MOE_CONFIG,
     TINY_GEMMA2_CONFIG,

@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-import src.distributed.expert_parallel.families.roster as ep_roster
+import halo.distributed.expert_parallel.families.roster as ep_roster
 from tests.common.equivalence.revisions import probe_in_tree
 from tests.common.goldens.registry_order import GOLDEN_PATH, render
 from tests.common.repo import REPO_ROOT

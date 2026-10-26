@@ -26,8 +26,8 @@ from unittest import mock
 import pytest
 from datasets import DatasetDict
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints.model_setup import default_padded_attn_implementation
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.model_setup import default_padded_attn_implementation
 from tests.common.offline_grpo import offline_grpo_dataset
 from tests.common.repo import REPO_ROOT, load_script_module
 
@@ -88,7 +88,7 @@ def _requested_attn(rel_path: str, yaml_body: str, tmp_path: Path, parallelism_c
             splits = DatasetDict(train=offline_grpo_dataset(2), test=offline_grpo_dataset(2, offset=2))
             stack.enter_context(mock.patch.object(module, "load_script_datasets", return_value=(splits, False)))
         # The log tee redirects the process's stdout/stderr fds — keep it out of the test process.
-        stack.enter_context(mock.patch("src.entrypoints.script.install_log_tee"))
+        stack.enter_context(mock.patch("halo.entrypoints.script.install_log_tee"))
         stack.enter_context(mock.patch.object(sys, "argv", ["prog", str(config)]))
         stack.enter_context(pytest.raises(_StopAtModelLoad))
         module.main()

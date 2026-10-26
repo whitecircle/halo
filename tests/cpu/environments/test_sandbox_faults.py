@@ -33,37 +33,37 @@ import time
 import pytest
 import torch
 
-from src.environments.episode import RolloutResult
-from src.environments.episode_keys import (
+from halo.environments.episode import RolloutResult
+from halo.environments.episode_keys import (
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
     SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
-from src.environments.episode_scoring import REWARD_PENDING_KEY
-from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.protocols.react import ReActEnvironment
-from src.environments.sandbox.bubblewrap import BubblewrapSandbox
-from src.environments.sandbox.local import (
+from halo.environments.episode_scoring import REWARD_PENDING_KEY
+from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
+from halo.environments.sandbox.local import (
     LOCAL_FSIZE_LIMIT,
     TAMPERED_WORKDIR_RETURNCODE,
     LocalSubprocessSandbox,
     _grant_owner,
     _restore_owner_access,
 )
-from src.environments.sandbox.remote import RemoteSandbox
-from src.environments.sandbox.repl import format_sandbox_repl_output
-from src.environments.sandbox.results import SandboxAgentFault, SandboxInfraError, SandboxResult
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
-from src.environments.tasks.coding.swe import SweEnvironment
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-from src.environments.tools.toolsets import build_session_code_tools
-from src.rewards import composer as scorers_module
-from src.rewards.scorers.base import Scorer, ScoreResult
-from src.rewards.terms import JudgeTerm
-from src.trainers.grpo.environmental.step_batch import rollout_valid_mask
-from src.trainers.grpo.objective.advantages import group_relative_advantages
+from halo.environments.sandbox.remote import RemoteSandbox
+from halo.environments.sandbox.repl import format_sandbox_repl_output
+from halo.environments.sandbox.results import SandboxAgentFault, SandboxInfraError, SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
+from halo.environments.tasks.coding.swe import SweEnvironment
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.tools.toolsets import build_session_code_tools
+from halo.rewards import composer as scorers_module
+from halo.rewards.scorers.base import Scorer, ScoreResult
+from halo.rewards.terms import JudgeTerm
+from halo.trainers.grpo.environmental.step_batch import rollout_valid_mask
+from halo.trainers.grpo.objective.advantages import group_relative_advantages
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
 from tests.common.repo import REPO_ROOT
 
@@ -470,8 +470,8 @@ _LOCK_THE_WORKDIR = (
 # next run (else it cannot write its source).
 _GRADE_AND_REPORT = f"""
 import json, os, tempfile
-from src.environments.tasks.coding.grading import run_solution_against_tests
-from src.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.tasks.coding.grading import run_solution_against_tests
+from halo.environments.sandbox.local import LocalSubprocessSandbox
 tempfile.tempdir = tempfile.mkdtemp()
 tests = [{{"input": "", "output": "right"}}] * 3
 sandbox = LocalSubprocessSandbox()

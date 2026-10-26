@@ -12,9 +12,9 @@ from unittest.mock import patch
 import pytest
 from transformers import AutoConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe.config_fields import has_routed_experts
-from src.models.moe.family_specs import find_moe_family_spec_for_config
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.moe.config_fields import has_routed_experts
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from tests.common.goldens.load_collective_trace import (
     GOLDEN_PATH,
     LOAD_CASES,

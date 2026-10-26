@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Muon factory contract tests (src/optimizers/muon.py) — CPU-only.
+"""Muon factory contract tests (halo/optimizers/muon.py) — CPU-only.
 
 The standard Muon recipe orthogonalizes only the hidden 2D weight matrices and keeps the token
 embedding and output head on AdamW; routing on ``ndim`` alone sends those 2D tensors through
@@ -22,9 +22,9 @@ import torch
 import torch.nn as nn
 from gram_newton_schulz import Muon as UpstreamMuon
 
-from src.models.param_roles import EMBEDDING_HEAD_MARKERS
-from src.optimizers import muon
-from src.optimizers.muon import _is_embedding_or_head, build_muon_optimizer
+from halo.models.param_roles import EMBEDDING_HEAD_MARKERS
+from halo.optimizers import muon
+from halo.optimizers.muon import _is_embedding_or_head, build_muon_optimizer
 
 
 class _TinyMoE(nn.Module):

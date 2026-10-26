@@ -20,10 +20,10 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-from src.kernels.lowp.quantization import BlockScaledTensor, dequantize, fake_quant
-from src.kernels.lowp.spec import MLP_PROJECTIONS
-from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
-from src.models.moe.family_specs import per_expert_layouts
+from halo.kernels.lowp.quantization import BlockScaledTensor, dequantize, fake_quant
+from halo.kernels.lowp.spec import MLP_PROJECTIONS
+from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
+from halo.models.moe.family_specs import per_expert_layouts
 from tests.common.checkpoint_io import weight_files
 from tests.common.repo import load_script_module
 

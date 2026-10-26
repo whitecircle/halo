@@ -18,7 +18,7 @@ import inspect
 import pytest
 from transformers.trainer import Trainer
 
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.rosters import distributed_trainer_classes
 
 _FLAG = "LOSS_IS_OWN_MEAN"
@@ -29,7 +29,7 @@ def _computes_its_own_loss(cls: type) -> bool:
     """The trainer's loss is written in this repo rather than inherited from HF/TRL."""
     for name in ("compute_loss", "get_batch_loss_metrics"):
         function = getattr(cls, name, None)
-        if function is not None and getattr(function, "__module__", "").startswith("src.trainers"):
+        if function is not None and getattr(function, "__module__", "").startswith("halo.trainers"):
             return True
     return False
 

@@ -26,7 +26,7 @@ run.
 
 ## EP wrapper
 
-`EPCohere2MoELayer` (`src/distributed/expert_parallel/families/cohere2_moe.py`) replaces
+`EPCohere2MoELayer` (`halo/distributed/expert_parallel/families/cohere2_moe.py`) replaces
 `Cohere2MoeSparseMoeBlock`. Layers whose `mlp_layer_types` entry is `dense` instantiate a plain MLP
 and are never wrapped.
 
@@ -58,7 +58,7 @@ and are never wrapped.
 ## CP wrapper
 
 `Cohere2MoeAttention` → `Cohere2MoeUlyssesAttention`
-(`src/distributed/context_parallel/families.py`), optimized `[B, S, H, D]` path. RoPE is
+(`halo/distributed/context_parallel/families.py`), optimized `[B, S, H, D]` path. RoPE is
 applied only where the HF layer applies it: sliding-window layers, plus the `force_rope`
 dense-prefix override — full-attention layers pass Q/K through untouched (NoPE). The rotary is the
 interleaved GPT-J form in fp32, matching `apply_rotary_pos_emb` bit-for-bit in bf16. The 8 KV heads

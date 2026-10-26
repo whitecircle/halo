@@ -51,7 +51,7 @@ A view over `max_view_chars` is cut in two stages:
 1. In the `full` view, reasoning goes first: each turn's is cut to head and tail within an even share of the room the rest leaves, so no call, result or text is cut for a thought.
 2. The view keeps two thirds of the budget from its head and one third from its tail, with a marker between, so the final answer survives.
 
-The reference is cut the same way. Renderers: `src/rewards/samples.py`.
+The reference is cut the same way. Renderers: `halo/rewards/samples.py`.
 
 ## Veto judge
 

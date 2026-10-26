@@ -14,8 +14,8 @@ import types
 import pytest
 import torch
 
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 
 
 class _PeftPolicy:

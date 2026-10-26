@@ -22,8 +22,8 @@ import torch
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
-from src.models.peft_adapters import lora_fold_targets, lora_folded
-from src.trainers.grpo.rollout.weight_push import gather_and_send_weights, reject_unsyncable_model
+from halo.models.peft_adapters import lora_fold_targets, lora_folded
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights, reject_unsyncable_model
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.peft_helpers import adapter_param_items, randomize_adapters
 from tests.common.weight_sync import RecordingSender, as_pushed, local_parameters, merged_by_peft, moved_parameters

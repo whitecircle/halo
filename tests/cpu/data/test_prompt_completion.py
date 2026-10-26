@@ -8,7 +8,7 @@ import copy
 
 import pytest
 
-from src.data.pipeline.prompt_completion import tokenize_completions_jointly, tokenize_prompt_completions
+from halo.data.pipeline.prompt_completion import tokenize_completions_jointly, tokenize_prompt_completions
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 

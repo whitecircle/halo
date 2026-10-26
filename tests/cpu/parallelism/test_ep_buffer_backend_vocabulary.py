@@ -12,8 +12,8 @@ from typing import get_args
 
 import pytest
 
-from src.distributed.expert_parallel.config import EPBufferBackend
-from src.distributed.expert_parallel.deepep import backends as backends_mod
+from halo.distributed.expert_parallel.config import EPBufferBackend
+from halo.distributed.expert_parallel.deepep import backends as backends_mod
 
 # What each name selects; "auto" is the elastic default.
 _SELECTED = {

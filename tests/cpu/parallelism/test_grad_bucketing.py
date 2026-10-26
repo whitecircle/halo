@@ -15,8 +15,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-import src.distributed.grad_reduce as grad_reduce
-from src.distributed.grad_reduce import reduce_grad, reduce_grads_bucketed
+import halo.distributed.grad_reduce as grad_reduce
+from halo.distributed.grad_reduce import reduce_grad, reduce_grads_bucketed
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

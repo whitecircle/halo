@@ -21,10 +21,10 @@ from datetime import timedelta
 
 import pytest
 
-import src.environments.protocols.mcp as mcp_module
-from src.environments.protocols.mcp import NativeMCPClientEnvironment, build_mcp_environment
-from src.environments.registry import build_environment
-from src.environments.rollout_config import RolloutConfig
+import halo.environments.protocols.mcp as mcp_module
+from halo.environments.protocols.mcp import NativeMCPClientEnvironment, build_mcp_environment
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
 
 
 class _StubTransport:
@@ -208,7 +208,7 @@ async def test_a_failing_mcp_tool_is_logged_once_by_the_protocol(caplog):
     env.stub_session.call_tool = _call_tool
     ids, _ = await env.reset_async(["task"])
     call = {"id": "c1", "function": {"name": "stub_tool", "arguments": "{}"}}
-    with caplog.at_level(logging.DEBUG, logger="src.environments"):
+    with caplog.at_level(logging.DEBUG, logger="halo.environments"):
         await env.step_async(ids, ["calling"], [{"finish_reason": "tool_calls", "tool_calls": [call]}])
     await env.disconnect()
     logged = [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -296,7 +296,7 @@ def test_sse_transport_is_registry_selectable_and_needs_a_url(monkeypatch):
     would build an env whose preset (and its credential resolution) is silently dead, so the two are
     mutually exclusive and the registry picks the transport from the config.
     """
-    mcp_module = importlib.import_module("src.environments.protocols.mcp")
+    mcp_module = importlib.import_module("halo.environments.protocols.mcp")
     monkeypatch.setattr(mcp_module, "sse_client", lambda url: ("sse-ctx", url))
 
     env = build_environment("mcp", {"transport": "sse", "server_url": "http://mcp.example:9000/sse"})
@@ -332,7 +332,7 @@ def test_stdio_transport_merges_credentials_over_sdk_default_env(monkeypatch):
             self.command, self.args, self.env = command, args, env
 
     # The SDK names the module binds at import; patch them where they are USED.
-    mcp_module = importlib.import_module("src.environments.protocols.mcp")
+    mcp_module = importlib.import_module("halo.environments.protocols.mcp")
     monkeypatch.setattr(mcp_module, "StdioServerParameters", _Params)
     monkeypatch.setattr(mcp_module, "get_default_environment", lambda: {"PATH": "/usr/bin", "HOME": "/root"})
     monkeypatch.setattr(mcp_module, "stdio_client", lambda params: captured.append(params) or "transport-ctx")

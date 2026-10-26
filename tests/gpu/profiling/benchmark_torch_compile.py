@@ -36,12 +36,12 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.distributed.parallelism_config import ParallelismConfig
-from src.log import configure_training_logging
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
-from src.trainers.sft import DistributedSFTTrainer
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.log import configure_training_logging
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import (
     cleanup_dirs,
     ensure_model_downloaded,

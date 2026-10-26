@@ -9,7 +9,7 @@ Environmental-GRPO training script consumes it with ``prompt_field: prompt`` / `
 answer``. Rows the stdin/stdout environment cannot grade are filtered out.
 
 Prompt building, payload packing, and filtering come from the dataset adapters in
-``src/environments/tasks/coding/contest_datasets.py`` (``CODE_DATASET_ADAPTERS``), so preparation,
+``halo/environments/tasks/coding/contest_datasets.py`` (``CODE_DATASET_ADAPTERS``), so preparation,
 evaluation, and training share one definition per dataset. Add an adapter there to support a new one.
 
 Usage (inside the training image):
@@ -49,18 +49,18 @@ from pathlib import Path
 
 from datasets import Dataset, DatasetDict, disable_caching, load_dataset
 
-from scripts.environments.preparation.parquet_parts import parquet_parts
-from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
-from src.data.pipeline.coordinated_map import resolve_map_num_proc
-from src.data.pipeline.rejected_rows import report_rejected_rows
-from src.environments.sandbox.factory import build_sandbox
-from src.environments.tasks.coding.contest_datasets import (
+from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
+from halo.data.pipeline.coordinated_map import resolve_map_num_proc
+from halo.data.pipeline.rejected_rows import report_rejected_rows
+from halo.environments.sandbox.factory import build_sandbox
+from halo.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,
     JOINED_CHECKER_FIELD,
     JOINED_TESTS_FIELD,
 )
-from src.environments.tasks.coding.verdicts import build_verdict
-from src.log import configure_cli_logging
+from halo.environments.tasks.coding.verdicts import build_verdict
+from halo.log import configure_cli_logging
+from scripts.environments.preparation.parquet_parts import parquet_parts
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

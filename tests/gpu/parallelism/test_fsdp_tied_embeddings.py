@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.distributed.fsdp import apply_fsdp2_for_dp
+from halo.distributed.fsdp import apply_fsdp2_for_dp
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.utils import log

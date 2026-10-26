@@ -18,10 +18,10 @@ from unittest.mock import patch
 
 import torch
 
-from src.distributed.nccl._nccl_wrapper import ncclUniqueId
-from src.weight_sync.transport import pynccl, rendezvous
-from src.weight_sync.transport.pynccl import PyNcclCommunicator, UniqueIdStore
-from src.weight_sync.transport.rendezvous import RendezvousListener
+from halo.weight_sync.transport import pynccl, rendezvous
+from halo.weight_sync.transport.nccl_library import ncclUniqueId
+from halo.weight_sync.transport.pynccl import PyNcclCommunicator, UniqueIdStore
+from halo.weight_sync.transport.rendezvous import RendezvousListener
 from tests.common.goldens import regen_main
 
 GOLDEN_PATH = Path(__file__).with_suffix(".json")

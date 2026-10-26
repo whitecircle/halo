@@ -32,11 +32,11 @@ from transformers.models.inkling.configuration_inkling import (
 )
 from transformers.models.inkling.modeling_inkling import InklingForCausalLM, InklingForConditionalGeneration
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.model_loading.parallel.ep import load_ep_model_lazy
-from src.model_loading.parallel.pp import _load_stage_lazy
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.pp import _load_stage_lazy
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG

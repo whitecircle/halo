@@ -22,15 +22,15 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from src.checkpoint.format import EP_SHARDED_FORMAT, ep_sharded_index_metadata
-from src.checkpoint.parallel.reading import reject_ep_sharded_resume
-from src.checkpoint.reading import (
+from halo.checkpoint.format import EP_SHARDED_FORMAT, ep_sharded_index_metadata
+from halo.checkpoint.parallel.reading import reject_ep_sharded_resume
+from halo.checkpoint.reading import (
     ep_sharded_checkpoint_reason,
     is_ep_sharded_checkpoint,
     load_full_state_dict,
     reject_partial_checkpoint,
 )
-from src.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint
+from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint
 
 
 def _write_index(tmp_path, payload: str) -> str:

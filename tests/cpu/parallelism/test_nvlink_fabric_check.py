@@ -23,17 +23,17 @@ from unittest.mock import patch
 
 import pytest
 
-from src.distributed.nvlink import (
+from halo.distributed.nvlink import (
     NO_FABRIC,
     _fabric_clique_for_device,
     _parse_fabric_clique,
     nvlink_fabric_clique_id,
     validate_nvlink_domain_against_fabric,
 )
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 
-_MOD = "src.distributed.nvlink"
-_CONFIG_MOD = "src.distributed.parallelism_config"
+_MOD = "halo.distributed.nvlink"
+_CONFIG_MOD = "halo.distributed.parallelism_config"
 
 
 def _run(

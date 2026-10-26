@@ -19,10 +19,10 @@ import torch.nn.functional as F
 from transformers.models.laguna.configuration_laguna import LagunaConfig
 from transformers.models.laguna.modeling_laguna import LagunaSparseMoeBlock
 
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.models.moe.family_specs import find_moe_family_spec
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.models.moe.family_specs import find_moe_family_spec
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 8, 16, 32, 3

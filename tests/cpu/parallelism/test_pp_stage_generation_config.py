@@ -21,8 +21,8 @@ import pytest
 import torch.nn as nn
 from transformers import GenerationConfig, PretrainedConfig
 
-from src.checkpoint.config_export import save_model_config
-from src.distributed.pipeline_parallel.stage import PipelineStageModule
+from halo.checkpoint.config_export import save_model_config
+from halo.distributed.pipeline_parallel.stage import PipelineStageModule
 from tests.common.pp_fakes import hand_built_stage
 
 

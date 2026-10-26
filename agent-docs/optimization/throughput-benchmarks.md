@@ -4,7 +4,7 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
 
 ## Setup
 
-- **GPU**: B300 SXM6 (288 GB HBM3e, 148-SM die). Peak TFLOPS from the toolkit's registry (`src/hardware.py`): bf16 **2250 TF**, fp8 4500 TF, fp4 9000 TF; the measured best large square bf16 GEMM is ~1800 TF (80% of peak).
+- **GPU**: B300 SXM6 (288 GB HBM3e, 148-SM die). Peak TFLOPS from the toolkit's registry (`halo/hardware.py`): bf16 **2250 TF**, fp8 4500 TF, fp4 9000 TF; the measured best large square bf16 GEMM is ~1800 TF (80% of peak).
 
     The peak scales the MFU/S-MFU percentages only; the tok/s/GPU and achieved-TFLOPS columns below do not use it.
 
@@ -110,7 +110,7 @@ The Megatron-LM, Laguna and LFM2.5 rows are from the Halo research page (whiteci
 
 ## Metrics
 
-All metrics computed by `EfficiencyCallback` (`src/callbacks/efficiency.py`).
+All metrics computed by `EfficiencyCallback` (`halo/callbacks/efficiency.py`).
 
 **Achieved TFLOPS** = `(tokens_per_gpu × (6·N_trainable + 4·N_frozen) + attention_score_flops / tp_size) / step_time`
 (PaLM/Megatron FLOP count).
@@ -126,7 +126,7 @@ the full `input_ids`; the wrapper splits inside forward).
 The attention-score term costs each decoder layer at `6 × keys × heads·(d_qk + d_v)` per token (QKᵀ and Attn·V,
 forward + backward; `12·S·H` for standard heads). Full attention is costed at every key (the PaLM convention,
 not the causal half); bounded layers at the keys their kernel visits. `keys` is set by the layer's
-`config.layer_types` entry (`src/models/attention/layout.py`):
+`config.layer_types` entry (`halo/models/attention/layout.py`):
 
 | `layer_types` entry | `keys` |
 |---|---|
@@ -375,7 +375,7 @@ Batch is the dominant lever — raise it with GC off while it fits. At a fixed 3
 
 Set `enable_efficiency_metrics: true` in any YAML; every standard training script builds the callback through `build_run_callbacks`, deriving EP/TP/CP sizes from `ParallelismConfig` and setting `include_num_input_tokens_seen="all"`. Off by default because multi-sequence trainers (DPO / SMPO / Reward / Distillation) report a misleading utilization. See [Performance & Balancing Flags](../reference/configuration-reference.md#performance--balancing-flags).
 
-For benchmark scripts outside `build_run_callbacks`, construct `EfficiencyCallback` directly (`src/callbacks/efficiency.py`) with the run's `ParallelismConfig` plus `num_full_model_params` (the expert count and top-k come from the model config); read `callback.tps.avg_tokens_per_second`, `callback.mfu.avg_tflops_per_sec`, `callback.memory.peak_allocated_gb`.
+For benchmark scripts outside `build_run_callbacks`, construct `EfficiencyCallback` directly (`halo/callbacks/efficiency.py`) with the run's `ParallelismConfig` plus `num_full_model_params` (the expert count and top-k come from the model config); read `callback.tps.avg_tokens_per_second`, `callback.mfu.avg_tflops_per_sec`, `callback.memory.peak_allocated_gb`.
 
 ## Running benchmarks
 

@@ -2,7 +2,7 @@
 name: docs
 description: >-
   Use when writing, editing, or reviewing any page under agent-docs/, or
-  when a code change in src/ needs its owning doc page updated (doc actualization).
+  when a code change in halo/ needs its owning doc page updated (doc actualization).
   Authors and maintains the Halo agent-docs/ tree and enforces the anti-AI-slop
   style charter.
 allowed-tools: [Read, Edit, Write, Grep, Glob, Bash]
@@ -15,20 +15,20 @@ paths:
 
 The `agent-docs/` tree is plain GitHub-rendered markdown (each section's `README.md` is its
 overview page). Two rules from `CLAUDE.md` govern this work: **Docs first** (check `agent-docs/`
-before searching the code) and **Keep docs current** (a significant `src/` change updates its
+before searching the code) and **Keep docs current** (a significant `halo/` change updates its
 owning doc page). This skill does both, to the house voice.
 
 ## Workflow
 
-1. **Find the owning page.** For a changed `src/` path, look it up in
+1. **Find the owning page.** For a changed `halo/` path, look it up in
    [`docs-ownership.md`](docs-ownership.md). For a new topic, place it in the
    section directory it belongs to and add it to that section's `README.md` — do
    not orphan a page.
-2. **Ground every edit against the code.** Read the actual `src/` file before you
+2. **Ground every edit against the code.** Read the actual `halo/` file before you
    write the claim; when the code and the doc disagree, the code wins — fix the
    doc. `CLAUDE.md` and sibling docs can themselves lag the code (e.g. a
    mid-migration WIP commit) — treat them as leads, not authority, and verify
-   against the `src/` file. Grounding is about correctness, not citation: cite the
+   against the `halo/` file. Grounding is about correctness, not citation: cite the
    path only where the reader needs to find or set that thing (see `style.md`), not
    on every sentence.
 3. **Apply the style charter.** Follow [`style.md`](style.md) on every edit: lead
@@ -59,7 +59,7 @@ owning doc page). This skill does both, to the house voice.
 
 ## Citing repo paths
 
-Cite a repo path as plain inline code (`` `src/trainers/distributed_trainer.py` ``,
+Cite a repo path as plain inline code (`` `halo/trainers/distributed_trainer.py` ``,
 `scripts/...`, `examples/...`, `tests/...`, `Dockerfile`, …). Do **not**
 hand-write `github.com` URLs — a relative markdown link is fine where the reader
 should click through to another doc page, and plain code is right for source
@@ -74,14 +74,14 @@ each cited path and dotted name, so spell a placeholder in angle brackets
 
 - [`style.md`](style.md) — the anti-AI-slop style charter (voice, banned
   register, good-vs-bad examples). Read it before editing prose.
-- [`docs-ownership.md`](docs-ownership.md) — the `src/` area → owning doc
+- [`docs-ownership.md`](docs-ownership.md) — the `halo/` area → owning doc
   page(s) map. Read it before documenting a code change.
 
 ## Sources of truth
 
-This skill's whole premise: `agent-docs/` describes intended behavior, but the **code under `src/` is the
+This skill's whole premise: `agent-docs/` describes intended behavior, but the **code under `halo/` is the
 ultimate authority** — workflow step 2 (ground every edit against the code; when code and doc disagree,
 the code wins) is non-negotiable. Never document a number, flag, or behavior you have not read in the
-`src/` file. Related skills own their domains — `parallelism`, `checkpoints`, `data`, `optimize`,
+`halo/` file. Related skills own their domains — `parallelism`, `checkpoints`, `data`, `optimize`,
 `rl-setup`, `add-model` each ground in their code; keep the doc page consistent with the skill that
 owns the feature.

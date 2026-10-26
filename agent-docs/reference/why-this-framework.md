@@ -67,7 +67,7 @@ gets TP. Advanced parallelism (EP, CP, ETP) requires per-family wrappers, not a 
 reimplementation or a checkpoint conversion.
 
 For EP, that is a frozen `MoEFamilySpec` holding the family's facts plus a wrapper under
-`src/distributed/expert_parallel/families/` (most under 140 lines) subclassing `EPMoELayerBase`, declaring
+`halo/distributed/expert_parallel/families/` (most under 140 lines) subclassing `EPMoELayerBase`, declaring
 its `HF_MODULE_NAMES` and pointing `FAMILY` at the spec, with `MOE_LAYER_MAP` built from the roster's
 imports. Fifteen MoE families ship one; the per-family × per-mode matrix is
 [Supported Models](../models/README.md), and [Adding a New Model](../models/adding-a-model.md) is the
@@ -81,4 +81,4 @@ Pinned versions: [Docker](../infrastructure/docker.md) (images) and `pyproject.t
 > [!WARNING]
 > **Rollout servers run as separate Docker containers**
 >
-> vLLM and SGLang each pin their own torch/transformers stack — neither is in the training environment. Each runs as an isolated container (`Dockerfile.vllm` + `docker-compose.vllm.yml`, `Dockerfile.sglang` + `docker-compose.sglang.yml`). The training container talks to the server over HTTP (generation) and an NCCL weight-sync client (`src/weight_sync/`).
+> vLLM and SGLang each pin their own torch/transformers stack — neither is in the training environment. Each runs as an isolated container (`Dockerfile.vllm` + `docker-compose.vllm.yml`, `Dockerfile.sglang` + `docker-compose.sglang.yml`). The training container talks to the server over HTTP (generation) and an NCCL weight-sync client (`halo/weight_sync/`).

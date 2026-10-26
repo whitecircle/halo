@@ -14,9 +14,9 @@ from accelerate import PartialState
 from datasets import DatasetDict
 
 import scripts.training.offline_grpo as offline_script
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.configs.script_arguments import ModelArguments
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.offline_grpo import offline_grpo_dataset
 
 PartialState(cpu=True)

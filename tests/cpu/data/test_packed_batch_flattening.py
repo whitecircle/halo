@@ -20,7 +20,7 @@ from transformers.modeling_flash_attention_utils import (
     prepare_fa_kwargs_from_position_ids,
 )
 
-from src.data.collators.packing import (
+from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithPacking,
     flatten_packed_batch,

@@ -6,7 +6,7 @@ wrapper's ``language_model.`` segment. Its experts are fused in memory, so a per
 (a Qwen3.5/3.6 checkpoint ``unfuse_moe_experts.py`` wrote, or a wrapper-less save of a model built from
 its config) is never a model key itself: the fuser finds the fused parameter it feeds from the key's
 namespace, which must therefore have the segment dropped too. Driven through the real
-:func:`~src.model_loading.parallel.ep.load_ep_model_lazy` (EP patching stubbed — it needs
+:func:`~halo.model_loading.parallel.ep.load_ep_model_lazy` (EP patching stubbed — it needs
 DeepEP and process groups) against ``from_pretrained`` of the same text-only class.
 
     python tests/cpu/parallelism/test_lazy_load_text_only_per_expert.py
@@ -16,10 +16,10 @@ import pytest
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3_5MoeConfig, Qwen3_5MoeForConditionalGeneration
 
-import src.model_loading.parallel.ep as ep_lazy_loader
-from src.checkpoint.reading import resolve_checkpoint_weights
-from src.distributed.expert_parallel.config import EPConfig
-from src.model_loading.parallel.ep import load_ep_model_lazy
+import halo.model_loading.parallel.ep as ep_lazy_loader
+from halo.checkpoint.reading import resolve_checkpoint_weights
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.model_loading.parallel.ep import load_ep_model_lazy
 from tests.common.models import TINY_QWEN35_MOE_CONFIG
 
 RUN_DTYPE = torch.bfloat16

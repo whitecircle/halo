@@ -45,9 +45,9 @@ shared mount gives one authoritative copy with no post-hoc gather. That combinat
 
 ## Coordination primitives
 
-Owning files: `src/runtime/filesystem.py` (the shared-FS flags, the writer/reader rank predicates,
-main-first ordering, `fs_aware_makedirs`, the output-FS probe), `src/runtime/consensus.py` (the
-c10d-store phase, the store and collective rejection joins) and `src/runtime/load_coordination.py`
+Owning files: `halo/runtime/filesystem.py` (the shared-FS flags, the writer/reader rank predicates,
+main-first ordering, `fs_aware_makedirs`, the output-FS probe), `halo/runtime/consensus.py` (the
+c10d-store phase, the store and collective rejection joins) and `halo/runtime/load_coordination.py`
 (the per-node load throttle and its world join).
 
 - `fs_aware_main_first(tag, timeout=None)` — context manager that orders the body main-rank-first.
@@ -109,7 +109,7 @@ c10d-store phase, the store and collective rejection joins) and `src/runtime/loa
 
 - `fs_aware_makedirs(path, writer_rank=is_fs_save_rank)` — creates a directory with the correct
   rank, then barriers. Pass `writer_rank=is_fs_load_rank` for a read-side cache dir (what
-  `src/entrypoints/run_setup.py` does for `HF_DATASETS_CACHE`).
+  `halo/entrypoints/run_setup.py` does for `HF_DATASETS_CACHE`).
 
 - `reject_across_ranks(local_reason, what, exc_type=RuntimeError)` — the collective that joins a
   rank-gated body. Every rank calls it with its own reason or `None`; if **any** is non-`None`, every
@@ -144,13 +144,13 @@ c10d-store phase, the store and collective rejection joins) and `src/runtime/loa
     launcher's elastic agent usually reaps the group first.
 
 ```python
-from src.runtime.filesystem import fs_aware_main_first
+from halo.runtime.filesystem import fs_aware_main_first
 
 with fs_aware_main_first("teacher_model"):
     snapshot_download(teacher_repo_id)   # one rank fetches; the rest read the populated cache
 ```
 
-- `run_load_rank_first(work, operation_name)` (`src/data/pipeline/coordinated_map.py`) — the ordering
+- `run_load_rank_first(work, operation_name)` (`halo/data/pipeline/coordinated_map.py`) — the ordering
   for read-side data work: `work` runs on the `is_fs_load_rank()` ranks, every rank joins on the
   store, then the peers run it against the cache and every rank joins again.
 
@@ -180,17 +180,17 @@ joins go permanently off-by-one on the equal-entry invariant.
 
 | Area | Side | File | Notes |
 |------|------|------|-------|
-| Model downloads | input | `src/model_loading/parallel/model_source.py` | `resolve_model_source()` runs the `snapshot_download` fetch in `fs_aware_main_first`, then joins every rank's view of the source over the store and agrees the commit; a source some ranks cannot see raises on every rank ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)) |
-| Dataset loading | input | `src/data/sources/loading.py` | `run_load_rank_first` around the source load (S3, Hub, or local) and the train/test split. The preprocessed-dataset probe runs once per filesystem scope (`agree_input_probe_across_ranks`) and its verdict is shared; a probe that raises raises its cause on every rank. A sharded dataset coordinates per shard with a file lock instead, and joins the world over the store so one rank's shard failure aborts every rank with the cause |
-| Dataset map / filter | input | `src/data/pipeline/coordinated_map.py` | `coordinated_map` / `coordinated_filter` — self-ordering, see the warning above |
+| Model downloads | input | `halo/model_loading/parallel/model_source.py` | `resolve_model_source()` runs the `snapshot_download` fetch in `fs_aware_main_first`, then joins every rank's view of the source over the store and agrees the commit; a source some ranks cannot see raises on every rank ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)) |
+| Dataset loading | input | `halo/data/sources/loading.py` | `run_load_rank_first` around the source load (S3, Hub, or local) and the train/test split. The preprocessed-dataset probe runs once per filesystem scope (`agree_input_probe_across_ranks`) and its verdict is shared; a probe that raises raises its cause on every rank. A sharded dataset coordinates per shard with a file lock instead, and joins the world over the store so one rank's shard failure aborts every rank with the cause |
+| Dataset map / filter | input | `halo/data/pipeline/coordinated_map.py` | `coordinated_map` / `coordinated_filter` — self-ordering, see the warning above |
 | Dataset packing | input | `coordinated_pack` (`coordinated_map.py`) | `run_load_rank_first` around a deterministic `cache_file_name`. Unguarded, `pack_dataset` materializes a full corpus copy **per rank** |
-| TRL dataset preparation (DPO, KTO, BT reward) | input | `src/trainers/trl_dataset_prep.py` (`TRLDatasetPrepMixin`) | `coordinated_dataset_transform` (`coordinated_map.py`): the load rank runs TRL's `_prepare_dataset` with its `main_process_first` barriers disabled and the map cache off, then publishes the result as `HF_DATASETS_CACHE/transform-<md5>`, keyed on the rows, the tokenizer and every training argument but the run's identity; the rest load it. Its intermediate maps write a staging directory beside that copy (`transform-<md5>.tmp-<uuid>`), removed when the preparation ends, rather than `$TMPDIR`. Unguarded, TRL holds the peers in an NCCL barrier for the whole tokenization and writes a full copy per rank per run |
-| EP lazy model loading | input | `src/distributed/expert_parallel/lazy_plan.py` | A shared prologue orders the meta-device instantiation main-rank-first; each rank then slices its expert range from the safetensors shards |
-| Checkpoint saves | output | `src/checkpoint/parallel/ep.py`, `src/checkpoint/parallel/save.py`, `src/trainers/checkpointing.py` | Writer-rank selection via `is_fs_save_rank()`, with HF's `save_on_each_node` aligned to it ([Checkpoints → Multi-node](../reference/checkpoints.md#multi-node)); a non-shared output FS also rejects a multi-node sharded-EP save (the per-rank expert shards are keyed by global rank and would scatter across nodes' local disks with no gather path) |
-| Optimizer shards and meta | output | `src/checkpoint/parallel/optimizer.py` | Every rank writes its own `optimizer_shard_<rank>.pt` and the save rank(s) write `optimizer_meta.pt`, so each node's directory carries its own meta. A resume needs each rank's own shard on its node ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)). Multi-group EP replica dedup runs on a shared output FS only |
-| Trainer sidecars | output | `src/trainers/reference_logps.py`, `src/trainers/grpo/environmental/async_rollouts.py` | `reference_logps.pt` from the save rank(s), `prefetch_pending-<rank>-of-<world>.pt` from every rank. Each read is rank-joined (`consensus_read`), so a node without its copy fails the resume everywhere |
-| Offline GRPO reference scratch | output | `src/trainers/grpo/offline/reference_cache.py` | `_reference_cache/<launch>/` under `output_dir`: the save rank(s) append and merge the scores, and every rank memory-maps the merged file from its own node's copy. Needs an output filesystem that appends and memory-maps; lifetime and cleanup: [Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model) |
-| `run.log` tee | output | `src/entrypoints/run_setup.py` | Same `is_fs_save_rank()` predicate as the checkpoint writers, so two nodes can never both hold one `run.log` |
+| TRL dataset preparation (DPO, KTO, BT reward) | input | `halo/trainers/trl_dataset_prep.py` (`TRLDatasetPrepMixin`) | `coordinated_dataset_transform` (`coordinated_map.py`): the load rank runs TRL's `_prepare_dataset` with its `main_process_first` barriers disabled and the map cache off, then publishes the result as `HF_DATASETS_CACHE/transform-<md5>`, keyed on the rows, the tokenizer and every training argument but the run's identity; the rest load it. Its intermediate maps write a staging directory beside that copy (`transform-<md5>.tmp-<uuid>`), removed when the preparation ends, rather than `$TMPDIR`. Unguarded, TRL holds the peers in an NCCL barrier for the whole tokenization and writes a full copy per rank per run |
+| EP lazy model loading | input | `halo/distributed/expert_parallel/lazy_plan.py` | A shared prologue orders the meta-device instantiation main-rank-first; each rank then slices its expert range from the safetensors shards |
+| Checkpoint saves | output | `halo/checkpoint/parallel/ep.py`, `halo/checkpoint/parallel/save.py`, `halo/trainers/checkpointing.py` | Writer-rank selection via `is_fs_save_rank()`, with HF's `save_on_each_node` aligned to it ([Checkpoints → Multi-node](../reference/checkpoints.md#multi-node)); a non-shared output FS also rejects a multi-node sharded-EP save (the per-rank expert shards are keyed by global rank and would scatter across nodes' local disks with no gather path) |
+| Optimizer shards and meta | output | `halo/checkpoint/parallel/optimizer.py` | Every rank writes its own `optimizer_shard_<rank>.pt` and the save rank(s) write `optimizer_meta.pt`, so each node's directory carries its own meta. A resume needs each rank's own shard on its node ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)). Multi-group EP replica dedup runs on a shared output FS only |
+| Trainer sidecars | output | `halo/trainers/reference_logps.py`, `halo/trainers/grpo/environmental/async_rollouts.py` | `reference_logps.pt` from the save rank(s), `prefetch_pending-<rank>-of-<world>.pt` from every rank. Each read is rank-joined (`consensus_read`), so a node without its copy fails the resume everywhere |
+| Offline GRPO reference scratch | output | `halo/trainers/grpo/offline/reference_cache.py` | `_reference_cache/<launch>/` under `output_dir`: the save rank(s) append and merge the scores, and every rank memory-maps the merged file from its own node's copy. Needs an output filesystem that appends and memory-maps; lifetime and cleanup: [Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model) |
+| `run.log` tee | output | `halo/entrypoints/run_setup.py` | Same `is_fs_save_rank()` predicate as the checkpoint writers, so two nodes can never both hold one `run.log` |
 | Directory creation | either | `fs_aware_makedirs()` | Output dirs by default; read-side cache dirs pass `writer_rank=is_fs_load_rank` |
 
 ## Storage layout

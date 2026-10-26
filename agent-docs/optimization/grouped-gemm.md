@@ -2,7 +2,7 @@
 
 Grouped GEMM (`torch.nn.functional.grouped_mm`) batches a rank's per-expert matmuls into one kernel launch, eliminating per-expert dispatch overhead in MoE layers. Available on SM90+ (Hopper, Blackwell) with the pinned PyTorch 2.11.x. Enabled by default (`use_grouped_gemm: true`).
 
-The MoE expert step sorts tokens by expert (contiguous per-expert blocks), builds an int32 cumulative-offset tensor, runs one `F.grouped_mm` over all groups, then scatters outputs back and applies routing weights. The sort (`_sort_tokens_for_grouped_mm`, `src/distributed/expert_parallel/moe_layer/compute.py`) drops `-1` padding from DeepEP dispatch (expert IDs outside `[0, experts_per_rank)`) before sorting; an unfiltered padding ID misaligns the groups and produces NaN.
+The MoE expert step sorts tokens by expert (contiguous per-expert blocks), builds an int32 cumulative-offset tensor, runs one `F.grouped_mm` over all groups, then scatters outputs back and applies routing weights. The sort (`_sort_tokens_for_grouped_mm`, `halo/distributed/expert_parallel/moe_layer/compute.py`) drops `-1` padding from DeepEP dispatch (expert IDs outside `[0, experts_per_rank)`) before sorting; an unfiltered padding ID misaligns the groups and produces NaN.
 
 ## Performance
 
@@ -49,7 +49,7 @@ Around the kernel sit the token permutation and, for expert-bias models (GptOss)
 
 PyTorch's default backward for a duplicate-valued gather is `index_add_`, whose bf16 kernel has no native atomic add and emulates one with a CAS loop that serializes under the duplicate-row contention. On a profiled gpt-oss-20b EP step that atomic scatter took ≈20% of all GPU time and inflated the DeepEP combine wait.
 
-**Rule: never let a duplicate-valued gather fall back to the default `index_add_` backward in a training forward.** Both gathers route through custom autograd Functions that keep the gather forward and replace the backward: `MoEGatherPermute` and `MoEExpertBiasGather` (`src/kernels/moe_permute.py`).
+**Rule: never let a duplicate-valued gather fall back to the default `index_add_` backward in a training forward.** Both gathers route through custom autograd Functions that keep the gather forward and replace the backward: `MoEGatherPermute` and `MoEExpertBiasGather` (`halo/kernels/moe_permute.py`).
 
 The bias gather (`MoEExpertBiasGather`, applied in `EPGptOssMoELayer`'s grouped path) computes `grad_bias` as one GEMM (`onehot(eids)ᵀ @ grad_out`, fp32 tensor-core accumulation): atomic-free and numerically identical (more accurate than the bf16 atomic add).
 
@@ -57,7 +57,7 @@ On that gpt-oss-20b EP step the atomic-free path runs ≈5× faster than the def
 
 ### The atomic-free gather-reduce permute
 
-The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `src/kernels/moe_permute.py`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step, 4.3 ms per call.
+The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `halo/kernels/moe_permute.py`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step, 4.3 ms per call.
 
 The permute expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded, built by `build_inv_map`), turning the scatter into gather + reduction. It matches `index_add_` to rounding, not bit for bit: the kernels accumulate in fp32, and the unpermute skips the bf16 rounding of each weighted row (checked fwd+bwd against a float64 `index_add_`).
 
@@ -65,7 +65,7 @@ It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`_sort_token
 
 The per-expert loop (`use_grouped_gemm: false`) does not use it: it gathers each expert's tokens with `index_select` and scatters the weighted outputs back with a bf16 atomic `index_add_`.
 
-Both reductions run as one Triton kernel (`src/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. Routing weights that need no gradient leave the expert outputs unsaved, since only the routing-weight gradient reads them. The fused `[gate | up]` GLU output is read in place by the packed GLU kernel (`GluCombine.packed` in `src/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
+Both reductions run as one Triton kernel (`halo/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. Routing weights that need no gradient leave the expert outputs unsaved, since only the routing-weight gradient reads them. The fused `[gate | up]` GLU output is read in place by the packed GLU kernel (`GluCombine.packed` in `halo/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
 
 The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free permute in its padded-gather form (the `halo_padded_gather` baseline below), on Qwen3.6-35B-A3B at EP=8; compare within it only (tuned absolute figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096)).
 
@@ -94,7 +94,7 @@ Compute–comm overlap is the remaining structural lever. One narrow form ships 
 
 ## Low precision
 
-This is the bf16 path, the MoE production default. fp8/fp4 grouped GEMM and the opt-in DeepGEMM kernel (`HALO_DEEPGEMM_NATIVE=1`) are net-slower than bf16 at the toolkit's MoE shapes — the per-expert GEMM is bandwidth-bound at the bf16 roofline. See [Low-Precision Kernels](low-precision-moe-kernels.md). The quantization-format dispatch is `expert_gemm()` (`src/kernels/expert_gemm.py`, called by the EP layer's `_grouped_mm` in `moe_layer/compute.py`): `quant_format=None` is this bf16 path.
+This is the bf16 path, the MoE production default. fp8/fp4 grouped GEMM and the opt-in DeepGEMM kernel (`HALO_DEEPGEMM_NATIVE=1`) are net-slower than bf16 at the toolkit's MoE shapes — the per-expert GEMM is bandwidth-bound at the bf16 roofline. See [Low-Precision Kernels](low-precision-moe-kernels.md). The quantization-format dispatch is `expert_gemm()` (`halo/kernels/expert_gemm.py`, called by the EP layer's `_grouped_mm` in `moe_layer/compute.py`): `quant_format=None` is this bf16 path.
 
 ## Requirements and compatibility
 
@@ -104,13 +104,13 @@ SM90+ (Hopper H100/H200, Blackwell B200/B300) and the pinned PyTorch 2.11.x. Dee
 
 `F.grouped_mm` has a backward bug on Blackwell (B200, B300): zero-stride gradients (from `.sum()` or any scalar reduction broadcasting back through `grouped_mm`) are rejected with `"Invalid strides/sizes, got [0, 0, 0]"`, and `torch.cumsum` upcasts int32 offsets to int64, rejected with `"Offsets have to be int32"`.
 
-The bf16 primitive `grouped_mm()` in `src/kernels/grouped_mm.py`, where `expert_gemm()` sends every EP MoE layer's bf16 path, materializes zero-stride grads and auto-casts offsets to int32. Overhead vs native is <3%; backward on `.sum()`-style losses runs 200–240× faster than the Python loop fallback.
+The bf16 primitive `grouped_mm()` in `halo/kernels/grouped_mm.py`, where `expert_gemm()` sends every EP MoE layer's bf16 path, materializes zero-stride grads and auto-casts offsets to int32. Overhead vs native is <3%; backward on `.sum()`-style losses runs 200–240× faster than the Python loop fallback.
 
 An empty group takes a fresh `torch.empty` instead of `.contiguous()`: at `M == 0` the copy is a no-op that keeps the `[0, 0]` strides the kernel still validates, reachable under EP whenever a rank routes zero tokens.
 
 ### Detection and disabling
 
-At model load the EP MoE layer enables grouped GEMM when `use_grouped_gemm` is `True` (default) and `supports_grouped_mm()` (`src/hardware.py`) holds — CUDA is available and compute capability is ≥ 9.0. That predicate is the single authority; a test asking for grouped GEMM on pre-SM90 hardware still gets the loop path. Opt out with `use_grouped_gemm: false` in the YAML config.
+At model load the EP MoE layer enables grouped GEMM when `use_grouped_gemm` is `True` (default) and `supports_grouped_mm()` (`halo/hardware.py`) holds — CUDA is available and compute capability is ≥ 9.0. That predicate is the single authority; a test asking for grouped GEMM on pre-SM90 hardware still gets the loop path. Opt out with `use_grouped_gemm: false` in the YAML config.
 
 ## Supported models
 
@@ -121,7 +121,7 @@ tensors at init, GPT-OSS de-interleaves its interleaved pair, and Bailing/Ling s
 
 The GLU activation and multiply run as one fused Triton kernel wherever the family's activation allows
 ([GLM-4 → Fused SwiGLU](../models/glm4.md#fused-swiglu) lists who gets which); GPT-OSS's clamped SwiGLU
-has its own kernel (`GluCombine.gptoss`, `src/kernels/fused_glu.py`).
+has its own kernel (`GluCombine.gptoss`, `halo/kernels/fused_glu.py`).
 
 > [!NOTE]
 > **Expert Tensor Parallelism**

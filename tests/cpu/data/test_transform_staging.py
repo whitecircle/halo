@@ -18,8 +18,8 @@ import pytest
 from datasets import Dataset, load_from_disk
 from datasets import fingerprint as hf_fingerprint
 
-from src.data.pipeline.coordinated_map import coordinated_dataset_transform
-from src.data.pipeline.map_cache_key import CACHE_KEY_ATTR
+from halo.data.pipeline.coordinated_map import coordinated_dataset_transform
+from halo.data.pipeline.map_cache_key import CACHE_KEY_ATTR
 
 ROWS = 8
 MAPS = 3

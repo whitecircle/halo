@@ -25,11 +25,11 @@ import pytest
 import torch
 from trl import GRPOTrainer
 
-from src.configs.grpo import RLRRConfig
-from src.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks
-from src.trainers.grpo.objective.advantages import degenerate_group_mask
-from src.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.configs.grpo import RLRRConfig
+from halo.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks
+from halo.trainers.grpo.objective.advantages import degenerate_group_mask
+from halo.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 SUM_THEN_NORMALIZE = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards="group")
 NORMALIZE_THEN_SUM = types.SimpleNamespace(multi_objective_aggregation="normalize_then_sum", scale_rewards="group")

@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from src.checkpoint.parallel.resume_weights import load_resume_weights
+from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from tests.common.checkpoint_io import load_context
 
 

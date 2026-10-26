@@ -27,7 +27,7 @@ from contextlib import contextmanager
 import pytest
 import torch.distributed as dist
 
-from src.runtime.consensus import (
+from halo.runtime.consensus import (
     DeferredRankFailure,
     agree_across_ranks,
     rank_max,

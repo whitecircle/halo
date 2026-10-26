@@ -29,11 +29,11 @@ from accelerate.utils import extract_model_from_parallel
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, shared_scratch_dir
 from tests.common.ep_reference import ep_layers

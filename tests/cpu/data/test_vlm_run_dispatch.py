@@ -27,26 +27,26 @@ from datasets import Image as ImageFeature
 from PIL import Image as PILImage
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.data import vlm_render as vlm_render_module
-from src.data import vlm_routing as vlm_routing_module
-from src.data.collators.self_distill import SelfDistillTextCollator
-from src.data.pipeline import conversation as conversation_module
-from src.data.pipeline import vlm_rows as vlm_rows_module
-from src.data.pipeline.chat_render import render_generation_prompt
-from src.data.pipeline.conversation import (
+from halo.data import vlm_render as vlm_render_module
+from halo.data import vlm_routing as vlm_routing_module
+from halo.data.collators.self_distill import SelfDistillTextCollator
+from halo.data.pipeline import conversation as conversation_module
+from halo.data.pipeline import vlm_rows as vlm_rows_module
+from halo.data.pipeline.chat_render import render_generation_prompt
+from halo.data.pipeline.conversation import (
     IMAGE_PART_PAYLOAD_KEY,
     IMAGE_PART_TYPE,
     conversation_carries_images,
 )
-from src.data.pipeline.preferences import render_preference_row
-from src.data.pipeline.text_rows import prepare_generative_row, render_row_conversation
-from src.data.pipeline.vlm_rows import normalize_vlm_conversation
-from src.data.preprocessed import tokenization as tokenization_module
-from src.data.vlm_render import extract_conversation_images
-from src.data.vlm_routing import VLM_IMAGE_COLUMNS, dataset_declares_images, dataset_image_evidence, is_vlm_run
-from src.entrypoints import data_setup
-from src.entrypoints.data_setup import resolve_vlm_run
-from src.entrypoints.model_setup import apply_text_path_padding_side
+from halo.data.pipeline.preferences import render_preference_row
+from halo.data.pipeline.text_rows import prepare_generative_row, render_row_conversation
+from halo.data.pipeline.vlm_rows import normalize_vlm_conversation
+from halo.data.preprocessed import tokenization as tokenization_module
+from halo.data.vlm_render import extract_conversation_images
+from halo.data.vlm_routing import VLM_IMAGE_COLUMNS, dataset_declares_images, dataset_image_evidence, is_vlm_run
+from halo.entrypoints import data_setup
+from halo.entrypoints.data_setup import resolve_vlm_run
+from halo.entrypoints.model_setup import apply_text_path_padding_side
 from tests.common.repo import load_script_module
 
 # Real configs, not stand-ins: the verdict must follow what transformers says about the architecture.

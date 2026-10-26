@@ -66,7 +66,7 @@ PIN_TREES = (
     "launcher-configs/**/*.hcl",
     "docker/**/*.sh",
     "docker/**/*.py",
-    "src/**/*.py",
+    "halo/**/*.py",
     "scripts/**/*.py",
     "tests/**/*.py",
 )

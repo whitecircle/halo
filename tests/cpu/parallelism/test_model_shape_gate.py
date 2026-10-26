@@ -28,15 +28,15 @@ import pytest
 import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.load_rules import _divisors_up_to, reject_unsupported_model
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.moe.config_fields import EXPERT_FFN_WIDTH_FIELDS, resolve_expert_ffn_width
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.parallelism.mode_setup import FsdpExclusions
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.load_rules import _divisors_up_to, reject_unsupported_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.moe.config_fields import EXPERT_FFN_WIDTH_FIELDS, resolve_expert_ffn_width
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.parallelism.mode_setup import FsdpExclusions
 from tests.common.parallelism import make_parallelism_config
 
-_MOD = "src.distributed.parallelism_config"
+_MOD = "halo.distributed.parallelism_config"
 # Enough to make every gate below see a MoE model; the field is an expert-count spelling.
 _MOE = {"num_experts": 8}
 

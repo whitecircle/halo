@@ -18,12 +18,12 @@ import types
 import pytest
 import torch
 
-import src.trainers.grpo.logprob_scoring as chunked
-from src.runtime.consensus import RankConsensus
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.logprob_scoring import LogitsWidth, LogprobScoringMixin, full_logits_verdict
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
+import halo.trainers.grpo.logprob_scoring as chunked
+from halo.runtime.consensus import RankConsensus
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.logprob_scoring import LogitsWidth, LogprobScoringMixin, full_logits_verdict
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 _GIB = 1024**3
 _WIDTH = LogitsWidth(1024, "max_completion_length")

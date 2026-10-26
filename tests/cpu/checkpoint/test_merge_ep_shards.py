@@ -19,13 +19,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 import scripts.after_training.merge_ep_shards as merge_mod
-from scripts.after_training.merge_ep_shards import (
-    _EP_EXPERT_PATTERN,
-    _EP_EXPERT_SUFFIXES,
-    _group_expert_weights,
-    merge_ep_shards,
-)
-from src.checkpoint.format import (
+from halo.checkpoint.format import (
     EP_SHARD_KEY_RE,
     OPTIMIZER_META_FILE,
     REFERENCE_LOGPS_FILE,
@@ -33,23 +27,29 @@ from src.checkpoint.format import (
     SCHEDULER_STATE_FILE,
     optimizer_shard_filename,
 )
-from src.checkpoint.parallel.resume_source import classify_resume_weights
-from src.checkpoint.writing import StreamingShardWriter
-from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
-from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
-from src.models.moe.expert_layout import to_hub_expert_tensors
-from src.models.moe.family_specs import expert_weight_roots, find_moe_family_spec
+from halo.checkpoint.parallel.resume_source import classify_resume_weights
+from halo.checkpoint.writing import StreamingShardWriter
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
+from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from halo.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from halo.models.moe.expert_layout import to_hub_expert_tensors
+from halo.models.moe.family_specs import expert_weight_roots, find_moe_family_spec
+from scripts.after_training.merge_ep_shards import (
+    _EP_EXPERT_PATTERN,
+    _EP_EXPERT_SUFFIXES,
+    _group_expert_weights,
+    merge_ep_shards,
+)
 
 # The whole-dict oracle the streamed merge is pinned against (test-only; see its module docstring).
 from tests.common.ep_merge_oracle import post_process_merged_weights
@@ -1035,7 +1035,7 @@ def test_merge_refuses_to_write_into_its_own_input_dir():
 
 
 def test_the_reader_accepts_exactly_what_the_writer_names():
-    """The per-rank shard filename has ONE home — ``src.checkpoint.format.ep_shard_filename``.
+    """The per-rank shard filename has ONE home — ``halo.checkpoint.format.ep_shard_filename``.
 
     A reader carrying its own copy of the pattern matches nothing after a writer-side rename (an
     empty merge on a full directory), and a loosened copy sweeps in a sibling adapter or a stale

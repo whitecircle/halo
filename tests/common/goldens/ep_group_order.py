@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from src.env import nccl_timeout
+from halo.env import nccl_timeout
 from tests.common.goldens import regen_main
 from tests.common.goldens.shape_grid import GridGolden, LayoutShape
 from tests.common.parallelism import StubGroup, stubbed_process_groups

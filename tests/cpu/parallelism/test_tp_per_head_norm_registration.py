@@ -16,7 +16,7 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
-from src.distributed.tensor_parallel.plain_params import per_head_norm_param_names, register_per_head_norm_params
+from halo.distributed.tensor_parallel.plain_params import per_head_norm_param_names, register_per_head_norm_params
 
 
 class _TwoNormModel(nn.Module):

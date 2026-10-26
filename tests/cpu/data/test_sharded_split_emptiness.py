@@ -16,9 +16,9 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset
 
-from src.data.preprocessed.preparation import shard_dataset
-from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
-from src.data.sources.loading import load_datasets
+from halo.data.preprocessed.preparation import shard_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from halo.data.sources.loading import load_datasets
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

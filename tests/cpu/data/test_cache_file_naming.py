@@ -19,11 +19,11 @@ from tokenizers.models import WordLevel
 from tokenizers.processors import TemplateProcessing
 from transformers import ProcessorMixin
 
-from src.data.collators.self_distill import SelfDistillTextCollator
-from src.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY
-from src.data.pipeline import map_cache_key
-from src.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
-from src.data.pipeline.map_cache_key import (
+from halo.data.collators.self_distill import SelfDistillTextCollator
+from halo.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY
+from halo.data.pipeline import map_cache_key
+from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
+from halo.data.pipeline.map_cache_key import (
     CACHE_KEY_ATTR,
     _closure_fingerprint,
     _tokenizer_content_sig,

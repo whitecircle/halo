@@ -23,7 +23,7 @@ Usage:
 import pytest
 import torch
 
-from src.data.completion_spans import COLLATOR_SPAN_POLICY, build_completion_only_labels, resolve_completion_spans
+from halo.data.completion_spans import COLLATOR_SPAN_POLICY, build_completion_only_labels, resolve_completion_spans
 
 EOS = 1
 M1, M2 = 10, 11

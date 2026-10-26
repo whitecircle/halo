@@ -27,10 +27,10 @@ from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.deepep.capacity import capacity_scope
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.deepep.capacity import capacity_scope
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 

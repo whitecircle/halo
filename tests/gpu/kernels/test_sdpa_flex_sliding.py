@@ -21,16 +21,16 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import flex_attention
 from transformers import Gemma4ForCausalLM, Gemma4TextConfig, GptOssConfig, MistralConfig, MistralForCausalLM
 
-from src.models.attention import sdpa_flex_sliding
-from src.models.attention.backend_setup import patch_sdpa_for_wide_heads
-from src.models.attention.sdpa_flex_sliding import (
+from halo.models.attention import sdpa_flex_sliding
+from halo.models.attention.backend_setup import patch_sdpa_for_wide_heads
+from halo.models.attention.sdpa_flex_sliding import (
     SDPA_FLEX_SLIDING,
     register_flex_sliding_attention,
     reject_full_determinism_after_warmup,
     resolve_flex_sliding_attn_implementation,
     warm_flex_sliding_kernels,
 )
-from src.models.attention.selection import has_head_dim_beyond_flash
+from halo.models.attention.selection import has_head_dim_beyond_flash
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import fro_rel_err
 

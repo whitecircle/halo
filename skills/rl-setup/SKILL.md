@@ -6,7 +6,7 @@ description: >-
   SGLang 0.5.22 for async GRPO with environments (rollout_backend: sglang, the families
   its loaders can take an update for)
   — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
-  NCCL weight sync through the engine client in src/weight_sync/
+  NCCL weight sync through the engine client in halo/weight_sync/
   (parallelism-aware gather — EP/TP/ETP and multi-rank FSDP2 all participate),
   select the RL environment by registry name, and set the key GRPO
   hyperparameters. USER-INVOKED ONLY — invoke when the user explicitly asks to set
@@ -25,7 +25,7 @@ allowed-tools:
 Wire up online GRPO (RLVR) or async GRPO with environments (multi-turn tool-use). The generation engine
 runs in a **separate container** (vLLM 0.32.0, or SGLang 0.5.22 for async GRPO): the training image
 cannot import either engine. Trainer and engine talk over **HTTP** (generation) and **NCCL** (weight sync
-through the engine client in `src/weight_sync/`). The owner page for everything server-side is
+through the engine client in `halo/weight_sync/`). The owner page for everything server-side is
 `agent-docs/infrastructure/rollout-servers.md`; a green image build is what proves the server can be
 synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
 
@@ -47,9 +47,9 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
    `agent-docs/reference/configuration-reference.md`.
 
 3. **NCCL weight sync** is `VLLMWeightSyncClient` / `SGLangWeightSyncClient`
-   (`src/weight_sync/clients/`): the trainer is NCCL rank 0, the server workers rank 1+. Online and env
+   (`halo/weight_sync/clients/`): the trainer is NCCL rank 0, the server workers rank 1+. Online and env
    GRPO share **one** parallelism- and PEFT-aware gather, `gather_and_send_weights`
-   (`src/trainers/grpo/rollout/weight_push.py`): under EP / TP / ETP **and** multi-rank FSDP2 every rank
+   (`halo/trainers/grpo/rollout/weight_push.py`): under EP / TP / ETP **and** multi-rank FSDP2 every rank
    joins the gather and only the forwarding rank sends; LoRA folds out of place into each base weight.
    Routing multi-rank DP through a single-process path deadlocks right after the server pauses. Which
    families each engine can update, and what refuses at construction:
@@ -91,7 +91,7 @@ the sync.
 
 `agent-docs/infrastructure/rollout-servers.md` + `agent-docs/training-methods/` document the setup
 (`grpo/rewards/README.md` owns the term list, `async-grpo/setup.md` the method's launch). The code is the
-**ultimate** authority: `src/trainers/grpo/environmental/trainer.py`, `src/weight_sync/` (the weight-sync
+**ultimate** authority: `halo/trainers/grpo/environmental/trainer.py`, `halo/weight_sync/` (the weight-sync
 clients), and `Dockerfile.vllm` decide the real handshake — when a doc, this skill, or memory disagrees,
 or you are unsure, read those files before wiring it up. (`CLAUDE.md`: docs-first, the code wins.) Related
 skills: `data` (the async-GRPO format: `prompt`, plus `answer` where the environment's `requires_answer`

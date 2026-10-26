@@ -18,10 +18,10 @@ from unittest.mock import patch
 
 import pytest
 
-from src.distributed import parallelism_rules
+from halo.distributed import parallelism_rules
 from tests.common.parallelism import make_parallelism_config
 
-_MOD = "src.distributed.parallelism_config"
+_MOD = "halo.distributed.parallelism_config"
 
 
 def _build(**kwargs):

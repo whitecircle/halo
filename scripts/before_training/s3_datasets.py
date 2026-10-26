@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """CLI over the toolkit's S3 transport: push, download, list and delete S3 folders, each through an
-:class:`~src.data.sources.s3_client.S3Client` built for ``--bucket``.
+:class:`~halo.data.sources.s3_client.S3Client` built for ``--bucket``.
 
 Usage: python scripts/before_training/s3_datasets.py <push|download|list|exists|delete> ...
 """
@@ -8,9 +8,9 @@ Usage: python scripts/before_training/s3_datasets.py <push|download|list|exists|
 import argparse
 import logging
 
-from src.data.sources import dataset_cache, s3_client, s3_dataset_store
-from src.data.sources.s3_client import DEFAULT_BUCKET, S3Client
-from src.log import configure_cli_logging
+from halo.data.sources import dataset_cache, s3_client, s3_dataset_store
+from halo.data.sources.s3_client import DEFAULT_BUCKET, S3Client
+from halo.log import configure_cli_logging
 
 
 def _cli_push(args, client: S3Client):

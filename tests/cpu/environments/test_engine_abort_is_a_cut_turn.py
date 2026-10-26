@@ -10,9 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.environments.environment_base import EnvironmentBase
-from src.environments.messages import Message, Trajectory
-from src.inference.response import FINISH_REASON_ABORT, FINISH_REASON_LENGTH
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.messages import Message, Trajectory
+from halo.inference.response import FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 
 
 def _record_turn(finish_reason: str | None) -> Message:

@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from src.data.collators.packing import DataCollatorWithPacking
+from halo.data.collators.packing import DataCollatorWithPacking
 
 
 def make_tokenizer() -> MagicMock:

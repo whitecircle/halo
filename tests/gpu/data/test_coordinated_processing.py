@@ -30,10 +30,10 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset, load_from_disk
 
-from src.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, coordinated_map_and_filter
-from src.runtime.collectives import barrier
-from src.runtime.filesystem import is_fs_load_rank, is_input_shared_filesystem
-from src.runtime.ranks import is_global_main_process
+from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, coordinated_map_and_filter
+from halo.runtime.collectives import barrier
+from halo.runtime.filesystem import is_fs_load_rank, is_input_shared_filesystem
+from halo.runtime.ranks import is_global_main_process
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log, log_all
 

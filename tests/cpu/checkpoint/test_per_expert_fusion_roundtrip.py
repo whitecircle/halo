@@ -24,10 +24,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.distributed.expert_parallel.families.roster import ep_layer_classes
-from src.models.moe import family_specs
-from src.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
-from src.models.moe.family_specs import MoEFamilySpec, per_expert_fusion_map
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes
+from halo.models.moe import family_specs
+from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
+from halo.models.moe.family_specs import MoEFamilySpec, per_expert_fusion_map
 from tests.common.ep_stubs import bare_ep_layer
 
 E, H, M = 3, 8, 16

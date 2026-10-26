@@ -24,8 +24,8 @@ Run with 2 GPUs:
 import torch
 import torch.distributed as dist
 
-from src.runtime.collectives import nccl_safe_broadcast
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.runtime.collectives import nccl_safe_broadcast
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.harness import gpu_test_main
 
 ROWS, SEQ, LAYERS = 2, 16, 3

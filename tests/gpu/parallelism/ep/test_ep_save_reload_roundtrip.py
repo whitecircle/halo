@@ -40,14 +40,14 @@ import torch
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from src.checkpoint.parallel.save import save_tokenizer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_flag, env_int, env_str
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
-from src.runtime.ranks import is_global_main_process
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.parallel.save import save_tokenizer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_flag, env_int, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.runtime.ranks import is_global_main_process
 from tests.common.checkpoint_io import fixed_batch_loss, fixed_text_batch, save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint

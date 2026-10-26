@@ -22,9 +22,9 @@ import pytest
 import torch
 from torch import nn
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.trainers.parallelism.ep_layers import EPLayersMixin
-from src.trainers.parallelism.grad_sync import GradientSyncMixin
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.trainers.parallelism.ep_layers import EPLayersMixin
+from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from tests.common.ep_stubs import StubEPLayerBase
 
 E, H, M = 2, 4, 8

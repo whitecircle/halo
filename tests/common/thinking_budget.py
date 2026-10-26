@@ -1,7 +1,7 @@
 """The live half of ``rollout_max_thinking_tokens``: is the budget enforced, and did a turn respect it.
 
 The budget is a vLLM-only request field — ``generation_control_fields``
-(:mod:`src.environments.engine_wire`) puts ``thinking_token_budget`` at the top level of the chat
+(:mod:`halo.environments.engine_wire`) puts ``thinking_token_budget`` at the top level of the chat
 request — and the ENGINE enforces it: nothing in the toolkit truncates or masks a turn's CoT, and
 reasoning ids are not captured separately from the turn's sampled ids. So both halves need a live
 server: whether this one honours the field at all, and what the rollouts then reasoned.
@@ -16,8 +16,8 @@ from collections.abc import Callable
 
 import requests
 
-from src.inference.response import get_reasoning_text
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.inference.response import get_reasoning_text
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.on_policy_e2e import PROBE_TIMEOUT_S
 from tests.common.utils import log
 

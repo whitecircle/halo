@@ -26,9 +26,9 @@ from transformers import (
     Step3p7Processor,
 )
 
-from src.entrypoints import model_setup
-from src.entrypoints.model_setup import install_resolved_tokenizer
-from src.model_loading.model_preparation import resolve_auto_model_class
+from halo.entrypoints import model_setup
+from halo.entrypoints.model_setup import install_resolved_tokenizer
+from halo.model_loading.model_preparation import resolve_auto_model_class
 from tests.common.models import (
     PINNED_REVISIONS,
     STEP3P7_FLASH,

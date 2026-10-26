@@ -16,7 +16,7 @@ import sys
 
 import pytest
 
-from src.diagnostics import py_spy
+from halo.diagnostics import py_spy
 from tests.common.repo import REPO_ROOT
 
 _PIDS = (101, 102, 103)

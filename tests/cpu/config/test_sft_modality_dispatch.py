@@ -24,8 +24,8 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.entrypoints.model_setup import PolicyLoad
-from src.model_loading.parallel import model_source
+from halo.entrypoints.model_setup import PolicyLoad
+from halo.model_loading.parallel import model_source
 from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
@@ -120,7 +120,7 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=((dataset, False), False)),
         mock.patch.object(module, "_prepare_text_data", side_effect=fail_text),
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
     if stub_vlm_prep:
@@ -184,9 +184,9 @@ def _run_dpo(tmp_path, dataset: DatasetDict, tokenizer):
         # The preference prep and the example log both live in the shared data_setup helper the
         # script calls, so the two arms are distinguished on ITS globals: the text arm reaches
         # the tokenizing prep first, the VLM arm (which has no prep) reaches the log.
-        mock.patch("src.entrypoints.data_setup.prepare_preference_datasets", side_effect=fail_text),
-        mock.patch("src.entrypoints.data_setup.log_dataset_examples", side_effect=fail_vlm),
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.data_setup.prepare_preference_datasets", side_effect=fail_text),
+        mock.patch("halo.entrypoints.data_setup.log_dataset_examples", side_effect=fail_vlm),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
 

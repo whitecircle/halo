@@ -12,15 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from src.inference import batch_requests
-from src.inference.batch_requests import (
+from halo.inference import batch_requests
+from halo.inference.batch_requests import (
     append_resume_records,
     load_resume_records,
     parallel_openai_requests,
     resolve_request_tools,
     resume_store_path,
 )
-from src.inference.response import OpenAIResponse
+from halo.inference.response import OpenAIResponse
 from tests.common.fake_chat_client import FakeChatClient, RecordingChatClient, fake_completion
 
 _TOOL = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}

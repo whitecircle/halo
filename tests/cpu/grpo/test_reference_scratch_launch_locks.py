@@ -19,8 +19,8 @@ import os
 
 import pytest
 
-import src.trainers.grpo.offline.reference_cache as cache_module
-from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
+import halo.trainers.grpo.offline.reference_cache as cache_module
+from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 
 # Bounds every wait on a spawned launch: spawn and import, then the step it signals.
 LAUNCH_TIMEOUT_S = 180.0

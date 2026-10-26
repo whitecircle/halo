@@ -24,8 +24,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.trainers.parallelism.grad_clipping import GradientClippingMixin
-from src.trainers.parallelism.grad_sync import GradientSyncMixin
+from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
+from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from tests.common.gloo import new_groups, run_gloo_ranks
 
 WORLD = 4

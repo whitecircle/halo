@@ -19,10 +19,10 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeStore
 from transformers import AutoConfig, AutoTokenizer
 
-from src.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
-from src.kernels.jit_cache import ensure_fa4_kernel_cache_env
-from src.runtime import filesystem
-from src.runtime.collectives import barrier, broadcast_from_rank0
+from halo.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
+from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
+from halo.runtime import filesystem
+from halo.runtime.collectives import barrier, broadcast_from_rank0
 from tests.common.scratch import SCRATCH_DIR_TAG
 
 
@@ -129,7 +129,7 @@ def init_distributed() -> tuple[int, int, int]:
         if torch.cuda.is_available():
             # Bind this rank's device before init so the NCCL backend does not infer the device from
             # the global rank, which warns and can hang on heterogeneous mappings. Mirrors
-            # src.runtime.process_group.init_distributed.
+            # halo.runtime.process_group.init_distributed.
             torch.cuda.set_device(local_rank)
             kwargs["device_id"] = torch.device("cuda", local_rank)
         dist.init_process_group(**kwargs)
@@ -163,7 +163,7 @@ def setup_cache_dirs(prefix: str, rank: int) -> tuple[str, str]:
     os.environ["HF_DATASETS_CACHE"] = cache_dir
     # datasets froze the env at import (datasets.config latches at module load), so the env write
     # alone doesn't isolate direct load_dataset callers — update the live config too (mirrors
-    # src/entrypoints/run_setup.py).
+    # halo/entrypoints/run_setup.py).
     datasets.config.HF_DATASETS_CACHE = Path(cache_dir)
     output_dir = tempfile.mkdtemp(prefix=f"{SCRATCH_DIR_TAG}{prefix}_out_")
     return output_dir, cache_dir

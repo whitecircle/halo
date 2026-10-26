@@ -14,13 +14,13 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.distributed.context_parallel.families import (
+from halo.distributed.context_parallel.families import (
     ULYSSES_ATTENTION_MAP,
     GptOssUlyssesAttention,
     Mistral4UlyssesAttention,
 )
-from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from tests.common.equivalence import cp_equivalence
 from tests.common.equivalence.cp_equivalence import (
     CP_SIZE,

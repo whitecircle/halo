@@ -36,10 +36,10 @@ import torch
 from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer
 
-from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import load_peft_model

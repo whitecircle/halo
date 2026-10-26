@@ -29,14 +29,14 @@ from datasets import Dataset
 from jinja2 import TemplateError
 from PIL import Image
 
-from src.data.pipeline.coordinated_map import coordinated_map_and_filter
-from src.data.pipeline.rejected_rows import _HIGH_REJECTION_WARN_FRACTION
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.preprocessed.tokenization import tokenize_vlm_dataset
-from src.trainers.reward.classification import _filter_over_length
+from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
+from halo.data.pipeline.rejected_rows import _HIGH_REJECTION_WARN_FRACTION
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
+from halo.trainers.reward.classification import _filter_over_length
 from tests.common.vlm_fakes import FakeVLMProcessorBase
 
-_REJECTION_LOGGER = "src.data.pipeline.rejected_rows"
+_REJECTION_LOGGER = "halo.data.pipeline.rejected_rows"
 
 
 @pytest.fixture(autouse=True)

@@ -14,10 +14,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import src.kernels.logprobs as logprob_kernels
-from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss, fused_causal_lm_token_loss
-from src.kernels.logprobs import token_logprobs
-from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
+import halo.kernels.logprobs as logprob_kernels
+from halo.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss, fused_causal_lm_token_loss
+from halo.kernels.logprobs import token_logprobs
+from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from tests.common.utils import autograd_nodes
 
 

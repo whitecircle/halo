@@ -19,7 +19,7 @@ import math
 import torch
 import torch.nn as nn
 
-from src.optimizers.flash_adamw import build_flash_adamw_optimizer
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import assert_optimizer_state_bit_exact
 

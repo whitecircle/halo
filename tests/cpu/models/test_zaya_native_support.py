@@ -18,10 +18,10 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.zaya import ZayaConfig
 from transformers.models.zaya.modeling_zaya import ZayaForCausalLM
 
-from src.model_loading import model_preparation
-from src.model_loading.remote_code import apply_remote_code_compat_shims
-from src.models.moe.balancing import resolve_balancing_mode
-from src.models.zaya import (
+from halo.model_loading import model_preparation
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.models.moe.balancing import resolve_balancing_mode
+from halo.models.zaya import (
     patch_zaya_flash_packed_position_ids,
     patch_zaya_gradient_checkpointing_refusal,
     patch_zaya_router_load_recording,

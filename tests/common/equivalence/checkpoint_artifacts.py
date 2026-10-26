@@ -24,14 +24,14 @@ from peft import LoraConfig, get_peft_model
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.distributed.tensor import DTensor
 
-from src.checkpoint.parallel.adapters import save_resume_adapter
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.checkpoint.parallel.save import save_checkpoint
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
-from src.model_loading.dtype import cast_parameters_to_run_dtype
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.checkpoint.parallel.adapters import save_resume_adapter
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.checkpoint.parallel.save import save_checkpoint
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
+from halo.model_loading.dtype import cast_parameters_to_run_dtype
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.checkpoint_io import save_context, shard_store_context
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 from tests.common.equivalence.revisions import (

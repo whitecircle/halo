@@ -49,14 +49,14 @@ from peft import PeftModel
 from safetensors.torch import load_file
 from transformers import AutoTokenizer, TrainerCallback
 
-import src.checkpoint.parallel.optimizer as optimizer_store_mod
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.unwrapping import find_peft_model
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+import halo.checkpoint.parallel.optimizer as optimizer_store_mod
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.unwrapping import find_peft_model
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import ensure_model_downloaded, pin_deterministic_ep_dispatch, shared_scratch_dir
 from tests.common.harness import gpu_test_main

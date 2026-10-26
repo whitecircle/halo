@@ -16,9 +16,9 @@ import pytest
 import torch
 from transformers import Trainer
 
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.sft import DistributedSFTTrainer
-from src.trainers.world_metrics import WorldMetrics
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.world_metrics import WorldMetrics
 
 
 def _inputs(seq_len):

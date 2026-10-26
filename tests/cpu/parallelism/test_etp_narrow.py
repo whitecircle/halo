@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class _Probe:

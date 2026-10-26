@@ -13,8 +13,8 @@ Usage:
 
 import argparse
 
-from src.checkpoint.pp_stage_merge import merge_pp_stage_parts
-from src.log import configure_cli_logging
+from halo.checkpoint.pp_stage_merge import merge_pp_stage_parts
+from halo.log import configure_cli_logging
 
 
 def main():

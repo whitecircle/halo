@@ -26,8 +26,8 @@ import torch
 from transformers import AutoModelForImageTextToText, PreTrainedTokenizerBase
 
 import scripts.training.distillation.teacher_distill as distill_script
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
 
 PINNED_SHA = "970cfc9f5e7e5a4f5f6f0645955928a9b6a98415"

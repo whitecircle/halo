@@ -12,14 +12,14 @@ from types import SimpleNamespace
 import pytest
 import torch.nn as nn
 
-import src.checkpoint.parallel.ep as ep_saving_mod
-from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
-from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.models.moe.family_specs import find_moe_family_spec
+import halo.checkpoint.parallel.ep as ep_saving_mod
+from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.models.moe.family_specs import find_moe_family_spec
 from tests.common.distributed import reset_shared_filesystem_consensus
 
 

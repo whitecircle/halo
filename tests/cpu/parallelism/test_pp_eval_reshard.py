@@ -17,7 +17,7 @@ import pytest
 import torch
 from torch.distributed.pipelining import PipelineStage
 
-from src.distributed.pipeline_parallel.runner import _REQUIRED_STAGE_INTERNALS
+from halo.distributed.pipeline_parallel.runner import _REQUIRED_STAGE_INTERNALS
 from tests.common.pp_fakes import fake_runner
 
 ROWS = 4

@@ -19,10 +19,10 @@ from unittest import mock
 import pytest
 import torch
 
-from src.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.data.collators.self_distill import format_field_names, inject_privileged_hint, privileged_hint
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.data.collators.self_distill import format_field_names, inject_privileged_hint, privileged_hint
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from tests.common.repo import load_script_module
 
 ONLINE_ARMS = (SDPGArguments, RLVROnlineGRPOScriptArguments)
@@ -137,7 +137,7 @@ def _run_rlvr_main(tmp_path, yaml_tail: str):
     )
     script = load_script_module("scripts/training/online_grpo/rlvr.py", "halo_test_rlvr_sdpg_gate")
     with (
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         mock.patch.object(script, "init_training_script", side_effect=AssertionError("reached the load")),
     ):

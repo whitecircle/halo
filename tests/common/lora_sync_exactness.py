@@ -59,21 +59,21 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-import src.models.peft_adapters as peft_adapters
-from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.peft_adapters import lora_fold_targets
-from src.models.unwrapping import find_peft_model, unwrap_framework_wrappers
-from src.runtime.collectives import broadcast_from_rank0
-from src.trainers.grpo.rollout.weight_push import (
+import halo.models.peft_adapters as peft_adapters
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.peft_adapters import lora_fold_targets
+from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
+from halo.runtime.collectives import broadcast_from_rank0
+from halo.trainers.grpo.rollout.weight_push import (
     gather_and_send_weights,
     reject_unsyncable_model,
     sync_trainer_weights,
 )
-from src.trainers.sft import DistributedSFTTrainer
-from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.checkpoint_io import fixed_text_batch
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir, world_all

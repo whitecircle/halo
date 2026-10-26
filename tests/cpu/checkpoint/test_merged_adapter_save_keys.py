@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 from torch import nn
 
-from src.checkpoint.parallel.ep import _save_key_remap
+from halo.checkpoint.parallel.ep import _save_key_remap
 
 PEFT_PREFIX = "lora_"  # PeftModel.prefix for LoRA; read off the live model in production.
 

@@ -21,9 +21,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.distributed.expert_parallel.deepep import backends as backends_mod
-from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
-from src.distributed.expert_parallel.deepep.capacity import capacity_scope
+from halo.distributed.expert_parallel.deepep import backends as backends_mod
+from halo.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
+from halo.distributed.expert_parallel.deepep.capacity import capacity_scope
 from tests.common.distributed import pin_deterministic_ep_dispatch
 
 NUM_EXPERTS, HIDDEN, TOPK = 8, 256, 2

@@ -24,8 +24,8 @@ import time
 import pytest
 import torch.distributed as dist
 
-from src.runtime import consensus
-from src.runtime.consensus import store_reject_across_ranks
+from halo.runtime import consensus
+from halo.runtime.consensus import store_reject_across_ranks
 from tests.common.distributed import FakeStore
 from tests.common.gloo import run_gloo_ranks
 

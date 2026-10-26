@@ -15,18 +15,18 @@ import pytest
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
-import src.checkpoint.parallel.save as save_mod
-from src.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sharded_checkpoint
-from src.checkpoint.parallel.pp import save_pp_checkpoint
-from src.checkpoint.parallel.save import (
+import halo.checkpoint.parallel.save as save_mod
+from halo.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sharded_checkpoint
+from halo.checkpoint.parallel.pp import save_pp_checkpoint
+from halo.checkpoint.parallel.save import (
     save_checkpoint,
     save_cp_checkpoint,
     save_fsdp2_checkpoint,
     save_tp_checkpoint,
     select_checkpoint_saver,
 )
-from src.models.unwrapping import find_peft_model
+from halo.models.unwrapping import find_peft_model
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
 

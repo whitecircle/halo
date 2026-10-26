@@ -10,8 +10,8 @@ import json
 
 import pytest
 
+from halo.environments.rollout_config import RolloutConfig
 from scripts.environments.eval_arguments import write_eval_outputs
-from src.environments.rollout_config import RolloutConfig
 
 
 def _write(output: str, results: list[dict]) -> None:

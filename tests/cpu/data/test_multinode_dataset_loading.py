@@ -23,10 +23,10 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline import coordinated_map as coordinated_map_module
-from src.data.preprocessed.preparation import shard_dataset
-from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
-from src.data.sources import loading
+from halo.data.pipeline import coordinated_map as coordinated_map_module
+from halo.data.preprocessed.preparation import shard_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from halo.data.sources import loading
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

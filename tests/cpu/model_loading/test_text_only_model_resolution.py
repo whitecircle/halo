@@ -11,8 +11,8 @@ from types import SimpleNamespace
 import pytest
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
-from src.entrypoints import model_setup
-from src.model_loading.model_preparation import resolve_auto_model_class
+from halo.entrypoints import model_setup
+from halo.model_loading.model_preparation import resolve_auto_model_class
 
 
 def test_multimodal_config_defaults_to_image_text_class():

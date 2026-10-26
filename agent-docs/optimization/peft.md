@@ -66,7 +66,7 @@ Both are reachable by an ordinary target list — target names are matched by su
 module tree, so a multimodal tower is matched by the language model's `q_proj`…`o_proj` spelling — and
 by `all-linear`, which reaches every `nn.Linear` subclass a family defines.
 
-`build_peft_config` (`src/model_loading/parallel/peft_setup.py`) scans the live model with PEFT's own
+`build_peft_config` (`halo/model_loading/parallel/peft_setup.py`) scans the live model with PEFT's own
 matcher and puts those modules in the `LoraConfig`'s `exclude_modules` by full path (PEFT also honors
 an entry as a dotted suffix), so an identically named leaf elsewhere keeps its adapter. A warning names
 the count and one example path per reason. If it leaves no adaptable target at all, the run is rejected
@@ -126,9 +126,9 @@ Ready configs: `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` (and its `-qlor
 MoE experts are fused `nn.Parameter` tensors (`GptOssExperts.gate_up_proj` / `down_proj`, and the
 equivalents on other families), not `nn.Linear`, so PEFT's `all-linear` cannot reach them; on gpt-oss it
 resolves to the attention `q/k/v/o_proj` only. Name the expert projections explicitly instead.
-`split_expert_lora_targets` (`src/model_loading/parallel/peft_setup.py`) peels those entries out of the list and
+`split_expert_lora_targets` (`halo/model_loading/parallel/peft_setup.py`) peels those entries out of the list and
 routes them to native grouped-LoRA built inside each EP layer (`_init_expert_lora` in
-`src/distributed/expert_parallel/moe_layer/layer.py`); the remaining attention names stay on stock PEFT.
+`halo/distributed/expert_parallel/moe_layer/layer.py`); the remaining attention names stay on stock PEFT.
 
 | `lora_target_modules` entry | Requests |
 |---|---|
@@ -171,7 +171,7 @@ Weights PEFT can't LoRA are **full-trained** (a trainable copy, not a low-rank a
 `lora_modules_to_save`: `embed_tokens` (an `nn.Embedding`), `lm_head` (excluded by `all-linear`), and the
 MoE `router` / `gate`. An **expert-only** run builds no `PeftModel`, so `lora_modules_to_save` raises there
 rather than leaving those modules silently frozen — add an attention target, or drop the field.
-`unfreeze_layers_patterns` / `freeze_layers_patterns` (`src/model_loading/parallel/freeze_patterns.py`) are
+`unfreeze_layers_patterns` / `freeze_layers_patterns` (`halo/model_loading/parallel/freeze_patterns.py`) are
 refused on any adapter run (attention LoRA or native expert LoRA): it freezes every base parameter and trains
 only the adapters, so a pattern would select nothing. Use `lora_modules_to_save` for a fully trained module.
 
@@ -189,7 +189,7 @@ layer registers at construction on the *original* router param, one that never s
 `modules_to_save` on any **other** EP-internal submodule is unsupported:
 `reject_unsynced_trainable_params` raises naming any trainable param left inside an EP module with
 no gradient sync — it would otherwise silently drift across DP ranks. Its sibling
-`reject_peft_lora_in_ep_layers` (`src/trainers/parallelism/adapter_rules.py`) rejects stock-PEFT LoRA layers placed
+`reject_peft_lora_in_ep_layers` (`halo/trainers/parallelism/adapter_rules.py`) rejects stock-PEFT LoRA layers placed
 inside EP modules.
 
 ### Example: gpt-oss LoRA under EP
@@ -246,7 +246,7 @@ replicated. Nothing broadcasts the replicated matrix (it diverges from init) and
 sharded one from a replica (the TP replicated-grad sync averages and corrupts it), so the trained adapter is
 rank-inconsistent and will not reload onto a non-TP model. Use FSDP/DP, CP, or pure ETP instead.
 
-The gate is `reject_lora_under_tp` (`src/trainers/parallelism/adapter_rules.py`) and it refuses both
+The gate is `reject_lora_under_tp` (`halo/trainers/parallelism/adapter_rules.py`) and it refuses both
 adapter kinds: a `PeftModel` or any PEFT tuner layer injected in place (read off the tuner layers, so a
 backbone's own `lora_*` weights stay base weights), and — checked first, via `model_has_expert_lora` — the native
 grouped expert adapters, which are no tuner layer and which the TP replicated-grad sweep skips by param
@@ -340,7 +340,7 @@ Each NCCL weight sync forwards every base weight with its adapter folded in, und
 un-adapted base.
 
 The fold is out of place, one tensor at a time as the sync sends it (`lora_folded` in
-`src/models/peft_adapters.py`): the value PEFT's `merge_adapter` would write on the same placement, bit
+`halo/models/peft_adapters.py`): the value PEFT's `merge_adapter` would write on the same placement, bit
 for bit, on Linear, Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA. A fold
 on FSDP2 shards can differ from a single-device merge by rounding, since the delta's contraction is
 summed across shards. The frozen base is never written: PEFT's in-place merge followed by its unmerge
@@ -353,7 +353,7 @@ tensor the sync's dense push does not send (an EP layer's expert weights, which 
 since only that push folds PEFT adapters. Each sync checks again: the layers before it streams, the
 targets as its dense push ends.
 
-Both trainers share this path (`gather_and_send_weights` in `src/trainers/grpo/rollout/weight_push.py`),
+Both trainers share this path (`gather_and_send_weights` in `halo/trainers/grpo/rollout/weight_push.py`),
 which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all ranks under FSDP2.
 
 ## Embedding models
@@ -402,7 +402,7 @@ disables entropy logging.
 
 ## Checkpoint saving
 
-`save_model()` saves only adapter weights (~MB). `save_peft_adapters` (`src/checkpoint/parallel/adapters.py`),
+`save_model()` saves only adapter weights (~MB). `save_peft_adapters` (`halo/checkpoint/parallel/adapters.py`),
 the saver ladder's first rung, handles every mixin-managed mode. Two routes bypass it: an accelerate-managed FSDP run, where the base
 Trainer's save owns the sharded layout, and `merge_expert_lora_on_save`, which goes through the gathered EP
 save instead. Per mode:
@@ -442,7 +442,7 @@ holding `.experts.<attr>.lora_{A,B}` keys is refused too.
 
 **Resume:** EP/CP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
 from the checkpoint's `adapter_model.safetensors` (a merged checkpoint's `resume_adapter/`; not from the base reload) by
-`restore_adapters` (`src/checkpoint/parallel/adapters.py`), which `load_resume_weights` calls. Resuming expert adapters into a run that does not build them (EP off,
+`restore_adapters` (`halo/checkpoint/parallel/adapters.py`), which `load_resume_weights` calls. Resuming expert adapters into a run that does not build them (EP off,
 `use_grouped_gemm: false`, or the expert projections dropped from `lora_target_modules`) raises rather than
 discarding them. So does a changed LoRA scaling: resume compares the scaling inputs the saved
 `adapter_config.json` records (`lora_alpha`, `use_rslora`, `use_dora`, `alpha_pattern`, and the expert

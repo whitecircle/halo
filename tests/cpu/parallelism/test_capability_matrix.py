@@ -16,8 +16,8 @@ import itertools
 
 import pytest
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.parallelism_rules import AXES, AXIS_SET_MECHANISMS, SUPPORTED_AXIS_SETS
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_rules import AXES, AXIS_SET_MECHANISMS, SUPPORTED_AXIS_SETS
 
 AXIS_NAMES = tuple(a.name for a in AXES)
 

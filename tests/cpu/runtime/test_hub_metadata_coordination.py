@@ -20,8 +20,8 @@ Run: pytest tests/cpu/runtime/test_hub_metadata_coordination.py
 import pytest
 import torch.distributed as dist
 
-from src.env import store_timeout
-from src.runtime import consensus, filesystem
+from halo.env import store_timeout
+from halo.runtime import consensus, filesystem
 from tests.common.distributed import FakeStore, reset_shared_filesystem_consensus
 
 _SHARED_FILESYSTEM_VARS = (

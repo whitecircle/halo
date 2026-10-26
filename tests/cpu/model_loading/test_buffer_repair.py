@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``finalize_loaded_model`` buffer-recompute tests (src/model_loading/buffer_repair.py) — CPU-only.
+"""``finalize_loaded_model`` buffer-recompute tests (halo/model_loading/buffer_repair.py) — CPU-only.
 
 transformers 5 pops ``rope_theta``/``partial_rotary_factor`` off the config top level into
 ``config.rope_parameters``; a recompute that reads ``getattr(config, "rope_theta", 10000.0)``
@@ -24,8 +24,8 @@ from transformers.models.gemma4.modeling_gemma4 import (
 )
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
-from src.model_loading import buffer_repair
-from src.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading import buffer_repair
+from halo.model_loading.buffer_repair import finalize_loaded_model
 
 
 def _model_with_rotary(theta: float) -> tuple[nn.Module, Qwen3RotaryEmbedding, torch.Tensor]:

@@ -12,8 +12,8 @@ Usage:
 
 import pytest
 
-from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.registry import build_environment
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments.registry import build_environment
 
 _REACT_TYPES = ["react_math", "react_search"]
 

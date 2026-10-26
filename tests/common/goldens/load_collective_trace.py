@@ -27,11 +27,11 @@ from huggingface_hub.file_download import repo_folder_name
 from transformers import PreTrainedModel
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
-from src.checkpoint.reading import load_full_state_dict
-from src.distributed import rank_uniform_env
-from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime import load_coordination
+from halo.checkpoint.reading import load_full_state_dict
+from halo.distributed import rank_uniform_env
+from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime import load_coordination
 from tests.common.collective_recorder import CollectiveTrace, rebind_everywhere, recording_rank
 from tests.common.goldens import regen_main
 from tests.common.parallelism import make_parallelism_config

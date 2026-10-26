@@ -63,17 +63,17 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoModel, PreTrainedTokenizerFast
 from trl import get_peft_config
 
+from halo.checkpoint.adapters import has_adapter_weight_file, resume_adapter_dir
+from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.checkpoint.reading import load_full_state_dict
+from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.script import ScriptContext
+from halo.trainers.embedding.trainer import EmbeddingTrainer
 from scripts.training.embedding import build_sentence_transformer, inject_lora
-from src.checkpoint.adapters import has_adapter_weight_file, resume_adapter_dir
-from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.checkpoint.reading import load_full_state_dict
-from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
-from src.configs.script_arguments import ModelArguments
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints.script import ScriptContext
-from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.models import PARAPHRASE_MINILM

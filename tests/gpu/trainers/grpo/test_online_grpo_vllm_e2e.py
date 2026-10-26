@@ -41,7 +41,7 @@ import sys
 
 import requests
 
-from src.env import env_str
+from halo.env import env_str
 from tests.common.env_grpo_e2e import run_env_grpo_e2e
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B, QWEN3_30B_A3B

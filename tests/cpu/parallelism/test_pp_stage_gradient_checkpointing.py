@@ -17,7 +17,7 @@ import pytest
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
 from tests.common.models import TINY_QWEN3_CONFIG
 
 PP_SIZE = 2

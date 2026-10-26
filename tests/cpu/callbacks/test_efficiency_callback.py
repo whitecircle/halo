@@ -8,12 +8,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.callbacks import efficiency, factory
-from src.callbacks.efficiency import EfficiencyCallback, MFUMetrics, StepTimeMetrics, ThroughputMetrics
-from src.callbacks.model_flops import RankFlopsModel, _is_expert_param, estimate_rank_flops
-from src.hardware import GPU_PEAK_FLOPS, _classify_gpu_name, get_gpu_peak_flops, peak_precision_key
-from src.kernels.lowp.spec import LowpSpec
-from src.models.moe.config_fields import resolve_expert_count, resolve_router_topk
+from halo.callbacks import efficiency, factory
+from halo.callbacks.efficiency import EfficiencyCallback, MFUMetrics, StepTimeMetrics, ThroughputMetrics
+from halo.callbacks.model_flops import RankFlopsModel, _is_expert_param, estimate_rank_flops
+from halo.hardware import GPU_PEAK_FLOPS, _classify_gpu_name, get_gpu_peak_flops, peak_precision_key
+from halo.kernels.lowp.spec import LowpSpec
+from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 from tests.common.parallelism import make_parallelism_config
 
 # Single-process topology: a test that exercises no parallel axis still owes the callback a real

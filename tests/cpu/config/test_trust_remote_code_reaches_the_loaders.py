@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from src.cli import training_methods
-from src.configs.script_arguments import ModelArguments
+from halo.cli import training_methods
+from halo.configs.script_arguments import ModelArguments
 from tests.common.repo import REPO_ROOT
 from tests.cpu.config.test_examples_parse import TRAINING_ROOT, parser_for
 

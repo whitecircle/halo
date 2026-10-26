@@ -23,7 +23,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.entrypoints.model_setup import PolicyLoad
+from halo.entrypoints.model_setup import PolicyLoad
 from tests.common.repo import load_script_module
 
 # Model ids the name heuristic reads the same way offline as against the hub, paired with a config
@@ -123,7 +123,7 @@ def _run_kto(
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "log_script_dataset_examples", side_effect=capture_and_stop),
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
 

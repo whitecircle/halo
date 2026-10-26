@@ -18,14 +18,14 @@ test failed — pays no rung and leaves the group baseline.
 
 import pytest
 
-from src.environments.episode_keys import EPISODE_ERROR_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
-from src.environments.messages import Message, Trajectory
-from src.environments.sandbox.results import SandboxInfraError
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.swe import SweEnvironment
-from src.environments.tasks.qa import ExamQAEnvironment
-from src.environments.tools.definitions import NativeToolResult
-from src.rewards.terms import OBJECTIVE_REWARD_KEY
+from halo.environments.episode_keys import EPISODE_ERROR_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.messages import Message, Trajectory
+from halo.environments.sandbox.results import SandboxInfraError
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.swe import SweEnvironment
+from halo.environments.tasks.qa import ExamQAEnvironment
+from halo.environments.tools.definitions import NativeToolResult
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 
 SUB, PEN = 0.1, 0.1
 

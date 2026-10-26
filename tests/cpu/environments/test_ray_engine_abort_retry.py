@@ -12,10 +12,10 @@ masked row.
 
 import pytest
 
-from src.environments.episode import TurnGeneration
-from src.environments.ray_actors import EnvironmentActor
-from src.environments.rollout_config import RolloutConfig
-from src.inference.response import FINISH_REASON_ABORT
+from halo.environments.episode import TurnGeneration
+from halo.environments.ray_actors import EnvironmentActor
+from halo.environments.rollout_config import RolloutConfig
+from halo.inference.response import FINISH_REASON_ABORT
 
 _OBSERVATION = [{"role": "user", "content": "2+2?"}]
 

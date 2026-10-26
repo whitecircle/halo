@@ -13,12 +13,12 @@ import torch
 from transformers import AutoTokenizer
 from trl import GRPOConfig
 
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.env import env_int, env_str
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.environmental.trajectory_tokenize import SAMPLED_IDS_MISSING_WARNING
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.env import env_int, env_str
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trajectory_tokenize import SAMPLED_IDS_MISSING_WARNING
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.harness import record_check

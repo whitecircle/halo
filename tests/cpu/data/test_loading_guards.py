@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load-time guards in ``src/data/sources/loading.py``.
+"""Load-time guards in ``halo/data/sources/loading.py``.
 
 Four guards pinned here:
 
@@ -30,14 +30,14 @@ import tempfile
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.preprocessed.metadata import PreprocessedDatasetMetadata
-from src.data.preprocessed.preparation import shard_dataset
-from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
-from src.data.render_columns import alias_tools_column
-from src.data.sources.loading import load_datasets, load_datasets_auto
-from src.data.sources.paths import METADATA_FILE
+from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata
+from halo.data.preprocessed.preparation import shard_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from halo.data.render_columns import alias_tools_column
+from halo.data.sources.loading import load_datasets, load_datasets_auto
+from halo.data.sources.paths import METADATA_FILE
 
-_LOADING_LOGGER = "src.data.sources.loading"
+_LOADING_LOGGER = "halo.data.sources.loading"
 
 _CONVERSATION = [{"role": "user", "content": "hi"}]
 

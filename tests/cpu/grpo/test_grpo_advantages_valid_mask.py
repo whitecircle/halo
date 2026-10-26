@@ -13,7 +13,7 @@ group falls back to the plain mean without crashing.
 import pytest
 import torch
 
-from src.trainers.grpo.objective.advantages import group_relative_advantages
+from halo.trainers.grpo.objective.advantages import group_relative_advantages
 
 
 def test_default_no_mask_unchanged():

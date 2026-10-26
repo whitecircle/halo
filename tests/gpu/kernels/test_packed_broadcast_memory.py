@@ -16,9 +16,9 @@ from unittest import mock
 
 import torch
 
-import src.weight_sync.clients.vllm as vllm_client_module
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-from src.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
+import halo.weight_sync.clients.vllm as vllm_client_module
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.weight_sync import offline_client, push
 

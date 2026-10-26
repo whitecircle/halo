@@ -18,10 +18,10 @@ import sys
 import torch
 from accelerate import PartialState
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.hardware import supports_grouped_mm
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
 from tests.common.distributed import (
     ensure_model_downloaded,
     init_distributed,

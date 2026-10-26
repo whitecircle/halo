@@ -20,7 +20,7 @@ from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutpu
 
 from tests.common.repo import REPO_ROOT
 
-LIGER_PACKAGE = REPO_ROOT / "src/model_loading/liger"
+LIGER_PACKAGE = REPO_ROOT / "halo/model_loading/liger"
 
 # The toolkit's own FLCE forward — one for the whole roster (the families upstream Liger does not
 # cover), so nobody else is holding it to this contract.

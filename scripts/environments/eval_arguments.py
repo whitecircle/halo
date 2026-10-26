@@ -1,6 +1,6 @@
 """The CLI surface the environment eval scripts share: the flags every runner registers, the ``Namespace``
 readers that turn them into a generation contract, and the output writer. The eval driver is
-:mod:`src.environments.eval_runner`; the training YAML's contract is :mod:`scripts.environments.training_contract`.
+:mod:`halo.environments.eval_runner`; the training YAML's contract is :mod:`scripts.environments.training_contract`.
 """
 
 import argparse
@@ -10,11 +10,11 @@ import os
 from dataclasses import asdict, replace
 from typing import Any
 
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.eval_runner import trajectory_path, write_trajectories_jsonl
+from halo.environments.rollout_config import RolloutConfig
 from scripts.cli_arguments import add_openai_endpoint_args
 from scripts.environments.training_contract import TrainingContract
-from src.environments.environment_base import EnvironmentBase
-from src.environments.eval_runner import trajectory_path, write_trajectories_jsonl
-from src.environments.rollout_config import RolloutConfig
 
 logger = logging.getLogger(__name__)
 

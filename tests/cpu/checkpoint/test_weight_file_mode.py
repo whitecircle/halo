@@ -17,14 +17,14 @@ from sentence_transformers import SentenceTransformer
 from sentence_transformers.models import Dense, Pooling, Router
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3Model
 
+from halo.checkpoint.adapters import write_adapter_file
+from halo.checkpoint.offline_export import save_full_checkpoint
+from halo.checkpoint.writing import StreamingShardWriter
+from halo.configs.embedding import EmbeddingConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
+from halo.trainers.embedding.trainer import EmbeddingTrainer
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
-from src.checkpoint.adapters import write_adapter_file
-from src.checkpoint.offline_export import save_full_checkpoint
-from src.checkpoint.writing import StreamingShardWriter
-from src.configs.embedding import EmbeddingConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.embedding.preloaded_transformer import PreloadedTransformer
-from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.tiny_models import word_level_tokenizer
 

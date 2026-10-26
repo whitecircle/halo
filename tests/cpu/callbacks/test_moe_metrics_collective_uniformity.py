@@ -15,8 +15,8 @@ import contextlib
 import pytest
 import torch
 
-from src.callbacks import moe_metrics
-from src.callbacks.moe_metrics import MoEMetricsCallback
+from halo.callbacks import moe_metrics
+from halo.callbacks.moe_metrics import MoEMetricsCallback
 
 
 class _State:

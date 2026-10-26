@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``src/data/deduplication.py``: row normalization, the seeded shuffle that decides which member of
+"""``halo/data/deduplication.py``: row normalization, the seeded shuffle that decides which member of
 a near-duplicate group survives, and the FAISS passes' surviving indices."""
 
 import time
@@ -7,8 +7,8 @@ import time
 import numpy as np
 import pytest
 
-from src.data import deduplication
-from src.data.deduplication import (
+from halo.data import deduplication
+from halo.data.deduplication import (
     DEDUP_SHUFFLE_SEED,
     _normalize_embeddings,
     _shuffle_matrix_with_mapping,

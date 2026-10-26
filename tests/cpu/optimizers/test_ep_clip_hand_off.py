@@ -12,8 +12,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.parallelism.grad_clipping import GradientClippingMixin, clip_coefficient
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.parallelism.grad_clipping import GradientClippingMixin, clip_coefficient
 
 MAX_NORM = 0.5
 

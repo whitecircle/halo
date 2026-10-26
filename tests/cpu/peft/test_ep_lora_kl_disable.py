@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """CPU test for native EP expert-LoRA disable + fail-loud resume guard
-(``src/distributed/expert_parallel/moe_layer/layer.py``).
+(``halo/distributed/expert_parallel/moe_layer/layer.py``).
 
 Native grouped LoRA on EP experts is NOT peft-managed. For a correct KL reference pass the delta must
 be removed; for resume the saved adapter keys must match the rebuilt layer exactly. This pins:
@@ -28,7 +28,7 @@ import pytest
 import torch
 from torch import nn
 
-from src.distributed.expert_parallel.moe_layer.expert_lora import (
+from halo.distributed.expert_parallel.moe_layer.expert_lora import (
     disable_expert_adapters,
     install_ep_aware_disable_adapter,
 )

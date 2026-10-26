@@ -28,7 +28,7 @@ import pytest
 from tests.common.repo import REPO_ROOT
 
 # The surface that writes or restores model weights; optimizer/scheduler state is per-rank by design.
-_SCANNED = (REPO_ROOT / "src" / "distributed", REPO_ROOT / "src" / "checkpoint")
+_SCANNED = (REPO_ROOT / "halo" / "distributed", REPO_ROOT / "halo" / "checkpoint")
 
 # Names that decide "this rank writes" — the gates that make a call rank-asymmetric.
 _RANK_GATES = (
@@ -80,6 +80,7 @@ def _offenders(path: Path) -> list[str]:
 
 
 def test_no_model_state_dict_under_a_rank_gate():
+    assert all(root.is_dir() for root in _SCANNED), f"the sweep lost a root: {_SCANNED}"
     scanned = [f for root in _SCANNED for f in sorted(root.rglob("*.py"))]
     assert len(scanned) > 50, "the sweep lost its roots — rglob on a missing directory is silent"
     offenders = [msg for f in scanned for msg in _offenders(f)]
@@ -97,7 +98,7 @@ def test_detector_catches_the_shape():
         "    if is_global_main_process():\n"
         "        matched = len(set(state) & set(model.state_dict()))\n"
     )
-    tmp = REPO_ROOT / "src" / "distributed" / "checkpoint" / "__init__.py"  # any real path for relative_to
+    tmp = REPO_ROOT / "halo" / "distributed" / "checkpoint" / "__init__.py"  # any real path for relative_to
     tree = ast.parse(source)
     hits = []
     for node in ast.walk(tree):

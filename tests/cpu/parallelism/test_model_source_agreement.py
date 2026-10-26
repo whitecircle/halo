@@ -36,9 +36,9 @@ from huggingface_hub import constants as hub_constants
 from huggingface_hub.utils import filter_repo_objects
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-import src.model_loading.parallel.whole_model as whole_model
-from src.model_loading.parallel import model_source
-from src.model_loading.parallel.model_source import HUB_SUBFOLDER_IGNORE_PATTERNS, ModelSource, resolve_model_source
+import halo.model_loading.parallel.whole_model as whole_model
+from halo.model_loading.parallel import model_source
+from halo.model_loading.parallel.model_source import HUB_SUBFOLDER_IGNORE_PATTERNS, ModelSource, resolve_model_source
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN3_CONFIG
 

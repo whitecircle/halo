@@ -8,7 +8,7 @@ under ``reset_sinks --in_place`` that file is the only copy of the weights.
 
 import pytest
 
-from src.checkpoint.atomic import is_atomic_staging_file, staged_file
+from halo.checkpoint.atomic import is_atomic_staging_file, staged_file
 
 
 @pytest.mark.parametrize("durable", [True, False])

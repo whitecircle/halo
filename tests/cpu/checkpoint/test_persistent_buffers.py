@@ -14,7 +14,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.models.param_roles import persistent_buffers
+from halo.models.param_roles import persistent_buffers
 
 
 class _Block(nn.Module):

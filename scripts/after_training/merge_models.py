@@ -49,22 +49,22 @@ from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from transformers import AutoConfig
 
-from scripts.cli_arguments import add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.config_export import finalize_exported_config
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, WEIGHT_FILE_IGNORE_PATTERNS
-from src.checkpoint.offline_export import (
+from halo.checkpoint.config_export import finalize_exported_config
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, WEIGHT_FILE_IGNORE_PATTERNS
+from halo.checkpoint.offline_export import (
     copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
 )
-from src.checkpoint.reading import header_nbytes, header_numel, iter_checkpoint_shard_entries
-from src.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
-from src.log import configure_cli_logging
-from src.model_loading.dtype import DTYPE_BY_NAME
-from src.model_loading.model_preparation import resolve_auto_model_class
-from src.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, config_sources
-from src.models.model_classes import mapped_model_class
-from src.models.moe.balancing import is_balancing_state_key
+from halo.checkpoint.reading import header_nbytes, header_numel, iter_checkpoint_shard_entries
+from halo.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
+from halo.log import configure_cli_logging
+from halo.model_loading.dtype import DTYPE_BY_NAME
+from halo.model_loading.model_preparation import resolve_auto_model_class
+from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, config_sources
+from halo.models.model_classes import mapped_model_class
+from halo.models.moe.balancing import is_balancing_state_key
+from scripts.cli_arguments import add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

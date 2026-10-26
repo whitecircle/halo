@@ -19,12 +19,12 @@ from accelerate.utils import extract_model_from_parallel
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from src.config_validation import (
+from halo.config_validation import (
     ValidatedConfig,
     differs_from_default,
     is_finite_number,
@@ -20,7 +20,7 @@ from src.config_validation import (
     require_int,
     require_text,
 )
-from src.configs.distillation import SelfDistillScriptArguments
+from halo.configs.distillation import SelfDistillScriptArguments
 
 
 @dataclass(kw_only=True)

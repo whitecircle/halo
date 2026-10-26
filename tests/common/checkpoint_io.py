@@ -15,16 +15,16 @@ from transformers import TrainerCallback
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.utils import CONFIG_NAME
 
-from src.checkpoint.format import (
+from halo.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     SAFETENSORS_INDEX_FILE,
 )
-from src.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
-from src.checkpoint.reading import has_whole_model_weight_file, load_full_state_dict
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.runtime.filesystem import is_fs_save_rank
+from halo.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
+from halo.checkpoint.reading import has_whole_model_weight_file, load_full_state_dict
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.runtime.filesystem import is_fs_save_rank
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.parallelism import make_parallelism_config
 from tests.common.peft_helpers import snapshot_adapters, unwrap

@@ -4,7 +4,7 @@
 EP/CP/TP require torchrun; the gates must reject EVERY ``accelerate launch`` distributed_type —
 including MULTI_GPU/DDP, which sets ``ACCELERATE_MIXED_PRECISION`` but not ``ACCELERATE_USE_FSDP``
 (rejecting only the FSDP launch lets DDP fall through into custom parallelism). Also pins
-``accelerate_manages_ddp`` semantics over the ``src.env`` helpers, and the ``reset_sinks``
+``accelerate_manages_ddp`` semantics over the ``halo.env`` helpers, and the ``reset_sinks``
 default parity between the two model-loading entry points.
 
 Three more refusals raised from the same package are pinned here, each of which replaces a failure
@@ -39,32 +39,32 @@ from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 from transformers.models.qwen3 import Qwen3Config
 from transformers.models.qwen3_vl import Qwen3VLConfig
 
-from src.configs.script_arguments import ModelLoadArguments
-from src.distributed.mesh import MeshDim
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.parallelism_rules import reject_accelerate_launch
-from src.distributed.tensor_parallel.hf_plan import plan_shards_param
-from src.kernels.lowp.spec import LowpSpec
-from src.model_loading.dtype import resolve_load_dtype
-from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.model_loading.parallel import load_rules, whole_model
-from src.model_loading.parallel import loader as model_loading
-from src.model_loading.parallel import tp as tp_loading
-from src.model_loading.parallel.cp import load_cp_model
-from src.model_loading.parallel.ep import load_ep_model_lazy
-from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
-from src.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
-from src.model_loading.parallel.loader import load_distributed_model
-from src.model_loading.parallel.model_source import ModelSource
-from src.model_loading.parallel.pp import _load_stage_lazy
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.attention.selection import resolve_attn_implementation
-from src.models.moe.family_specs import GEMMA4, MoEFamilySpec
-from src.trainers.accelerator import accelerate_manages_ddp
+from halo.configs.script_arguments import ModelLoadArguments
+from halo.distributed.mesh import MeshDim
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_rules import reject_accelerate_launch
+from halo.distributed.tensor_parallel.hf_plan import plan_shards_param
+from halo.kernels.lowp.spec import LowpSpec
+from halo.model_loading.dtype import resolve_load_dtype
+from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from halo.model_loading.parallel import load_rules, whole_model
+from halo.model_loading.parallel import loader as model_loading
+from halo.model_loading.parallel import tp as tp_loading
+from halo.model_loading.parallel.cp import load_cp_model
+from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.model_loading.parallel.pp import _load_stage_lazy
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.selection import resolve_attn_implementation
+from halo.models.moe.family_specs import GEMMA4, MoEFamilySpec
+from halo.trainers.accelerator import accelerate_manages_ddp
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.parallelism import make_parallelism_config
 
-_CP_LOADING = "src.model_loading.parallel.cp"
+_CP_LOADING = "halo.model_loading.parallel.cp"
 _SOURCE = ModelSource("org/x", None, "org/x")
 
 # accelerate MULTI_GPU (DDP) launch: MIXED_PRECISION set, USE_FSDP unset.
@@ -191,7 +191,7 @@ def _load_collaborators(model):
         patch.object(tp_loading, "tp_submesh", return_value="tp-mesh"),
         patch.object(tp_loading, "joined_node_load", _throttle),
         patch.object(tp_loading, "from_pretrained_verified", _load),
-        patch("src.distributed.tensor_parallel.hf_plan.retarget_hf_replicated_grad_hooks", lambda _model: None),
+        patch("halo.distributed.tensor_parallel.hf_plan.retarget_hf_replicated_grad_hooks", lambda _model: None),
     ):
         yield
 
@@ -605,7 +605,7 @@ def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
     with (
         patch(f"{_CP_LOADING}.load_whole_model", fake_load_whole_model),
         patch(f"{_CP_LOADING}.UlyssesModel", lambda model, cp_config: model),
-        patch("src.models.attention.selection.validate_attn_implementation", return_value="sdpa") as validator,
+        patch("halo.models.attention.selection.validate_attn_implementation", return_value="sdpa") as validator,
     ):
         with pytest.raises(KeyError, match="config"):
             load_cp_model(

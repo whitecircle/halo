@@ -22,10 +22,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.callbacks.balancing import BalancingBiasCallback
-from src.callbacks.factory import build_run_callbacks
+from halo.callbacks.balancing import BalancingBiasCallback
+from halo.callbacks.factory import build_run_callbacks
 
-_BALANCING_MOD = "src.callbacks.balancing"
+_BALANCING_MOD = "halo.callbacks.balancing"
 
 
 # BalancingBiasCallback.reduce_group

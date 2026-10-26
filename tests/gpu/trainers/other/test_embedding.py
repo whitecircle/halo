@@ -25,11 +25,11 @@ from peft import LoraConfig, TaskType, inject_adapter_in_model
 from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformer
 
-from src.checkpoint.parallel.writing import chunked_saveable_tensors
-from src.checkpoint.writing import save_dtype_caster
-from src.configs.embedding import EmbeddingConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.embedding.trainer import EmbeddingTrainer
+from halo.checkpoint.parallel.writing import chunked_saveable_tensors
+from halo.checkpoint.writing import save_dtype_caster
+from halo.configs.embedding import EmbeddingConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import PARAPHRASE_MINILM
 from tests.common.peft_helpers import (

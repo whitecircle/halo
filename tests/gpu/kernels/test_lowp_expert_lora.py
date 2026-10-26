@@ -22,9 +22,9 @@ from types import MethodType, SimpleNamespace
 import torch
 import torch.nn as nn
 
-import src.distributed.expert_parallel.moe_layer.compute as compute_mod
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.kernels.lowp.quantization import fake_quant
+import halo.distributed.expert_parallel.moe_layer.compute as compute_mod
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.kernels.lowp.quantization import fake_quant
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
 

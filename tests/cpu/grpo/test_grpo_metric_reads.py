@@ -21,11 +21,11 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
-from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
-from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
-from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, KL_LOGRATIO_CLAMP, kl_clamp_counts
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
+from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, KL_LOGRATIO_CLAMP, kl_clamp_counts
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.gloo import run_gloo_ranks
 from tests.common.routing import BareEPLayer

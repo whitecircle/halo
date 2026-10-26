@@ -26,10 +26,10 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForImageTextToText
 
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.mesh import build_dp_tp_mesh
-from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.mesh import build_dp_tp_mesh
+from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from tests.common.distributed import ensure_model_downloaded, world_mean, world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B

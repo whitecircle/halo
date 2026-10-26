@@ -13,8 +13,8 @@ import pytest
 import torch
 from trl.trainer.utils import selective_log_softmax
 
-import src.kernels.logprobs as logprob_kernels
-from src.kernels.logprobs import logit_chunk_rows, next_token_logprobs, selective_logprobs, token_logprobs
+import halo.kernels.logprobs as logprob_kernels
+from halo.kernels.logprobs import logit_chunk_rows, next_token_logprobs, selective_logprobs, token_logprobs
 from tests.common.utils import autograd_nodes
 
 VOCAB = 37

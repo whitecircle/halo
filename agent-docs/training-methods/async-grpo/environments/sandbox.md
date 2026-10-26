@@ -1,6 +1,6 @@
 # Code Execution Sandboxes
 
-`SandboxExecutor` (`src/environments/sandbox/`) runs a complete untrusted program — Python, bash, C or C++ — against stdin in a subprocess. It backs:
+`SandboxExecutor` (`halo/environments/sandbox/`) runs a complete untrusted program — Python, bash, C or C++ — against stdin in a subprocess. It backs:
 
 - code-contests grading and its scratchpad test tool;
 - the `swe` environment's `run_code`, `run_bash_command` and file tools;
@@ -67,7 +67,7 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 ## Using it from Python
 
 ```python
-from src.environments.sandbox.factory import build_sandbox
+from halo.environments.sandbox.factory import build_sandbox
 
 sandbox = build_sandbox(backend="bubblewrap")   # args beat HALO_SANDBOX_*
 result = sandbox.run("print(input())", stdin="hi\n", language="python", timeout=15.0)
@@ -142,7 +142,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 
 ## Languages
 
-`LANGUAGES` (`src/environments/sandbox/languages.py`) is the registry `local` and `bubblewrap` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
+`LANGUAGES` (`halo/environments/sandbox/languages.py`) is the registry `local` and `bubblewrap` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
 
 | Language | Aliases | Compile | Run |
 |---|---|---|---|

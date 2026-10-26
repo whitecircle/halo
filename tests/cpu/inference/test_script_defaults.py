@@ -46,13 +46,13 @@ import pytest
 import torch
 from openai import AsyncOpenAI
 
+from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from scripts.cli_arguments import add_dtype_arg, add_openai_endpoint_args
 from scripts.inference import inference_arguments
 from scripts.inference.inference_arguments import add_prompt_field_args
 from scripts.inference.playground import gradio_environment_playground
 from scripts.inference.reward_model import reward_model_arguments
 from scripts.inference.reward_model.reward_model_arguments import build_generation_parser
-from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT, load_script_module
 
@@ -408,7 +408,7 @@ def test_the_local_endpoint_default_has_one_home():
     """One spelling of the value that decides whether a run's conversations stay on this host.
 
     Every CLI that defaults an endpoint takes it from ``add_openai_endpoint_args``, which reads
-    ``src.inference.endpoints``'s constant; a re-declaration anywhere under ``scripts/`` is a
+    ``halo.inference.endpoints``'s constant; a re-declaration anywhere under ``scripts/`` is a
     second source of truth.
     """
     assert add_openai_endpoint_args(argparse.ArgumentParser()).get_default("base_url") is DEFAULT_LOCAL_BASE_URL

@@ -27,15 +27,15 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer.grad_sync import build_router_grad_hook
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer.grad_sync import build_router_grad_hook
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import built_ep_config, make_parallelism_config, stubbed_process_groups
 
-_GS_MOD = "src.distributed.expert_parallel.moe_layer.grad_sync"
+_GS_MOD = "halo.distributed.expert_parallel.moe_layer.grad_sync"
 # The trainer-side sweep, whose globals the deferred-sync tests patch.
-_MIXIN_MOD = "src.trainers.parallelism.grad_sync"
+_MIXIN_MOD = "halo.trainers.parallelism.grad_sync"
 
 
 def _make_ep(rank: int, *, world_size: int, stage_world_size: int, fsdp_shard_ep1_experts: bool = True, **kwargs):
@@ -365,7 +365,7 @@ def test_the_fsdp_norm_reduce_falls_back_to_the_stage_not_the_world():
     host._bucket_grad_shards = MethodType(DistributedTrainerMixin._bucket_grad_shards, host)
     groups: list = []
     with patch(
-        "src.trainers.parallelism.grad_clipping.dist.all_reduce", lambda t, op=None, group=None: groups.append(group)
+        "halo.trainers.parallelism.grad_clipping.dist.all_reduce", lambda t, op=None, group=None: groups.append(group)
     ):
         DistributedTrainerMixin._compute_global_grad_norm(host, list(model.parameters()))
     assert groups == [stage_group]

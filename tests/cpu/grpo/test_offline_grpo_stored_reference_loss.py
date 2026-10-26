@@ -6,9 +6,9 @@ import pytest
 import torch
 from torch import nn
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.world_metrics import WorldMetrics
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.world_metrics import WorldMetrics
 
 
 class _Policy(nn.Module):

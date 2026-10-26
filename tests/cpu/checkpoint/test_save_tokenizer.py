@@ -13,8 +13,8 @@ import os
 import pytest
 import torch.nn as nn
 
-from src.checkpoint.parallel.save import save_checkpoint, save_tokenizer
-from src.checkpoint.writing import StreamingShardWriter
+from halo.checkpoint.parallel.save import save_checkpoint, save_tokenizer
+from halo.checkpoint.writing import StreamingShardWriter
 from tests.common.checkpoint_io import save_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import word_level_tokenizer

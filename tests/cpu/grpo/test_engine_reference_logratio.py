@@ -14,16 +14,16 @@ from unittest import mock
 import pytest
 import torch
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.trainers.grpo.environmental import async_rollouts, importance_sampling
-from src.trainers.grpo.environmental.environmental_rules import reject_unsupported_engine_reference
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.environmental.trajectory_tokenize import TurnRow
-from src.trainers.grpo.objective.logratio import select_mask_logratio
-from src.trainers.grpo.rollout import engine_preflight
-from src.trainers.grpo.rollout.engine_preflight import _probe_prompt_logprobs, verify_engine_prompt_logprobs
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient as VLLMClient
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.trainers.grpo.environmental import async_rollouts, importance_sampling
+from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_engine_reference
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
+from halo.trainers.grpo.objective.logratio import select_mask_logratio
+from halo.trainers.grpo.rollout import engine_preflight
+from halo.trainers.grpo.rollout.engine_preflight import _probe_prompt_logprobs, verify_engine_prompt_logprobs
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from tests.common.fake_engines import GRAPH_CAPTURE_TOKENS, FakeEngineServer, fake_server_class
 from tests.common.repo import REPO_ROOT
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics

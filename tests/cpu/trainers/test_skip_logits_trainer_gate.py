@@ -16,9 +16,9 @@ from unittest import mock
 
 import pytest
 
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.sft import DistributedSFTTrainer
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.sft import DistributedSFTTrainer
 
 
 class _Gate(DistributedSFTTrainer):

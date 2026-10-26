@@ -23,16 +23,16 @@ from dataclasses import asdict, dataclass
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.preprocessed.metadata import (
+from halo.data.preprocessed.metadata import (
     PreprocessedDatasetMetadata,
     PreprocessingConfig,
     _verify_render_knobs,
     is_preprocessed_dataset,
     load_preprocessed_metadata,
 )
-from src.data.preprocessed.shard_index import IncompatiblePreprocessedDataset
-from src.data.sources.corpus import _reject_tools_field_nowhere
-from src.data.sources.paths import METADATA_FILE
+from halo.data.preprocessed.shard_index import IncompatiblePreprocessedDataset
+from halo.data.sources.corpus import _reject_tools_field_nowhere
+from halo.data.sources.paths import METADATA_FILE
 
 
 def _write_metadata(directory, payload: dict) -> str:

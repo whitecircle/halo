@@ -20,18 +20,18 @@ from typing import get_type_hints
 
 import pytest
 
-from src.configs.classification import ClassificationScriptArguments
-from src.configs.distillation import SelfDistillScriptArguments, TeacherDistillScriptArguments
-from src.configs.embedding import EmbeddingScriptArguments
-from src.configs.grpo_environmental import EnvironmentalGRPOScriptArguments
-from src.configs.grpo_offline import OfflineGRPOScriptArguments
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.configs.parser import HaloArgumentParser
-from src.configs.preference import DPOScriptArguments, KTOScriptArguments, SMPOScriptArguments
-from src.configs.reward import RewardScriptArguments
-from src.configs.script_arguments import GenerationEvalArguments
-from src.configs.sft import SFTScriptArguments
-from src.entrypoints.run_setup import _configure_tracking_env_vars
+from halo.configs.classification import ClassificationScriptArguments
+from halo.configs.distillation import SelfDistillScriptArguments, TeacherDistillScriptArguments
+from halo.configs.embedding import EmbeddingScriptArguments
+from halo.configs.grpo_environmental import EnvironmentalGRPOScriptArguments
+from halo.configs.grpo_offline import OfflineGRPOScriptArguments
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.parser import HaloArgumentParser
+from halo.configs.preference import DPOScriptArguments, KTOScriptArguments, SMPOScriptArguments
+from halo.configs.reward import RewardScriptArguments
+from halo.configs.script_arguments import GenerationEvalArguments
+from halo.configs.sft import SFTScriptArguments
+from halo.entrypoints.run_setup import _configure_tracking_env_vars
 
 # Every script-arg class and the tracking project its runs land in. Pinned by NAME, not merely "not
 # the placeholder": a class that declares no ``PROJECT_NAME`` of its own inherits a parent's project

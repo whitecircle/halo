@@ -30,16 +30,16 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-import src.checkpoint.parallel.adapters as peft_mod
-import src.checkpoint.parallel.optimizer as optimizer_mod
-import src.checkpoint.parallel.resume_weights as loader_mod
-from src.checkpoint.hub_layout import ModuleLayoutView
-from src.checkpoint.parallel.adapters import restore_adapters
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.checkpoint.parallel.resume_weights import load_resume_weights
-from src.checkpoint.parallel.sidecars import restore_lr_scheduler
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.tensor_parallel.plain_params import register_hand_sliced
+import halo.checkpoint.parallel.adapters as peft_mod
+import halo.checkpoint.parallel.optimizer as optimizer_mod
+import halo.checkpoint.parallel.resume_weights as loader_mod
+from halo.checkpoint.hub_layout import ModuleLayoutView
+from halo.checkpoint.parallel.adapters import restore_adapters
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.checkpoint.parallel.resume_weights import load_resume_weights
+from halo.checkpoint.parallel.sidecars import restore_lr_scheduler
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.distributed.tensor_parallel.plain_params import register_hand_sliced
 from tests.common.checkpoint_io import load_context
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 

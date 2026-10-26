@@ -24,9 +24,9 @@ import types
 
 import pytest
 
-import src.trainers.grpo.environmental.async_rollouts as async_mod
-from src.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
-from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
+import halo.trainers.grpo.environmental.async_rollouts as async_mod
+from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

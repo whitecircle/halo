@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from torch.utils.data import SequentialSampler
 
-from src.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.dataloaders import DataParallelLoaderMixin
 
 _ROWS = list(range(8))
 

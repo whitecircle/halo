@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from tests.common.env_grpo_batch import batch_host, episode, row
 
 

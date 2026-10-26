@@ -13,7 +13,7 @@ Run: pytest tests/cpu/trainers/test_embedding_metric_features.py
 import pytest
 import torch
 
-from src.trainers.embedding.trainer import _METRIC_MAX_SAMPLES, EmbeddingTrainer
+from halo.trainers.embedding.trainer import _METRIC_MAX_SAMPLES, EmbeddingTrainer
 
 _CAP = _METRIC_MAX_SAMPLES
 

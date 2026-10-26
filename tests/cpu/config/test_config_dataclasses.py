@@ -12,12 +12,12 @@ import os
 
 import pytest
 
-import src.configs.grpo_environmental as grpo_environmental
-from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.configs.parser import HaloArgumentParser
-from src.configs.preference import SmoothMarginPOConfig
-from src.rewards.terms import EnvironmentTerm
+import halo.configs.grpo_environmental as grpo_environmental
+from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.parser import HaloArgumentParser
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.rewards.terms import EnvironmentTerm
 
 OUTPUT_DIR = "/tmp/test_output"
 

@@ -23,8 +23,8 @@ import torch.nn as nn
 from transformers import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssMLP
 
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from tests.common.parallelism import single_process_ep_config
 
 

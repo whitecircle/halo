@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Unit tests for :func:`src.data.pipeline.coordinated_map.coordinated_pack`
+"""Unit tests for :func:`halo.data.pipeline.coordinated_map.coordinated_pack`
 and the rank-stable cache identifier it uses.
 
 Pins the behavior the helper exists for: even when HF's ``Dataset._fingerprint``
@@ -20,7 +20,7 @@ import tempfile
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline.map_cache_key import rank_stable_dataset_id, stamp_cache_key
+from halo.data.pipeline.map_cache_key import rank_stable_dataset_id, stamp_cache_key
 
 
 def _on_disk_dataset(dirpath: str, data: dict, fingerprint: str) -> Dataset:

@@ -17,8 +17,8 @@ Run: pytest tests/cpu/runtime/test_load_concurrency.py
 import pytest
 import torch.distributed as dist
 
-from src.runtime import consensus, load_coordination
-from src.runtime.load_coordination import MAX_CONCURRENT_LOADING_CAP, resolve_load_concurrency
+from halo.runtime import consensus, load_coordination
+from halo.runtime.load_coordination import MAX_CONCURRENT_LOADING_CAP, resolve_load_concurrency
 from tests.common.distributed import FakeStore
 
 

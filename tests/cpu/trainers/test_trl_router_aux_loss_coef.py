@@ -19,15 +19,15 @@ import pytest
 import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
-import src.trainers.distributed_trainer as spine
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.config_access import ROUTER_AUX_FIELDS, restore_config_fields, snapshot_config_fields
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.sft import DistributedSFTTrainer
+import halo.trainers.distributed_trainer as spine
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.config_access import ROUTER_AUX_FIELDS, restore_config_fields, snapshot_config_fields
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.sft import DistributedSFTTrainer
 
 HUB_COEF = 0.9
 

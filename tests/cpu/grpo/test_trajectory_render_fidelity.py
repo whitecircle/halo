@@ -32,11 +32,11 @@ import pytest
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-from src.environments.episode import RolloutResult
-from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-from src.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from tests.common.models import GEMMA3_4B_IT, GPT_OSS_20B_OPENAI, QWEN3_0_6B
 from tests.common.tokenizers import try_cached_tokenizer
 

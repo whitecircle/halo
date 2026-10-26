@@ -20,13 +20,13 @@ import pytest
 import torch
 from transformers import AutoConfig
 
-import src.model_loading.parallel.ep as ep_loading
-import src.model_loading.parallel.tp as tp_loading
-import src.model_loading.parallel.whole_model as whole_model
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.mesh import build_dp_tp_mesh
-from src.model_loading.parallel.model_source import ModelSource
+import halo.model_loading.parallel.ep as ep_loading
+import halo.model_loading.parallel.tp as tp_loading
+import halo.model_loading.parallel.whole_model as whole_model
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.mesh import build_dp_tp_mesh
+from halo.model_loading.parallel.model_source import ModelSource
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint
 

@@ -19,10 +19,10 @@ import torch
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import group_max_abs_diff
 from tests.common.models import QWEN3_0_6B

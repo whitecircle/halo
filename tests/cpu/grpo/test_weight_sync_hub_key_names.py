@@ -20,10 +20,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.models.moe.family_specs import MoEFamilySpec
-from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.models.moe.family_specs import MoEFamilySpec
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 
 LAYER_PATH = "mlp"
 NUM_EXPERTS, HIDDEN, INTERMEDIATE = 2, 6, 4

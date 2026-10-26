@@ -26,19 +26,19 @@ import torch
 from torch import nn
 from transformers import AutoModelForImageTextToText, GenerationConfig
 
+import halo.model_loading.parallel.frozen_models as frozen_models
 import scripts.training.distillation.self_distill as self_distill_script
 import scripts.training.distillation.teacher_distill as distill_script
 import scripts.training.offline_grpo as offline_grpo_script
-import src.model_loading.parallel.frozen_models as frozen_models
-from src.configs.script_arguments import ModelArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.frozen_models import (
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.frozen_models import (
     load_frozen_auxiliary_model,
     load_reference_model_for_on_policy_grpo,
     load_reference_model_for_preference,
 )
-from src.model_loading.parallel.model_source import ModelSource
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
 from tests.common.repo import REPO_ROOT
@@ -59,13 +59,13 @@ FROZEN_LOAD_STEPS = ("resolve_attn_implementation", "apply_sinks_policy")
 # RECORDED or explicit policy to a checkpoint on disk rather than filling ``.sinks`` by name behind it.
 FROZEN_LOAD_STEP_OWNERS = frozenset(
     {
-        "src/models/attention/selection.py",
-        "src/models/attention/gpt_oss_sinks.py",
-        "src/model_loading/model_preparation.py",
-        "src/model_loading/parallel/frozen_models.py",
-        "src/model_loading/parallel/loader.py",
+        "halo/models/attention/selection.py",
+        "halo/models/attention/gpt_oss_sinks.py",
+        "halo/model_loading/model_preparation.py",
+        "halo/model_loading/parallel/frozen_models.py",
+        "halo/model_loading/parallel/loader.py",
         "scripts/training/embedding.py",
-        "src/checkpoint/sidecars.py",
+        "halo/checkpoint/sidecars.py",
         "scripts/before_training/patch_vocab.py",
         "scripts/after_training/reset_sinks.py",
     }
@@ -302,10 +302,12 @@ def test_the_resolve_and_sinks_steps_live_only_in_their_owners(step):
     each such copy at the moment it is written, so the assertion is inverted: any module outside the
     owners that binds one of these steps is a new copy until proven otherwise.
     """
+    roots = [REPO_ROOT / directory for directory in ("halo", "scripts")]
+    assert all(root.is_dir() for root in roots), f"the sweep lost a root: {roots}"
     offenders = sorted(
         str(path.relative_to(REPO_ROOT))
-        for directory in ("src", "scripts")
-        for path in (REPO_ROOT / directory).rglob("*.py")
+        for root in roots
+        for path in root.rglob("*.py")
         if str(path.relative_to(REPO_ROOT)) not in FROZEN_LOAD_STEP_OWNERS and _module_binds(path, step)
     )
     assert not offenders, (

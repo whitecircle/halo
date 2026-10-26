@@ -2,7 +2,7 @@
 
 Three jobs:
 
-1. Snapshot an :class:`~src.callbacks.efficiency.EfficiencyCallback`
+1. Snapshot an :class:`~halo.callbacks.efficiency.EfficiencyCallback`
    into a flat, JSON-serializable dict with a stable schema. The **headline**
    metrics are hardware-anchored and unambiguous — tokens/s/GPU, cluster
    tokens/s, peak memory (GiB), step time. MFU / S-MFU / achieved-TFLOPS are

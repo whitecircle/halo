@@ -12,7 +12,7 @@ import random
 
 import pytest
 
-from src.trainers.grpo.offline.group_sampler import MultiGroupSampler
+from halo.trainers.grpo.offline.group_sampler import MultiGroupSampler
 
 
 def _group_ids(num_groups=24, group_size=5):

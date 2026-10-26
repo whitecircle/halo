@@ -65,21 +65,21 @@ from transformers.models.step3p7.modeling_step3p7 import Step3p7SparseMoeBlock
 from transformers.models.zaya.configuration_zaya import ZayaConfig
 from transformers.models.zaya.modeling_zaya import ZayaSparseMoeBlock
 
-from src.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
-from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.families.roster import ep_layer_classes
-from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
-from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
-from src.models.moe.balancing import resolve_balancing_slot
+from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
+from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from halo.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes
+from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from halo.models.moe.balancing import resolve_balancing_slot
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 8, 16, 32, 3  # experts, hidden, moe intermediate, top_k

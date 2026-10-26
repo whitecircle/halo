@@ -29,6 +29,23 @@ import logging
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
+from halo.checkpoint.offline_export import (
+    preflight_model_load_resources,
+    reject_in_place_conversion,
+    save_full_checkpoint,
+)
+from halo.checkpoint.reading import reject_partial_checkpoint
+from halo.log import configure_cli_logging
+from halo.model_loading.dtype import DTYPE_BY_NAME
+from halo.model_loading.model_preparation import auto_load_model
+from halo.model_loading.tokenizer_setup import (
+    adopt_tokenizer_chat_template,
+    load_chat_template,
+    load_processing_class,
+    resolve_tokenizer,
+    set_run_chat_template,
+)
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 from scripts.cli_arguments import (
     add_device_map_arg,
     add_dtype_arg,
@@ -36,23 +53,6 @@ from scripts.cli_arguments import (
     add_max_shard_size_arg,
     add_trust_remote_code_arg,
 )
-from src.checkpoint.offline_export import (
-    preflight_model_load_resources,
-    reject_in_place_conversion,
-    save_full_checkpoint,
-)
-from src.checkpoint.reading import reject_partial_checkpoint
-from src.log import configure_cli_logging
-from src.model_loading.dtype import DTYPE_BY_NAME
-from src.model_loading.model_preparation import auto_load_model
-from src.model_loading.tokenizer_setup import (
-    adopt_tokenizer_chat_template,
-    load_chat_template,
-    load_processing_class,
-    resolve_tokenizer,
-    set_run_chat_template,
-)
-from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

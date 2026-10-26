@@ -13,15 +13,15 @@ from typing import get_args, get_type_hints
 
 import pytest
 
-import src.environments.engine_wire as engine_wire
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.engine_wire import capture_generation_tokens, turn_from_chat_completion
-from src.environments.ray_actors import EnvironmentActor
-from src.environments.rollout_config import RolloutConfig
-from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
+import halo.environments.engine_wire as engine_wire
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.engine_wire import capture_generation_tokens, turn_from_chat_completion
+from halo.environments.ray_actors import EnvironmentActor
+from halo.environments.rollout_config import RolloutConfig
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.weight_sync import StockModel, offline_client
 

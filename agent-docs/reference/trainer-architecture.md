@@ -1,6 +1,6 @@
 # Trainer Architecture
 
-All distributed trainers inherit `DistributedTrainerMixin` (`src/trainers/distributed_trainer.py`), which
+All distributed trainers inherit `DistributedTrainerMixin` (`halo/trainers/distributed_trainer.py`), which
 sits alongside a base trainer class (`SFTTrainer`, `Trainer`, `GRPOTrainer`) and overrides the
 parallelism-sensitive methods while delegating the rest. The spine itself holds construction
 (`_init_distributed_config`), the post-wrap orchestration (`_configure_distributed_modes`), the HF
@@ -32,7 +32,7 @@ Each mixin is a class because it reads live trainer state; the methods a test or
 `_inner_training_loop`) must reach the base Trainer — `tests/cpu/trainers/test_mixin_composition.py`
 fails if a sibling base ever intercepts one.
 
-Three mixins sit outside that composition, in `src/trainers/`. `StoredMetricsMixin`
+Three mixins sit outside that composition, in `halo/trainers/`. `StoredMetricsMixin`
 (`stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
 distillation, and SDPG for buffered per-step metric logging. `log` reports
 each metric's row-weighted world mean through one `WorldMetrics` flush per log call: one object gather
@@ -150,7 +150,7 @@ recomputed from trained weights on resume.
 constructor-time gates rather than class attributes. Rejections land in three places.
 
 `PipelineTrainerMixin._split_pipeline_stage` rejects the generic blockers on every trainer
-(`src/trainers/parallelism/pipeline_rules.py`):
+(`halo/trainers/parallelism/pipeline_rules.py`):
 an unset `max_length`, `save_sharded_ep`, reentrant gradient checkpointing, `peft_config`, TRL's
 `activation_offloading`, `torch_compile`, image-bearing data, and an eval batch size differing
 from train. Padding-free collation is rejected at the collator wrap (its flattened width varies
@@ -161,7 +161,7 @@ wrappers add on top, through the `_reject_unsupported_pp_options` hook or their 
 `compute_metrics` (no PP reduction reproduces their non-PP prediction convention). A tied-embedding
 checkpoint, live MTP tail layers, a family that is refused or not registered in `PP_FAMILY_SPECS`,
 and aux-loss MoE balancing are rejected later, at the model split
-(`src/distributed/pipeline_parallel/model_rules.py`). See
+(`halo/distributed/pipeline_parallel/model_rules.py`). See
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 
 ## Modality support
@@ -222,7 +222,7 @@ reconciles `save_on_each_node`, the Liger config and the GC `use_reentrant` kwar
 mode and the model (every MoE, EP or CP run goes reentrant). It then runs the construction refusals
 (`reject_undeclared_axes`, `reject_pp_named_optimizer`, `reject_accelerate_launch`, the determinism
 gates) and the PP split.
-`distributed_trainer_kwargs` (`src/entrypoints/script.py`) is the bundle every entry script
+`distributed_trainer_kwargs` (`halo/entrypoints/script.py`) is the bundle every entry script
 passes.
 
 A trainer that forwards `**kwargs` calls it as above. One whose `__init__` names those parameters
@@ -319,7 +319,7 @@ correct global mean (`effective_grad = (1/cp_size) * sum(partial_grad_i)`). In E
 DTensor and EP hooks alone sync; with DP>1, FSDP2 syncs non-EP params across nodes.
 
 Clipping and sync read the mesh groups (TP, DP) through the mesh accessors (`tp_group`, `dp_group`
-in `src/distributed/mesh.py`) and the expert groups (dispatch-EP, expert-TP, expert-replica) off
+in `halo/distributed/mesh.py`) and the expert groups (dispatch-EP, expert-TP, expert-replica) off
 `EPConfig`, rather than re-deriving them per call site.
 
 ### EP-aware gradient clipping
@@ -337,7 +337,7 @@ norms. The EP and TP clips share one norm, `_compute_global_grad_norm`:
 
 Then `global_norm = sqrt(expert_norm_sq + other_norm_sq)` sets the clip. Every clip derives one
 device-resident coefficient,
-`clip_coefficient` (`src/trainers/parallelism/grad_clipping.py`), and refuses any `norm_type` but 2 (`require_l2`).
+`clip_coefficient` (`halo/trainers/parallelism/grad_clipping.py`), and refuses any `norm_type` but 2 (`require_l2`).
 The EP clip refuses to install on a model with no EP layers.
 The TP clip, and the EP clip under any other optimizer, scale every local gradient by it
 in place (`scale_shards_to_max_norm_`). Under EP with AdamWBF16 stepping exactly the clipped parameters
@@ -346,18 +346,18 @@ which multiplies it into each gradient inside its fused step; the gradients stay
 
 ## Optimizer construction
 
-Each optimizer module under `src/optimizers/` owns its own builder, and every builder is pure: it
+Each optimizer module under `halo/optimizers/` owns its own builder, and every builder is pure: it
 takes the model, args and decay parameters and returns an optimizer without touching trainer state.
 `create_optimizer` picks one and owns the `self.optimizer` assignment:
 
 | Condition | Optimizer |
 |---|---|
 | `bf16_optimizer` | `AdamWBF16` (stochastic rounding) |
-| `args.optim` present in the `NAMED_OPTIMIZER_BUILDERS` registry (`src/optimizers/registry.py`; Muon, FlashAdamW) | That builder |
+| `args.optim` present in the `NAMED_OPTIMIZER_BUILDERS` registry (`halo/optimizers/registry.py`; Muon, FlashAdamW) | That builder |
 | `fp32_non_ep_params` (or `optim: sgd` on a model with EP layers) | Param groups split by `(weight_decay, dtype, is_dtensor)` with `foreach`/`fused` disabled (PyTorch's foreach/fused optimizers cannot mix DTensor and plain-tensor params) |
 | else | The base Trainer optimizer |
 
-`build_optimizer` (`src/trainers/optimizer_selection.py`) returns `None` for that last row, and the
+`build_optimizer` (`halo/trainers/optimizer_selection.py`) returns `None` for that last row, and the
 stock build is gated, not a fallthrough: `reject_stock_adamw_on_mixed_params` raises on a
 stock fused/foreach AdamW whenever `ep_group_size > 1`, or the EP wrappers hold the experts and
 FSDP2 does not (`experts_fsdp_managed` false). `aten._fused_adamw_` raises "mixed torch.Tensor and
@@ -485,15 +485,15 @@ but under CP they cover only the local chunk.
   `eval()` mode.
 - **DistributedAsyncEnvironmentalGRPOTrainer** — async multi-turn RL with Ray actors against vLLM or
   SGLang servers (`rollout_backend`); rollout generation overlaps training; environments resolved by
-  `environment_type` through `src/environments/registry.py`. See
+  `environment_type` through `halo/environments/registry.py`. See
   [Async GRPO](../training-methods/async-grpo/README.md).
 
-The `src/trainers/grpo/` package keeps the online trainer (`online.py`), the `offline/` and `environmental/`
+The `halo/trainers/grpo/` package keeps the online trainer (`online.py`), the `offline/` and `environmental/`
 packages, and these shared leaves at the top level: `on_policy.py`, the constructor spine
 (`OnPolicyGRPOInitMixin`) and generation-round geometry (`GenerationRoundMixin`) both on-policy trainers
 compose; `grpo_rules.py`, their construction refusals as pure `reject_*` functions called ahead of TRL's
 constructor; `early_stop.py`; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
-`src/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
+`halo/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
 `_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
 its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`
 (`weight_push.py`, the push and its construction gate; `engine_preflight.py`, the COLLECTIVE rollout-server
@@ -523,7 +523,7 @@ diagnostics).
 built no `vllm_generation` (server-mode vLLM is required). Before it, the init spine both on-policy
 trainers close through (`OnPolicyGRPOInitMixin._finish_on_policy_init`) runs
 `reject_unsyncable_model` against the trainer's engine.
-TRL builds `TrlVLLMClient` (`src/trainers/grpo/rollout/trl_vllm_client.py`), TRL's `generate`
+TRL builds `TrlVLLMClient` (`halo/trainers/grpo/rollout/trl_vllm_client.py`), TRL's `generate`
 contract over the vLLM weight-sync client, in place of its own `VLLMClient`, which would import the
 vLLM package ([generation](../training-methods/grpo/online.md#server-mode-only)).
 
@@ -537,7 +537,7 @@ TRL slices the broadcast by `process_index`, each TP rank lands on different com
 first forward deadlocks on its first all-reduce.
 
 `_distributed_sync_weights` calls `sync_trainer_weights`
-(`src/trainers/grpo/rollout/weight_push.py`, also used by the async GRPO trainer), which gathers,
+(`halo/trainers/grpo/rollout/weight_push.py`, also used by the async GRPO trainer), which gathers,
 sends, and closes the engine's update with `finish_weight_update` — see
 [the gather](../training-methods/grpo/online.md#weight-sync) for what it collects.
 EP layers are found by `isinstance(module, EPMoELayerBase)` rather than an `ep_config` probe (a PEFT
@@ -564,7 +564,7 @@ saver's trainer state is read, and the ladder reads rank-uniform state only, so 
 identical saver (`None` = fall through to `Trainer.save_model`).
 
 Weight resume goes through `load_resume_weights()` over `_weights_load_context()`, and the per-rank
-optimizer shards through `OptimizerShardStore` (`src/checkpoint/parallel/`) over
+optimizer shards through `OptimizerShardStore` (`halo/checkpoint/parallel/`) over
 `_checkpoint_load_context()`; where `load_resume_weights()` declines, `_load_weights_through_base` runs
 the base Trainer's own load, and `_load_best_model` routes through `_load_from_checkpoint` too. A trainer
 whose saves write a sub-module's names overrides the two hooks (the embedding trainer: the backbone,
@@ -573,7 +573,7 @@ and sentence-transformers' own reload).
 Around it the mixin orchestrates the non-weight parts of a checkpoint: `_save_checkpoint` (which
 defers `save_total_limit` rotation until the new checkpoint is complete, and lets the shard store
 replace the base's `optimizer.pt`), and the LR-scheduler and `router_balancing_biases.pt` sidecars of
-`src/checkpoint/parallel/sidecars.py`.
+`halo/checkpoint/parallel/sidecars.py`.
 `_persist_trainer_sidecars` is a trainer's own hook, called on every rank before rotation, and
 `_restore_trainer_sidecars` its read-back, called on every rank of a resume (never a best-model
 load). The shared reference mixin overrides the write for DPO/KTO and offline GRPO's `reference_logps.pt`.

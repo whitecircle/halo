@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.configs.script_arguments import ModelArguments
-from src.entrypoints import model_setup
-from src.entrypoints.script import ScriptContext
+from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints import model_setup
+from halo.entrypoints.script import ScriptContext
 
 _BASE = "org/base-model"
 _CHECKPOINT = "/runs/out/checkpoint-10"

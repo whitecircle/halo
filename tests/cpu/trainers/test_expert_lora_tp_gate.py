@@ -22,10 +22,10 @@ import torch
 import torch.nn as nn
 from peft import IA3Config, LoraConfig, PeftModel, get_peft_model, inject_adapter_in_model
 
-import src.trainers.parallelism.adapter_rules as validation_mod
-from src.models.peft_adapters import tuner_adapter_param_ids
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.parallelism.adapter_rules import reject_lora_under_tp
+import halo.trainers.parallelism.adapter_rules as validation_mod
+from halo.models.peft_adapters import tuner_adapter_param_ids
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.parallelism.adapter_rules import reject_lora_under_tp
 from tests.common.parallelism import make_parallelism_config
 
 
@@ -108,7 +108,7 @@ class _ConstructionHost(DistributedTrainerMixin):
         self.model = model
         self.args = SimpleNamespace(optim="adamw_torch")
         self._bf16_optimizer = False
-        with patch("src.distributed.parallelism_config.validate_nvlink_domain_against_fabric"):
+        with patch("halo.distributed.parallelism_config.validate_nvlink_domain_against_fabric"):
             self.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2, **parallelism)
 
     def _restore_trl_overrides(self):
@@ -131,7 +131,7 @@ def test_trainer_construction_refuses_lora_under_tp_only(parallelism, error, fra
     any wrap, and the same model on plain data parallelism passes it."""
     host = _ConstructionHost(get_peft_model(_TinyLM(), LoraConfig(r=4, target_modules=["q_proj"])), **parallelism)
 
-    with patch("src.trainers.distributed_trainer.agree_rank_uniform_env"), pytest.raises(error, match=fragment):
+    with patch("halo.trainers.distributed_trainer.agree_rank_uniform_env"), pytest.raises(error, match=fragment):
         DistributedTrainerMixin._configure_distributed_modes(host)
 
 

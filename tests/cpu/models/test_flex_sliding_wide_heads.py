@@ -10,8 +10,8 @@ import pytest
 from transformers import Gemma4ForCausalLM, Gemma4TextConfig, MistralConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
 
-from src.models.attention.sdpa_flex_sliding import sliding_attention_calls
-from src.models.attention.selection import FLASH_MAX_HEAD_DIM, has_head_dim_beyond_flash
+from halo.models.attention.sdpa_flex_sliding import sliding_attention_calls
+from halo.models.attention.selection import FLASH_MAX_HEAD_DIM, has_head_dim_beyond_flash
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 
 

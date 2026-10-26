@@ -17,7 +17,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.runtime.consensus import _value_digest, assert_rank_uniform
+from halo.runtime.consensus import _value_digest, assert_rank_uniform
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -47,7 +47,7 @@ def _outcome(recorder: _Recorder, value, label: str, **kwargs) -> dict[str, obje
 
 def _worker(rank: int, tmp_dir: str) -> None:
     recorder = _Recorder()
-    logging.getLogger("src.runtime.consensus").addHandler(recorder)
+    logging.getLogger("halo.runtime.consensus").addHandler(recorder)
     divergent_shape = tuple(torch.zeros(2, 4 + rank).shape)
     os.environ.pop("HALO_TP_CONSISTENCY_CHECK", None)
     outcomes = {

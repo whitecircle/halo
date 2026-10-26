@@ -30,18 +30,18 @@ from transformers import (
 )
 from trl import DPOConfig, KTOConfig, RewardConfig
 
-from src.configs.classification import ClassificationConfig
-from src.configs.preference import SmoothMarginPOConfig
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from src.model_loading.tokenizer_setup import configure_run_tokenizer
-from src.runtime.collectives import barrier
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-from src.trainers.reward.classification import ClassificationTrainer
+from halo.configs.classification import ClassificationConfig
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.runtime.collectives import barrier
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.trainers.reward.classification import ClassificationTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import (

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Tests for OpenAI tool-call format handling on the data model
-(``src/environments/tools/definitions.py``): parsing one tool call out of a chat-completion message
+(``halo/environments/tools/definitions.py``): parsing one tool call out of a chat-completion message
 and serializing a tool result back into an OpenAI ``tool`` message.
 
 Tool-call *parsing* belongs on the data model (any OpenAI-compatible server, including vLLM,
@@ -16,8 +16,8 @@ import warnings
 
 import pytest
 
-from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from src.environments.tools.definitions import (
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,
     NativeToolRegistry,

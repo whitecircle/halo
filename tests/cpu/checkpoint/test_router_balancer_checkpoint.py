@@ -18,10 +18,10 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-import src.checkpoint.parallel.reading as coordination
-from src.checkpoint.parallel.sidecars import restore_balancing_biases, save_balancing_biases
-from src.models.moe.balancing import apply_balancing_bias_sidecar
-from src.runtime.consensus import RankConsensus
+import halo.checkpoint.parallel.reading as coordination
+from halo.checkpoint.parallel.sidecars import restore_balancing_biases, save_balancing_biases
+from halo.models.moe.balancing import apply_balancing_bias_sidecar
+from halo.runtime.consensus import RankConsensus
 
 
 class _Router(nn.Module):

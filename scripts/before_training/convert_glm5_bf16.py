@@ -33,10 +33,10 @@ import math
 
 import torch
 
+from halo.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
+from halo.checkpoint.reading import read_checkpoint_config
+from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg
-from src.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
-from src.checkpoint.reading import read_checkpoint_config
-from src.log import configure_cli_logging
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

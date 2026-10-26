@@ -5,7 +5,7 @@ per assistant turn.
 ``train_on_completions_only`` finds the assistant span by searching the RENDERED conversation for
 the marker string. When the marker does not occur — a template swapped for another family's, a
 marker copied from a sibling model — the collator masks the whole row
-(``src/data/collators/packing.py``: ``batch["labels"][i, :] = ignore_index``) and the run trains on
+(``halo/data/collators/packing.py``: ``batch["labels"][i, :] = ignore_index``) and the run trains on
 nothing, reporting loss 0 instead of failing. A marker that occurs only ONCE on a multi-turn row is
 the same failure at 1/n scale: every earlier assistant turn is masked, silently. Both are invisible
 in a parse-only check: every one of these configs parses clean.

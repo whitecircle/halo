@@ -23,9 +23,9 @@ import pytest
 from botocore.exceptions import ClientError
 from datasets import Dataset
 
-from src.data.sources import s3_dataset_store
-from src.data.sources.s3_client import S3Client
-from src.data.sources.s3_dataset_store import _PUSH_COMPLETE_MARKER, _PUSH_INFIX
+from halo.data.sources import s3_dataset_store
+from halo.data.sources.s3_client import S3Client
+from halo.data.sources.s3_dataset_store import _PUSH_COMPLETE_MARKER, _PUSH_INFIX
 
 BUCKET = "test-bucket"
 KEY = "datasets/results"
@@ -393,16 +393,16 @@ def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
     recovered = MagicMock(spec=Dataset)
     torn = FileNotFoundError("no state.json")
     with (
-        patch("src.data.sources.s3_dataset_store._recover_from_pending_push", return_value=recovered),
-        patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
-        patch("src.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
+        patch("halo.data.sources.s3_dataset_store._recover_from_pending_push", return_value=recovered),
+        patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
+        patch("halo.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
     ):
         assert s3_dataset_store.load_dataset(client, KEY) is recovered
 
     with (
-        patch("src.data.sources.s3_dataset_store._recover_from_pending_push", return_value=None),
-        patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
-        patch("src.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
+        patch("halo.data.sources.s3_dataset_store._recover_from_pending_push", return_value=None),
+        patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
+        patch("halo.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
     ):
         with pytest.raises(FileNotFoundError, match="state.json"):
             s3_dataset_store.load_dataset(client, KEY)

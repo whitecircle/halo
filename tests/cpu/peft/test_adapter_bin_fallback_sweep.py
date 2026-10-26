@@ -16,8 +16,8 @@ import os
 import pytest
 import torch
 
-import src.checkpoint.adapters as adapters_mod
-from src.checkpoint.format import ADAPTER_BIN_FILE, ADAPTER_SAFETENSORS_FILE
+import halo.checkpoint.adapters as adapters_mod
+from halo.checkpoint.format import ADAPTER_BIN_FILE, ADAPTER_SAFETENSORS_FILE
 
 
 def _failing_save(*args, **kwargs):

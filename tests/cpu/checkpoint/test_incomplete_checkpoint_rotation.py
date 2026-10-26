@@ -26,11 +26,11 @@ import pytest
 from accelerate import PartialState
 from transformers import TrainerState
 
-from src.entrypoints.run_setup import resume_checkpoint_from_config
-from src.runtime import collectives, filesystem
-from src.runtime.filesystem import is_fs_save_rank
-from src.runtime.ranks import get_global_rank
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.entrypoints.run_setup import resume_checkpoint_from_config
+from halo.runtime import collectives, filesystem
+from halo.runtime.filesystem import is_fs_save_rank
+from halo.runtime.ranks import get_global_rank
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks

@@ -21,27 +21,27 @@ import torch
 from datasets import Dataset
 from PIL import Image
 
-from src.data.collators.self_distill import SelfDistillTextCollator
-from src.data.collators.vlm import VLMDataCollator
-from src.data.pipeline import chat_render as rendered
-from src.data.pipeline import preferences, rejected_rows
-from src.data.pipeline.chat_render import render_conversation
-from src.data.pipeline.preferences import (
+from halo.data.collators.self_distill import SelfDistillTextCollator
+from halo.data.collators.vlm import VLMDataCollator
+from halo.data.pipeline import chat_render as rendered
+from halo.data.pipeline import preferences, rejected_rows
+from halo.data.pipeline.chat_render import render_conversation
+from halo.data.pipeline.preferences import (
     render_vlm_preference_row,
     split_vlm_preference_row,
     tokenize_vlm_preference_row,
 )
-from src.data.pipeline.text_rows import build_chat_row_processor, render_row_conversation
-from src.data.pipeline.vlm_rows import (
+from halo.data.pipeline.text_rows import build_chat_row_processor, render_row_conversation
+from halo.data.pipeline.vlm_rows import (
     _VLM_SIGNATURE_COLUMNS,
     build_vlm_history,
     build_vlm_row_processor,
     vlm_map_features,
 )
-from src.data.preprocessed import tokenization
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.preprocessed.tokenization import tokenize_vlm_dataset
-from src.data.vlm_render import VLM_OUTPUT_FEATURES
+from halo.data.preprocessed import tokenization
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
+from halo.data.vlm_render import VLM_OUTPUT_FEATURES
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer
 
 
@@ -334,7 +334,7 @@ def test_rejected_rows_imports_nothing_from_the_coordinated_map_module():
     ``coordinated_map`` can import the predicate without either module reaching back."""
     tree = ast.parse(pathlib.Path(rejected_rows.__file__).read_text())
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
-    assert "src.data.pipeline.coordinated_map" not in imported, sorted(imported)
+    assert "halo.data.pipeline.coordinated_map" not in imported, sorted(imported)
 
 
 def test_the_row_map_factories_expose_no_dead_injection_knobs():

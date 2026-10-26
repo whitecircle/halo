@@ -31,9 +31,9 @@ from transformers import CONFIG_MAPPING, AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import CONFIG_NAME
 
-from src.checkpoint.config_export import export_source_config_schema, restore_model_type
-from src.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, find_moe_family_spec
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.checkpoint.config_export import export_source_config_schema, restore_model_type
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, find_moe_family_spec
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.models import (
     TINY_BAILING_MOE_CONFIG,
     TINY_GEMMA4_MOE_CONFIG,

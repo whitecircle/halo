@@ -2,7 +2,7 @@
 
 TP shards large weight matrices across GPUs. Use it when a dense model's layers don't fit on one
 GPU. `data_parallel_size = world_size / tp_size`; all ranks participate in gradient sync
-(`ParallelismConfig`, `src/distributed/parallelism_config.py`). Why its all-reduce has to stay on
+(`ParallelismConfig`, `halo/distributed/parallelism_config.py`). Why its all-reduce has to stay on
 NVLink: [GPU Training Theory §9](../reference/gpu-training-theory.md#collectives).
 
 > [!WARNING]
@@ -43,7 +43,7 @@ embedding/lm_head replicated):
 
 Every MoE under **pure** TP routes to `load_tp_moe_model` rather than `tp_plan="auto"`, because
 HF's auto plan wrongly shards MoE expert biases. Supported attention classes:
-`TP_SHARDABLE_ATTENTION_CLASSES` in `src/distributed/tensor_parallel/parallelize_attention.py`.
+`TP_SHARDABLE_ATTENTION_CLASSES` in `halo/distributed/tensor_parallel/parallelize_attention.py`.
 
 **Not supported:** every family absent from the table above. Their attention class is in no
 registry, so a `tp_size > 1` run shards zero layers and raises rather than leaving every weight
@@ -53,7 +53,7 @@ load. Per family, with the reason on its page:
 
 ## Load paths
 
-Three paths in `load_distributed_model` (`src/model_loading/parallel/loader.py`):
+Three paths in `load_distributed_model` (`halo/model_loading/parallel/loader.py`):
 
 | Path | When | Mechanism |
 |---|---|---|
@@ -64,9 +64,9 @@ Three paths in `load_distributed_model` (`src/model_loading/parallel/loader.py`)
 The HF-native path validates the load's materialization, not just its plan (`finish_hf_tp_load`): a plan
 that shards zero parameters raises (the run would be `tp_size` replicas), and a plan-sharded param that materialized
 as a **plain** tensor raises too (`reject_plan_sharded_plain_params`,
-`src/distributed/tensor_parallel/hf_plan.py`) — such a bare slice is indistinguishable from a
+`halo/distributed/tensor_parallel/hf_plan.py`) — such a bare slice is indistinguishable from a
 replica downstream, and the replicated-grad AVG would mix disjoint slices across the TP group.
-Hand-sliced params (`register_hand_sliced`, `src/distributed/tensor_parallel/plain_params.py`) are exempt.
+Hand-sliced params (`register_hand_sliced`, `halo/distributed/tensor_parallel/plain_params.py`) are exempt.
 
 ### Tied embeddings under HF-native TP
 
@@ -86,7 +86,7 @@ An architecture planning only **one** end of the pair (a multimodal wrapper clas
 `lm_head` entry; a backbone shipping no `base_model_tp_plan`) cannot do that: the tie would hand the
 unplanned end a weight of the other kind and the first forward dies on mixed plain/DTensor operands.
 
-`consistent_tied_tp_plan` (`src/distributed/tensor_parallel/hf_plan.py`) drops that lone entry for
+`consistent_tied_tp_plan` (`halo/distributed/tensor_parallel/hf_plan.py`) drops that lone entry for
 the load so the pair stays replicated instead, warning that those weights cost a full copy per rank.
 `validate_tied_pair_consistent` then fails the
 load loud if the loaded pair is untied, or if its sharding disagrees with the applied plan.
@@ -106,7 +106,7 @@ straight on its GPU, so host RAM never holds the model. The FP32-master restore 
 
 ## The selective-TP plan
 
-`apply_tp_to_attention_only` (`src/distributed/tensor_parallel/parallelize_attention.py`) walks the
+`apply_tp_to_attention_only` (`halo/distributed/tensor_parallel/parallelize_attention.py`) walks the
 model and builds a per-module DTensor plan:
 
 | Module | Strategy | Notes |
@@ -157,7 +157,7 @@ all-reduce (visible in py-spy as ranks stuck at different sub-modules of one for
 
 This affects trainers pulling per-rank data from an external service. `DistributedGRPOTrainer`
 overrides `_generate_single_turn` to broadcast the vLLM rollout tuple from the TP-group leader. For
-custom trainers, add an `assert_rank_uniform` call (`src.runtime.consensus`; pass
+custom trainers, add an `assert_rank_uniform` call (`halo.runtime.consensus`; pass
 `tuple(t.shape)` to compare a shape) at the suspect tensor — the toolkit ships no call sites, so
 `HALO_TP_CONSISTENCY_CHECK=1` on its own produces nothing; it only turns the check's warning into a
 raise.
@@ -180,7 +180,7 @@ torchrun --nproc_per_node=4 scripts/training/sft.py \
 2D `(dp, tp)` mesh: TP within a node, FSDP2 across replicas. DTensor gradients cannot be reduced
 with plain `dist.all_reduce` or DDP — FSDP2's `fully_shard` understands DTensor semantics. The
 loader builds the mesh and attaches it to the model; the trainer wraps over the DP dimension via
-`apply_fsdp2_for_tp` (`src/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
+`apply_fsdp2_for_tp` (`halo/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
 point with its EP modules as `ignored_params`. Pure TP (DP=1)
 skips FSDP. Prefer `tp_size = world_size` when the model fits the TP group's memory.
 
@@ -199,7 +199,7 @@ wrong is silent — the loss stays finite and the objective is just different:
 The trap is the plain slice. It is indistinguishable from a replica by tensor type, and once FSDP2
 wraps the run for DP **both** become 1-D `dp` DTensors, so the mesh cannot separate them either.
 
-`_tp_sharded_plain_param_ids()` (`src/trainers/parallelism/grad_sync.py`) is the single source of truth:
+`_tp_sharded_plain_param_ids()` (`halo/trainers/parallelism/grad_sync.py`) is the single source of truth:
 it reads the hand-sliced registry (`hand_sliced_suffixes`: the suffixes `register_hand_sliced`
 records, each with its shard dim, when a param is sliced by hand), and both
 `_sync_tp_replicated_grads` and `_sharded_grad_bucket` key off it. Everything a TP plan shards is a DTensor whose gradient reduces itself, so the plan contributes
@@ -238,7 +238,7 @@ parallel-vs-baseline bound.
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 **Models.** There is no per-family "supports TP" flag. Selective TP shards exactly the attention
-classes in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`), and
+classes in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`), and
 a `tp_size > 1` run that shards **zero** layers raises, naming the model's attention classes; that
 is how the [unsupported families](#supported-models) are rejected.
 
@@ -273,7 +273,7 @@ reshape, after the whole checkpoint has been pulled and placed on every rank.
 | `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `reject_accelerate_launch` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `reject_unreloadable_best_model` |
-| `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `src/model_loading/liger/dispatch.py` |
+| `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `halo/model_loading/liger/dispatch.py` |
 | `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `configure_run_tokenizer` (`is_input_embedding_tp_sharded`) |
 | `gradient_checkpointing`, `packing`, `padding_free`, `lowp_precision`, `moe_balancing` | not gated under TP | — |
 | `torch_compile` | not gated, and no meaningful speedup — DTensor's sharded-op dispatch breaks the graph at every sharded op. Use Liger | — |
@@ -297,14 +297,14 @@ GPU-side barrier, not the PyTorch watchdog, so this does **not** bound it.
 
 ## Checkpoint saving
 
-`save_tp_checkpoint` (`src/checkpoint/parallel/save.py`), the ladder's TP rung, always
+`save_tp_checkpoint` (`halo/checkpoint/parallel/save.py`), the ladder's TP rung, always
 gathers: all TP ranks reconstruct full tensors and one save rank writes a standard HF checkpoint, put
 through `normalize_gathered_state_dict` (hub expert layout, save dtype) like the FSDP2 and CP
 writers. There is no per-rank TP save. The write streams through `stream_gathered_checkpoint`, so
 the save rank's host RAM is bounded by one chunk plus one pending shard rather than the whole model.
 
 `chunked_saveable_tensors` reconstructs every sharded param with `DTensor.full_tensor()` — one walk
-covers both mechanisms — and `gather_hand_sliced_params` (`src/checkpoint/parallel/writing.py`)
+covers both mechanisms — and `gather_hand_sliced_params` (`halo/checkpoint/parallel/writing.py`)
 all-gathers the hand-sliced GptOss `sinks` after it. Both are **collective**: every TP-mesh rank
 must drive them or the gather hangs.
 

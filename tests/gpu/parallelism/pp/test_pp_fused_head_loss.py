@@ -43,10 +43,10 @@ import torch
 import torch.distributed as dist
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss
-from src.kernels import logprobs as logprob_kernels
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss
+from halo.kernels import logprobs as logprob_kernels
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG

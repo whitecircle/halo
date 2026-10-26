@@ -20,17 +20,17 @@ from unittest import mock
 
 import pytest
 
-import src.configs
-from src import env
-from src.configs.script_arguments import CommonScriptArguments
+import halo.configs
+from halo import env
+from halo.configs.script_arguments import CommonScriptArguments
 
 
 def _script_argument_classes() -> dict[str, type]:
-    """Every script-argument dataclass under ``src/configs/``, by name — derived, so a new one is pinned or
+    """Every script-argument dataclass under ``halo/configs/``, by name — derived, so a new one is pinned or
     fails."""
     found = {}
-    for module_info in pkgutil.iter_modules(src.configs.__path__):
-        module = importlib.import_module(f"src.configs.{module_info.name}")
+    for module_info in pkgutil.iter_modules(halo.configs.__path__):
+        module = importlib.import_module(f"halo.configs.{module_info.name}")
         for name, obj in vars(module).items():
             if isinstance(obj, type) and obj.__module__ == module.__name__ and issubclass(obj, CommonScriptArguments):
                 found[name] = obj

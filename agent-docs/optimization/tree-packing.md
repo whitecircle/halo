@@ -52,10 +52,10 @@ still about 1.3× more examples per second. Building the trees adds dataset maps
 
 ## Attention
 
-The collator (`src/data/collators/tree_packing.py`) concatenates the batch's packed rows, recovers every
+The collator (`halo/data/collators/tree_packing.py`) concatenates the batch's packed rows, recovers every
 tree from two per-token columns (position along the token's own path, depth of its node) and puts the
-index tensors each layer needs under the `tree_attention` batch key (`src/models/attention/tree_plan.py`).
-`src/models/attention/tree.py` installs the readers on the family's own modeling module; nothing else in
+index tensors each layer needs under the `tree_attention` batch key (`halo/models/attention/tree_plan.py`).
+`halo/models/attention/tree.py` installs the readers on the family's own modeling module; nothing else in
 the model changes. A softmax layer runs the stock packed path on a batch with no branch.
 
 - **Sliding-window layers** gather, per tree node, the last `sliding_window - 1` prefix tokens ahead
@@ -68,7 +68,7 @@ the model changes. A softmax layer runs the stock packed path on a batch with no
   log-sum-exp with a gradient.
 - **Full layers, `gather`**: one key sequence per node, the whole prefix ahead of it. Runs on FA2 as
   well; the gathered keys grow with fan-out × prefix length, so a layer whose row gathers more than
-  2^19 keys (`GATHER_KEYS_PER_CALL` in `src/models/attention/tree_plan.py`) attends in several calls of
+  2^19 keys (`GATHER_KEYS_PER_CALL` in `halo/models/attention/tree_plan.py`) attends in several calls of
   whole nodes. That bounds the GQA backward, which expands key and value gradients to every query head.
 - **GatedDeltaNet layers** (Qwen3.5/3.6): the causal convolution runs each node behind the last
   `linear_conv_kernel_dim - 1` tokens of its path, and the delta-rule recurrence runs one tree depth
@@ -142,7 +142,7 @@ under context, tensor and pipeline parallelism, with `torch_compile`, with `trai
 pre-processed dataset and on the VLM path. The other `tree_*` options raise when set without it.
 Expert parallelism and FSDP2 data parallelism never slice a row and run tree rows unchanged.
 
-Families are admitted one by one (`TREE_FAMILIES` in `src/models/attention/tree.py`), each by passing
+Families are admitted one by one (`TREE_FAMILIES` in `halo/models/attention/tree.py`), each by passing
 the per-example oracle test; every other family is refused before the model loads. GLM-5 Next is among
 those: its sparse-attention indexer selects keys over the whole row and takes no per-sequence bounds.
 Backends are admitted the same way, by the GPU kernel test: `flash_attention_3` is refused.

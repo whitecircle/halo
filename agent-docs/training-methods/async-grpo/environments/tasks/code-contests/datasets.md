@@ -19,7 +19,7 @@ A code-contests row carries the problem statement as `prompt` and its test set a
 
 ## Adapters
 
-Adapters live in `src/environments/tasks/coding/contest_datasets.py`:
+Adapters live in `halo/environments/tasks/coding/contest_datasets.py`:
 
 | Adapter | Source | Role | Notes |
 |---|---|---|---|

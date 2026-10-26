@@ -17,15 +17,15 @@ from collections import defaultdict
 import pytest
 import torch
 
-import src.trainers.grpo.environmental.rollout_metrics as rm
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.episode import RolloutResult
-from src.environments.episode_keys import SOLVE_RATE_KEY
-from src.environments.messages import Trajectory
-from src.trainers.grpo.environmental.rollout_metrics import group_solve_counts
-from src.trainers.grpo.environmental.step_batch import BatchRows
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.world_metrics import WorldMetrics
+import halo.trainers.grpo.environmental.rollout_metrics as rm
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.episode import RolloutResult
+from halo.environments.episode_keys import SOLVE_RATE_KEY
+from halo.environments.messages import Trajectory
+from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
+from halo.trainers.grpo.environmental.step_batch import BatchRows
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.world_metrics import WorldMetrics
 from tests.common.world_metrics import attach_world_metrics, fake_world, flushed_metrics
 
 _Trainer = DistributedAsyncEnvironmentalGRPOTrainer

@@ -8,10 +8,10 @@ from dataclasses import replace
 import torch
 import torch.nn as nn
 
-from src.distributed.pipeline_parallel.families import GENERIC_PP, PP_SPEC_MAP
-from src.distributed.pipeline_parallel.runner import PipelineRunner
-from src.distributed.pipeline_parallel.stage import PipelineStageModule, StageLayout
-from src.distributed.pipeline_parallel.stage_losses import TokenLoss
+from halo.distributed.pipeline_parallel.families import GENERIC_PP, PP_SPEC_MAP
+from halo.distributed.pipeline_parallel.runner import PipelineRunner
+from halo.distributed.pipeline_parallel.stage import PipelineStageModule, StageLayout
+from halo.distributed.pipeline_parallel.stage_losses import TokenLoss
 
 # The layout of a ``*ForCausalLM`` whose backbone sits under ``model`` and its head under ``lm_head``.
 CAUSAL_LM_LAYOUT = StageLayout(

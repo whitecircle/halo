@@ -21,10 +21,10 @@ Run: python tests/cpu/parallelism/test_pp_group_construction.py
 
 import pytest
 
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import build_pipeline_group, build_stage_group
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.pipeline_parallel.groups import build_pipeline_group, build_stage_group
 from tests.common.parallelism import make_parallelism_config, stubbed_process_groups
 
 

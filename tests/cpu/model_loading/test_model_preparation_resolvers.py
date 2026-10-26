@@ -21,9 +21,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.model_loading import dtype as dtype_mod
-from src.model_loading import tokenizer_setup
-from src.model_loading.dtype import DTYPE_BY_NAME
+from halo.model_loading import dtype as dtype_mod
+from halo.model_loading import tokenizer_setup
+from halo.model_loading.dtype import DTYPE_BY_NAME
 
 
 class _UnexpectedTokenizerError(RuntimeError):

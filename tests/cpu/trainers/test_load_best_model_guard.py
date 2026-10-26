@@ -16,9 +16,9 @@ import torch
 from peft import LoraConfig, get_peft_model
 from transformers import PretrainedConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.parallelism.trainer_rules import reject_unreloadable_best_model
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.parallelism.trainer_rules import reject_unreloadable_best_model
 
 # A real PretrainedConfig, not a namespace: get_peft_model reads the config through ``to_dict()``
 # for its tied-weights probe, and the guard reads the expert count off it.

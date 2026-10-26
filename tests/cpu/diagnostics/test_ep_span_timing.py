@@ -12,7 +12,7 @@ import pytest
 import torch
 from torch.profiler import ProfilerActivity, profile
 
-from src.diagnostics.ep_span_timing import EPSpanTimer
+from halo.diagnostics.ep_span_timing import EPSpanTimer
 
 
 def _profiled_event_names() -> tuple[set[str], EPSpanTimer]:

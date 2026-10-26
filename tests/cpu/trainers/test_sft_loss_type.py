@@ -16,10 +16,10 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.sft import DistributedSFTTrainer
 
 REQUIRED_KWARGS = {
     DistributedSelfDistillationTrainer: {

@@ -19,7 +19,7 @@ from __future__ import annotations
 import pytest
 from transformers import LlamaConfig
 
-from src.models.config_access import apply_config_overrides
+from halo.models.config_access import apply_config_overrides
 
 # Spelled out rather than read off the production tuple: parametrizing over the very collection under
 # test turns shrinking it into a silently dropped test node instead of a failure. transformers 5

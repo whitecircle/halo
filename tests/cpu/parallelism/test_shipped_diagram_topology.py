@@ -15,7 +15,7 @@ import ast
 
 import pytest
 
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.repo import REPO_ROOT
 
 _GENERATOR = REPO_ROOT / "scripts/diagrams/gen_ep_group_tree.py"

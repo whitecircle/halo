@@ -34,8 +34,8 @@ from huggingface_hub.constants import REPOCARD_NAME
 from safetensors.torch import load_file, save_file
 from transformers.trainer import SCHEDULER_NAME, TRAINER_STATE_NAME
 
-from src.checkpoint.atomic import atomic_torch_save, create_staged_file
-from src.checkpoint.format import (
+from halo.checkpoint.atomic import atomic_torch_save, create_staged_file
+from halo.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     OPTIMIZER_META_FILE,
     REFERENCE_LOGPS_FILE,
@@ -45,7 +45,7 @@ from src.checkpoint.format import (
     WEIGHT_FILE_IGNORE_PATTERNS,
     prefetch_pending_filename,
 )
-from src.checkpoint.offline_export import copy_checkpoint_aux_files
+from halo.checkpoint.offline_export import copy_checkpoint_aux_files
 from tests.common.checkpoint_io import mark_resume_adapter
 
 SKIPPED = (

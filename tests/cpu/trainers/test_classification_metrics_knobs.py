@@ -21,9 +21,9 @@ from scipy.special import softmax
 from sklearn.metrics import matthews_corrcoef, roc_auc_score
 from transformers.trainer_utils import EvalPrediction
 
-from src.configs.classification import ClassificationConfig
-from src.trainers.reward.classification import ClassificationTrainer, reject_unsupported_classification_args
-from src.trainers.reward.classification_loss import build_classification_loss
+from halo.configs.classification import ClassificationConfig
+from halo.trainers.reward.classification import ClassificationTrainer, reject_unsupported_classification_args
+from halo.trainers.reward.classification_loss import build_classification_loss
 
 # Binary fixture: labels are 4 positives then 6 negatives; argmax gives TP=3 FN=1 FP=2 TN=4, an
 # asymmetric confusion matrix (so the two per-class rows differ). The logit-0 column varies, so

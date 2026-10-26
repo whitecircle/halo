@@ -18,12 +18,12 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.data.collators.factory import select_data_collator
-from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
-from src.trainers.sft import DistributedSFTTrainer
+from halo.data.collators.factory import select_data_collator
+from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.parallel_shape import parallel_shape_checks

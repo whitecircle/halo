@@ -15,11 +15,11 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.runtime.collectives import collective_device
-from src.runtime.consensus import agree_across_ranks, rank_consensus
-from src.runtime.load_coordination import _log_global_load_duration_seconds
+from halo.runtime.collectives import collective_device
+from halo.runtime.consensus import agree_across_ranks, rank_consensus
+from halo.runtime.load_coordination import _log_global_load_duration_seconds
 
-_MOD = "src.runtime.collectives"
+_MOD = "halo.runtime.collectives"
 
 
 @contextlib.contextmanager
@@ -75,7 +75,7 @@ def test_a_group_agreement_places_its_tensor_for_that_group():
 
     with (
         _world("gloo"),
-        patch("src.runtime.consensus.collective_device", side_effect=device_for),
+        patch("halo.runtime.consensus.collective_device", side_effect=device_for),
         patch(f"{_MOD}.dist.all_reduce"),
     ):
         agree_across_ranks("value", group=subgroup)

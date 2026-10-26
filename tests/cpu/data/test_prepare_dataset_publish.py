@@ -26,9 +26,9 @@ import types
 
 import pytest
 
+from halo.checkpoint import atomic
+from halo.model_loading import tokenizer_setup
 from scripts.before_training import prepare_dataset as mod
-from src.checkpoint import atomic
-from src.model_loading import tokenizer_setup
 
 
 def _staged(tmp_path, name="staged"):

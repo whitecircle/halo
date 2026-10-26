@@ -17,7 +17,7 @@ block-scaled convention:
   - ``<name>.weight_shape``  — the original ``[out, in]`` shape (the packed nvfp4 data halves the last dim),
   - ``<name>.weight_global_scale`` — nvfp4 only: the per-tensor fp32 scale of its two-level scaling, in
     compressed-tensors' spelling: an element is ``code x weight_scale / weight_global_scale``, so the
-    stored value is the reciprocal of :class:`~src.kernels.lowp.quantization.BlockScaledTensor`'s
+    stored value is the reciprocal of :class:`~halo.kernels.lowp.quantization.BlockScaledTensor`'s
     multiplier (dropping it rescales the weight).
 
 Which weights those are is derived from the rosters that decide what QAT quantized (the trainer's
@@ -28,7 +28,7 @@ biases, and a VLM's vision tower / projector) is copied unchanged in its origina
 ``--lowp_apply_moe_experts`` / ``--lowp_keep_first_blocks`` / ``--lowp_keep_last_blocks``, defaulting
 to the training defaults); they are not recoverable from the checkpoint. A
 ``quantization_config.json`` records the scheme so a loader (an inference engine, or the toolkit's
-:mod:`src.kernels.lowp.quantization` dequantizer) can reconstruct the weights. The block layout is OCP
+:mod:`halo.kernels.lowp.quantization` dequantizer) can reconstruct the weights. The block layout is OCP
 microscaling (mxfp8) / NVFP4 (1x16 e4m3), the formats TensorRT-LLM and vLLM consume via
 ``compressed-tensors`` / ModelOpt; mapping this manifest to a specific engine's loader remains an
 integration step.
@@ -52,24 +52,24 @@ from operator import itemgetter
 
 import torch
 
-from src.checkpoint.atomic import save_safetensors_file
-from src.checkpoint.config_export import write_config_json
-from src.checkpoint.format import SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
-from src.checkpoint.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
-from src.checkpoint.reading import (
+from halo.checkpoint.atomic import save_safetensors_file
+from halo.checkpoint.config_export import write_config_json
+from halo.checkpoint.format import SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
+from halo.checkpoint.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
+from halo.checkpoint.reading import (
     SAFETENSORS_FLOAT_DTYPES,
     checkpoint_shard_files,
     detect_model_types,
     iter_checkpoint_shard_entries,
     read_checkpoint_config,
 )
-from src.checkpoint.writing import remove_stale_checkpoint_files, write_merged_index
-from src.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
-from src.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, kept_block_indices
-from src.log import configure_cli_logging
-from src.models.module_tree import decoder_layer_index, decoder_layer_stack_prefix
-from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
-from src.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_layouts
+from halo.checkpoint.writing import remove_stale_checkpoint_files, write_merged_index
+from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
+from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, kept_block_indices
+from halo.log import configure_cli_logging
+from halo.models.module_tree import decoder_layer_index, decoder_layer_stack_prefix
+from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
+from halo.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_layouts
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
@@ -437,7 +437,7 @@ def _write_manifest(
         "note": (
             f"Trained with mixed-precision QAT (lowp_precision: {lowp_precision}, "
             f"i.e. {fmt}); quantizing the bf16/fp32 master to this format reproduces the QAT "
-            "forward exactly. Dequantize via src.kernels.lowp.quantization.dequantize, whose nvfp4 "
+            "forward exactly. Dequantize via halo.kernels.lowp.quantization.dequantize, whose nvfp4 "
             "global scale is the reciprocal of the stored weight_global_scale."
         ),
     }

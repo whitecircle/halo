@@ -12,12 +12,12 @@ import json
 
 import pytest
 
-from src.environments.episode_keys import REWARD_COMPONENTS_KEY
-from src.environments.sandbox.base import SandboxExecutor
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.program_source import is_output_only_change, normalized_program
-from src.environments.tools.definitions import NativeToolCall
+from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.program_source import is_output_only_change, normalized_program
+from halo.environments.tools.definitions import NativeToolCall
 
 PRICE = 0.1
 # Two hidden tests whose input is its own index; the stub passes test ``i`` when the program's text holds ``i``.

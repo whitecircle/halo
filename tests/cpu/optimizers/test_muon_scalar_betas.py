@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the Adam-beta plumbing in :func:`src.optimizers.muon.muon_optimizer_from_args`.
+"""CPU tests for the Adam-beta plumbing in :func:`halo.optimizers.muon.muon_optimizer_from_args`.
 
 Muon's internal scalar (1D / embedding / head) AdamW has its own tuned betas ``(0.9, 0.95)``, while
 HF's ``TrainingArguments.adam_beta2`` defaults to ``0.999``. Forwarding the training args
@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from transformers import TrainingArguments
 
-from src.optimizers.muon import DEFAULT_SCALAR_BETAS, muon_optimizer_from_args
+from halo.optimizers.muon import DEFAULT_SCALAR_BETAS, muon_optimizer_from_args
 
 
 class _TinyModel(nn.Module):

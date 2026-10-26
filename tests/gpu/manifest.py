@@ -188,7 +188,7 @@ _PRECOMPUTE_SWEEP_FAMILIES = tuple(family for family in _TINY_MOE_FAMILIES if fa
 # tests/cpu/conventions/test_tiny_family_roster.py holds them to tests/common/equivalence/cp_equivalence.py.
 _CP_MOE_FAMILIES = ("bailing_moe", "cohere2_moe", "glm4_moe_lite", "gpt_oss", "mistral4", "qwen3_5_moe_text")
 # The families whose attention the selective-TP path shards; tests/cpu/conventions/test_tiny_family_roster.py
-# holds this to src/distributed/tensor_parallel/parallelize_attention.py.
+# holds this to halo/distributed/tensor_parallel/parallelize_attention.py.
 _TP_FAMILIES = ("cohere2_moe", "glm4_moe_lite", "gpt_oss", "lfm2_moe", "mistral4", "qwen3_5_moe_text", "qwen3_moe")
 _PRECOMPUTE_FAMILY_ROWS = tuple(
     f"--trainer {trainer} --family {family}{mode}"

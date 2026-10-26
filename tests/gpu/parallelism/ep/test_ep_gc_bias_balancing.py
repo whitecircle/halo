@@ -13,7 +13,7 @@ whose backward is skipped or pruned drops the microbatch — and DOUBLE-counts i
 shipped balancing config sets ``gradient_checkpointing: true``, and nothing about either failure
 surfaces as an error.
 
-:func:`~src.models.gradient_checkpointing.counts_toward_expert_load` is unit-pinned on stubs
+:func:`~halo.models.gradient_checkpointing.counts_toward_expert_load` is unit-pinned on stubs
 in ``tests/cpu/parallelism/test_expert_load_recording.py``. What only a GPU can show is the same
 matrix through the real thing: a patched ``EPGptOssMoELayer`` with a live DeepEP ``ElasticBuffer``,
 HF's own checkpoint function, and the native adopted ``router.bias`` the export path serves. So this
@@ -41,13 +41,13 @@ import torch
 import torch.distributed as dist
 from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
-from src.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import (
+from halo.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import (
     apply_ep_layers,
 )
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.utils import log

@@ -35,13 +35,13 @@ import torch
 import torch.distributed as dist
 from accelerate.state import GradientState
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import (
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import (
     apply_ep_layers,
 )
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_reference import ep_layers, score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import freeze_base_keep_expert_adapters

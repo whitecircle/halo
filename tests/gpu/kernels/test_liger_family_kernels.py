@@ -5,7 +5,7 @@ The CPU coverage suite (``tests/cpu/model_loading/test_liger_family_coverage.py`
 forward is the FUNCTION the declared kernel computes; this proves the kernel then computes it — the
 Triton path, forward and backward, against the family's unpatched module.
 
-Three layers, one per role a :class:`~src.model_loading.liger.applier.LigerFamilySpec` can fill:
+Three layers, one per role a :class:`~halo.model_loading.liger.applier.LigerFamilySpec` can fill:
 
 * the fused head, whole-model: the fused loss must reproduce the family's own head, including a
   declared ``logit_scale`` (Cohere folds it onto the hidden states, which is exact only because
@@ -32,10 +32,10 @@ from liger_kernel.transformers.swiglu import LigerExperts
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.model_loading.liger.dispatch import resolve_liger_applier
-from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.model_loading.liger.dispatch import resolve_liger_applier
+from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from tests.common.ep_reference import compare_grad, ep_layers
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG, TINY_QWEN35_MOE_CONFIG

@@ -25,17 +25,17 @@ from transformers.models.cohere2_moe.modeling_cohere2_moe import (
     eager_attention_forward,
 )
 
-from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, Cohere2MoeUlyssesAttention
-from src.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
-from src.model_loading.buffer_repair import finalize_loaded_model
-from src.models.moe.balancing import (
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, Cohere2MoeUlyssesAttention
+from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
+from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.models.moe.balancing import (
     accepts_native_balancing_bias,
     is_transient_balancing_router,
     resolve_balancing_mode,
 )
-from src.models.moe.expert_layout import ExpertLayout
+from halo.models.moe.expert_layout import ExpertLayout
 from tests.common.models import TINY_COHERE2_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config
 from tests.common.rosters import ep_layer_class_by_model_type

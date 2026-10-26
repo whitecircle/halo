@@ -14,8 +14,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.distributed.fsdp as fsdp
-from src.distributed.fsdp import mixed_precision_policy
+import halo.distributed.fsdp as fsdp
+from halo.distributed.fsdp import mixed_precision_policy
 
 
 @pytest.mark.parametrize(

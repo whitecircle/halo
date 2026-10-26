@@ -9,7 +9,7 @@ contract, fp8, quantized storage and fp32-master handling included, (2) that the
 CPU run reaches hand back a uniform run-dtype model for every pinned family, (3) that under fp32
 masters the lazy loaders preserve every configured non-EP master (including stored pins), while
 without the flag they load all bf16, and (4) that every model build in
-``src/`` and ``scripts/training/`` either casts and finalizes or is pinned as no training load, so a
+``halo/`` and ``scripts/training/`` either casts and finalizes or is pinned as no training load, so a
 new loader that forgets either fails here rather than on its first GPU step.
 
 Run: python tests/cpu/model_loading/test_run_dtype_cast.py  (or pytest)
@@ -27,25 +27,25 @@ from safetensors.torch import save_file
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import AutoConfig
 
+import halo.model_loading.parallel.ep as ep_lazy_loader
+import halo.model_loading.parallel.pp as pp_lazy_loader
 import scripts.training.embedding as embedding_script
-import src.model_loading.parallel.ep as ep_lazy_loader
-import src.model_loading.parallel.pp as pp_lazy_loader
-from src.checkpoint.reading import resolve_checkpoint_weights
-from src.configs.embedding import EmbeddingConfig
-from src.configs.script_arguments import ModelArguments
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
-from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, StageLayout
-from src.model_loading.buffer_repair import finalize_loaded_model
-from src.model_loading.dtype import cast_parameters_to_run_dtype
-from src.model_loading.lazy_safetensors.materialization import SafetensorsWeightLoader, WeightAction, WeightPlan
-from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.model_loading.parallel.ep import load_ep_model_lazy
-from src.model_loading.parallel.fp32_masters import fp32_master_param_keys
-from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
-from src.model_loading.parallel.pp import StageKeyFilter, _load_stage_lazy
-from src.model_loading.parallel.whole_model import cast_loaded_parameters, resolve_trainer_model
-from src.models.param_roles import fp32_pinned_names
+from halo.checkpoint.reading import resolve_checkpoint_weights
+from halo.configs.embedding import EmbeddingConfig
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
+from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, StageLayout
+from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.dtype import cast_parameters_to_run_dtype
+from halo.model_loading.lazy_safetensors.materialization import SafetensorsWeightLoader, WeightAction, WeightPlan
+from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.fp32_masters import fp32_master_param_keys
+from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.model_loading.parallel.pp import StageKeyFilter, _load_stage_lazy
+from halo.model_loading.parallel.whole_model import cast_loaded_parameters, resolve_trainer_model
+from halo.models.param_roles import fp32_pinned_names
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B
 from tests.common.pinned_params import pins_off_stored, stored_fp32_pins
@@ -60,29 +60,29 @@ CASTS = frozenset({cast_parameters_to_run_dtype.__name__, cast_loaded_parameters
 FINALIZE = finalize_loaded_model.__name__
 
 # Where a training or scoring load lives; every model build there inherits the fp32 pins.
-# ``src/model_loading/`` defines the entry points and is left out: conversion tools load through it
+# ``halo/model_loading/`` defines the entry points and is left out: conversion tools load through it
 # too and must keep the pins, so the cast belongs to each training loader rather than to the shared core.
 # Its ``parallel/`` dispatch holds the training loaders and is swept.
-SWEPT_ROOTS = ("src", "scripts/training")
-LOAD_CORE = "src/model_loading/"
-TRAINING_LOADERS = "src/model_loading/parallel/"
+SWEPT_ROOTS = ("halo", "scripts/training")
+LOAD_CORE = "halo/model_loading/"
+TRAINING_LOADERS = "halo/model_loading/parallel/"
 
 # Every function the sweep below finds. Pinned exactly so a renamed or new loader is a deliberate
 # edit rather than a silently shrunk sweep.
 EAGER_LOADERS = frozenset(
     {
         ("scripts/training/embedding.py", "_load_sentence_transformer"),
-        ("src/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
-        ("src/model_loading/parallel/loader.py", "_build_random_init"),
-        ("src/model_loading/parallel/whole_model.py", "load_whole_model"),
-        ("src/model_loading/parallel/whole_model.py", "resolve_trainer_model"),
+        ("halo/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
+        ("halo/model_loading/parallel/loader.py", "_build_random_init"),
+        ("halo/model_loading/parallel/whole_model.py", "load_whole_model"),
+        ("halo/model_loading/parallel/whole_model.py", "resolve_trainer_model"),
     }
 )
 
 # The dense TP load materializes straight into DTensors, which the cast cannot re-dtype (it skips one
 # already at the run dtype and raises on any other). No dense family pins a parameter, and a mixed load
 # there would fail FSDP2's wrap loudly.
-UNCAST_LOADERS = frozenset({("src/model_loading/parallel/tp.py", "load_tp_model")})
+UNCAST_LOADERS = frozenset({("halo/model_loading/parallel/tp.py", "load_tp_model")})
 
 # Pipelines assembled around a backbone the parallel loader already cast and finalized.
 ASSEMBLED_FROM_LOADED = frozenset({("scripts/training/embedding.py", "_assemble_preloaded_pipeline")})
@@ -92,8 +92,8 @@ ASSEMBLED_FROM_LOADED = frozenset({("scripts/training/embedding.py", "_assemble_
 # shell that holds no weights.
 NON_TRAINING_BUILDS = frozenset(
     {
-        ("src/checkpoint/adapter_merge.py", "merge_adapter_into_base"),
-        ("src/models/head_transform.py", "_probe_logits"),
+        ("halo/checkpoint/adapter_merge.py", "merge_adapter_into_base"),
+        ("halo/models/head_transform.py", "_probe_logits"),
     }
 )
 
@@ -103,9 +103,9 @@ NON_MODEL_BUILDERS = frozenset(
     {
         ("scripts/training/offline_grpo.py", "main"),
         ("scripts/training/sft.py", "main"),
-        ("src/rewards/terms.py", "from_config"),
-        ("src/rewards/terms.py", "parse_reward_terms"),
-        ("src/entrypoints/data_setup.py", "prepare_script_preference_data"),
+        ("halo/rewards/terms.py", "from_config"),
+        ("halo/rewards/terms.py", "parse_reward_terms"),
+        ("halo/entrypoints/data_setup.py", "prepare_script_preference_data"),
     }
 )
 

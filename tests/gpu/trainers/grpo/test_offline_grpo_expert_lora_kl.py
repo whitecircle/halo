@@ -15,13 +15,13 @@ import torch.distributed as dist
 from peft import PeftModel
 from transformers import AutoModelForCausalLM
 
+from halo.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.configs.grpo_offline import OfflineGRPOScriptArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.script import ScriptContext
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from scripts.training.offline_grpo import _load_kl_reference
-from src.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.configs.grpo_offline import OfflineGRPOScriptArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints.script import ScriptContext
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main

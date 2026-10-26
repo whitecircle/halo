@@ -12,8 +12,8 @@ Run: ``python tests/cpu/parallelism/test_pp_missing_shard_gates.py`` (or ``pytes
 
 import pytest
 
-from src.distributed.expert_parallel.expert_fuser import FusionTask
-from src.model_loading.parallel.pp import _missing_fusion_shards_reason
+from halo.distributed.expert_parallel.expert_fuser import FusionTask
+from halo.model_loading.parallel.pp import _missing_fusion_shards_reason
 
 
 def _task(shard_file: str, expert_idx: int = 0):

@@ -1,6 +1,6 @@
 # BF16 Master Weights with Stochastic Rounding
 
-`AdamWBF16` keeps both model weights and optimizer states in bf16 (6 B/param), matching pure-bf16 memory while avoiding the "stale weights" problem via stochastic rounding (SR). A fused Triton kernel makes the step faster than `adamw_torch_fused`. Owning files: `src/optimizers/adamw_bf16.py` (`AdamWBF16`, and `adamw_bf16_optimizer_from_args`, which builds it from the training args) and `src/optimizers/stochastic_rounding.py` (the SR seeds and the bf16 rounding step it shares with Muon); auto-enable lives in `src/trainers/optimizer_selection.py`. What stays fp32 in a bf16 run, and where master weights fit: [GPU Training Theory §7](../reference/gpu-training-theory.md#bf16-numerics-what-stays-fp32).
+`AdamWBF16` keeps both model weights and optimizer states in bf16 (6 B/param), matching pure-bf16 memory while avoiding the "stale weights" problem via stochastic rounding (SR). A fused Triton kernel makes the step faster than `adamw_torch_fused`. Owning files: `halo/optimizers/adamw_bf16.py` (`AdamWBF16`, and `adamw_bf16_optimizer_from_args`, which builds it from the training args) and `halo/optimizers/stochastic_rounding.py` (the SR seeds and the bf16 rounding step it shares with Muon); auto-enable lives in `halo/trainers/optimizer_selection.py`. What stays fp32 in a bf16 run, and where master weights fit: [GPU Training Theory §7](../reference/gpu-training-theory.md#bf16-numerics-what-stays-fp32).
 
 ## The problem: stale weights in bf16
 
@@ -27,7 +27,7 @@ The kernel computes both EMAs and the weight update in fp32, truncating only on 
 
 **Gradient clipping inside the step.** `defer_grad_scale(coef)` hands the step a device scalar that the kernel multiplies into each gradient as it reads it. The EP clip (`GradientClippingMixin._install_ep_clip`) uses it whenever the optimizer exposes the hook and its parameters with gradients are exactly the clipped parameters with gradients, instead of rescaling every gradient with `_foreach_mul_` (whose fp32-scalar-on-bf16 form runs one unvectorized kernel per parameter). The gradients stay unscaled until the step; `zero_grad` drops a scale no step consumed. So anything reading `.grad` between the clip and the step (a `TrainerCallback.on_pre_optimizer_step`, which Hugging Face documents as running after clipping) sees the unclipped gradients; the reported `grad_norm` is the pre-clip norm either way.
 
-SR seeds are drawn from no generator: `sr_seed_pair` (`src/optimizers/stochastic_rounding.py`) hashes the parameter's optimizer step (`state["step"]`) and its name (`sr_param_index`, over the `param_names` each group carries) under a per-optimizer key. Replicas that hold the same parameter and receive the same averaged gradient — HSDP `dp_replicate` groups, DDP, EP replica groups, expert-TP partners — round it identically and stay bit-for-bit in sync, even where the ranks' optimizers hold different parameter lists (GPT-OSS keeps an expert's `down_proj_bias` on expert-TP rank 0 only). The optimizer refuses param groups built without names. A resumed run restores `step` with the optimizer state, so it rounds exactly as the uninterrupted run would have; there is no generator state to checkpoint, and the zero-LR step torch runs to materialize state before a restore consumes nothing. An element's noise is keyed by its offset in the rank's local shard, so it reproduces for one sharding layout (the one an optimizer-shard resume must keep), not across layouts.
+SR seeds are drawn from no generator: `sr_seed_pair` (`halo/optimizers/stochastic_rounding.py`) hashes the parameter's optimizer step (`state["step"]`) and its name (`sr_param_index`, over the `param_names` each group carries) under a per-optimizer key. Replicas that hold the same parameter and receive the same averaged gradient — HSDP `dp_replicate` groups, DDP, EP replica groups, expert-TP partners — round it identically and stay bit-for-bit in sync, even where the ranks' optimizers hold different parameter lists (GPT-OSS keeps an expert's `down_proj_bias` on expert-TP rank 0 only). The optimizer refuses param groups built without names. A resumed run restores `step` with the optimizer state, so it rounds exactly as the uninterrupted run would have; there is no generator state to checkpoint, and the zero-LR step torch runs to materialize state before a restore consumes nothing. An element's noise is keyed by its offset in the rank's local shard, so it reproduces for one sharding layout (the one an optimizer-shard resume must keep), not across layouts.
 
 ## Benchmarks
 
@@ -66,7 +66,7 @@ round-to-nearest updates (the stall above), not fp32 ones; fp32 masters come fro
 
 Combining `bf16_optimizer: true` with `optim: muon` or `optim: flash_adamw` **raises**: both select an optimizer and the bf16 path would silently win, so pick one.
 
-Direct use: `AdamWBF16(model.named_parameters(), lr=1e-4, betas=(0.9, 0.999), eps=1e-8)`, or the named decay / no-decay groups `decay_groups` builds (`src/optimizers/param_groups.py`). Pass `use_triton=False` for the eager PyTorch fallback (functionally equivalent, slower — multiple memory passes instead of the one fused kernel; it also engages automatically without CUDA). The eager path seeds its SR noise from the same `sr_seed_pair`, so replica bit-identity and exact resume hold there too.
+Direct use: `AdamWBF16(model.named_parameters(), lr=1e-4, betas=(0.9, 0.999), eps=1e-8)`, or the named decay / no-decay groups `decay_groups` builds (`halo/optimizers/param_groups.py`). Pass `use_triton=False` for the eager PyTorch fallback (functionally equivalent, slower — multiple memory passes instead of the one fused kernel; it also engages automatically without CUDA). The eager path seeds its SR noise from the same `sr_seed_pair`, so replica bit-identity and exact resume hold there too.
 
 ## Master-weight and grad-reduce options
 
@@ -98,7 +98,7 @@ Default `false`. `fp32_non_ep_params` implies it only for the FSDP2 reduce dtype
 
 ## Compatibility
 
-Every distributed trainer supports `bf16_optimizer`; resolution lives in `resolve_bf16_optimizer` (`src/trainers/optimizer_selection.py`), which every trainer's construction runs. It auto-enables under FSDP, EP, TP, CP and their combinations (rank-local experts and per-rank DTensor shards alike).
+Every distributed trainer supports `bf16_optimizer`; resolution lives in `resolve_bf16_optimizer` (`halo/trainers/optimizer_selection.py`), which every trainer's construction runs. It auto-enables under FSDP, EP, TP, CP and their combinations (rank-local experts and per-rank DTensor shards alike).
 
 The one exception is accelerate-managed replicated DDP, where the auto-enable is skipped as a conservative default outside the validated FSDP/EP/TP/HSDP matrix, not a correctness limit. SR is replica-safe (the step-and-name seed rounds shared params identically), so `bf16_optimizer: true` opts in.
 

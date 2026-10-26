@@ -24,10 +24,10 @@ import pytest
 from datasets import Dataset
 from transformers import ProcessorMixin
 
-from src.data.pipeline.map_cache_key import kwargs_fingerprint
-from src.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
-from src.trainers.preference.preference_rules import reject_smpo_pp_options, reject_smpo_vlm_options
-from src.trainers.preference.smpo import resolve_vlm_mode
+from halo.data.pipeline.map_cache_key import kwargs_fingerprint
+from halo.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
+from halo.trainers.preference.preference_rules import reject_smpo_pp_options, reject_smpo_vlm_options
+from halo.trainers.preference.smpo import resolve_vlm_mode
 from tests.cpu.trainers.test_smpo_vlm import EOS_ID, StubProcessor, StubTokenizer, make_features, make_trainer
 
 # Already chat-templated strings — the shape the script's text path (prepare_preference_datasets)
@@ -54,7 +54,7 @@ def _capture_map(trainer, dataset, processing_class):
         # A column the VLM branch's cast_column can re-type; the text branch passes it through.
         return Dataset.from_dict({"images": [[]]})
 
-    with mock.patch("src.trainers.preference.smpo.coordinated_map", _fake_map):
+    with mock.patch("halo.trainers.preference.smpo.coordinated_map", _fake_map):
         trainer._prepare_dataset(dataset, processing_class, trainer.args, "train")
     return captured
 

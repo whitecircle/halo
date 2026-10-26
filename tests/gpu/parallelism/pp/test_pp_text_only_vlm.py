@@ -40,9 +40,9 @@ from transformers import (
 )
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.parallelism.pipeline_trainer import wrapper_state_outside_stages
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.parallelism.pipeline_trainer import wrapper_state_outside_stages
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_output_dir, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import (

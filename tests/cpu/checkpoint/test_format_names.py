@@ -1,4 +1,4 @@
-"""The on-disk names in ``src.checkpoint.format`` are the files every saved checkpoint already carries.
+"""The on-disk names in ``halo.checkpoint.format`` are the files every saved checkpoint already carries.
 
 A changed spelling orphans them: a resume that cannot find ``trainer_state.json`` restarts at step 0,
 an export that drops ``router_balancing_biases.pt`` serves pretrained routing, and a merge that misses
@@ -12,7 +12,7 @@ import peft.utils
 import pytest
 import transformers.trainer
 
-from src.checkpoint import format as checkpoint_format
+from halo.checkpoint import format as checkpoint_format
 
 GOLDEN = {
     "DEFAULT_MAX_SHARD_SIZE": "5GB",

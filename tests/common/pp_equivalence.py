@@ -26,18 +26,18 @@ from transformers import (
 )
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer import compute
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.groups import build_pipeline_group
-from src.distributed.pipeline_parallel.runner import PipelineRunner
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.distributed.pipeline_parallel.stage_losses import TokenLoss
-from src.models.moe.expert_layout import to_hub_expert_tensors
-from src.runtime.dtensor import materialize_dtensor
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer import compute
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.pipeline_parallel.groups import build_pipeline_group
+from halo.distributed.pipeline_parallel.runner import PipelineRunner
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.distributed.pipeline_parallel.stage_losses import TokenLoss
+from halo.models.moe.expert_layout import to_hub_expert_tensors
+from halo.runtime.dtensor import materialize_dtensor
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import world_spread
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.utils import log, max_abs_rel_err, max_or_nan
@@ -408,7 +408,7 @@ def bf16_twin_reference(ctx, rows: torch.Tensor, labels: torch.Tensor) -> Unspli
 
 
 class _UnfusedWeightedUnpermute:
-    """:class:`~src.kernels.moe_permute.MoEWeightedUnpermute`'s contract with each weighted expert row
+    """:class:`~halo.kernels.moe_permute.MoEWeightedUnpermute`'s contract with each weighted expert row
     rounded to the run dtype before an ``index_add`` sums a token's rows."""
 
     @staticmethod

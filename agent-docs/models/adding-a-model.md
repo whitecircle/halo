@@ -11,15 +11,15 @@
 
 For plain FSDP, no work is needed — any `AutoModelForCausalLM` works.
 
-Pipeline parallelism is an allowlist: a new backbone splits under PP only once its class is in a `validated=True` `PPFamilySpec` in `PP_FAMILY_SPECS` (`src/distributed/pipeline_parallel/families.py`; `STOCK_FORWARD_PP` when the upstream forward splits as-is), added after its PP GPU rows pass. Until then `reject_unsupported_pp_structure` refuses it by name.
+Pipeline parallelism is an allowlist: a new backbone splits under PP only once its class is in a `validated=True` `PPFamilySpec` in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`; `STOCK_FORWARD_PP` when the upstream forward splits as-is), added after its PP GPU rows pass. Until then `reject_unsupported_pp_structure` refuses it by name.
 
-Multimodal models work too: the loaders resolve the class through `resolve_auto_model_class()` (`src/model_loading/model_preparation.py`), so any `model_type` in transformers' image-text-to-text mapping loads via `AutoModelForImageTextToText` rather than dropping the vision tower. The training scripts detect a VLM from its config and route the load through `load_distributed_model`, so a MoE VLM gets EP/CP/TP on the multimodal wrapper (`has_routed_experts` finds the experts on the nested `text_config`). No EP-wrapper work is VLM-specific.
+Multimodal models work too: the loaders resolve the class through `resolve_auto_model_class()` (`halo/model_loading/model_preparation.py`), so any `model_type` in transformers' image-text-to-text mapping loads via `AutoModelForImageTextToText` rather than dropping the vision tower. The training scripts detect a VLM from its config and route the load through `load_distributed_model`, so a MoE VLM gets EP/CP/TP on the multimodal wrapper (`has_routed_experts` finds the experts on the nested `text_config`). No EP-wrapper work is VLM-specific.
 
 ## Attention backend
 
 Auto-detection covers a family whose attention the installed kernels already run. It falls short on a head dim no flash kernel accepts, a NaN-prone backward, attention sinks, or position IDs the modeling never forwards.
 
-Two seams handle those. `resolve_attn_implementation` (`src/models/attention/selection.py`) narrows the backend from the family's own capabilities; `apply_family_patches` (`src/model_loading/model_preparation.py`) applies the family's patches, keyed on that backend, to trainable and frozen loads alike, and returns the implementation both loaders build with (the backend, or a variant of it such as Gemma 4's `sdpa_flex_sliding`).
+Two seams handle those. `resolve_attn_implementation` (`halo/models/attention/selection.py`) narrows the backend from the family's own capabilities; `apply_family_patches` (`halo/model_loading/model_preparation.py`) applies the family's patches, keyed on that backend, to trainable and frozen loads alike, and returns the implementation both loaders build with (the backend, or a variant of it such as Gemma 4's `sdpa_flex_sliding`).
 
 Add the family predicate beside the existing ones and wire it into whichever seam applies. The per-family matrix is in [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
@@ -27,7 +27,7 @@ Add the family predicate beside the existing ones and wire it into whichever sea
 
 The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) compute logits from the backbone's hidden state instead of calling `*ForCausalLM.forward`, as does the PP stage seam. Whatever that forward applies around `lm_head` — a hidden-state scale, a logit scale or division, a softcap, a vocabulary cut — has to be declared, or the chunked path refuses the family.
 
-Declare it with a `HeadTransformSpec` subclass in `src/models/head_transform.py`: claim the causal-LM class names in `HF_MODULE_NAMES` and build the `HeadTransform` from the config in `transform`. Resolution walks the class's MRO. A family with no spec gets the base, which applies `final_logit_softcapping` where the config sets it.
+Declare it with a `HeadTransformSpec` subclass in `halo/models/head_transform.py`: claim the causal-LM class names in `HF_MODULE_NAMES` and build the `HeadTransform` from the config in `transform`. Resolution walks the class's MRO. A family with no spec gets the base, which applies `final_logit_softcapping` where the config sets it.
 
 The declaration is verified, never trusted: `verify_head_transform` runs the family's own forward on a meta-device shell whose backbone emits a fixed hidden state and whose output embedding is a small stand-in, and raises when the declaration does not reproduce the logits. `tests/cpu/models/test_head_transform.py` runs that check over every roster class, the MoE ones derived from the EP layer registry, and compares the chunked sweep's log-probs and gradients with each listed tiny model's forward; add the family's tiny model there, and a dense family to the dense roster.
 
@@ -35,8 +35,8 @@ The declaration is verified, never trusted: `verify_head_transform` runs the fam
 
 EP mechanics are in the [Expert Parallelism guide](../parallelism/expert-parallelism.md). A new family is three pieces:
 
-- a frozen `MoEFamilySpec` constant in `src/models/moe/family_specs.py`, listed in `MOE_FAMILY_SPECS` — the family's facts, which offline tools, config writers, weight sync and the loaders read by `config.model_type` without importing EP;
-- one wrapper class in `src/distributed/expert_parallel/families/<name>.py` declaring `FAMILY = <SPEC>`;
+- a frozen `MoEFamilySpec` constant in `halo/models/moe/family_specs.py`, listed in `MOE_FAMILY_SPECS` — the family's facts, which offline tools, config writers, weight sync and the loaders read by `config.model_type` without importing EP;
+- one wrapper class in `halo/distributed/expert_parallel/families/<name>.py` declaring `FAMILY = <SPEC>`;
 - one import line in `families/roster.py`, which builds `MOE_LAYER_MAP` from the imported classes' `HF_MODULE_NAMES` (a duplicate HF class name raises at import).
 
 `tests/cpu/models/test_moe_family_specs.py` holds every spec to exactly one family class, and the spec index refuses a `model_type` two specs claim.
@@ -79,7 +79,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 - `model_types` — every `config.model_type` its checkpoints carry, the family's own first, then the composite wrappers, text towers and remote-code spellings. That union resolves a checkpoint back to its family offline (sharded merge, lazy load, quantize, unfuse, config export).
 - `expert_weight_roots` — every attribute the family may store as a direct expert `nn.Parameter`, across **all** config branches (fused vs separate/ETP); the default `GLU_PROJECTIONS` covers `gate_up_proj`/`gate_proj`/`up_proj`/`down_proj`, GptOss extends it.
 
-    Highest blast radius: it feeds `expert_named_params()` (grad-sync hooks, FP32 upcast, checkpoint skip-set) and the name-only weight-sync classifier. An undeclared root leaves a trainable param with no gradient sync — the construction-time scan (`reject_unsynced_trainable_params`, `src/trainers/parallelism/mode_setup.py`) raises on it.
+    Highest blast radius: it feeds `expert_named_params()` (grad-sync hooks, FP32 upcast, checkpoint skip-set) and the name-only weight-sync classifier. An undeclared root leaves a trainable param with no gradient sync — the construction-time scan (`reject_unsynced_trainable_params`, `halo/trainers/parallelism/mode_setup.py`) raises on it.
 
 - `experts_container_attrs` / `fused_contraction_axis` — the attribute the block holds its experts under (default `experts`; declare every spelling across revisions, as GLM-4's `routed_experts`), and which axis of the fused 3D tensors contracts (the base export's `F.linear` `[E, N, K]`; only GptOss says `1`). The wrong axis block-scales the output dim on a low-precision export and corrupts every dequantized expert.
 - `shared_expert_attrs` — the attribute name(s) the block may hold its shared expert under, tried in order; the first the block carries becomes `_shared_expert_attr`, the *export* key. Declare every spelling across revisions (GLM-4 serves `shared_experts` and `shared_expert`).
@@ -94,9 +94,9 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 - `HF_MODULE_NAMES` — the HF MoE block class name(s) this wrapper replaces. The sole registration point.
 - `_NUM_EXPERTS_ATTR_PATHS` — the family's expert-count attribute paths on the live HF module, resolved in order by the base `detect_num_experts()` before its generic container probe. Every wrapper declares or inherits one (Laguna takes GLM-4's).
 
-    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` in `src/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
+    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` in `halo/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
 
-- `MoEFamilySpec.expert_layout` — the family's one `ExpertLayout` (`src/models/moe/expert_layout.py`), which the EP gather, the RL weight sync and `merge_ep_shards.py` all apply through `to_hub_expert_tensors`:
+- `MoEFamilySpec.expert_layout` — the family's one `ExpertLayout` (`halo/models/moe/expert_layout.py`), which the EP gather, the RL weight sync and `merge_ep_shards.py` all apply through `to_hub_expert_tensors`:
 
     | Kind | Hub layout | Families |
     |---|---|---|
@@ -109,7 +109,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - **Rollout-engine support is not a family declaration.** Both pinned engines read the layout the family's `ExpertLayout` writes, so nothing here is per engine.
 
-    Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `reject_unsyncable_model` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+    Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `halo/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `reject_unsyncable_model` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 - `SUPPORTS_BIAS_BALANCING` — `True` when routing *selection* happens in-layer. Select through the shared helpers, not a hand-added `self._balancing_bias(...)`, which is `None` when balancing is off and in native-adoption mode (the adopted slot already sits in the selection): score-routed layers take top-k over `self._selection_scores(scores)` (the group-limited base, DeepSeek-V4, Inkling, LFM-2); logit-routed ones use `self._biased_topk(logits)` (Qwen3, Cohere2 MoE) or `_deepseek_biased_route`, which also returns the unbiased gate (GPT-OSS, Qwen3.5). Gate weights come from the **unbiased** scores, and the caller records the load with `self._record_expert_load(indices)`.
 
@@ -119,7 +119,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - `MoEFamilySpec.balancing_slot` — the family's exported balancing slot: its first spelling is the live-tree path the layer adopts, so the sign-updates land in exported state (`bias_update_transient` is the user's explicit opt-in where there is none), and its `config_flag` the field flipped for a slot the config gates. A config-gated slot also implements the `_materialize_native_balancing_slot` hook (LFM-2).
 
-- `SEVERS_AUX_LOSS` — `True` when the wrapper bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `src/models/moe/balancing.py`, applied by `src/callbacks/balancing.py`).
+- `SEVERS_AUX_LOSS` — `True` when the wrapper bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `halo/models/moe/balancing.py`, applied by `halo/callbacks/balancing.py`).
 - `_SHARED_EXPERT_REQUIRED` — `True` for a family whose block always builds its shared expert, so a rename raises instead of dropping the FFN from every output.
 
     `replicated_named_params()` is derived from the adopted name, so a family with the ordinary single shared expert writes no override. Replicated submodules are FSDP-ignored and DP-averaged by the router hook, and an undeclared one trips the same construction-time scan. Override `replicated_named_params()` only when the replicated set is a different *shape* — Qwen3.5/3.6, whose gate is a second module.
@@ -132,7 +132,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - `_fused_glu_mul` — the single seam for the GLU combine. `_resolve_activation` latches it from the resolved activation.
 
-    A family with a clamped SwiGLU (DeepSeek-V4 and GLM-5 Next clamp before the activation, Step-3.7 after it) rebinds it in `_adopt_expert_compute` to `resolve_clamped_glu_mul` (`src/kernels/fused_glu.py`): the fused kernel for a SiLU gate, the same clamps eagerly for any other.
+    A family with a clamped SwiGLU (DeepSeek-V4 and GLM-5 Next clamp before the activation, Step-3.7 after it) rebinds it in `_adopt_expert_compute` to `resolve_clamped_glu_mul` (`halo/kernels/fused_glu.py`): the fused kernel for a SiLU gate, the same clamps eagerly for any other.
 
     Latch it rather than overriding `_glu_combine`. The construction summary names the latched callable, so an override makes the reported combine and the running one two declarations that can disagree, and the fused `[gate | up]` path runs a latch's packed form without calling `_glu_combine` at all.
 
@@ -140,11 +140,11 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
     Everything else is required — an upstream rename raises instead of silently under-scaling every routed weight. Laguna and Step-3.7 carry no group limiting and no `norm_topk_prob`; no family opts out of `routed_scaling_factor`.
 
-**4. Expert LoRA.** A new stored weight root needs a `LORA_PROJECTION_COVERAGE` entry (`src/models/moe/expert_lora_spec.py`) mapping it to the logical `gate`/`up`/`down` projection — without it `expert_lora` silently never adapts that weight (`tests/cpu/peft/test_expert_lora_projection_coverage.py` fails on any registered root missing an entry).
+**4. Expert LoRA.** A new stored weight root needs a `LORA_PROJECTION_COVERAGE` entry (`halo/models/moe/expert_lora_spec.py`) mapping it to the logical `gate`/`up`/`down` projection — without it `expert_lora` silently never adapts that weight (`tests/cpu/peft/test_expert_lora_projection_coverage.py` fails on any registered root missing an entry).
 
 **5. Sharded-save merge.** `merge_ep_shards.py` resolves a checkpoint to its spec through `find_moe_family_spec(model_type)` and writes the spec's `ExpertLayout`, the same transform the gathered save applies, so a family needs nothing more; a `model_type` no spec claims **raises** at trainer construction under `save_sharded_ep=True` (`reject_unmergeable_ep_sharded_save`). Add the family to `test_full_merge_matches_gathered_save` in `tests/cpu/checkpoint/test_merge_ep_shards.py`.
 
-**6. Buffers.** `finalize_loaded_model()` (`src/model_loading/buffer_repair.py`) is the post-load repair every load path runs: it walks two fixer chains — `_ROTARY_FIXERS` for `inv_freq`, `_NON_PERSISTENT_FIXERS` for the rest — and re-ties shared weights. transformers 5 re-materializes every non-persistent buffer as `torch.empty_like`, so add a fixer to the matching chain for any the family carries; an uncovered one reaches device placement still on meta, where the trainer raises rather than training on uninitialized memory.
+**6. Buffers.** `finalize_loaded_model()` (`halo/model_loading/buffer_repair.py`) is the post-load repair every load path runs: it walks two fixer chains — `_ROTARY_FIXERS` for `inv_freq`, `_NON_PERSISTENT_FIXERS` for the rest — and re-ties shared weights. transformers 5 re-materializes every non-persistent buffer as `torch.empty_like`, so add a fixer to the matching chain for any the family carries; an uncovered one reaches device placement still on meta, where the trainer raises rather than training on uninitialized memory.
 
 **7. Tests.** The DeepSeek-V4 trio is the template: an EP=2-vs-stock row (`tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family deepseek_v4`, generated from `TINY_MOE_FAMILIES`; family-specific checks go in its `FAMILY_CHECKS`), a trainer test that saves via the gathered EP path and reloads the checkpoint as a plain HF model (`tests/gpu/trainers/sft/test_sft_ep_roundtrip.py --family deepseek_v4`, a thin subclass of `EPSftRoundTrip` in `tests/common/ep_sft_roundtrip.py` — add one beside it and override only the family hooks), both registered in `tests/gpu/manifest.py`, plus a CPU test covering registration, gather/merge layout, and balancing resolution (`tests/cpu/models/test_deepseek_v4_support.py`). The family's tiny model also goes into `TINY_MOE_FAMILIES` (`tests/common/tiny_models.py`), keyed by its `model_type`, and its name into `_TINY_MOE_FAMILIES` in the manifest: the merge-on-save and precompute-resume sweeps run every entry, and `tests/cpu/conventions/test_tiny_family_roster.py` fails on a registered EP family missing from either. `tests/cpu/parallelism/test_ep_family_instantiation.py` builds every registered family's EP layer on its tiny model, and `tests/cpu/parallelism/test_ep_gc_replay.py` replays its dispatch under gradient checkpointing for every family whose layer supports it.
 
@@ -152,7 +152,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 ## Add CP support
 
-Full procedure in [Context Parallelism — Adding a new model](../parallelism/context-parallelism.md#adding-a-new-model). The machinery lives in `src/distributed/context_parallel/`.
+Full procedure in [Context Parallelism — Adding a new model](../parallelism/context-parallelism.md#adding-a-new-model). The machinery lives in `halo/distributed/context_parallel/`.
 
 1. **Write a wrapper** in `families.py` and declare `HF_MODULE_NAMES`. Two templates: subclass `UlyssesAttention` for the optimized path (RoPE before all-to-all, native GQA — copy `Qwen3MoeUlyssesAttention`), or `MLAUlyssesAttention` when Q/K and V head dims differ (copy `Glm4MoeLiteUlyssesAttention`).
 
@@ -169,7 +169,7 @@ The wrapper must split Q/K/V into the local-rank slice before all-to-all, apply 
 ## Add TP support
 
 - **Model already has `base_model_tp_plan`** — `tp_plan="auto"` does everything (Llama, Mistral, most Qwen variants). Nothing to add.
-- **Selective TP for EP+TP** — add the attention class to `TP_SHARDABLE_ATTENTION_CLASSES` in `src/distributed/tensor_parallel/parallelize_attention.py`. The selective path only visits attention submodules, so MoE blocks need no opt-out; `embed_tokens` and `lm_head` stay replicated.
+- **Selective TP for EP+TP** — add the attention class to `TP_SHARDABLE_ATTENTION_CLASSES` in `halo/distributed/tensor_parallel/parallelize_attention.py`. The selective path only visits attention submodules, so MoE blocks need no opt-out; `embed_tokens` and `lm_head` stay replicated.
 
     If the attention has a non-standard shape (GLM-4's LoRA-style compression, GPT-OSS's sinks), add a case in `parallelize_attention.py`. A non-shardable attention (DeepSeek-V4's shared-KV MQA) stays off the list, and `apply_tp_to_attention_only` raises when it ends up patching zero modules.
 
@@ -181,33 +181,33 @@ The wrapper must split Q/K/V into the local-rank slice before all-to-all, apply 
 
 If a model isn't in transformers yet, or its `trust_remote_code` conflicts with the v5 pin, vendor it — and remove the vendoring at step 5 once upstream ships the family.
 
-1. **Copy `configuration_*.py` and `modeling_*.py`** into `src/models/<name>/`. Seed
+1. **Copy `configuration_*.py` and `modeling_*.py`** into `halo/models/<name>/`. Seed
    `HARDCODED_CONFIG_FOR_MODELS["<name>"]` (`transformers.utils.auto_docstring`) before importing the
    modeling module, or `@auto_docstring` raises "Config not found". A hub checkpoint that stores experts
    per expert while the module fuses them gets no entry in transformers' conversion mapping, so declare
    the layout on the spec (`expert_layout` with its `per_expert_keys`), which the gather and the lazy
    loader read.
-2. **Register in a module**, not in the package `__init__.py` — every package init under `src/` but the `src/__init__.py` bootstrap carries a docstring only (`tests/cpu/conventions/test_package_inits.py`). Put the calls in `src/models/<name>/registration.py`:
+2. **Register in a module**, not in the package `__init__.py` — every package init under `halo/` but the `halo/__init__.py` bootstrap carries a docstring only (`tests/cpu/conventions/test_package_inits.py`). Put the calls in `halo/models/<name>/registration.py`:
 
     ```python
     AutoConfig.register("<name>", YourConfig)
     AutoModelForCausalLM.register(YourConfig, YourForCausalLM)
     ```
 
-3. **Trigger registration** by adding a module-level side-effect import of that module to `src/model_loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `src/models/seq_cls_heads.py` register).
+3. **Trigger registration** by adding a module-level side-effect import of that module to `halo/model_loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `halo/models/seq_cls_heads.py` register).
 
     `apply_remote_code_compat_shims()` restores removed transformers APIs (`is_torch_fx_available`, `ROPE_INIT_FUNCTIONS['default']`), binds names remote files call without importing (`DynamicLayer`), and patches every loaded remote module for dispatchless eager attention and legacy list-form tied-weight keys, which convert to the v5 dict form; `reject_untieable_list_ties` refuses a tied config that carried one, since `{}` ties nothing.
 
 4. **Add a CPU test** — `tests/cpu/models/test_<name>_registration.py` verifying `AutoModelForCausalLM.from_pretrained` resolves to your class.
-5. **Remove the vendoring** once upstream lands — the directory, its registration import, and the registration test all go, and the EP wrapper, Liger spec and any patches re-key to the upstream module. Name the removal trigger (the upstream PR) in the docstring of `src/models/<name>/__init__.py`.
+5. **Remove the vendoring** once upstream lands — the directory, its registration import, and the registration test all go, and the EP wrapper, Liger spec and any patches re-key to the upstream module. Name the removal trigger (the upstream PR) in the docstring of `halo/models/<name>/__init__.py`.
 
 HF models that only need `trust_remote_code=True` (Bailing/Ling, Laguna) take the shims path with no vendoring.
 
-A node's ranks share the module cache transformers copies remote code into (`HF_MODULES_CACHE`), and transformers rewrites a module there in place. `src/model_loading/remote_code.py`, which every loader, training entry point and `from_pretrained_verified` caller imports, makes each copy land whole through the checkpoint staging writes (the remote code a save writes beside a checkpoint too), so a rank never imports a module a peer is still writing.
+A node's ranks share the module cache transformers copies remote code into (`HF_MODULES_CACHE`), and transformers rewrites a module there in place. `halo/model_loading/remote_code.py`, which every loader, training entry point and `from_pretrained_verified` caller imports, makes each copy land whole through the checkpoint staging writes (the remote code a save writes beside a checkpoint too), so a rank never imports a module a peer is still writing.
 
 ## Declare Liger coverage
 
-Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported model, and covers some only in part. A family that neither registry covers warns at model load that the run trains unfused, and refuses an explicit `liger_kernel_config` key. Add one `LigerFamilySpec` to `src/model_loading/liger/family_specs.py` — there is no per-family applier module:
+Upstream Liger's `MODEL_TYPE_TO_APPLY_LIGER_FN` doesn't cover every supported model, and covers some only in part. A family that neither registry covers warns at model load that the run trains unfused, and refuses an explicit `liger_kernel_config` key. Add one `LigerFamilySpec` to `halo/model_loading/liger/family_specs.py` — there is no per-family applier module:
 
 1. **Name the classes that fill each role** — `rms_norm`, `gated_rms_norm` (a linear-attention block's `norm(x) * w * act(gate)`, served by `fla`), `glu_mlp`, `causal_lm`.
 

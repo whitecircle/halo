@@ -4,7 +4,7 @@
 The merge-on-save, precompute-resume, LoRA sync-exactness and EP determinism GPU suites take their
 ``--family`` names from ``tests/common/tiny_models.py``'s ``TINY_MOE_FAMILIES`` (the sync-exactness
 suite its dense ones from ``TINY_DENSE_FAMILIES``) and their rows from ``tests/gpu/manifest.py``. A family registered
-in ``src/distributed/expert_parallel/families`` with no tiny model, or one the rows skip for an adapter
+in ``halo/distributed/expert_parallel/families`` with no tiny model, or one the rows skip for an adapter
 shape or a layout, would leave its path untested with nothing failing; the roster is therefore held to
 the EP registry, and the rows to the roster (for the sync-exactness suite, the part of it some
 rollout engine takes an online update for). The CP-vs-reference suite runs the CP roster
@@ -17,7 +17,7 @@ import shlex
 
 import pytest
 
-from src.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
+from halo.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 from tests.common import ep_determinism
 from tests.common.equivalence.cp_equivalence import FAMILIES as CP_FAMILIES
 from tests.common.lora_sync_exactness import parse_row, row_families, syncable_moe_families

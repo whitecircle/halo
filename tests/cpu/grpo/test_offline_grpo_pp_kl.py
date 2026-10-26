@@ -16,12 +16,12 @@ import types
 import pytest
 import torch
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPODataCollatorWithPadding
-from src.kernels.logprobs import LABEL_IGNORE_INDEX, token_logprobs
-from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
-from src.trainers.grpo.offline.offline_rules import reject_offline_pp_options, resolve_pp_max_length
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.world_metrics import WorldMetrics
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPODataCollatorWithPadding
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, token_logprobs
+from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
+from halo.trainers.grpo.offline.offline_rules import reject_offline_pp_options, resolve_pp_max_length
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.world_metrics import WorldMetrics
 
 BATCH, PROMPT, COMPLETION, VOCAB, MAX_LENGTH = 4, 3, 4, 16, 10
 PAD = 0

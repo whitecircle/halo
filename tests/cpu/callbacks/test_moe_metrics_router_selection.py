@@ -31,9 +31,9 @@ from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM, GptOssTopKRouter
 from transformers.utils.output_capturing import OutputRecorder
 
-import src.callbacks.moe_metrics as moe_metrics
-from src.callbacks.moe_metrics import MoEMetricsCallback
-from src.models.moe.router_logits import declared_routers
+import halo.callbacks.moe_metrics as moe_metrics
+from halo.callbacks.moe_metrics import MoEMetricsCallback
+from halo.models.moe.router_logits import declared_routers
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GPTOSS_CONFIG
 
 NUM_EXPERTS = TINY_GLM5_CONFIG["n_routed_experts"]

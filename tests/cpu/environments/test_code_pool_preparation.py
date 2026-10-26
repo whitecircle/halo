@@ -24,6 +24,22 @@ import pyarrow.parquet as pq
 import pytest
 from datasets import Dataset, DatasetDict, load_from_disk
 
+from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
+from halo.environments.tasks.coding.contest_datasets import (
+    CODE_DATASET_ADAPTERS,
+    CodeDatasetAdapter,
+    ContestSelection,
+    _hardtests_memory_limit_mb,
+    codeforces_examples_only,
+    decode_test_payload,
+    format_hardtests_prompt,
+    hardtests_checker,
+    hardtests_rating,
+    keep_hardtests,
+    normalize_hardtests,
+    pack_codeforces_verification,
+    pack_hardtests_verification,
+)
 from scripts.environments.inference import regrade_trajectories
 from scripts.environments.inference.run_code_contests import build_examples, resolve_selection
 from scripts.environments.preparation import compact_code_tests as cct
@@ -40,22 +56,6 @@ from scripts.environments.preparation.prepare_code_dataset import (
     load_exclusions,
     load_tests_table,
     suite_rejects_constants,
-)
-from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
-from src.environments.tasks.coding.contest_datasets import (
-    CODE_DATASET_ADAPTERS,
-    CodeDatasetAdapter,
-    ContestSelection,
-    _hardtests_memory_limit_mb,
-    codeforces_examples_only,
-    decode_test_payload,
-    format_hardtests_prompt,
-    hardtests_checker,
-    hardtests_rating,
-    keep_hardtests,
-    normalize_hardtests,
-    pack_codeforces_verification,
-    pack_hardtests_verification,
 )
 from tests.common.repo import REPO_ROOT
 

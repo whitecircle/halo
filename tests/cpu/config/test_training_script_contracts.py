@@ -29,9 +29,9 @@ from unittest import mock
 
 import pytest
 
-from src.cli import training_methods
-from src.data.collators import padded
-from src.data.preprocessed.metadata import PreprocessedDatasetMetadata, verify_preprocessed_dataset
+from halo.cli import training_methods
+from halo.data.collators import padded
+from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, verify_preprocessed_dataset
 from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
@@ -63,7 +63,7 @@ def _named_calls(tree: ast.AST, func_name: str) -> list[ast.Call]:
 # the loader directly, so all are held to the same contract. The shared helper is listed explicitly because a vacuous
 # parametrization (all scripts skipping) would silently stop testing anything — ``test_loader_contract_is_not_vacuous``
 # pins that.
-_LOADER_CALL_SITES = [*_TRAINING_SCRIPTS, REPO_ROOT / "src" / "entrypoints" / "model_setup.py"]
+_LOADER_CALL_SITES = [*_TRAINING_SCRIPTS, REPO_ROOT / "halo" / "entrypoints" / "model_setup.py"]
 
 
 def _threads_loader_kwargs(script: Path) -> bool:
@@ -89,7 +89,7 @@ def test_loader_contract_is_not_vacuous():
     threading = [p for p in _LOADER_CALL_SITES if _threads_loader_kwargs(p)]
     assert threading, (
         "No load_distributed_model call site found across the training scripts or "
-        "src/entrypoints/model_setup.py — the loader-kwarg contract is no longer tested. "
+        "halo/entrypoints/model_setup.py — the loader-kwarg contract is no longer tested. "
         "Add the module that now owns the load."
     )
 
@@ -128,8 +128,8 @@ def test_training_script_index_is_nonempty():
 # pin is threaded.
 _VLM_PROBE_CALL_SITES = [
     *_TRAINING_SCRIPTS,
-    REPO_ROOT / "src" / "entrypoints" / "model_setup.py",
-    REPO_ROOT / "src" / "entrypoints" / "data_setup.py",
+    REPO_ROOT / "halo" / "entrypoints" / "model_setup.py",
+    REPO_ROOT / "halo" / "entrypoints" / "data_setup.py",
 ]
 
 
@@ -205,11 +205,11 @@ def _forced_remote_code_lines(path: Path) -> list[int]:
 
 
 def test_no_src_load_forces_trust_remote_code():
-    """Every load in ``src/`` takes the run's ``trust_remote_code``. Forced on, it runs a
+    """Every load in ``halo/`` takes the run's ``trust_remote_code``. Forced on, it runs a
     checkpoint's remote modules the run never trusted, and on a repo that ships a native class
     beside an ``auto_map`` it swaps the native config or processor for the remote one."""
-    src_files = sorted((REPO_ROOT / "src").rglob("*.py"))
-    assert len(src_files) > 100, f"the src/ sweep collapsed to {len(src_files)} files"
+    src_files = sorted((REPO_ROOT / "halo").rglob("*.py"))
+    assert len(src_files) > 100, f"the halo/ sweep collapsed to {len(src_files)} files"
     forced = [
         f"{path.relative_to(REPO_ROOT)}:{line}" for path in src_files for line in _forced_remote_code_lines(path)
     ]
@@ -299,7 +299,7 @@ def _run_main_with_yaml(module, yaml_body: str, tmp_path: Path):
     )
     # The log tee redirects the process's stdout/stderr fds — keep it out of the test process.
     with (
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ):
         module.main()
@@ -368,7 +368,7 @@ def test_no_script_calls_bare_get_peft_model(script: Path):
     source = script.read_text(encoding="utf-8")
     assert not _named_calls(ast.parse(source), "get_peft_model"), (
         f"{script}: calls bare get_peft_model — route through build_peft_model "
-        f"(src/model_loading/parallel/peft_setup.py) like SMPO/classification/offline-GRPO."
+        f"(halo/model_loading/parallel/peft_setup.py) like SMPO/classification/offline-GRPO."
     )
 
 
@@ -384,7 +384,7 @@ def test_no_script_calls_bare_get_peft_config(script: Path):
     source = script.read_text(encoding="utf-8")
     assert not _named_calls(ast.parse(source), "get_peft_config"), (
         f"{script}: calls bare get_peft_config — route through build_peft_config "
-        f"(src/model_loading/parallel/peft_setup.py), directly or via configure_adapter_training."
+        f"(halo/model_loading/parallel/peft_setup.py), directly or via configure_adapter_training."
     )
 
 

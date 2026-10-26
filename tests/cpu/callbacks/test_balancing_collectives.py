@@ -21,12 +21,13 @@ def test_the_cases_are_the_golden_cases():
 
 def test_the_golden_holds_every_collective_seam():
     """Anti-vacuity: the cases reach the mode agreement, the nothing-balanced consensus and the export
-    contract, and some raise."""
+    contract, some raise, and the toolkit's records reach the trace (a stale logger prefix drops them all)."""
     events = [event for trace in GOLDEN.values() for event in trace]
     assert any(event.startswith("all_gather_object") for event in events)
     assert any(event.startswith("all_reduce SUM") for event in events)
     assert any(event.startswith("all_reduce MAX") for event in events)
     assert any(event.startswith("raised") for event in events)
+    assert any(event.startswith("log ") for event in events)
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case_key(*case))

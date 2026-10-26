@@ -20,7 +20,7 @@ Config: `examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml`
 (template: `rlvr-online-grpo-template.yaml`). Uses TRL-native vLLM fields
 (`use_vllm: true`, `vllm_mode: server`, `vllm_server_host`, `vllm_server_port`) and the same
 `rewards:` term list, defaulting to `[{source: accuracy}]` — the RLVR graders `accuracy` and
-`format`, plus `judge` / `reward_model` (`src/rewards/graders/verifiable.py`).
+`format`, plus `judge` / `reward_model` (`halo/rewards/graders/verifiable.py`).
 
 Server and trainer GPUs must be disjoint (a rank cannot NCCL-broadcast to itself), and the server
 must serve the trained model — bare compose serves `Qwen/Qwen3-0.6B` on GPU 7.

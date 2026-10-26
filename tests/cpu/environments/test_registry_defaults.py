@@ -11,13 +11,13 @@ Run: python tests/cpu/environments/test_registry_defaults.py  (or pytest)
 
 import pytest
 
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
+from halo.environments.protocols.react import build_react_math_environment
+from halo.environments.registry import build_environment, get_registered_environments
+from halo.rewards.terms import EnvironmentTerm
 from scripts.docs.markdown import parse_tables
-from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.environment_base import EnvironmentBase
-from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
-from src.environments.protocols.react import build_react_math_environment
-from src.environments.registry import build_environment, get_registered_environments
-from src.rewards.terms import EnvironmentTerm
 from tests.common.repo import REPO_ROOT
 
 _ENVIRONMENTS_OVERVIEW = REPO_ROOT / "agent-docs/training-methods/async-grpo/environments/README.md"

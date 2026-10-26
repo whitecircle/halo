@@ -21,8 +21,8 @@ import pytest
 import transformers.training_args
 import yaml
 
-from src.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, _load_yaml
-from src.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
+from halo.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, _load_yaml
+from halo.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
 from tests.common.repo import REPO_ROOT, load_script_module
 
 EXAMPLES_ROOT = REPO_ROOT / "examples"

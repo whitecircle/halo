@@ -27,11 +27,11 @@ import shutil
 import torch
 import torch.distributed as dist
 
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sharded_checkpoint
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.model_loading.model_preparation import auto_load_model
 from scripts.after_training.merge_ep_shards import merge_ep_shards
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sharded_checkpoint
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.model_loading.model_preparation import auto_load_model
 from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main

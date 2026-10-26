@@ -3,7 +3,7 @@
 The embedding script injects LoRA in place (the model stays a SentenceTransformer, not a PeftModel),
 so the save must fold the adapters into the base weights — otherwise the checkpoint carries
 ``base_layer``/``lora_*`` keys that reload as random base weights. The save folds each tensor out of
-place with the weight sync's fold (``src.models.peft_adapters.lora_folded``); this checks what the save
+place with the weight sync's fold (``halo.models.peft_adapters.lora_folded``); this checks what the save
 gets from it: the plain module's names and nothing else, PEFT's own merge for every target kind and
 variant the fold covers (a linear, an embedding with its transposed delta, a conv; DoRA and
 ``lora_bias``), and a live model left untouched.
@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
 
-from src.trainers.embedding.injected_lora import folded_backbone_chunks
+from halo.trainers.embedding.injected_lora import folded_backbone_chunks
 from tests.common.peft_helpers import merged_lora_targets, randomize_adapters
 
 VOCAB = 11

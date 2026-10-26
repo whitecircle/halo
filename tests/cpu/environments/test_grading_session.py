@@ -10,10 +10,10 @@ import logging
 
 import pytest
 
-from src.environments.sandbox.base import SandboxExecutor, SandboxSession
-from src.environments.sandbox.local import LocalSubprocessSandbox
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
+from halo.environments.sandbox.base import SandboxExecutor, SandboxSession
+from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
 
 _TESTS = [{"input": f"{i}\n", "output": "ok\n"} for i in range(3)]
 _OK = SandboxResult(stdout="ok\n", returncode=0)
@@ -116,7 +116,7 @@ def test_a_host_fault_shows_its_class_alone_under_outcome(stage, caplog):
 def test_a_backend_down_for_every_test_logs_one_line_per_grade(stage, caplog):
     """A pool of hundreds of tests against a dead backend must not log a traceback per test: the grade
     logs one line counting its infra errors, the per-test detail stays at debug."""
-    with caplog.at_level(logging.WARNING, logger="src.environments.tasks.coding.grading"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tasks.coding.grading"):
         grade = run_solution_against_tests("code", _TESTS, sandbox=_DeniedSandbox(stage))
     assert grade.infra_errors == len(_TESTS)
     logged = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
@@ -142,7 +142,7 @@ def test_tests_of_one_grade_cannot_see_each_others_files():
 
 def test_an_executor_without_sessions_grades_one_shot_without_a_warning(caplog):
     sandbox = _SessionSandbox(sessions=False)
-    with caplog.at_level(logging.WARNING, logger="src.environments.tasks.coding.grading"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tasks.coding.grading"):
         grade = run_solution_against_tests("code", _TESTS, sandbox=sandbox)
     assert grade.passed == 3 and sandbox.one_shot == 3
     assert caplog.records == []

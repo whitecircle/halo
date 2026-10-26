@@ -20,9 +20,9 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from src.weight_sync import transport_check as wst
-from src.weight_sync.chunking import resolve_sync_device
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync import transport_check as wst
+from halo.weight_sync.chunking import resolve_sync_device
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeVLLMServer
 from tests.common.repo import load_script_module
 from tests.common.weight_sync import Wire

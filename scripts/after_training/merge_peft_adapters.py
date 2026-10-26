@@ -25,14 +25,14 @@ import logging
 import torch
 from transformers import AutoModelForSequenceClassification
 
+from halo.checkpoint.adapter_merge import merge_adapter_into_base
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from halo.checkpoint.offline_export import cast_norms_to_fp32
+from halo.log import configure_cli_logging
+from halo.model_loading.checkpoint_coverage import from_pretrained_verified
+from halo.model_loading.dtype import DTYPE_BY_NAME
+from halo.model_loading.model_preparation import auto_load_model
 from scripts.cli_arguments import add_device_map_arg, add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.adapter_merge import merge_adapter_into_base
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from src.checkpoint.offline_export import cast_norms_to_fp32
-from src.log import configure_cli_logging
-from src.model_loading.checkpoint_coverage import from_pretrained_verified
-from src.model_loading.dtype import DTYPE_BY_NAME
-from src.model_loading.model_preparation import auto_load_model
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

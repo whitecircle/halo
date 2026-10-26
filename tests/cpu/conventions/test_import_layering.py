@@ -1,6 +1,6 @@
-"""The import layering of ``src/``, read off the import graph: the sharding-agnostic trees reach no
-``src.distributed``, ``torch.distributed`` or loader dispatch, no parallelism package imports the dispatch, the
-packages import their members acyclically, toolkit env knobs go through ``src/env.py``, and every import follows the
+"""The import layering of ``halo/``, read off the import graph: the sharding-agnostic trees reach no
+``halo.distributed``, ``torch.distributed`` or loader dispatch, no parallelism package imports the dispatch, the
+packages import their members acyclically, toolkit env knobs go through ``halo/env.py``, and every import follows the
 final layer table ``_LAYERS``, which agent-docs/reference/architecture.md renders. ``TYPE_CHECKING`` imports and the
 package's bootstrap ``__init__`` are exempt; a function-local import counts like any other."""
 
@@ -21,7 +21,7 @@ _SRC = REPO_ROOT / PACKAGE
 _INDEX = RepoIndex(REPO_ROOT)
 _ARCHITECTURE_DOC = REPO_ROOT / "agent-docs" / "reference" / "architecture.md"
 
-# The package above every parallelism implementation, which nothing in src/distributed imports.
+# The package above every parallelism implementation, which nothing in halo/distributed imports.
 _DISPATCH_PACKAGE = "model_loading.parallel"
 _DISPATCH_DIR = _SRC.joinpath(*_DISPATCH_PACKAGE.split("."))
 # The collective half of the checkpoint tree, which the agnostic sweep skips and the dispatch sweep covers.
@@ -32,7 +32,7 @@ _AGNOSTIC_DIRS = ("checkpoint", "model_loading", "models")
 _FORBIDDEN_ROOTS = (f"{PACKAGE}.distributed", "torch.distributed", f"{PACKAGE}.{_DISPATCH_PACKAGE}")
 
 # EP_* stays out: EP_DISABLE_GIN / EP_SUPPRESS_NCCL_CHECK are DeepEP's own vars, read raw at
-# their owner by design (src/env.py docstring).
+# their owner by design (halo/env.py docstring).
 _ENV_PREFIXES = ("HALO_", "DIST_", "VLLM_", "SGLANG_", "NVLINK_")
 _ENV_OWNER = _SRC / "env.py"
 
@@ -53,7 +53,7 @@ _LAYERS = (
     ("entrypoints",),
 )
 _LEVEL = {unit: level for level, row in enumerate(_LAYERS) for unit in row}
-# The src/checkpoint/ modules that read no model; the rest of the package reads one.
+# The halo/checkpoint/ modules that read no model; the rest of the package reads one.
 _MODEL_FREE_CHECKPOINT_MODULES = frozenset({"format", "atomic", "reading", "model_card"})
 # What the standalone tools load, and what it may not reach: no process group, collective or rollout sync.
 _TOOL_SAFE = frozenset(
@@ -107,10 +107,7 @@ _PACKAGE_INTERNAL = {
 }
 # Where each module that has not moved yet lands, by its longest entry: today's dotted path under the package
 # root -> the final one. A move deletes its entry; a module staying in its unit and member needs none.
-_PENDING_MOVES = {
-    "distributed.nccl": "weight_sync.transport",
-    "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
-}
+_PENDING_MOVES: dict[str, str] = {}
 
 
 class _Import(NamedTuple):
@@ -404,7 +401,7 @@ def _report(breaks: Iterable[_Break]) -> str:
 def test_the_sweep_sees_every_agnostic_tree():
     """Anti-vacuity: an empty or shrunken sweep would pass every assertion below."""
     assert len(_AGNOSTIC_FILES) > 10, f"the sharding-agnostic sweep collapsed to {len(_AGNOSTIC_FILES)} files"
-    assert _DISPATCH_DIR.is_dir(), f"src/{_DISPATCH_PACKAGE.replace('.', '/')} moved; the sweep excludes it by path"
+    assert _DISPATCH_DIR.is_dir(), f"halo/{_DISPATCH_PACKAGE.replace('.', '/')} moved; the sweep excludes it by path"
     for directory in _AGNOSTIC_DIRS:
         assert any(path.is_relative_to(_SRC / directory) for path in _AGNOSTIC_FILES), directory
 
@@ -446,7 +443,7 @@ def test_no_distributed_package_imports_the_loader_dispatch(path):
         {found.module for found in _imports_of(path) if _is_within(_in_package(found.module) or "", _DISPATCH_PACKAGE)}
     )
     assert not offending, (
-        f"{path.relative_to(REPO_ROOT)} imports {offending}. src/model_loading/parallel/ dispatches to "
+        f"{path.relative_to(REPO_ROOT)} imports {offending}. halo/model_loading/parallel/ dispatches to "
         f"every parallelism package, so an import back closes a package cycle — move what both sides "
         f"need into the lower package (the expert-key plan and fuser live in expert_parallel/)."
     )
@@ -501,7 +498,7 @@ def test_the_packages_import_their_members_acyclically(package, node, required):
     assert required <= set(graph), sorted(graph)
     cycles = _cycles(graph)
     assert not cycles, (
-        f"src/{package.replace('.', '/')} import cycles: {cycles}. Each member must sit at one layer — move what "
+        f"halo/{package.replace('.', '/')} import cycles: {cycles}. Each member must sit at one layer — move what "
         f"both sides need into the lower one rather than importing back up."
     )
 
@@ -513,7 +510,7 @@ def test_toolkit_env_vars_are_read_only_through_the_env_helpers(path):
     offending = sorted(set(_env_literals_read_directly(path)))
     assert not offending, (
         f"{path.relative_to(REPO_ROOT)} reads {offending} from the environment directly; route it "
-        f"through src/env.py (env_flag / env_int / env_float / env_str), which owns the default."
+        f"through halo/env.py (env_flag / env_int / env_float / env_str), which owns the default."
     )
 
 

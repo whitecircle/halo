@@ -11,7 +11,7 @@ from dataclasses import replace
 
 import pytest
 
-from src.rewards.samples import (
+from halo.rewards.samples import (
     CUT_CALL_NOTE,
     CUT_MARKER,
     CUT_TOOL_CALLS_KEY,
@@ -35,7 +35,7 @@ from src.rewards.samples import (
     task_text,
     view_text,
 )
-from src.rewards.terms import View
+from halo.rewards.terms import View
 
 CALL = {"id": "call_1", "type": "function", "function": {"name": "run", "arguments": '{"code": "print(1)", "n": 2}'}}
 TURNS = [

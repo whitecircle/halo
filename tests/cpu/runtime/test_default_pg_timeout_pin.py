@@ -17,8 +17,8 @@ import datetime
 import pytest
 import torch.distributed.distributed_c10d as c10d
 
-from src.env import nccl_timeout
-from src.runtime.process_group import _apply_default_pg_timeout
+from halo.env import nccl_timeout
+from halo.runtime.process_group import _apply_default_pg_timeout
 
 
 def test_torch_still_exposes_the_new_group_timeout_default():

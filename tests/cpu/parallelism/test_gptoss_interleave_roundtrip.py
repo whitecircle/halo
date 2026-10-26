@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.models.moe.expert_layout import interleave_gate_up, split_interleaved_gate_up
+from halo.models.moe.expert_layout import interleave_gate_up, split_interleaved_gate_up
 
 E, H, M = 3, 5, 4  # experts, hidden, intermediate
 

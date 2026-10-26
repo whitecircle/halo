@@ -20,40 +20,40 @@ import warnings
 import numpy as np
 import pytest
 
-from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
-from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
-from src.environments.episode_scoring import EpisodeGrade
-from src.environments.messages import Message, Trajectory
-from src.environments.protocols.mcp import (
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
+from halo.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.episode_scoring import EpisodeGrade
+from halo.environments.messages import Message, Trajectory
+from halo.environments.protocols.mcp import (
     MCP_SERVERS,
     NativeMCPClientEnvironment,
     build_mcp_environment,
     get_mcp_server_config,
 )
-from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.protocols.react import (
+from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from halo.environments.protocols.react import (
     ReActEnvironment,
     build_react_math_environment,
     build_react_search_environment,
     parse_react_output,
 )
-from src.environments.ray_actors import RolloutManager
-from src.environments.registry import build_environment, get_registered_environments, register_environment
-from src.environments.rollout_config import RolloutConfig
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tasks.coding.grading import run_solution_against_tests
-from src.environments.tasks.coding.swe import SweEnvironment
-from src.environments.tasks.qa import (
+from halo.environments.ray_actors import RolloutManager
+from halo.environments.registry import build_environment, get_registered_environments, register_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.grading import run_solution_against_tests
+from halo.environments.tasks.coding.swe import SweEnvironment
+from halo.environments.tasks.qa import (
     ExamQAEnvironment,
     build_qa_search_environment,
     multiple_choice_match,
     render_choices,
 )
-from src.environments.tools import web_search as ws
-from src.environments.tools.definitions import NativeTool, NativeToolCall, NativeToolRegistry, ToolParameter
-from src.environments.tools.toolsets import (
+from halo.environments.tools import web_search as ws
+from halo.environments.tools.definitions import NativeTool, NativeToolCall, NativeToolRegistry, ToolParameter
+from halo.environments.tools.toolsets import (
     build_code_tools,
     build_combined_tools,
     build_math_tools,
@@ -61,9 +61,9 @@ from src.environments.tools.toolsets import (
     build_search_tools,
     build_simulated_file_tools,
 )
-from src.environments.tools.web_search import _format_results, async_web_search, web_search, web_search_raw
-from src.rewards.graders.matching import exact_match, is_correct_answer, normalize_text, numeric_match
-from src.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm
+from halo.environments.tools.web_search import _format_results, async_web_search, web_search, web_search_raw
+from halo.rewards.graders.matching import exact_match, is_correct_answer, normalize_text, numeric_match
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm
 from tests.common.code_contests import StubSandbox
 
 
@@ -695,7 +695,7 @@ def test_react_tool_that_raises_is_logged_and_charged(caplog):
     env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
     episode_ids, _ = env.reset(["Test"])
 
-    with caplog.at_level(logging.WARNING, logger="src.environments.tool_accounting"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tool_accounting"):
         steps = env.step(episode_ids, ['Thought: compute\nAction: calculate(expression="1+1")'])
 
     assert any("raised during execution" in record.getMessage() for record in caplog.records), (
@@ -713,7 +713,7 @@ def test_native_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog
     trajectory = Trajectory()
     trajectory.info.update(total_tool_calls=0, successful_tool_calls=0)
     call = NativeToolCall(id="1", name="submit_solution", arguments={})
-    with caplog.at_level(logging.WARNING, logger="src.environments.tool_accounting"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tool_accounting"):
         results, reward = env._execute_tool_calls([call], trajectory)
 
     assert results[0].success is False
@@ -736,7 +736,7 @@ def test_react_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog)
     )
     env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
     episode_ids, _ = env.reset(["Test"])
-    with caplog.at_level(logging.WARNING, logger="src.environments.tool_accounting"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tool_accounting"):
         steps = env.step(episode_ids, ["Thought: compute\nAction: calculate()"])
 
     assert steps[0].reward == pytest.approx(-0.1)
@@ -1463,7 +1463,7 @@ def test_a_failing_search_backend_is_logged_once_by_the_protocol(monkeypatch, ca
     env = NativeToolUseEnvironment(tool_registry=build_search_tools(backend="serper"), max_turns=3)
     ids, _ = env.reset(["task"])
     call = {"id": "c1", "function": {"name": "web_search", "arguments": '{"query": "q"}'}}
-    with caplog.at_level(logging.DEBUG, logger="src.environments"):
+    with caplog.at_level(logging.DEBUG, logger="halo.environments"):
         env.step(ids, ["searching"], [{"finish_reason": "tool_calls", "tool_calls": [call]}])
     warnings_logged = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings_logged) == 1 and warnings_logged[0].exc_info is not None

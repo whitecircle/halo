@@ -12,8 +12,8 @@ nan/inf filter garbage — without an error anywhere.
 import pytest
 import torch
 
-import src.distributed.pipeline_parallel.groups as groups
-from src.distributed.pipeline_parallel.groups import broadcast_scalar_from_last_stage
+import halo.distributed.pipeline_parallel.groups as groups
+from halo.distributed.pipeline_parallel.groups import broadcast_scalar_from_last_stage
 
 LAST_STAGE_RANK = 1
 

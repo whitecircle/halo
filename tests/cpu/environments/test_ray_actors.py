@@ -23,25 +23,25 @@ from types import SimpleNamespace
 import pytest
 import ray
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments import ray_actors
-from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
-from src.environments.messages import Trajectory
-from src.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.ray_actors import (
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments import ray_actors
+from halo.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
+from halo.environments.messages import Trajectory
+from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from halo.environments.ray_actors import (
     EnvironmentActor,
     RolloutHTTPError,
     RolloutManager,
     _should_giveup,
     ray_init_kwargs,
 )
-from src.environments.registry import build_environment
-from src.environments.rollout_config import RolloutConfig
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-from src.environments.tools.toolsets import build_math_tools
-from src.inference.response import FINISH_REASON_LENGTH
-from src.rewards.samples import CUT_TOOL_CALLS_KEY
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.tools.toolsets import build_math_tools
+from halo.inference.response import FINISH_REASON_LENGTH
+from halo.rewards.samples import CUT_TOOL_CALLS_KEY
 from tests.common.repo import REPO_ROOT
 
 # Test: Environment Actor (Direct - Without Ray)
@@ -440,7 +440,7 @@ CONSUMED_ROLLOUT_RESULT_FIELDS = {
 }
 
 # Where a rollout result is read: the actor/manager that builds it and the trainer that consumes it.
-ROLLOUT_RESULT_CONSUMERS = ("src/environments", "src/trainers/grpo")
+ROLLOUT_RESULT_CONSUMERS = ("halo/environments", "halo/trainers/grpo")
 
 
 def _bare_local_attribute_reads(root):

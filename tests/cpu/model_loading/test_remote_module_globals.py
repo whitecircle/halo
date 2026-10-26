@@ -23,7 +23,7 @@ import pytest
 import transformers.dynamic_module_utils
 from transformers.cache_utils import DynamicCache, DynamicLayer
 
-from src.model_loading.remote_code import (
+from halo.model_loading.remote_code import (
     _UNIMPORTED_REMOTE_GLOBALS,
     apply_remote_code_compat_shims,
 )

@@ -15,8 +15,8 @@ from collections import UserDict
 import pytest
 import torch
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 _extract = DistributedTrainerMixin._extract_output_token_count
 _accumulate = DistributedTrainerMixin._accumulate_unmasked_output_tokens

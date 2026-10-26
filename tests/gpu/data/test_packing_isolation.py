@@ -23,7 +23,7 @@ Single GPU::
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.data.collators.packing import DataCollatorWithPacking
+from halo.data.collators.packing import DataCollatorWithPacking
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log

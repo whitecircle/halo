@@ -26,11 +26,11 @@ import torch
 import torch.utils.checkpoint as torch_checkpoint
 from trl import SFTTrainer
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.models.attention.tree_plan import TREE_ATTENTION_KEY
-from src.models.gradient_checkpointing import scoped_checkpoint_func
-from src.models.moe.balancing import expert_load_token_weights
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
+from halo.models.gradient_checkpointing import scoped_checkpoint_func
+from halo.models.moe.balancing import expert_load_token_weights
+from halo.trainers.sft import DistributedSFTTrainer
 
 _INDICES = torch.tensor([0, 1, 1, 3])
 _EXPECTED = torch.tensor([1.0, 2.0, 0.0, 1.0])

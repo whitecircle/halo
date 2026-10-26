@@ -13,8 +13,8 @@ import inspect
 
 import pytest
 
-from src.model_loading.liger import dispatch
-from src.model_loading.liger.dispatch import _apply_liger_for_standard_models
+from halo.model_loading.liger import dispatch
+from halo.model_loading.liger.dispatch import _apply_liger_for_standard_models
 from tests.common.repo import probe_findings
 
 # The exception types an applier can raise. Each must reach the caller.
@@ -78,7 +78,7 @@ def test_every_registered_model_type_applies_without_raising():
 import sys
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-from src.model_loading.liger.dispatch import _TOOLKIT_LIGER_APPLIERS, _apply_liger_for_standard_models, _liger_model_types
+from halo.model_loading.liger.dispatch import _TOOLKIT_LIGER_APPLIERS, _apply_liger_for_standard_models, _liger_model_types
 
 failures = []
 for model_type in sorted({**MODEL_TYPE_TO_APPLY_LIGER_FN, **_TOOLKIT_LIGER_APPLIERS}):

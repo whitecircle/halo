@@ -16,9 +16,9 @@ import torch
 from trl import DPOTrainer, KTOTrainer
 from trl.trainer.utils import hash_module
 
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
 
 TRAINERS = [(DistributedDPOTrainer, DPOTrainer), (DistributedKTOTrainer, KTOTrainer)]
 

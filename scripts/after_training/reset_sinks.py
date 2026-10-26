@@ -23,33 +23,33 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file
 
-from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.atomic import (
+from halo.checkpoint.atomic import (
     PUBLISH_STAGING_SUFFIX,
     clear_staging_path,
     link_or_copy_file,
     save_safetensors_file,
     staged_file,
 )
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
-from src.checkpoint.model_card import tag_exported_model_card
-from src.checkpoint.offline_export import (
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
+from halo.checkpoint.model_card import tag_exported_model_card
+from halo.checkpoint.offline_export import (
     preflight_model_load_resources,
     reject_in_place_conversion,
     save_full_checkpoint,
 )
-from src.checkpoint.reading import iter_checkpoint_tensors, reject_partial_checkpoint
-from src.checkpoint.writing import sweep_after_full_save
-from src.log import configure_cli_logging
-from src.model_loading.model_preparation import auto_load_model
-from src.model_loading.tokenizer_setup import load_processing_class
-from src.models.attention.gpt_oss_sinks import (
+from halo.checkpoint.reading import iter_checkpoint_tensors, reject_partial_checkpoint
+from halo.checkpoint.writing import sweep_after_full_save
+from halo.log import configure_cli_logging
+from halo.model_loading.model_preparation import auto_load_model
+from halo.model_loading.tokenizer_setup import load_processing_class
+from halo.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
     is_sink_key,
     neutralized_sink_value,
     stamped_sinks_policy,
 )
+from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

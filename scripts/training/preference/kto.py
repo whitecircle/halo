@@ -23,22 +23,22 @@ Usage:
 
 from trl import KTOConfig
 
-from src.config_validation import reject_unsupported_args
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.preference import KTOScriptArguments
-from src.configs.script_arguments import ModelArguments
-from src.data.pipeline.map_cache_key import carry_cache_key
-from src.data.render_columns import alias_images_column, reject_missing_render_column
-from src.data.vlm_routing import dataset_declares_images
-from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
-from src.entrypoints.model_setup import (
+from halo.config_validation import reject_unsupported_args
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.preference import KTOScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.pipeline.map_cache_key import carry_cache_key
+from halo.data.render_columns import alias_images_column, reject_missing_render_column
+from halo.data.vlm_routing import dataset_declares_images
+from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
+from halo.entrypoints.model_setup import (
     apply_max_length,
     default_padded_attn_implementation,
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -46,10 +46,10 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.runtime.collectives import barrier
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.trainers.preference.kto import DistributedKTOTrainer
 
 _KTO_RENAMED_FIELDS = (("completion_field", "completion"), ("label_field", "label"))
 

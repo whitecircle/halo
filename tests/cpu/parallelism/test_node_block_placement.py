@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """``node_placement_contradiction`` — the rank→machine assumption every node-local group rests on.
 
-``src.distributed.group_layout`` cuts every node-local EP/CP/TP/ETP group as a CONTIGUOUS global-rank
+``halo.distributed.group_layout`` cuts every node-local EP/CP/TP/ETP group as a CONTIGUOUS global-rank
 block, and ``ParallelismConfig`` derives ``num_nodes`` as ``world_size // gpus_per_node``. Both are a
 machine only while rank ``r`` sits on node ``r // gpus_per_node``. One torchrun per node makes that
 true by construction; a launcher that numbers ranks round-robin over the allocation does not, and
@@ -19,9 +19,9 @@ from unittest.mock import patch
 
 import pytest
 
-from src.distributed.nvlink import NO_FABRIC, node_placement_contradiction, validate_nvlink_domain_against_fabric
+from halo.distributed.nvlink import NO_FABRIC, node_placement_contradiction, validate_nvlink_domain_against_fabric
 
-_MOD = "src.distributed.nvlink"
+_MOD = "halo.distributed.nvlink"
 
 
 def _block(num_nodes: int, gpus_per_node: int) -> list[str]:

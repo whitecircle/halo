@@ -23,12 +23,12 @@ import torch
 from peft import LoraConfig, get_peft_model
 from transformers import modeling_flash_attention_utils as flash_utils
 
-from src.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.models import segment_markers
-from src.models.attention import tree as tree_attention
-from src.models.attention import tree_plan
-from src.models.attention.tree import (
+from halo.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models import segment_markers
+from halo.models.attention import tree as tree_attention
+from halo.models.attention import tree_plan
+from halo.models.attention.tree import (
     TREE_FAMILIES,
     TreeAttentionRegistry,
     TreeFamily,
@@ -38,7 +38,7 @@ from src.models.attention.tree import (
     install_tree_attention,
     resolve_tree_plan_options,
 )
-from src.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
+from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILY,
     TINY_MOE_FAMILIES,

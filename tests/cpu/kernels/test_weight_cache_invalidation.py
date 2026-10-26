@@ -13,8 +13,8 @@ import pytest
 import torch
 from torch import nn
 
-from src.kernels.lowp.quantization import cached_fake_quant
-from src.optimizers.adamw_bf16 import AdamWBF16
+from halo.kernels.lowp.quantization import cached_fake_quant
+from halo.optimizers.adamw_bf16 import AdamWBF16
 
 BLOCK_AXIS = 1
 

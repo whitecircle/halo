@@ -32,15 +32,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
-from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
-from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
+from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 

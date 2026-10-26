@@ -18,7 +18,22 @@ from types import SimpleNamespace
 
 import pytest
 
-import src.environments.eval_runner as eval_runner
+import halo.environments.eval_runner as eval_runner
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.tasks.coding.code_contests import (
+    DEFAULT_EVAL_PROTOCOL,
+    EVAL_PROTOCOL_KNOB_DEFAULTS,
+    EVAL_PROTOCOLS,
+    CodeContestsEnvironment,
+)
+from halo.environments.tasks.coding.code_contests_prompts import (
+    SCRATCHPAD_BUDGET_SPENT_REPLY,
+    SUBMISSION_BUDGET_SPENT_REPLY,
+)
+from halo.environments.tasks.coding.contest_datasets import ContestSelection
+from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
+from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from scripts.environments.eval_arguments import rollout_config_from_args
 from scripts.environments.inference.run_code_contests import (
     FLAG_OWNED_ENV_KWARGS,
@@ -31,21 +46,6 @@ from scripts.environments.inference.run_code_contests import (
     resolve_eval_protocol,
     run_trajectory_path,
 )
-from src.environments.registry import build_environment
-from src.environments.rollout_config import RolloutConfig
-from src.environments.tasks.coding.code_contests import (
-    DEFAULT_EVAL_PROTOCOL,
-    EVAL_PROTOCOL_KNOB_DEFAULTS,
-    EVAL_PROTOCOLS,
-    CodeContestsEnvironment,
-)
-from src.environments.tasks.coding.code_contests_prompts import (
-    SCRATCHPAD_BUDGET_SPENT_REPLY,
-    SUBMISSION_BUDGET_SPENT_REPLY,
-)
-from src.environments.tasks.coding.contest_datasets import ContestSelection
-from src.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
-from src.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
     StubSandbox,

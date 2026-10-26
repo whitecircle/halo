@@ -11,9 +11,9 @@ import math
 import httpx
 import pytest
 
-from src.rewards.samples import ScoringSample
-from src.rewards.scorers.reward_model import ServedRewardModel
-from src.rewards.terms import RewardModelTerm
+from halo.rewards.samples import ScoringSample
+from halo.rewards.scorers.reward_model import ServedRewardModel
+from halo.rewards.terms import RewardModelTerm
 
 
 class _Template:

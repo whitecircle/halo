@@ -31,7 +31,7 @@ No training-side prompt cap exists, so an over-long prompt eats its own completi
 
 The trainer sums sequence log-probs in fp32. TRL's own `selective_log_softmax` keeps the per-token log-probs of bf16 logits in bf16, and sums them in bf16. At `|logp|` in [8192, 16384) that grid is 64 nats, so a long completion's margin carries tens of nats of rounding.
 
-`TRLPreferenceMixin` (`src/trainers/preference/trl_preference.py`) swaps that function out while TRL's loss and reference pass run. The replacement is a chunked fp32 log-softmax (`src/kernels/logprobs.py`) that never builds a full fp32 `[B, T, V]` plane. TRL sums its output in fp32, so these are fp32:
+`TRLPreferenceMixin` (`halo/trainers/preference/trl_preference.py`) swaps that function out while TRL's loss and reference pass run. The replacement is a chunked fp32 log-softmax (`halo/kernels/logprobs.py`) that never builds a full fp32 `[B, T, V]` plane. TRL sums its output in fp32, so these are fp32:
 
 - every loss term built on the sequence log-probs, and the `ld_alpha` split;
 - the log-prob term of the WPO weights;
@@ -43,7 +43,7 @@ Every run takes the fp32 path. The trainer turns TRL's `use_liger_kernel` off at
 
 ## Reference model
 
-Three shapes, decided by `load_reference_model_for_preference` (`src/model_loading/parallel/frozen_models.py`):
+Three shapes, decided by `load_reference_model_for_preference` (`halo/model_loading/parallel/frozen_models.py`):
 
 - **PEFT** (`use_peft: true`) — no second model: the script passes a LoRA config, so the reference is the base with the adapter disabled. A trainer built by hand around an already-wrapped `PeftModel` gets a frozen `ref` adapter copy instead.
 - **EP / TP with `precompute_ref_log_probs: true`** — no reference is loaded either. Log-probs come from the untrained policy before step 1, and a resume restores them from the checkpoint ([below](#resuming-a-precompute-run)).
@@ -55,7 +55,7 @@ A reference model whose attention sinks differ from the policy's is refused in e
 
 ### Resuming a precompute run
 
-The sweep runs inside the trainer's `__init__`, over the policy when no separate reference exists, and every rank attaches the gathered columns in memory, so per-node storage needs no shared cache file. A [Path-B resume](../../reference/checkpoints.md#resuming-training) builds the policy from the checkpoint before that, so a sweep there would score the trained weights and zero every log-ratio. Every checkpoint of a sweeping run therefore carries the columns in `reference_logps.pt`: one entry per split (`train`, then each eval dataset by name) with its row count, a digest of each token-id column the reference read, and the settings that shape the values (`max_length` and the [log-prob precision](#log-prob-precision), plus `truncation_mode` and `ld_alpha` for DPO). The script hands the trainer the resume checkpoint, and the shared lifecycle attaches the saved columns instead of sweeping (`src/trainers/reference_logps.py`).
+The sweep runs inside the trainer's `__init__`, over the policy when no separate reference exists, and every rank attaches the gathered columns in memory, so per-node storage needs no shared cache file. A [Path-B resume](../../reference/checkpoints.md#resuming-training) builds the policy from the checkpoint before that, so a sweep there would score the trained weights and zero every log-ratio. Every checkpoint of a sweeping run therefore carries the columns in `reference_logps.pt`: one entry per split (`train`, then each eval dataset by name) with its row count, a digest of each token-id column the reference read, and the settings that shape the values (`max_length` and the [log-prob precision](#log-prob-precision), plus `truncation_mode` and `ld_alpha` for DPO). The script hands the trainer the resume checkpoint, and the shared lifecycle attaches the saved columns instead of sweeping (`halo/trainers/reference_logps.py`).
 
 - When the policy was built from the checkpoint's weights and no separate reference exists, a split with no saved entry raises, and so does one whose row count, token ids, settings or columns (a KL column the run's KTO loss needs) differ from the run's. Any other resume (an adapter or merge-on-save checkpoint builds the policy from the base; a frozen reference copy) sweeps untrained weights for such a split and proceeds.
 - A split whose settings record another log-prob precision, or none, is such a mismatch: its values carry that precision's rounding. The refusal names the one-step regeneration below.

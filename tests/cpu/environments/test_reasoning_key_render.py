@@ -24,7 +24,7 @@ import pytest
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-from src.environments.messages import REASONING_KEYS, Message
+from halo.environments.messages import REASONING_KEYS, Message
 from tests.common.models import (
     BAILING_MOE_RING_MINI,
     GEMMA3_4B_IT,

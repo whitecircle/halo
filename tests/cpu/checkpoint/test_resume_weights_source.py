@@ -18,7 +18,7 @@ import json
 
 import pytest
 
-from src.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
+from halo.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
 from tests.common.parallelism import make_parallelism_config
 
 BASE = "org/base-model"

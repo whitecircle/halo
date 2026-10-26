@@ -17,7 +17,7 @@ import pytest
 import torch
 from transformers import Trainer
 
-from src.trainers.parallelism.grad_clipping import GradientClippingMixin, pp_clip_grad_norm
+from halo.trainers.parallelism.grad_clipping import GradientClippingMixin, pp_clip_grad_norm
 
 
 class _NoHostSync(torch.Tensor):
@@ -155,8 +155,8 @@ def test_the_pipeline_clip_returns_a_device_tensor(monkeypatch):
             self.all_reduces += 1
 
     fake = _Dist()
-    monkeypatch.setattr("src.trainers.parallelism.grad_clipping.dist", fake)
-    monkeypatch.setattr("src.trainers.parallelism.grad_clipping.torch.cuda.current_device", lambda: "cpu")
+    monkeypatch.setattr("halo.trainers.parallelism.grad_clipping.dist", fake)
+    monkeypatch.setattr("halo.trainers.parallelism.grad_clipping.torch.cuda.current_device", lambda: "cpu")
     monkeypatch.setattr(torch.Tensor, "item", _NoHostSync.item, raising=True)
 
     params = [torch.nn.Parameter(torch.ones(4)) for _ in range(2)]

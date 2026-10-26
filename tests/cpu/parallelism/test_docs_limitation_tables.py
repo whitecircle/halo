@@ -16,15 +16,15 @@ from pathlib import Path
 import pytest
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING, model_type_to_module_name
 
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.context_parallel.model_rules import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_rules import AXES, SUPPORTED_AXIS_SETS
+from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, find_moe_family_spec
 from scripts.docs.markdown import parse_tables
-from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
-from src.distributed.context_parallel.model_rules import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.parallelism_rules import AXES, SUPPORTED_AXIS_SETS
-from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from src.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
-from src.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, find_moe_family_spec
 from tests.common.repo import REPO_ROOT
 from tests.common.rosters import distributed_trainer_classes
 

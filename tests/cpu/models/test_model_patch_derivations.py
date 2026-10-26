@@ -24,11 +24,11 @@ import torch.nn as nn
 import transformers
 from transformers.models.zaya import modeling_zaya
 
-from src.distributed.fsdp import _should_cast_forward_inputs
-from src.model_loading.buffer_repair import finalize_loaded_model
-from src.model_loading.parallel.peft_setup import _peft_module_casting_to_bf16
-from src.models.attention.selection import is_fa4_backward_nan_prone
-from src.models.zaya import patch_zaya_fp32_interlayer_residual
+from halo.distributed.fsdp import _should_cast_forward_inputs
+from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.parallel.peft_setup import _peft_module_casting_to_bf16
+from halo.models.attention.selection import is_fa4_backward_nan_prone
+from halo.models.zaya import patch_zaya_fp32_interlayer_residual
 
 
 def _config(model_type: str):

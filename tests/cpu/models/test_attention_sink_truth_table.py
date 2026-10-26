@@ -17,9 +17,9 @@ import torch
 from transformers import AutoModelForCausalLM, GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 
-from src.model_loading.parallel import loader as model_loading
-from src.model_loading.parallel.model_source import ModelSource
-from src.models.attention.gpt_oss_sinks import RESOLVED_SINKS_RESET_ATTR
+from halo.model_loading.parallel import loader as model_loading
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.models.attention.gpt_oss_sinks import RESOLVED_SINKS_RESET_ATTR
 from tests.common.parallelism import make_parallelism_config
 
 REQUESTS = ("sdpa", "flash_attention_2", "flex_attention", "eager")

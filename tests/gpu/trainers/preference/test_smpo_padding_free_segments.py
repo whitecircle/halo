@@ -18,9 +18,9 @@ from types import SimpleNamespace
 
 import torch
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.segment_isolation import (
     FAMILIES,

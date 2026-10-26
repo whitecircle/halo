@@ -30,7 +30,7 @@ rejected at config time, before any rank math.
 ## Known limitations
 
 **RL weight sync stages one chunk on the forwarding rank's GPU.** For Online GRPO and Async GRPO with Environments the NCCL
-weight-sync client (`src/weight_sync/`) stages each un-sharded policy weight on the sync GPU and streams it to the engine in
+weight-sync client (`halo/weight_sync/`) stages each un-sharded policy weight on the sync GPU and streams it to the engine in
 byte-bounded chunks (`HALO_WEIGHT_SYNC_CHUNK_MB`, 1 GiB), never the model and never host RAM.
 
 The forwarding rank's peak is the assembled EP layer being sent plus the chunk, the largest tensor's

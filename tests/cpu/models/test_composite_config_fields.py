@@ -26,22 +26,22 @@ import torch
 from transformers import CONFIG_MAPPING, Qwen3_5MoeForCausalLM, Qwen3_5MoeForConditionalGeneration
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 
-from src.callbacks.balancing import apply_balancing_mode
-from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.model_loading.tokenizer_setup import sync_special_token_id
-from src.models import config_access
-from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
-from src.models.config_access import (
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.model_loading.tokenizer_setup import sync_special_token_id
+from halo.models import config_access
+from halo.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
+from halo.models.config_access import (
     apply_config_overrides,
     config_sources,
     configs_declaring,
     set_config_field,
     ties_word_embeddings,
 )
-from src.models.moe import balancing
-from src.models.moe.config_fields import has_routed_experts
-from src.models.moe.router_logits import honors_router_logits_flag
+from halo.models.moe import balancing
+from halo.models.moe.config_fields import has_routed_experts
+from halo.models.moe.router_logits import honors_router_logits_flag
 
 # Families whose decoder lives on a nested ``text_config``; the plain ones are the control group.
 COMPOSITE_MODEL_TYPES = ("qwen3_5_moe", "qwen3_5", "gemma4")

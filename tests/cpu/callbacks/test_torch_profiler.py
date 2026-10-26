@@ -17,8 +17,8 @@ import pytest
 import torch
 from torch.profiler import ProfilerAction
 
-from src.callbacks.torch_profiler import TorchProfilerCallback
-from src.diagnostics.profiling import build_profiler
+from halo.callbacks.torch_profiler import TorchProfilerCallback
+from halo.diagnostics.profiling import build_profiler
 
 
 def _drive(cb, n_steps):
@@ -64,7 +64,7 @@ def test_profiler_is_built_from_the_callbacks_settings(tmp_path, monkeypatch):
         built.append((output_dir, settings))
         return build_profiler(output_dir, **settings)
 
-    monkeypatch.setattr("src.callbacks.torch_profiler.build_profiler", recording_build_profiler)
+    monkeypatch.setattr("halo.callbacks.torch_profiler.build_profiler", recording_build_profiler)
     cb = TorchProfilerCallback(
         output_dir=str(tmp_path),
         wait=2,

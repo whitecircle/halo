@@ -33,10 +33,10 @@ import torch
 import torch.distributed as dist
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.plain_params import per_head_norm_param_names
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.plain_params import per_head_norm_param_names
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.distributed import shared_scratch_dir, world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.utils import cleanup_memory, log, log_all, max_or_nan

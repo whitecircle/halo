@@ -1,4 +1,4 @@
-"""CPU tests for the chunked GRPO log-probs: the head kernel (src/kernels/head_logprobs.py) and its trainer side.
+"""CPU tests for the chunked GRPO log-probs: the head kernel (halo/kernels/head_logprobs.py) and its trainer side.
 
 The chunked path must compute the SAME per-token log-probs and entropy as the full-logits path TRL
 uses (``selective_log_softmax`` / ``entropy_from_logits`` over ``hidden @ lm_head.weight.T / temp``),
@@ -17,19 +17,19 @@ from transformers import Gemma2Config, Gemma2ForCausalLM, LlamaConfig, LlamaForC
 from trl import GRPOTrainer
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
-from src.kernels import head_logprobs
-from src.kernels.head_logprobs import VOCAB_TILE, chunked_head_logprobs
-from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
-from src.runtime.dtensor import materialize_dtensor
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.logprob_scoring import (
+from halo.kernels import head_logprobs
+from halo.kernels.head_logprobs import VOCAB_TILE, chunked_head_logprobs
+from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
+from halo.runtime.dtensor import materialize_dtensor
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.logprob_scoring import (
     ChunkedGRPOLogprobsMixin,
     LogprobScoringMixin,
     rows_forward_densely,
 )
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 # Vocab spans multiple chunk tiles so the online-softmax accumulation across chunks is exercised.
 VOCAB = VOCAB_TILE * 2 + 137

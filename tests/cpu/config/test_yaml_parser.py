@@ -18,16 +18,16 @@ import pytest
 from transformers import TrainingArguments
 from trl import DPOConfig, GRPOConfig, RewardConfig, SFTConfig
 
-from src.configs.distillation import SelfDistillScriptArguments
-from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, expand_strftime_directives
-from src.configs.preference import DPOScriptArguments, SmoothMarginPOConfig
-from src.configs.reward import RewardScriptArguments
-from src.configs.script_arguments import ModelArguments
-from src.configs.sft import SFTScriptArguments
-from src.entrypoints.script import parse_script_args
+from halo.configs.distillation import SelfDistillScriptArguments
+from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, expand_strftime_directives
+from halo.configs.preference import DPOScriptArguments, SmoothMarginPOConfig
+from halo.configs.reward import RewardScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.configs.sft import SFTScriptArguments
+from halo.entrypoints.script import parse_script_args
 
 # Simple target dataclasses for parsing
 
@@ -429,7 +429,7 @@ def test_parse_script_args_expands_output_dir_alone(tmp_path):
     """Only output_dir expands: a directive in any other string value reaches its field verbatim."""
     path = tmp_path / "out.yaml"
     path.write_text(f'output_dir: "{tmp_path}/run-%Y"\nname: "run-%Y"\n')
-    with mock.patch.object(sys, "argv", ["prog", str(path)]), mock.patch("src.entrypoints.script.install_log_tee"):
+    with mock.patch.object(sys, "argv", ["prog", str(path)]), mock.patch("halo.entrypoints.script.install_log_tee"):
         config = parse_script_args(OutputDirConfig)
     assert config.output_dir == f"{tmp_path}/run-{datetime.now():%Y}"
     assert config.name == "run-%Y"
@@ -1073,8 +1073,8 @@ def test_output_dir_is_rank0s_expansion_broadcast_once(tmp_path):
 
     with (
         mock.patch.object(sys, "argv", ["prog", str(path)]),
-        mock.patch("src.entrypoints.script.broadcast_from_rank0", side_effect=rank0_value),
-        mock.patch("src.entrypoints.script.install_log_tee") as tee,
+        mock.patch("halo.entrypoints.script.broadcast_from_rank0", side_effect=rank0_value),
+        mock.patch("halo.entrypoints.script.install_log_tee") as tee,
     ):
         config = parse_script_args(OutputDirConfig)
     assert config.output_dir == str(tmp_path / "rank0")

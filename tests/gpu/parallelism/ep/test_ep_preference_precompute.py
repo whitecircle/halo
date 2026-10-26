@@ -39,8 +39,8 @@ import torch.distributed as dist
 from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
 from tests.common.preference_precompute import TRAINERS, column
@@ -112,7 +112,7 @@ def rank_private_dataset(kind: str, ctx, subdir: str) -> Dataset:
 
 
 def sequence_logprobs(model, prompt_ids: list[list[int]], completion_ids: list[list[int]], device) -> torch.Tensor:
-    """TRL's reference log-prob per row, on a DENSE model, independent of ``src/``.
+    """TRL's reference log-prob per row, on a DENSE model, independent of ``halo/``.
 
     Mirrors ``compute_ref_log_probs``: forward prompt⧺completion, shift by one, score the tokens the
     shifted completion mask marks, sum. Both TRL collators right-pad only, so under causal attention

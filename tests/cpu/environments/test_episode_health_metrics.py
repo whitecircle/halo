@@ -10,9 +10,9 @@ Run: python tests/cpu/environments/test_episode_health_metrics.py  (or pytest)
 
 import pytest
 
-from src.environments.messages import Message, Trajectory
-from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.messages import Message, Trajectory
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 
 def _make_env(**kwargs):

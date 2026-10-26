@@ -21,12 +21,12 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.model_loading.liger import dispatch
-from src.model_loading.liger.applier import LigerApplier
-from src.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
-from src.model_loading.liger.dispatch import finalize_liger_after_direct_load
-from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from src.models.moe.family_specs import find_moe_family_spec_for_config
+from halo.model_loading.liger import dispatch
+from halo.model_loading.liger.applier import LigerApplier
+from halo.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
+from halo.model_loading.liger.dispatch import finalize_liger_after_direct_load
+from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 
 
 class _RecordingApplier:
@@ -103,7 +103,7 @@ def test_flce_is_never_applied_through_a_multimodal_wrappers_text_tower(monkeypa
     """
     applier = _RecordingApplier()
     monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "lfm2", applier)
-    with caplog.at_level(logging.WARNING, logger="src.model_loading.liger.dispatch"):
+    with caplog.at_level(logging.WARNING, logger="halo.model_loading.liger.dispatch"):
         applied = dispatch.apply_liger_kernel(_wrapper_config("lfm2_vl", "lfm2"), {"fused_linear_cross_entropy": True})
     assert applied["fused_linear_cross_entropy"] is False
     assert applied["cross_entropy"] is True, "the working CE kernel must not be traded for a dead FLCE"
@@ -444,7 +444,7 @@ def test_no_applier_warns_and_records_nothing(monkeypatch, caplog):
     """``use_liger_kernel`` defaults ON, so an uncovered family must SAY it is training unfused."""
     monkeypatch.setattr(dispatch, "_TOOLKIT_LIGER_APPLIERS", {})
     config = types.SimpleNamespace(model_type="model_type_without_any_applier", text_config=None)
-    with caplog.at_level(logging.WARNING, logger="src.model_loading.liger.dispatch"):
+    with caplog.at_level(logging.WARNING, logger="halo.model_loading.liger.dispatch"):
         applied = dispatch.apply_liger_kernel(config, None)
     assert applied is None
     assert config._halo_liger_applied_config is None

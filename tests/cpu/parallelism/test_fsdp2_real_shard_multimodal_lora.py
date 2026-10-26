@@ -13,7 +13,7 @@ of them).
 Run: pytest tests/cpu/parallelism/test_fsdp2_real_shard_multimodal_lora.py
 """
 
-import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
+import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 import pytest
 import torch
@@ -21,8 +21,8 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
 
-import src.distributed.fsdp as fsdp
-from src.distributed.fsdp import IdentityParamSet
+import halo.distributed.fsdp as fsdp
+from halo.distributed.fsdp import IdentityParamSet
 from tests.cpu.parallelism.test_fsdp2_unit_active_at_param_use import _FAMILIES, _MODULES_TO_SAVE, _attention_lora
 
 _COMPOSITES = sorted(family for family in _FAMILIES if family.endswith("composite"))

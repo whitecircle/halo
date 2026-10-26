@@ -20,7 +20,7 @@ allowed-tools:
 
 # Parallelism configuration gate
 
-Recommend a **valid** `ParallelismConfig` (`src/distributed/parallelism_config.py`) and **reject**
+Recommend a **valid** `ParallelismConfig` (`halo/distributed/parallelism_config.py`) and **reject**
 unsupported combos before the user burns GPU hours. Every rule lives once in the docs; read the owner
 section before a verdict on any non-trivial combo:
 
@@ -35,9 +35,9 @@ section before a verdict on any non-trivial combo:
   [Pipeline Parallelism](../../agent-docs/parallelism/pipeline-parallelism.md#rejected-combinations);
 - per-axis knob refusals — each axis page's *Limitations*.
 
-The code is the **ultimate** authority: `src/distributed/parallelism_rules.py` (`reject_unsupported_axes`,
+The code is the **ultimate** authority: `halo/distributed/parallelism_rules.py` (`reject_unsupported_axes`,
 then `reject_invalid_composition` and its `_reject_*`), and `parallelism_config_from_args`
-(`src/configs/parallelism_arguments.py`: `lowp_*` or `init_from_scratch` outside SFT, a trainer's
+(`halo/configs/parallelism_arguments.py`: `lowp_*` or `init_from_scratch` outside SFT, a trainer's
 `SUPPORTS_CP` / `PP_REFUSAL`). When a doc, this skill or memory disagrees, read those files before
 advising.
 

@@ -17,25 +17,25 @@ from typing import get_type_hints
 
 import pytest
 
-from src.config_validation import ValidatedConfig
-from src.configs.classification import ClassificationConfig
-from src.configs.distillation import (
+from halo.config_validation import ValidatedConfig
+from halo.configs.classification import ClassificationConfig
+from halo.configs.distillation import (
     DistillationConfig,
     SDPGArguments,
     SelfDistillScriptArguments,
     TeacherDistillScriptArguments,
 )
-from src.configs.embedding import EmbeddingConfig
-from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.parser import HaloArgumentParser, _literal_choices
-from src.configs.preference import SmoothMarginPOConfig
-from src.entrypoints.script import init_training_script
-from src.env import DEFAULT_NCCL_TIMEOUT_MINUTES
-from src.subclass_registry import iter_subclasses
-from src.trainers.distillation.divergences import DIVERGENCES
+from halo.configs.embedding import EmbeddingConfig
+from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.parser import HaloArgumentParser, _literal_choices
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.entrypoints.script import init_training_script
+from halo.env import DEFAULT_NCCL_TIMEOUT_MINUTES
+from halo.subclass_registry import iter_subclasses
+from halo.trainers.distillation.divergences import DIVERGENCES
 
 # bf16/use_cpu keep TrainingArguments constructible on a GPU-less runner.
 _CPU_TAIL = "bf16: false\nuse_cpu: true\n"

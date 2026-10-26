@@ -18,15 +18,15 @@ from datasets import Dataset
 from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 
-from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPOCPDataCollatorWithPadding
-from src.distributed.context_parallel.ulysses_attention import _flash_attn_func
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPOCPDataCollatorWithPadding
+from halo.distributed.context_parallel.ulysses_attention import _flash_attn_func
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.cp_grpo import (
     ep_gradient_parameter_names,
     gradient_agreement,

@@ -18,12 +18,12 @@ import torch.nn.functional as F
 from transformers.models.inkling.configuration_inkling import InklingTextConfig
 from transformers.models.inkling.modeling_inkling import InklingTopkRouter
 
-from src.distributed.context_parallel.model_rules import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
-from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
-from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from src.models.moe.config_fields import resolve_expert_count
+from halo.distributed.context_parallel.model_rules import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
+from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.lazy_plan import is_lazy_loadable
+from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.models.moe.config_fields import resolve_expert_count
 
 SEED = 1234
 N_ROUTED = 8

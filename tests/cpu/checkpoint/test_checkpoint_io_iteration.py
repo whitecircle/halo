@@ -27,8 +27,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from src.checkpoint import reading
-from src.checkpoint.reading import (
+from halo.checkpoint import reading
+from halo.checkpoint.reading import (
     detect_model_type,
     detect_model_types,
     iter_checkpoint_shard_entries,

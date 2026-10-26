@@ -7,7 +7,7 @@ Specific to the coding-contest task: it applies a dataset adapter that scores ra
 ``CODE_DATASET_ADAPTERS`` entry without a ``normalize`` step) to a contest dataset, prompts in a chosen
 solution `language`, and reports `success@1` / `success@k` bucketed by the adapter's report field
 (rating on Codeforces, difficulty on LiveCodeBench, contest on ICPC-Eval and HLCE). The rollout loop
-and reward aggregation are shared with the other eval scripts via :mod:`src.environments.eval_runner`.
+and reward aggregation are shared with the other eval scripts via :mod:`halo.environments.eval_runner`.
 `--eval_protocol` names the evaluation contract (`harness`: the configured budgets; `leaderboard`: one
 graded program, no scratchpad), and on a benchmark that stamps contest dates
 `--start_date` / `--end_date` / `--platform` select the problems scored. A problem whose only tests are
@@ -45,6 +45,24 @@ import json
 import logging
 from typing import Any
 
+from halo.environments.episode_keys import ANSWER_KEY
+from halo.environments.eval_runner import (
+    collect_results,
+    load_hf_split,
+    report,
+)
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.tasks.coding.code_contests import (
+    DEFAULT_EVAL_PROTOCOL,
+    DEFAULT_REASONING_EFFORT,
+    EVAL_PROTOCOLS,
+    CodeContestsEnvironment,
+    without_eval_protocol_pins,
+)
+from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
+from halo.inference.openai_client import build_openai_client
+from halo.log import configure_cli_logging
 from scripts.environments.eval_arguments import (
     DEFAULT_SPLIT,
     add_endpoint_args,
@@ -54,24 +72,6 @@ from scripts.environments.eval_arguments import (
     write_eval_outputs,
 )
 from scripts.environments.training_contract import load_training_contract
-from src.environments.episode_keys import ANSWER_KEY
-from src.environments.eval_runner import (
-    collect_results,
-    load_hf_split,
-    report,
-)
-from src.environments.registry import build_environment
-from src.environments.rollout_config import RolloutConfig
-from src.environments.tasks.coding.code_contests import (
-    DEFAULT_EVAL_PROTOCOL,
-    DEFAULT_REASONING_EFFORT,
-    EVAL_PROTOCOLS,
-    CodeContestsEnvironment,
-    without_eval_protocol_pins,
-)
-from src.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
-from src.inference.openai_client import build_openai_client
-from src.log import configure_cli_logging
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

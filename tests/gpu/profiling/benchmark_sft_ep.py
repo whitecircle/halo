@@ -55,18 +55,18 @@ from peft import LoraConfig
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.callbacks.torch_profiler import TorchProfilerCallback
-from src.diagnostics.ep_span_timing import get_ep_span_timer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_float, torch_trace_dir
-from src.kernels.lowp.spec import LowpPrecision, LowpSpec
-from src.log import configure_training_logging
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.runtime.collectives import barrier, broadcast_from_rank0
-from src.trainers.sft import DistributedSFTTrainer
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.callbacks.torch_profiler import TorchProfilerCallback
+from halo.diagnostics.ep_span_timing import get_ep_span_timer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_float, torch_trace_dir
+from halo.kernels.lowp.spec import LowpPrecision, LowpSpec
+from halo.log import configure_training_logging
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.runtime.collectives import barrier, broadcast_from_rank0
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.benchmark_args import axis_tags, create_benchmark_parser, pp_topology_kwargs
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (

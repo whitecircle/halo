@@ -24,13 +24,13 @@ from typing import get_args
 import pytest
 import torch
 
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.environments.rollout_config import resolve_rollout_stop_token_ids
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence, batch_reward_std
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS
-from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.environments.rollout_config import resolve_rollout_stop_token_ids
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, batch_reward_std
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS
+from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 # --- _context_limit fail-loud ---
 

@@ -19,10 +19,10 @@ import numpy as np
 import pytest
 import torch
 
-from src.runtime.consensus import RankConsensus
-from src.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
-from src.trainers.grpo.objective import advantages as advantages_module
-from src.trainers.grpo.objective.advantages import (
+from halo.runtime.consensus import RankConsensus
+from halo.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
+from halo.trainers.grpo.objective import advantages as advantages_module
+from halo.trainers.grpo.objective.advantages import (
     compute_group_advantages,
     degenerate_group_mask,
     group_relative_advantages,

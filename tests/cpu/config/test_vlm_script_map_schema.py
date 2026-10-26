@@ -19,7 +19,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from PIL import Image
 
-from src.entrypoints.data_setup import prepare_raw_vlm_split
+from halo.entrypoints.data_setup import prepare_raw_vlm_split
 
 _ROWS_PER_MODALITY = 4
 
@@ -71,7 +71,7 @@ def _training_config() -> SimpleNamespace:
 def test_raw_vlm_map_keeps_mixed_modality_rows_intact():
     ds = DatasetDict({"train": _mixed_split(), "test": _mixed_split()})
     training_config = _training_config()
-    with mock.patch("src.entrypoints.data_setup.VLMDataCollator"):
+    with mock.patch("halo.entrypoints.data_setup.VLMDataCollator"):
         train, test, _ = prepare_raw_vlm_split(
             ds, _args(), training_config, _Processor(), _Tokenizer(), None, desc="Processing VLM dataset"
         )

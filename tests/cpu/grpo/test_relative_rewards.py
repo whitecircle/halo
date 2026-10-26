@@ -9,8 +9,8 @@ import math
 import numpy as np
 import pytest
 
-from src.configs.grpo import RLRRConfig
-from src.trainers.grpo.objective.relative_rewards import (
+from halo.configs.grpo import RLRRConfig
+from halo.trainers.grpo.objective.relative_rewards import (
     dense_ranks,
     hierarchical_ranks,
     relative_advantages,

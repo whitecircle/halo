@@ -7,8 +7,8 @@ A GRPO trainer method records into ``self._world_metrics`` and the step's flush 
 from contextlib import contextmanager
 from unittest.mock import patch
 
-from src.trainers import world_metrics
-from src.trainers.world_metrics import WorldMetrics
+from halo.trainers import world_metrics
+from halo.trainers.world_metrics import WorldMetrics
 
 
 def attach_world_metrics(host):

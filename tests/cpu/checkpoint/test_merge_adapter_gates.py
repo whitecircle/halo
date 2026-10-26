@@ -26,15 +26,15 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from scripts.after_training import convert_to_bf16, merge_peft_adapters
-from src.checkpoint import adapter_merge
-from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, assert_no_expert_lora_adapter
-from src.checkpoint.format import (
+from halo.checkpoint import adapter_merge
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, assert_no_expert_lora_adapter
+from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_WEIGHT_NAMES,
     MERGED_ADAPTER_CONFIG_DIR,
     SAFETENSORS_INDEX_FILE,
 )
+from scripts.after_training import convert_to_bf16, merge_peft_adapters
 
 # The gates that must run for real: each one is the check under test, not a stand-in for it.
 _REAL_GATES = (

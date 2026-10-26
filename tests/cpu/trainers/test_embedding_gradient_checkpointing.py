@@ -21,8 +21,8 @@ from sentence_transformers.models import Normalize
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from src.trainers.embedding.preloaded_transformer import patch_sentence_transformer_gradient_checkpointing
-from src.trainers.embedding.trainer import EmbeddingTrainer
+from halo.trainers.embedding.preloaded_transformer import patch_sentence_transformer_gradient_checkpointing
+from halo.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
 
 

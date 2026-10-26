@@ -16,9 +16,9 @@ import os
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline import coordinated_map as coordinated_map_module
-from src.entrypoints import run_setup as run_logger
-from src.runtime import filesystem
+from halo.data.pipeline import coordinated_map as coordinated_map_module
+from halo.entrypoints import run_setup as run_logger
+from halo.runtime import filesystem
 from tests.common.distributed import reset_shared_filesystem_consensus
 
 FS_VARS = ("DIST_SHARED_FILESYSTEM", "DIST_INPUT_SHARED_FILESYSTEM", "DIST_OUTPUT_SHARED_FILESYSTEM")

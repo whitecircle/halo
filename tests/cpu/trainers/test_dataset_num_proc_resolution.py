@@ -19,17 +19,17 @@ from functools import partial
 import pytest
 from datasets import Dataset
 
-import src.trainers.preference.smpo as smpo_module
-from src.data.pipeline.coordinated_map import (
+import halo.trainers.preference.smpo as smpo_module
+from halo.data.pipeline.coordinated_map import (
     DATASET_NUM_PROC,
     coordinated_filter,
     coordinated_map,
     reject_self_capturing_fn,
     resolve_map_num_proc,
 )
-from src.data.pipeline.preferences import tokenize_preference_row
-from src.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.data.pipeline.preferences import tokenize_preference_row
+from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 
 # >1 is what makes datasets pickle the mapped callable.
 _WORKERS = 2

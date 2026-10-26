@@ -8,21 +8,21 @@ import logging
 
 from trl import SFTConfig
 
-from src.callbacks.generate_examples import GenerateExamplesCallback
-from src.config_validation import reject_non_default_args
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import ModelArguments
-from src.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
-from src.data.collators.factory import select_data_collator
-from src.data.collators.tree_packing import DataCollatorWithTreePacking
-from src.data.collators.vlm import PreprocessedVLMDataCollator
-from src.data.pipeline.coordinated_map import coordinated_map_and_filter, coordinated_pack, resolve_map_num_proc
-from src.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
-from src.data.pipeline.tree_rows import prepare_tree_dataset
-from src.data.preprocessed.metadata import load_preprocessed_metadata, verify_preprocessed_dataset
-from src.data.sources.loading import load_datasets_auto
-from src.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
-from src.entrypoints.data_setup import (
+from halo.callbacks.generate_examples import GenerateExamplesCallback
+from halo.config_validation import reject_non_default_args
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
+from halo.data.collators.factory import select_data_collator
+from halo.data.collators.tree_packing import DataCollatorWithTreePacking
+from halo.data.collators.vlm import PreprocessedVLMDataCollator
+from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, coordinated_pack, resolve_map_num_proc
+from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
+from halo.data.pipeline.tree_rows import prepare_tree_dataset
+from halo.data.preprocessed.metadata import load_preprocessed_metadata, verify_preprocessed_dataset
+from halo.data.sources.loading import load_datasets_auto
+from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
+from halo.entrypoints.data_setup import (
     disable_trl_dataset_prep,
     load_script_datasets,
     log_script_dataset_examples,
@@ -31,14 +31,14 @@ from src.entrypoints.data_setup import (
     reject_trl_dataset_prep_args,
     resolve_vlm_run,
 )
-from src.entrypoints.model_setup import (
+from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -46,23 +46,23 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.dtype import resolve_training_dtype
-from src.model_loading.parallel.loader import resolve_policy_attn_implementation
-from src.model_loading.parallel.model_source import probe_checkpoint
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.model_loading.parallel.whole_model import warm_tree_attention_kernels
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.attention.tree import (
+from halo.model_loading.dtype import resolve_training_dtype
+from halo.model_loading.parallel.loader import resolve_policy_attn_implementation
+from halo.model_loading.parallel.model_source import probe_checkpoint
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.model_loading.parallel.whole_model import warm_tree_attention_kernels
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.tree import (
     install_tree_attention,
     reject_unsupported_tree_attention,
     resolve_tree_plan_options,
 )
-from src.models.segment_markers import reject_compressed_kv_rows
-from src.runtime.collectives import barrier
-from src.runtime.consensus import agree_probe_across_ranks
-from src.runtime.ranks import is_global_main_process
-from src.trainers.sft import DistributedSFTTrainer
-from src.trainers.sft_rules import (
+from halo.models.segment_markers import reject_compressed_kv_rows
+from halo.runtime.collectives import barrier
+from halo.runtime.consensus import agree_probe_across_ranks
+from halo.runtime.ranks import is_global_main_process
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.sft_rules import (
     reject_unsupported_sft_data_options,
     reject_unsupported_tree_packing,
     reject_unsupported_vlm_sft_options,

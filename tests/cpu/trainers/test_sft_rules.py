@@ -9,9 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.sft import SFTScriptArguments
-from src.trainers.sft_rules import (
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.sft import SFTScriptArguments
+from halo.trainers.sft_rules import (
     reject_unsupported_sft_data_options,
     reject_unsupported_tree_packing,
     reject_unsupported_vlm_sft_options,

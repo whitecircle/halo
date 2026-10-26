@@ -40,7 +40,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 
-from src.distributed.nccl._nccl_wrapper import ncclUniqueId as shim_unique_id
+from halo.weight_sync.transport.nccl_library import ncclUniqueId as shim_unique_id
 
 
 def check_engine_stack() -> None:

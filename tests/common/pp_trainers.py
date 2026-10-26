@@ -10,11 +10,11 @@ from datasets import Dataset
 from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, Qwen3Config, Qwen3ForSequenceClassification, default_data_collator
 
-from src.callbacks.balancing import configure_moe_balancing
-from src.callbacks.factory import build_run_callbacks
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.trainers.sft import DistributedSFTTrainer
+from halo.callbacks.balancing import configure_moe_balancing
+from halo.callbacks.factory import build_run_callbacks
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import causal_lm_loss, dp_slice_batch
 from tests.common.tolerances import TOL

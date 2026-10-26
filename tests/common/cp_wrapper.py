@@ -2,8 +2,8 @@
 
 from torch import nn
 
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 
 
 def unpatched_cp_wrapper(model, *, cp_size=1, cp_rank=0, cp_config=None):

@@ -17,7 +17,7 @@ Usage:
 
 import pytest
 
-from src.distributed.parallelism_rules import SUPPORTED_AXIS_SETS, render_axis_set
+from halo.distributed.parallelism_rules import SUPPORTED_AXIS_SETS, render_axis_set
 from tests.gpu.manifest import MANIFEST
 
 # Axis set -> GPU tests comparing it to an UNDISTRIBUTED reference; smoke tests do not count.

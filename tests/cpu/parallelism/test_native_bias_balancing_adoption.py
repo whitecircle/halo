@@ -8,22 +8,22 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.families.roster import ep_layer_classes
-from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
-from src.distributed.expert_parallel.moe_layer.balancing_bias import EPBalancingBiasMixin
-from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.models.moe.balancing import is_transient_balancing_router, iter_balancing_routers
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes
+from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from halo.distributed.expert_parallel.moe_layer.balancing_bias import EPBalancingBiasMixin
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.models.moe.balancing import is_transient_balancing_router, iter_balancing_routers
 from tests.common.ep_reference import ep_layers
 from tests.common.parallelism import single_process_ep_config
 from tests.common.rosters import ep_layer_class_by_model_type
@@ -97,7 +97,7 @@ def test_every_family_with_a_native_slot_is_covered_here():
     declaring = {
         cls.__name__
         for cls in ep_layer_classes()
-        if (family := getattr(cls, "FAMILY", None)) and family.balancing_slot and cls.__module__.startswith("src.")
+        if (family := getattr(cls, "FAMILY", None)) and family.balancing_slot and cls.__module__.startswith("halo.")
     }
     assert declaring == _COVERED
 

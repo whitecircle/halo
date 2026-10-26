@@ -11,7 +11,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.trainers.reward.classification_loss import focal_loss
+from halo.trainers.reward.classification_loss import focal_loss
 
 GAMMA = 2.0
 

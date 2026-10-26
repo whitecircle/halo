@@ -8,9 +8,9 @@ import torch
 from datasets import Dataset
 from torch import nn
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.runtime.consensus import DeferredRankFailure
-from src.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.runtime.consensus import DeferredRankFailure
+from halo.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import mapped_scores
 

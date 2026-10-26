@@ -25,9 +25,9 @@ import pandas as pd
 import pytest
 from openai.types.chat import ChatCompletionMessage
 
+from halo.inference.openai_client import EmptyChoicesError
 from scripts.inference import inference_arguments
 from scripts.inference.reward_model import reward_model_arguments, rm_rejection_sampling, rm_scoring
-from src.inference.openai_client import EmptyChoicesError
 
 
 def _prompt_rows(count: int) -> list[dict]:

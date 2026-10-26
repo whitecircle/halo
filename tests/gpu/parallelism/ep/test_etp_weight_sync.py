@@ -27,9 +27,9 @@ import sys
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM
 
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.utils import log

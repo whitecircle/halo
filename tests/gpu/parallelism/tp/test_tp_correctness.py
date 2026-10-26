@@ -33,12 +33,12 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.distributed.tensor_parallel import gather_state_dict_for_save
 from trl import SFTConfig
 
-from src.distributed.mesh import MeshDim, mesh_dim_names, model_tp_mesh, tp_group
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
-from src.runtime.dtensor import materialize_dtensor
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.mesh import MeshDim, mesh_dim_names, model_tp_mesh, tp_group
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.runtime.dtensor import materialize_dtensor
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff, world_mean, world_spread
 from tests.common.ep_reference import fixed_chat_batch

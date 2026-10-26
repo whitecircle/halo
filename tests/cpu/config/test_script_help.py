@@ -81,7 +81,7 @@ def pristine_root_logging():
 @pytest.mark.parametrize("tool", _TOOLS, ids=[str(p.relative_to(_SCRIPTS_DIR)) for p in _TOOLS])
 def test_every_tool_script_imports(tool: pathlib.Path, pristine_root_logging):
     """The tools `halo run` indexes must at least import: most are driven by no other test, so a
-    `src` module moved out from under one breaks it silently until an operator runs it. In-process,
+    `halo` module moved out from under one breaks it silently until an operator runs it. In-process,
     unlike the subprocess sweep above — enough to catch a stale import, at seconds instead of 30 s
     a script."""
     importlib.import_module(".".join(tool.relative_to(REPO_ROOT).with_suffix("").parts))

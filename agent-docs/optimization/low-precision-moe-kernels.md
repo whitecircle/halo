@@ -14,11 +14,11 @@ The unconditional low-precision win is **inference memory**: convert the checkpo
 | **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Slower than bf16 (mxfp8 ≈8× a bf16 step, fp4 ≈17–19×) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
 | **DeepGEMM native** (fp8/fp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Net-slower than bf16 at every training shape (0.05–0.07× at production shapes) | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
 
-The `lowp_*` keys build one `LowpSpec` (`src/kernels/lowp/spec.py`), carried as `ParallelismConfig.lowp` and validated there (`LowpSpec.validate`). `LOWP_RECIPES` maps each `lowp_precision` mode to its block-scaled `QuantFormat` and the peak-FLOPS key the MFU callback scores it against; the EP layers, the dense linear and the export tool all read it.
+The `lowp_*` keys build one `LowpSpec` (`halo/kernels/lowp/spec.py`), carried as `ParallelismConfig.lowp` and validated there (`LowpSpec.validate`). `LOWP_RECIPES` maps each `lowp_precision` mode to its block-scaled `QuantFormat` and the peak-FLOPS key the MFU callback scores it against; the EP layers, the dense linear and the export tool all read it.
 
-The apply step is `apply_lowp_compute(model, lowp, *, expert_weight_cacheable)` (`src/model_loading/parallel/lowp_compute.py`), called pre-FSDP in `load_distributed_model`: it converts the dense MLP `gate_proj`/`up_proj`/`down_proj` (attention, embeddings, `lm_head`, and norms stay bf16) and sets each EP layer's expert quant format (`set_lowp_compute`) per `lowp_apply_*`. `lowp_keep_first_blocks` / `lowp_keep_last_blocks` exempt whole blocks, counted over the text backbone only so a vision tower's `layers.N` is not miscounted.
+The apply step is `apply_lowp_compute(model, lowp, *, expert_weight_cacheable)` (`halo/model_loading/parallel/lowp_compute.py`), called pre-FSDP in `load_distributed_model`: it converts the dense MLP `gate_proj`/`up_proj`/`down_proj` (attention, embeddings, `lm_head`, and norms stay bf16) and sets each EP layer's expert quant format (`set_lowp_compute`) per `lowp_apply_*`. `lowp_keep_first_blocks` / `lowp_keep_last_blocks` exempt whole blocks, counted over the text backbone only so a vision tower's `layers.N` is not miscounted.
 
-**The dense conversion is in place, not a rebuild.** `LowPrecisionLinear.convert_` (`src/kernels/lowp/linear.py`) retypes the existing `nn.Linear` (`linear.__class__ = cls`) and attaches one attribute.
+**The dense conversion is in place, not a rebuild.** `LowPrecisionLinear.convert_` (`halo/kernels/lowp/linear.py`) retypes the existing `nn.Linear` (`linear.__class__ = cls`) and attaches one attribute.
 
 It must not construct a replacement: HF-native tensor parallelism carries its semantics in state attached to the module — an instance-level `module.forward` holding the DTensor redistributes that *are* Colwise's and Rowwise's collectives, a full backward hook for the replicated-grad all-reduce, and the `_is_hooked` marker — so a rebuilt module silently drops them and the model trains on unsynced partial sums.
 
@@ -79,7 +79,7 @@ The simulated path is a convergence-validation tool — run a few hundred steps 
 
 ## DeepGEMM: the native fp8/fp4 path
 
-Native fp8/fp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's Blackwell grouped block-scaled GEMM, via `src/kernels/lowp/deepgemm.py`. At MoE token counts the grouped GEMM is host-launch-bound, not math-bound, so the winning kernel constructs nothing per call: DeepGEMM resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk). Per-call host cost at small M is ~240 µs, mostly the activation-quant pass.
+Native fp8/fp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's Blackwell grouped block-scaled GEMM, via `halo/kernels/lowp/deepgemm.py`. At MoE token counts the grouped GEMM is host-launch-bound, not math-bound, so the winning kernel constructs nothing per call: DeepGEMM resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk). Per-call host cost at small M is ~240 µs, mostly the activation-quant pass.
 
 Even with the host wall removed, **DeepGEMM is net-slower than bf16 at every training shape** (the per-token activation-quant pass remains), so it is **never auto-selected**. Opt-in via `HALO_DEEPGEMM_NATIVE=1`, and even then only above a shape floor (`HALO_DEEPGEMM_MIN_TOKENS_PER_EXPERT` default 1024, `HALO_DEEPGEMM_MIN_N` default 4096).
 
@@ -171,7 +171,7 @@ Consuming the result — per quantized weight `<name>`:
 - The contraction axis is **per weight**, from `quantization_config.json`'s `weight_axes` map — fused 3-D experts differ by family (gpt-oss contracts on axis 1, the rest on the last), so the manifest's single `contraction_axis` is only the fallback for names absent from that map.
 - `quantization_config.json` also carries a `scope` block recording what this export reproduced: `apply_dense_mlp`, `apply_moe_experts`, `keep_first_blocks`, `keep_last_blocks` (the flags, minus the `lowp_` prefix) plus the resolved `kept_blocks` indices. The whole manifest is stamped into the output `config.json` under `quantization_config` as well.
 
-The dequantized weight reproduces the QAT forward exactly (relerr 0), so QAT→inference is consistent; `src.kernels.lowp.quantization.dequantize` is the reference reader (its nvfp4 `global_scale` is the reciprocal of the stored one). Engine loading — vLLM / TRT-LLM compressed-tensors — is the remaining integration step.
+The dequantized weight reproduces the QAT forward exactly (relerr 0), so QAT→inference is consistent; `halo.kernels.lowp.quantization.dequantize` is the reference reader (its nvfp4 `global_scale` is the reciprocal of the stored one). Engine loading — vLLM / TRT-LLM compressed-tensors — is the remaining integration step.
 
 ## Usage
 

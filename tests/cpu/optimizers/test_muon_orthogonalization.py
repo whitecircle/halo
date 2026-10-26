@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Newton-Schulz orthogonality of Muon's matrix update (``src/optimizers/muon.py``), on CPU.
+"""Newton-Schulz orthogonality of Muon's matrix update (``halo/optimizers/muon.py``), on CPU.
 
 Muon replaces a matrix's momentum with an approximation of its polar factor ``U V^T``: five quintic
 Newton-Schulz steps after a Frobenius normalization push every singular value into the band
@@ -24,7 +24,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.optimizers.muon import build_muon_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 from tests.common.tolerances import TOL
 from tests.common.utils import assert_orthogonalized, log_spectrum_matrix
 

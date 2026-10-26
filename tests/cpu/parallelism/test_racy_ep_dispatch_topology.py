@@ -21,7 +21,7 @@ group construction — after the whole model has loaded.
 
 import pytest
 
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.parallelism import make_parallelism_config
 
 

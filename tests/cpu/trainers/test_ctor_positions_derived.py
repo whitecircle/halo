@@ -16,12 +16,12 @@ Run: ``python tests/cpu/trainers/test_ctor_positions_derived.py`` (or ``pytest -
 
 import pytest
 
-from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, get_ctor_model_and_config, resolve_ctor_positions
-from src.trainers.grpo.on_policy import GRPO_CTOR_POSITIONS
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-from src.trainers.sft import _CTOR_POSITIONS as SFT_CTOR_POSITIONS
+from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, get_ctor_model_and_config, resolve_ctor_positions
+from halo.trainers.grpo.on_policy import GRPO_CTOR_POSITIONS
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.trainers.sft import _CTOR_POSITIONS as SFT_CTOR_POSITIONS
 
 DPO_CTOR_POSITIONS = DistributedDPOTrainer.CTOR_POSITIONS
 KTO_CTOR_POSITIONS = DistributedKTOTrainer.CTOR_POSITIONS

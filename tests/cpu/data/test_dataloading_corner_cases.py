@@ -19,16 +19,16 @@ import pytest
 from datasets import Dataset
 from transformers import ProcessorMixin
 
-from src.data.pipeline.coordinated_map import coordinated_map
-from src.data.pipeline.map_cache_key import _closure_fingerprint, _tokenizer_identity
-from src.data.preprocessed.metadata import is_preprocessed_dataset
-from src.data.sources import s3_dataset_store
-from src.data.sources.s3_dataset_store import (
+from halo.data.pipeline.coordinated_map import coordinated_map
+from halo.data.pipeline.map_cache_key import _closure_fingerprint, _tokenizer_identity
+from halo.data.preprocessed.metadata import is_preprocessed_dataset
+from halo.data.sources import s3_dataset_store
+from halo.data.sources.s3_dataset_store import (
     _PUSH_COMPLETE_MARKER,
     _control_json_mirror_path,
     read_control_json_with_cache,
 )
-from src.data.sources.sharded_dataset import ShardedDatasetLoader
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 from tests.cpu.data.test_s3_staged_push import (
     BUCKET,
     FakeBoto,
@@ -42,7 +42,7 @@ OUTAGE = OSError("Could not connect to the endpoint URL")
 
 @pytest.fixture()
 def cache_root(tmp_path):
-    with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
         yield tmp_path
 
 
@@ -67,11 +67,11 @@ def test_corrupt_mirror_during_outage_degrades_loud_not_crash(cache_root):
     the probes must degrade with their normal warnings, never crash a rank ahead of the consensus
     all-reduce."""
     _seed_mirror("b", "d/train/shard_index.json", '{"num_shards": 4, "sha')
-    with patch("src.data.sources.s3_dataset_store.read_json_from_s3", side_effect=OUTAGE):
+    with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=OUTAGE):
         assert ShardedDatasetLoader.is_sharded_dataset("s3://b/d") is False
 
     _seed_mirror("b", "raw/metadata.json", "not json at all")
-    with patch("src.data.sources.s3_dataset_store.read_json_from_s3", side_effect=OUTAGE):
+    with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=OUTAGE):
         assert is_preprocessed_dataset("s3://b/raw") is False
 
 
@@ -87,7 +87,7 @@ def test_an_unreadable_stamp_raises_rather_than_reading_raw(tmp_path, cache_root
 
     with pytest.raises(json.JSONDecodeError):
         is_preprocessed_dataset(str(prepared))
-    with patch("src.data.sources.s3_dataset_store.read_json_from_s3", side_effect=torn):
+    with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=torn):
         with pytest.raises(json.JSONDecodeError):
             is_preprocessed_dataset("s3://b/prepped")
 
@@ -100,18 +100,18 @@ def test_absence_contract_survives_a_read_only_cache_volume(cache_root, monkeypa
     def _read_only_unlink(path):
         raise PermissionError(30, "Read-only file system")
 
-    monkeypatch.setattr("src.data.sources.s3_dataset_store.os.unlink", _read_only_unlink)
-    with patch("src.data.sources.s3_dataset_store.read_json_from_s3", side_effect=FileNotFoundError("404")):
+    monkeypatch.setattr("halo.data.sources.s3_dataset_store.os.unlink", _read_only_unlink)
+    with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=FileNotFoundError("404")):
         with pytest.raises(FileNotFoundError):
             read_control_json_with_cache("b", "d/metadata.json")
 
 
 def test_distinct_control_files_never_share_a_mirror(cache_root):
-    with patch("src.data.sources.s3_dataset_store.read_json_from_s3", return_value={"split": "train"}):
+    with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", return_value={"split": "train"}):
         read_control_json_with_cache("b", "d/train/shard_index.json")
-    with patch("src.data.sources.s3_dataset_store.read_json_from_s3", return_value={"split": "test"}):
+    with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", return_value={"split": "test"}):
         read_control_json_with_cache("b", "d/test/shard_index.json")
-    with patch("src.data.sources.s3_dataset_store.read_json_from_s3", side_effect=OUTAGE):
+    with patch("halo.data.sources.s3_dataset_store.read_json_from_s3", side_effect=OUTAGE):
         assert read_control_json_with_cache("b", "d/train/shard_index.json") == {"split": "train"}
         assert read_control_json_with_cache("b", "d/test/shard_index.json") == {"split": "test"}
 

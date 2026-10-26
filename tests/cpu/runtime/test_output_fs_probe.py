@@ -22,10 +22,10 @@ from types import SimpleNamespace
 
 import pytest
 
-import src.trainers.distributed_trainer as base_mixin
-from src.distributed.parallelism_config import ParallelismConfig
-from src.runtime import filesystem, ranks
-from src.runtime.filesystem import output_filesystem_contradiction
+import halo.trainers.distributed_trainer as base_mixin
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.runtime import filesystem, ranks
+from halo.runtime.filesystem import output_filesystem_contradiction
 
 
 def test_declared_shared_on_per_node_storage_is_rejected():

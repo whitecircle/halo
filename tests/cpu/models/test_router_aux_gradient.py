@@ -3,7 +3,7 @@
 
 Every MoE run with gradient checkpointing is forced reentrant, whose original forward runs under
 ``no_grad``. transformers collects ``outputs.router_logits`` in that pass, so without
-:func:`~src.models.moe.router_aux_gradient.install_router_aux_gradient` each checkpointed layer's aux term reaches
+:func:`~halo.models.moe.router_aux_gradient.install_router_aux_gradient` each checkpointed layer's aux term reaches
 the loss with no graph and the router gets none of its gradient. The reference throughout is the same
 model with checkpointing off, where the family's own ``load_balancing_loss_func`` backpropagates
 natively: with ``moe_balancing: aux_loss`` applied, a checkpointed backward must land the same router
@@ -27,18 +27,18 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditio
 from transformers.models.laguna.configuration_laguna import LagunaConfig
 from transformers.models.laguna.modeling_laguna import LagunaForCausalLM
 
-from src.callbacks.balancing import apply_balancing_mode
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.models.config_access import config_export_ready
-from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.models.moe import router_aux_gradient
-from src.models.moe.balancing import resolve_balancing_mode
-from src.models.moe.config_fields import resolve_expert_count
-from src.models.moe.router_logits import declared_routers
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.models.config_access import config_export_ready
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.moe import router_aux_gradient
+from halo.models.moe.balancing import resolve_balancing_mode
+from halo.models.moe.config_fields import resolve_expert_count
+from halo.models.moe.router_logits import declared_routers
 from tests.common.models import (
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,

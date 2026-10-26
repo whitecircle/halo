@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from src.model_loading.parallel import frozen_models
-from src.model_loading.parallel.model_source import ModelSource
+from halo.model_loading.parallel import frozen_models
+from halo.model_loading.parallel.model_source import ModelSource
 
 AGREED_COMMIT = "1111111111111111111111111111111111111111"
 

@@ -4,9 +4,9 @@ Catalog of toolkit scripts by category. For config fields see [Configuration](co
 
 Every entry script answers `python <script> --help` with its full flag list, including the CLI overrides for any YAML field.
 
-The `halo` CLI (`src/cli.py`) runs them by name: `halo launch <method> <config>` for `scripts/training/`, `halo run <tool>` for every other `scripts/` subtree except `diagrams/` (`--list` on either enumerates them). The launcher follows the flags, never the config: `accelerate launch` with `--accelerate <cfg>`, `torchrun` when `--nproc/-n > 1`, plain `python` otherwise. So `halo launch sft <ep-config>.yaml` without `-n` runs single-process.
+The `halo` CLI (`halo/cli.py`) runs them by name: `halo launch <method> <config>` for `scripts/training/`, `halo run <tool>` for every other `scripts/` subtree except `diagrams/` (`--list` on either enumerates them). The launcher follows the flags, never the config: `accelerate launch` with `--accelerate <cfg>`, `torchrun` when `--nproc/-n > 1`, plain `python` otherwise. So `halo launch sft <ep-config>.yaml` without `-n` runs single-process.
 
-Run scripts from the repo root with the repo root importable. The wheel installs `src` only (`packages = ["src"]`), and `python scripts/<subtree>/<tool>.py` puts the *script's* directory on `sys.path`, not the repo root. So every CLI that imports a `scripts.*` helper needs `scripts` importable as well as `src`.
+Run scripts from the repo root with the repo root importable. The wheel installs `halo` only (`packages = ["halo"]`), and `python scripts/<subtree>/<tool>.py` puts the *script's* directory on `sys.path`, not the repo root. So every CLI that imports a `scripts.*` helper needs `scripts` importable as well as `halo`.
 
 Both training images set `PYTHONPATH=/workspace` and the Makefile passes it into every container it starts. A host run needs `PYTHONPATH=.` from the repo root.
 
@@ -32,7 +32,7 @@ Launcher choice: [Two launchers](../parallelism/data-parallelism.md#two-launcher
 
 ## Training scripts
 
-Every training entry script runs the shared skeleton in `src/entrypoints/`: `parse_script_args` (distributed init, the YAML/CLI parse, the `output_dir` expansion and the `run.log` tee) → `init_training_script` (parallelism config, run setup, resume resolution, returning the run's `ScriptContext`) → DP-shard-aware dataset loading and the modality verdict (`data_setup.py`) → the policy load and window pins (`model_setup.py`) → `configure_balancing_and_build_callbacks` → `run_trainer`, which emits the canonical start log (mode plus EP/CP/TP/ETP/DP sizes) and reorders integration callbacks last so `moe/*` and efficiency keys reach W&B. `with_distributed_teardown(main)()` tears the process group down after a finished or early-stopped run.
+Every training entry script runs the shared skeleton in `halo/entrypoints/`: `parse_script_args` (distributed init, the YAML/CLI parse, the `output_dir` expansion and the `run.log` tee) → `init_training_script` (parallelism config, run setup, resume resolution, returning the run's `ScriptContext`) → DP-shard-aware dataset loading and the modality verdict (`data_setup.py`) → the policy load and window pins (`model_setup.py`) → `configure_balancing_and_build_callbacks` → `run_trainer`, which emits the canonical start log (mode plus EP/CP/TP/ETP/DP sizes) and reorders integration callbacks last so `moe/*` and efficiency keys reach W&B. `with_distributed_teardown(main)()` tears the process group down after a finished or early-stopped run.
 
 Which parallelism axes each trainer takes: [Trainer compatibility](trainer-architecture.md#trainer-compatibility). Launch commands are on each method's page.
 
@@ -60,7 +60,7 @@ Which parallelism axes each trainer takes: [Trainer compatibility](trainer-archi
 | `scripts/inference/reward_model/rm_rejection_sampling.py` | Rejection-sampled preference (or offline-GRPO) dataset generation: hypotheses from any OpenAI-compatible endpoint, scored by a local reward model. A hypothesis the endpoint cut at `--max_gen_tokens` is dropped rather than scored as if it had finished, and a row left with fewer than two usable hypotheses is skipped; both counts are in the run summary. Each generated turn is written as `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`); null reply fields are dropped |
 | `scripts/inference/reward_model/rm_scoring.py` | Score datasets using reward models. A response cut at `--max_gen_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished. The scored turn is `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`) |
 | `scripts/inference/playground/gradio_openai_chatbot.py` | Chatbot UI (Gradio + OpenAI API). `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder |
-| `scripts/inference/playground/gradio_environment_playground.py` | Environment playground (Gradio) for testing GRPO environments against a rollout server. Episodes run through the shared eval driver (`run_episode` in `src/environments/eval_runner.py`), so a turn the engine cut off at its token cap, or one the model ended on nothing, is recovered here exactly as in training. `--base_url` prefills the rollout server base URL; `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder, and stays server-side; `--host` binds loopback (`127.0.0.1`), so publishing the UI — and that key's spend — takes an explicit `--host 0.0.0.0` |
+| `scripts/inference/playground/gradio_environment_playground.py` | Environment playground (Gradio) for testing GRPO environments against a rollout server. Episodes run through the shared eval driver (`run_episode` in `halo/environments/eval_runner.py`), so a turn the engine cut off at its token cap, or one the model ended on nothing, is recovered here exactly as in training. `--base_url` prefills the rollout server base URL; `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder, and stays server-side; `--host` binds loopback (`127.0.0.1`), so publishing the UI — and that key's spend — takes an explicit `--host 0.0.0.0` |
 | `scripts/environments/inference/run_code_contests.py` | Evaluate a served model on competitive programming, success@k per rating, difficulty or contest: [Code Contests → Evaluation](../training-methods/async-grpo/environments/tasks/code-contests/evaluation.md) |
 | `scripts/environments/inference/run_env.py` | Evaluate a served model on any other environment (`qa_search`, `exam_qa`, `swe`, `mcp`, …): [Evaluation](../training-methods/async-grpo/evaluation.md#running-an-evaluation) |
 | `scripts/environments/inference/regrade_trajectories.py` | Re-grade saved `run_code_contests.py` trajectories in one bounded process, apart from generation: [Re-grading](../training-methods/async-grpo/evaluation.md#re-grading-recorded-trajectories) |
@@ -73,7 +73,7 @@ local file or a Hub dataset id and `--output_path` a local path.
 The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
 — run under a shared SIGINT/SIGTERM handler
 (`run_async_cli`) that exits `128 + signo`, the shell's own convention for a signalled process.
-Progress is stored for resume (generation through `parallel_openai_requests` and its JSONL resume store in `src/inference/batch_requests.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
+Progress is stored for resume (generation through `parallel_openai_requests` and its JSONL resume store in `halo/inference/batch_requests.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
 `&&` chain from consuming a partial output dataset as a finished one.
 
 A run that produced no usable row raises rather than writing an empty result (`reject_empty_results`), so a dead endpoint or a
@@ -81,9 +81,9 @@ wrong `--model` cannot republish the resumed rows as a finished job. Each CLI's 
 names its per-reason drop counts (first-response failures, degenerate skips).
 
 Every endpoint these CLIs talk to is OpenAI-compatible (`--base_url` / `--api_key`),
-reached through the one shared client (`build_openai_client`, `src/inference/openai_client.py`) with the toolkit's retry policy;
+reached through the one shared client (`build_openai_client`, `halo/inference/openai_client.py`) with the toolkit's retry policy;
 `--base_url` defaults to `http://localhost:8000/v1` and `--api_key` to `VLLM_API_KEY`, then `OPENAI_API_KEY`, then the
-`EMPTY` placeholder (`src/inference/endpoints.py`). There
+`EMPTY` placeholder (`halo/inference/endpoints.py`). There
 is no separate Azure mode — point `--base_url` at the deployment's OpenAI-compatible route like
 any other endpoint.
 
@@ -248,7 +248,7 @@ python scripts/before_training/patch_vocab.py \
 | `scripts/profiling/trace_report.py` | TraceLens analysis workbooks from torch.profiler traces — per-rank perf report + multi-rank NCCL collective/skew report (see [Debugging](debugging.md#1b-tracelens--automated-trace-analysis)). Trace sets are independent, so one unreportable capture does not cost the others' workbooks, but any failure exits non-zero; `--keep-going` accepts a partial run |
 | `scripts/profiling/py_spy_diag.py` | Attach py-spy to a running job. Takes a subcommand: `dump` (instantaneous all-rank stack dump, hang triage) or `record` (per-rank CPU flame graphs over `--duration` seconds). Both default to this node's torchrun ranks, attach to every one at once, and exit 1 naming each pid they could not attach to; `--pid` (repeatable) targets others |
 | `scripts/profiling/nvlink_health.py` | Torch-free NVLink preflight from `nvidia-smi`: per-link hard errors, FEC correction depth, active bandwidth. Exits non-zero only when a link is unhealthy, separating real faults from benign `Xid 145` churn (see [Debugging](debugging.md)) |
-| `scripts/profiling/weight_sync_transport.py` | Weight-sync transport preflight against a live rollout server (driver `src/weight_sync/transport_check.py`): forms the group with the toolkit's own client, pushes one parameter of the served checkpoint unchanged and names the transport NCCL formed on. `--server-url` (required), `--backend vllm\|sglang`, `--group-port` (`0` = ephemeral), `--group-host` (auto), `--device` (`cuda:0`), `--param` (the input embedding), `--model-id` / `--revision` (the checkpoint the server loaded; default the id it advertises), `--rounds` (3), `--connection-timeout` (120 s), `--expect efa\|ib\|socket\|p2p\|shm` (exit 1 on a mismatch or an altered served model), `--json`. Procedure and transport legend: [Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
+| `scripts/profiling/weight_sync_transport.py` | Weight-sync transport preflight against a live rollout server (driver `halo/weight_sync/transport_check.py`): forms the group with the toolkit's own client, pushes one parameter of the served checkpoint unchanged and names the transport NCCL formed on. `--server-url` (required), `--backend vllm\|sglang`, `--group-port` (`0` = ephemeral), `--group-host` (auto), `--device` (`cuda:0`), `--param` (the input embedding), `--model-id` / `--revision` (the checkpoint the server loaded; default the id it advertises), `--rounds` (3), `--connection-timeout` (120 s), `--expect efa\|ib\|socket\|p2p\|shm` (exit 1 on a mismatch or an altered served model), `--json`. Procedure and transport legend: [Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa) |
 
 Throughput benchmarks live under `tests/gpu/profiling/`, grouped by what they measure:
 

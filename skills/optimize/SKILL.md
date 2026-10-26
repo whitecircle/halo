@@ -84,6 +84,6 @@ Mention these only to confirm, not as new advice:
 ## Sources of truth
 
 The `agent-docs/optimization/` pages own every figure and rule above; the code is the **ultimate**
-authority when a page, this skill or memory disagrees with the `src/` implementation or a fresh
+authority when a page, this skill or memory disagrees with the `halo/` implementation or a fresh
 benchmark. Find the module behind a lever in the [module map](../../agent-docs/reference/architecture.md).
 Related skills: `data` (packing / padding-free / sharding), `checkpoints` (low-precision fp8/fp4 export).

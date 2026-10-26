@@ -36,18 +36,18 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM
 from trl import get_quantization_config
 
-from src.checkpoint.adapters import has_adapter_weight_file
-from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, SAFETENSORS_INDEX_FILE
-from src.checkpoint.reading import read_checkpoint_index
-from src.checkpoint.writing import cast_to_save_dtype
-from src.configs.script_arguments import ModelArguments
-from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.buffer_repair import finalize_loaded_model
-from src.model_loading.parallel.loader import load_distributed_model
-from src.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
-from src.models.unwrapping import plain_adapter_key, strip_peft_adapter_segment
-from src.runtime.collectives import barrier
+from halo.checkpoint.adapters import has_adapter_weight_file
+from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, SAFETENSORS_INDEX_FILE
+from halo.checkpoint.reading import read_checkpoint_index
+from halo.checkpoint.writing import cast_to_save_dtype
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
+from halo.models.unwrapping import plain_adapter_key, strip_peft_adapter_segment
+from halo.runtime.collectives import barrier
 from tests.common.ep_reference import ep_layers
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
 from tests.common.tolerances import TOL

@@ -14,7 +14,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.trainers.preference.smpo_objective import SMPOObjective, cp_quantile
+from halo.trainers.preference.smpo_objective import SMPOObjective, cp_quantile
 from tests.common.gloo import run_gloo_ranks
 
 CP_WORLD_SIZE = 2

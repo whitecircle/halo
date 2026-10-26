@@ -16,8 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.trainers.dataloaders import DataParallelLoaderMixin
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 # 4 groups x 2 completions, as the per-rank slice of an already-sharded dataset.
 GROUP_IDS = [0, 0, 1, 1, 2, 2, 3, 3]

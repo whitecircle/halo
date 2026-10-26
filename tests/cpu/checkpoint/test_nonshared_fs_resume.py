@@ -38,9 +38,9 @@ import pathlib
 import pytest
 import torch
 
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.runtime import filesystem
-from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.runtime import filesystem
+from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from tests.common.checkpoint_io import (
     shard_round_trip_model,
     shard_round_trip_optimizer,

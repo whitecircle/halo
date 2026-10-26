@@ -18,8 +18,8 @@ from collections import deque
 import pytest
 import torch
 
-from src.trainers.grpo.objective.advantages import group_relative_advantages
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.objective.advantages import group_relative_advantages
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 G = 4
 # Rewards all within 2e-3 of each other: no real signal, std ~1e-3.

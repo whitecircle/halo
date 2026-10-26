@@ -44,7 +44,7 @@ Usage (trainer on GPUs the server does NOT own — a rank cannot NCCL broadcast 
 
 import argparse
 
-from src.env import env_str
+from halo.env import env_str
 from tests.common.env_grpo_e2e import MODEL_NAME, run_env_grpo_e2e
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B

@@ -17,11 +17,11 @@ from sentence_transformers.models import Normalize
 from torch.utils.checkpoint import checkpoint
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.trainers.embedding.preloaded_transformer import patch_sentence_transformer_gradient_checkpointing
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.trainers.embedding.preloaded_transformer import patch_sentence_transformer_gradient_checkpointing
 from tests.common.models import TINY_QWEN3_CONFIG
 
 # The call transformers' Trainer.train makes.

@@ -12,7 +12,7 @@ drops the structural tokens from the trained set — the template rot the mixin 
 import pytest
 import torch
 
-from src.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
+from halo.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
 
 SPECIAL_ID = 100
 

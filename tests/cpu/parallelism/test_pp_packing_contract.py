@@ -20,15 +20,15 @@ import pytest
 import torch
 from torch.distributed.pipelining.microbatch import split_args_kwargs_into_chunks
 
-from src.data.collators.fixed_shape import FixedShapeCollator, pad_to_fixed_length
-from src.data.collators.packing import (
+from halo.data.collators.fixed_shape import FixedShapeCollator, pad_to_fixed_length
+from halo.data.collators.packing import (
     PAD_TAIL_SEGMENT_CHUNK,
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithPacking,
     pad_tail_positions,
 )
-from src.distributed.pipeline_parallel.runner import resolve_batch_pad_values
-from src.kernels.logprobs import loss_token_counts_per_row
+from halo.distributed.pipeline_parallel.runner import resolve_batch_pad_values
+from halo.kernels.logprobs import loss_token_counts_per_row
 
 PAD = 0
 IGNORE = -100

@@ -9,10 +9,10 @@ from typing import get_args
 
 import pytest
 
-from src.hardware import GPU_PEAK_FLOPS
-from src.kernels.lowp.deepgemm import DEEPGEMM_FORMATS
-from src.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS
-from src.kernels.lowp.spec import LOWP_RECIPES, LowpPrecision, LowpSpec, QuantFormat
+from halo.hardware import GPU_PEAK_FLOPS
+from halo.kernels.lowp.deepgemm import DEEPGEMM_FORMATS
+from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpPrecision, LowpSpec, QuantFormat
 
 
 def test_every_enabled_mode_has_a_recipe():

@@ -12,9 +12,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import src.environments.engine_wire as engine_wire
-from src.environments.ray_actors import EnvironmentActor
-from src.environments.rollout_config import RolloutConfig
+import halo.environments.engine_wire as engine_wire
+from halo.environments.ray_actors import EnvironmentActor
+from halo.environments.rollout_config import RolloutConfig
 
 
 class _Session:

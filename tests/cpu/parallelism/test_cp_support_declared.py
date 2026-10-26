@@ -13,7 +13,7 @@ Run: python tests/cpu/parallelism/test_cp_support_declared.py
 
 import pytest
 
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.rosters import distributed_trainer_classes
 
 # The trainers whose objective is verified under CP (CLAUDE.md, "Distributed trainers" CP column).

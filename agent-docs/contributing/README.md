@@ -116,10 +116,10 @@ make train METHOD=preference/smpo CONFIG=<config>    # METHOD defaults to sft
 - **ruff, line length 119.** Selected: `E, F, I, W, UP, B, C4, SIM, T20, PLC0415`. `make lint`
   enforces the full set, and the blocking CI job runs `ruff format --check` plus the same full set.
   See [Continuous Integration](../infrastructure/ci.md).
-- **No inline imports** (`PLC0415`), in `tests/` as in `src/`. A function-level import is reserved
+- **No inline imports** (`PLC0415`), in `tests/` as in `halo/`. A function-level import is reserved
   for a genuinely optional or arch-specific dependency (`flash_attn`, `deep_ep`, `kernels`). A
   circular import is never that exception — fix it structurally.
-- **No stray `print()` in `src/`** (`T20`). `tests/**` relaxes `E402`, `T20`, `E741`, `B007`,
+- **No stray `print()` in `halo/`** (`T20`). `tests/**` relaxes `E402`, `T20`, `E741`, `B007`,
   `B023`, and `SIM117`; `scripts/**` relaxes `T20`.
 - **Reuse over re-implementation.** New trainers extend `DistributedTrainerMixin`; new parallelism
   wrappers reuse the EP-layer base hooks. See
@@ -157,7 +157,7 @@ manifest.
   `pytestmark`; re-declaring `cpu` in one duplicates a marker the collector already applied.
 - **Imports resolve from the image, not from `sys.path` surgery.** `PYTHONPATH=/workspace` is baked
   into the training images (and `tests/conftest.py` puts the repo root on the path for a pytest
-  run), so `from src...` / `from tests.common...` work in both `pytest` and a standalone
+  run), so `from halo...` / `from tests.common...` work in both `pytest` and a standalone
   `torchrun tests/gpu/<script>.py`.
 
     A per-file `sys.path.insert` is dead weight that only masks running outside the image. `scripts/`
@@ -170,7 +170,7 @@ manifest.
 - **Every first-party reference resolves without running.** `tests/cpu/conventions/test_references_resolve.py`
   statically resolves each first-party import, `patch` / `monkeypatch` target (string or object form),
   attribute chain on an imported module or class, dotted name and repo-root path in the Python under
-  `src/`, `scripts/`, `tests/`, `docker/` and `.github/`, in the other text files of those trees (the
+  `halo/`, `scripts/`, `tests/`, `docker/` and `.github/`, in the other text files of those trees (the
   GPU benchmark runners, the workflows), and in the image builds, `Makefile`, `pyproject.toml`,
   `.env.example`, `.pre-commit-config.yaml` and the recipes, so a moved module, a renamed method or a
   dead patch target fails the CPU tier even where only a GPU script names it. A class attribute must be
@@ -188,7 +188,7 @@ manifest.
     patching a name the module only binds intercepts nothing, so the test would pass whatever the code does.
 
 - **A message names symbols, not source paths.** `tests/cpu/conventions/test_messages_name_symbols.py`
-  fails a string in `src/` or `scripts/` that names a file of the package by path, from the repo root or
+  fails a string in `halo/` or `scripts/` that names a file of the package by path, from the repo root or
   from the package's: an error, a warning or a field help names the function, class or constant its reader
   acts on (`DECODER_LAYER_LIST_ATTRS`, `LigerFamilySpec`), which a move leaves valid. Docstrings are exempt,
   and a `scripts/` tool a user runs keeps its path.
@@ -203,12 +203,12 @@ manifest.
   code ([Move kit](#move-kit)).
 
 - **The import layering is read off the import graph.** `tests/cpu/conventions/test_import_layering.py`
-  fails a `src.distributed` or `torch.distributed` import in `src/checkpoint/`, `src/model_loading/` or
-  `src/models/config_access.py`, an import of the loader dispatch from the rest of `src/distributed`, a
-  cycle among the members of `src/distributed` and a raw toolkit env read. It also lays the final layer
+  fails a `halo.distributed` or `torch.distributed` import in `halo/checkpoint/`, `halo/model_loading/` or
+  `halo/models/config_access.py`, an import of the loader dispatch from the rest of `halo/distributed`, a
+  cycle among the members of `halo/distributed` and a raw toolkit env read. It also lays the final layer
   table (`_LAYERS`: a unit imports only units of lower rows, `cli` imports nothing from the package, the
   tool-safe units reach no process group, parallelism or rollout sync, the member orders inside
-  `src/distributed`, one lazy `deep_ep` importer, package-internal modules, no module cycle) over today's
+  `halo/distributed`, one lazy `deep_ep` importer, package-internal modules, no module cycle) over today's
   tree, each module that has not moved yet placed where it lands through `_PENDING_MOVES`, and asserts
   `_LAYERS` equals the table [Architecture](../reference/architecture.md#layer-table) renders. Any break
   fails, and so do a module the table cannot place and a pending move that has landed. `TYPE_CHECKING`
@@ -291,7 +291,7 @@ manifest.
     asserting the unsupported ones are rejected.
 
 The GPU launcher (`tests/gpu/conftest.py`) reads its knobs with raw `os.environ` — importing
-`src/env.py` would pull torch and transformers into the launcher process — so each one is matched as
+`halo/env.py` would pull torch and transformers into the launcher process — so each one is matched as
 a literal string, not through the toolkit's `1/true/yes/on` flag parsing. The ones shipped
 infrastructure sets:
 
@@ -301,7 +301,7 @@ infrastructure sets:
 | `HALO_TEST_LAUNCH_ID` | per launch | Set BY the launcher, not for it: a unique id stamped into every torchrun launch's environment so the orphan sweep can identify surviving workers from `/proc` without matching on a script name a co-tenant might also be running. Do not export it. |
 | `HALO_TEST_REQUIRE_SERVER` | unset | The **engine name** (`vllm` / `sglang`, set by the `make` server tiers) whose tests must not be skipped: a node carrying the `<value>_server` marker raises a `UsageError` instead of skipping when the endpoint is unreachable, so a dead container cannot pass as a skip. Any other engine's tests still skip. |
 
-Test scripts read their own knobs through `src/env.py`, `HALO_TEST_`-prefixed so a stray `export` or
+Test scripts read their own knobs through `halo/env.py`, `HALO_TEST_`-prefixed so a stray `export` or
 a co-tenant compose file cannot collide with them — the one exception is the server-side `VLLM_MODEL`
 below. The cross-suite ones:
 
@@ -626,9 +626,9 @@ Declare what the definitions do not show in a JSON file under the repo, passed b
 
 ```json
 {
-  "files": {"src/<old path>.py": "src/<new path>.py"},
-  "symbols": {"src.<module>:<old qualname>": "src.<module>:<new qualname>"},
-  "added": ["src.<new module>:__doc__", "src.<new module>:logger"],
+  "files": {"halo/<old path>.py": "halo/<new path>.py"},
+  "symbols": {"halo.<module>:<old qualname>": "halo.<module>:<new qualname>"},
+  "added": ["halo.<new module>:__doc__", "halo.<new module>:logger"],
   "goldens": ["weight_sync_wire.json"]
 }
 ```
@@ -741,7 +741,7 @@ catches are in `tests/cpu/callbacks/test_efficiency_harness.py`.
 
 ## Docs
 
-Update the owning doc page in the same PR when you change `src/` (`skills/docs/docs-ownership.md` is the map) and
+Update the owning doc page in the same PR when you change `halo/` (`skills/docs/docs-ownership.md` is the map) and
 follow the anti-slop charter carried by the `/docs` skill: American English, active voice, short
 sentences, tables only for real matrices, no marketing register.
 

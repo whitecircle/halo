@@ -19,11 +19,11 @@ import pytest
 import torch.nn as nn
 from peft import LoraConfig
 
-from src.configs.script_arguments import ModelArguments
-from src.model_loading.parallel import model_source
-from src.model_loading.parallel import peft_setup as model_info
-from src.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.configs.script_arguments import ModelArguments
+from halo.model_loading.parallel import model_source
+from halo.model_loading.parallel import peft_setup as model_info
+from halo.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 
 

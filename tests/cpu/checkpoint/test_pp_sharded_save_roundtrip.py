@@ -41,25 +41,25 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint.hub_layout import export_conversions, revert_conversions
-from src.checkpoint.parallel.context import CheckpointLoadContext
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.checkpoint.parallel.pp import is_pp_shard_writer, save_pp_checkpoint
-from src.checkpoint.parallel.resume_weights import load_resume_weights
-from src.checkpoint.reading import checkpoint_shard_files, is_ep_sharded_checkpoint
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.checkpoint.writing import save_dtype_caster
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
-from src.model_loading.parallel.pp import _load_stage_lazy
-from src.models.attention.gpt_oss_sinks import neutralized_sink_value
-from src.models.param_roles import persistent_buffers
-from src.runtime import dtensor
-from src.trainers.parallelism.pipeline_trainer import stash_wrapper_state
+from halo.checkpoint.hub_layout import export_conversions, revert_conversions
+from halo.checkpoint.parallel.context import CheckpointLoadContext
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.checkpoint.parallel.pp import is_pp_shard_writer, save_pp_checkpoint
+from halo.checkpoint.parallel.resume_weights import load_resume_weights
+from halo.checkpoint.reading import checkpoint_shard_files, is_ep_sharded_checkpoint
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.checkpoint.writing import save_dtype_caster
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
+from halo.model_loading.parallel.pp import _load_stage_lazy
+from halo.models.attention.gpt_oss_sinks import neutralized_sink_value
+from halo.models.param_roles import persistent_buffers
+from halo.runtime import dtensor
+from halo.trainers.parallelism.pipeline_trainer import stash_wrapper_state
 from tests.common.checkpoint_io import load_context, save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks
@@ -75,7 +75,7 @@ from tests.common.pp_fakes import hand_built_stage, registered_pp_backbones
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.utils import safetensors_state_dict
 
-_PC_MOD = "src.distributed.parallelism_config"
+_PC_MOD = "halo.distributed.parallelism_config"
 
 WORLD_SIZE = 4
 PP_SIZE = 2

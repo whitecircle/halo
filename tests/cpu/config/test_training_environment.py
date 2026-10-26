@@ -1,5 +1,5 @@
 """Tests for checkpoint-resume detection and the output_dir overwrite guard
-(src/entrypoints/run_setup.py), single-process (no torch.distributed init).
+(halo/entrypoints/run_setup.py), single-process (no torch.distributed init).
 
 Run: python -m pytest tests/cpu/config/test_training_environment.py
 """
@@ -9,12 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME
-from src.entrypoints.run_setup import _validate_output_dir, resume_checkpoint_from_config
-from src.log import RUN_LOG_DIR_NAME
+from halo.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME
+from halo.entrypoints.run_setup import _validate_output_dir, resume_checkpoint_from_config
+from halo.log import RUN_LOG_DIR_NAME
 
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
-from src.runtime.filesystem import OUTPUT_FS_PROBE_PREFIX
+from halo.runtime.filesystem import OUTPUT_FS_PROBE_PREFIX
 
 
 def _config(output_dir, resume=None):

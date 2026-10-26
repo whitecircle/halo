@@ -14,8 +14,8 @@ import pytest
 import torch
 from transformers import Qwen3_5Config
 
-from src.checkpoint.writing import reconcile_tie_word_embeddings
-from src.models.config_access import tie_flag_configs
+from halo.checkpoint.writing import reconcile_tie_word_embeddings
+from halo.models.config_access import tie_flag_configs
 
 
 def _model(tied=True):

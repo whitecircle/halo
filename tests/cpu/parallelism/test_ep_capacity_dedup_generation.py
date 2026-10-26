@@ -35,11 +35,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.deepep import backends as backends_mod
-from src.distributed.expert_parallel.deepep import capacity as capacity_mod
-from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
-from src.distributed.expert_parallel.deepep import settings as settings_mod
-from src.distributed.pipeline_parallel.stage import PipelineStageModule
+from halo.distributed.expert_parallel.deepep import backends as backends_mod
+from halo.distributed.expert_parallel.deepep import capacity as capacity_mod
+from halo.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
+from halo.distributed.expert_parallel.deepep import settings as settings_mod
+from halo.distributed.pipeline_parallel.stage import PipelineStageModule
 from tests.common.pp_fakes import hand_built_stage
 
 

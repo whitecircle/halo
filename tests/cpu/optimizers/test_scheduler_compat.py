@@ -28,9 +28,9 @@ import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import build_flash_adamw_optimizer
-from src.optimizers.muon import build_muon_optimizer
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 
 BASE_LR = 1e-2
 DECAY = 0.5

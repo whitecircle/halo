@@ -28,9 +28,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.tensor_parallel.plain_params import hand_sliced_dims, hand_sliced_suffixes, register_hand_sliced
-from src.trainers.grpo.rollout import weight_push
-from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from halo.distributed.tensor_parallel.plain_params import hand_sliced_dims, hand_sliced_suffixes, register_hand_sliced
+from halo.trainers.grpo.rollout import weight_push
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 
 HIDDEN, NUM_HEADS, TP_SIZE = 8, 4, 2
 SINK_NAME = "layers.0.self_attn.sinks"

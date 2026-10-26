@@ -27,9 +27,9 @@ import torch.nn as nn
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from transformers import GenerationMixin, PretrainedConfig, PreTrainedModel
 
-import src.distributed.fsdp as fsdp
-from src.distributed.fsdp import IdentityParamSet
-from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
+import halo.distributed.fsdp as fsdp
+from halo.distributed.fsdp import IdentityParamSet
+from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
 
 
 class _ProbeConfig(PretrainedConfig):

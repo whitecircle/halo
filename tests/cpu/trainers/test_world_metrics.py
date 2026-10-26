@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.trainers.world_metrics import WorldMetrics
+from halo.trainers.world_metrics import WorldMetrics
 from tests.common.gloo import new_groups, run_gloo_ranks
 from tests.common.world_metrics import fake_world
 

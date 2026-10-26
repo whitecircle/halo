@@ -8,8 +8,8 @@ import logging
 
 import pytest
 
-from src.entrypoints import script
-from src.log import configure_training_logging
+from halo.entrypoints import script
+from halo.log import configure_training_logging
 from tests.common import harness
 
 

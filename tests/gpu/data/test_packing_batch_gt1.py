@@ -33,8 +33,8 @@ import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.data.collators.packing import DataCollatorWithPacking
-from src.hardware import is_blackwell_gpu
+from halo.data.collators.packing import DataCollatorWithPacking
+from halo.hardware import is_blackwell_gpu
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import cleanup_memory, log

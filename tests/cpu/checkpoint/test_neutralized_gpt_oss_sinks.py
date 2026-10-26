@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
+from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 
 
 class _Cfg:

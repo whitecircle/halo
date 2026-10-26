@@ -15,9 +15,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.checkpoint.adapters import is_expert_lora_key
-from src.distributed.expert_parallel.moe_layer.expert_lora import load_expert_lora_adapters
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.checkpoint.adapters import is_expert_lora_key
+from halo.distributed.expert_parallel.moe_layer.expert_lora import load_expert_lora_adapters
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
 class _StubEPLoraLayer(EPMoELayerBase):

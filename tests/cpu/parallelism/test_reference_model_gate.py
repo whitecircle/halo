@@ -20,20 +20,20 @@ from unittest import mock
 import pytest
 from trl import SFTTrainer
 
-import src.model_loading.parallel.frozen_models as frozen_models
-import src.trainers.distillation.self_distillation as self_distillation
-from src.configs.script_arguments import ModelArguments
-from src.entrypoints.model_setup import PolicyLoad
-from src.model_loading.parallel.frozen_models import (
+import halo.model_loading.parallel.frozen_models as frozen_models
+import halo.trainers.distillation.self_distillation as self_distillation
+from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints.model_setup import PolicyLoad
+from halo.model_loading.parallel.frozen_models import (
     ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
     PREFERENCE_REFERENCE_ALTERNATIVES,
     load_reference_model_for_on_policy_grpo,
     load_reference_model_for_preference,
 )
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.sft import DistributedSFTTrainer
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import load_script_module
 
@@ -289,7 +289,7 @@ def test_the_dpo_script_hands_the_loaded_reference_to_the_trainer(tmp_path):
         "DistributedDPOTrainer": trainer,
     }
     with (
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded),
         mock.patch.multiple(module, **stubs),

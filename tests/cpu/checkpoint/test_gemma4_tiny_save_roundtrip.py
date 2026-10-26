@@ -23,9 +23,9 @@ import torch
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from tests.common.checkpoint_io import save_context, written_keys
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config

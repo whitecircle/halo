@@ -27,12 +27,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Qwen3Config, Qwen3ForSequenceClassification
 
-import src.trainers.token_metrics as token_metrics
-from src.configs.classification import ClassificationConfig
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.parallelism.pipeline_loss_adapter import decode_pooling_plane, pooled_logits
-from src.trainers.reward.classification import ClassificationTrainer
-from src.trainers.reward.classification_loss import ClassificationLoss, build_classification_loss, focal_loss
+import halo.trainers.token_metrics as token_metrics
+from halo.configs.classification import ClassificationConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.parallelism.pipeline_loss_adapter import decode_pooling_plane, pooled_logits
+from halo.trainers.reward.classification import ClassificationTrainer
+from halo.trainers.reward.classification_loss import ClassificationLoss, build_classification_loss, focal_loss
 
 NUM_CLASSES = 6
 # Not bf16-representable, and spanning two orders of magnitude — the shape derive_class_weights

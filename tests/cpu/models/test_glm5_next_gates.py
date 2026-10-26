@@ -24,25 +24,25 @@ from transformers.models.glm5_next.configuration_glm5_next import Glm5NextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextTextModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 
-from src.data.collators.factory import select_data_collator
-from src.distributed.context_parallel.config import CPConfigError
-from src.distributed.context_parallel.model_rules import (
+from halo.data.collators.factory import select_data_collator
+from halo.distributed.context_parallel.config import CPConfigError
+from halo.distributed.context_parallel.model_rules import (
     _UNSUPPORTED_SEQUENCE_AXIS_LAYERS,
     reject_unsupported_ulysses_model,
 )
-from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
-from src.distributed.tensor_parallel.parallelize_attention import (
+from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
+from halo.distributed.tensor_parallel.parallelize_attention import (
     TP_SHARDABLE_ATTENTION_CLASSES,
     apply_tp_to_attention_only,
 )
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.attention.selection import (
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.selection import (
     is_fa4_backward_nan_prone,
     resolve_attn_implementation,
     validate_attn_implementation,
 )
-from src.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
+from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
 from tests.common.distributed import fake_process_group_mesh
 
 # One layer of each block type, MLA/indexer/KDA widths shrunk to the divisibility floors

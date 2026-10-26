@@ -8,12 +8,12 @@ import math
 
 import pytest
 
-from src.configs.grpo_environmental import EnvironmentConfig
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
-from src.rewards.composer import RewardComposer
-from src.rewards.graders.verifiable import AccuracyTerm, FormatTerm
-from src.rewards.terms import (
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
+from halo.rewards.composer import RewardComposer
+from halo.rewards.graders.verifiable import AccuracyTerm, FormatTerm
+from halo.rewards.terms import (
     Check,
     EnvironmentTerm,
     JudgeReasoningEffort,

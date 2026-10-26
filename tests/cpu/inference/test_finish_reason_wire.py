@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.inference.response import (
+from halo.inference.response import (
     ENGINE_CUT_FINISH_REASONS,
     FINISH_REASON_ABORT,
     FINISH_REASON_LENGTH,

@@ -23,8 +23,8 @@ from datasets import Dataset, DatasetDict
 
 PartialState()
 
+from halo.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking, DataCollatorWithPacking
 from scripts.training.sft import _prepare_text_data
-from src.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking, DataCollatorWithPacking
 
 PAD = 0
 EOS = 1

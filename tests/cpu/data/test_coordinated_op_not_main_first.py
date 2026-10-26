@@ -11,7 +11,7 @@ Against ``fs_aware_main_first`` the peers sit on the outer store key and are in 
 all, so the main rank's barrier blocks alone.
 
 Three parts: the gloo run proves the mechanism on a real process group, the repo scan is the
-regression detector over ``src/`` and ``scripts/``, and the synthetic modules prove the scan is not
+regression detector over ``halo/`` and ``scripts/``, and the synthetic modules prove the scan is not
 vacuous by making it fire on the exact shape above. The scan follows calls by bare name —
 the module's own definitions first, then any name defined exactly once tree-wide — so it sees a body
 that reaches the op through a helper here or in another file. It does not model imports, so a name
@@ -31,12 +31,12 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset
 
-from src.data.pipeline.coordinated_map import coordinated_map
-from src.runtime import consensus, filesystem
+from halo.data.pipeline.coordinated_map import coordinated_map
+from halo.runtime import consensus, filesystem
 from tests.common.gloo import run_gloo_ranks
 from tests.common.repo import REPO_ROOT
 
-SCANNED_ROOTS = ("src", "scripts")
+SCANNED_ROOTS = ("halo", "scripts")
 
 WORLD_SIZE = 2
 
@@ -167,6 +167,7 @@ def find_collective_in_main_first(*roots: str) -> list[str]:
 
 def test_no_collective_inside_a_main_first_block():
     """The regression detector: a main-first wrapper around SMPO's dataset prep fails here."""
+    assert all(os.path.isdir(os.path.join(REPO_ROOT, name)) for name in SCANNED_ROOTS), SCANNED_ROOTS
     offenders = find_collective_in_main_first(*(os.path.join(REPO_ROOT, name) for name in SCANNED_ROOTS))
 
     assert not offenders, (
@@ -176,16 +177,16 @@ def test_no_collective_inside_a_main_first_block():
 
 
 def test_every_collective_callee_is_defined_under_src():
-    """A collective renamed in ``src/`` but still listed here under its old name drops out of the scan
+    """A collective renamed in ``halo/`` but still listed here under its old name drops out of the scan
     unnoticed, so every listed name must name a function that exists."""
     defined = {
         node.name
-        for path in pathlib.Path(REPO_ROOT, "src").rglob("*.py")
+        for path in pathlib.Path(REPO_ROOT, "halo").rglob("*.py")
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     missing = sorted(COLLECTIVE_CALLEES - defined)
-    assert not missing, f"listed but defined nowhere under src/: {missing}"
+    assert not missing, f"listed but defined nowhere under halo/: {missing}"
 
 
 def test_detector_fires_on_the_smpo_shape(tmp_path):
@@ -205,7 +206,7 @@ def test_detector_fires_on_the_smpo_shape(tmp_path):
         encoding="utf-8",
     )
     (tmp_path / "helpers.py").write_text(
-        "from src.data.pipeline.coordinated_map import coordinated_map\n"
+        "from halo.data.pipeline.coordinated_map import coordinated_map\n"
         "\n"
         "def tokenize_rows(ds):\n"
         "    return coordinated_map(ds, lambda r: r)\n"

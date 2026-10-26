@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Tests for the native tool data structures, registry and the environment registry
-(``src/environments/tools/`` + ``src/environments/registry.py``).
+(``halo/environments/tools/`` + ``halo/environments/registry.py``).
 
 The vLLM parsing/formatting helpers are covered by
 ``tests/cpu/environments/test_openai_tool_format.py`` and the pre-built tool factories by
@@ -16,10 +16,10 @@ import time
 
 import pytest
 
-from src.environments.registry import build_environment, get_registered_environments, register_environment
-from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tools.definitions import (
+from halo.environments.registry import build_environment, get_registered_environments, register_environment
+from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,
     NativeToolRegistry,
@@ -27,7 +27,7 @@ from src.environments.tools.definitions import (
     ToolArgumentError,
     ToolParameter,
 )
-from src.environments.tools.toolsets import (
+from halo.environments.tools.toolsets import (
     build_code_tools,
     build_combined_tools,
     build_math_tools,

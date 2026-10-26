@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Unit tests for :mod:`src.callbacks.moe_metrics`.
+"""Unit tests for :mod:`halo.callbacks.moe_metrics`.
 
 ``compute_moe_load_metrics`` is the single source of truth for the ``moe/``
 metric keys used by both :class:`MoEMetricsCallback` (router-logits path,
@@ -23,13 +23,13 @@ import math
 import pytest
 import torch
 
-import src.callbacks.moe_metrics as mm
-from src.callbacks.moe_metrics import (
+import halo.callbacks.moe_metrics as mm
+from halo.callbacks.moe_metrics import (
     MoEMetricsCallback,
     _extract_router_logits,
     compute_moe_load_metrics,
 )
-from src.models.moe.config_fields import resolve_expert_count, resolve_router_topk
+from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 
 
 def _approx(a: float, b: float, tol: float = 1e-6) -> bool:

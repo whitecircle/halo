@@ -1,6 +1,6 @@
 """First-party references in text, resolved against the repository without importing anything.
 
-A reference is a dotted name in a :data:`FIRST_PARTY` package (``src.env.env_flag``, a ``module:attr``
+A reference is a dotted name in a :data:`FIRST_PARTY` package (``halo.env.env_flag``, a ``module:attr``
 entry point, each name of a ``from … import`` line) or a repo-root path under one of the
 :data:`REFERENCE_ROOTS`, with its ``#heading`` when it names one on a markdown page. A placeholder
 (``<x>``, ``{}``, ``*``, ``$``, ``…``) cuts a reference short: only the part before it is checked. A
@@ -21,7 +21,7 @@ from typing import Literal, NamedTuple
 from scripts.docs.markdown import fragment_page, load_document
 
 # The import package; every reference to it, dotted or by path, is spelled from this name.
-PACKAGE = "src"
+PACKAGE = "halo"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # Top-level packages a dotted reference may start with.
 FIRST_PARTY = (PACKAGE, "scripts", "tests")

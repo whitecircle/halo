@@ -12,9 +12,9 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer
 
-from src.distributed.mesh import model_tp_mesh
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
+from halo.distributed.mesh import model_tp_mesh
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded, world_spread
 from tests.common.ep_reference import (
     broadcast_reference,

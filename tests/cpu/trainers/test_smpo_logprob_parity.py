@@ -2,7 +2,7 @@
 """CPU test: SMPO's PP and non-PP losses score a bf16 model's tokens identically.
 
 Both paths take their per-token log-probs from one fp32 primitive
-(:func:`~src.kernels.logprobs.next_token_logprobs`), so the same batch must give
+(:func:`~halo.kernels.logprobs.next_token_logprobs`), so the same batch must give
 the same loss and the same gradient whether it runs as one padded forward or as interleaved pipeline
 microbatches, up to fp32 summation order. Agreement alone would also hold if both paths went back to
 a bf16 ``log_softmax`` (TRL's ``selective_log_softmax`` on bf16 logits), which rounds every token's
@@ -23,8 +23,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
 from tests.common.smpo_trainer import smpo_trainer
 
 VOCAB = 64

@@ -20,8 +20,8 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import world_all, world_min
 from tests.common.harness import gpu_test_main

@@ -28,10 +28,10 @@ from collections.abc import Callable
 import pytest
 import torch
 
-from src.weight_sync.chunking import snapshot_to_sync_device
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-from src.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES
+from halo.weight_sync.chunking import snapshot_to_sync_device
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES
 from tests.common.repo import probe_findings
 from tests.common.weight_sync import Wire, offline_client, push
 
@@ -129,7 +129,7 @@ def test_snapshot_residency_never_exceeds_one_chunk(monkeypatch):
     the client still holds anywhere is counted; the engine side copies what it receives and keeps no
     reference (``retain=False``), as a real one does.
     """
-    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     param_bytes, num_params, budget = 512, 10, 4096
     client = _bare_client(Wire(retain=False))
     refs: list[weakref.ref] = []
@@ -150,7 +150,7 @@ def test_snapshot_residency_never_exceeds_one_chunk(monkeypatch):
 
 def test_streaming_sends_every_param_once_in_order(monkeypatch):
     """Anti-vacuity for the bound above: chunking must not drop, duplicate or reorder a param."""
-    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     wire = Wire()
     client = _bare_client(wire)
     names = [f"w{index}" for index in range(10)]
@@ -185,7 +185,7 @@ def test_chunks_are_cut_before_the_budget_is_exceeded(monkeypatch):
     budget of snapshot device memory here, and the same overshoot in the receive buffers the engine
     allocates for every declared name before the first byte arrives.
     """
-    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     budget, oversize = 4096, 4096 + 512
     wire = Wire()
     client = _bare_client(wire)
@@ -209,7 +209,7 @@ def test_sglang_declares_one_request_per_chunk(monkeypatch):
     A second, stricter budget inside the client would re-split every already-budgeted chunk — each
     fragment its own ``/update_weights_from_distributed`` declare, thread and round-trip.
     """
-    monkeypatch.setattr("src.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 4096)
     client = offline_client(SGLangWeightSyncClient)
     declares: list[list[str]] = []
     client._start_engine_update = lambda: None
@@ -237,7 +237,7 @@ def test_the_chunk_budget_is_read_once_from_the_env_in_megabytes(monkeypatch, va
         monkeypatch.delenv("HALO_WEIGHT_SYNC_CHUNK_MB", raising=False)
     else:
         monkeypatch.setenv("HALO_WEIGHT_SYNC_CHUNK_MB", value)
-    script = "import src.weight_sync.chunking as c; print('CHUNK_BYTES:' + str(c.WEIGHT_SYNC_CHUNK_BYTES))"
+    script = "import halo.weight_sync.chunking as c; print('CHUNK_BYTES:' + str(c.WEIGHT_SYNC_CHUNK_BYTES))"
     [budget] = probe_findings(script, "CHUNK_BYTES:")
     assert int(budget) == expected
 

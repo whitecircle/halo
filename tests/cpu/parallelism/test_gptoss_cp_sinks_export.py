@@ -18,9 +18,9 @@ import torch.nn as nn
 from transformers import CONFIG_MAPPING
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention
 
-from src.distributed.context_parallel.families import GptOssUlyssesAttention
-from src.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks, neutralized_gpt_oss_sinks
-from src.models.unwrapping import strip_cp_attention_level
+from halo.distributed.context_parallel.families import GptOssUlyssesAttention
+from halo.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks, neutralized_gpt_oss_sinks
+from halo.models.unwrapping import strip_cp_attention_level
 
 LIVE_SINK_VALUE = 0.75
 

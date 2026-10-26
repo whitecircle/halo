@@ -4,7 +4,7 @@
 
 The **TP column** tracks the Halo-side path: HF-native `tp_plan="auto"` for dense models (Yes when the config ships a `base_model_tp_plan`), and *selective* TP (attention only; embeddings and `lm_head` replicated; experts left to EP) for MoE models. GPT-OSS ships a `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo path.
 
-The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `src/models/moe/family_specs.py`) and their EP wrappers under `src/distributed/expert_parallel/families/`; the Ulysses wrappers (`ULYSSES_ATTENTION_MAP`, `src/distributed/context_parallel/families.py`) less the sequence-axis layers CP refuses (`src/distributed/context_parallel/model_rules.py`); `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`); `PP_FAMILY_SPECS` (`src/distributed/pipeline_parallel/families.py`).
+The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/models/moe/family_specs.py`) and their EP wrappers under `halo/distributed/expert_parallel/families/`; the Ulysses wrappers (`ULYSSES_ATTENTION_MAP`, `halo/distributed/context_parallel/families.py`) less the sequence-axis layers CP refuses (`halo/distributed/context_parallel/model_rules.py`); `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`); `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`).
 
 ## Compatibility matrix
 
@@ -66,14 +66,14 @@ Every MoE family shares three settings:
 
 Every expert / router config field — the expert count, the top-k spelling, `router_aux_loss_coef`, `output_router_logits` — lives on the **text** sub-config for a composite (multimodal) family (Qwen3.5/3.6-MoE, Gemma 4, Mistral-4 under its VLM wrapper). `PreTrainedConfig` does not delegate attribute reads, so the toolkit resolves these through `get_config_field` / `set_config_field` over `config` **and** `config.get_text_config()`. Read one field off the wrapper alone and balancing plus `moe/*` metrics silently disappear.
 
-Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `resolve_expert_count` and `resolve_router_topk` in `src/models/moe/config_fields.py` are the one reader every consumer calls — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP the wrapper's own `_NUM_EXPERTS_ATTR_PATHS` resolves the count off the live module instead.
+Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `resolve_expert_count` and `resolve_router_topk` in `halo/models/moe/config_fields.py` are the one reader every consumer calls — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP the wrapper's own `_NUM_EXPERTS_ATTR_PATHS` resolves the count off the live module instead.
 
 [MoEMetricsCallback](../training-methods/callbacks.md#moemetricscallback) logs per-layer expert load by default (`enable_moe_metrics`).
 
 ## Load precision
 
 The training and scoring loaders cast floating parameters to the run dtype after `from_pretrained`
-and before parallel wrappers (`cast_parameters_to_run_dtype` in `src/model_loading/dtype.py`, applied by
+and before parallel wrappers (`cast_parameters_to_run_dtype` in `halo/model_loading/dtype.py`, applied by
 the whole-model loads through `load_whole_model`; lazy loaders cast per tensor). This overrides transformers' FP32 module pins — DeepSeek-V4's norms and
 hyper-connections, GLM-5 Next's KDA state, Inkling's short convolutions — so FSDP2 sees one dtype
 within each shard group. Persistent buffers have a separate policy: a family-pinned buffer stays
@@ -81,7 +81,7 @@ FP32 on every loader, including the lazy EP loader's `e_score_correction_bias`, 
 biases are FP32 by design.
 
 Configured FP32 parameter masters are the exception. The shared selector in
-`src/model_loading/parallel/fp32_masters.py` (selection, coverage check and eager restore) preserves non-EP weights under `fp32_non_ep_params`
+`halo/model_loading/parallel/fp32_masters.py` (selection, coverage check and eager restore) preserves non-EP weights under `fp32_non_ep_params`
 and the EP wrapper's selected router/expert weights under their flags. Eager construction streams
 those checkpoint values back before wrapping; lazy EP construction reads and fuses them at FP32
 directly. Native dense TP rebuilds its existing TP shards at FP32 before the DP wrap, preserving tied

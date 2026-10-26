@@ -18,14 +18,14 @@ import torch
 from transformers import AutoModelForCausalLM, GptOssConfig, LlamaConfig, PreTrainedModel
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 
-from src.configs.script_arguments import ModelArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.liger.dispatch import LIGER_APPLIED_CONFIG_ATTR
-from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
-from src.models.attention import gpt_oss_sinks
-from src.models.attention.gpt_oss_sinks import SinksPolicy, install_sdpa_for_reset_sinks
-from src.models.attention.selection import _attn_impl_handles_sinks, validate_attn_implementation
-from src.models.config_access import (
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.liger.dispatch import LIGER_APPLIED_CONFIG_ATTR
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
+from halo.models.attention import gpt_oss_sinks
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, install_sdpa_for_reset_sinks
+from halo.models.attention.selection import _attn_impl_handles_sinks, validate_attn_implementation
+from halo.models.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )

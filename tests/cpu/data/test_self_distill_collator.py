@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The SDPG self-distillation collators (src/data/collators/self_distill.py and the VLM sibling).
+"""The SDPG self-distillation collators (halo/data/collators/self_distill.py and the VLM sibling).
 
 OPD pairs the k-th supervised token of the student branch with the k-th of the hinted teacher
 branch, so both must supervise the same tokens in the same order while the teacher sequence is
@@ -17,15 +17,15 @@ import pytest
 import torch
 from datasets import Dataset, DatasetDict
 
-from src.data.collators.self_distill import (
+from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     confidence_normalizer,
     inject_privileged_hint,
     privileged_hint,
     teacher_history,
 )
-from src.data.collators.vlm import SelfDistillVLMDataCollator
-from src.data.pipeline.vlm_rows import _filter_vlm_over_length
+from halo.data.collators.vlm import SelfDistillVLMDataCollator
+from halo.data.pipeline.vlm_rows import _filter_vlm_over_length
 from tests.common.models import QWEN3_0_6B
 from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_tokenizer

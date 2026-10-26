@@ -126,7 +126,7 @@ def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labe
         mock.patch.object(classification, "configure_adapter_training", return_value=None),
         mock.patch.object(classification, "log_model_info"),
         mock.patch.object(classification, "coordinated_map", side_effect=_map),
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
     with contextlib.ExitStack() as stack:

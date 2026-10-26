@@ -16,11 +16,11 @@ import torch.nn as nn
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers, ep_claimed_blocks
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe.balancing import resolve_balancing_mode
-from src.models.moe.expert_layout import (
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers, ep_claimed_blocks
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.moe.balancing import resolve_balancing_mode
+from halo.models.moe.expert_layout import (
     SEPARATE_GLU_PROJECTIONS,
     ExpertLayout,
     ExpertLayoutKind,

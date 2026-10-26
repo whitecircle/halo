@@ -32,19 +32,19 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.moe_layer.expert_lora import (
+from halo.distributed.expert_parallel.moe_layer.expert_lora import (
     disable_expert_adapters,
     gather_expert_lora_adapters,
     load_expert_lora_adapters,
     model_has_expert_lora,
 )
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int, env_str
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.runtime.collectives import barrier
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers

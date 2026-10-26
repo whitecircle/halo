@@ -15,8 +15,8 @@ from accelerate import PartialState
 from safetensors.torch import save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.offline_grpo import (
     OFFLINE_VOCAB,
     doubled_head_kl_verdict,

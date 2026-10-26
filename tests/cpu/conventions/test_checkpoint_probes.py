@@ -15,7 +15,7 @@ import torch
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.utils import CONFIG_NAME
 
-from src.checkpoint.format import SAFETENSORS_WEIGHTS_FILE
+from halo.checkpoint.format import SAFETENSORS_WEIGHTS_FILE
 from tests.common.checkpoint_io import (
     OPTIMIZER_META_FILE,
     OPTIMIZER_SHARD_FILE,

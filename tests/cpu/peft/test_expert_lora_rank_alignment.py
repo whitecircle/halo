@@ -16,9 +16,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
-from src.kernels.grouped_mm import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
+from halo.kernels.grouped_mm import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 
 NUM_LOCAL_EXPERTS, HIDDEN, INTERMEDIATE = 2, 8, 16

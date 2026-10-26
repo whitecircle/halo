@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 def _host(*, fsdp_wrapped=True, use_liger_kernel=True, **loss_attrs):

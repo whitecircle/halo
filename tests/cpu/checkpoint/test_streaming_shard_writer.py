@@ -23,9 +23,9 @@ import torch
 from huggingface_hub import split_torch_state_dict_into_shards
 from safetensors.torch import safe_open
 
-import src.checkpoint.writing as checkpoint_writing
-from src.checkpoint.format import STREAM_PART_PREFIX
-from src.checkpoint.writing import StreamingShardWriter, merge_shard_index, write_merged_index
+import halo.checkpoint.writing as checkpoint_writing
+from halo.checkpoint.format import STREAM_PART_PREFIX
+from halo.checkpoint.writing import StreamingShardWriter, merge_shard_index, write_merged_index
 
 PREFIX = "model-pp00000-of-00002"
 

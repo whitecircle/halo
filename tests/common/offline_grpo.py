@@ -16,14 +16,14 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.checkpoint.reading import load_full_state_dict
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.model_loading.liger.dispatch import apply_liger_kernel
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.checkpoint.reading import load_full_state_dict
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.model_loading.liger.dispatch import apply_liger_kernel
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.tolerances import TOL
 from tests.common.utils import cleanup_memory, finish_phase, log, max_or_nan

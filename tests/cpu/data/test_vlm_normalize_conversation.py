@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from src.data.pipeline.vlm_rows import build_vlm_row_processor, normalize_vlm_conversation
-from src.data.vlm_render import extract_conversation_images
+from halo.data.pipeline.vlm_rows import build_vlm_row_processor, normalize_vlm_conversation
+from halo.data.vlm_render import extract_conversation_images
 
 
 def _image(color: int = 128) -> Image.Image:

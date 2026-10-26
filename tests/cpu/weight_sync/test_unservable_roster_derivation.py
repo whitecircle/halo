@@ -8,10 +8,10 @@ the two Bailing gaps off one table both clients quote, and the release off each 
 
 import pytest
 
-from src.models.moe.family_specs import BAILING, STEP3P7
-from src.weight_sync.clients.base import unservable_bailing_model_types
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.models.moe.family_specs import BAILING, STEP3P7
+from halo.weight_sync.clients.base import unservable_bailing_model_types
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 _CLIENTS = (VLLMWeightSyncClient, SGLangWeightSyncClient)
 

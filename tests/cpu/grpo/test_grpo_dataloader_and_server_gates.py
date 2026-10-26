@@ -27,13 +27,13 @@ import pytest
 from datasets import Dataset
 from torch.utils.data import SequentialSampler
 
-from src.trainers.grpo.grpo_rules import (
+from halo.trainers.grpo.grpo_rules import (
     _GATED_CTOR_POSITIONS,
     reject_tool_calling_loop,
     reject_unshared_rollout_func,
     require_vllm_server_mode,
 )
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 _ROWS = [{"prompt": "p", "unused": i} for i in range(6)]
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Ulysses' all-to-all moves real data — pin what it moves, on CPU.
 
-The collective in ``src/distributed/context_parallel/all_to_all.py`` cannot run for real here: gloo
+The collective in ``halo/distributed/context_parallel/all_to_all.py`` cannot run for real here: gloo
 implements no alltoall at all, and the CP GPU suites only ever compare an end-to-end loss, where a
 transposed head/sequence axis or a non-inverted backward is one contribution among many.
 
@@ -29,7 +29,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed.context_parallel.all_to_all import UlyssesAllToAll, heads_to_sequence, sequence_to_heads
+from halo.distributed.context_parallel.all_to_all import UlyssesAllToAll, heads_to_sequence, sequence_to_heads
 
 CP_SIZES = (2, 4)
 BATCH = 2

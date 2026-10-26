@@ -15,10 +15,10 @@ from unittest import mock
 
 import torch
 
-import src.weight_sync.clients.sglang as sglang_module
-import src.weight_sync.transport.packed_broadcast as packed_broadcast
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
+import halo.weight_sync.clients.sglang as sglang_module
+import halo.weight_sync.transport.packed_broadcast as packed_broadcast
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.weight_sync import offline_client
 

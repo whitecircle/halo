@@ -29,7 +29,7 @@ import time
 
 import pytest
 
-from src.checkpoint.writing import sweep_after_full_save
+from halo.checkpoint.writing import sweep_after_full_save
 
 INDEX = "model.safetensors.index.json"
 SINGLE = "model.safetensors"

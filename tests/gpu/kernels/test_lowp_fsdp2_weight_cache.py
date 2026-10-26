@@ -31,8 +31,8 @@ import torch.nn as nn
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
-from src.kernels.expert_gemm import expert_gemm
-from src.kernels.lowp.quantization import cached_fake_quant, fake_quant
+from halo.kernels.expert_gemm import expert_gemm
+from halo.kernels.lowp.quantization import cached_fake_quant, fake_quant
 from tests.common.harness import gpu_test_main
 
 FMT = "mxfp8"

@@ -28,9 +28,9 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, GptOssForCausalLM
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.unwrapping import unwrap_toolkit_wrappers
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.unwrapping import unwrap_toolkit_wrappers
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG

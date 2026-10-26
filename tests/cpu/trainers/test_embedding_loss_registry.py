@@ -12,8 +12,8 @@ from typing import get_args, get_type_hints
 
 import pytest
 
-from src.configs.embedding import EmbeddingConfig
-from src.trainers.embedding.trainer import LOSS_REGISTRY
+from halo.configs.embedding import EmbeddingConfig
+from halo.trainers.embedding.trainer import LOSS_REGISTRY
 
 
 def test_the_registry_holds_exactly_the_configs_loss_choices():

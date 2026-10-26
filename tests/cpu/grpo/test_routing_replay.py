@@ -15,12 +15,12 @@ from transformers import PretrainedConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
 
-from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
-from src.models.gradient_checkpointing import RecomputeScope
-from src.models.moe.family_specs import MoEFamilySpec
-from src.trainers.grpo.environmental.routing_replay import (
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.models.gradient_checkpointing import RecomputeScope
+from halo.models.moe.family_specs import MoEFamilySpec
+from halo.trainers.grpo.environmental.routing_replay import (
     RoutingReplayInjector,
     assemble_rollout_masks,
     build_routing_replay_injector,

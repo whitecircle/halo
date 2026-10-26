@@ -7,7 +7,7 @@ against a frozen generator. That refusal is correct — but only for values vLLM
 
 The toolkit's ``env_flag`` additionally accepts ``yes``/``on``. Reading a third-party variable
 through it makes the trainer refuse a launch the server happily ignores: pynccl stays ENABLED on the
-server while the trainer dies claiming it is disabled. ``src/env.py``'s rule is that third-party
+server while the trainer dies claiming it is disabled. ``halo/env.py``'s rule is that third-party
 vars match their owner's parse, and this is the only place that rule is enforceable in a test.
 
 Run: pytest tests/cpu/weight_sync/test_vllm_pynccl_parse.py
@@ -15,7 +15,7 @@ Run: pytest tests/cpu/weight_sync/test_vllm_pynccl_parse.py
 
 import pytest
 
-from src.weight_sync.transport.pynccl import vllm_pynccl_disabled
+from halo.weight_sync.transport.pynccl import vllm_pynccl_disabled
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", " true "])

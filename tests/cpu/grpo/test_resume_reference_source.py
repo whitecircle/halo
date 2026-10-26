@@ -18,14 +18,14 @@ import torch
 from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-import src.entrypoints.model_setup as model_setup
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, config_schema_source, weights_read_from
-from src.configs.script_arguments import ModelArguments
-from src.entrypoints.model_setup import load_model_and_tokenizer
-from src.entrypoints.run_setup import prepare_distributed_resume
-from src.entrypoints.script import ScriptContext
-from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
-from src.trainers.grpo.online import DistributedGRPOTrainer
+import halo.entrypoints.model_setup as model_setup
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, config_schema_source, weights_read_from
+from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints.model_setup import load_model_and_tokenizer
+from halo.entrypoints.run_setup import prepare_distributed_resume
+from halo.entrypoints.script import ScriptContext
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.offline_grpo import make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config

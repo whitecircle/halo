@@ -36,17 +36,17 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.context_parallel.config import CPConfigError
-from src.distributed.context_parallel.families import (
+from halo.distributed.context_parallel.config import CPConfigError
+from halo.distributed.context_parallel.families import (
     ULYSSES_ATTENTION_MAP,
     BailingMoeV2UlyssesAttention,
     Glm4MoeLiteUlyssesAttention,
 )
-from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
-from src.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
-from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
+from halo.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
+from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_mean, world_spread
 from tests.common.ep_reference import random_token_batch
 from tests.common.equivalence.cp_equivalence import (

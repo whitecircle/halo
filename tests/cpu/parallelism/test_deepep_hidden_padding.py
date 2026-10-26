@@ -24,8 +24,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.distributed.expert_parallel.deepep.backends import _ElasticBackend
-from src.distributed.expert_parallel.deepep.capacity import DEEPEP_HIDDEN_ALIGN
+from halo.distributed.expert_parallel.deepep.backends import _ElasticBackend
+from halo.distributed.expert_parallel.deepep.capacity import DEEPEP_HIDDEN_ALIGN
 
 # Roster hidden sizes: the first pads (GptOss), the rest already conform.
 GPTOSS_HIDDEN = 2880

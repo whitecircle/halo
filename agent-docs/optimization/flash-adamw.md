@@ -26,7 +26,7 @@ uv pip install -e ".[flash-optimizers]"   # or: pip install flashoptim
 
 Without the package, `optim: flash_adamw` raises an import error stating what to install.
 
-The YAML/trainer path (`flash_adamw_optimizer_from_args` in `src/optimizers/flash_adamw.py`) wires `learning_rate`, `weight_decay`, `betas` (from `adam_beta1`/`adam_beta2`), and `eps` (from `adam_epsilon`). Only `master_weight_bits` is not read from `TrainingArguments`, so over YAML it stays at its default. To override it, construct directly: `build_flash_adamw_optimizer(model, lr=..., weight_decay=..., master_weight_bits=24)` in `src/optimizers/flash_adamw.py`. The wrapper splits parameters into weight-decay groups (`decay_parameters` get `weight_decay`, the rest `0.0`).
+The YAML/trainer path (`flash_adamw_optimizer_from_args` in `halo/optimizers/flash_adamw.py`) wires `learning_rate`, `weight_decay`, `betas` (from `adam_beta1`/`adam_beta2`), and `eps` (from `adam_epsilon`). Only `master_weight_bits` is not read from `TrainingArguments`, so over YAML it stays at its default. To override it, construct directly: `build_flash_adamw_optimizer(model, lr=..., weight_decay=..., master_weight_bits=24)` in `halo/optimizers/flash_adamw.py`. The wrapper splits parameters into weight-decay groups (`decay_parameters` get `weight_decay`, the rest `0.0`).
 
 `build_flash_adamw_optimizer` defaults: `lr=1e-3`, `betas=(0.9, 0.999)`, `eps=1e-8`, `weight_decay=0.01`, `master_weight_bits=24` (24 = bf16 + 8-bit correction, 32 = full fp32, `None` = no master weights).
 
@@ -51,13 +51,13 @@ A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qw
 
 ## Compatibility
 
-`optim: flash_adamw` routes through `create_optimizer` (`build_optimizer`, `src/trainers/optimizer_selection.py`) for every distributed trainer, the same path as Muon and AdamWBF16, and composes with gradient checkpointing and FSDP2. `flashoptim` steps per parameter and unwraps DTensors to their local shard before the kernel runs, so a weight-decay group mixing FSDP2/TP DTensors with the plain rank-local tensors EP and `fp32_non_ep_params` produce is handled, not rejected — `examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` ships this combination at `expert_parallel_size: 4`.
+`optim: flash_adamw` routes through `create_optimizer` (`build_optimizer`, `halo/trainers/optimizer_selection.py`) for every distributed trainer, the same path as Muon and AdamWBF16, and composes with gradient checkpointing and FSDP2. `flashoptim` steps per parameter and unwraps DTensors to their local shard before the kernel runs, so a weight-decay group mixing FSDP2/TP DTensors with the plain rank-local tensors EP and `fp32_non_ep_params` produce is handled, not rejected — `examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` ships this combination at `expert_parallel_size: 4`.
 
-Pipeline parallelism refuses it at trainer construction (`reject_pp_named_optimizer`, `src/trainers/parallelism/pipeline_rules.py`): no PP run validates it. The other guard is the shared `reject_conflicting_optimizer_choice`: `bf16_optimizer: true` together with a named `optim` raises rather than silently discarding one of them. Correctness coverage is single-GPU (`tests/gpu/manifest.py` registers `test_flash_adamw.py` at `nproc=1`).
+Pipeline parallelism refuses it at trainer construction (`reject_pp_named_optimizer`, `halo/trainers/parallelism/pipeline_rules.py`): no PP run validates it. The other guard is the shared `reject_conflicting_optimizer_choice`: `bf16_optimizer: true` together with a named `optim` raises rather than silently discarding one of them. Correctness coverage is single-GPU (`tests/gpu/manifest.py` registers `test_flash_adamw.py` at `nproc=1`).
 
 The wrapper registers a step post-hook that advances each stepped param's version counter — `flashoptim`'s fused Triton update stores through raw pointers ATen never sees, and the low-precision weight-quant cache keys on that counter (see [Low-Precision MoE](low-precision-moe-kernels.md)).
 
-**Checkpoint limit: unevenly sharded params.** `flashoptim`'s `state_dict` refuses any FSDP2 DTensor param whose sharded dim does not divide the mesh, and the trainer's all-or-nothing shard save then raises at the first checkpoint. Training itself is unaffected. `_warn_if_uneven_shards` (`src/optimizers/flash_adamw.py`) says so at optimizer build; set `save_only_model: true` for weights-only checkpoints, or pick dims divisible by the shard world or another `optim` to keep optimizer state.
+**Checkpoint limit: unevenly sharded params.** `flashoptim`'s `state_dict` refuses any FSDP2 DTensor param whose sharded dim does not divide the mesh, and the trainer's all-or-nothing shard save then raises at the first checkpoint. Training itself is unaffected. `_warn_if_uneven_shards` (`halo/optimizers/flash_adamw.py`) says so at optimizer build; set `save_only_model: true` for weights-only checkpoints, or pick dims divisible by the shard world or another `optim` to keep optimizer state.
 
 ## References
 

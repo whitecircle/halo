@@ -31,8 +31,8 @@ import pytest
 import torch.distributed as dist
 import torch.nn as nn
 
-from src.checkpoint.parallel.context import CheckpointLoadContext
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.checkpoint.parallel.context import CheckpointLoadContext
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
 from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import make_parallelism_config

@@ -19,9 +19,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.callbacks.balancing import BalancingBiasCallback
-from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from src.models.moe.balancing import resolve_balancing_mode
+from halo.callbacks.balancing import BalancingBiasCallback
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.models.moe.balancing import resolve_balancing_mode
 
 NUM_EXPERTS = 8
 # The hub slot's dtype: adoption has to upcast it, so a fp32 fixture would hide that step.

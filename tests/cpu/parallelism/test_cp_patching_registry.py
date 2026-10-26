@@ -20,10 +20,10 @@ import inspect
 import pytest
 import torch.nn as nn
 
-from src.distributed.context_parallel import model_rules
-from src.distributed.context_parallel.config import CPConfigError
-from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
-from src.distributed.context_parallel.ulysses_model import apply_ulysses_attention
+from halo.distributed.context_parallel import model_rules
+from halo.distributed.context_parallel.config import CPConfigError
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.context_parallel.ulysses_model import apply_ulysses_attention
 
 
 def test_validator_reads_the_derived_registry():

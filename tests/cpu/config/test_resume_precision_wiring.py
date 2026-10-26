@@ -12,14 +12,14 @@ import torch
 from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3MoeConfig
 
-import src.entrypoints.model_setup as model_setup
-import src.model_loading.parallel.loader as loading
-from src.configs.script_arguments import ModelArguments
-from src.entrypoints.model_setup import load_model_and_tokenizer
-from src.entrypoints.run_setup import prepare_distributed_resume
-from src.entrypoints.script import ScriptContext
-from src.model_loading.parallel.model_source import ModelSource
-from src.trainers.sft import DistributedSFTTrainer
+import halo.entrypoints.model_setup as model_setup
+import halo.model_loading.parallel.loader as loading
+from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints.model_setup import load_model_and_tokenizer
+from halo.entrypoints.run_setup import prepare_distributed_resume
+from halo.entrypoints.script import ScriptContext
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.source_sweep import call_name, functions_in
 

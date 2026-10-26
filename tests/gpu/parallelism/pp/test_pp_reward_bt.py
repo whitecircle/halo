@@ -30,8 +30,8 @@ import torch.nn.functional as F
 from datasets import Dataset
 from trl import RewardConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.distributed import world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG

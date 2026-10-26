@@ -28,10 +28,10 @@ from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.unwrapping import find_peft_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.unwrapping import find_peft_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import adapter_param_items, load_peft_model

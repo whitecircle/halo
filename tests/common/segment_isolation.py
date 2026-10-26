@@ -8,13 +8,13 @@ preference batch and that lone-document reference.
 # The device-aware kernel-dispatch shim must land before the modeling modules the registry below
 # imports bind transformers' hub-kernel fallback factory at import: after them, a CPU forward reaches
 # the CUDA-only kernels and a CUDA forward can capture the torch fallback instead of the fla kernel.
-import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
+import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 import torch
 import torch.nn.functional as F
 
-from src.data.collators.smpo import DataCollatorForSMPO
-from src.models.segment_markers import SegmentMarkers
+from halo.data.collators.smpo import DataCollatorForSMPO
+from halo.models.segment_markers import SegmentMarkers
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
 
 PAD_ID = 0

@@ -26,13 +26,13 @@ import requests
 import torch
 from urllib3.util.retry import Retry
 
-from src.weight_sync.clients import base as client_base
-from src.weight_sync.clients import sglang as sglang_client
-from src.weight_sync.clients import vllm as vllm_client
-from src.weight_sync.clients.base import WeightSyncClientBase
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-from src.weight_sync.transport import rendezvous
+from halo.weight_sync.clients import base as client_base
+from halo.weight_sync.clients import sglang as sglang_client
+from halo.weight_sync.clients import vllm as vllm_client
+from halo.weight_sync.clients.base import WeightSyncClientBase
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.transport import rendezvous
 from tests.common.fake_engines import CALL_ID_HEADER, FakeEngineServer, fake_server_class
 from tests.common.goldens import regen_main
 

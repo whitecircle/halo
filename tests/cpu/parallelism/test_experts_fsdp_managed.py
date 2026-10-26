@@ -14,7 +14,7 @@ Usage:
 
 import pytest
 
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 
 WORLD = 8
 

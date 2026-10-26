@@ -14,7 +14,7 @@ Run: ``pytest tests/cpu/parallelism/test_ep_checkpoint_scope.py``.
 import pytest
 import torch
 
-from src.models.gradient_checkpointing import (
+from halo.models.gradient_checkpointing import (
     RecomputeScope,
     active_recompute_scope,
     scoped_checkpoint_func,

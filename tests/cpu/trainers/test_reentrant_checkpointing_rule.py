@@ -13,7 +13,7 @@ Run: pytest tests/cpu/trainers/test_reentrant_checkpointing_rule.py
 import pytest
 from transformers import Qwen3Config, Qwen3MoeConfig
 
-from src.trainers.parallelism.ep_layers import resolve_use_reentrant, uses_reentrant_checkpointing
+from halo.trainers.parallelism.ep_layers import resolve_use_reentrant, uses_reentrant_checkpointing
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 

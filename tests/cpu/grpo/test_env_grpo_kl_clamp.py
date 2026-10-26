@@ -10,7 +10,7 @@ import math
 import pytest
 import torch
 
-from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP, clamp_ref_logps
+from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP, clamp_ref_logps
 
 
 def _k3(ref: torch.Tensor, logp: torch.Tensor) -> torch.Tensor:

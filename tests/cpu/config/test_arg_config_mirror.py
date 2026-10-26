@@ -25,12 +25,12 @@ from typing import get_args, get_type_hints
 
 import pytest
 
-from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
-from src.configs.parser import _literal_choices
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.parallelism_rules import AXES
-from src.kernels.lowp.spec import LowpSpec
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from halo.configs.parser import _literal_choices
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_rules import AXES
+from halo.kernels.lowp.spec import LowpSpec
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 

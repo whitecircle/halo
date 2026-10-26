@@ -18,18 +18,18 @@ import torch
 from safetensors import safe_open
 from transformers import CONFIG_MAPPING, AutoModelForCausalLM, BertConfig, BertModel
 
-import src.checkpoint.parallel.save as checkpoint_save_mod
-import src.checkpoint.parallel.writing as checkpoint_write_mod
-import src.checkpoint.writing as writing_mod
-from src.checkpoint.parallel.save import save_tp_checkpoint
-from src.checkpoint.parallel.writing import (
+import halo.checkpoint.parallel.save as checkpoint_save_mod
+import halo.checkpoint.parallel.writing as checkpoint_write_mod
+import halo.checkpoint.writing as writing_mod
+from halo.checkpoint.parallel.save import save_tp_checkpoint
+from halo.checkpoint.parallel.writing import (
     chunked_saveable_tensors,
     conversion_chunk_key,
     stream_gathered_checkpoint,
 )
-from src.checkpoint.reading import load_full_state_dict
-from src.checkpoint.writing import StreamingShardWriter, normalize_gathered_state_dict
-from src.distributed.tensor_parallel.plain_params import register_hand_sliced
+from halo.checkpoint.reading import load_full_state_dict
+from halo.checkpoint.writing import StreamingShardWriter, normalize_gathered_state_dict
+from halo.distributed.tensor_parallel.plain_params import register_hand_sliced
 from tests.common.checkpoint_io import save_context, weight_files
 
 SHARD_SIZE = "64KB"

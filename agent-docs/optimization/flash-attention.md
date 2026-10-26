@@ -1,6 +1,6 @@
 # Flash Attention & Attention Backends
 
-`load_distributed_model` (`src/model_loading/parallel/loader.py`) auto-detects the backend per GPU and model: `flash_attention_4` on Blackwell, `flash_attention_3` on Hopper, `flash_attention_2` otherwise. Pass `attn_implementation` only to override it.
+`load_distributed_model` (`halo/model_loading/parallel/loader.py`) auto-detects the backend per GPU and model: `flash_attention_4` on Blackwell, `flash_attention_3` on Hopper, `flash_attention_2` otherwise. Pass `attn_implementation` only to override it.
 
 FA2 is the detector's terminal default, with no availability probe — every shipped image carries it, and a host without it raises at model build. Context Parallelism hard-requires flash-attn and raises `ImportError` when it is missing.
 
@@ -19,7 +19,7 @@ Why tiling attention is the standard fix for the model's most memory-bound op: [
 
 GPU support: A100 (SM80) = FA2/flex/sdpa. H100/H200 (SM90) = FA2/FA3/flex/sdpa, no FA4. B200 (SM100) / B300 (SM103) = FA2/FA4/flex/sdpa, no FA3.
 
-The CP column above is what `reject_unsupported_ulysses_model` (`src/distributed/context_parallel/model_rules.py`) accepts as a config label; it is not which kernel runs. CP's attention call goes through `_flash_attn_func` (`src/distributed/context_parallel/ulysses_attention.py`), which ignores that label and probes in a fixed order: the architecture's `preferred_flash_impl` (`src/models/attention/selection.py`: FA3 on Hopper (SM90), FA4 on Blackwell (SM100+)), then FA2, then the `kernels-community/flash-attn2` kernel.
+The CP column above is what `reject_unsupported_ulysses_model` (`halo/distributed/context_parallel/model_rules.py`) accepts as a config label; it is not which kernel runs. CP's attention call goes through `_flash_attn_func` (`halo/distributed/context_parallel/ulysses_attention.py`), which ignores that label and probes in a fixed order: the architecture's `preferred_flash_impl` (`halo/models/attention/selection.py`: FA3 on Hopper (SM90), FA4 on Blackwell (SM100+)), then FA2, then the `kernels-community/flash-attn2` kernel.
 
 Both architecture probes precede FA2 because every image ships FA2; an FA2 probe placed first would resolve on every device and leave the arch-matched kernel unreachable.
 
@@ -35,7 +35,7 @@ On B300, CP on FA4 measures 1.2–3× FA2 at ≥32k tokens with equal peak memor
 
 ## Automatic detection
 
-`_detect_attention_impl` (`src/models/attention/selection.py`) takes `preferred_flash_impl`, which reads only the compute-capability major:
+`_detect_attention_impl` (`halo/models/attention/selection.py`) takes `preferred_flash_impl`, which reads only the compute-capability major:
 
 1. `major >= 10` (Blackwell SM100/SM103): `flash_attention_4` if `flash_attn.cute` imports, else `flash_attention_2`. A build that is present but unusable warns before degrading.
 2. `major == 9` (Hopper): `flash_attention_3` if `flash_attn_interface` (else `flash_attn_3`) provides the varlen kernel, else `flash_attention_2`.
@@ -83,7 +83,7 @@ EP/long-context throughput tables live in [Throughput Benchmarks](throughput-ben
 **GptOss** (attention sinks):
 
 1. Disables transformers' auto-fallback to `vllm-flash-attn3` (`install_local_flash_for_sinks`). transformers reroutes FA2 requests to `kernels-community/vllm-flash-attn3` (SM90-only), which crashes on Blackwell; the attribute is reset to `None` before `from_pretrained`.
-2. Applies the run's sink policy (`src/models/attention/gpt_oss_sinks.py`). The policies — neutralized, live and frozen, trainable — and what each refuses are on [GPT-OSS → Attention sinks](../models/gpt-oss.md#attention-sinks).
+2. Applies the run's sink policy (`halo/models/attention/gpt_oss_sinks.py`). The policies — neutralized, live and frozen, trainable — and what each refuses are on [GPT-OSS → Attention sinks](../models/gpt-oss.md#attention-sinks).
 3. **Variable-length RL (async GRPO) runs FA4 via a per-row dense forward** (`_dense_last_hidden_state`), for exact RoPE positions and rank-uniform collective counts (`rows_forward_densely`).
 
     The dense kernel is seqlen-invariant, so the path forwards each row on its own, trimmed to its real contiguous span, with `attention_mask=None`: RoPE positions `[0, len)`, log-probs bit-identical to the unpadded forward. FA4 is where the trim is *mandatory*; `rows_forward_densely` also takes it on any attention path at `per_device_train_batch_size: 1`, for the cost alone ([Chunked log-probs](../training-methods/async-grpo/performance.md#chunked-log-probs)).
@@ -152,7 +152,7 @@ cd flash-attention/hopper && pip install --no-cache-dir --no-build-isolation .
 
 On Hopper (sm_90) under CUDA 13.2, `ptxas` hangs on the 24 `flash_fwd_split_hdim*_*_sm80.cu` kernels. The Docker Hopper build replaces them with throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`). Building FA2 for Hopper outside Docker on CUDA 13.2 needs the same workaround (or CUDA 13.1).
 
-`mha_varlen_fwd` gates split-K behind `seqlenq_ngroups_swapped`, so packed/padding-free training and the whole backward never reach these kernels. `mha_fwd` (non-varlen) does **not** gate it: with dropout 0 the occupancy heuristic picks split-K whenever `batch*heads*ceil(seq_q/64)` is under ~`0.8*2*SMs`, so a non-varlen caller must prefer FA3 on sm_90, which `src/distributed/context_parallel/ulysses_attention.py` does.
+`mha_varlen_fwd` gates split-K behind `seqlenq_ngroups_swapped`, so packed/padding-free training and the whole backward never reach these kernels. `mha_fwd` (non-varlen) does **not** gate it: with dropout 0 the occupancy heuristic picks split-K whenever `batch*heads*ceil(seq_q/64)` is under ~`0.8*2*SMs`, so a non-varlen caller must prefer FA3 on sm_90, which `halo/distributed/context_parallel/ulysses_attention.py` does.
 
 Import FA3 from `flash_attn_interface` (`import flash_attn_3` succeeds but does not guarantee a functional
 build). transformers auto-detects FA3 through `is_flash_attn_3_available()`, which reads the
@@ -169,7 +169,7 @@ A YAML config can pin the backend (`attn_implementation: flash_attention_2`); om
 auto-detection plus the model-specific handling above.
 
 **Gradient checkpointing with EP.** EP MoE layers go through `enable_scoped_gradient_checkpointing`
-(`src/models/gradient_checkpointing.py`), which enables GC and installs the recompute scope its
+(`halo/models/gradient_checkpointing.py`), which enables GC and installs the recompute scope its
 recompute replays the DeepEP dispatch from. Enabling GC by any other route leaves EP without that scope
 and raises.
 
@@ -215,23 +215,23 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 
 **flex_attention + FSDP2 NaN gradients (GptOss).** Loss starts normally then collapses to 0 with NaN `grad_norm`. transformers wraps `flex_attention` in `torch.compile(dynamic=False)` (`WrappedFlexAttention`); the compiled backward produces NaN when GptOss sinks (plain `nn.Parameter`) interact with FSDP2's DTensor-wrapped LSE during post-attention renorm.
 
-`patch_flex_attention_compile()` (`src/models/attention/backend_setup.py`) bypasses the compile wrapper. `load_distributed_model` applies it whenever flex is the resolved backend and either EP is on (the compile path also deadlocks with EP's all-to-all on seq-length recompiles) or the model is a sinks model running with `reset_sinks: true`.
+`patch_flex_attention_compile()` (`halo/models/attention/backend_setup.py`) bypasses the compile wrapper. `load_distributed_model` applies it whenever flex is the resolved backend and either EP is on (the compile path also deadlocks with EP's all-to-all on seq-length recompiles) or the model is a sinks model running with `reset_sinks: true`.
 
 **flex_attention gradient overflow on dense Qwen3.** flex produces ~6e18 grad norms on Qwen3-0.6B/8B, even single-GPU without distributed wrapping; losses are fine but overflow is a stability risk. Use the auto-detected flash backend for training, not flex. Upstream PyTorch/transformers issue.
 
 **FA4 first-use compile under multi-rank parallelism.** FA4 JIT-compiles each kernel on first use (~10 s) mid-forward. A cache-miss compile on one rank stalls it while peers race ahead to the next collective (a TP `o_proj` all-reduce, an EP DeepEP dispatch), desyncing the group into a deadlock.
 
-`warm_attention_kernels` (`src/model_loading/parallel/whole_model.py`, called at the end of `load_distributed_model` and of the frozen reference/teacher loader) runs the rank-local compiles on every rank behind one barrier, so the training loop only hits warm kernels: `warm_fa4_kernels` (`src/models/attention/backend_setup.py`) when FA4 is active, and `warm_flex_sliding_kernels` when the model runs `sdpa_flex_sliding` ([below](#sliding-window-and-wide-head-layers-on-sdpa)). It is a no-op at `world_size == 1`, where no peer waits on a compiling rank and each kernel compiles at its first call. [Tree packing](tree-packing.md) warms the kernel variants it adds behind the same fence (`warm_tree_attention_kernels`).
+`warm_attention_kernels` (`halo/model_loading/parallel/whole_model.py`, called at the end of `load_distributed_model` and of the frozen reference/teacher loader) runs the rank-local compiles on every rank behind one barrier, so the training loop only hits warm kernels: `warm_fa4_kernels` (`halo/models/attention/backend_setup.py`) when FA4 is active, and `warm_flex_sliding_kernels` when the model runs `sdpa_flex_sliding` ([below](#sliding-window-and-wide-head-layers-on-sdpa)). It is a no-op at `world_size == 1`, where no peer waits on a compiling rank and each kernel compiles at its first call. [Tree packing](tree-packing.md) warms the kernel variants it adds behind the same fence (`warm_tree_attention_kernels`).
 
 It covers both entry points — dense `flash_attn_func` and varlen `flash_attn_varlen_func` over a two-document `cu_seqlens` — each in the variants the model can reach: sliding-window when the config declares one, and a learnable sink when the model carries sinks.
 
-The on-disk cache (`ensure_fa4_kernel_cache_env` in `src/kernels/jit_cache.py`, anchored on `HF_HOME`) makes the compile a one-time cost across processes. The DeepEP `ElasticBuffer` dispatch/combine timeout is long (100 s) and absorbs residual skew. FA2 is precompiled and unaffected.
+The on-disk cache (`ensure_fa4_kernel_cache_env` in `halo/kernels/jit_cache.py`, anchored on `HF_HOME`) makes the compile a one-time cost across processes. The DeepEP `ElasticBuffer` dispatch/combine timeout is long (100 s) and absorbs residual skew. FA2 is precompiled and unaffected.
 
 **FA4 varlen backward JIT-cache key (packed / masked batches).** A packed or attention-masked batch unpads to a `cu_seqlens` varlen FA4 call. transformers' `_process_flash_attention_kwargs` coerces the 0-dim `max_seqlen` tensor to `int` only under tracing; in eager it forwards a fresh CUDA tensor each step, and `flash_attn.cute`'s varlen backward keys its JIT cache on that tensor by *identity*.
 
 The backward then recompiles every step: ~190 s/step vs ~10 s on gpt-oss-20b ep4, flat across sequence length because it is codegen of the backward template, not real attention.
 
-`patch_transformers_flash_varlen_int_seqlen` (`src/models/attention/backend_setup.py`, applied by `load_distributed_model` when FA4 is active) coerces `max_seqlen_{q,k}` to `int` at that boundary, so the key caches by value and the backward compiles once — one `.item()` per call, where the forward already syncs. `warm_fa4_kernels` warms this varlen backward too, so the first packed step is already compiled.
+`patch_transformers_flash_varlen_int_seqlen` (`halo/models/attention/backend_setup.py`, applied by `load_distributed_model` when FA4 is active) coerces `max_seqlen_{q,k}` to `int` at that boundary, so the key caches by value and the backward compiles once — one `.item()` per call, where the forward already syncs. `warm_fa4_kernels` warms this varlen backward too, so the first packed step is already compiled.
 
 ## Blackwell notes
 
@@ -239,7 +239,7 @@ vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` where FlashInfer JIT-fails
 
 ## Sliding-window and wide-head layers on SDPA
 
-On CUDA, a model whose run resolves to `sdpa` and whose widest head exceeds 256 (`has_head_dim_beyond_flash`; Gemma 4) is built with `sdpa_flex_sliding` (`src/models/attention/sdpa_flex_sliding.py`), which `apply_family_patches` returns to the policy loader and the frozen reference/teacher loader alike. Sinks models keep `sdpa`. `HALO_FLEX_SLIDING=0` opts out.
+On CUDA, a model whose run resolves to `sdpa` and whose widest head exceeds 256 (`has_head_dim_beyond_flash`; Gemma 4) is built with `sdpa_flex_sliding` (`halo/models/attention/sdpa_flex_sliding.py`), which `apply_family_patches` returns to the policy loader and the frozen reference/teacher loader alike. Sinks models keep `sdpa`. `HALO_FLEX_SLIDING=0` opts out.
 
 - **Sliding layers** run compiled FlexAttention under a `BlockMask` derived from the dense mask transformers built, so causality, the window, packed-document isolation and padding carry over and the tiles outside the window are skipped. Under SDPA the same layers compute every tile of the dense mask. Each query's allowed keys in such a mask are one contiguous run, so the mask reduces to the first and last key per query (`key_intervals`, read 256 query rows at a time), and the kernel's mask function compares against those two `[Q]` tensors: no index over the `[Q, K]` grid (whose flattened offset outgrows int32 past about 46k tokens) and no copy of the dense mask is kept. A mask that allows some query a non-contiguous set of keys goes to SDPA. The block masks are built once per mask tensor (every sliding layer of a forward, and its gradient-checkpoint recompute, gets the same one) and are freed with it.
 - **One compiled shape family.** Each batch row runs alone, padded to a multiple of 128, always under a mask and with autocast off inside the kernel. Under autocast the inputs first take the autocast dtype, as SDPA's do, so fp32 parameters under bf16 autocast, whose fp32 rotary embedding promotes the queries and keys beside bf16 values, still run the warmed bf16 graph and the tuned tiles. A call either records a graph with every input requiring grad (an input left frozen, as by a LoRA that adapts `q_proj` alone, joins as a detached leaf) or runs under `no_grad`. The kernel therefore compiles twice, a training graph and a forward-only one, for any mix of lengths, batch sizes, grad modes and trained projections. `warm_flex_sliding_kernels` compiles both for each call the model's sliding attention modules make (head count, head width, window and `scaling`, which Dynamo guards on), so no rank compiles mid-run. Deterministic-algorithms mode is a guard too, and HF's `Trainer` turns it on after the load under `full_determinism`, so each rank would compile again at its own first long sliding call while its peers wait in the next collective. Where the warm-up ran (world size > 1), every trainer therefore refuses `full_determinism` at construction (`reject_full_determinism_after_warmup`); with `HALO_FLEX_SLIDING=0` the model runs plain SDPA and takes it. The tuned tiles (head_dim 256, 16-bit inputs, SM100+) do not depend on the length, since a length-dependent choice is itself a recompile guard; other shapes use FlexAttention's defaults. The contract exists because Dynamo guards on a batch of one, a tile-multiple length, grad mode, each input's dtype and `requires_grad`, the autocast state and whether a block mask carries a mask tensor: a mid-run compile stalls the other ranks in the next collective, and past Dynamo's recompile limit (8) FlexAttention runs unfused over the full score matrix.

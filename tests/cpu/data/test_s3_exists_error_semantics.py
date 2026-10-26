@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import pytest
 from botocore.exceptions import ClientError
 
-from src.data.sources.s3_client import S3Client
+from halo.data.sources.s3_client import S3Client
 
 
 def _client_raising(code: str) -> S3Client:

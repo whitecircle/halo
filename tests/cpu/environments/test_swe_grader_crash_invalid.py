@@ -11,11 +11,11 @@ against. A real pass/fail verdict must NOT carry it.
 
 import pytest
 
-from src.environments.episode_keys import EPISODE_INVALID_REASON_KEY
-from src.environments.messages import Trajectory
-from src.environments.sandbox.base import SandboxExecutor
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tasks.coding.swe import SweEnvironment
+from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY
+from halo.environments.messages import Trajectory
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.swe import SweEnvironment
 
 
 class _StubSandbox(SandboxExecutor):

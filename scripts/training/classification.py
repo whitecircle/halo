@@ -3,7 +3,7 @@
 
 Modality: text-only. VLM sequence classification needs a multimodal classification head, which
 transformers ships for only a few families (Gemma3, dense Qwen3.5, T5Gemma2, ModernVBert); the
-toolkit registers two more itself in src/models/seq_cls_heads.py — Gemma 4 and MoE Qwen3.5/3.6,
+toolkit registers two more itself in halo/models/seq_cls_heads.py — Gemma 4 and MoE Qwen3.5/3.6,
 each in both spellings a checkpoint can carry (composite and text tower). Other VLM families have
 no such head, so general VLM classification is not supported upstream.
 
@@ -22,24 +22,24 @@ import torch.distributed as dist
 from datasets import DatasetDict
 from transformers import AutoModelForSequenceClassification
 
-from src.config_validation import reject_unsupported_args
-from src.configs.classification import ClassificationConfig, ClassificationScriptArguments
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import ModelArguments
-from src.data.pipeline.chat_render import tokenize_rendered
-from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
-from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
-from src.data.sources.paths import EVAL_SPLIT_NAMES
-from src.data.vlm_routing import reject_image_columns
-from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
-from src.entrypoints.model_setup import (
+from halo.config_validation import reject_unsupported_args
+from halo.configs.classification import ClassificationConfig, ClassificationScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.pipeline.chat_render import tokenize_rendered
+from halo.data.pipeline.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
+from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
+from halo.data.sources.paths import EVAL_SPLIT_NAMES
+from halo.data.vlm_routing import reject_image_columns
+from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from halo.entrypoints.model_setup import (
     apply_max_length,
     default_padded_attn_implementation,
     load_model_and_tokenizer,
     log_model_info,
     reject_multimodal_model_without_seq_cls_head,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -47,12 +47,12 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.runtime.collectives import barrier
-from src.runtime.consensus import reject_across_ranks
-from src.runtime.ranks import get_global_world_size, is_global_main_process
-from src.trainers.reward.classification import ClassificationTrainer
-from src.trainers.training_args_overrides import uses_evaluation
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.runtime.consensus import reject_across_ranks
+from halo.runtime.ranks import get_global_world_size, is_global_main_process
+from halo.trainers.reward.classification import ClassificationTrainer
+from halo.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
 

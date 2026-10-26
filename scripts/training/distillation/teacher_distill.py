@@ -9,19 +9,19 @@ import logging
 
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
-from src.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import ModelArguments
-from src.data.collators.factory import select_data_collator
-from src.data.collators.padded import DataCollatorForCausalLMWithPadding
-from src.entrypoints.data_setup import (
+from halo.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.collators.factory import select_data_collator
+from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
+from halo.entrypoints.data_setup import (
     load_script_datasets,
     log_script_dataset_examples,
     prepare_chat_text_split,
     prepare_raw_vlm_split,
     resolve_vlm_run,
 )
-from src.entrypoints.model_setup import (
+from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
     default_padded_attn_implementation,
@@ -29,7 +29,7 @@ from src.entrypoints.model_setup import (
     load_policy_model,
     log_model_info,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -37,14 +37,14 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.dtype import resolve_training_dtype
-from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.runtime.collectives import barrier
-from src.runtime.filesystem import hub_metadata_main_first
-from src.runtime.ranks import is_global_main_process
-from src.trainers.distillation.divergences import resolve_shared_vocab_width
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.model_loading.dtype import resolve_training_dtype
+from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.runtime.filesystem import hub_metadata_main_first
+from halo.runtime.ranks import is_global_main_process
+from halo.trainers.distillation.divergences import resolve_shared_vocab_width
+from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 
 logger = logging.getLogger(__name__)
 

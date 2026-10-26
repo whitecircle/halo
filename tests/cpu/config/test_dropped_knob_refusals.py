@@ -52,7 +52,7 @@ def _run_main(script: str, config_body: str, tmp_path: Path, **stubs) -> None:
         f"bf16: false\nuse_cpu: true\n{config_body}"
     )
     with contextlib.ExitStack() as stack:
-        stack.enter_context(mock.patch("src.entrypoints.script.install_log_tee"))
+        stack.enter_context(mock.patch("halo.entrypoints.script.install_log_tee"))
         stack.enter_context(mock.patch.object(sys, "argv", ["prog", str(config)]))
         for name, stub in stubs.items():
             stack.enter_context(mock.patch.object(module, name, stub))

@@ -31,9 +31,9 @@ import torch
 from datasets import Dataset
 from transformers import AutoTokenizer
 
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.distributed import hf_eval_loss_reference, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
@@ -92,7 +92,7 @@ def offline_grpo_reference(
     policy_gradient_formulation,
     min_log_prob,
 ) -> float:
-    """The exact offline-GRPO objective (kl_beta=0) on an unsplit model, fp32, independent of src/."""
+    """The exact offline-GRPO objective (kl_beta=0) on an unsplit model, fp32, independent of halo/."""
     with torch.no_grad():
         logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.float()
     shift_labels = labels[:, 1:]

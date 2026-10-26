@@ -8,7 +8,7 @@ Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family mistral4` 
 
 ## EP wrapper
 
-`EPMistral4MoELayer` (`src/distributed/expert_parallel/families/mistral4.py`) replaces `Mistral4MoE`.
+`EPMistral4MoELayer` (`halo/distributed/expert_parallel/families/mistral4.py`) replaces `Mistral4MoE`.
 
 - Routing: the wrapper calls `Mistral4TopkRouter` and keeps only its logits (the router also returns weights and indices, which balancing and routing replay have to recompute); `route_tokens_to_experts` then does softmax + group-topk inline, mirroring the router's own arithmetic. No `e_score_correction_bias` (unlike GLM-4); `norm_topk_prob` and `routed_scaling_factor` are honored.
 - Load balancing: Mistral4 has **no bias slot** (a plain softmax router, no correction-bias tensor), so `moe_balancing: bias_update` **raises** and the explicit `bias_update_transient` is the opt-in. `Mistral4ForCausalLM.forward` declares no `output_router_logits` parameter either, so `aux_loss` cannot work and `auto` resolves to `none` with a warning naming the transient opt-in.
@@ -18,20 +18,20 @@ Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family mistral4` 
 - Routed experts: `Mistral4Experts`, fused `gate_up_proj [E, 2M, H]` (F.linear convention; matmul-internal form `[E, H, 2M]`) and `down_proj [E, H, M]`. Same layout as Qwen3.5 / GLM-4, so the shared `EPMoELayerBase` fused-GLU helpers cover compute (Grouped GEMM on SM90+).
 - Shared expert: `Mistral4MLP`, replicated per rank, summed after DeepEP combine. Intermediate size = `moe_intermediate_size * n_shared_experts`.
 - Checkpoints: weights stored in matmul convention internally; the export's `FUSED` expert layout transposes back to F.linear convention at save so `from_pretrained` reloads as-is. The public `mistralai/Mistral-Small-4-119B-*` checkpoint ships every language-model weight in FP8 — dequantize once with `scripts/before_training/convert_mistral4_bf16.py` (streams shard-by-shard, handles scalar and per-expert `_scale_inv` layouts) before training.
-- Activation: the routed-expert SwiGLU runs through the fused Triton kernel (`src/kernels/fused_glu.py`) when the gate is a genuine SiLU, logged as `glu_combine=silu`.
+- Activation: the routed-expert SwiGLU runs through the fused Triton kernel (`halo/kernels/fused_glu.py`) when the gate is a genuine SiLU, logged as `glu_combine=silu`.
 
 ## Packing
 
 Packed documents stay isolated on both paths, but flash needs a toolkit patch:
 `Mistral4Attention.forward` takes `position_ids` as an explicit parameter and forwards only
 `**kwargs` to the attention interface, so the varlen detection never sees them.
-`patch_mistral4_flash_packed_position_ids` (`src/models/attention/packed_position_ids.py`) re-injects them
+`patch_mistral4_flash_packed_position_ids` (`halo/models/attention/packed_position_ids.py`) re-injects them
 and is applied at load whenever the resolved implementation is a flash one. The dense path builds the
 packed mask itself and is clean to grouped-GEMM reduction noise.
 
 ## CP wrapper
 
-`Mistral4Attention` → `Mistral4UlyssesAttention` (`src/distributed/context_parallel/families.py`), on the shared `MLAUlyssesAttention`.
+`Mistral4Attention` → `Mistral4UlyssesAttention` (`halo/distributed/context_parallel/families.py`), on the shared `MLAUlyssesAttention`.
 
 Three MLA-specific bits the wrapper handles:
 
@@ -45,7 +45,7 @@ RoPE follows `config.rope_interleave`: rotate-half (`apply_rotary_pos_emb`) or i
 
 ## TP
 
-Selective TP via `apply_tp_to_attention_only()` — `Mistral4Attention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`). MLA reuses GLM-4's compress/expand layout, so the plan applies verbatim:
+Selective TP via `apply_tp_to_attention_only()` — `Mistral4Attention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`). MLA reuses GLM-4's compress/expand layout, so the plan applies verbatim:
 
 - **Sharded** (ColwiseParallel): `q_b_proj`, `kv_b_proj` (head-dim expansions).
 - **Replicated**: `q_a_proj`, `kv_a_proj_with_mqa`, `q_a_layernorm`, `kv_a_layernorm` — low-rank compressions where sharding produces degenerate per-rank shapes.
@@ -61,7 +61,7 @@ On save, gate/up shards are all-gathered, concatenated back into contiguous halv
 
 ## Liger kernel
 
-Liger upstream ships no `mistral4` applier; the toolkit covers `mistral4` from its own spec in `src/model_loading/liger/family_specs.py`. A `mistral3` checkpoint resolves through its text tower: this spec for a `mistral4` tower, upstream's `mistral` applier for a Mistral Small 3.x one.
+Liger upstream ships no `mistral4` applier; the toolkit covers `mistral4` from its own spec in `halo/model_loading/liger/family_specs.py`. A `mistral3` checkpoint resolves through its text tower: this spec for a `mistral4` tower, upstream's `mistral` applier for a Mistral Small 3.x one.
 
 With `use_liger_kernel: true` it swaps `Mistral4RMSNorm` for Liger's fused RMSNorm, `Mistral4MLP` for the toolkit's fused SwiGLU (the shared expert's `(config, intermediate_size=None)` constructor is inherited, not restated), routes cross-entropy through Liger, and offers the fused loss on `Mistral4ForCausalLM` for text-only checkpoints (off by default).
 

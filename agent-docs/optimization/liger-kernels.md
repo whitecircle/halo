@@ -11,15 +11,15 @@ Why fusion pays, counted in HBM round trips:
 
 ## Supported models
 
-The dispatch (`src/model_loading/liger/dispatch.py`) resolves one applier per `model_type`: the toolkit
+The dispatch (`halo/model_loading/liger/dispatch.py`) resolves one applier per `model_type`: the toolkit
 registry for the `model_type` or the wrapper's `text_config.model_type`, then upstream Liger's
 `MODEL_TYPE_TO_APPLY_LIGER_FN` in the same order. A multimodal wrapper whose text tower a toolkit spec covers
 resolves to that spec even where upstream registers the wrapper (`gemma4`), so upstream's wrapper applier never
 runs its own text-tower swaps over the roles the spec takes over.
 
-The toolkit registry is built from one declarative spec per family (`src/model_loading/liger/family_specs.py`): a spec
+The toolkit registry is built from one declarative spec per family (`halo/model_loading/liger/family_specs.py`): a spec
 names the classes filling each role — RMSNorm, GLU MLP, causal-LM head — and only where the kernel computes
-the family's function **exactly**. The applier (`src/model_loading/liger/applier.py`) patches a role by subclassing the family's own class,
+the family's function **exactly**. The applier (`halo/model_loading/liger/applier.py`) patches a role by subclassing the family's own class,
 preserving its constructor signature and class name.
 
 Upstream Liger 0.8 covers Llama, Qwen2/3, Qwen3 MoE, Qwen3.5/3.6, Mistral, Mixtral, Gemma 2/3/4, GLM-4
@@ -48,9 +48,9 @@ reason:
 
 The Bailing families are `trust_remote_code`, so their modeling module does not exist when Liger is applied.
 Their patch is registered on the shared hook over `transformers.dynamic_module_utils.get_class_in_module`
-(`src/model_loading/remote_code.py`, wrapped once for every registrant), the funnel every remote
+(`halo/model_loading/remote_code.py`, wrapped once for every registrant), the funnel every remote
 class loads through, and fires on the module defining the declared classes
-(`src/model_loading/liger/applier.py`). Laguna is native to transformers, but its released repos also ship
+(`halo/model_loading/liger/applier.py`). Laguna is native to transformers, but its released repos also ship
 their own modeling file through `auto_map`, which the shipped recipes load; its spec names that file's
 classes too, so either load takes the same swaps.
 
@@ -92,7 +92,7 @@ patch instead, and a delegating spec withholds the flag from upstream the same w
 still records `cross_entropy: true`; it is the same fused kernel at the same call site.
 
 **One fused head for the roster.** Every family declaring a fused loss installs the same forward
-(`src/model_loading/liger/cross_entropy.py`), which applies the head transform the family's `HeadTransformSpec`
+(`halo/model_loading/liger/cross_entropy.py`), which applies the head transform the family's `HeadTransformSpec`
 declares ([Adding a Model](../models/adding-a-model.md#declare-the-head-transform)): a logit scale (Cohere's
 `logit_scale`) folds onto the hidden states. It refuses the shapes it cannot reproduce: a softcap or a vocabulary
 cut, an `lm_head` bias, and `output_router_logits` on a family whose head adds the router aux loss *after* the
@@ -199,7 +199,7 @@ Liger's: SwiGLU (`GluCombine.silu()`) or tanh-GeGLU (`GluCombine.gelu_tanh()`), 
 `act_fn` and falling back to the family's eager combine when neither kernel computes it. It runs on the
 grouped-GEMM, per-expert-loop and ETP paths alike.
 
-One row-strided kernel pair (`src/kernels/fused_glu.py`) serves every combine, each a `GluCombine`
+One row-strided kernel pair (`halo/kernels/fused_glu.py`) serves every combine, each a `GluCombine`
 (`silu`, `gelu_tanh`, `clamped_silu`, `silu_then_clamp`, `gptoss`): the activation, the clamp placement and
 GptOss's `up + 1` are `tl.constexpr`, `alpha` and the bound runtime arguments. On a layer storing one fused
 `[gate | up]` projection, a latched `GluCombine` runs its packed form (`GluCombine.packed`), which reads
@@ -224,7 +224,7 @@ resolved applier's signature does not accept is dropped, with a warning naming i
 
 | Kernel | Default | Notes |
 |---|---|---|
-| `rope` | On | Fused rotary embedding. Auto-off whenever the resolved applier's own `rope` parameter defaults to `False` — the family's rotary (partial, mrope, YARN) has no Liger kernel. Read off the signature, not a model_type list, so a family added upstream later is covered. An explicit `rope: true` bypasses the auto-off: a toolkit-spec family whose rotary Liger does not compute refuses it with `NotImplementedError` (`src/model_loading/liger/applier.py`), while an upstream-only applier receives the flag as-is |
+| `rope` | On | Fused rotary embedding. Auto-off whenever the resolved applier's own `rope` parameter defaults to `False` — the family's rotary (partial, mrope, YARN) has no Liger kernel. Read off the signature, not a model_type list, so a family added upstream later is covered. An explicit `rope: true` bypasses the auto-off: a toolkit-spec family whose rotary Liger does not compute refuses it with `NotImplementedError` (`halo/model_loading/liger/applier.py`), while an upstream-only applier receives the flag as-is |
 | `rms_norm` | On | Fused RMS normalization. Also covers a family's gated (GDN) norm where its spec declares one — one knob, both norm kernels |
 | `swiglu` | On | Auto-off where the applier's own default is `False` (GptOss, whose upstream applier has no SwiGLU patch block; Qwen3-VL), and where an **upstream** applier's expert-FFN swap is replaced by an EP wrapper, which runs Halo's own fused GLU combine instead. A toolkit spec patches the dense and shared-expert MLPs, which survive EP — see below. Forced off, even when requested, wherever upstream's swap would reach [routed experts Halo does not wrap](#routed-experts) |
 | `geglu` | On | Gemma 4. Served by the toolkit's spec on the always-on dense `Gemma4TextMLP`, which survives the EP wrapper, so it is **not** forced off under EP |
@@ -239,7 +239,7 @@ Per-model defaults are read off each applier's own signature (`_PER_MODEL_DEFAUL
 `flce_default`, set by the three large-vocab families above and nothing else.
 
 Two library defaults are overridden: TRL's `use_liger_kernel=False` (toolkit → `True`, via
-`_TOOLKIT_DEFAULTS` in `src/configs/parser.py`), and Liger's `fused_linear_cross_entropy=True,
+`_TOOLKIT_DEFAULTS` in `halo/configs/parser.py`), and Liger's `fused_linear_cross_entropy=True,
 cross_entropy=False` (toolkit → the reverse, because CE preserves logits for metrics and works with every
 trainer).
 
@@ -265,7 +265,7 @@ with no `skip_logits` parameter.
 
 **SwiGLU / GeGLU on MoE under EP wrappers.** Liger's MoE appliers set a class-level fused expert FFN (e.g.
 `Qwen3MoeExperts = LigerExperts`) holding every expert on one rank, while `apply_ep_layers`
-(`src/distributed/expert_parallel/parallelize.py`) swaps each layer's sparse-MoE block for an `EPMoELayerBase`
+(`halo/distributed/expert_parallel/parallelize.py`) swaps each layer's sparse-MoE block for an `EPMoELayerBase`
 subclass holding only the local shard.
 
 The dispatch therefore sets `swiglu=False` / `geglu=False` when all four of
@@ -309,13 +309,13 @@ The load-time patch site cannot know the trainer and a construction-time re-appl
 ([Online GRPO](../training-methods/grpo/online.md#chunked-log-probs),
 [Offline GRPO](../training-methods/grpo/offline.md#memory-chunked-log-probs)).
 
-Liger is applied twice: at model load, and again by `DistributedTrainerMixin` (`src/trainers/distributed_trainer.py`),
+Liger is applied twice: at model load, and again by `DistributedTrainerMixin` (`halo/trainers/distributed_trainer.py`),
 which re-sanitizes the train-time `liger_kernel_config` before HF Trainer can re-apply it on the wrapped
 model. A filter present at only one site would be undone by whichever runs second, so both call one
 sanitizer, `sanitize_liger_config`.
 
 The dispatch records the **effective** applied config on `model.config`, and
-`finalize_liger_after_direct_load` (`src/model_loading/liger/dispatch.py`) reads it after a
+`finalize_liger_after_direct_load` (`halo/model_loading/liger/dispatch.py`) reads it after a
 `load_distributed_model` load. With FLCE applied it keeps `use_liger_kernel` on and pins
 `liger_kernel_config` to the applied dict, so TRL's re-application is an identical re-patch and its entropy
 guard knows logits are `None`; otherwise it turns the flag off.
@@ -350,7 +350,7 @@ family the on-policy RL trainers score against a vLLM copy running the eager nor
 
 The EP MoE layer's own clamped-SwiGLU is independent of Liger: every path — per-expert loop,
 [grouped GEMM](grouped-gemm.md) (default on SM90+) and ETP — runs the same fused Triton kernel
-`GluCombine.gptoss` (`src/kernels/fused_glu.py`), the loop path splitting the halves out of one interleaved
+`GluCombine.gptoss` (`halo/kernels/fused_glu.py`), the loop path splitting the halves out of one interleaved
 `gate_up` projection.
 
 ## Benchmarks

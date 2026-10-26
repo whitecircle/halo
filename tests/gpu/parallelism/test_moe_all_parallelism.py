@@ -18,11 +18,11 @@ import torch.distributed as dist
 from liger_kernel.transformers import LigerRMSNorm
 from torch.distributed.tensor import DTensor
 
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from src.checkpoint.parallel.save import save_tokenizer
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.moe.config_fields import require_expert_count
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.parallel.save import save_tokenizer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.moe.config_fields import require_expert_count
 from tests.common.checkpoint_io import save_context
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
 from tests.common.ep_reference import ep_layers, random_token_batch

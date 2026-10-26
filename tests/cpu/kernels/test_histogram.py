@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests for the sync-free routing histogram shared by the EP layers and the MoE metrics callback.
 
-``src.kernels.histogram`` replaces ``torch.bincount`` on the routing hot path, where bincount's
+``halo.kernels.histogram`` replaces ``torch.bincount`` on the routing hot path, where bincount's
 device→host read-back of the max index costs a full sync per MoE layer per forward. Three
 properties are load-bearing and each has a way of failing silently:
 
@@ -21,7 +21,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.kernels.histogram import accumulate_bincount, sync_free_bincount
+from halo.kernels.histogram import accumulate_bincount, sync_free_bincount
 
 
 def test_counts_match_bincount():

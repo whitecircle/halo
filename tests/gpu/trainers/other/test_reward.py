@@ -36,11 +36,11 @@ from datasets import Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from trl import RewardConfig
 
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from src.model_loading.tokenizer_setup import configure_run_tokenizer
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.distributed import (
     ensure_model_downloaded,
     snapshot_full_weights,

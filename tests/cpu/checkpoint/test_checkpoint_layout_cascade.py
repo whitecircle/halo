@@ -15,8 +15,8 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from src.checkpoint.format import LEGACY_WEIGHTS_FILE, WHOLE_MODEL_WEIGHT_FILES
-from src.checkpoint.reading import (
+from halo.checkpoint.format import LEGACY_WEIGHTS_FILE, WHOLE_MODEL_WEIGHT_FILES
+from halo.checkpoint.reading import (
     StreamingCheckpointReader,
     checkpoint_shard_files,
     has_whole_model_weight_file,

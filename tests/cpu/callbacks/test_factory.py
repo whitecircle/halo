@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The run's callback roster (:func:`src.callbacks.factory.build_run_callbacks`): its order, the
+"""The run's callback roster (:func:`halo.callbacks.factory.build_run_callbacks`): its order, the
 balancing callbacks a resolved mode selects, and the refusal of an unresolved mode.
 
 Run: python tests/cpu/callbacks/test_factory.py
@@ -11,7 +11,7 @@ import pytest
 import torch
 from transformers import TrainerCallback
 
-from src.callbacks.factory import build_run_callbacks
+from halo.callbacks.factory import build_run_callbacks
 from tests.common.parallelism import make_parallelism_config
 
 _NO_PARALLELISM = make_parallelism_config(world_size=1, gpus_per_node=1)

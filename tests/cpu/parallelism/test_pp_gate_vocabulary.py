@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The shared PP rejection vocabulary (``src.trainers.parallelism.pipeline_rules``) and its call sites.
+"""The shared PP rejection vocabulary (``halo.trainers.parallelism.pipeline_rules``) and its call sites.
 
 ``test_pp_trainer_gates.py`` covers *which trainers* may run PP (``PP_REFUSAL``). This file covers
 what happens once a supported trainer is under PP and carries an option the pipeline cannot honor.
@@ -24,8 +24,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.trainers.grpo.offline.offline_rules import reject_offline_pp_options
-from src.trainers.parallelism.pipeline_rules import (
+from halo.trainers.grpo.offline.offline_rules import reject_offline_pp_options
+from halo.trainers.parallelism.pipeline_rules import (
     reject_missing_precomputed_columns,
     reject_missing_precomputed_reference,
     reject_positional_model_or_args,
@@ -34,10 +34,10 @@ from src.trainers.parallelism.pipeline_rules import (
     reject_pp_ref_model,
     reject_unsupported_pp_training_args,
 )
-from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.preference.preference_rules import reject_smpo_pp_options
+from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.preference.preference_rules import reject_smpo_pp_options
 
 PEFT_SENTINEL = object()
 """Stand-in for a ``peft_config``: the gates test identity against ``None``, never structure."""

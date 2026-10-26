@@ -14,9 +14,9 @@ Run with 1 GPU:
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_vlm_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log

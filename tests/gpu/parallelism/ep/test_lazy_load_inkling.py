@@ -32,10 +32,10 @@ from transformers.models.inkling.configuration_inkling import (
 )
 from transformers.models.inkling.modeling_inkling import InklingForCausalLM, InklingForConditionalGeneration
 
-from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.ep import load_ep_model_lazy
+from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from halo.distributed.expert_parallel.lazy_plan import is_lazy_loadable
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.ep import load_ep_model_lazy
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG

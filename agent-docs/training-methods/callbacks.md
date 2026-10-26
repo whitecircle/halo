@@ -1,8 +1,8 @@
 # Training Callbacks
 
-Callbacks extend `transformers.TrainerCallback` to log metrics, generate samples, schedule hyperparameters and balance MoE routers. Source: `src/callbacks/`.
+Callbacks extend `transformers.TrainerCallback` to log metrics, generate samples, schedule hyperparameters and balance MoE routers. Source: `halo/callbacks/`.
 
-Scripts assemble them in `configure_balancing_and_build_callbacks(...)` (`src/entrypoints/script.py`): `configure_moe_balancing` (`src/callbacks/balancing.py`, collective) resolves, agrees and applies `moe_balancing`, then `build_run_callbacks` (`src/callbacks/factory.py`) builds the roster for that mode. `run_trainer` then reorders HF's report-to integrations last: they fire before user callbacks, so otherwise every key added via `logs.update(...)` is lost.
+Scripts assemble them in `configure_balancing_and_build_callbacks(...)` (`halo/entrypoints/script.py`): `configure_moe_balancing` (`halo/callbacks/balancing.py`, collective) resolves, agrees and applies `moe_balancing`, then `build_run_callbacks` (`halo/callbacks/factory.py`) builds the roster for that mode. `run_trainer` then reorders HF's report-to integrations last: they fire before user callbacks, so otherwise every key added via `logs.update(...)` is lost.
 
 ## Built-in callbacks
 
@@ -37,7 +37,7 @@ Tracks token throughput, step time and GPU memory; tokens/s/GPU is the headline.
 | `tokens_per_second` | This GPU's tokens over step compute time — the headline |
 | `cluster_tokens_per_second` | Unique cluster tokens: per-GPU × `data_parallel_size` × `cp_size` |
 | `step_time_seconds` | Optimizer-step wall clock between two device synchronizes, so it times the step's kernels, not their launch |
-| `mfu_percent`, `tflops_per_sec` | Against the device peak in `src/hardware.py`; `0.0`, with a startup warning, for an undetected GPU or a GPU/precision pair it lacks |
+| `mfu_percent`, `tflops_per_sec` | Against the device peak in `halo/hardware.py`; `0.0`, with a startup warning, for an undetected GPU or a GPU/precision pair it lacks |
 | `smfu_percent`, `smfu_tflops_per_sec` | MoE-aware twin, crediting only the experts that fire; sparse models only |
 
 Memory keys take no prefix: `allocated_gb`, `reserved_gb`, `peak_allocated_gb`, `training_peak_allocated_gb`; `num_full_model_params` adds `distributed_efficiency`.
@@ -74,7 +74,7 @@ Two live paths bypass the hooks even when wired: a wrapper routing without the H
 
 ### BalancingBiasCallback
 
-DeepSeek-V3 auxiliary-loss-free router balancing (`src/callbacks/balancing.py`). The bias is added to the *detached* top-k scores, so gradients flow through un-biased gating weights and quality matches no-balancing.
+DeepSeek-V3 auxiliary-loss-free router balancing (`halo/callbacks/balancing.py`). The bias is added to the *detached* top-k scores, so gradients flow through un-biased gating weights and quality matches no-balancing.
 
 The rule is `b_i ← b_i + γ · sign(mean_count − count_i)` over tokens routed to expert *i* in the last step, summed across ranks. It runs every step; only the `moe/*` summary is periodic, since it ends in a host sync. Defaults: `update_rate=1e-3`, `log_every_n_steps=1`, `exclude_last_slot` off the router class attribute `_has_discard_expert_slot`.
 
@@ -101,7 +101,7 @@ The contract is checked on the **enabled tree**, not the class declaration: a re
 
 ### VariableSchedulerCallback
 
-Schedules any numeric attribute on the model over training (`src/callbacks/variable_scheduler.py`) — `min_log_prob` for offline GRPO, `target_margin` for SMPO.
+Schedules any numeric attribute on the model over training (`halo/callbacks/variable_scheduler.py`) — `min_log_prob` for offline GRPO, `target_margin` for SMPO.
 
 ```python
 VariableSchedulerCallback("min_log_prob", -2.0, -5.0)
@@ -133,7 +133,7 @@ Under pipeline parallelism no stage runs the `*ForCausalLM.forward` that adds th
 
 The SFT trainer weighs the term at `router_aux_loss_coef` once per optimizer step: it averages the window's micro-batch aux losses, and the gradient sync averages them over ranks. In each eval batch it adds the term once at that coefficient, so `loss` and `eval_loss` both read as the language-model mean plus `router_aux_loss_coef × aux_loss`.
 
-HF's `num_items_in_batch` path multiplies every micro-batch loss, train and eval, by the process count and sums the accumulation window. That is right for the token-summed cross-entropy, but it would weigh the per-micro-batch aux mean `world_size × gradient_accumulation_steps` times its coefficient (`world_size` times in eval). `DistributedSFTTrainer._weigh_router_aux_loss` therefore rescales the term. When HF withholds the labels from the forward, the forward adds no aux term, so the trainer adds it itself. HF does this under a label smoother (`label_smoothing_factor`) or a TRL `compute_loss_func` (`loss_type: dft` with Liger off). Both this rescale and the CP model read the coefficient through `require_router_aux_loss_coef` (`src/models/moe/config_fields.py`), which raises when the config declares none. CP computes its own mean and needs no rescale.
+HF's `num_items_in_batch` path multiplies every micro-batch loss, train and eval, by the process count and sums the accumulation window. That is right for the token-summed cross-entropy, but it would weigh the per-micro-batch aux mean `world_size × gradient_accumulation_steps` times its coefficient (`world_size` times in eval). `DistributedSFTTrainer._weigh_router_aux_loss` therefore rescales the term. When HF withholds the labels from the forward, the forward adds no aux term, so the trainer adds it itself. HF does this under a label smoother (`label_smoothing_factor`) or a TRL `compute_loss_func` (`loss_type: dft` with Liger off). Both this rescale and the CP model read the coefficient through `require_router_aux_loss_coef` (`halo/models/moe/config_fields.py`), which raises when the config declares none. CP computes its own mean and needs no rescale.
 
 The resolved mode is reconciled world-wide with precedence `bias_update > bias_update_transient > aux_loss > none`, so every rank runs the same collectives.
 
@@ -141,7 +141,7 @@ The resolved mode is reconciled world-wide with precedence `bias_update > bias_u
 
 Every MoE run with gradient checkpointing is reentrant, and a reentrant checkpoint runs a layer's original forward under `no_grad`. transformers collects `router_logits` in that pass, so on its own a checkpointed layer's aux term reaches the loss with no graph and adds no router gradient.
 
-`aux_loss` therefore installs `install_router_aux_gradient` (`src/models/moe/router_aux_gradient.py`) on the module collecting the logits, the innermost one declaring `router_logits` in `_can_record_outputs`. Each tensor collected under a checkpoint's `no_grad` pass becomes a carrier whose backward keeps the gradient the loss hands it. In the layer's recompute, an identity node on the output of the block owning the router passes that gradient to the router's recomputed logits.
+`aux_loss` therefore installs `install_router_aux_gradient` (`halo/models/moe/router_aux_gradient.py`) on the module collecting the logits, the innermost one declaring `router_logits` in `_can_record_outputs`. Each tensor collected under a checkpoint's `no_grad` pass becomes a carrier whose backward keeps the gradient the loss hands it. In the layer's recompute, an identity node on the output of the block owning the router passes that gradient to the router's recomputed logits.
 
 The gradient is the family's own `load_balancing_loss_func`, differentiated by autograd: the load pooled over all layers, the attention mask, `router_aux_loss_coef` and the trainer's loss scaling apply exactly as without checkpointing, whichever consumer adds the term (the model forward, a fused-loss forward, the CP wrapper, TRL's KTO). The coefficient stays as configured, so the logged `loss` and `aux_loss` read as they do without checkpointing. Collected logits that carry a graph (no checkpointing, the layers `every_n_layers` leaves unchecked) keep the native path, so no term counts twice. EP needs no collective: each rank computes its aux loss from its own tokens, as HF does.
 
@@ -212,4 +212,4 @@ class LossSpikeCallback(TrainerCallback):
             control.should_training_stop = True   # also: should_evaluate/save/log
 ```
 
-Distributed rules: gate prints on `is_global_main_process()` (`src/runtime/ranks.py`); unwrap FSDP/DDP before `.generate()`; wrap collectives in `barrier()`, keeping any participation gate rank-uniform. A reusable callback goes in `src/callbacks/` and is imported from its own module — the package init re-exports nothing.
+Distributed rules: gate prints on `is_global_main_process()` (`halo/runtime/ranks.py`); unwrap FSDP/DDP before `.generate()`; wrap collectives in `barrier()`, keeping any participation gate rank-uniform. A reusable callback goes in `halo/callbacks/` and is imported from its own module — the package init re-exports nothing.

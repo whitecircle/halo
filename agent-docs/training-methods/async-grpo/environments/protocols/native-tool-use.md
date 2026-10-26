@@ -1,6 +1,6 @@
 # Native Tool-Use Environments
 
-`NativeToolUseEnvironment` (`src/environments/protocols/native_tool_use.py`) runs the OpenAI/vLLM function-calling protocol: the environment advertises tool schemas, the server's `--tool-call-parser` extracts the calls, and each result returns as a `tool` message.
+`NativeToolUseEnvironment` (`halo/environments/protocols/native_tool_use.py`) runs the OpenAI/vLLM function-calling protocol: the environment advertises tool schemas, the server's `--tool-call-parser` extracts the calls, and each result returns as a `tool` message.
 
 Serve the model with its family's parser ([Tool calls](../../episodes.md#tool-calls)). Without one, vLLM rejects the request (400) and SGLang returns the calls as plain text, so every episode ends on its first turn.
 
@@ -34,7 +34,7 @@ The [common knobs](../README.md#common-knobs) apply too.
 - `web_search` — `query` and optional `max_results` (default 5).
 - `read_file`, `write_file`, `list_files` — a simulated per-episode file store.
 
-The builders in `src/environments/tools/toolsets.py` return registries: `build_math_tools`, `build_code_tools`, `build_python_tools`, `build_search_tools`, `build_simulated_file_tools` and `build_combined_tools` stateless, `build_session_{code,bash,file}_tools` bound to the episode's persistent [sandbox session](../sandbox.md). `NativeToolRegistry.combine(a, b)` composes two. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports ([Choosing a backend](../sandbox.md#choosing-a-backend)).
+The builders in `halo/environments/tools/toolsets.py` return registries: `build_math_tools`, `build_code_tools`, `build_python_tools`, `build_search_tools`, `build_simulated_file_tools` and `build_combined_tools` stateless, `build_session_{code,bash,file}_tools` bound to the episode's persistent [sandbox session](../sandbox.md). `NativeToolRegistry.combine(a, b)` composes two. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports ([Choosing a backend](../sandbox.md#choosing-a-backend)).
 
 ## Reward
 
@@ -58,7 +58,7 @@ The reward's `environment` term prices the grade as `reward/objective` ([Reward 
 
 ### Argument binding
 
-Every call is checked against the tool's schema before it runs or spends budget (`src/environments/tools/definitions.py`). A call that fails is refused as a tool error and never ends the episode:
+Every call is checked against the tool's schema before it runs or spends budget (`halo/environments/tools/definitions.py`). A call that fails is refused as a tool error and never ends the episode:
 
 - `Error: <tool>: unknown argument '<name>'; its arguments are …`
 - `Error: <tool>: missing a required argument: '<name>'`
@@ -99,8 +99,8 @@ The endpoint needs tool calling enabled. Flags and the `--training_config` contr
 A custom tool set goes through the constructor ([A custom tool](../custom.md#a-custom-tool)):
 
 ```python
-from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from src.environments.tools.toolsets import build_combined_tools
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.tools.toolsets import build_combined_tools
 
 env = NativeToolUseEnvironment(tool_registry=build_combined_tools(), max_turns=10)
 ```

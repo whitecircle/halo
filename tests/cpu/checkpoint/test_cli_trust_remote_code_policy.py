@@ -46,6 +46,8 @@ from unittest.mock import patch
 import pytest
 from datasets import DatasetDict
 
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from halo.data.preprocessed import tokenization
 from scripts.cli_arguments import (
     HUB_SOURCE_HELP,
     add_device_map_arg,
@@ -53,8 +55,6 @@ from scripts.cli_arguments import (
     add_hub_source_args,
     add_max_shard_size_arg,
 )
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from src.data.preprocessed import tokenization
 from tests.common.repo import REPO_ROOT, load_script_module
 
 # (tool, the default its input source earns). Every standalone tool that executes a checkpoint's own

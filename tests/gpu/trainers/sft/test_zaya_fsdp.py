@@ -28,10 +28,10 @@ Run (2 GPUs; ``$D`` a large mounted volume for the HF cache):
 import torch
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_flag, env_int, env_str
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_flag, env_int, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B

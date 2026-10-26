@@ -22,9 +22,9 @@ import torch
 from datasets import Dataset
 from trl import SFTConfig
 
-from src.data.collators.packing import PAD_TAIL_SEGMENT_CHUNK, DataCollatorWithPacking
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.data.collators.packing import PAD_TAIL_SEGMENT_CHUNK, DataCollatorWithPacking
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import build_dense_model

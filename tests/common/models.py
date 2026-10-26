@@ -4,7 +4,7 @@ One constant per checkpoint a test loads, per local patched-checkpoint path and 
 family's branches need. A test that inlines a model name or a tiny config splits the roster in two.
 """
 
-from src.env import data_path
+from halo.env import data_path
 
 # Dense Models
 

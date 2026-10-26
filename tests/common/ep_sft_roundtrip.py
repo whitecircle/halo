@@ -16,13 +16,13 @@ import torch
 from transformers import AutoTokenizer, PreTrainedModel
 from trl import SFTConfig
 
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
-from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints.script import ScriptContext, configure_balancing_and_build_callbacks
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.module_tree import backbone_with_layers
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.expert_parallel.lazy_plan import is_lazy_loadable
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.script import ScriptContext, configure_balancing_and_build_callbacks
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.module_tree import backbone_with_layers
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import fixed_batch_loss
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir

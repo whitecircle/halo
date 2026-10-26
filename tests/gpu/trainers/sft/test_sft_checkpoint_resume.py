@@ -15,11 +15,11 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_flag, env_str
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_flag, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import RESUME_PROBE_TEXT, fixed_text_batch, run_two_phase_resume
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir

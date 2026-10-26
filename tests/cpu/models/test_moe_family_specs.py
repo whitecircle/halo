@@ -6,9 +6,9 @@ Run: ``python tests/cpu/models/test_moe_family_specs.py`` (or ``pytest -m cpu``)
 
 import pytest
 
-from src.distributed.expert_parallel.families.roster import ep_layer_classes
-from src.models.moe import family_specs
-from src.models.moe.family_specs import (
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes
+from halo.models.moe import family_specs
+from halo.models.moe.family_specs import (
     LAGUNA,
     MOE_FAMILY_SPECS,
     QWEN3,
@@ -21,7 +21,7 @@ from src.models.moe.family_specs import (
 
 def _family_classes() -> list[type]:
     """Toolkit EP layer classes declaring their own spec; test doubles join the same subclass tree."""
-    return [cls for cls in ep_layer_classes() if "FAMILY" in vars(cls) and cls.__module__.startswith("src.")]
+    return [cls for cls in ep_layer_classes() if "FAMILY" in vars(cls) and cls.__module__.startswith("halo.")]
 
 
 def test_every_spec_is_held_by_exactly_one_family_class():

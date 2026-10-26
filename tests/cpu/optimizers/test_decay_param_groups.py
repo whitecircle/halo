@@ -21,10 +21,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.optimizers import flash_adamw
-from src.optimizers.adamw_bf16 import adamw_bf16_optimizer_from_args
-from src.optimizers.flash_adamw import build_flash_adamw_optimizer
-from src.optimizers.muon import build_muon_optimizer
+from halo.optimizers import flash_adamw
+from halo.optimizers.adamw_bf16 import adamw_bf16_optimizer_from_args
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 
 WEIGHT_DECAY = 0.123
 SCALAR_WEIGHT_DECAY = 0.456  # distinct, so a scalar group serving the matrix value is visible

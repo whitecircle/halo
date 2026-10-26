@@ -21,11 +21,11 @@ import math
 
 import torch
 
+from halo.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
+from halo.checkpoint.reading import SAFETENSORS_FLOAT_DTYPES, header_nbytes, header_numel
+from halo.checkpoint.writing import cast_to_save_dtype
+from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg
-from src.checkpoint.fp8_dequant import DequantRules, run_dequant_conversion
-from src.checkpoint.reading import SAFETENSORS_FLOAT_DTYPES, header_nbytes, header_numel
-from src.checkpoint.writing import cast_to_save_dtype
-from src.log import configure_cli_logging
 
 configure_cli_logging()
 

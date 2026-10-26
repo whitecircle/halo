@@ -15,8 +15,8 @@ from unittest import mock
 
 import pytest
 
-from src.trainers.parallelism.pipeline_rules import reject_uncovered_pp_ep_layers
-from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
+from halo.trainers.parallelism.pipeline_rules import reject_uncovered_pp_ep_layers
+from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from tests.common.parallelism import make_parallelism_config
 
 _EP_LAYERS = [object()]
@@ -29,7 +29,7 @@ def _config(**overrides):
 
 def _joined_reason(config, ep_layers) -> str | None:
     """The reason the gate hands the cross-rank joiner; the joiner is stubbed, so nothing raises here."""
-    with mock.patch("src.trainers.parallelism.pipeline_rules.reject_across_ranks") as join:
+    with mock.patch("halo.trainers.parallelism.pipeline_rules.reject_across_ranks") as join:
         reject_uncovered_pp_ep_layers(config, ep_layers)
     join.assert_called_once()
     return join.call_args.args[0]

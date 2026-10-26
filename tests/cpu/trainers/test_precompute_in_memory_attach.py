@@ -20,7 +20,7 @@ from datasets import Dataset, concatenate_datasets, load_from_disk
 from trl.trainer.dpo_trainer import DPOTrainer as TrlDPOTrainer
 from trl.trainer.kto_trainer import KTOTrainer as TrlKTOTrainer
 
-from src.trainers.preference.trl_preference import TRLPreferenceMixin
+from halo.trainers.preference.trl_preference import TRLPreferenceMixin
 from tests.common.preference_precompute import (
     BASE,
     N_ROWS,

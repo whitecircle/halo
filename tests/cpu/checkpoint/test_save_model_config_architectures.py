@@ -26,8 +26,8 @@ import pytest
 import torch.nn as nn
 from transformers import CONFIG_MAPPING, AutoModelForSequenceClassification
 
-from src.checkpoint.config_export import hf_architecture_name, save_model_config
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.checkpoint.config_export import hf_architecture_name, save_model_config
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
 
 HUB_ARCHITECTURE = "Qwen3ForCausalLM"  # what the base checkpoint's config.json carries
 LIVE_ARCHITECTURE = "Qwen3ForSequenceClassification"  # what the run actually built

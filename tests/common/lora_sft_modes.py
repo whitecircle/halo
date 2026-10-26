@@ -14,10 +14,10 @@ from typing import Any
 import torch
 from safetensors.torch import load_file
 
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.checkpoint.parallel.adapters import restore_adapters
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.runtime.collectives import barrier
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
+from halo.checkpoint.parallel.adapters import restore_adapters
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.runtime.collectives import barrier
 from tests.common.distributed import shared_output_dir
 from tests.common.models import BAILING_MOE_RING_MINI, GPT_OSS_20B, QWEN3_0_6B
 from tests.common.peft_helpers import (

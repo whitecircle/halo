@@ -46,7 +46,7 @@ Read the script's `--help` before running it — don't guess the flags.
 | LoRA / QLoRA (any mode) | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); it refuses a native EP expert-LoRA adapter — train with `merge_expert_lora_on_save: true` instead |
 | Embedding LoRA (in-place injected) | loadable, adapters folded in | — | use directly (`SentenceTransformer(path)`) |
 | TP-only | loadable | — (no per-rank TP save) | use directly |
-| EP — every family (each family's `MoEFamilySpec.model_types` in `src/models/moe/family_specs.py`; read them there, and `moe_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
+| EP — every family (each family's `MoEFamilySpec.model_types` in `halo/models/moe/family_specs.py`; read them there, and `moe_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
 | CP / EP+CP | loadable | **rejected** — `save_sharded_ep` raises under Ulysses attention | use gathered directly |
 | ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — plain `ep2` on 8, or EP+TP with `ep_size < world_size`), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), a load that converted names the merge cannot respell (Step-3.7 Flash, a vendor namespace, a SigLIP tower), PP, multi-node non-shared output FS | loadable | **rejected at construction** (`reject_unmergeable_ep_sharded_save`, re-checked at save; PP by the pipeline gate) | use gathered directly |
 | PP | per-stage parts + merged index under the hub's names, loadable and servable as the EP-gathered save | per-node output FS: each node holds its own stages' parts | use directly; per-node directories **`merge_pp_stages.py`** first |
@@ -75,6 +75,6 @@ python -c "import json; ix=json.load(open('<out>/model.safetensors.index.json'))
 
 `agent-docs/reference/checkpoints.md` is the documented behavior — check it first; the module map is
 `agent-docs/reference/architecture.md`. The code is the **ultimate** authority: when a doc, this skill, or
-memory disagrees with the code — or you are unsure — read `src/checkpoint/` and the
+memory disagrees with the code — or you are unsure — read `halo/checkpoint/` and the
 `scripts/after_training/` script you are about to run before you assert or act. (`CLAUDE.md`:
 docs-first, but the code wins.)

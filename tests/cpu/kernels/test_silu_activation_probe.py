@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.activations import ACT2FN
 
-from src.kernels.fused_glu import is_gelu_tanh_activation, is_silu_activation, silu_mul_eager
+from halo.kernels.fused_glu import is_gelu_tanh_activation, is_silu_activation, silu_mul_eager
 
 # The only registry entries that resolve to each probed activation. Every other name must be rejected;
 # a new alias lands here only alongside a deliberate decision that the kernels may serve it.

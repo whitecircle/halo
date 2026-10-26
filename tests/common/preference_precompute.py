@@ -17,8 +17,8 @@ import torch
 from datasets import Dataset
 from trl import DPOConfig, KTOConfig
 
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
 
 # Each kind's trainer and the TRL config it takes.
 TRAINERS = {"dpo": (DistributedDPOTrainer, DPOConfig), "kto": (DistributedKTOTrainer, KTOConfig)}

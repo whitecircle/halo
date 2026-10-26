@@ -8,12 +8,12 @@ import json
 
 import pytest
 
-import src.checkpoint.atomic as checkpoint_atomic
-import src.checkpoint.parallel.ep as ep_save
-import src.checkpoint.parallel.optimizer as checkpoint_optimizer
-import src.checkpoint.parallel.save as checkpoint_save
-import src.checkpoint.parallel.writing as checkpoint_write
-import src.checkpoint.writing as checkpoint_writing
+import halo.checkpoint.atomic as checkpoint_atomic
+import halo.checkpoint.parallel.ep as ep_save
+import halo.checkpoint.parallel.optimizer as checkpoint_optimizer
+import halo.checkpoint.parallel.save as checkpoint_save
+import halo.checkpoint.parallel.writing as checkpoint_write
+import halo.checkpoint.writing as checkpoint_writing
 from tests.common.equivalence.checkpoint_artifacts import (
     ARTIFACT_CASES,
     EXPERT_LORA_MODES,

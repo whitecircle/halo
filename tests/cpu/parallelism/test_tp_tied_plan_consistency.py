@@ -18,8 +18,8 @@ from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import CONFIG_MAPPING, AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
 
-from src.checkpoint.parallel.writing import chunked_saveable_tensors
-from src.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, validate_tied_pair_consistent
+from halo.checkpoint.parallel.writing import chunked_saveable_tensors
+from halo.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, validate_tied_pair_consistent
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
 

@@ -19,15 +19,15 @@ import types
 import pytest
 from transformers import TrainerControl, TrainerState
 
-from src.callbacks.early_stop import StopsTrainingEarly
-from src.configs.grpo import EarlyStopConfig
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.entrypoints.script import EarlyStopExit, run_trainer
-from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.callbacks.early_stop import StopsTrainingEarly
+from halo.configs.grpo import EarlyStopConfig
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.entrypoints.script import EarlyStopExit, run_trainer
+from halo.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.repo import REPO_ROOT
 
 

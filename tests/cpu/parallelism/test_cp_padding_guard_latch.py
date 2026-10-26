@@ -26,9 +26,9 @@ import torch.distributed as dist
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.ulysses_model import UlyssesModel, _reject_left_padding
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel, _reject_left_padding
 
 VOCAB = 64
 

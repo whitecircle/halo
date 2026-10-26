@@ -24,7 +24,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.trainers.stored_metrics import StoredMetricsMixin
+from halo.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.gloo import run_gloo_ranks
 
 

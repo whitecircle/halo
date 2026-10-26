@@ -23,11 +23,11 @@ os.environ["HF_DATASETS_CACHE"] = _CACHE_DIR
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline.map_cache_key import CACHE_KEY_ATTR, map_cache_file_name, rank_stable_dataset_id
-from src.data.preprocessed.preparation import shard_dataset
-from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
-from src.data.render_columns import alias_tools_column
-from src.data.sources.loading import load_datasets
+from halo.data.pipeline.map_cache_key import CACHE_KEY_ATTR, map_cache_file_name, rank_stable_dataset_id
+from halo.data.preprocessed.preparation import shard_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from halo.data.render_columns import alias_tools_column
+from halo.data.sources.loading import load_datasets
 
 
 def _make_sharded_dataset(tmp_dir: str, num_rows: int = 100, num_shards: int = 2) -> str:

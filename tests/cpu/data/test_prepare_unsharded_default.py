@@ -10,8 +10,8 @@ import os
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.preprocessed.shard_index import SHARD_INDEX_FILE
-from src.data.sources.loading import load_preprocessed_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE
+from halo.data.sources.loading import load_preprocessed_dataset
 from tests.common.datasets import write_prepared_text_dataset
 
 _DOCS = [f"Document number {i} of the raw corpus." for i in range(12)]

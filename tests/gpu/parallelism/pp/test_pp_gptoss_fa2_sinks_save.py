@@ -32,9 +32,9 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, GptOssForCausalLM, default_data_collator
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG

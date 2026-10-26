@@ -37,7 +37,7 @@ The checkpoint is a composite VLM with **no text-only CausalLM sibling** in tran
 
 ## EP wrapper
 
-`EPGlm5NextMoELayer` (`src/distributed/expert_parallel/families/glm5_next.py`) replaces `Glm5NextTextMoE`.
+`EPGlm5NextMoELayer` (`halo/distributed/expert_parallel/families/glm5_next.py`) replaces `Glm5NextTextMoE`.
 
 - Routing: sigmoid scores plus the fp32 `gate.e_score_correction_bias` on **selection only** (the routed weight comes from the unbiased scores), top-8, `norm_topk_prob`, then `routed_scaling_factor` — fp32 top-k weights, expert load recorded for balancing.
 - Experts: fused `Glm5NextTextExperts.gate_up_proj [E, 2M, H]` / `down_proj [E, H, M]` in-module. The hub spells them per-expert (`experts.{i}.gate_proj/up_proj/down_proj`); transformers' weight converter restores the fused layout on load and, on a wrapper-less `save_pretrained`, the per-expert spelling on save.

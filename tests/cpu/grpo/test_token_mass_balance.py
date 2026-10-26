@@ -19,14 +19,14 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.trainers.grpo.grpo_rules import reject_unbalanceable_token_mass
-from src.trainers.grpo.objective.loss_inputs import (
+from halo.trainers.grpo.grpo_rules import reject_unbalanceable_token_mass
+from halo.trainers.grpo.objective.loss_inputs import (
     NEGATIVE_ONLY_MASS_KEY,
     NET_TOKEN_MASS_KEY,
     TOKEN_MASS_SCALE_KEY,
     record_token_mass,
 )
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 
 
 def _local(x):

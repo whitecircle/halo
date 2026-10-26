@@ -24,8 +24,8 @@ import time
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline.coordinated_map import coordinated_dataset_operation
-from src.entrypoints import script
+from halo.data.pipeline.coordinated_map import coordinated_dataset_operation
+from halo.entrypoints import script
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

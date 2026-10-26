@@ -7,8 +7,8 @@ Run: python tests/cpu/parallelism/test_parallelism_config_gate_order.py
 
 import pytest
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.lowp.spec import LowpSpec
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.lowp.spec import LowpSpec
 from tests.common.parallelism import create_config, simulated_world
 
 # (shape breaking both gates, the earlier gate's message head, shape breaking only the later gate,

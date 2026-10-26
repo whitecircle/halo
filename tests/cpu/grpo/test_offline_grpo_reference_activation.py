@@ -9,10 +9,10 @@ from accelerate import PartialState
 from datasets import Dataset
 from torch import nn
 
-import src.trainers.grpo.offline.reference as reference_module
-from src.trainers.checkpointing import CheckpointingMixin
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.reference_logps import ReferenceLogpsMixin
+import halo.trainers.grpo.offline.reference as reference_module
+from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.reference_logps import ReferenceLogpsMixin
 from tests.common.gloo import run_gloo_ranks
 
 

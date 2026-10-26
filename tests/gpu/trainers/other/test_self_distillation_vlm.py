@@ -23,10 +23,10 @@ from datasets import Image as HFImage
 from transformers import AutoModelForImageTextToText, AutoProcessor
 from trl import SFTConfig
 
-from src.data.collators.vlm import SelfDistillVLMDataCollator
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.data.collators.vlm import SelfDistillVLMDataCollator
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from tests.common.datasets import digit_image
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B

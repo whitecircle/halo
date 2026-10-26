@@ -8,9 +8,9 @@ after, and the read must not repeat per split.
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.preprocessed import tokenization
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.preprocessed.preparation import preprocess_dataset
+from halo.data.preprocessed import tokenization
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.preparation import preprocess_dataset
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
 

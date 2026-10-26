@@ -5,7 +5,7 @@ import pytest
 import torch
 from transformers import Qwen3_5MoeConfig
 
-from src.models.config_access import (
+from halo.models.config_access import (
     TIE_WORD_EMBEDDINGS_FLAG,
     text_config,
     tie_flag_configs,

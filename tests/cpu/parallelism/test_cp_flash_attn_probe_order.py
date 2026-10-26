@@ -19,8 +19,8 @@ from unittest.mock import patch
 
 import pytest
 
-import src.distributed.context_parallel.ulysses_attention as base_layer
-import src.models.attention.selection as selection
+import halo.distributed.context_parallel.ulysses_attention as base_layer
+import halo.models.attention.selection as selection
 
 
 def _importable(name: str) -> bool:

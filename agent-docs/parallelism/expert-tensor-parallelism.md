@@ -43,8 +43,8 @@ inside DeepEP's intranode combine barrier, and under FSDP2 multi-stream drift th
 wait and the barrier times out.
 
 The Megatron-LM scatter-gather pattern, a matched autograd pair — the scatter half is the toolkit-wide
-`SumGradAcrossGroup` (`src/distributed/grad_reduce.py`, shared with TP), the gather half
-`ReduceFromExpertTP` (`src/distributed/expert_parallel/moe_layer/layer.py`):
+`SumGradAcrossGroup` (`halo/distributed/grad_reduce.py`, shared with TP), the gather half
+`ReduceFromExpertTP` (`halo/distributed/expert_parallel/moe_layer/layer.py`):
 
 - **`SumGradAcrossGroup`** — identity forward; `all_reduce(SUM)` backward over `expert_tp_group`. It is
   applied to **both** the layer input tokens **and** the routing weights.
@@ -58,7 +58,7 @@ The Megatron-LM scatter-gather pattern, a matched autograd pair — the scatter 
   expert outputs; identity backward, correct because `SumGradAcrossGroup` owns the input-gradient
   reduction and each shard's weight gradient is independently correct.
 
-Gradient divisors (`build_expert_grad_hook` / `build_router_grad_hook`, `src/distributed/expert_parallel/moe_layer/grad_sync.py`):
+Gradient divisors (`build_expert_grad_hook` / `build_router_grad_hook`, `halo/distributed/expert_parallel/moe_layer/grad_sync.py`):
 
 | Parameter | Divisor | Rationale |
 |---|---|---|
@@ -83,7 +83,7 @@ torchrun --nproc_per_node=2 \
 
 ## Validation rules
 
-Enforced in `src/distributed/parallelism_rules.py` before model loading:
+Enforced in `halo/distributed/parallelism_rules.py` before model loading:
 
 - `expert_tp_size` must divide the NVLink domain (= `gpus_per_node` on a standard node, the rack on
   NVL72).
@@ -146,7 +146,7 @@ EP=16 throughput. Validate convergence on your own config before a long run.
 ## Weight sharding
 
 ETP shards the intermediate dimension `M` of expert FFN weights; the recipe is keyed on the model's
-expert layout (`src/distributed/expert_parallel/moe_layer/compute.py` + `families/`).
+expert layout (`halo/distributed/expert_parallel/moe_layer/compute.py` + `families/`).
 
 - **GptOss (fused interleaved GLU)** — `gate_up_proj [E, H, 2M]` is `[g0,u0,g1,u1,…]`. De-interleave
   (`gate = [...,::2]`, `up = [...,1::2]`), shard each along dim 2 to `[E, H, M/tp]`; shard

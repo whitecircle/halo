@@ -15,8 +15,8 @@ import torch
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch
 from tests.common.harness import gpu_test_main

@@ -11,30 +11,30 @@ pyproject.toml
 uv.lock
 
 # Parallelism core
-src/distributed/**
-src/runtime/**
-src/checkpoint/parallel/**
-src/subclass_registry.py
-src/kernels/moe_permute.py
-src/kernels/fused_glu.py
-src/kernels/lowp/spec.py
-src/models/gradient_checkpointing.py
-src/models/moe/**
-src/model_loading/parallel/**
-src/callbacks/balancing.py
+halo/distributed/**
+halo/runtime/**
+halo/checkpoint/parallel/**
+halo/subclass_registry.py
+halo/kernels/moe_permute.py
+halo/kernels/fused_glu.py
+halo/kernels/lowp/spec.py
+halo/models/gradient_checkpointing.py
+halo/models/moe/**
+halo/model_loading/parallel/**
+halo/callbacks/balancing.py
 
 # Rollout-engine weight sync
-src/weight_sync/**
+halo/weight_sync/**
 
 # Trainers
-src/trainers/**
+halo/trainers/**
 
 # Checkpoint artifact layout the savers and the weight sync share
-src/checkpoint/hub_layout.py
-src/checkpoint/writing.py
-src/checkpoint/adapters.py
-src/checkpoint/sidecars.py
-src/checkpoint/weights_source.py
+halo/checkpoint/hub_layout.py
+halo/checkpoint/writing.py
+halo/checkpoint/adapters.py
+halo/checkpoint/sidecars.py
+halo/checkpoint/weights_source.py
 
 # Rulebook
 CLAUDE.md

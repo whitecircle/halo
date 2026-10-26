@@ -22,8 +22,8 @@ from types import SimpleNamespace
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline.chat_render import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
-from src.entrypoints.data_setup import prepare_chat_text_split
+from halo.data.pipeline.chat_render import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
+from halo.entrypoints.data_setup import prepare_chat_text_split
 from tests.common.repo import load_script_module
 
 BOS_ID = 1

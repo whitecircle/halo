@@ -15,16 +15,16 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from transformers import CONFIG_MAPPING, PretrainedConfig
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.env import env_int, env_str
-from src.runtime.collectives import broadcast_from_rank0
-from src.runtime.consensus import DeferredRankFailure
-from src.runtime.dtensor import materialize_dtensor, to_local
-from src.trainers.grpo.rollout.weight_push import _HubForwarder
-from src.weight_sync.chunking import resolve_sync_device
-from src.weight_sync.clients.base import WeightSyncClientBase
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.env import env_int, env_str
+from halo.runtime.collectives import broadcast_from_rank0
+from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.dtensor import materialize_dtensor, to_local
+from halo.trainers.grpo.rollout.weight_push import _HubForwarder
+from halo.weight_sync.chunking import resolve_sync_device
+from halo.weight_sync.clients.base import WeightSyncClientBase
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.ports import free_port
 
 # The rollout endpoints the GPU server tiers drive. ``or`` rather than an env_str default: an

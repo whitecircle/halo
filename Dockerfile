@@ -310,7 +310,7 @@ LABEL version="${VERSION}"
 LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 
-COPY src/ ./src/
+COPY halo/ ./halo/
 COPY scripts/ ./scripts/
 COPY launcher-configs/ ./launcher-configs/
 COPY jinja-templates/ ./jinja-templates/
@@ -320,8 +320,8 @@ COPY skills/ ./skills/
 RUN mkdir -p .claude .agents && ln -s ../skills .claude/skills && ln -s ../skills .agents/skills
 COPY README.md CLAUDE.md AGENTS.md LICENSE APACHE-2.0.txt ./
 
-# Editable install, deliberately unmasked: a swallowed failure would ship an image with no `halo`
-# CLI and no installed `src` distribution.
+# Editable install, deliberately unmasked: a swallowed failure would ship an image with neither the
+# `halo` CLI nor an installed `halo` package.
 RUN uv pip install --system -e . --no-deps
 
 # transformer_engine ships with the NGC base and is unused here. Removed after the reconcile, so

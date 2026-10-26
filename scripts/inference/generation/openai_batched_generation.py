@@ -28,6 +28,9 @@ Output dataset format:
 import argparse
 import logging
 
+from halo.data.pipeline.conversation import build_base_prompt, resolve_system_prompt
+from halo.inference.batch_requests import parallel_openai_requests
+from halo.inference.openai_client import build_openai_client
 from scripts.cli_arguments import add_openai_endpoint_args
 from scripts.inference.inference_arguments import (
     add_checkpoint_interval_arg,
@@ -41,9 +44,6 @@ from scripts.inference.inference_arguments import (
     run_async_cli,
     save_results_to_s3,
 )
-from src.data.pipeline.conversation import build_base_prompt, resolve_system_prompt
-from src.inference.batch_requests import parallel_openai_requests
-from src.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)
 

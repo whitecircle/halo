@@ -34,11 +34,11 @@ import torch.nn.functional as F
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.configs.distillation import DistillationConfig
-from src.data.collators.padded import DataCollatorForCausalLMWithPadding
-from src.distributed.parallelism_config import ParallelismConfig
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.configs.distillation import DistillationConfig
+from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_all, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B

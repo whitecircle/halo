@@ -17,8 +17,8 @@ import torch
 import torch.nn.functional as F
 from transformers.loss import loss_utils
 
-import src.model_loading.liger.cross_entropy as ce_module
-from src.model_loading.liger.cross_entropy import (
+import halo.model_loading.liger.cross_entropy as ce_module
+from halo.model_loading.liger.cross_entropy import (
     _TORCH_CROSS_ENTROPY,
     liger_cross_entropy,
     patch_loss_utils_cross_entropy,
@@ -138,8 +138,8 @@ import torch.nn.functional as F
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
-from src.model_loading.liger.dispatch import apply_liger_kernel
+from halo.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
+from halo.model_loading.liger.dispatch import apply_liger_kernel
 
 applied = apply_liger_kernel(CONFIG_MAPPING["llama"]())
 failures = []

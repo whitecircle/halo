@@ -19,10 +19,10 @@ from transformers.loss.loss_utils import ForCausalLMLoss
 from transformers.models.cohere2_moe import Cohere2MoeConfig, Cohere2MoeForCausalLM
 from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM
 
-from src.model_loading.liger import cross_entropy
-from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from src.model_loading.liger.fused_modules import apply_fused_modules_to_model
-from src.models.head_transform import HeadTransform
+from halo.model_loading.liger import cross_entropy
+from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.model_loading.liger.fused_modules import apply_fused_modules_to_model
+from halo.models.head_transform import HeadTransform
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG
 
 # Four times the class default (0.0625), so a head reading a stale default would train a different loss.

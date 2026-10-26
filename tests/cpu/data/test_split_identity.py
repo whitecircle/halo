@@ -33,8 +33,8 @@ from datasets import (
     load_from_disk,
 )
 
-from src.data.sources import replica_identity
-from src.data.sources.replica_identity import _split_identity
+from halo.data.sources import replica_identity
+from halo.data.sources.replica_identity import _split_identity
 
 ROWS = 20
 # Each media feature with how one stored file sits in its column.

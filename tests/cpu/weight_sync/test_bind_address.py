@@ -30,13 +30,13 @@ from typing import NamedTuple
 import pytest
 from torch.distributed import distributed_c10d as c10d
 
-import src.weight_sync.clients.base as base_module
-import src.weight_sync.clients.sglang as sglang_module
-import src.weight_sync.clients.vllm as vllm_module
-from src.inference.endpoints import is_loopback
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
-from src.weight_sync.transport.rendezvous import RendezvousListener, _outbound_ip
+import halo.weight_sync.clients.base as base_module
+import halo.weight_sync.clients.sglang as sglang_module
+import halo.weight_sync.clients.vllm as vllm_module
+from halo.inference.endpoints import is_loopback
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.transport.rendezvous import RendezvousListener, _outbound_ip
 from tests.common.fake_engines import FakeVLLMServer
 from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client

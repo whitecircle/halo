@@ -15,10 +15,10 @@ import types
 
 import pytest
 
-from src.configs.script_arguments import ModelArguments
-from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
-from src.model_loading.parallel.peft_setup import wraps_in_peft_model
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.configs.script_arguments import ModelArguments
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
+from halo.model_loading.parallel.peft_setup import wraps_in_peft_model
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 
 # What split_expert_lora_targets leaves behind: the attention targets of a mixed run, none of an
 # expert-only one.

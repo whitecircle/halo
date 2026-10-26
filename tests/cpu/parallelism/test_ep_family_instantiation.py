@@ -15,9 +15,9 @@ Run: python tests/cpu/parallelism/test_ep_family_instantiation.py
 import pytest
 import torch
 
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers, ep_claimed_blocks
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers, ep_claimed_blocks
 from tests.common.parallelism import single_process_ep_config
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model

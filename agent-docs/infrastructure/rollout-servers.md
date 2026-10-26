@@ -7,7 +7,7 @@ back over a per-server NCCL group. Every on-policy GRPO trainer needs one:
 [Async GRPO with Environments](../training-methods/async-grpo/README.md).
 
 The training environment never imports either engine (ABI-incompatible stacks); it speaks to them
-through the weight-sync clients in `src/weight_sync/`. Select the engine with
+through the weight-sync clients in `halo/weight_sync/`. Select the engine with
 `rollout_backend: vllm | sglang` (async GRPO only; Online GRPO is vLLM-only by construction). Every
 other server knob is the same for both engines:
 
@@ -207,7 +207,7 @@ Missing, it shows as `RoutedExperts: Failed to load weights` per expert layer pe
 log, with the trainer's `sampling/logratio_mean` drifting monotonically negative
 (`YaRNScalingRotaryEmbedding: Failed to load weights` is benign: no loadable weights). Do not
 override `PYTHONPATH` at `docker run`: dropping `/opt/nccl_compat` kills weight-transfer init
-(`No module named 'src'`).
+(`No module named 'halo'`).
 
 **The weight-transfer re-init patch** (`docker/vllm/patches/vllm_weight_transfer_reinit_patch.py`,
 applied through the same `sitecustomize` hook) destroys the engine's previous NCCL communicator
@@ -263,7 +263,7 @@ Checkpoint layout and expert un-fuse rules live in
 ### Construction gates
 
 Which families each backend accepts for RL is gated trainer-side at construction
-(`reject_unsyncable_model`, `src/trainers/grpo/rollout/weight_push.py`). Inkling, GLM-5 Next
+(`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`). Inkling, GLM-5 Next
 and Cohere2 MoE carry a `weight_sync_refusal` on their family spec and are refused on both engines; every other
 refusal is an engine fact on that engine's client
 ([Which families each engine serves](#which-families-each-engine-serves)).
@@ -279,7 +279,7 @@ run has none; `use_grouped_gemm: true` (the torchrun default) installs the wrapp
 **Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry. Where
 the live module tree and the hub checkpoint differ, the rewrite is derived, not tabulated: Laguna's
 `export_key_renames` pairs, then transformers' own save-side revert of what the load converted
-outside the per-expert merges (`export_conversions` in `src/checkpoint/hub_layout.py`, the list the gathered save inverts).
+outside the per-expert merges (`export_conversions` in `halo/checkpoint/hub_layout.py`, the list the gathered save inverts).
 
 One-to-one renames stream tensor by tensor. A tensor a reverse converter claims (a fused
 `gate_up_proj` the hub stores split, a vision tower's q/k/v the hub stores fused) is held until its
@@ -623,7 +623,7 @@ Engine behavior under RL:
     switches to raw values, and the startup probe refuses them.
 
 - **A length cut-off is a `stop_reason`**, not a `finish_reason`. `get_finish_reason`
-  (`src/inference/response.py`) reads `finish_reason or stop_reason`, so the rollout path grades an
+  (`halo/inference/response.py`) reads `finish_reason or stop_reason`, so the rollout path grades an
   engine-truncated completion as truncated rather than as an answer.
 
 - **R3**: serve with `--enable-return-routed-experts --moe-runner-backend triton`. The fused runners

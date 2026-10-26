@@ -23,9 +23,9 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
 from tests.common.distributed import ensure_model_downloaded, world_mean, world_spread
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main

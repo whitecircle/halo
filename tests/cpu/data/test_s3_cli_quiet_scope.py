@@ -14,7 +14,7 @@ from scripts.before_training.s3_datasets import main as s3_cli_main
 
 
 def _run(argv: list[str]) -> None:
-    with patch("src.data.sources.s3_client.S3Client.__post_init__"), patch.object(sys, "argv", ["s3", *argv]):
+    with patch("halo.data.sources.s3_client.S3Client.__post_init__"), patch.object(sys, "argv", ["s3", *argv]):
         s3_cli_main()
 
 
@@ -25,7 +25,7 @@ def _run(argv: list[str]) -> None:
 )
 @pytest.mark.parametrize("quiet", [False, True], ids=["default", "quiet"])
 def test_quiet_turns_off_the_transfer_progress_bar(argv, method, quiet):
-    with patch(f"src.data.sources.s3_client.S3Client.{method}", return_value="s3://b/key") as transfer:
+    with patch(f"halo.data.sources.s3_client.S3Client.{method}", return_value="s3://b/key") as transfer:
         _run([*argv, *(["-q"] if quiet else [])])
     assert transfer.call_args.kwargs["show_progress"] is not quiet
 

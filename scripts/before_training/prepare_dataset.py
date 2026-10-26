@@ -17,24 +17,24 @@ from huggingface_hub import HfApi, upload_folder
 from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTokenizer
 
-from scripts.cli_arguments import add_trust_remote_code_arg
-from src.checkpoint.atomic import DISPLACED_SUFFIX, clear_staging_path
-from src.configs.parser import HaloArgumentParser
-from src.data.pipeline.coordinated_map import resolve_map_num_proc
-from src.data.preprocessed.metadata import PreprocessingConfig
-from src.data.preprocessed.preparation import preprocess_dataset
-from src.data.render_columns import reject_missing_render_column
-from src.data.sources.loading import load_dataset_from_source
-from src.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_dataset_destination, parse_s3_uri
-from src.data.sources.s3_client import S3Client
-from src.log import configure_cli_logging
-from src.model_loading.tokenizer_setup import (
+from halo.checkpoint.atomic import DISPLACED_SUFFIX, clear_staging_path
+from halo.configs.parser import HaloArgumentParser
+from halo.data.pipeline.coordinated_map import resolve_map_num_proc
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.preparation import preprocess_dataset
+from halo.data.render_columns import reject_missing_render_column
+from halo.data.sources.loading import load_dataset_from_source
+from halo.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_dataset_destination, parse_s3_uri
+from halo.data.sources.s3_client import S3Client
+from halo.log import configure_cli_logging
+from halo.model_loading.tokenizer_setup import (
     adopt_tokenizer_chat_template,
     load_chat_template,
     resolve_tokenizer,
     set_run_chat_template,
 )
-from src.models.segment_markers import reject_compressed_kv_rows
+from halo.models.segment_markers import reject_compressed_kv_rows
+from scripts.cli_arguments import add_trust_remote_code_arg
 
 logger = logging.getLogger(__name__)
 

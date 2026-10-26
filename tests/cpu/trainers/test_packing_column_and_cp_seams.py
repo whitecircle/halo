@@ -23,9 +23,9 @@ import pytest
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from trl import SFTTrainer
 
-from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
-from src.trainers.dataloaders import DataParallelLoaderMixin
-from src.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
+from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
+from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
 from tests.common.models import TINY_DSV4_CONFIG
 
 

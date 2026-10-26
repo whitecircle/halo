@@ -8,7 +8,7 @@ world_size // 2``) and setting ``ep_size = gpus_per_node`` — one node-local EP
 That is the canonical production multi-node MoE shape: experts distributed node-locally (NVLink
 all-to-all), DP across nodes, and expert gradients averaged across nodes via the
 cross-domain expert-replica groups. It exercises the membership math in
-``src.distributed.group_layout`` (``NodeLocalLayout.group_ranks`` / ``replica_ranks``) and the
+``halo.distributed.group_layout`` (``NodeLocalLayout.group_ranks`` / ``replica_ranks``) and the
 ``num_ep_groups > 1`` replica-grad-sync path — the parts that only run when there is more than one
 EP group, i.e. only in multi-node.
 
@@ -35,10 +35,10 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.hardware import supports_grouped_mm
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff
 from tests.common.ep_reference import ep_layers

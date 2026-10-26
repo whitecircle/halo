@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """The divergence registry, the gold-token gathers, the token reduction and the SDPG beta schedule
-(``src/trainers/distillation/divergences.py``).
+(``halo/trainers/distillation/divergences.py``).
 
 Pure tensor math, so the assertions are closed-form values, symmetry and bound properties, the
 temperature convention and the reduction semantics. The fp32 evaluation and the ``-inf`` handling
@@ -16,7 +16,7 @@ import pytest
 import torch
 from torch.nn.functional import softmax
 
-from src.trainers.distillation.divergences import (
+from halo.trainers.distillation.divergences import (
     DIVERGENCES,
     call_divergence,
     cosine_similarity_loss,
@@ -31,7 +31,7 @@ from src.trainers.distillation.divergences import (
     soft_target_cross_entropy_loss,
     unnormalized_kl_loss,
 )
-from src.trainers.distillation.opd_term import beta_warmup_decay
+from halo.trainers.distillation.opd_term import beta_warmup_decay
 
 BS, SEQ, VOCAB = 2, 4, 8
 torch.manual_seed(42)

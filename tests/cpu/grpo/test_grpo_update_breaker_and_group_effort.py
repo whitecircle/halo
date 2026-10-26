@@ -35,14 +35,14 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
-from src.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
-from src.environments.rollout_config import VALID_REASONING_EFFORTS
-from src.trainers.grpo.environmental import step_batch
-from src.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
-from src.trainers.grpo.environmental.step_batch import EMPTY_ROLLOUT_STEP_LIMIT, BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.objective.loss_inputs import (
+from halo.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
+from halo.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS
+from halo.trainers.grpo.environmental import step_batch
+from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from halo.trainers.grpo.environmental.step_batch import EMPTY_ROLLOUT_STEP_LIMIT, BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.objective.loss_inputs import (
     NEGATIVE_ONLY_MASS_KEY,
     NET_TOKEN_MASS_KEY,
     TOKEN_MASS_SCALE_KEY,
@@ -196,7 +196,7 @@ def test_none_gradients_leave_adam_state_and_weights_untouched():
 def test_toolkit_optimizers_skip_none_gradients():
     """Guards the same contract for the toolkit's own optimizers, whose step loops are hand-written."""
     for name in ("adamw_bf16", "flash_adamw", "muon"):
-        source = (pathlib.Path("src/optimizers") / f"{name}.py").read_text()
+        source = (pathlib.Path("halo/optimizers") / f"{name}.py").read_text()
         assert "grad is None" in source or "grad is not None" in source, f"{name}: no None-grad guard in the step loop"
 
 

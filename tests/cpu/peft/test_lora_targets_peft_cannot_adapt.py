@@ -31,10 +31,10 @@ from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM, DeepseekV4GroupedLinear
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 
-import src.model_loading.parallel.peft_setup as peft_setup
-from src.configs.script_arguments import ModelArguments
-from src.kernels.lowp.linear import LowPrecisionLinear
-from src.model_loading.parallel.peft_setup import build_peft_config, configure_adapter_training
+import halo.model_loading.parallel.peft_setup as peft_setup
+from halo.configs.script_arguments import ModelArguments
+from halo.kernels.lowp.linear import LowPrecisionLinear
+from halo.model_loading.parallel.peft_setup import build_peft_config, configure_adapter_training
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_DSV4_CONFIG
 

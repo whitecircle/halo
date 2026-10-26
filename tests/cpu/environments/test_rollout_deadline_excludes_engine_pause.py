@@ -16,11 +16,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.environments import ray_actors
-from src.environments.episode import RolloutResult
-from src.environments.messages import Trajectory
-from src.environments.ray_actors import EnginePauseClock, EnvironmentActor, RolloutManager, _await_with_deadline
-from src.environments.rollout_config import RolloutConfig
+from halo.environments import ray_actors
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Trajectory
+from halo.environments.ray_actors import EnginePauseClock, EnvironmentActor, RolloutManager, _await_with_deadline
+from halo.environments.rollout_config import RolloutConfig
 
 # The episode overruns the deadline by half a second, and a credit equal to the timeout clears it by
 # another half: a stalled event loop on a loaded runner must not flip either verdict.

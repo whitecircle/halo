@@ -108,7 +108,7 @@ stages, and non-first stages driven through `inputs_embeds`, so each family's ro
 construction, `layer_types` handling and MoE wrappers are inherited. The input embedding is located
 by identity (`get_input_embeddings`).
 
-Families are registered in `PP_FAMILY_SPECS` (`src/distributed/pipeline_parallel/families.py`), one
+Families are registered in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`), one
 `PPFamilySpec` per family keyed by its backbone class. A spec with `validated=True` is registered: its
 stages reproduce the unsplit model on the pipeline GPU tier. A spec with a `refusal` is refused with
 its reason. A backbone no spec registers is refused by name —
@@ -282,7 +282,7 @@ last-stage peak memory **1045.9 → 470.9 MiB**.
 The last stage applies what the family's `*ForCausalLM.forward` does around `lm_head` — Cohere's
 `logit_scale`, Gemma's softcap, Granite's division — to the logits it returns and inside the fused
 loss: the transform the chunked GRPO log-probs apply, verified against the family's forward
-(`src/models/head_transform.py`). A family whose forward it does not reproduce is refused on every
+(`halo/models/head_transform.py`). A family whose forward it does not reproduce is refused on every
 rank.
 
 ## Attention, masks, and checkpointing
@@ -378,7 +378,7 @@ reduction, so evaluation does not reshard the stage per batch.
 Loading is **stage-aware**: each rank builds the whole model shell on the meta device, plans the
 checkpoint against that key space, keeps only the plans for its stage's decoder layers — re-basing
 `layers.5` on disk to `layers.1` on a stage starting at layer 4 — and streams exactly those tensors
-from safetensors (`load_pp_stage_model`, `src/model_loading/parallel/pp.py`, narrowing the
+from safetensors (`load_pp_stage_model`, `halo/model_loading/parallel/pp.py`, narrowing the
 whole-model plan through `StageKeyFilter`). Peak
 per-rank load memory is
 
@@ -405,7 +405,7 @@ load runs on every rank at once; `max_concurrent_loading` does not apply
 
 ## Checkpoints and resume
 
-`save_pp_checkpoint` (`src/checkpoint/parallel/pp.py`) writes one complete-tensor safetensors
+`save_pp_checkpoint` (`halo/checkpoint/parallel/pp.py`) writes one complete-tensor safetensors
 part set per stage under the hub's names plus a merged standard HF index: the directory loads via
 plain `from_pretrained` and serves like an EP-gathered save
 ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)). A stage names its tensors
@@ -448,7 +448,7 @@ python scripts/after_training/merge_pp_stages.py \
     --output_dir /models/merged
 ```
 
-`merge_pp_stage_parts` (`src/checkpoint/pp_stage_merge.py`) requires identical indexes across the
+`merge_pp_stage_parts` (`halo/checkpoint/pp_stage_merge.py`) requires identical indexes across the
 inputs and copies each part the index names from the first input that holds it, refusing a size
 mismatch. It copies every input's optimizer shards, RNG and prefetch states and one
 `optimizer_meta.pt`, refusing metas that differ, a per-rank file held at two sizes and a rank whose
@@ -475,11 +475,11 @@ check. A part no input holds raises naming it and its stage. The merged director
 PP is declare-to-enable per trainer (like `SUPPORTS_CP`): `PP_REFUSAL` is the mechanism a refusing
 trainer's error names, `None` where PP is supported. An enabled trainer declares its
 pipeline-loss contract as a `PipelineLossAdapter` (`_pp_loss_adapter()`,
-`src/trainers/parallelism/pipeline_loss_adapter.py`). `_configure_pipeline_parallel` calls
+`halo/trainers/parallelism/pipeline_loss_adapter.py`). `_configure_pipeline_parallel` calls
 `_pp_loss_adapter()` once, before anything reads the adapter, so an adapter builder may seed the
 per-step state its loss closes over.
 
-The refusals are pure functions in `src/trainers/parallelism/pipeline_rules.py`.
+The refusals are pure functions in `halo/trainers/parallelism/pipeline_rules.py`.
 `_split_pipeline_stage` runs them before the split, in this order: the trainer's own
 `_reject_unsupported_pp_options` hook (DPO and KTO: positional `model`/`args`, a live `ref_model`, the
 precompute-only reference contract, `compute_metrics`), then `reject_unsupported_pp_training_args`
@@ -511,14 +511,14 @@ distillation (a second forward per microbatch through a distinct frozen teacher)
 
 ## Code map
 
-`src/distributed/pipeline_parallel/`: `families.py` (`PPFamilySpec`, `PP_FAMILY_SPECS`, the
+`halo/distributed/pipeline_parallel/`: `families.py` (`PPFamilySpec`, `PP_FAMILY_SPECS`, the
 hyper-connection stream forwards), `model_rules.py` (`reject_unsupported_pp_structure`, the
 run-settings gate), `partition.py` (the head-weighted split and `validate_partition`), `stage.py`
 (`StageLayout`, `PipelineStageModule`, `build_pipeline_stage` and the stage↔global naming contract),
 `stage_losses.py` (`TokenLoss`, `FusedHeadLoss`), `groups.py` (the chain and stage groups), `runner.py`
 (`PipelineRunner` over torch's `Schedule1F1B` / `ScheduleGPipe`, `resolve_microbatch_count`); the
-stage-aware loader is `src/model_loading/parallel/pp.py`. Trainer side: `PipelineTrainerMixin`
-(`src/trainers/parallelism/pipeline_trainer.py`, inert at `pp_size == 1`), the refusals
-(`src/trainers/parallelism/pipeline_rules.py`), `PipelineLossAdapter` and the stage clip
-`pp_clip_grad_norm` (`src/trainers/parallelism/grad_clipping.py`); the next-token label math the losses
-share lives in `src/kernels/logprobs.py`.
+stage-aware loader is `halo/model_loading/parallel/pp.py`. Trainer side: `PipelineTrainerMixin`
+(`halo/trainers/parallelism/pipeline_trainer.py`, inert at `pp_size == 1`), the refusals
+(`halo/trainers/parallelism/pipeline_rules.py`), `PipelineLossAdapter` and the stage clip
+`pp_clip_grad_norm` (`halo/trainers/parallelism/grad_clipping.py`); the next-token label math the losses
+share lives in `halo/kernels/logprobs.py`.

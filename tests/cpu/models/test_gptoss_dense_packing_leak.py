@@ -21,9 +21,9 @@ import torch
 from transformers import GptOssConfig, Mistral4Config
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
-from src.data.collators.factory import select_data_collator
-from src.data.collators.packing import DataCollatorWithPacking
-from src.models.segment_markers import DENSE_PACKING_LEAK_MODEL_TYPES
+from halo.data.collators.factory import select_data_collator
+from halo.data.collators.packing import DataCollatorWithPacking
+from halo.models.segment_markers import DENSE_PACKING_LEAK_MODEL_TYPES
 
 SEED = 1234
 

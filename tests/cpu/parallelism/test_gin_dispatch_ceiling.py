@@ -15,7 +15,7 @@ import importlib
 
 import pytest
 
-from src.distributed.expert_parallel.deepep import capacity as capacity_mod
+from halo.distributed.expert_parallel.deepep import capacity as capacity_mod
 
 # The process capacity scope the backends hold; reloading the module for its ceiling must not replace it.
 _CAPACITY_SCOPE = capacity_mod.capacity_scope

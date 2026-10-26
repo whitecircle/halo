@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
-from src.optimizers.muon import _GNS_CHUNK_SIZE, _muon_kernels_available, build_muon_optimizer
+from halo.optimizers.muon import _GNS_CHUNK_SIZE, _muon_kernels_available, build_muon_optimizer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import assert_optimizer_state_bit_exact, assert_orthogonalized, log, log_spectrum_matrix
 

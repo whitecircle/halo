@@ -17,8 +17,8 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import MappingProxyType
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.parallelism_rules import AXES, SUPPORTED_AXIS_SETS
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_rules import AXES, SUPPORTED_AXIS_SETS
 from tests.common.parallelism import make_parallelism_config
 
 STAGE_WIDTH_LIMIT = 32

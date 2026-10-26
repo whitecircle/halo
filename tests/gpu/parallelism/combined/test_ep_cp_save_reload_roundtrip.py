@@ -28,13 +28,13 @@ import torch.distributed as dist
 from safetensors import safe_open
 from transformers import AutoConfig, AutoTokenizer
 
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from src.checkpoint.parallel.save import save_tokenizer
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_flag, env_str
-from src.model_loading.parallel.loader import load_distributed_model
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.parallel.save import save_tokenizer
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_flag, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint

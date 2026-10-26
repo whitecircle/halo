@@ -17,9 +17,9 @@ from collections.abc import AsyncGenerator
 import gradio as gr
 from openai import NOT_GIVEN, AsyncOpenAI
 
+from halo.inference.openai_client import build_openai_client
 from scripts.cli_arguments import add_openai_endpoint_args
 from scripts.inference.inference_arguments import add_gradio_server_args, launch_gradio
-from src.inference.openai_client import build_openai_client
 
 
 def build_parser() -> argparse.ArgumentParser:

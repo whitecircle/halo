@@ -39,24 +39,24 @@ import logging
 
 from trl import GRPOConfig
 
-from src.config_validation import reject_unsupported_args
-from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments, EnvironmentConfig
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, ModelArguments
-from src.data.pipeline.chat_render import render_generation_prompt
-from src.data.pipeline.conversation import as_conversation
-from src.data.pipeline.coordinated_map import coordinated_map_and_filter
-from src.data.pipeline.rejected_rows import blank_conversation
-from src.data.render_columns import missing_render_column_splits, reject_missing_render_column
-from src.data.vlm_routing import reject_image_columns
-from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
-from src.entrypoints.model_setup import (
+from halo.config_validation import reject_unsupported_args
+from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments, EnvironmentConfig
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, ModelArguments
+from halo.data.pipeline.chat_render import render_generation_prompt
+from halo.data.pipeline.conversation import as_conversation
+from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
+from halo.data.pipeline.rejected_rows import blank_conversation
+from halo.data.render_columns import missing_render_column_splits, reject_missing_render_column
+from halo.data.vlm_routing import reject_image_columns
+from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from halo.entrypoints.model_setup import (
     apply_tokenizer_window,
     default_padded_attn_implementation,
     load_model_and_tokenizer,
     log_model_info,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -65,17 +65,17 @@ from src.entrypoints.script import (
     verify_backend_on_rank0,
     with_distributed_teardown,
 )
-from src.environments.episode_keys import ANSWER_KEY
-from src.environments.reasoning_effort import bind_episode_effort
-from src.environments.registry import build_environment
-from src.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.models.context_window import get_model_context_window
-from src.runtime.collectives import barrier
-from src.runtime.ranks import is_global_main_process
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
-from src.trainers.grpo.rollout.engine_preflight import (
+from halo.environments.episode_keys import ANSWER_KEY
+from halo.environments.reasoning_effort import bind_episode_effort
+from halo.environments.registry import build_environment
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.context_window import get_model_context_window
+from halo.runtime.collectives import barrier
+from halo.runtime.ranks import is_global_main_process
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
+from halo.trainers.grpo.rollout.engine_preflight import (
     verify_context_window,
     verify_engine_prompt_logprobs,
     verify_sampler_logprob_reference,

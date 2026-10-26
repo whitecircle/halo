@@ -42,13 +42,13 @@ from trl import DPOConfig
 from trl.models.utils import disable_gradient_checkpointing
 from trl.trainer.utils import use_adapter
 
-from src.configs.preference import DPOScriptArguments
-from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int, env_str
-from src.model_loading.parallel.frozen_models import load_reference_model_for_preference
-from src.trainers.preference.dpo import DistributedDPOTrainer
+from halo.configs.preference import DPOScriptArguments
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int, env_str
+from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
+from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.distributed import ensure_model_downloaded, world_all, world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B

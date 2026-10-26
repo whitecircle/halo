@@ -13,8 +13,8 @@ import pytest
 import torch
 from torch import nn
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.muon import build_muon_optimizer
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.muon import build_muon_optimizer
 
 LR = 3e-4  # the documented Muon default, and a typical fine-tune LR
 STEPS = 200

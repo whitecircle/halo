@@ -7,8 +7,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.parallelism.grad_clipping import GradientClippingMixin
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
 
 
 def _params(n: int) -> list[nn.Parameter]:

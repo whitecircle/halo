@@ -32,20 +32,20 @@ from accelerate import PartialState
 from datasets import Dataset, Features, List, Value, concatenate_datasets
 from trl import DPOConfig, KTOConfig
 
-import src.checkpoint.atomic as atomic_mod
-import src.trainers.reference_logps as precompute_mod
-from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.parser import HaloArgumentParser
-from src.configs.preference import DPOScriptArguments, KTOScriptArguments
-from src.configs.script_arguments import ModelArguments
-from src.entrypoints.run_setup import resume_checkpoint_from_config
-from src.entrypoints.script import ScriptContext
-from src.runtime import filesystem
-from src.runtime.consensus import RankConsensus
-from src.trainers.checkpointing import CheckpointingMixin
-from src.trainers.preference.trl_preference import TRLPreferenceMixin
-from src.trainers.reference_logps import token_digest as _token_digest
+import halo.checkpoint.atomic as atomic_mod
+import halo.trainers.reference_logps as precompute_mod
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.parser import HaloArgumentParser
+from halo.configs.preference import DPOScriptArguments, KTOScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints.run_setup import resume_checkpoint_from_config
+from halo.entrypoints.script import ScriptContext
+from halo.runtime import filesystem
+from halo.runtime.consensus import RankConsensus
+from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.preference.trl_preference import TRLPreferenceMixin
+from halo.trainers.reference_logps import token_digest as _token_digest
 from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 from tests.common.preference_precompute import (

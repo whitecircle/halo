@@ -24,9 +24,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.distributed.fsdp as fsdp
-from src.distributed.mesh import MeshDim
-from src.trainers.parallelism.mode_setup import ModeSetupMixin
+import halo.distributed.fsdp as fsdp
+from halo.distributed.mesh import MeshDim
+from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 
 _BF16 = {"compute_dtype": torch.bfloat16, "fp32_reduce": False}
 _FP32 = {"compute_dtype": torch.float32, "fp32_reduce": False}

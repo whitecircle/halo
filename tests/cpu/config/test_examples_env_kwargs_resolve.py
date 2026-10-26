@@ -19,9 +19,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.registry import build_environment
-from src.rewards.terms import JudgeTerm
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments.registry import build_environment
+from halo.rewards.terms import JudgeTerm
 from tests.common.repo import REPO_ROOT
 
 ENV_EXAMPLES_ROOT = REPO_ROOT / "examples" / "grpo" / "environmental"

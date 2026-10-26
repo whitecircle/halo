@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.distributed.mesh import (
+from halo.distributed.mesh import (
     MeshDim,
     dp_group,
     has_tp_dim,

@@ -1,4 +1,4 @@
-"""CPU tests for :class:`src.kernels.lowp.quantization.WeightVersionCache` — the shared auto-evicting
+"""CPU tests for :class:`halo.kernels.lowp.quantization.WeightVersionCache` — the shared auto-evicting
 weight cache behind the low-precision dequant cache (``quantization.cached_fake_quant``) and the
 DeepGEMM quantized-operand cache.
 
@@ -14,8 +14,8 @@ import gc
 import pytest
 import torch
 
-from src.kernels.lowp import quantization
-from src.kernels.lowp.quantization import WeightVersionCache
+from halo.kernels.lowp import quantization
+from halo.kernels.lowp.quantization import WeightVersionCache
 
 
 def test_hit_and_fingerprint_invalidation():

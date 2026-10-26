@@ -2,7 +2,7 @@
 """Gradio Environment Playground — Interactive UI for testing GRPO environments.
 
 Runs multi-turn episodes with any registered environment against a live rollout server, through the
-same driver the offline eval uses (:func:`src.environments.eval_runner.run_episode`), so an episode
+same driver the offline eval uses (:func:`halo.environments.eval_runner.run_episode`), so an episode
 here is generated and graded exactly as one collected by the trainer.
 
 Usage:
@@ -24,15 +24,15 @@ from typing import Any
 
 import gradio as gr
 
+from halo.environments.episode_keys import ANSWER_KEY
+from halo.environments.eval_runner import EVAL_STATS_KEY, reject_answerless_examples, run_episode
+from halo.environments.messages import Trajectory
+from halo.environments.registry import build_environment, get_registered_environments
+from halo.environments.rollout_config import RolloutConfig
+from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL
+from halo.inference.openai_client import build_openai_client
 from scripts.cli_arguments import add_openai_endpoint_args
 from scripts.inference.inference_arguments import add_gradio_server_args, launch_gradio
-from src.environments.episode_keys import ANSWER_KEY
-from src.environments.eval_runner import EVAL_STATS_KEY, reject_answerless_examples, run_episode
-from src.environments.messages import Trajectory
-from src.environments.registry import build_environment, get_registered_environments
-from src.environments.rollout_config import RolloutConfig
-from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
-from src.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)
 

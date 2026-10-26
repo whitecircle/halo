@@ -18,10 +18,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 
 class _QuantizedStub(nn.Module):

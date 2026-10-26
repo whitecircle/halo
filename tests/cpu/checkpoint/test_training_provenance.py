@@ -19,9 +19,9 @@ import torch
 import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
-from src.checkpoint.format import TRAINING_PROVENANCE_FILE
-from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_provenance, write_training_provenance
-from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
+from halo.checkpoint.format import TRAINING_PROVENANCE_FILE
+from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_provenance, write_training_provenance
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
 
 NUM_HEADS = 4
 

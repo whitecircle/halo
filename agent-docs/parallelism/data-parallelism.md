@@ -36,14 +36,14 @@ over. What gets sharded varies:
 | Mode | What's sharded | Note |
 |------|----------------|------|
 | No parallelism / CP | All params | CP attention coordinates the sequence split independently |
-| EP / ETP / EP+CP / EP+TP | Non-EP params only | EP modules (router + experts) excluded via `ignored_params`; their gradients sync through the EP layer's own post-accumulation grad hooks (`src/distributed/expert_parallel/moe_layer/grad_sync.py`), or — at `num_ep_groups > 1`, single-node shapes included — through one post-backward sweep instead. **Multi-group EP across nodes** (`is_deferred_dp`) additionally shards non-EP params over the EP group; `ep_size==1` MoE stays on plain world-wide FSDP — see [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync) |
+| EP / ETP / EP+CP / EP+TP | Non-EP params only | EP modules (router + experts) excluded via `ignored_params`; their gradients sync through the EP layer's own post-accumulation grad hooks (`halo/distributed/expert_parallel/moe_layer/grad_sync.py`), or — at `num_ep_groups > 1`, single-node shapes included — through one post-backward sweep instead. **Multi-group EP across nodes** (`is_deferred_dp`) additionally shards non-EP params over the EP group; `ep_size==1` MoE stays on plain world-wide FSDP — see [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync) |
 | TP (DP > 1) | Per-layer, 2D `(dp, tp)` mesh | DTensor-compatible grad sync across the DP dim |
 | TP (DP == 1, pure TP) | None | Nothing to sync across DP |
 | Single GPU | None | — |
 
 The plain-DP, CP, EP and EP+TP wraps also leave out the frozen parameters whose dtype no trainable
 parameter shares (a base under differently typed adapters), one parameter at a time, so a trainable child
-of their module stays in its shard group (`_fsdp_exclusions` in `src/trainers/parallelism/mode_setup.py`). A
+of their module stays in its shard group (`_fsdp_exclusions` in `halo/trainers/parallelism/mode_setup.py`). A
 trainable parameter left out of every group has no reduce-scatter, and only an EP layer can leave one out;
 unless its hooks or the deferred sweep average it, trainer construction raises on every rank rather than
 let it drift across DP ranks (`reject_unsynced_trainable_params`).
@@ -63,7 +63,7 @@ experts (`fsdp_shard_ep1_experts: false`, which keeps the router out of FSDP2) r
 
 FSDP2 shards params, gradients, and optimizer states across the DP ranks, so per-rank optimizer-state
 memory is ~`dp_size` smaller than DDP's full per-rank replication. Setup lives in
-`src/distributed/fsdp.py`; `IdentityParamSet` backs `ignored_params` with `id()`-based
+`halo/distributed/fsdp.py`; `IdentityParamSet` backs `ignored_params` with `id()`-based
 membership, because a plain set's membership test triggers tensor `__eq__` on a hash collision and
 raises when comparing EP's fused 3D expert weights against standard 2D weights.
 
@@ -71,7 +71,7 @@ Groups are one per decoder layer, one for the module that embeds the input ids, 
 `fully_shard` unshards a group from a forward pre-hook, so `embed_tokens` has to sit in a group whose
 `__call__` runs before the lookup: on a multimodal wrapper that is the composite `model.model`, which
 builds `inputs_embeds` itself before handing them to the decoder backbone below it
-(`input_embedding_backbone`, `src/models/module_tree.py`). The rule is ancestry — `model.model` is
+(`input_embedding_backbone`, `halo/models/module_tree.py`). The rule is ancestry — `model.model` is
 taken whenever the layer backbone sits under it, however the text stack is spelled — and the probe
 reads the plain transformers tree under every wrapper: a `PeftModel`'s attribute forwarding answers
 with the head module, whose `__call__` the adapter's tuner bypasses, and the CP wrapper's `.model` is
@@ -89,7 +89,7 @@ Two setups **raise** rather than wrap:
 
 - A generative decoder whose layer list the backbone probe cannot reach (`DECODER_LAYER_LIST_ATTRS` —
   `.layers`, `.h`, `.layer`); the message names the class. The fix for a decoder is to add its spelling to
-  `DECODER_LAYER_LIST_ATTRS` (`src/models/module_tree.py`).
+  `DECODER_LAYER_LIST_ATTRS` (`halo/models/module_tree.py`).
 
     The alternative is one root shard group all-gathered for the whole forward, the per-rank memory
     ceiling FSDP2 exists to remove, reported as a successful wrap. Models that carry no such list by
@@ -129,7 +129,7 @@ so the measured peak is unchanged. With the trainer's NCCL on TCP sockets (the n
 step at `gradient_accumulation_steps: 24`.
 
 The window's **last** backward still reshards: the trainer arms the flag per microstep from
-`accelerator.sync_gradients` (`_set_window_end`, `src/trainers/parallelism/grad_sync.py`). That leaves one
+`accelerator.sync_gradients` (`_set_window_end`, `halo/trainers/parallelism/grad_sync.py`). That leaves one
 re-gather per optimizer step instead of one per microstep, so the saving scales with
 `gradient_accumulation_steps` and is nil at 1.
 
@@ -240,7 +240,7 @@ with [`fsdp_defer_grad_sync`](#deferred-gradient-reduce-fsdp_defer_grad_sync).
 
 Enable with `--use_hsdp`. The layout is derived from topology — no shard-size knob: shard width =
 `nvlink_domain_size`, replica count = `num_nvlink_domains`. `apply_fsdp2_for_dp()` applies FSDP2 over
-the 2D `(dp_replicate, dp_shard)` mesh built by `build_dp_mesh` (`src/distributed/mesh.py`);
+the 2D `(dp_replicate, dp_shard)` mesh built by `build_dp_mesh` (`halo/distributed/mesh.py`);
 grad-norm sums shard norms over the `dp_shard` sub-group only.
 
 - **Scope:** pure DP and CP only; every other mode rejects `use_hsdp` at config time
@@ -297,7 +297,7 @@ Derived once in [Stacking the dimensions](README.md#stacking-the-dimensions), pe
 
 ## How the mixin manages FSDP
 
-Under `torchrun`, `DistributedTrainerMixin` (`src/trainers/distributed_trainer.py`) owns FSDP2:
+Under `torchrun`, `DistributedTrainerMixin` (`halo/trainers/distributed_trainer.py`) owns FSDP2:
 `_configure_distributed_modes()` runs the mode ladder (`ModeSetupMixin._wrap_for_parallel_mode`) after
 `super().__init__()`. HF's own
 FSDP wiring is disabled ahead of it: `_init_distributed_config` blanks `fsdp` on every distributed
@@ -310,7 +310,7 @@ loading, and an MoE under `accelerate launch` is rejected at load ([Two launcher
 
 The trainer resolves the compute dtype from the training args (`bf16` / `fp16`) and hands it, with
 `fp32_grad_reduce`, to the FSDP2 entry points, which build the policy (`mixed_precision_policy`,
-`src/distributed/fsdp.py`). With `fp32_non_ep_params: true`, non-expert params are
+`halo/distributed/fsdp.py`). With `fp32_non_ep_params: true`, non-expert params are
 stored fp32 while compute and the param all-gather run in bf16 and gradients reduce in fp32 — an
 alternative to `AdamWBF16` when exact fp32 updates beat stochastic rounding (12 vs 6 B/param). The
 lighter `fp32_grad_reduce` sets `reduce_dtype=fp32` **without** moving storage, keeping BF16 masters
@@ -334,13 +334,13 @@ MoE.
 | Knob | Under plain DP | Gate |
 |---|---|---|
 | `use_grouped_gemm: true` + MoE + `accelerate launch` | rejected — the wrappers need the mixin-managed FSDP2 path. Use `torchrun`, or `use_grouped_gemm: false` | `reject_unsupported_model` |
-| multi-device `device_map` (e.g. `"auto"`) under `torchrun` | rejected — the FSDP2 setup cannot skip a rank-local bail-out before a collective mesh build | `src/distributed/fsdp.py` |
+| multi-device `device_map` (e.g. `"auto"`) under `torchrun` | rejected — the FSDP2 setup cannot skip a rank-local bail-out before a collective mesh build | `halo/distributed/fsdp.py` |
 | `bf16_optimizer: false` with a stock AdamW `optim` on a MoE with `fsdp_shard_ep1_experts: false` | rejected — fused AdamW cannot mix the unsharded plain expert tensors with FSDP2 DTensors. At the default `fsdp_shard_ep1_experts: true` the experts are DTensors too and it is allowed | `reject_stock_adamw_on_mixed_params` |
 | `fp32_non_ep_params` on a MoE at the default `fsdp_shard_ep1_experts: true` | rejected — the FSDP-managed experts stay bf16 beside fp32 dense params in one shard group, which FSDP2 refuses. Set `fsdp_shard_ep1_experts: false` | `reject_unsupported_model` |
 | `fsdp_defer_grad_sync: true` or `fsdp_reshard_after_backward: false` with `fsdp_reshard_after_forward: true` | rejected — each holds unsharded state across the window ZeRO-3 exists to shard; use them under ZeRO-2 | `_reject_fsdp_settings` |
 | `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward`, `fsdp_defer_grad_sync`, `fp32_grad_reduce` under `accelerate launch` | warned and ignored — accelerate owns the wrap | `AcceleratorMixin._warn_knobs_unapplied_under_accelerate` |
 | `bf16_optimizer` auto-enable under accelerate DDP | warned and skipped — replicated DDP is outside the validated stochastic-rounding matrix; set it explicitly to override | `resolve_bf16_optimizer` |
-| accelerate FSDP v1 at `SHARD_GRAD_OP` / `FULL_SHARD` | warned — a known PyTorch bug can corrupt model state after a save. Use the FSDP2 configs or DDP | `src/trainers/parallelism/mode_setup.py` |
+| accelerate FSDP v1 at `SHARD_GRAD_OP` / `FULL_SHARD` | warned — a known PyTorch bug can corrupt model state after a save. Use the FSDP2 configs or DDP | `halo/trainers/parallelism/mode_setup.py` |
 | `use_hsdp` on a single NVLink domain | warned — no-op; the replica axis engages once the job spans domains | `_reject_hsdp` |
 | QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher. QLoRA skips FSDP2, so `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` and `fsdp_defer_grad_sync` raise under it | `model_loading/parallel/load_rules.py`, `reject_fsdp_knobs_under_qlora` |
 | `use_peft` / LoRA, `packing`, `padding_free`, `torch_compile`, `gradient_checkpointing` | supported and ungated — plain DP is the mode with the widest knob surface | — |

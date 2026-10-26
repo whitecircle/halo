@@ -38,7 +38,7 @@ All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignore
 | **Anything else** | **Not supported** | Rejected at config time with the mechanism named — see below |
 
 The supported set is an **allowlist** (`SUPPORTED_AXIS_SETS` in
-`src/distributed/parallelism_rules.py`), checked first by `reject_unsupported_axes`, before any rank
+`halo/distributed/parallelism_rules.py`), checked first by `reject_unsupported_axes`, before any rank
 math, so a combination nobody considered is refused rather than run unvalidated. Adding one means
 adding the equivalence gate that proves its gradients against an unsplit reference. Rejections quote
 the flags you typed and the mechanism from `AXIS_SET_MECHANISMS` that would break, for example:
@@ -88,7 +88,7 @@ Two ways to group ranks, used where each fits:
   collective follows from the tensor layout: `fully_shard` reduce-scatters FSDP params, TP's
   `ColwiseParallel` / `RowwiseParallel` all-reduce attention weights.
 
-    The meshes are built in one place, `src/distributed/mesh.py`: a 1D `(dp,)` mesh, a 2D HSDP
+    The meshes are built in one place, `halo/distributed/mesh.py`: a 1D `(dp,)` mesh, a 2D HSDP
     `(dp_replicate, dp_shard)` mesh (replicate across NVLink domains, shard within one), and the
     `(tp,)` / `(dp, tp)` tensor mesh. The trainer reads the resulting groups through its accessors
     (`tp_group`, `tp_local_rank`, `dp_group`).
@@ -99,11 +99,11 @@ Two ways to group ranks, used where each fits:
   swap) rather than a layout-inferred redistribution.
 
     DeepEP also needs contiguous rank blocks for its intra-node kernel, which a mesh's row-major
-    order cannot produce. `EPConfig` (`src/distributed/expert_parallel/config.py`) builds the EP,
+    order cannot produce. `EPConfig` (`halo/distributed/expert_parallel/config.py`) builds the EP,
     expert-replica, dispatch (sub-EP) and expert-TP groups; `CPConfig`
-    (`src/distributed/context_parallel/config.py`) builds the CP groups. All of them, and
+    (`halo/distributed/context_parallel/config.py`) builds the CP groups. All of them, and
     `ParallelismConfig`, take their membership from the two layouts in
-    `src/distributed/group_layout.py`: `NodeLocalLayout` and the cross-node `CrossNodeLayout`.
+    `halo/distributed/group_layout.py`: `NodeLocalLayout` and the cross-node `CrossNodeLayout`.
 
 What crosses the wire:
 
@@ -127,7 +127,7 @@ grads all-reduce over the expert-replica group only when a run holds more than o
 `fp32_grad_reduce` runs that reduction in fp32 over bf16 storage.
 
 The global batch is split along the data-parallel axis only: each of `data_parallel_size` ranks takes
-a disjoint slice, sharded by `data_parallel_rank` in `src/trainers/dataloaders.py`. Ranks
+a disjoint slice, sharded by `data_parallel_rank` in `halo/trainers/dataloaders.py`. Ranks
 inside a TP, CP, or ETP group see the **same** batch; they shard weights or the sequence, not the
 data.
 

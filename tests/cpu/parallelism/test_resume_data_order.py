@@ -19,8 +19,8 @@ import torch
 from accelerate.data_loader import get_sampler, prepare_data_loader, skip_first_batches
 from torch.utils.data import DataLoader, RandomSampler, Sampler
 
-from src.trainers.dataloaders import DataParallelLoaderMixin, set_sampler_epoch
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.dataloaders import DataParallelLoaderMixin, set_sampler_epoch
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 _ROWS = 24
 _BATCH_SIZE = 2

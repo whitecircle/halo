@@ -15,14 +15,14 @@ Run: python tests/cpu/trainers/test_mixin_composition.py
 
 import pytest
 
-from src.trainers.accelerator import AcceleratorMixin
-from src.trainers.checkpointing import CheckpointingMixin
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.evaluation import EvaluationMixin
-from src.trainers.parallelism.grad_clipping import GradientClippingMixin
-from src.trainers.parallelism.grad_sync import GradientSyncMixin
-from src.trainers.parallelism.mode_setup import ModeSetupMixin
-from src.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
+from halo.trainers.accelerator import AcceleratorMixin
+from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.evaluation import EvaluationMixin
+from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
+from halo.trainers.parallelism.grad_sync import GradientSyncMixin
+from halo.trainers.parallelism.mode_setup import ModeSetupMixin
+from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
 
 # name -> the sub-mixin that must own it. Each is reached off ``DistributedTrainerMixin`` by a
 # trainer, a test or a strategy, so an owner change must stay MRO-visible from the composed class.

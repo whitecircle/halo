@@ -32,10 +32,10 @@ import pytest
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 
-from src.model_loading.liger import dispatch
-from src.model_loading.liger.applier import LigerApplier
-from src.model_loading.liger.cross_entropy import liger_cross_entropy
-from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS, LigerFamilySpec
+from halo.model_loading.liger import dispatch
+from halo.model_loading.liger.applier import LigerApplier
+from halo.model_loading.liger.cross_entropy import liger_cross_entropy
+from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS, LigerFamilySpec
 from tests.common.repo import probe_findings
 
 DELEGATING_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.delegates_to_upstream]
@@ -255,8 +255,8 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
-from src.model_loading.liger.dispatch import apply_liger_kernel
+from halo.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
+from halo.model_loading.liger.dispatch import apply_liger_kernel
 
 seen = []
 upstream = MODEL_TYPE_TO_APPLY_LIGER_FN["qwen3_5"]
@@ -266,7 +266,7 @@ def spy(**kwargs):
     return upstream(**kwargs)
 
 MODEL_TYPE_TO_APPLY_LIGER_FN["qwen3_5"] = spy
-from src.model_loading.liger import dispatch
+from halo.model_loading.liger import dispatch
 dispatch._TOOLKIT_LIGER_APPLIERS["qwen3_5"].upstream = spy
 
 applied = apply_liger_kernel(CONFIG_MAPPING["qwen3_5"]())
@@ -323,8 +323,8 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.model_loading.liger.fused_modules import _fused_glu_forward
-from src.model_loading.liger.dispatch import resolve_liger_applier
+from halo.model_loading.liger.fused_modules import _fused_glu_forward
+from halo.model_loading.liger.dispatch import resolve_liger_applier
 from tests.common.models import TINY_QWEN35_MOE_CONFIG
 
 applier = resolve_liger_applier("qwen3_5_moe_text")
@@ -383,8 +383,8 @@ def test_the_upstream_applier_actually_runs():
     """
     script = """
 import importlib, inspect
-from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from src.model_loading.liger.dispatch import resolve_liger_applier
+from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.model_loading.liger.dispatch import resolve_liger_applier
 
 failures = []
 for spec in [s for s in LIGER_FAMILY_SPECS if s.delegates_to_upstream]:
@@ -432,8 +432,8 @@ def test_a_role_upstream_also_swaps_is_refused_when_the_patch_runs():
     """
     script = """
 from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_qwen3_5
-from src.model_loading.liger.applier import LigerApplier
-from src.model_loading.liger.family_specs import LigerFamilySpec
+from halo.model_loading.liger.applier import LigerApplier
+from halo.model_loading.liger.family_specs import LigerFamilySpec
 
 apply_liger_kernel_to_qwen3_5(rope=False, cross_entropy=False, fused_linear_cross_entropy=False,
                               rms_norm=False, swiglu=True)

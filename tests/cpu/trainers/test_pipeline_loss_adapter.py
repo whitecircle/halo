@@ -10,8 +10,8 @@ the knob says.
 
 import pytest
 
-from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss, causal_lm_token_loss
-from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
+from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss, causal_lm_token_loss
+from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 
 
 def _sequence_loss(logits, target):

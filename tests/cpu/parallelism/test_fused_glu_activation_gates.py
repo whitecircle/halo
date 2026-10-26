@@ -23,13 +23,13 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import Mistral4Experts
 
-from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.families.roster import ep_layer_classes
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
-from src.kernels import fused_glu
-from src.kernels.fused_glu import GluCombine, is_gelu_tanh_activation, is_silu_activation, resolve_fused_glu_mul
+from halo.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
+from halo.kernels import fused_glu
+from halo.kernels.fused_glu import GluCombine, is_gelu_tanh_activation, is_silu_activation, resolve_fused_glu_mul
 from tests.common.parallelism import single_process_ep_config
 
 E, K, H, M = 4, 2, 8, 16

@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
 
-from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 
 TOKENS, EXPERTS, TOP_K, HIDDEN = 6, 8, 2, 16
 

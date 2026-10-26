@@ -6,8 +6,8 @@ import io
 import numpy as np
 from torch import nn
 
-from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
-from src.models.moe.family_specs import MoEFamilySpec
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
+from halo.models.moe.family_specs import MoEFamilySpec
 
 
 class BareEPLayer(EPGroupLimitedMoELayerBase):

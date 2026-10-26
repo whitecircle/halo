@@ -24,10 +24,10 @@ import pytest
 from accelerate import PartialState
 from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
 
-from src.data.preprocessed import metadata as preprocessed_metadata
-from src.data.preprocessed.metadata import PreprocessedDatasetMetadata, is_preprocessed_dataset
-from src.data.sources.loading import load_datasets_auto
-from src.runtime.filesystem import agree_input_probe_across_ranks
+from halo.data.preprocessed import metadata as preprocessed_metadata
+from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, is_preprocessed_dataset
+from halo.data.sources.loading import load_datasets_auto
+from halo.runtime.filesystem import agree_input_probe_across_ranks
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 4

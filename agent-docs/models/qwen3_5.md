@@ -18,7 +18,7 @@ Each decoder layer is *either* full softmax attention *or* a linear-attention bl
 | RoPE | Partial — only the first `head_dim * partial_rotary_factor` channels rotate (default `0.25`) |
 | Heads | 16 Q heads, 2 KV heads (GQA factor 8), which caps TP at `tp_size=2` |
 
-> **FlashAttention-4 is unsupported for this family on Blackwell.** FA4's backward emits NaN gradients for the combination head_dim 256 + partial RoPE + output gate + GQA 16:2. `is_fa4_backward_nan_prone` (`src/models/attention/selection.py`) demotes the load to SDPA, keyed on the `qwen3_5*` / `qwen3_next*` `model_type` prefixes. Qwen3.6 is covered by those: it reuses the 3.5 classes and ships under the 3.5 types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower).
+> **FlashAttention-4 is unsupported for this family on Blackwell.** FA4's backward emits NaN gradients for the combination head_dim 256 + partial RoPE + output gate + GQA 16:2. `is_fa4_backward_nan_prone` (`halo/models/attention/selection.py`) demotes the load to SDPA, keyed on the `qwen3_5*` / `qwen3_next*` `model_type` prefixes. Qwen3.6 is covered by those: it reuses the 3.5 classes and ships under the 3.5 types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower).
 
 On Hopper the standard detector picks FA3 when installed, else FA2.
 
@@ -28,7 +28,7 @@ A gated delta-rule recurrent attention with a sequence-axis causal Conv1d on the
 
 The imports reach the layer through transformers' hub-kernel funnel, whose package resolution attribute-walks a bare package import. `fla` exports nothing at root, so upstream alone silently captures the torch scan, at ~10x the kernel's step time.
 
-`src/kernels/hub_kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed; that warning in a training log is a throughput alarm. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair.
+`halo/kernels/hub_kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed; that warning in a training log is a throughput alarm. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair.
 
 The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing, and SMPO refuses its own `padding_free` likewise ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
@@ -36,7 +36,7 @@ These layers need no CP for memory: the recurrent state is independent of `S`, p
 
 ## Model loading
 
-Qwen3.5/3.6 ship as multimodal: `model_type` `qwen3_5_moe` (or `qwen3_5` dense), top-level class `Qwen3_5MoeForConditionalGeneration`, registered under `AutoModelForImageTextToText`. `resolve_auto_model_class()` keeps the vision tower intact, and the config detection routes the **load** through `load_distributed_model`, adding the processor on top (`src/entrypoints/model_setup.py`). The MoE VLM therefore gets the same EP/TP support as a standalone causal LM — `has_routed_experts` finds the experts on the nested `text_config`.
+Qwen3.5/3.6 ship as multimodal: `model_type` `qwen3_5_moe` (or `qwen3_5` dense), top-level class `Qwen3_5MoeForConditionalGeneration`, registered under `AutoModelForImageTextToText`. `resolve_auto_model_class()` keeps the vision tower intact, and the config detection routes the **load** through `load_distributed_model`, adding the processor on top (`halo/entrypoints/model_setup.py`). The MoE VLM therefore gets the same EP/TP support as a standalone causal LM — `has_routed_experts` finds the experts on the nested `text_config`.
 
 That verdict does not decide the data path: a text-only dataset on these checkpoints is a text run, which is what lets the text SFT recipes below use `packing` ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
@@ -44,7 +44,7 @@ The resolver keys on `model_type` alone, not `architectures`. A `*-patched` chec
 
 ## EP wrapper
 
-`EPQwen3_5MoELayer` (`src/distributed/expert_parallel/families/qwen3_5.py`) replaces `Qwen3_5MoeSparseMoeBlock`. Softmax top-k routing via `Qwen3_5MoeTopKRouter`. The shared expert (`Qwen3_5MoeMLP`, sigmoid-gated output) stays local on every rank and is combined with routed-expert output after DeepEP combine. Routed experts use the fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]` layout, sharded along the expert dimension, SwiGLU, grouped GEMM on SM90+.
+`EPQwen3_5MoELayer` (`halo/distributed/expert_parallel/families/qwen3_5.py`) replaces `Qwen3_5MoeSparseMoeBlock`. Softmax top-k routing via `Qwen3_5MoeTopKRouter`. The shared expert (`Qwen3_5MoeMLP`, sigmoid-gated output) stays local on every rank and is combined with routed-expert output after DeepEP combine. Routed experts use the fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]` layout, sharded along the expert dimension, SwiGLU, grouped GEMM on SM90+.
 
 The wrapper re-derives selection from the router's own logits — top-k on the bias-adjusted probabilities, gate weights from the unbiased renormalized softmax, which makes a zero bias a no-op.
 
@@ -62,7 +62,7 @@ Both classes drop the Hub checkpoints' `mtp.*` MTP head at load, so a run's expo
 
 ## CP wrapper
 
-`Qwen3_5MoeUlyssesAttention` (`src/distributed/context_parallel/families.py`) replaces `Qwen3_5MoeAttention` / `Qwen3_5Attention` and handles two quirks:
+`Qwen3_5MoeUlyssesAttention` (`halo/distributed/context_parallel/families.py`) replaces `Qwen3_5MoeAttention` / `Qwen3_5Attention` and handles two quirks:
 
 - **Double-width `q_proj`** — the output is viewed as `[..., num_q_heads, head_dim * 2]` and chunked into query + gate. The query goes through Ulysses (q_norm + RoPE + all-to-all + flash-attn + all-to-all back), then `attn_output * sigmoid(gate)` before `o_proj`.
 

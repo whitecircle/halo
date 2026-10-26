@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 class _Model(torch.nn.Module):
@@ -56,9 +56,9 @@ def _run_sweep(trainer, *, present_on_some_rank):
         tensor.copy_(torch.tensor(present_on_some_rank, dtype=tensor.dtype))
 
     with (
-        patch("src.trainers.parallelism.grad_sync.dist.all_reduce", side_effect=fake_all_reduce),
+        patch("halo.trainers.parallelism.grad_sync.dist.all_reduce", side_effect=fake_all_reduce),
         patch(
-            "src.trainers.parallelism.grad_sync.reduce_grads_bucketed",
+            "halo.trainers.parallelism.grad_sync.reduce_grads_bucketed",
             side_effect=lambda grads, **kw: reduced.append(grads),
         ),
     ):

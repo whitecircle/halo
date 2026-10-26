@@ -36,18 +36,18 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, TRAINING_PROVENANCE_FILE
-from src.checkpoint.parallel.adapters import (
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, TRAINING_PROVENANCE_FILE
+from halo.checkpoint.parallel.adapters import (
     _load_peft_adapter_state,
     remap_cp_adapter_keys_to_live,
     save_peft_adapters,
 )
-from src.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
-from src.models.param_roles import persistent_buffers
+from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
+from halo.models.param_roles import persistent_buffers
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
 

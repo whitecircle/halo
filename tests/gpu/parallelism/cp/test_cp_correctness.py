@@ -30,9 +30,9 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from tests.common.distributed import world_mean, world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B

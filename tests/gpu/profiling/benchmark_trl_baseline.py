@@ -34,12 +34,12 @@ from torch.distributed.optim import ZeroRedundancyOptimizer
 from transformers import AutoConfig, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.model_preparation import resolve_auto_model_class
-from src.optimizers.flash_adamw import build_flash_adamw_optimizer
-from src.optimizers.registry import register_custom_optimizers
-from src.runtime.collectives import barrier
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.model_preparation import resolve_auto_model_class
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
+from halo.optimizers.registry import register_custom_optimizers
+from halo.runtime.collectives import barrier
 from tests.common.benchmark_args import create_benchmark_parser
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (

@@ -50,18 +50,18 @@ import torch
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.checkpoint.adapters import resume_adapter_dir
-from src.checkpoint.format import (
+from halo.checkpoint.adapters import resume_adapter_dir
+from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
 )
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.distributed.context_parallel.config import CPConfigError
-from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.distributed.context_parallel.config import CPConfigError
+from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir, world_all

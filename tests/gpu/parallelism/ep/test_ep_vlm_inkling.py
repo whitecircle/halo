@@ -16,9 +16,9 @@ import torch
 from transformers.models.inkling.configuration_inkling import InklingConfig, InklingVisionConfig
 from transformers.models.inkling.modeling_inkling import InklingForConditionalGeneration
 
-from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_INKLING_CONFIG

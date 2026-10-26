@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch import nn
 
-import src.distributed.context_parallel.ulysses_model as cp_wrapper
+import halo.distributed.context_parallel.ulysses_model as cp_wrapper
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 
 SEQ = 12

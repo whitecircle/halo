@@ -22,14 +22,14 @@ import argparse
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.callbacks.balancing import apply_balancing_mode
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.parallelize import (
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import (
     apply_ep_layers,
 )
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.models.moe.router_logits import declared_routers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.moe.router_logits import declared_routers
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.utils import log

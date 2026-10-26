@@ -18,7 +18,7 @@ from unittest import mock
 import pytest
 import torch
 
-from src.trainers.distributed_trainer import (
+from halo.trainers.distributed_trainer import (
     MEMORY_MARGIN_WARN_RATIO,
     DistributedTrainerMixin,
     thin_memory_margin_message,
@@ -80,8 +80,8 @@ def _oom_step():
 def _recorder(monkeypatch, main: bool) -> mock.MagicMock:
     """The module logger replaced by a recorder, on a rank that is or is not the global main process."""
     recorder = mock.MagicMock()
-    monkeypatch.setattr("src.trainers.distributed_trainer.logger", recorder)
-    monkeypatch.setattr("src.trainers.distributed_trainer.is_global_main_process", lambda: main)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.logger", recorder)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.is_global_main_process", lambda: main)
     return recorder
 
 
@@ -90,7 +90,7 @@ def test_primary_failure_banner_logs_off_the_main_process(monkeypatch):
     died — never in the case it exists for, leaving a post-mortem with peer watchdog timeouts and no
     primary cause."""
     recorder = _recorder(monkeypatch, main=False)
-    monkeypatch.setattr("src.trainers.distributed_trainer.get_global_rank", lambda: 3)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.get_global_rank", lambda: 3)
 
     with pytest.raises(torch.OutOfMemoryError):
         _oom_step()
@@ -109,7 +109,7 @@ def test_thin_margin_warning_logs_off_the_main_process(monkeypatch):
     CUDA is faked rather than skipped: on the CPU tier a skip would leave the emit unpinned, which is the
     whole behaviour under test."""
     recorder = _recorder(monkeypatch, main=False)
-    monkeypatch.setattr("src.trainers.distributed_trainer.thin_memory_margin_message", lambda *a, **k: "thin margin")
+    monkeypatch.setattr("halo.trainers.distributed_trainer.thin_memory_margin_message", lambda *a, **k: "thin margin")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 99 * 1024**3)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
@@ -127,8 +127,8 @@ def test_thin_margin_warning_logs_off_the_main_process(monkeypatch):
 def test_the_released_buffers_line_logs_on_the_main_process_only(monkeypatch, main):
     """The control for the two above: the released-buffers line is for global rank 0 only."""
     recorder = _recorder(monkeypatch, main)
-    monkeypatch.setattr("src.trainers.distributed_trainer.free_unclaimed_ep_buffers", lambda: 2)
-    monkeypatch.setattr("src.trainers.distributed_trainer.barrier", lambda: None)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.free_unclaimed_ep_buffers", lambda: 2)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.barrier", lambda: None)
 
     DistributedTrainerMixin.cleanup_ep(types.SimpleNamespace(_ep_layers=lambda: []))
 

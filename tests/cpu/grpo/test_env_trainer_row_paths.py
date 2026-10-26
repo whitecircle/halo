@@ -28,17 +28,17 @@ import pytest
 import torch
 from trl.trainer.utils import pad
 
-from src.environments.engine_wire import capture_generation_tokens
-from src.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
-from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence, BatchRows, rollout_valid_mask
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.environmental.trajectory_tokenize import (
+from halo.environments.engine_wire import capture_generation_tokens
+from halo.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, BatchRows, rollout_valid_mask
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trajectory_tokenize import (
     SAMPLED_IDS_MISSING_WARNING,
     UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY,
 )
-from src.trainers.grpo.objective.logratio import zero_engine_forced_closes
+from halo.trainers.grpo.objective.logratio import zero_engine_forced_closes
 from tests.common.routing import BareEPLayer, npy_routing_payload
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 

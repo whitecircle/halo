@@ -21,8 +21,8 @@ import torch
 import torch.nn as nn
 from transformers import Trainer
 
-from src.model_loading.liger.cross_entropy import build_lce_forward
-from src.trainers.sft import DistributedSFTTrainer
+from halo.model_loading.liger.cross_entropy import build_lce_forward
+from halo.trainers.sft import DistributedSFTTrainer
 
 
 class FlcePatchedModel(nn.Module):

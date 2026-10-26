@@ -18,7 +18,7 @@ import logging
 
 import pytest
 
-from src.data.pipeline.map_cache_key import _closure_fingerprint, _unfingerprintable_warned
+from halo.data.pipeline.map_cache_key import _closure_fingerprint, _unfingerprintable_warned
 
 
 def _capturing(value):
@@ -76,7 +76,7 @@ def test_unfingerprintable_cell_warns_once(caplog):
         pass
 
     _unfingerprintable_warned.clear()
-    with caplog.at_level(logging.WARNING, logger="src.data.pipeline.map_cache_key"):
+    with caplog.at_level(logging.WARNING, logger="halo.data.pipeline.map_cache_key"):
         _closure_fingerprint(_capturing(_Opaque()))
     warnings = [r for r in caplog.records if "skips a value of type" in r.getMessage()]
     assert len(warnings) == 1
@@ -84,7 +84,7 @@ def test_unfingerprintable_cell_warns_once(caplog):
     assert "_capturing" in warnings[0].getMessage()
 
     caplog.clear()
-    with caplog.at_level(logging.WARNING, logger="src.data.pipeline.map_cache_key"):
+    with caplog.at_level(logging.WARNING, logger="halo.data.pipeline.map_cache_key"):
         _closure_fingerprint(_capturing(_Opaque()))
     assert not [r for r in caplog.records if "skips a value of type" in r.getMessage()], (
         "the skip warning must be one-time per (function, cell type)"

@@ -16,7 +16,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 
 def _host():

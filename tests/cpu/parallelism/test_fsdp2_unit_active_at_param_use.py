@@ -22,7 +22,7 @@ Run: pytest tests/cpu/parallelism/test_fsdp2_unit_active_at_param_use.py
 # The device-aware kernel-dispatch shim must land before the modeling modules below bind transformers'
 # hub-kernel fallback at import, or a CPU forward of a conv / linear-attention family reaches the
 # CUDA-only causal_conv1d kernel.
-import src.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
+import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -74,10 +74,10 @@ from transformers import (
     ZayaForCausalLM,
 )
 
-import src.distributed.fsdp as fsdp
-from src.configs.script_arguments import ModelArguments
-from src.distributed.fsdp import IdentityParamSet
-from src.model_loading.parallel.peft_setup import build_peft_config
+import halo.distributed.fsdp as fsdp
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.fsdp import IdentityParamSet
+from halo.model_loading.parallel.peft_setup import build_peft_config
 from tests.common.models import (
     TINY_COHERE2_MOE_CONFIG,
     TINY_DSV4_CONFIG,

@@ -12,11 +12,11 @@ from unittest.mock import patch
 
 import torch.distributed as dist
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 
-_MOD = "src.distributed.parallelism_config"
-_RULES_MOD = "src.distributed.parallelism_rules"
+_MOD = "halo.distributed.parallelism_config"
+_RULES_MOD = "halo.distributed.parallelism_rules"
 
 
 @contextlib.contextmanager

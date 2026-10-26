@@ -11,7 +11,7 @@ import types
 
 import pytest
 
-from src.inference.openai_client import (
+from halo.inference.openai_client import (
     UPSTREAM_RETRIES,
     EmptyChoicesError,
     build_openai_client,
@@ -113,7 +113,7 @@ def _record_backoff(monkeypatch) -> list[float]:
     async def no_sleep(seconds):
         waits.append(seconds)
 
-    monkeypatch.setattr("src.inference.openai_client.asyncio.sleep", no_sleep)
+    monkeypatch.setattr("halo.inference.openai_client.asyncio.sleep", no_sleep)
     return waits
 
 

@@ -10,8 +10,8 @@ import pytest
 import torch
 from torch import nn
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.stochastic_rounding import sr_seed_pair, stochastic_round_to_bf16
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.stochastic_rounding import sr_seed_pair, stochastic_round_to_bf16
 
 # bf16 bit patterns (int16 view) after three eager steps: (param, exp_avg, exp_avg_sq).
 GOLDEN_STATE = {

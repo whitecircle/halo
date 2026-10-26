@@ -26,11 +26,11 @@ from datasets import Dataset, DatasetDict, load_from_disk
 from trl import DPOConfig, DPOTrainer
 from trl.trainer import utils as trl_trainer_utils
 
-from src.data.sources.loading import load_datasets
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-from src.trainers.trl_dataset_prep import _MAIN_FIRST_METHODS, TRLDatasetPrepMixin
+from halo.data.sources.loading import load_datasets
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.trainers.trl_dataset_prep import _MAIN_FIRST_METHODS, TRLDatasetPrepMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer, try_cached_tokenizer

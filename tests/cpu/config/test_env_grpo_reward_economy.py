@@ -30,10 +30,10 @@ from pathlib import Path
 import pytest
 from ruamel.yaml import YAML
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.rollout_config import VALID_REASONING_EFFORTS
-from src.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
-from src.rewards.terms import (
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS
+from halo.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
+from halo.rewards.terms import (
     ENVIRONMENT_REWARD_SOURCES,
     JudgeTerm,
     OnError,
@@ -41,7 +41,7 @@ from src.rewards.terms import (
     read_context_files,
     resolve_environment_checks,
 )
-from src.trainers.grpo.environmental.reasoning import (
+from halo.trainers.grpo.environmental.reasoning import (
     REASONING_TARGET_SHARE,
     reasoning_floor_term,
     reasoning_price_term,

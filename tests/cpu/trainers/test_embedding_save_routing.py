@@ -24,16 +24,16 @@ from peft import LoraConfig, inject_adapter_in_model
 from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformerTrainer
 
-import src.checkpoint.writing as writing_mod
-import src.models.peft_adapters as peft_adapters
-import src.trainers.checkpointing as checkpointing_mod
-from src.checkpoint.parallel.writing import conversion_chunk_key
-from src.checkpoint.reading import load_full_state_dict
-from src.checkpoint.writing import cast_to_save_dtype, normalize_gathered_state_dict
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.trainers.embedding import trainer as embedding_module
-from src.trainers.embedding.injected_lora import has_injected_lora
-from src.trainers.embedding.trainer import EmbeddingTrainer
+import halo.checkpoint.writing as writing_mod
+import halo.models.peft_adapters as peft_adapters
+import halo.trainers.checkpointing as checkpointing_mod
+from halo.checkpoint.parallel.writing import conversion_chunk_key
+from halo.checkpoint.reading import load_full_state_dict
+from halo.checkpoint.writing import cast_to_save_dtype, normalize_gathered_state_dict
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.trainers.embedding import trainer as embedding_module
+from halo.trainers.embedding.injected_lora import has_injected_lora
+from halo.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks
 from tests.common.peft_helpers import randomize_adapters
@@ -120,7 +120,7 @@ class _TokenizerStub:
 
 def _context(host, monkeypatch):
     monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: host._is_save_rank)
-    monkeypatch.setattr("src.trainers.checkpointing.is_fs_save_rank", lambda: host._is_save_rank)
+    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: host._is_save_rank)
     return EmbeddingTrainer._checkpoint_context(host)
 
 
@@ -287,7 +287,7 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
 
     monkeypatch.setattr(checkpointing_mod, "pristine_model_max_length", _pristine)
     monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: True)
-    monkeypatch.setattr("src.trainers.checkpointing.is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: True)
     monkeypatch.setattr(
         EmbeddingTrainer,
         "_save_distributed_embedding_model",
@@ -307,7 +307,7 @@ def _record_save_steps(host, monkeypatch) -> list[str]:
     for module in (embedding_module, checkpointing_mod):
         monkeypatch.setattr(module, "reshard_fsdp2_modules", lambda _model: calls.append("reshard"))
     monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: True)
-    monkeypatch.setattr("src.trainers.checkpointing.is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: True)
     monkeypatch.setattr(
         EmbeddingTrainer,
         "_save_distributed_embedding_model",

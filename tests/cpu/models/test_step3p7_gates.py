@@ -19,26 +19,30 @@ import torch.nn as nn
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config, Step3p7TextConfig
 from transformers.models.step3p7.modeling_step3p7 import Step3p7TextModel
 
-from src.callbacks.balancing import apply_balancing_mode
-from src.distributed.context_parallel.config import CPConfigError
-from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
-from src.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
-from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from src.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
-from src.distributed.pipeline_parallel.partition import compute_layer_partition, layer_types_period, validate_partition
-from src.distributed.tensor_parallel.parallelize_attention import (
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.distributed.context_parallel.config import CPConfigError
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
+from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
+from halo.distributed.pipeline_parallel.partition import (
+    compute_layer_partition,
+    layer_types_period,
+    validate_partition,
+)
+from halo.distributed.tensor_parallel.parallelize_attention import (
     TP_SHARDABLE_ATTENTION_CLASSES,
     apply_tp_to_attention_only,
     validate_tp_head_divisibility,
 )
-from src.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks
-from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
-from src.models.attention.selection import is_fa4_backward_nan_prone, resolve_attn_implementation
-from src.models.config_access import get_config_field
-from src.models.modality import config_declares_multimodality, is_vlm_model
-from src.models.moe.balancing import resolve_balancing_mode
-from src.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
-from src.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks
+from halo.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
+from halo.models.attention.selection import is_fa4_backward_nan_prone, resolve_attn_implementation
+from halo.models.config_access import get_config_field
+from halo.models.modality import config_declares_multimodality, is_vlm_model
+from halo.models.moe.balancing import resolve_balancing_mode
+from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
+from halo.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
 from tests.common.distributed import fake_process_group_mesh
 
 # The real checkpoint's shape at divisibility floors: period-4 layer_types (full, sliding x3),

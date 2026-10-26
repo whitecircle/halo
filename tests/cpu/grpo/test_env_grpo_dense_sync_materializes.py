@@ -25,8 +25,8 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor, init_device_mesh
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 ROWS, COLS = 8, 4
 

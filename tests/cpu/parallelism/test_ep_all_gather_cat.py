@@ -17,8 +17,8 @@ Run: pytest tests/cpu/parallelism/test_ep_all_gather_cat.py
 import pytest
 import torch
 
-from src.runtime import collectives as runtime_collectives
-from src.runtime.collectives import all_gather_cat
+from halo.runtime import collectives as runtime_collectives
+from halo.runtime.collectives import all_gather_cat
 
 WORLD = 4
 GROUP = "fake-ep-group"

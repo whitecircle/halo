@@ -28,12 +28,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
-from src.distributed.expert_parallel.deepep.backends import DeepEPBackend
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
-from src.models.moe.family_specs import find_moe_family_spec
+from halo.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
+from halo.distributed.expert_parallel.deepep.backends import DeepEPBackend
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
+from halo.models.moe.family_specs import find_moe_family_spec
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 

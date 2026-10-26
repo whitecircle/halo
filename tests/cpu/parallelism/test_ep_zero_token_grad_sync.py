@@ -34,11 +34,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
 from tests.common.parallelism import stubbed_process_groups
 
-_GS_MOD = "src.distributed.expert_parallel.moe_layer.grad_sync"
+_GS_MOD = "halo.distributed.expert_parallel.moe_layer.grad_sync"
 
 
 def _make_ep(

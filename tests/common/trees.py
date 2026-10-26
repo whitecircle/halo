@@ -12,9 +12,16 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 
-from src.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN, TRAINED_COLUMN, build_trie, serialize_tree, share_limit
-from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.models.attention.tree_plan import NodeTable, build_node_table
+from halo.data.tree_layout import (
+    DEPTH_COLUMN,
+    POSITION_COLUMN,
+    TRAINED_COLUMN,
+    build_trie,
+    serialize_tree,
+    share_limit,
+)
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models.attention.tree_plan import NodeTable, build_node_table
 
 
 def tree_attention_masks(

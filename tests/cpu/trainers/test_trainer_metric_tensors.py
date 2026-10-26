@@ -14,9 +14,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.stored_metrics import StoredMetricsMixin
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.smpo_trainer import smpo_trainer
 
 

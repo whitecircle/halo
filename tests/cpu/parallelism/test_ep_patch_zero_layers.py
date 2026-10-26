@@ -17,8 +17,8 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 
 
 def _model_without_moe() -> nn.Module:

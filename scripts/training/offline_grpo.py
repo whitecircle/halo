@@ -10,23 +10,23 @@ Usage:
 
 from functools import partial
 
-from src.callbacks.generate_examples import GenerateExamplesCallback
-from src.configs.grpo_offline import OfflineGRPOConfig, OfflineGRPOScriptArguments
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import ModelArguments
-from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content
-from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
-from src.data.pipeline.prompt_completion import render_prompt_completions
-from src.data.pipeline.text_rows import prepare_generative_row
-from src.data.vlm_routing import reject_image_columns
-from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
-from src.entrypoints.model_setup import (
+from halo.callbacks.generate_examples import GenerateExamplesCallback
+from halo.configs.grpo_offline import OfflineGRPOConfig, OfflineGRPOScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.pipeline.conversation import chat_template_kwargs, reject_image_content
+from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
+from halo.data.pipeline.prompt_completion import render_prompt_completions
+from halo.data.pipeline.text_rows import prepare_generative_row
+from halo.data.vlm_routing import reject_image_columns
+from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from halo.entrypoints.model_setup import (
     apply_prompt_completion_window,
     default_padded_attn_implementation,
     load_model_and_tokenizer,
     log_model_info,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     ScriptContext,
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
@@ -35,11 +35,11 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.parallel.frozen_models import load_frozen_reference_model
-from src.model_loading.parallel.peft_setup import configure_adapter_training, wraps_in_peft_model
-from src.runtime.collectives import barrier
-from src.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.model_loading.parallel.frozen_models import load_frozen_reference_model
+from halo.model_loading.parallel.peft_setup import configure_adapter_training, wraps_in_peft_model
+from halo.runtime.collectives import barrier
+from halo.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 
 def render_offline_grpo_row(row, tokenizer, tools_field: str | None):

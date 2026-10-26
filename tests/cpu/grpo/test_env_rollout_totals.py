@@ -18,8 +18,8 @@ from collections import defaultdict
 
 import pytest
 
-import src.trainers.grpo.environmental.rollout_metrics as rm
-from src.trainers import world_metrics
+import halo.trainers.grpo.environmental.rollout_metrics as rm
+from halo.trainers import world_metrics
 
 
 class _MetricsHost(rm.RolloutMetricsMixin):

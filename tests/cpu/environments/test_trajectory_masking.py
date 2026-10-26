@@ -14,10 +14,10 @@ from types import MethodType, SimpleNamespace
 
 import pytest
 
-from src.environments.environment_base import EnvironmentBase
-from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 

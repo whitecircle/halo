@@ -16,15 +16,15 @@ import pytest
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM
 
-from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.models.attention.gpt_oss_sinks import (
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
     has_live_attention_sinks,
     stamped_sinks_policy,
 )
-from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 
 def _tiny_gpt_oss():

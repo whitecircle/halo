@@ -17,10 +17,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.distributed.nccl._nccl_wrapper import ncclComm_t, ncclUniqueId
-from src.weight_sync.transport import bounded_waits, packed_broadcast, pynccl
-from src.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
-from src.weight_sync.transport.pynccl import PyNcclCommunicator
+from halo.weight_sync.transport import bounded_waits, packed_broadcast, pynccl
+from halo.weight_sync.transport.nccl_library import ncclComm_t, ncclUniqueId
+from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
+from halo.weight_sync.transport.pynccl import PyNcclCommunicator
 from tests.common.repo import probe_findings
 
 _DRAIN_MARKER = "DRAIN_DEADLINE:"
@@ -146,7 +146,7 @@ def test_the_drain_deadline_is_read_once_from_the_env(monkeypatch, value, expect
     else:
         monkeypatch.setenv("HALO_NCCL_SYNC_TIMEOUT_SECONDS", value)
     script = (
-        "from src.weight_sync.transport import bounded_waits; "
+        "from halo.weight_sync.transport import bounded_waits; "
         f"print({_DRAIN_MARKER!r} + repr(bounded_waits.BROADCAST_DRAIN_TIMEOUT_S))"
     )
     [deadline] = probe_findings(script, _DRAIN_MARKER)

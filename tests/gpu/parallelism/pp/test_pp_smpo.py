@@ -30,9 +30,9 @@ import torch
 import torch.nn.functional as F
 from datasets import Dataset
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.distributed import hf_eval_loss_reference, world_any, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -86,7 +86,7 @@ def build_pref_dataset(vocab_size: int, n_rows: int = 16, seed: int = 7) -> Data
 
 
 def smpo_reference(model, input_ids, attention_mask, labels, *, margin, min_log_prob, loss_type) -> float:
-    """The exact SMPO objective on an interleaved [c0, r0, ...] batch, fp32, independent of src/."""
+    """The exact SMPO objective on an interleaved [c0, r0, ...] batch, fp32, independent of halo/."""
     with torch.no_grad():
         logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.float()
     shift_labels = labels[:, 1:]

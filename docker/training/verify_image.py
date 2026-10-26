@@ -23,7 +23,7 @@ from flash_attn.flash_attn_interface import flash_attn_func as fa2_flash_attn_fu
 from flashoptim import FlashAdamW  # noqa: F401
 from transformers.utils import is_flash_attn_3_available
 
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient  # noqa: F401
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient  # noqa: F401
 
 
 def check_flash_attention_4() -> None:

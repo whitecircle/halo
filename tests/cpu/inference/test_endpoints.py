@@ -11,8 +11,8 @@ import pathlib
 
 import pytest
 
-from src.inference import endpoints
-from src.inference.endpoints import (
+from halo.inference import endpoints
+from halo.inference.endpoints import (
     LOCAL_SERVER_API_KEY,
     is_loopback,
     resolve_external_api_key,
@@ -79,7 +79,7 @@ def test_the_endpoint_leaf_imports_nothing_from_the_sdk():
     imported = _imported_modules(pathlib.Path(endpoints.__file__))
     assert imported, "the scan read no imports, so it covers nothing"
     sdk = [name for name in imported if name == "openai" or name.startswith("openai.")]
-    assert not sdk, f"src/inference/endpoints.py imports the SDK: {sdk}"
+    assert not sdk, f"halo/inference/endpoints.py imports the SDK: {sdk}"
 
 
 if __name__ == "__main__":

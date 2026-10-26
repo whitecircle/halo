@@ -113,7 +113,7 @@ def benchmark_grouped_mm(stacked_weights, all_tokens, offsets, num_iters=100, wa
     matmuls are batched into a single kernel launch using cumulative offsets.
 
     The `offs` parameter uses cumulative token counts (matching
-    EPMoELayerBase._sort_tokens_for_grouped_mm in src/distributed/expert_parallel/moe_layer/layer.py).
+    EPMoELayerBase._sort_tokens_for_grouped_mm in halo/distributed/expert_parallel/moe_layer/layer.py).
 
     Args:
         stacked_weights: [E, H, I] stacked expert weights.

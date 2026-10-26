@@ -21,7 +21,7 @@ import argparse
 import os
 from functools import partial
 
-from src.runtime.collectives import barrier
+from halo.runtime.collectives import barrier
 from tests.common.checkpoint_io import model_save_checks
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B

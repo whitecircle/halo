@@ -15,13 +15,13 @@ from accelerate import PartialState
 from datasets import Dataset
 from transformers import AutoTokenizer
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.log import configure_training_logging
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.log import configure_training_logging
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.benchmark_args import axis_tags, create_benchmark_parser
 from tests.common.distributed import (
     cleanup_dirs,

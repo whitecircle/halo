@@ -12,14 +12,14 @@ from typing import ClassVar
 
 import pytest
 
-from src.rewards import composer as composer_module
-from src.rewards.composer import SCORERS, RewardComposer, Settlement, build_scorer
-from src.rewards.graders.verifiable import RLVR_GRADERS, AccuracyTerm, FormatTerm
-from src.rewards.samples import ScoringSample
-from src.rewards.scorers.base import Scorer, ScoreResult
-from src.rewards.scorers.judge import GenerativeJudge
-from src.rewards.scorers.reward_model import ServedRewardModel
-from src.rewards.terms import (
+from halo.rewards import composer as composer_module
+from halo.rewards.composer import SCORERS, RewardComposer, Settlement, build_scorer
+from halo.rewards.graders.verifiable import RLVR_GRADERS, AccuracyTerm, FormatTerm
+from halo.rewards.samples import ScoringSample
+from halo.rewards.scorers.base import Scorer, ScoreResult
+from halo.rewards.scorers.judge import GenerativeJudge
+from halo.rewards.scorers.reward_model import ServedRewardModel
+from halo.rewards.terms import (
     Check,
     EnvironmentTerm,
     JudgeTerm,
@@ -28,7 +28,7 @@ from src.rewards.terms import (
     RewardTerm,
     scored_metric_key,
 )
-from src.rewards.trl_reward_functions import ScorerRewardFunction, TermRewardFunction, build_trl_reward_functions
+from halo.rewards.trl_reward_functions import ScorerRewardFunction, TermRewardFunction, build_trl_reward_functions
 
 JUDGE = JudgeTerm(name="quality", weight=0.3, exponent=2.0, requirements=(Requirement(name="r", description="d"),))
 LENIENT = JudgeTerm(name="lenient", on_error="neutral", requirements=(Requirement(name="r", description="d"),))

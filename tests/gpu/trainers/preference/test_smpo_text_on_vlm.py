@@ -22,9 +22,9 @@ import shutil
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SmoothMarginPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main

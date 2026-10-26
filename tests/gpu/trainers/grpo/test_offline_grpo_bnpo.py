@@ -31,12 +31,12 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.callbacks.generate_examples import GenerateExamplesCallback
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.runtime.collectives import barrier
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.callbacks.generate_examples import GenerateExamplesCallback
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main

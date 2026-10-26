@@ -11,10 +11,10 @@ import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.distributed.context_parallel.ulysses_model import find_ulysses_model
-from src.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_targets
-from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
-from src.trainers.grpo.objective.offline_loss import offline_loss
+from halo.distributed.context_parallel.ulysses_model import find_ulysses_model
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_targets
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import full_row_loss
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -129,7 +129,7 @@ def test_dropping_boundary_targets_breaks_the_production_scorer_objective():
         return next_token_targets(labels[:, start : start + length], 0, length)
 
     correct = score_loss()
-    with patch("src.distributed.context_parallel.sequence_chunks.next_token_targets", side_effect=drop_boundary):
+    with patch("halo.distributed.context_parallel.sequence_chunks.next_token_targets", side_effect=drop_boundary):
         broken = score_loss()
     torch.testing.assert_close(correct, expected, atol=1e-4, rtol=1e-4)
     assert not torch.isclose(broken, expected, atol=1e-4, rtol=1e-4)

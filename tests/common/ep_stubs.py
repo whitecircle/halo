@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.models.moe.family_specs import MoEFamilySpec
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.models.moe.family_specs import MoEFamilySpec
 
 
 class StubEPLayerBase(EPMoELayerBase):

@@ -21,13 +21,13 @@ from datasets import Dataset
 from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 from transformers.training_args import OptimizerNames
 
-from src.checkpoint.writing import save_dtype_caster
-from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
-from src.model_loading.parallel.freeze_patterns import _reject_layer_indexed_patterns_under_pp as guard
-from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.parallelism.pipeline_rules import reject_pp_named_optimizer
-from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin, wrapper_state_outside_stages
+from halo.checkpoint.writing import save_dtype_caster
+from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
+from halo.model_loading.parallel.freeze_patterns import _reject_layer_indexed_patterns_under_pp as guard
+from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.parallelism.pipeline_rules import reject_pp_named_optimizer
+from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin, wrapper_state_outside_stages
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.parallelism import make_parallelism_config
 from tests.common.rosters import distributed_trainer_classes

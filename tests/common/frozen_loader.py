@@ -2,7 +2,7 @@
 
 Every unparallelized frozen model the toolkit scores a policy against (the DPO/KTO reference, the
 SDPG KL anchor, the offline-GRPO KL reference, both distillation teacher paths) loads through
-:func:`~src.model_loading.parallel.frozen_models.load_frozen_auxiliary_model`, so its module namespace is
+:func:`~halo.model_loading.parallel.frozen_models.load_frozen_auxiliary_model`, so its module namespace is
 where a test intercepts the hub fetches. That also makes these stubs a consolidation check: a call
 site that re-implemented the load would fetch through its own names, and :func:`captured_load` would
 find no recorded fetch.
@@ -12,9 +12,9 @@ import contextlib
 import types
 from unittest.mock import patch
 
-import src.model_loading.parallel.frozen_models as frozen_loader
-import src.models.attention.gpt_oss_sinks as sink_patches
-from src.model_loading.parallel.model_source import ModelSource
+import halo.model_loading.parallel.frozen_models as frozen_loader
+import halo.models.attention.gpt_oss_sinks as sink_patches
+from halo.model_loading.parallel.model_source import ModelSource
 
 STUB_CONFIG = "AUXILIARY_CONFIG"
 STUB_RESOLVED_ATTN = "flex_attention"

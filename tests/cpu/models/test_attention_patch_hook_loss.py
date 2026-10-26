@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from src.models.attention import backend_setup, packed_position_ids
+from halo.models.attention import backend_setup, packed_position_ids
 
 
 def _attention_class() -> type:

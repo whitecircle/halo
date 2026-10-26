@@ -23,16 +23,16 @@ import torch.distributed as dist
 import torch.nn as nn
 from transformers import CONFIG_MAPPING, AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM, TrainerState
 
-import src.checkpoint.parallel.ep as ep
-from src.checkpoint.parallel.adapters import _adapter_file_state
-from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from src.checkpoint.parallel.pp import save_pp_checkpoint
-from src.checkpoint.parallel.save import save_tp_checkpoint
-from src.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
-from src.checkpoint.reading import load_full_state_dict
-from src.checkpoint.writing import normalize_gathered_state_dict
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+import halo.checkpoint.parallel.ep as ep
+from halo.checkpoint.parallel.adapters import _adapter_file_state
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.parallel.pp import save_pp_checkpoint
+from halo.checkpoint.parallel.save import save_tp_checkpoint
+from halo.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
+from halo.checkpoint.reading import load_full_state_dict
+from halo.checkpoint.writing import normalize_gathered_state_dict
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.checkpoint_io import save_context
 from tests.common.gloo import run_gloo_ranks

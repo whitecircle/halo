@@ -13,18 +13,18 @@ from datasets import Dataset
 from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForCausalLM
 
+import halo.trainers.grpo.offline.reference as reference_logps_module
 import scripts.training.offline_grpo as offline_grpo_script
-import src.trainers.grpo.offline.reference as reference_logps_module
-from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.configs.script_arguments import ModelArguments
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.grpo.logprob_scoring import LogprobScoringMixin
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from src.trainers.reference_logps import LOGPROB_PRECISION_KEY
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.configs.script_arguments import ModelArguments
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.reference_logps import LOGPROB_PRECISION_KEY
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import captured_load, stub_frozen_loader
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset

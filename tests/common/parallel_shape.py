@@ -8,9 +8,9 @@ weights they hold, the TP-sharded parameters, the Ulysses attention layers.
 
 from torch.distributed.tensor import DTensor
 
-from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
-from src.distributed.mesh import has_tp_dim
-from src.models.moe.config_fields import has_routed_experts
+from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
+from halo.distributed.mesh import has_tp_dim
+from halo.models.moe.config_fields import has_routed_experts
 from tests.common.ep_reference import ep_layers
 from tests.common.utils import log
 

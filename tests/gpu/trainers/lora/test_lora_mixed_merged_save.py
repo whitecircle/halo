@@ -45,13 +45,13 @@ from accelerate.utils import extract_model_from_parallel
 from safetensors import safe_open
 from trl import SFTConfig
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_flag, env_int, env_str
-from src.models.unwrapping import find_peft_model, plain_peft_param_name
-from src.trainers.sft import DistributedSFTTrainer
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_flag, env_int, env_str
+from halo.models.unwrapping import find_peft_model, plain_peft_param_name
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main

@@ -18,7 +18,7 @@ import os
 import pytest
 import torch.distributed as dist
 
-from src.runtime.load_coordination import _log_global_load_duration_seconds
+from halo.runtime.load_coordination import _log_global_load_duration_seconds
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

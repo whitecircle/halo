@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Tests for select_data_collator routing logic in src/data/collators/factory.py.
+Tests for select_data_collator routing logic in halo/data/collators/factory.py.
 
 Run: python tests/cpu/data/test_collator_factory.py
 """
@@ -11,9 +11,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from src.data.collators.factory import select_data_collator
-from src.data.collators.padded import DataCollatorForCausalLMWithPadding
-from src.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS
+from halo.data.collators.factory import select_data_collator
+from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
+from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -335,7 +335,7 @@ def test_varlen_gate_covers_every_declared_flash_impl():
 
 def _warnings_for(**kwargs) -> str:
     """The main-process warnings select_data_collator emits, as one lowercased blob."""
-    with patch("src.data.collators.collator_rules.logger") as mock_logger:
+    with patch("halo.data.collators.collator_rules.logger") as mock_logger:
         select_data_collator(tokenizer=_make_tokenizer(), **kwargs)
         rendered = []
         for call in mock_logger.warning.call_args_list:
@@ -383,7 +383,7 @@ def test_pipeline_parallelism_is_not_warned():
 # The chat-template probe
 
 
-_MARKER_LOGGER = "src.data.turn_markers"
+_MARKER_LOGGER = "halo.data.turn_markers"
 
 
 def _probe_tokenizer(*, renders: bool):

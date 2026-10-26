@@ -69,8 +69,8 @@ from transformers import (
 from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
 from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
-from src.model_loading.remote_code import apply_remote_code_compat_shims
-from src.models.param_roles import fp32_pinned_names
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.models.param_roles import fp32_pinned_names
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import (
     BAILING_MOE_LING_MINI,
@@ -273,7 +273,7 @@ def _tiny_bailing(overrides: dict) -> PreTrainedModel:
     return AutoModelForCausalLM.from_config(config, trust_remote_code=True)
 
 
-# One entry per EP MoE family (``src/distributed/expert_parallel/families``), keyed by the ``model_type``
+# One entry per EP MoE family (``halo/distributed/expert_parallel/families``), keyed by the ``model_type``
 # its tiny model carries, which the GPU suites take as ``--family``.
 # ``tests/cpu/conventions/test_tiny_family_roster.py`` holds the keys to the EP registry, so a new
 # family without a tiny model fails there.

@@ -10,13 +10,13 @@ import time
 
 import pytest
 
-from src.environments.sandbox.inprocess import (
+from halo.environments.sandbox.inprocess import (
     SAFE_MATH_BUILTINS,
     SAFE_PYTHON_BUILTINS,
     calculate_sandboxed,
     run_python_sandboxed,
 )
-from src.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE
+from halo.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE
 
 # calculate_sandboxed
 

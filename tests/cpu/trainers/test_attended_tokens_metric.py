@@ -14,7 +14,7 @@ import pytest
 import torch
 from trl import SFTTrainer
 
-from src.trainers.sft import DistributedSFTTrainer
+from halo.trainers.sft import DistributedSFTTrainer
 
 
 def _fake_self(metrics):

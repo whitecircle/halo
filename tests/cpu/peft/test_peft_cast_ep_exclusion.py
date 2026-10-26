@@ -24,8 +24,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 
-from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k

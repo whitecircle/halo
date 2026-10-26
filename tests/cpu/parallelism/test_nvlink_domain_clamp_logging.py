@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import pytest
 
-import src.distributed.parallelism_config as parallelism_config_module
+import halo.distributed.parallelism_config as parallelism_config_module
 from tests.common.parallelism import create_config
 
 

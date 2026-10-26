@@ -14,10 +14,10 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.callbacks.balancing import apply_balancing_mode
-from src.models.config_access import get_config_field, set_config_field
-from src.models.moe.config_fields import resolve_expert_count, resolve_router_topk
-from src.models.moe.router_logits import mark_router_logits_forced_off, router_logits_forced_off
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.models.config_access import get_config_field, set_config_field
+from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
+from halo.models.moe.router_logits import mark_router_logits_forced_off, router_logits_forced_off
 
 
 class _TextConfig:

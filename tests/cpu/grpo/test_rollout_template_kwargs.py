@@ -13,14 +13,14 @@ from dataclasses import replace
 
 import pytest
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.engine_wire import generation_control_fields
-from src.environments.rollout_config import (
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.engine_wire import generation_control_fields
+from halo.environments.rollout_config import (
     REASONING_BUDGET_SOFT_TEMPLATE_VAR,
     REASONING_BUDGET_TEMPLATE_VAR,
     RolloutConfig,
 )
-from src.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
+from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 
 
 def test_request_and_render_agree_on_the_episode_variables():

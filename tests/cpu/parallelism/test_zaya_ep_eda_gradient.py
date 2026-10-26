@@ -26,7 +26,7 @@ import torch.nn as nn
 from transformers.models.zaya.configuration_zaya import ZayaConfig
 from transformers.models.zaya.modeling_zaya import ZayaSparseMoeBlock
 
-from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from tests.common.parallelism import single_process_ep_config
 from tests.common.utils import fro_rel_err
 

@@ -14,9 +14,9 @@ import types
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline import vlm_rows
-from src.data.pipeline.vlm_rows import prepare_vlm_dataset, vlm_map_features
-from src.entrypoints import model_setup
+from halo.data.pipeline import vlm_rows
+from halo.data.pipeline.vlm_rows import prepare_vlm_dataset, vlm_map_features
+from halo.entrypoints import model_setup
 
 
 def _args(**overrides) -> types.SimpleNamespace:

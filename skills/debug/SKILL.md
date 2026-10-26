@@ -7,7 +7,7 @@ description: >-
   mode. Auto-fire when a training run hangs/deadlocks, OOMs, produces
   loss=NaN/Inf, or hits a DeepEP/NCCL fault, or when the user asks to debug,
   triage, or diagnose such a problem. Grounds every recommendation in
-  src/diagnostics/, src/callbacks/torch_profiler.py, and
+  halo/diagnostics/, halo/callbacks/torch_profiler.py, and
   agent-docs/reference/debugging.md.
 allowed-tools:
   - Read
@@ -19,10 +19,10 @@ allowed-tools:
 # Distributed-training failure triage
 
 Diagnose a hang / OOM / NaN-loss / DeepEP fault / NCCL timeout. Every helper and
-env var below matches its owner **exactly** — `src/runtime/consensus.py` (`assert_rank_uniform` consistency
-check), `src/diagnostics/py_spy.py` (py-spy capture), `src/diagnostics/profiling.py`
-(`cuda_memory_history`, `log_cuda_memory`), `src/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`),
-`src/models/attention/selection.py` (`is_fa4_backward_nan_prone`) — do not invent flags. Before a
+env var below matches its owner **exactly** — `halo/runtime/consensus.py` (`assert_rank_uniform` consistency
+check), `halo/diagnostics/py_spy.py` (py-spy capture), `halo/diagnostics/profiling.py`
+(`cuda_memory_history`, `log_cuda_memory`), `halo/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`),
+`halo/models/attention/selection.py` (`is_fa4_backward_nan_prone`) — do not invent flags. Before a
 verdict on anything non-trivial, find the symptom's row in
 [Troubleshooting](../../agent-docs/reference/troubleshooting.md#symptom--cause--fix) and the helper's
 enable recipe in [Debugging](../../agent-docs/reference/debugging.md).
@@ -64,7 +64,7 @@ the others never reach.
 1. **Which model + attention impl?** qwen3.5/3.6/Qwen3-Next and GLM-4 MoE Lite under FA4 NaN the
    first backward (head_dim-256 + partial rotary) — the fix is the auto FA4→SDPA fallback
    (`is_fa4_backward_nan_prone`, applied in `resolve_attn_implementation` in
-   `src/models/attention/selection.py`); confirm it engaged, don't force FA4.
+   `halo/models/attention/selection.py`); confirm it engaged, don't force FA4.
 2. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
    makes tiny LRs converge; a NaN right after an optimizer step suggests SR/precision —
    check `fp32_grad_reduce` / `fp32_non_ep_params`.
@@ -116,7 +116,7 @@ the MoE `CheckpointError`, tokenizer-cache embedding OOB, a fused EP export an e
 ## Sources of truth
 
 `agent-docs/reference/troubleshooting.md` + `debugging.md` capture the known failure modes. The code is the
-**ultimate** authority: `src/diagnostics/` (the opt-in helpers) and the failing
-`src/` path itself are what actually behave — when a doc, this skill, or memory disagrees, or you are
+**ultimate** authority: `halo/diagnostics/` (the opt-in helpers) and the failing
+`halo/` path itself are what actually behave — when a doc, this skill, or memory disagrees, or you are
 unsure, read the real file before concluding. (`CLAUDE.md`: docs-first, the code wins.) Related skill:
 `data` (data loading: `num_shards < DP` raises at train load, S3 path split), `parallelism` (rejected/deadlocking combos).

@@ -15,9 +15,9 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
-from src.checkpoint.parallel.adapters import resolve_adapter_state
-from src.checkpoint.writing import adapter_save_dtype_caster
-from src.models.moe.balancing import is_balancing_state_key
+from halo.checkpoint.parallel.adapters import resolve_adapter_state
+from halo.checkpoint.writing import adapter_save_dtype_caster
+from halo.models.moe.balancing import is_balancing_state_key
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 ALL_FAMILIES = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES, **TINY_DENSE_FAMILIES}

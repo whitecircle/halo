@@ -30,9 +30,9 @@ Usage:
 
 import argparse
 
-from src.env import env_int, env_str
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.env import env_int, env_str
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.weight_sync import SGLANG_SERVER_URL, VLLM_DENSE_SERVER_URL

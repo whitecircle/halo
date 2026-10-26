@@ -20,11 +20,11 @@ import torch
 import torch.nn as nn
 from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGeneration
 
-from src.checkpoint.parallel.save import save_checkpoint
-from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from src.entrypoints.model_setup import install_resolved_tokenizer
-from src.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.checkpoint.parallel.save import save_checkpoint
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.entrypoints.model_setup import install_resolved_tokenizer
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from tests.common.checkpoint_io import save_context
 from tests.common.models import QWEN3_5_9B, TINY_QWEN35_CONFIG
 from tests.common.repo import load_script_module

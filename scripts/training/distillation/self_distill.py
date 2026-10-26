@@ -28,12 +28,12 @@ from functools import partial
 from transformers import AutoTokenizer, PreTrainedModel
 from trl import SFTConfig
 
-from src.config_validation import reject_non_default_args
-from src.configs.distillation import SelfDistillScriptArguments
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.script_arguments import ModelArguments
-from src.configs.sft import TREE_PACKING_FIELDS
-from src.data.collators.self_distill import (
+from halo.config_validation import reject_non_default_args
+from halo.configs.distillation import SelfDistillScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.configs.sft import TREE_PACKING_FIELDS
+from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     audit_self_distill_row,
     confidence_normalizer,
@@ -41,26 +41,26 @@ from src.data.collators.self_distill import (
     privileged_hint,
     teacher_history,
 )
-from src.data.collators.vlm import SelfDistillVLMDataCollator
-from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
-from src.data.pipeline.text_rows import text_render_kwargs
-from src.data.pipeline.vlm_rows import prepare_vlm_dataset
-from src.data.render_columns import reject_missing_render_column
-from src.entrypoints.data_setup import (
+from halo.data.collators.vlm import SelfDistillVLMDataCollator
+from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
+from halo.data.pipeline.text_rows import text_render_kwargs
+from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
+from halo.data.render_columns import reject_missing_render_column
+from halo.entrypoints.data_setup import (
     disable_trl_dataset_prep,
     load_script_datasets,
     log_script_dataset_examples,
     reject_trl_dataset_prep_args,
     resolve_vlm_run,
 )
-from src.entrypoints.model_setup import (
+from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -68,13 +68,13 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.parallel.frozen_models import load_frozen_reference_model
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.runtime.collectives import barrier
-from src.runtime.filesystem import hub_metadata_main_first
-from src.runtime.ranks import is_global_main_process
-from src.trainers.distillation.divergences import verify_same_token_ids
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.model_loading.parallel.frozen_models import load_frozen_reference_model
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.runtime.filesystem import hub_metadata_main_first
+from halo.runtime.ranks import is_global_main_process
+from halo.trainers.distillation.divergences import verify_same_token_ids
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 
 logger = logging.getLogger(__name__)
 

@@ -13,7 +13,7 @@ than from a hand-maintained name list:
 
 A dotted THIRD-PARTY target (``transformers.models.<family>.modeling_<family>``) is left alone: the
 pin guarantees the distribution, not that a given release ships that submodule. A dotted FIRST-PARTY
-target (``src.*``, ``scripts.*``, ``tests.*``) is never exempt — it ships in this repository, so a
+target (``halo.*``, ``scripts.*``, ``tests.*``) is never exempt — it ships in this repository, so a
 skip there hides a broken module instead of an absent one.
 
 Usage:
@@ -36,7 +36,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 _REQUIREMENT_TAIL = re.compile(r"[\[<>=!~;\s]")
 # Packages that ship in this repository: always importable, so a guard in front of one is never a
 # supported-configuration check. Load a scripts/ entry point with tests.common.repo.load_script_module.
-FIRST_PARTY_ROOTS = {"src", "scripts", "tests"}
+FIRST_PARTY_ROOTS = {"halo", "scripts", "tests"}
 
 
 def _normalize(name: str) -> str:

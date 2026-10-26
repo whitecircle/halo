@@ -18,7 +18,7 @@ import types
 import pytest
 import torch
 
-import src.kernels.lowp.deepgemm as deepgemm
+import halo.kernels.lowp.deepgemm as deepgemm
 
 E, K, N, T = 4, 8, 16, 40
 

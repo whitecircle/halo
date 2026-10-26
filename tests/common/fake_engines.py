@@ -14,9 +14,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import torch
 from torch.distributed import TCPStore
 
-from src.weight_sync.clients.base import WeightSyncClientBase
-from src.weight_sync.clients.sglang import SGLangWeightSyncClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.clients.base import WeightSyncClientBase
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.repo import REPO_ROOT
 
 # vLLM's default CUDA-graph capture ceiling on H100/H200 (1024 on B200/B300): prefills up to this many

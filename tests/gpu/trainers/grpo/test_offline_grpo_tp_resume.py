@@ -11,12 +11,12 @@ from types import SimpleNamespace
 import torch
 from transformers import AutoTokenizer
 
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.configs.grpo_offline import OfflineGRPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_str
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_str
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RESUME_PROBE_TEXT, fixed_text_batch, run_two_phase_resume
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import shared_output_dir

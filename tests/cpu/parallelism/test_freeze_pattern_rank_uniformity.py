@@ -2,7 +2,7 @@
 """A freeze/unfreeze pattern that misses on ONE stage must abort every rank — on a real group.
 
 ``freeze_modules_by_patterns`` / ``unfreeze_modules_by_patterns`` route their verdict through
-:func:`~src.runtime.consensus.reject_across_ranks` because the patterns are matched
+:func:`~halo.runtime.consensus.reject_across_ranks` because the patterns are matched
 against the LIVE module tree, which under pipeline parallelism is this rank's stage only. A pattern
 naming a layer that lives on stage 0 misses on stage 1 — so the verdict is genuinely rank-local, and
 a bare ``raise`` there takes one rank out while its peers block in the next collective until the
@@ -28,7 +28,7 @@ import pytest
 import torch.distributed as dist
 from torch import nn
 
-from src.model_loading.parallel.freeze_patterns import freeze_modules_by_patterns, unfreeze_modules_by_patterns
+from halo.model_loading.parallel.freeze_patterns import freeze_modules_by_patterns, unfreeze_modules_by_patterns
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2

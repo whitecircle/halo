@@ -19,19 +19,19 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.environments.environment_base import EnvironmentBase
-from src.environments.episode import TurnGeneration, step_context_from_generation
-from src.environments.episode_keys import REWARD_COMPONENTS_KEY
-from src.environments.messages import Message, Trajectory, engine_view
-from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from src.environments.protocols.react import ReActEnvironment
-from src.environments.tasks.qa import ExamQAEnvironment
-from src.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
-from src.rewards.samples import CUT_TOOL_CALLS_KEY
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.episode import TurnGeneration, step_context_from_generation
+from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.messages import Message, Trajectory, engine_view
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.tasks.qa import ExamQAEnvironment
+from halo.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
+from halo.rewards.samples import CUT_TOOL_CALLS_KEY
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 
 def _environment_classes(cls: type = EnvironmentBase) -> list[type]:

@@ -6,7 +6,7 @@ modules no CPU test imports, so a moved module or a renamed symbol would surface
 next runs. This sweep resolves them statically, through the index the docs gate checks markdown with
 (:class:`scripts.docs.references.RepoIndex`):
 
-* each import of a first-party package in the Python under ``src/``, ``scripts/``, ``tests/`` (the GPU
+* each import of a first-party package in the Python under ``halo/``, ``scripts/``, ``tests/`` (the GPU
   scripts included), ``docker/`` and ``.github/``, from the module that defines what it takes: one that
   only re-binds the name by an import of its own is a second path, which would keep a moved symbol
   reachable through its old home;

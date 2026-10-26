@@ -26,11 +26,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
-from src.distributed.expert_parallel.moe_layer import gather as expert_gather
-from src.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
-from src.models.moe.family_specs import MoEFamilySpec
-from src.runtime import collectives
+from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
+from halo.distributed.expert_parallel.moe_layer import gather as expert_gather
+from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
+from halo.models.moe.family_specs import MoEFamilySpec
+from halo.runtime import collectives
 from tests.common.ep_stubs import StubEPLayerBase
 
 

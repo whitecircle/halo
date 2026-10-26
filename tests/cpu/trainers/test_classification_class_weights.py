@@ -5,7 +5,7 @@ Tests for ClassificationTrainer derive_class_weights global-count aggregation.
 With a pre-sharded dataset every DP rank holds a different shard; class weights must be
 derived from the world-summed label counts, not the local shard, or ranks silently train
 with divergent loss weighting. These tests simulate two ranks by faking the distributed
-primitives inside src.trainers.reward.classification and assert both ranks produce
+primitives inside halo.trainers.reward.classification and assert both ranks produce
 IDENTICAL weights equal to the global-count-derived ("balanced") weights.
 
 Run: python tests/cpu/trainers/test_classification_class_weights.py
@@ -22,9 +22,9 @@ import torch
 from datasets import Dataset
 from sklearn.utils.class_weight import compute_class_weight
 
-from src.trainers.reward.classification_loss import balanced_class_weights, build_classification_loss
+from halo.trainers.reward.classification_loss import balanced_class_weights, build_classification_loss
 
-_MODULE = "src.trainers.reward.classification_loss"
+_MODULE = "halo.trainers.reward.classification_loss"
 
 
 class _FakeDist:

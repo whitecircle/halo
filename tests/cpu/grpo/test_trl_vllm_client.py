@@ -16,8 +16,8 @@ import types
 import pytest
 import trl.generation.vllm_generation as trl_vllm_generation
 
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from tests.common.weight_sync import offline_client
 
 _TRL_TREE = ast.parse(inspect.getsource(trl_vllm_generation))

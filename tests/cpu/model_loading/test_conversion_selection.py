@@ -32,11 +32,11 @@ from transformers.core_model_loading import (
 from transformers.models.inkling.configuration_inkling import InklingTextConfig
 from transformers.models.inkling.modeling_inkling import InklingForCausalLM
 
-import src.model_loading.lazy_safetensors.conversion_selection as conversion_selection
-from src.checkpoint.reading import resolve_checkpoint_weights
-from src.distributed.expert_parallel.lazy_plan import WeightPlanner
-from src.model_loading.checkpoint_keys import build_key_plan
-from src.model_loading.lazy_safetensors.conversion import (
+import halo.model_loading.lazy_safetensors.conversion_selection as conversion_selection
+from halo.checkpoint.reading import resolve_checkpoint_weights
+from halo.distributed.expert_parallel.lazy_plan import WeightPlanner
+from halo.model_loading.checkpoint_keys import build_key_plan
+from halo.model_loading.lazy_safetensors.conversion import (
     Concat,
     Deinterleave,
     PermuteRope,
@@ -44,14 +44,14 @@ from src.model_loading.lazy_safetensors.conversion import (
     lazy_key_mapping,
     translate_converter,
 )
-from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
-from src.model_loading.lazy_safetensors.materialization import (
+from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
+from halo.model_loading.lazy_safetensors.materialization import (
     SafetensorsWeightLoader,
     WeightAction,
     WeightPlan,
 )
-from src.model_loading.model_preparation import resolve_auto_model_class
-from src.models.moe.expert_layout import ExpertLayoutKind
+from halo.model_loading.model_preparation import resolve_auto_model_class
+from halo.models.moe.expert_layout import ExpertLayoutKind
 from tests.common.models import TINY_INKLING_CONFIG
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, build_tiny_family_checkpoint, module_with_weight_keys

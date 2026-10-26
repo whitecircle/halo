@@ -20,18 +20,18 @@ from pathlib import Path
 
 from transformers import AutoModelForSequenceClassification
 
-import src.environments.registry as environment_registry
-import src.models.moe.balancing as moe_balancing
-import src.models.seq_cls_heads as seq_cls_heads
-from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
-from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP, ep_layer_classes
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from src.models.head_transform import _HEAD_TRANSFORM_SPEC_MAP
-from src.models.moe.family_specs import MOE_FAMILY_SPECS, moe_model_types
-from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
-from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
+import halo.environments.registry as environment_registry
+import halo.models.moe.balancing as moe_balancing
+import halo.models.seq_cls_heads as seq_cls_heads
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP, ep_layer_classes
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.models.head_transform import _HEAD_TRANSFORM_SPEC_MAP
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS, moe_model_types
+from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
+from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.goldens import regen_main
 from tests.common.rosters import ep_layer_class_by_model_type
 

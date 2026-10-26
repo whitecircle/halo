@@ -55,14 +55,14 @@ from transformers import (
     Qwen3MoeForCausalLM,
 )
 
-from src.checkpoint.reading import resolve_checkpoint_weights
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.pipeline_parallel.partition import resolve_layer_partition
-from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
-from src.model_loading.parallel.ep import load_ep_model_lazy
-from src.model_loading.parallel.pp import _load_stage_lazy
+from halo.checkpoint.reading import resolve_checkpoint_weights
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.pipeline_parallel.partition import resolve_layer_partition
+from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
+from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.pp import _load_stage_lazy
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG

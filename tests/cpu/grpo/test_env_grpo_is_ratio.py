@@ -8,7 +8,7 @@ silently removing the correction on any step containing one bad episode.
 import pytest
 import torch
 
-from src.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
+from halo.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
 
 CLIP_MAX = 3.0
 

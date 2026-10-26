@@ -11,15 +11,15 @@ import os
 import pytest
 import torch.distributed as dist
 
-from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.group_layout import NodeLocalLayout
-from src.kernels.lowp.spec import LowpSpec
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.group_layout import NodeLocalLayout
+from halo.kernels.lowp.spec import LowpSpec
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import create_config, make_parallelism_config, simulated_world
 

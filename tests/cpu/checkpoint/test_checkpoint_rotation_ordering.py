@@ -33,10 +33,10 @@ import torch.nn as nn
 from transformers import TrainerState
 from transformers.trainer_utils import rotate_checkpoints
 
-import src.checkpoint.parallel.optimizer as optimizer_mod
-import src.trainers.checkpointing as checkpointing_mod
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+import halo.checkpoint.parallel.optimizer as optimizer_mod
+import halo.trainers.checkpointing as checkpointing_mod
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.checkpoint_io import load_context
 

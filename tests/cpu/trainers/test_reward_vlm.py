@@ -33,14 +33,14 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 from trl import RewardConfig, RewardTrainer
 
-from src.data.collators.vlm_preference import DataCollatorForVLMPreference
-from src.distributed.parallelism_config import ParallelismConfig
-from src.entrypoints import model_setup
-from src.model_loading.tokenizer_setup import resolve_tokenizer
-from src.models.modality import config_declares_multimodality, is_vlm_model
-from src.models.seq_cls_heads import multimodal_sequence_classification_model_types
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.data.collators.vlm_preference import DataCollatorForVLMPreference
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints import model_setup
+from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.models.modality import config_declares_multimodality, is_vlm_model
+from halo.models.seq_cls_heads import multimodal_sequence_classification_model_types
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.repo import load_script_module
 from tests.cpu.data.test_vlm_preference_collator import IMAGE_TOKEN, StubProcessor, StubTokenizer, make_row
 
@@ -138,7 +138,7 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
         mock.patch.object(module, "barrier"),
         mock.patch.object(module, "DistributedRewardTrainer", side_effect=capture_trainer),
         mock.patch.object(module, "run_trainer"),
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
     with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
@@ -314,7 +314,7 @@ def test_vlm_prepare_raises_when_the_budget_empties_the_split():
         return local
 
     with (
-        mock.patch("src.trainers.reward.bradley_terry.agree_probe_across_ranks", _agree),
+        mock.patch("halo.trainers.reward.bradley_terry.agree_probe_across_ranks", _agree),
         pytest.raises(ValueError, match="exceed max_length=2"),
     ):
         _bare_trainer(True, processor)._prepare_dataset(
@@ -373,8 +373,8 @@ def test_the_checkpoint_context_hands_the_processor_to_the_save():
         mock.patch.object(DistributedRewardTrainer, "_top_level_model", lambda self: model),
         mock.patch.object(DistributedRewardTrainer, "_get_tp_rank", lambda self: 0),
         mock.patch.object(DistributedRewardTrainer, "_find_cp_wrapper", lambda self: None),
-        mock.patch("src.trainers.checkpointing.is_fs_save_rank", return_value=True),
-        mock.patch("src.trainers.checkpointing.model_has_expert_lora", return_value=False),
+        mock.patch("halo.trainers.checkpointing.is_fs_save_rank", return_value=True),
+        mock.patch("halo.trainers.checkpointing.model_has_expert_lora", return_value=False),
     ):
         ctx = trainer._checkpoint_context()
 

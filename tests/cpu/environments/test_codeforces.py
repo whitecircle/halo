@@ -19,16 +19,15 @@ import zlib
 
 import pytest
 
-from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
-from src.configs.grpo_environmental import EnvironmentConfig
-from src.environments.episode_keys import REWARD_COMPONENTS_KEY
-from src.environments.registry import build_environment, get_registered_environments
-from src.environments.sandbox.base import SandboxExecutor
-from src.environments.sandbox.factory import build_sandbox
-from src.environments.sandbox.results import SandboxResult
-from src.environments.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT, CodeContestsEnvironment
-from src.environments.tasks.coding.code_contests_prompts import NO_STDIN_NOTE, SCRATCHPAD_BUDGET_SPENT_REPLY
-from src.environments.tasks.coding.contest_datasets import (
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.registry import build_environment, get_registered_environments
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.factory import build_sandbox
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT, CodeContestsEnvironment
+from halo.environments.tasks.coding.code_contests_prompts import NO_STDIN_NOTE, SCRATCHPAD_BUDGET_SPENT_REPLY
+from halo.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,
     format_codeforces_prompt,
     format_icpc_prompt,
@@ -41,8 +40,8 @@ from src.environments.tasks.coding.contest_datasets import (
     pack_icpc_verification,
     pack_livecodebench_verification,
 )
-from src.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
-from src.environments.tasks.coding.verdicts import (
+from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
+from halo.environments.tasks.coding.verdicts import (
     DEFAULT_FLOAT_TOLERANCE,
     FloatTolerance,
     build_verdict,
@@ -50,7 +49,8 @@ from src.environments.tasks.coding.verdicts import (
     find_stated_float_tolerance,
     float_tolerance,
 )
-from src.rewards.terms import OBJECTIVE_REWARD_KEY
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY
+from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
 from tests.common.code_contests import StubSandbox
 
 # A tolerance special-judge: accept any float within 1e-4 of the reference (argv = 3 file paths).

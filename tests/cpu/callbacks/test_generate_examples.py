@@ -11,8 +11,8 @@ import pytest
 import torch
 from datasets import Dataset
 
-import src.callbacks.generate_examples as cb_module
-from src.callbacks.generate_examples import (
+import halo.callbacks.generate_examples as cb_module
+from halo.callbacks.generate_examples import (
     _MAX_PRINTED_PROMPT_CHARS,
     GenerateExamplesCallback,
     _pretty_print_dataframe,
@@ -337,7 +337,7 @@ def test_pretty_print_dataframe_truncates_long_prompt(caplog):
     long_prompt = "y" * (_MAX_PRINTED_PROMPT_CHARS + 1) + "x" * _MAX_PRINTED_PROMPT_CHARS
     df = pd.DataFrame([{"Prompt": long_prompt, "Completion": "c"}])
 
-    with caplog.at_level(logging.INFO, logger="src.callbacks.generate_examples"):
+    with caplog.at_level(logging.INFO, logger="halo.callbacks.generate_examples"):
         _pretty_print_dataframe(df)
 
     table = caplog.records[-1].getMessage()

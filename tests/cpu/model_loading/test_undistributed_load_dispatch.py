@@ -20,13 +20,13 @@ import torch
 import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
-import src.model_loading.parallel.loader as model_loading
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.model_source import ModelSource
-from src.models.moe.config_fields import has_routed_experts
+import halo.model_loading.parallel.loader as model_loading
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.models.moe.config_fields import has_routed_experts
 from tests.common.parallelism import make_parallelism_config
 
-_PC_MOD = "src.distributed.parallelism_config"
+_PC_MOD = "halo.distributed.parallelism_config"
 
 
 def _pc(**kwargs) -> ParallelismConfig:

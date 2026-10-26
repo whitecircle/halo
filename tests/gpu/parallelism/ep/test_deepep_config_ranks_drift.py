@@ -26,8 +26,8 @@ Requirements:
     - DeepEP installed (both prebuilt images ship it). Builds no model and no buffer.
 """
 
-from src.distributed.expert_parallel.deepep.backends import deep_ep
-from src.distributed.expert_parallel.deepep.capacity import DEEPEP_V1_CONFIG_RANKS
+from halo.distributed.expert_parallel.deepep.backends import deep_ep
+from halo.distributed.expert_parallel.deepep.capacity import DEEPEP_V1_CONFIG_RANKS
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
 
@@ -61,7 +61,7 @@ def assert_table_matches(name: str, upstream: frozenset[int]) -> None:
         f"DEEPEP_V1_CONFIG_RANKS has drifted from deep_ep.Buffer.{name}: upstream-only widths "
         f"{missing} are refused at config time though they would run, and toolkit-only widths "
         f"{stale} pass the gate and then trip DeepEP's own assert at the first dispatch. Set "
-        f"DEEPEP_V1_CONFIG_RANKS in src/distributed/expert_parallel/config.py to {sorted(upstream)}."
+        f"DEEPEP_V1_CONFIG_RANKS in halo/distributed/expert_parallel/config.py to {sorted(upstream)}."
     )
 
 

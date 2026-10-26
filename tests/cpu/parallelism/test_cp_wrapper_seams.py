@@ -23,12 +23,12 @@ import torch.distributed as dist
 from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.models.unwrapping import CP_ATTENTION_INNER_ATTR, strip_cp_attention_level
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.models.unwrapping import CP_ATTENTION_INNER_ATTR, strip_cp_attention_level
 
-_CP_MOD = "src.distributed.context_parallel.config"
+_CP_MOD = "halo.distributed.context_parallel.config"
 
 VOCAB = 64
 SEQ_LEN = 8

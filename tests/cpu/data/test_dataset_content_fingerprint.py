@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Unit tests for :func:`src.data.pipeline.map_cache_key.dataset_content_fingerprint`.
+"""Unit tests for :func:`halo.data.pipeline.map_cache_key.dataset_content_fingerprint`.
 
 HF's ``Dataset._fingerprint`` is *not* stable across Python processes, so
 using it as the dataset half of the cache key built by
@@ -27,7 +27,7 @@ import tempfile
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline.map_cache_key import dataset_content_fingerprint
+from halo.data.pipeline.map_cache_key import dataset_content_fingerprint
 
 
 def _on_disk_dataset(dirpath: str, data: dict, fingerprint: str) -> Dataset:

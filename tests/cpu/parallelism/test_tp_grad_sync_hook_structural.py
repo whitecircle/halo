@@ -20,8 +20,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.trainers.parallelism.grad_sync as grad_sync_mod
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+import halo.trainers.parallelism.grad_sync as grad_sync_mod
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 def _trainer(max_grad_norm: float = 0.0):

@@ -9,9 +9,9 @@ is applied where the observation is built, so the rollout and the trainer's reco
 
 import pytest
 
-from src.environments.messages import Trajectory
-from src.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.tools.definitions import NativeTool, NativeToolCall
+from halo.environments.messages import Trajectory
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tools.definitions import NativeTool, NativeToolCall
 
 
 def _env(cap):

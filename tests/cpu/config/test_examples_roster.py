@@ -25,17 +25,17 @@ from pathlib import Path
 import pytest
 import yaml
 
-from src.configs.parallelism_arguments import parallelism_config_from_args
-from src.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
-from src.environments.rollout_config import resolve_reasoning_end_ids
-from src.model_loading.parallel.load_rules import reject_unsupported_model
-from src.model_loading.parallel.peft_setup import split_expert_lora_targets
-from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
-from src.models.attention.selection import validate_attn_implementation
-from src.models.config_access import text_config
-from src.models.context_window import is_bounded_length
-from src.models.moe.balancing import BIAS_UPDATE_MODES
-from src.models.moe.config_fields import has_routed_experts
+from halo.configs.parallelism_arguments import parallelism_config_from_args
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
+from halo.environments.rollout_config import resolve_reasoning_end_ids
+from halo.model_loading.parallel.load_rules import reject_unsupported_model
+from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
+from halo.models.attention.selection import validate_attn_implementation
+from halo.models.config_access import text_config
+from halo.models.context_window import is_bounded_length
+from halo.models.moe.balancing import BIAS_UPDATE_MODES
+from halo.models.moe.config_fields import has_routed_experts
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
@@ -163,7 +163,7 @@ def build_parallelism_config(config: Path):
     Goes through ``parallelism_config_from_args`` — the factory the entry scripts call — so the
     trainer-capability rejections (CP/PP on a script that supports neither) and every
     ``__post_init__`` rank rule are the ones under test. The world-size seams are the three
-    ``src.runtime.ranks`` readers the module imported; a CPU tier has no launcher to report them.
+    ``halo.runtime.ranks`` readers the module imported; a CPU tier has no launcher to report them.
     """
     script = script_for(config)
     parsed = parser_for(script).parse_yaml_file(str(config))
@@ -184,7 +184,7 @@ def build_parallelism_config(config: Path):
             ("get_local_world_size", gpus_per_node),
             ("get_global_rank", 0),
         ):
-            patcher.setattr(f"src.distributed.parallelism_config.{name}", lambda _value=value: _value)
+            patcher.setattr(f"halo.distributed.parallelism_config.{name}", lambda _value=value: _value)
         built = [
             parallelism_config_from_args(dist_args, trainer_cls=trainer_cls, expert_lora=expert_lora, **flags)
             for trainer_cls in script_trainer_classes(script)
@@ -361,7 +361,7 @@ def test_moe_example_declares_the_reentrant_checkpointing_it_runs(config):
         return
     declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
     assert declared is not False, (
-        "a MoE force-promotes use_reentrant to True (src/trainers/distributed_trainer.py), so this config's "
+        "a MoE force-promotes use_reentrant to True (halo/trainers/distributed_trainer.py), so this config's "
         "use_reentrant: false is silently overridden — write true, or drop the kwarg"
     )
 

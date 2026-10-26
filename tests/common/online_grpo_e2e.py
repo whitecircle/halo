@@ -15,12 +15,12 @@ from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import GRPOConfig
 
-from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.grpo.online import DistributedGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.ep_reference import ep_layers
@@ -342,7 +342,7 @@ def _lora_under_tp_refused(**build_kwargs) -> dict[str, bool]:
     ``reject_lora_under_tp`` runs inside ``_configure_distributed_modes``, after the trainer's
     own ``__init__`` has built the model wrappers and TRL's weight-transfer client, so a config-level
     assertion never reaches it. The client that construction left behind is closed by the ``atexit``
-    hook ``init_communicator`` registers (``src/weight_sync/clients/vllm.py``), since the raise
+    hook ``init_communicator`` registers (``halo/weight_sync/clients/vllm.py``), since the raise
     leaves no handle to close it through.
     """
     try:

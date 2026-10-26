@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the attention-backend dispatch in ``src/models/attention/selection.py``.
+"""CPU tests for the attention-backend dispatch in ``halo/models/attention/selection.py``.
 
 The arch and model gates that pick the kernel, all silent when they break: the SM100+ Blackwell
 predicate every backend choice shares, the per-model kernel limits ``resolve_attn_implementation``
@@ -20,11 +20,11 @@ import torch
 from transformers import PretrainedConfig, Qwen3Config
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src import hardware
-from src.distributed.context_parallel import ulysses_attention as cp_base_layer
-from src.model_loading.parallel import loader as model_loading
-from src.models.attention import selection as attention_mod
-from src.models.attention.gpt_oss_sinks import SinksPolicy
+from halo import hardware
+from halo.distributed.context_parallel import ulysses_attention as cp_base_layer
+from halo.model_loading.parallel import loader as model_loading
+from halo.models.attention import selection as attention_mod
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from tests.common.parallelism import make_parallelism_config
 
 # Every ``model_type`` transformers actually registers for an FA4-NaN attention stack. Listed

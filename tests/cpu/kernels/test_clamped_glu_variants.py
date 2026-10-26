@@ -25,8 +25,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from src.kernels import fused_glu
-from src.kernels.fused_glu import (
+from halo.kernels import fused_glu
+from halo.kernels.fused_glu import (
     GluCombine,
     clamped_silu_mul_eager,
     gptoss_glu_eager,

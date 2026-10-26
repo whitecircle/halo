@@ -19,9 +19,9 @@ import torch
 from transformers import Mistral4Config
 from transformers.models.qwen3_next import Qwen3NextConfig
 
-from src.data.collators.factory import select_data_collator
-from src.models import segment_markers
-from src.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS
+from halo.data.collators.factory import select_data_collator
+from halo.models import segment_markers
+from halo.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS
 
 
 def make_tokenizer() -> MagicMock:

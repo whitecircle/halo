@@ -21,11 +21,11 @@ import numpy as np
 import pytest
 import torch
 
-from src.environments.episode import RolloutResult
-from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
-from src.trainers.grpo.environmental.step_batch import BatchBuildFence
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.routing import BareEPLayer, raw_routing_payload
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 

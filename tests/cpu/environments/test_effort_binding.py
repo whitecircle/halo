@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests: both rollout drivers bind an episode's reasoning effort through ONE seam.
 
-``bind_episode_effort`` (``src/environments/reasoning_effort.py``) resolves the episode's level once and turns the
+``bind_episode_effort`` (``halo/environments/reasoning_effort.py``) resolves the episode's level once and turns the
 env's per-level CoT budget into the per-turn reasoning cap every turn runs under. The Ray actor and the
 offline eval runner must both go through it: a driver that resolves the level itself, or skips the
 budget, generates under a different contract than the one the policy was trained on. The episode
@@ -22,15 +22,15 @@ from types import SimpleNamespace
 
 import pytest
 
-import src.environments.eval_runner as eval_runner
-import src.environments.ray_actors as ray_actors
-from src.environments import reasoning_effort
-from src.environments.engine_wire import generation_control_fields
-from src.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
-from src.environments.messages import Trajectory
-from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from src.environments.rollout_config import VALID_REASONING_EFFORTS
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry
+import halo.environments.eval_runner as eval_runner
+import halo.environments.ray_actors as ray_actors
+from halo.environments import reasoning_effort
+from halo.environments.engine_wire import generation_control_fields
+from halo.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.messages import Trajectory
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry
 from tests.common.fake_chat_client import chat_reply
 
 _MAX_TOKENS = 20000

@@ -24,18 +24,18 @@ from transformers import AutoConfig, BitsAndBytesConfig, Qwen3Config, Qwen3ForCa
 from transformers.core_model_loading import WeightRenaming
 from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 
-import src.model_loading.parallel.cp as cp_loading
-import src.model_loading.parallel.fp32_masters as master_loading
-import src.model_loading.parallel.loader as loading
-import src.model_loading.parallel.tp as tp_loading
-import src.model_loading.parallel.whole_model as whole_model
-from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.expert_fuser import ExpertFuser, FusionTask
-from src.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
-from src.model_loading.parallel.fp32_masters import fp32_master_param_keys
-from src.model_loading.parallel.model_source import ModelSource
-from src.runtime import consensus, load_coordination
+import halo.model_loading.parallel.cp as cp_loading
+import halo.model_loading.parallel.fp32_masters as master_loading
+import halo.model_loading.parallel.loader as loading
+import halo.model_loading.parallel.tp as tp_loading
+import halo.model_loading.parallel.whole_model as whole_model
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.expert_fuser import ExpertFuser, FusionTask
+from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
+from halo.model_loading.parallel.fp32_masters import fp32_master_param_keys
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.runtime import consensus, load_coordination
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import module_with_weight_keys
 

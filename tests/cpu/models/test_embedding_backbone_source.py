@@ -15,9 +15,9 @@ from types import SimpleNamespace
 import pytest
 
 import scripts.training.embedding as embedding_script
-from src.configs.embedding import EmbeddingConfig
-from src.configs.script_arguments import ModelArguments
-from src.model_loading.parallel.model_source import ModelSource
+from halo.configs.embedding import EmbeddingConfig
+from halo.configs.script_arguments import ModelArguments
+from halo.model_loading.parallel.model_source import ModelSource
 
 REPO = "org/model"
 COMMIT_A = "a" * 40

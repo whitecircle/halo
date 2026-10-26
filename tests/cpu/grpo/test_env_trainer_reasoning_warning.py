@@ -17,15 +17,15 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.environments.episode import RolloutResult
-from src.environments.messages import Message, Trajectory
-from src.trainers.grpo.environmental.reasoning import reasoning_token_counts
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.reasoning import reasoning_token_counts
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 # The warning goes through the tokenize mixin's stdlib logger (the repo's warn_once convention).
-LOGGER = "src.trainers.grpo.environmental.trajectory_tokenize"
+LOGGER = "halo.trainers.grpo.environmental.trajectory_tokenize"
 
 
 class _StubTokenizer:

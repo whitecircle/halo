@@ -30,12 +30,12 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, default_data_collator
 from trl import SFTConfig
 
-from src.checkpoint.reading import StreamingCheckpointReader
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.loader import load_distributed_model
-from src.models.unwrapping import unwrap_toolkit_wrappers
-from src.runtime.dtensor import full_cpu_tensor
-from src.trainers.sft import DistributedSFTTrainer
+from halo.checkpoint.reading import StreamingCheckpointReader
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.runtime.dtensor import full_cpu_tensor
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG

@@ -11,7 +11,7 @@ import os
 import pytest
 import torch
 
-from src.model_loading.dtype import configure_float32_matmul_precision
+from halo.model_loading.dtype import configure_float32_matmul_precision
 
 
 @pytest.fixture(autouse=True)

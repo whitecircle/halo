@@ -21,10 +21,10 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
-from src.data.collators.self_distill import SelfDistillTextCollator
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_str
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.data.collators.self_distill import SelfDistillTextCollator
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_str
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log, step_losses

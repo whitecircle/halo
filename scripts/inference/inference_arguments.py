@@ -13,9 +13,9 @@ from typing import TYPE_CHECKING
 
 from datasets import Dataset
 
-from src.data.sources.s3_client import S3Client, build_s3_uri
-from src.data.sources.s3_dataset_store import load_dataset_from_s3_uri, push_dataset_to_s3_uri
-from src.log import configure_cli_logging
+from halo.data.sources.s3_client import S3Client, build_s3_uri
+from halo.data.sources.s3_dataset_store import load_dataset_from_s3_uri, push_dataset_to_s3_uri
+from halo.log import configure_cli_logging
 
 if TYPE_CHECKING:
     # Annotation only: the generation CLIs import this module too, and gradio takes seconds to

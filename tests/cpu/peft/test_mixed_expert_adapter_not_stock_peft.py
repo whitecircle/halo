@@ -28,7 +28,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file, save_file
 from torch import nn
 
-from src.checkpoint.adapters import (
+from halo.checkpoint.adapters import (
     EXPERT_LORA_PEFT_TYPE,
     EXPERT_LORA_SCALING_FIELDS,
     MIXED_EXPERT_LORA_PEFT_TYPE,
@@ -41,8 +41,8 @@ from src.checkpoint.adapters import (
     write_adapter_config,
     write_mixed_adapter_config,
 )
-from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 
 # Exactly the keys gather_expert_lora_adapters emits under a PeftModel: the layer path it walks is
 # PEFT-prefixed (unwrap_toolkit_wrappers stops at the PeftModel), and the key ends at lora_A/lora_B because

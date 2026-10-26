@@ -20,7 +20,7 @@ import pytest
 import torch
 from torch.nn.functional import kl_div, log_softmax, softmax
 
-from src.trainers.distillation.divergences import (
+from halo.trainers.distillation.divergences import (
     call_divergence,
     forward_kl_loss,
     require_divergence,

@@ -12,7 +12,7 @@ import os
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.sources.loading import load_preprocessed_dataset
+from halo.data.sources.loading import load_preprocessed_dataset
 from tests.common.datasets import write_prepared_text_dataset
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
@@ -20,7 +20,7 @@ from tests.common.tokenizers import load_cached_tokenizer
 _TRAIN = Dataset.from_dict({"text": [f"Training document number {i}." for i in range(12)]})
 _HELD_OUT = Dataset.from_dict({"text": [f"Held-out document number {i}." for i in range(3)]})
 _EXTRA = Dataset.from_dict({"text": [f"Extra document number {i}." for i in range(2)]})
-_PREPARATION_LOGGER = "src.data.preprocessed.preparation"
+_PREPARATION_LOGGER = "halo.data.preprocessed.preparation"
 
 
 def _decoded_test_rows(output_dir) -> list[str]:

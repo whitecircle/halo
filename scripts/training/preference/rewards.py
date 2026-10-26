@@ -6,12 +6,12 @@ The model class follows the checkpoint (``AutoModelForSequenceClassification``);
 follows the run (``is_vlm_run``), so a natively-multimodal checkpoint trained on text-only pairs
 takes the text path, where TRL chat-templates and tokenizes the raw columns itself. A run that
 declares image data loads an ``AutoProcessor`` as the processing class and takes the vision pair:
-the rendered-text map in ``src/data/pipeline/preferences.py``, placeholder expansion at collation in
-``src/data/collators/vlm_preference.py``.
+the rendered-text map in ``halo/data/pipeline/preferences.py``, placeholder expansion at collation in
+``halo/data/collators/vlm_preference.py``.
 
 Multimodal reward modeling needs a multimodal sequence-classification head, which transformers
 ships for only a few families (Gemma3, dense Qwen3.5, T5Gemma2, ModernVBert); the toolkit registers
-two more itself in src/models/seq_cls_heads.py — Gemma 4 and MoE Qwen3.5/3.6, each in both
+two more itself in halo/models/seq_cls_heads.py — Gemma 4 and MoE Qwen3.5/3.6, each in both
 spellings a checkpoint can carry (composite and text tower). Any other multimodal checkpoint is
 refused up front, before the model load.
 
@@ -28,14 +28,14 @@ Usage:
 from transformers import AutoModelForSequenceClassification
 from trl import RewardConfig
 
-from src.config_validation import reject_unsupported_args
-from src.configs.parallelism_arguments import ParallelismArguments
-from src.configs.reward import RewardScriptArguments
-from src.configs.script_arguments import ModelArguments
-from src.data.render_columns import alias_images_column, alias_tools_column
-from src.data.vlm_routing import is_vlm_run
-from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
-from src.entrypoints.model_setup import (
+from halo.config_validation import reject_unsupported_args
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.reward import RewardScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.render_columns import alias_images_column, alias_tools_column
+from halo.data.vlm_routing import is_vlm_run
+from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from halo.entrypoints.model_setup import (
     apply_max_length,
     default_padded_attn_implementation,
     install_resolved_tokenizer,
@@ -44,7 +44,7 @@ from src.entrypoints.model_setup import (
     log_model_info,
     reject_multimodal_model_without_seq_cls_head,
 )
-from src.entrypoints.script import (
+from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
@@ -52,9 +52,9 @@ from src.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from src.model_loading.parallel.peft_setup import configure_adapter_training
-from src.runtime.collectives import barrier
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 
 
 def main():
@@ -114,7 +114,7 @@ def main():
     # text-only pairs is a text run. The model class is unaffected; it followed the checkpoint above.
     is_vlm = is_vlm_run(args, model_config.model_name_or_path, ds, config=model.config)
     if is_vlm:
-        # The VLM pair render (src/data/pipeline/preferences.py) templates the prompt without
+        # The VLM pair render (halo/data/pipeline/preferences.py) templates the prompt without
         # `tools=`, so the aliased column would render toolless on this arm.
         reject_unsupported_args("Reward modeling (VLM)", tools_field=args.tools_field)
     # The processor only on the VLM branch: TRL's text tokenize map calls tokenizer-only methods

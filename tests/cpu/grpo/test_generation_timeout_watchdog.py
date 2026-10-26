@@ -14,9 +14,9 @@ import logging
 
 import pytest
 
-from src.env import nccl_timeout, watchdog_bounded_seconds
-from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.env import nccl_timeout, watchdog_bounded_seconds
+from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.weight_sync import offline_client
 
 

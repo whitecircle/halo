@@ -52,13 +52,13 @@ from transformers import AutoTokenizer
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_str
-from src.hardware import supports_grouped_mm
-from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model, sync_weights_to_client
-from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_str
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model, sync_weights_to_client
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
 from tests.common.utils import log, max_or_nan
 from tests.common.weight_sync import weight_transfer_port

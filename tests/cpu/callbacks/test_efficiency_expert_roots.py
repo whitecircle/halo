@@ -2,7 +2,7 @@
 """CPU guards on how the FLOPs estimator learns which params are sparse (routed) MoE experts.
 
 The estimator must read the family specs' declared ``expert_weight_roots`` and ``experts_container_attrs``
-(:class:`~src.models.moe.family_specs.MoEFamilySpec`) — not a copy of them. A copy drifts silently: a
+(:class:`~halo.models.moe.family_specs.MoEFamilySpec`) — not a copy of them. A copy drifts silently: a
 family adding an expert-weight root or container spelling the callback does not know is classified as a
 DENSE parameter, so its params count as always-active and S-MFU (sparsity = top_k/num_experts applies
 only to expert params) is over-reported for that model.
@@ -22,9 +22,9 @@ import sys
 
 import pytest
 
-from src.callbacks.model_flops import _is_expert_param
-from src.models.moe import family_specs
-from src.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, expert_weight_roots, experts_container_attrs
+from halo.callbacks.model_flops import _is_expert_param
+from halo.models.moe import family_specs
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, expert_weight_roots, experts_container_attrs
 from tests.common.repo import REPO_ROOT
 
 
@@ -82,7 +82,7 @@ def test_a_new_family_spelling_needs_no_callback_edit(monkeypatch, declared, par
 
 
 def test_importing_the_callback_does_not_import_deep_ep():
-    """``import src.callbacks.efficiency`` must leave ``deep_ep`` unimported.
+    """``import halo.callbacks.efficiency`` must leave ``deep_ep`` unimported.
 
     Dense/DDP/CPU jobs build this callback; ``import deep_ep`` runs ``cuInit`` and latches
     ``CUDA_DEVICE_MAX_CONNECTIONS`` for the whole process.
@@ -90,7 +90,7 @@ def test_importing_the_callback_does_not_import_deep_ep():
     if importlib.util.find_spec("deep_ep") is None:
         pytest.skip("deep_ep is not installed — the guard cannot distinguish deferred from absent")
 
-    probe = "import sys\nimport src.callbacks.efficiency\nprint('deep_ep' in sys.modules)\n"
+    probe = "import sys\nimport halo.callbacks.efficiency\nprint('deep_ep' in sys.modules)\n"
     result = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
     assert result.stdout.strip().splitlines()[-1] == "False", (
         "importing EfficiencyCallback pulled in deep_ep — the EP import chain must stay free of the "

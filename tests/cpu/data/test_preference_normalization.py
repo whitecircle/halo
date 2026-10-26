@@ -12,8 +12,8 @@ import copy
 
 import pytest
 
-from src.data.pipeline import preferences as prefs
-from src.data.pipeline.preferences import normalize_preference_row, render_preference_row
+from halo.data.pipeline import preferences as prefs
+from halo.data.pipeline.preferences import normalize_preference_row, render_preference_row
 
 
 class StubTokenizer:

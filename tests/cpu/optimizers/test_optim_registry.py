@@ -16,7 +16,7 @@ import pytest
 from transformers import HfArgumentParser, TrainingArguments
 from transformers.training_args import OptimizerNames
 
-from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, optim_name, register_custom_optimizers
+from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, optim_name, register_custom_optimizers
 
 register_custom_optimizers()
 

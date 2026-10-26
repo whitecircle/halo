@@ -13,7 +13,7 @@ from torch.distributed import distributed_c10d as c10d
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 
-from src.runtime.collectives import broadcast_from_rank0
+from halo.runtime.collectives import broadcast_from_rank0
 from tests.common.collective_recorder import recording_rank
 
 

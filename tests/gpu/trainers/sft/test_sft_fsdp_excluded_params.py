@@ -24,9 +24,9 @@ from unittest import mock
 
 import torch
 
-import src.model_loading.parallel.whole_model as whole_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.model_loading.parallel.freeze_patterns import unfreeze_modules_by_patterns
+import halo.model_loading.parallel.whole_model as whole_model
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.freeze_patterns import unfreeze_modules_by_patterns
 from tests.common.harness import gpu_test_main
 from tests.common.pinned_params import (
     RUN_DTYPE,

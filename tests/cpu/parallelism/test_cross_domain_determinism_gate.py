@@ -14,8 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import simulated_world
 
 

@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common import thinking_budget
 from tests.common.thinking_budget import ReasoningTurnRecorder, record_thinking_budget_checks
 

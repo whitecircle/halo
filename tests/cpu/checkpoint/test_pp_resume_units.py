@@ -23,15 +23,15 @@ import torch.nn as nn
 from safetensors.torch import save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-import src.checkpoint.parallel.optimizer as optimizer_mod
-import src.checkpoint.parallel.pp as pp_mod
-import src.checkpoint.parallel.reading as coordination_mod
-from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
-from src.checkpoint.parallel.resume_weights import load_resume_weights
-from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
-from src.runtime.consensus import RankConsensus
+import halo.checkpoint.parallel.optimizer as optimizer_mod
+import halo.checkpoint.parallel.pp as pp_mod
+import halo.checkpoint.parallel.reading as coordination_mod
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
+from halo.checkpoint.parallel.resume_weights import load_resume_weights
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
+from halo.runtime.consensus import RankConsensus
 from tests.common.checkpoint_io import load_context
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.pp_fakes import hand_built_stage

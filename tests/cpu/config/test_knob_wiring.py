@@ -21,21 +21,21 @@ import pytest
 from datasets import Dataset, DatasetDict
 from trl import SFTConfig
 
-from src.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
-from src.configs.grpo import RLRRConfig
-from src.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
-from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
-from src.entrypoints.data_setup import reject_trl_dataset_prep_args
-from src.entrypoints.script import distributed_trainer_kwargs
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.distributed_trainer import DistributedTrainerMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.optimizer_selection import resolve_bf16_optimizer
-from src.trainers.parallelism.trainer_rules import reject_stock_adamw_on_mixed_params
-from src.trainers.preference.trl_preference import TRLPreferenceMixin
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
+from halo.configs.grpo import RLRRConfig
+from halo.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
+from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from halo.entrypoints.data_setup import reject_trl_dataset_prep_args
+from halo.entrypoints.script import distributed_trainer_kwargs
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.optimizer_selection import resolve_bf16_optimizer
+from halo.trainers.parallelism.trainer_rules import reject_stock_adamw_on_mixed_params
+from halo.trainers.preference.trl_preference import TRLPreferenceMixin
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.repo import REPO_ROOT, load_script_module
 
 # bf16_optimizer: YAML/CLI reachable, tri-state, and honored by the mixin
@@ -313,7 +313,7 @@ def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
         f"bf16: false\nuse_cpu: true\n{config_body}"
     )
     with (
-        mock.patch("src.entrypoints.script.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ):
         module.main()
@@ -779,7 +779,7 @@ def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():
 
 # The package that consumes the knobs. Searched for the construction rather than pinned to a file, so
 # the trainer may move it into a helper or a mixin without this test going quiet.
-_IS_MASK_CONSUMER_ROOT = "src/trainers/grpo"
+_IS_MASK_CONSUMER_ROOT = "halo/trainers/grpo"
 
 # ISMaskConfig field -> the AsyncTrainingConfig knob that must supply it, under the ``isr_`` prefix
 # the YAML surface spells them with. Derived, so a stage added to the mask config is covered here.

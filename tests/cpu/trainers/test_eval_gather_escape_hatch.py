@@ -31,8 +31,8 @@ from unittest.mock import patch
 
 import pytest
 
-import src.trainers.evaluation as mixin_module
-from src.trainers.distributed_trainer import DistributedTrainerMixin
+import halo.trainers.evaluation as mixin_module
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 # Any quantile < 1.0 turns entropy masking on; the sentinel is what the stubbed super().evaluate()
 # returns, so an assert matching it proves the call passed THROUGH the escape hatch unchanged.

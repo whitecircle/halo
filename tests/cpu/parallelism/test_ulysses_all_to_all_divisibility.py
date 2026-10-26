@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed.context_parallel.all_to_all import UlyssesAllToAll
+from halo.distributed.context_parallel.all_to_all import UlyssesAllToAll
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
