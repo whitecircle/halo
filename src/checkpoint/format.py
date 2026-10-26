@@ -11,7 +11,7 @@ import re
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME, VIDEO_PROCESSOR_NAME
 
-from src.checkpoint.atomic import withheld_file_name
+from src.checkpoint.atomic import WITHHELD_FILE_SUFFIX
 
 # Per-file cap for gathered safetensors saves, shared by every save path and the arg default.
 DEFAULT_MAX_SHARD_SIZE = "5GB"
@@ -35,6 +35,8 @@ STREAM_PART_PREFIX = "model-streaming"
 # A PP checkpoint's part names. Each stage picks its own prefix without coordinating with the other writers: a
 # global "k-of-n" counter is not derivable locally once a stage emits a variable number of parts.
 PP_WRAPPER_PART_PREFIX = "model-wrapper"
+# Matches a :func:`pp_stage_part_prefix` name; group 1 is the stage, group 2 the stage count.
+PP_STAGE_PART_RE = re.compile(r"model-pp(\d+)-of-(\d+)")
 LEGACY_WEIGHTS_FILE = "pytorch_model.bin"
 # Every filename that makes a directory a whole-model checkpoint, in the layout cascade's order.
 WHOLE_MODEL_WEIGHT_FILES = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE, LEGACY_WEIGHTS_FILE)
@@ -42,7 +44,7 @@ WHOLE_MODEL_WEIGHT_FILES = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE, LE
 # HF Trainer's own filenames, spelled here because ``transformers.trainer`` is a ~1 s import.
 TRAINER_STATE_FILE = "trainer_state.json"
 # Where the base save's trainer_state.json waits until every other file of the checkpoint is on disk.
-UNCOMMITTED_TRAINER_STATE_FILE = withheld_file_name(TRAINER_STATE_FILE)
+UNCOMMITTED_TRAINER_STATE_FILE = f".{TRAINER_STATE_FILE}{WITHHELD_FILE_SUFFIX}"
 SCHEDULER_STATE_FILE = "scheduler.pt"
 # HF Trainer's replicated optimizer state, which the sharded modes deliberately replace.
 OPTIMIZER_STATE_FILES = ("optimizer.pt", "optimizer.bin")

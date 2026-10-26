@@ -51,8 +51,8 @@ from itertools import groupby
 from operator import itemgetter
 
 import torch
-from safetensors.torch import save_file
 
+from src.checkpoint.atomic import save_safetensors_file
 from src.checkpoint.config_export import write_config_json
 from src.checkpoint.format import SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
 from src.checkpoint.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
@@ -358,7 +358,7 @@ def quantize_checkpoint(
                     )
                 if rel > max_relerr:
                     max_relerr, worst_relerr_name = rel, name
-        save_file(out_tensors, os.path.join(output_dir, shard_name), metadata=SAFETENSORS_METADATA)
+        save_safetensors_file(out_tensors, os.path.join(output_dir, shard_name), metadata=SAFETENSORS_METADATA)
         for key, tensor in out_tensors.items():
             weight_map[key] = shard_name
             total_size += tensor.numel() * tensor.element_size()

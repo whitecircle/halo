@@ -100,10 +100,11 @@ every tensor at its live dtype), so the stored dtype is what the merge writes. T
 
 ### `merge_peft_adapters.py`
 
-Load base + adapter, `merge_and_unload()`, save standalone HF checkpoint (base path read from
-`adapter_config.json`). Flags: `--adapter_dir`, `--output_dir`,
+The one adapter-merge tool: load base + adapter, `merge_and_unload()`, save standalone HF checkpoint
+(base path read from `adapter_config.json`). Flags: `--adapter_dir`, `--output_dir`,
 `--task {causal_lm,classification}`, `--dtype` (`bfloat16`), `--device_map` (`auto`/`cpu` for big
-models), `--num_labels`, `--max_shard_size` (`5GB`), `--attn_implementation`, plus the shared
+models), `--num_labels`, `--max_shard_size` (`5GB`), `--attn_implementation`, `--fp32_norms` (every
+normalization leaf written fp32, `convert_to_bf16.py`'s layout), plus the shared
 `--trust_remote_code` / `--quiet`. The base loads through the class the adapter's keys address
 (`load_base_for_adapter`): the widest one (`resolve_auto_model_class`, the full
 `*ForImageTextToText` wrapper for a VLM), or the `*ForCausalLM` sibling when the adapter came from a
@@ -119,15 +120,15 @@ run's routing and a `reset_sinks` run's sinks are lost.
 
 ### `convert_to_bf16.py`
 
-Re-save a model in BF16, optionally merging a PEFT adapter in the same pass. Flags: `--input_dir`,
-`--output_dir`, `--model_type {causal_lm,classifier,base}`, `--peft`, `--merge_adapter`,
+Re-save a model or a PEFT adapter in BF16 (merging an adapter is `merge_peft_adapters.py`'s). Flags:
+`--input_dir`, `--output_dir`, `--model_type {causal_lm,classifier,base}`, `--peft`,
 `--device_map`, `--verify`, `--check_inference`, `--max_shard_size`, `--trust_remote_code` /
 `--no-trust_remote_code` (default **True** — a local checkpoint source; Bailing/Ling need remote code.
 `patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `reattach_vision_tower.py` and `reset_sinks.py`
 read a Hub-capable `--model_id`, so those default **off**).
 **Forces every normalization leaf (torch norm bases, or a class named `*Norm*`) back to fp32** (BF16
-body + fp32 norms) — the only tool that does: `merge_peft_adapters.py` leaves norms at the `--dtype`
-it loads the base at, except modules a family pins through transformers'
+body + fp32 norms) — as `merge_peft_adapters.py --fp32_norms` does; without it the merge leaves norms
+at the `--dtype` it loads the base at, except modules a family pins through transformers'
 `_keep_in_fp32_modules_strict` (e.g. DeepSeek-V4's norms and HC modules), which load fp32 under a
 bf16 or fp16 `--dtype`. GPT-OSS declares its norms in the non-strict `_keep_in_fp32_modules`, which
 transformers keeps fp32 only under `--dtype float16`. `merge_ep_shards.py` keeps norms at their

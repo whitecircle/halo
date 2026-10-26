@@ -247,7 +247,7 @@ def test_convert_to_bf16_carries_source_aux_files_without_shadowing_the_fresh_co
 
 
 def test_convert_to_bf16_unmerged_peft_save_never_sweeps_the_output_dir():
-    """--peft without --merge_adapter writes ADAPTER files only: the full-checkpoint sweep must not
+    """--peft writes ADAPTER files only: the full-checkpoint sweep must not
     run there, or it deletes whatever full-model weights the directory already holds while the save
     replaces none of them."""
     PartialState()
@@ -258,7 +258,7 @@ def test_convert_to_bf16_unmerged_peft_save_never_sweeps_the_output_dir():
         _plant_stale_weights(out)
         planted = set(_weight_files(out))
 
-        cb.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True, merge_adapter=False)
+        cb.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True)
 
         assert (out / "adapter_model.safetensors").exists(), "adapter save must still land"
         assert planted <= set(_weight_files(out)), "the unmerged-PEFT branch swept full-model weights it did not write"

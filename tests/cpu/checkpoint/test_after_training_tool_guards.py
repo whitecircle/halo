@@ -7,7 +7,7 @@ silence.
   for.
 * ``reset_sinks.py`` defaulting ``--output_dir`` to its input lets a mistyped command rewrite the
   only copy of a checkpoint with no undo. In-place is a flag you ask for.
-* ``convert_to_bf16.py --peft --merge_adapter`` copying the ADAPTER directory's aux files into the
+* ``merge_peft_adapters.py`` copying the ADAPTER directory's aux files into the
   merged checkpoint lands ``adapter_config.json`` beside full merged weights, and every
   from_pretrained-based tool downstream then reads the result as an unmerged adapter — and
   re-exports the bare base.
@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from datasets import Dataset
 
-from scripts.after_training import convert_to_bf16, merge_models, reset_sinks
+from scripts.after_training import merge_models, merge_peft_adapters, reset_sinks
 from scripts.inference.generation import dataset_deduplication
 from src.checkpoint import adapter_merge
 
@@ -126,15 +126,15 @@ def test_one_spelling_decides_what_a_sink_key_is():
     assert not reset_sinks.is_sink_key("model.layers.0.self_attn.q_proj.weight")
 
 
-# --- convert_to_bf16: the merged branch takes the BASE's aux files --------------------------------
+# --- merge_peft_adapters: the merge takes the BASE's aux files -----------------------------------
 
 
-def test_a_merged_peft_conversion_copies_the_base_directory_not_the_adapter(tmp_path, monkeypatch):
+def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkeypatch):
     """With the adapter directory as ``source_dir`` the save would copy ``adapter_config.json`` next
     to full merged weights, and downstream tools would re-export the base.
 
-    Driven through the tool's own entry point, so it also pins that ``--peft --merge_adapter`` still
-    reaches the shared merge rather than growing a second copy of the sequence.
+    Driven through the tool's own entry point, so it also pins that the tool reaches the shared merge
+    rather than growing a second copy of the sequence.
     """
     adapter = tmp_path / "adapter"
     base = tmp_path / "base"
@@ -181,9 +181,9 @@ def test_a_merged_peft_conversion_copies_the_base_directory_not_the_adapter(tmp_
         "save_full_checkpoint",
         lambda model, output_dir, **kwargs: captured.update(source_dir=kwargs.get("source_dir")),
     )
-    monkeypatch.setattr(convert_to_bf16, "_load_verified", lambda *a, **k: _Merged())
+    monkeypatch.setattr(merge_peft_adapters, "_load_base_model", lambda *a, **k: _Merged())
 
-    convert_to_bf16.convert_to_bf16(str(adapter), str(tmp_path / "out"), "causal_lm", is_peft=True, merge_adapter=True)
+    merge_peft_adapters.merge_peft_adapter(str(adapter), str(tmp_path / "out"), fp32_norms=True, verbose=False)
 
     assert captured["source_dir"] == str(base), "the merged checkpoint must inherit the BASE's aux files"
     assert captured["adapter_config_written_to"].endswith("original_adapter_config"), (

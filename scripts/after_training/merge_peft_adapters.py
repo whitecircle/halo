@@ -4,7 +4,8 @@
 A LoRA run's output directory carries only ``adapter_model.safetensors`` + ``adapter_config.json``;
 this loads the base model, applies the adapter and saves a standard HuggingFace checkpoint. Covers
 causal-LM and sequence-classification (``--task classification``) adapters; a VLM base is detected
-from its config, and remote-code families load under ``--trust_remote_code`` (default on). ``--output_dir`` is
+from its config, and remote-code families load under ``--trust_remote_code`` (default on). ``--fp32_norms``
+writes every normalization leaf in fp32, the layout ``convert_to_bf16.py`` writes. ``--output_dir`` is
 written fresh: every ``model*.safetensors`` or index the completed save did not produce is removed
 afterwards.
 
@@ -28,6 +29,7 @@ from transformers import AutoModelForSequenceClassification
 from scripts.cli_arguments import add_device_map_arg, add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.adapter_merge import merge_adapter_into_base
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from src.checkpoint.offline_export import cast_norms_to_fp32
 from src.log import configure_cli_logging
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.dtype import DTYPE_BY_NAME
@@ -93,6 +95,7 @@ def merge_peft_adapter(
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     attn_implementation: str | None = None,
     trust_remote_code: bool = True,
+    fp32_norms: bool = False,
     verbose: bool = True,
 ):
     """Merge a PEFT adapter into its base model and save the result.
@@ -107,6 +110,7 @@ def merge_peft_adapter(
         max_shard_size: Maximum shard size for output safetensors
         attn_implementation: Override attention implementation (e.g., "flash_attention_2", "sdpa")
         trust_remote_code: Passed to the base-model and processor loads
+        fp32_norms: Write every normalization leaf in fp32 instead of ``dtype``
         verbose: Log progress messages
     """
     if verbose:
@@ -133,6 +137,7 @@ def merge_peft_adapter(
         device_map=device_map,
         max_shard_size=max_shard_size,
         trust_remote_code=trust_remote_code,
+        prepare_for_save=cast_norms_to_fp32 if fp32_norms else None,
         verbose=verbose,
     )
 
@@ -204,6 +209,11 @@ Examples:
     )
     add_trust_remote_code_arg(parser)
     parser.add_argument(
+        "--fp32_norms",
+        action="store_true",
+        help="Write every normalization leaf in fp32 instead of --dtype (convert_to_bf16.py's layout)",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress verbose output",
@@ -224,6 +234,7 @@ Examples:
         max_shard_size=args.max_shard_size,
         attn_implementation=args.attn_implementation,
         trust_remote_code=args.trust_remote_code,
+        fp32_norms=args.fp32_norms,
         verbose=not args.quiet,
     )
 

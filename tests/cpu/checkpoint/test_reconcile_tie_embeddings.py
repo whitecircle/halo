@@ -3,15 +3,19 @@
 The checker flips ``config.tie_word_embeddings`` to False when the saved lm_head and embed_tokens
 diverged, so ``from_pretrained`` keeps the trained lm_head instead of re-tying it away. Keys are
 resolved by suffix so wrapped/VLM layouts (``model.language_model.embed_tokens.weight`` etc.) are
-covered — an exact-key lookup silently skips them and the reload re-ties a trained head away.
+covered — an exact-key lookup silently skips them and the reload re-ties a trained head away. A composite
+(VLM) config may declare the tie on its text sub-config alone, which transformers ties all the same, so every
+declaring level is read and cleared.
 """
 
 from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import Qwen3_5Config
 
 from src.checkpoint.writing import reconcile_tie_word_embeddings
+from src.models.config_access import tie_flag_configs
 
 
 def _model(tied=True):
@@ -77,6 +81,20 @@ def test_suffix_requires_dot_boundary():
     state = {"custom_lm_head.weight": torch.ones(4, 8), "model.embed_tokens.weight": torch.zeros(4, 8)}
     reconcile_tie_word_embeddings(model, state)
     assert model.config.tie_word_embeddings is True
+
+
+def test_a_tie_declared_only_on_the_text_config_is_cleared_on_every_level():
+    config = Qwen3_5Config(tie_word_embeddings=False, text_config={"tie_word_embeddings": True})
+    model = SimpleNamespace(config=config)
+    state = {
+        "lm_head.weight": torch.ones(4, 8),
+        "model.language_model.embed_tokens.weight": torch.zeros(4, 8),
+    }
+    reconcile_tie_word_embeddings(model, state)
+    assert {path: level.tie_word_embeddings for path, level in tie_flag_configs(config).items()} == {
+        "": False,
+        "text_config.": False,
+    }
 
 
 def test_untied_config_untouched():

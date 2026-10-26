@@ -649,19 +649,5 @@ def test_converter_progress_lines_survive_the_src_root_handler(module, progress_
     assert "INFO_ENABLED True" in completed.stdout, completed.stdout + completed.stderr
 
 
-def test_convert_to_bf16_refuses_merge_adapter_without_peft(tmp_path):
-    """``--merge_adapter`` is read ONLY on the PEFT path, so without ``--peft`` it is a silent no-op.
-
-    The tool loads the source as a full model, never reaches ``merge_and_unload``, and exits 0 having
-    written an UNMERGED bf16 checkpoint — the exact opposite of what a caller asking to merge an
-    adapter wants, with nothing in the output to tell the two apart. Refused before any I/O.
-    """
-    src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type="qwen3_moe")
-    out = tmp_path / "out"
-    with pytest.raises(ValueError, match="--merge_adapter is only used with --peft"):
-        convert_to_bf16(str(src), str(out), model_type="qwen3_moe", is_peft=False, merge_adapter=True)
-    assert not out.exists(), "the refusal must land before anything is written"
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

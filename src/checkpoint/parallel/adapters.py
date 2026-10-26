@@ -18,7 +18,6 @@ from dataclasses import replace
 import torch
 from peft import PeftModel
 from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
-from safetensors.torch import save_file as safetensors_save_file
 from torch.distributed.tensor import DTensor
 
 from src.checkpoint.adapters import (
@@ -32,6 +31,7 @@ from src.checkpoint.adapters import (
     write_adapter_file,
     write_mixed_adapter_config,
 )
+from src.checkpoint.atomic import apply_umask_mode, save_safetensors_file
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR
 from src.checkpoint.model_card import tag_model_card
 from src.checkpoint.parallel.completeness import mark_resume_adapter_complete
@@ -43,10 +43,9 @@ from src.distributed.expert_parallel.moe_layer.expert_lora import (
     gather_expert_lora_adapters,
     load_expert_lora_adapters,
 )
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.log import KEY_PREVIEW_COUNT
-from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from src.models.param_roles import persistent_buffers
 from src.models.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
@@ -177,6 +176,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
         if ctx.is_save_rank:
             if state is None:
                 peft_model.save_pretrained(output_dir)
+                apply_umask_mode(os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
             elif mixed:
                 write_mixed_adapter_config(
                     peft_config, getattr(ctx.parallelism_config, "expert_lora", None), output_dir
@@ -214,7 +214,7 @@ def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
             state = (
                 adapters if ctx.training_checkpoint else {key: cast_to_save_dtype(t) for key, t in adapters.items()}
             )
-            safetensors_save_file(state, os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
+            save_safetensors_file(state, os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
             if adapter_config is not None:
                 write_adapter_config(adapter_config, output_dir)
             tag_model_card(output_dir)
@@ -253,76 +253,6 @@ def read_adapter_across_ranks(
     if path is not None:
         reject_across_ranks(lora_scaling_mismatch(adapter_dir, attention, expert), what, ValueError)
     return state, path
-
-
-def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
-    """Restore LoRA adapters when base-weight reload is skipped (EP/CP).
-
-    EP/CP rebuild the model with zero-init adapters, so trained weights must reload here or resume
-    continues from the untrained adapter. Handles native EP expert adapters (sliced per rank by
-    :func:`load_expert_lora_adapters`) and PEFT attention adapters. Refuses, on every rank, an adapter
-    whose recorded LoRA scaling differs from the live run's (:func:`lora_scaling_mismatch`). Returns
-    the adapter file restored from, or ``None`` when ``checkpoint`` holds none on any rank (a no-op);
-    rank-uniform either way.
-    """
-    unwrapped = unwrap_framework_wrappers(model)
-    peft_model = find_peft_model(unwrapped)
-    expert_spec = _live_expert_lora_spec(unwrapped)
-    state, loaded_path = read_adapter_across_ranks(
-        checkpoint,
-        checkpoint=checkpoint,
-        what="Adapter checkpoint",
-        attention=peft_model.peft_config["default"].to_dict() if peft_model is not None else None,
-        expert=expert_lora_config_fields(expert_spec) if expert_spec is not None else None,
-    )
-    if loaded_path is None:
-        return None  # no adapters anywhere: full fine-tuning
-
-    expert_state = {k: v for k, v in state.items() if is_expert_lora_key(k)}
-    # Unconditional: the apply is collective at ep_size==1 and decides "nothing to load" rank-uniformly.
-    # Inner model, matching the saver: the CP wrapper's extra 'model.' level makes keys miss.
-    load_expert_lora_adapters(unwrap_toolkit_wrappers(unwrapped), expert_state)
-
-    attn_state = {k: v for k, v in state.items() if k not in expert_state}
-    if attn_state:
-        if peft_model is None:
-            # Attention tensors with no PeftModel would be dropped silently — base-weight resume.
-            raise RuntimeError(
-                f"Adapter checkpoint at {checkpoint} contains {len(attn_state)} attention/PEFT "
-                f"adapter tensors but the model has no PEFT adapters — resume would silently "
-                f"continue from base weights. Enable use_peft (with the same lora_target_modules "
-                f"as at save) or resume from a full checkpoint. First few: {sorted(attn_state)[:KEY_PREVIEW_COUNT]}"
-            )
-        # Saver wrote CP-normalized keys; remap to live CP-wrapped names or all keys miss.
-        if is_cp_mode:
-            attn_state = remap_cp_adapter_keys_to_live(attn_state, peft_model)
-        unexpected = _load_peft_adapter_state(peft_model, attn_state)
-        if unexpected and len(unexpected) == len(attn_state):
-            raise RuntimeError(
-                f"PEFT adapter resume from {checkpoint}: all {len(attn_state)} saved adapter "
-                f"keys were unexpected — the adapter would resume from zero-init, not the "
-                f"trained weights. Likely a key mismatch (CP-remap regression, or different "
-                f"lora_target_modules than at save). First few: {unexpected[:KEY_PREVIEW_COUNT]}"
-            )
-        if unexpected and is_global_main_process():
-            logger.warning(
-                f"PEFT adapter resume: {len(unexpected)} of {len(attn_state)} saved adapter "
-                f"keys were unexpected and dropped (those layers stay at init): {unexpected[:KEY_PREVIEW_COUNT]}"
-            )
-
-    if is_global_main_process():
-        logger.info(
-            f"Restored adapters from {loaded_path} ({len(expert_state)} expert + {len(attn_state)} attention tensors)"
-        )
-    return loaded_path
-
-
-def _live_expert_lora_spec(model) -> ExpertLoraSpec | None:
-    """The native expert adapters' recipe, off an EP layer that built them, or None."""
-    return next(
-        (m.ep_config.expert_lora for m in model.modules() if isinstance(m, EPMoELayerBase) and m.has_expert_lora),
-        None,
-    )
 
 
 def _load_peft_adapter_state(peft_model, attn_state: dict) -> list[str]:
@@ -378,3 +308,67 @@ def remap_cp_adapter_keys_to_live(state: dict, peft_model: PeftModel) -> dict:
         live_key = strip_peft_adapter_segment(name)
         normalized_to_live[plain_adapter_key(live_key)] = live_key
     return {normalized_to_live.get(key, key): value for key, value in state.items()}
+
+
+def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
+    """Restore LoRA adapters when base-weight reload is skipped (EP/CP).
+
+    EP/CP rebuild the model with zero-init adapters, so trained weights must reload here or resume
+    continues from the untrained adapter. Handles native EP expert adapters (sliced per rank by
+    :func:`load_expert_lora_adapters`) and PEFT attention adapters. Refuses, on every rank, an adapter
+    whose recorded LoRA scaling differs from the live run's (:func:`lora_scaling_mismatch`). Returns
+    the adapter file restored from, or ``None`` when ``checkpoint`` holds none on any rank (a no-op);
+    rank-uniform either way.
+    """
+    unwrapped = unwrap_framework_wrappers(model)
+    peft_model = find_peft_model(unwrapped)
+    expert_spec = next(
+        (layer.ep_config.expert_lora for _, layer in named_ep_layers(unwrapped) if layer.has_expert_lora), None
+    )
+    state, loaded_path = read_adapter_across_ranks(
+        checkpoint,
+        checkpoint=checkpoint,
+        what="Adapter checkpoint",
+        attention=peft_model.peft_config["default"].to_dict() if peft_model is not None else None,
+        expert=expert_lora_config_fields(expert_spec) if expert_spec is not None else None,
+    )
+    if loaded_path is None:
+        return None  # no adapters anywhere: full fine-tuning
+
+    expert_state = {k: v for k, v in state.items() if is_expert_lora_key(k)}
+    # Unconditional: the apply is collective at ep_size==1 and decides "nothing to load" rank-uniformly.
+    # Inner model, matching the saver: the CP wrapper's extra 'model.' level makes keys miss.
+    load_expert_lora_adapters(unwrap_toolkit_wrappers(unwrapped), expert_state)
+
+    attn_state = {k: v for k, v in state.items() if k not in expert_state}
+    if attn_state:
+        if peft_model is None:
+            # Attention tensors with no PeftModel would be dropped silently — base-weight resume.
+            raise RuntimeError(
+                f"Adapter checkpoint at {checkpoint} contains {len(attn_state)} attention/PEFT "
+                f"adapter tensors but the model has no PEFT adapters — resume would silently "
+                f"continue from base weights. Enable use_peft (with the same lora_target_modules "
+                f"as at save) or resume from a full checkpoint. First few: {sorted(attn_state)[:KEY_PREVIEW_COUNT]}"
+            )
+        # Saver wrote CP-normalized keys; remap to live CP-wrapped names or all keys miss.
+        if is_cp_mode:
+            attn_state = remap_cp_adapter_keys_to_live(attn_state, peft_model)
+        unexpected = _load_peft_adapter_state(peft_model, attn_state)
+        if unexpected and len(unexpected) == len(attn_state):
+            raise RuntimeError(
+                f"PEFT adapter resume from {checkpoint}: all {len(attn_state)} saved adapter "
+                f"keys were unexpected — the adapter would resume from zero-init, not the "
+                f"trained weights. Likely a key mismatch (CP-remap regression, or different "
+                f"lora_target_modules than at save). First few: {unexpected[:KEY_PREVIEW_COUNT]}"
+            )
+        if unexpected and is_global_main_process():
+            logger.warning(
+                f"PEFT adapter resume: {len(unexpected)} of {len(attn_state)} saved adapter "
+                f"keys were unexpected and dropped (those layers stay at init): {unexpected[:KEY_PREVIEW_COUNT]}"
+            )
+
+    if is_global_main_process():
+        logger.info(
+            f"Restored adapters from {loaded_path} ({len(expert_state)} expert + {len(attn_state)} attention tensors)"
+        )
+    return loaded_path

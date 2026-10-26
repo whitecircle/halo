@@ -1,19 +1,22 @@
-"""Staged checkpoint-file writes, with ordinary umask permissions and durable publication, and the staged
-directory publish of a tool that may be replacing the only copy of its input."""
+"""Checkpoint-file writes under ordinary umask permissions, safetensors files included, staged and durably
+published, and the staged directory publish of a tool that may be replacing the only copy of its input."""
 
 import errno
 import os
 import pickle
 import shutil
+import stat
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 import torch
+from safetensors.torch import save_file
 
 FILE_STAGING_SUFFIX = ".tmp"
-# A complete file held off its published name until the rest of its checkpoint is on disk.
+# A complete file held off its published name, as ``.<name>.uncommitted``, until the rest of its checkpoint is
+# on disk.
 WITHHELD_FILE_SUFFIX = ".uncommitted"
 # A staged directory publish builds beside the target and swaps in; a failed swap prints these paths.
 PUBLISH_STAGING_SUFFIX = ".halo-staging"
@@ -28,14 +31,9 @@ def create_staged_file(directory: str | Path, filename: str) -> Path:
     return staged
 
 
-def withheld_file_name(filename: str) -> str:
-    """The name ``filename`` waits under until its checkpoint is complete."""
-    return f".{filename}{WITHHELD_FILE_SUFFIX}"
-
-
 def is_atomic_staging_file(name: str) -> bool:
     """Whether ``name`` is an unpublished stage a crash left: one :func:`create_staged_file` made, or a
-    :func:`withheld_file_name`."""
+    withheld file (:data:`WITHHELD_FILE_SUFFIX`)."""
     return name.startswith(".") and name.endswith((FILE_STAGING_SUFFIX, WITHHELD_FILE_SUFFIX))
 
 
@@ -101,6 +99,33 @@ def atomic_torch_save(
             link_or_copy_file(previous, staged)
         else:
             torch.save(payload(), staged, pickle_module=pickle_module)
+
+
+def apply_umask_mode(path: str | Path) -> None:
+    """Give the file ``path``, or every ``*.safetensors`` directly under ``path``, a directory its save owns
+    whole, the mode a new file there gets: safetensors, and the ``save_pretrained`` writers over it, create
+    theirs ``0600``.
+
+    The mode is read off a probe file, so the umask and any default ACL apply without the process-wide,
+    thread-racy ``os.umask`` swap.
+    """
+    path = Path(path)
+    files = sorted(path.glob("*.safetensors")) if path.is_dir() else [path]
+    if not files:
+        return
+    probe = create_staged_file(files[0].parent, "mode-probe")
+    try:
+        mode = stat.S_IMODE(probe.stat().st_mode)
+    finally:
+        probe.unlink()
+    for file in files:
+        os.chmod(file, mode)
+
+
+def save_safetensors_file(tensors: dict[str, torch.Tensor], path: str | Path, *, metadata=None) -> None:
+    """``safetensors.torch.save_file`` under the mode every other checkpoint file gets."""
+    save_file(tensors, path, metadata=metadata)
+    apply_umask_mode(path)
 
 
 def clear_staging_path(target: str | os.PathLike, suffix: str = PUBLISH_STAGING_SUFFIX) -> str:

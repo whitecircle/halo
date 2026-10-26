@@ -432,10 +432,11 @@ launch through the training scripts ([Resume by parallelism mode](../reference/c
 ### Per-node export
 
 On per-node output storage each node's directory holds the full index but only the parts of the
-stages it ran, plus the wrapper parts. It resumes only the topology and rank placement that wrote it;
-a node asked for another stage's layers fails on every rank, naming the placement, and every
-after-training tool refuses the directory, naming its absent parts. To export, copy each node's
-directory onto one host and merge:
+stages it ran, plus the wrapper parts, and only its own ranks' optimizer shards and RNG states. It
+resumes only the topology and rank placement that wrote it; a node asked for another stage's layers
+fails on every rank, naming the placement, and every after-training tool refuses the directory, naming
+its absent parts. To export, or to resume from one directory, copy each node's directory onto one host
+and merge:
 
 ```bash
 python scripts/after_training/merge_pp_stages.py \
@@ -444,11 +445,13 @@ python scripts/after_training/merge_pp_stages.py \
 ```
 
 `merge_pp_stage_parts` (`src/checkpoint/pp_stage_merge.py`) requires identical indexes across the
-inputs, copies each part the index names from the first input that holds it (refusing a size
-mismatch), copies the config, tokenizer, remote code and export sidecars from the first input, writes
-the index last, and finishes with the absent-shard check. A part no input holds raises naming it and
-its stage. The merged directory loads with `from_pretrained` and uploads like a shared-filesystem
-save.
+inputs and copies each part the index names from the first input that holds it, refusing a size
+mismatch. It copies every input's optimizer shards, RNG and prefetch states and one
+`optimizer_meta.pt`, refusing metas that differ, a per-rank file held at two sizes and a rank whose
+shard no input holds. The config, tokenizer, remote code, trainer state, scheduler and export
+sidecars come from the first input. It writes the index last and finishes with the absent-shard
+check. A part no input holds raises naming it and its stage. The merged directory loads with
+`from_pretrained`, uploads like a shared-filesystem save, and resumes exactly on the save's topology.
 
 ## Constraints inherited from `torch.distributed.pipelining`
 

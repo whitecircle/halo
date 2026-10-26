@@ -1,17 +1,18 @@
 """The standalone tools' model-directory contract: the source resolver, the input gates, the size preflight,
-the non-weight copy and the one full-model write every tool owes its output directory."""
+the non-weight copy, the fp32 norm cast and the one full-model write every tool owes its output directory."""
 
 import contextlib
 import logging
 import os
 import shutil
 
+import torch
 from accelerate.utils import is_peft_model
 from huggingface_hub import snapshot_download
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import GENERATION_CONFIG_NAME
 
-from src.checkpoint.atomic import is_atomic_staging_file
+from src.checkpoint.atomic import apply_umask_mode, is_atomic_staging_file
 from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
@@ -31,6 +32,7 @@ from src.checkpoint.weights_source import config_schema_source
 from src.checkpoint.writing import sweep_after_full_save
 from src.hardware import available_host_ram_bytes
 from src.model_loading.model_preparation import sanitize_generation_config
+from src.models.param_roles import is_normalization_module
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,15 @@ def _file_versions(directory: str, names: tuple[str, ...]) -> dict[str, tuple[in
     return versions
 
 
+def cast_norms_to_fp32(model) -> None:
+    """Cast every normalization leaf to fp32 (a bf16 body with fp32 norms). Leaves only: a container that
+    classifies as a norm must not drag its children up with it."""
+    logger.info("Setting specific layers to appropriate precision...")
+    for module in model.modules():
+        if is_normalization_module(module) and next(module.children(), None) is None:
+            module.to(torch.float32)
+
+
 def save_full_checkpoint(
     model,
     output_dir: str,
@@ -137,6 +148,7 @@ def save_full_checkpoint(
             if _file_versions(output_dir, (name,)).get(name) == version:
                 os.remove(os.path.join(output_dir, name))
     sweep_after_full_save(output_dir)
+    apply_umask_mode(output_dir)
 
 
 def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str:

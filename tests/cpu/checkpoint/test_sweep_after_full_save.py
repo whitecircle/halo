@@ -202,7 +202,7 @@ def test_save_sharded_state_dict_sweeps_only_after_a_completed_write(tmp_path, m
     def failing_write(*args, **kwargs):
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(checkpoint_writing, "save_file", failing_write)
+    monkeypatch.setattr(checkpoint_writing, "save_safetensors_file", failing_write)
     with pytest.raises(OSError):
         checkpoint_writing.save_sharded_state_dict({"w": torch.ones(2)}, str(out))
 

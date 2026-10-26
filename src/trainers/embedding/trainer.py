@@ -19,7 +19,6 @@ import transformers
 from datasets import Dataset, DatasetDict, IterableDataset
 from peft import LoraConfig
 from peft.tuners.tuners_utils import BaseTunerLayer
-from safetensors.torch import save_file
 from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer
 from sentence_transformers.base.sampler import BatchSamplers, NoDuplicatesBatchSampler
 from sentence_transformers.evaluation import SentenceEvaluator
@@ -50,6 +49,7 @@ from src.checkpoint.adapters import (
     resume_adapter_on_own_weights_reason,
     unmarked_merged_checkpoint_reason,
 )
+from src.checkpoint.atomic import save_safetensors_file
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
 from src.checkpoint.parallel.adapters import read_adapter_across_ranks
 from src.checkpoint.parallel.completeness import mark_resume_adapter_complete
@@ -651,7 +651,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         with barrier_on_exit():
             if is_save_rank:
                 peft_config.save_pretrained(adapter_dir)
-                save_file(state, os.path.join(adapter_dir, ADAPTER_SAFETENSORS_FILE))
+                save_safetensors_file(state, os.path.join(adapter_dir, ADAPTER_SAFETENSORS_FILE))
         del state
         mark_resume_adapter_complete(checkpoint_dir, is_save_rank=is_save_rank)
 

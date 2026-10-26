@@ -13,6 +13,7 @@ from sentence_transformers.base.model import BaseModel
 from sentence_transformers.base.modules.input_module import InputModule
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
+from src.checkpoint.atomic import apply_umask_mode
 from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.weights_source import config_schema_source
 
@@ -115,6 +116,7 @@ class PreloadedTransformer(InputModule):
     def save(self, output_path: str, **kwargs) -> None:
         """Save backbone and tokenizer. For EP/TP, the trainer handles saving."""
         self.auto_model.save_pretrained(output_path)
+        apply_umask_mode(output_path)
         finalize_exported_config(self.auto_model.config, output_path, source=config_schema_source(self.auto_model))
         self.tokenizer.save_pretrained(output_path)
         self.save_config(output_path)

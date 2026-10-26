@@ -22,6 +22,7 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from src.checkpoint.atomic import create_staged_file, publish_staged_file
 from src.model_loading.buffer_repair import default_rope_parameters
+from src.models.config_access import ties_word_embeddings
 
 # Names a published modeling file calls but never imports (Ring-mini-linear-2.0's cached forward builds a
 # ``DynamicLayer``); only the module whose global lookup misses can be given them.
@@ -143,9 +144,7 @@ def apply_remote_code_compat_shims() -> None:
 
 def reject_untieable_list_ties(model) -> None:
     """Refuse a tied config whose remote class shipped the legacy list-form ``_tied_weights_keys``."""
-    if getattr(type(model), TIED_KEYS_WERE_LIST_ATTR, False) and getattr(
-        model.config.get_text_config(), "tie_word_embeddings", False
-    ):
+    if getattr(type(model), TIED_KEYS_WERE_LIST_ATTR, False) and ties_word_embeddings(model.config):
         raise RuntimeError(
             f"{type(model).__name__} declares tie_word_embeddings=True but shipped the legacy "
             "list-form _tied_weights_keys, which transformers cannot tie (the compat shim "

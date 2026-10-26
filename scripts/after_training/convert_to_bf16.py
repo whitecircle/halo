@@ -1,16 +1,15 @@
 """Convert a checkpoint (full model or PEFT adapter) to a BF16 checkpoint, normalization layers in fp32.
 
-Handles causal-LM, sequence-classification and bare-base checkpoints, optionally merging a LoRA
-adapter into its base model first. ``--verify`` reads the saved safetensors headers and asserts the
+Handles causal-LM, sequence-classification and bare-base checkpoints; ``merge_peft_adapters.py --fp32_norms``
+merges an adapter into the same layout. ``--verify`` reads the saved safetensors headers and asserts the
 stored parameters are primarily bfloat16, raising on failure; ``--check_inference`` runs a short
 generation / classification pass and reports its output. A full-model save writes ``--output_dir``
 fresh: every ``model*.safetensors`` or index the completed save did not produce is removed afterwards.
-An unmerged ``--peft`` save writes no model weights (adapter, tokenizer, sidecars, card) and removes
-nothing.
+A ``--peft`` save writes no model weights (adapter, tokenizer, sidecars, card) and removes nothing.
 
 Usage:
     python scripts/after_training/convert_to_bf16.py --input_dir <src> --output_dir <dst> \
-        [--model_type causal_lm|classifier|base] [--peft [--merge_adapter]] [--verify] [--check_inference]
+        [--model_type causal_lm|classifier|base] [--peft] [--verify] [--check_inference]
 """
 
 import argparse
@@ -25,10 +24,12 @@ from safetensors import safe_open
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
 from scripts.cli_arguments import add_device_map_arg, add_max_shard_size_arg, add_trust_remote_code_arg
-from src.checkpoint.adapter_merge import adapter_input_gates, load_base_for_adapter, merge_adapter_into_base
+from src.checkpoint.adapter_merge import adapter_input_gates, load_base_for_adapter
+from src.checkpoint.atomic import apply_umask_mode
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
 from src.checkpoint.model_card import tag_model_card
 from src.checkpoint.offline_export import (
+    cast_norms_to_fp32,
     preflight_model_load_resources,
     reject_in_place_conversion,
     save_full_checkpoint,
@@ -40,7 +41,6 @@ from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified
 from src.model_loading.model_preparation import auto_load_model, sanitize_generation_config
 from src.model_loading.tokenizer_setup import load_processing_class, resolve_peft_processing_class
-from src.models.param_roles import is_normalization_module
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ _MODEL_CLASSES = {
     "base": AutoModel,
 }
 
-# Types a PEFT adapter can be merged into. A bare backbone has no adapter task type to load.
+# Types a PEFT adapter loads onto. A bare backbone has no adapter task type to load.
 _PEFT_MODEL_TYPES = ("causal_lm", "classifier")
 
 # --verify bar: share of saved float parameters that must be bf16, weighted by numel. Numerous but
@@ -94,33 +94,23 @@ def load_model(model_path, model_type, is_peft=False, **load_kwargs):
 
 def _load_adapter_model(adapter_dir, model_type, load_kwargs) -> tuple[PeftModel, bool]:
     """The adapter applied to its base, and whether that base is a multimodal checkpoint's text-only class."""
-    _reject_unsupported_peft_type(model_type)
+    if model_type not in _PEFT_MODEL_TYPES:
+        raise ValueError(f"PEFT is only supported for model types {sorted(_PEFT_MODEL_TYPES)}, not {model_type!r}")
     peft_config = PeftConfig.from_pretrained(adapter_dir)
-    base = load_base_for_adapter(
-        adapter_dir,
-        peft_config.base_model_name_or_path,
-        _base_loader(model_type, load_kwargs),
-        excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
-        log=logger.info,
-    )
-    return PeftModel.from_pretrained(base.model, adapter_dir), base.text_only
-
-
-def _base_loader(model_type, load_kwargs):
-    """The base-model loader both adapter paths hand to the shared helpers: this tool's class table and dtype."""
 
     def load_base_model(base_model_path, *, excuse_task_head: bool, text_only: bool = False):
         return _load_verified(
             base_model_path, model_type, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs
         )
 
-    return load_base_model
-
-
-def _reject_unsupported_peft_type(model_type: str) -> None:
-    """Refuse a ``--model_type`` an adapter cannot be loaded onto: a bare backbone has no task type."""
-    if model_type not in _PEFT_MODEL_TYPES:
-        raise ValueError(f"PEFT is only supported for model types {sorted(_PEFT_MODEL_TYPES)}, not {model_type!r}")
+    base = load_base_for_adapter(
+        adapter_dir,
+        peft_config.base_model_name_or_path,
+        load_base_model,
+        excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
+        log=logger.info,
+    )
+    return PeftModel.from_pretrained(base.model, adapter_dir), base.text_only
 
 
 def _load_verified(model_path, model_type, *, excuse_task_head: bool, text_only: bool = False, **load_kwargs):
@@ -128,7 +118,7 @@ def _load_verified(model_path, model_type, *, excuse_task_head: bool, text_only:
 
     ``--check_inference`` generates from what this returns, and transformers 5 hands back every
     non-persistent buffer as uninitialized memory, so the repair belongs on the load rather than on
-    whichever caller happens to run a forward. ``text_only`` (the merge's request for the class an
+    whichever caller happens to run a forward. ``text_only`` (the adapter load's request for the class an
     adapter was trained through) applies to the causal-LM resolution only.
     """
     model_class = _MODEL_CLASSES[model_type]
@@ -143,7 +133,7 @@ def _load_verified(model_path, model_type, *, excuse_task_head: bool, text_only:
 
 
 def verify_adapter_save(adapter_path):
-    """Report on an unmerged PEFT save, which the bf16 assertion does not apply to.
+    """Report on a PEFT adapter save, which the bf16 assertion does not apply to.
 
     PEFT restores LoRA ``A``/``B`` to fp32 as it writes them (``autocast_adapter_dtype``), so a
     correct output on this path is entirely fp32 and the bf16 assertion does not apply. What is
@@ -155,7 +145,7 @@ def verify_adapter_save(adapter_path):
         raise RuntimeError(f"{adapter_path} carries no tensors — the save produced an adapter with nothing in it.")
     logger.info(
         f"✓ Adapter-only save with {tensor_count} tensors. PEFT restores LoRA A/B to fp32 as it saves, "
-        f"so the BF16 check applies only to a merged model — re-run with --merge_adapter to verify weights."
+        f"so the BF16 check applies only to a full model, such as the adapter merged by merge_peft_adapters.py."
     )
     return True
 
@@ -243,48 +233,6 @@ def run_test_inference(model_path, model_type, is_peft=False, trust_remote_code=
     logger.info(f"Classification logits: {outputs.logits}")
 
 
-def _cast_norms_to_fp32(model) -> None:
-    """Keep normalization layers in fp32 after the bf16 load.
-
-    Classified by the toolkit's norm predicate, the same one the save-dtype decisions use, rather
-    than a second name rule that could disagree with it. Leaves only: a container that classifies as
-    a norm must not drag its children up with it.
-    """
-    logger.info("Setting specific layers to appropriate precision...")
-    for module in model.modules():
-        if is_normalization_module(module) and next(module.children(), None) is None:
-            module.to(torch.float32)
-
-
-def _merge_adapter_to_bf16(
-    adapter_dir,
-    output_path,
-    model_type,
-    load_kwargs,
-    *,
-    device_map,
-    max_shard_size,
-    trust_remote_code,
-) -> None:
-    """``--peft --merge_adapter``: the shared merge, at this tool's dtype.
-
-    :func:`merge_adapter_into_base` handles the gate order, the adapter's sidecars and the merged
-    save; this tool supplies the dtype the base loads at and the fp32 norm leaves it is written
-    with.
-    """
-    _reject_unsupported_peft_type(model_type)
-    merge_adapter_into_base(
-        adapter_dir,
-        output_path,
-        load_base_model=_base_loader(model_type, load_kwargs),
-        tool="convert_to_bf16",
-        device_map=device_map,
-        max_shard_size=max_shard_size,
-        trust_remote_code=trust_remote_code,
-        prepare_for_save=_cast_norms_to_fp32,
-    )
-
-
 def _convert_checkpoint_to_bf16(
     model_path,
     output_path,
@@ -296,7 +244,7 @@ def _convert_checkpoint_to_bf16(
     max_shard_size,
     trust_remote_code,
 ) -> None:
-    """A full checkpoint — or an adapter left unmerged — reloaded at bf16 and written back out."""
+    """A full checkpoint or an adapter reloaded at bf16 and written back out."""
     # Guards before the load and os.makedirs: a per-rank EP/TP save loads its .shard_N expert keys as
     # missing and randomly initialized, which --verify's dtype count cannot catch. An adapter takes the
     # merge's gates.
@@ -309,8 +257,8 @@ def _convert_checkpoint_to_bf16(
         processing_class = load_processing_class(model_path, trust_remote_code=trust_remote_code)
 
     # Size preflight before the heavy load: from_pretrained lands the whole checkpoint in host RAM
-    # unless --device_map routes it, and a full-model output is about the source's size on disk (an
-    # unmerged --peft run writes adapter files only, so it has no full-model disk cost).
+    # unless --device_map routes it, and a full-model output is about the source's size on disk (a
+    # --peft run writes adapter files only, so it has no full-model disk cost).
     preflight_model_load_resources(
         weights_source,
         output_path,
@@ -322,31 +270,30 @@ def _convert_checkpoint_to_bf16(
     if is_peft:
         logger.info("Loading PEFT adapter model...")
         model, text_only = _load_adapter_model(model_path, model_type, load_kwargs)
-        # The merge's choice too (the class the adapter addresses decides it), so the adapter-only and
-        # the merged export of one adapter ship the same processing class.
+        # The merge's choice too (the class the adapter addresses decides it), so this adapter and its
+        # later merge ship the same processing class.
         processing_class = resolve_peft_processing_class(
             model_path, weights_source, text_only=text_only, trust_remote_code=trust_remote_code
         )
     else:
         model = load_model(model_path, model_type, **load_kwargs)
-
-    if not is_peft:
-        # Skipped for an adapter-only save: it writes no weights, so nothing re-applied here would
-        # reach the output. The sidecars are copied across verbatim instead, for the later merge.
+        # Not for an adapter save: it writes no weights for a re-applied sidecar to reach, and copies the
+        # sidecars across verbatim for the later merge instead.
         for action in apply_training_sidecars(model, model_path):
             logger.info(action)
 
-    _cast_norms_to_fp32(model)
+    cast_norms_to_fp32(model)
 
     logger.info(f"Model converted to BF16. Saving to {output_path}...")
 
     os.makedirs(output_path, exist_ok=True)
 
     if is_peft:
-        # Unmerged --peft writes adapter files only: sweeping here would delete the full-model weights
+        # --peft writes adapter files only: sweeping here would delete the full-model weights
         # the directory holds, and restore_model_type would stamp a family this save never wrote.
         sanitize_generation_config(model)
         model.save_pretrained(output_path)
+        apply_umask_mode(os.path.join(output_path, ADAPTER_SAFETENSORS_FILE))
         if processing_class is not None:
             processing_class.save_pretrained(output_path)
         # Only this branch copies them by hand: the adapter dir's sidecars have to survive for the
@@ -370,21 +317,12 @@ def convert_to_bf16(
     output_path,
     model_type,
     is_peft=False,
-    merge_adapter=False,
     device_map=None,
     verify=False,
     check_inference=False,
     trust_remote_code=True,
     max_shard_size=DEFAULT_MAX_SHARD_SIZE,
 ):
-    # Refused before any I/O: merging is read only on the PEFT path, so without it the tool would exit
-    # 0 having written an unmerged checkpoint.
-    if merge_adapter and not is_peft:
-        raise ValueError(
-            "--merge_adapter is only used with --peft: a full-model source carries no adapter to fold in. "
-            "Add --peft (the source is an adapter directory), or drop --merge_adapter."
-        )
-
     logger.info(f"Loading model from {model_path}...")
 
     load_kwargs = {
@@ -395,37 +333,25 @@ def convert_to_bf16(
     if device_map is not None:
         load_kwargs["device_map"] = device_map
 
-    if merge_adapter:
-        _merge_adapter_to_bf16(
-            model_path,
-            output_path,
-            model_type,
-            load_kwargs,
-            device_map=device_map,
-            max_shard_size=max_shard_size,
-            trust_remote_code=trust_remote_code,
-        )
-    else:
-        _convert_checkpoint_to_bf16(
-            model_path,
-            output_path,
-            model_type,
-            load_kwargs,
-            is_peft=is_peft,
-            device_map=device_map,
-            max_shard_size=max_shard_size,
-            trust_remote_code=trust_remote_code,
-        )
+    _convert_checkpoint_to_bf16(
+        model_path,
+        output_path,
+        model_type,
+        load_kwargs,
+        is_peft=is_peft,
+        device_map=device_map,
+        max_shard_size=max_shard_size,
+        trust_remote_code=trust_remote_code,
+    )
 
     logger.info(f"Model successfully converted and saved to {output_path}")
 
-    # An unmerged --peft save writes no model weights, so its adapter is what gets verified: any
+    # A --peft save writes no model weights, so its adapter is what gets verified: any
     # model*.safetensors in --output_dir is an earlier save's, which this one did not remove.
-    adapter_save = is_peft and not merge_adapter
     if verify:
         verified = (
             verify_adapter_save(os.path.join(output_path, ADAPTER_SAFETENSORS_FILE))
-            if adapter_save
+            if is_peft
             else verify_model_conversion(output_path)
         )
         # Raise so a failed conversion cannot report success to its caller.
@@ -435,8 +361,8 @@ def convert_to_bf16(
             )
 
     if check_inference:
-        # An unmerged --peft save is an adapter dir with no config.json, which the plain loader rejects.
-        run_test_inference(output_path, model_type, is_peft=adapter_save, trust_remote_code=trust_remote_code)
+        # A --peft save is an adapter dir with no config.json, which the plain loader rejects.
+        run_test_inference(output_path, model_type, is_peft=is_peft, trust_remote_code=trust_remote_code)
 
 
 def parse_args():
@@ -448,7 +374,7 @@ def parse_args():
         required=True,
         help=(
             "Output directory for the BF16 model. A full-model save removes every model*.safetensors/index "
-            "the completed save did not produce; an unmerged --peft save writes no model weights (adapter, "
+            "the completed save did not produce; a --peft save writes no model weights (adapter, "
             "tokenizer, sidecars, card) and removes nothing"
         ),
     )
@@ -459,23 +385,24 @@ def parse_args():
         choices=list(_MODEL_CLASSES),
         help="Type of the model: causal_lm (for LLMs), classifier, or base",
     )
-    parser.add_argument("--peft", action="store_true", help="Whether the model is a PEFT adapter model")
     parser.add_argument(
-        "--merge_adapter", action="store_true", help="If using PEFT, whether to merge the adapter with the base model"
+        "--peft",
+        action="store_true",
+        help="The source is a PEFT adapter, written back as an adapter (merge one with merge_peft_adapters.py)",
     )
     add_device_map_arg(parser)
     parser.add_argument(
         "--verify",
         action="store_true",
         help="Assert the saved checkpoint is stored in BF16 (reads the safetensors headers; raises on failure). "
-        "An unmerged --peft save is only checked to be non-empty.",
+        "A --peft save is only checked to be non-empty.",
     )
     parser.add_argument(
         "--check_inference",
         action="store_true",
         help="Run a test inference on the converted model to verify functionality",
     )
-    add_max_shard_size_arg(parser, note="An unmerged --peft save writes no model weights and ignores it.")
+    add_max_shard_size_arg(parser, note="A --peft save writes no model weights and ignores it.")
     add_trust_remote_code_arg(parser)
     return parser.parse_args()
 
@@ -490,7 +417,6 @@ def main():
         args.output_dir,
         args.model_type,
         is_peft=args.peft,
-        merge_adapter=args.merge_adapter,
         device_map=args.device_map,
         verify=args.verify,
         check_inference=args.check_inference,

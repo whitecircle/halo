@@ -24,6 +24,7 @@ from src.checkpoint.writing import (
 )
 from src.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
 from src.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
+from src.models.config_access import ties_word_embeddings
 from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
 from src.models.param_roles import persistent_buffers
 from src.runtime.consensus import DeferredRankFailure
@@ -145,7 +146,7 @@ def stream_gathered_checkpoint(
     guard = DeferredRankFailure(f"gathered checkpoint write to {output_dir}")
     # Held across the stream only where the reconcile below can act on them: an untied config makes
     # it a no-op, and these are two of the largest tensors in the checkpoint.
-    keep_tied = getattr(getattr(model, "config", None), "tie_word_embeddings", False)
+    keep_tied = getattr(model, "config", None) is not None and ties_word_embeddings(model.config)
     tied: dict[str, torch.Tensor] = {}
     written = 0
 

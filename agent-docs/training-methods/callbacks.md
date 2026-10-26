@@ -184,7 +184,7 @@ Every bias mode checkpoints its biases to `router_balancing_biases.pt` on the FS
 
 The restore is all-or-nothing across ranks: a missing or torn file on some ranks raises, as does a saved bias whose shape does not match the live router, rather than being `copy_`-broadcast into it. A checkpoint without the file keeps zero-init biases and warns; a sidecar matching **no** live router drops every trained bias, loudly — what a weight-sync RL leg does to a `bias_update` checkpoint.
 
-The PEFT merge path (`merge_peft_adapters.py`, `convert_to_bf16.py --peft --merge_adapter`) applies the sidecar into the model's native slots, materializing a config-gated slot the base lacks — a merge starts from base weights that never saw the sign updates. A full checkpoint already carries the biases in those slots, so `convert_to_bf16.py` reads them back from its shards at the trained fp32. Saves keep balancing tensors at their trained fp32; a bf16 round trip would quantize away several 1e-3 steps.
+The PEFT merge (`merge_peft_adapters.py`) applies the sidecar into the model's native slots, materializing a config-gated slot the base lacks — a merge starts from base weights that never saw the sign updates. A full checkpoint already carries the biases in those slots, so `convert_to_bf16.py` reads them back from its shards at the trained fp32. Saves keep balancing tensors at their trained fp32; a bf16 round trip would quantize away several 1e-3 steps.
 
 ## Relevant YAML
 

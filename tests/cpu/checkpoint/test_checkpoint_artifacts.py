@@ -176,7 +176,11 @@ def test_a_staged_file_readable_by_its_owner_only_is_a_mode_delta(monkeypatch, t
 
     deltas = compare_outputs(baseline, _produced(tmp_path / "mutated", [DENSE_TRAINING]))
 
-    staged = sorted((meta, f"{DENSE_TRAINING.path}/README.md"))
+    # The safetensors files take the mode a staged probe file gets (apply_umask_mode).
+    weights = [
+        path for path in baseline if path.startswith(f"{DENSE_TRAINING.path}/") and path.endswith(".safetensors")
+    ]
+    staged = sorted((meta, f"{DENSE_TRAINING.path}/README.md", *weights))
     assert sorted(deltas, key=lambda delta: delta["path"]) == [
         {"path": path, "delta": "differs", "entries": [f'mode: "{baseline[path]["mode"]}" != "600"']}
         for path in staged

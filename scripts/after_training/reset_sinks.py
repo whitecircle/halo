@@ -22,13 +22,14 @@ from pathlib import Path
 
 import torch
 from accelerate import PartialState
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 
 from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.atomic import (
     PUBLISH_STAGING_SUFFIX,
     clear_staging_path,
     link_or_copy_file,
+    save_safetensors_file,
     staged_file,
 )
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
@@ -154,7 +155,7 @@ def _reset_sinks_safetensors(safetensors_path: Path, output_dir: Path, dry_run: 
     # kill mid-write, or a write that kept live sinks, must not reach.
     logger.info(f"Saving updated checkpoint to {output_dir / SAFETENSORS_WEIGHTS_FILE}...")
     with staged_file(output_dir, SAFETENSORS_WEIGHTS_FILE) as staged:
-        save_file(state_dict, str(staged), metadata=SAFETENSORS_METADATA)
+        save_safetensors_file(state_dict, staged, metadata=SAFETENSORS_METADATA)
         logger.info("Verifying...")
         written = {key: tensor for key, tensor in load_file(str(staged), device="cpu").items() if is_sink_key(key)}
         _assert_sinks_at_min(written, sink_keys, str(staged))

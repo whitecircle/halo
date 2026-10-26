@@ -10,9 +10,9 @@ from functools import partial
 import torch
 from accelerate.logging import get_logger
 from accelerate.utils import is_peft_model
-from safetensors.torch import save_file
 from transformers.core_model_loading import rename_source_key
 
+from src.checkpoint.atomic import save_safetensors_file
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.format import EP_SHARD_KEY_INFIX, ep_shard_filename, ep_sharded_index_metadata
 from src.checkpoint.hub_layout import export_conversions, reversed_export_transforms, revert_conversions
@@ -359,7 +359,7 @@ def save_ep_sharded_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     # Every rank writes, so a local raise here would leave the peers in the collectives below.
     guard = DeferredRankFailure(f"EP sharded checkpoint write to {output_dir}")
     if shard:
-        guard.run(partial(save_file, shard, os.path.join(output_dir, shard_filename)))
+        guard.run(partial(save_safetensors_file, shard, os.path.join(output_dir, shard_filename)))
         if guard.reason is None:
             logger.info(
                 f"[Rank {rank}] Saved shard: {shard_filename} ({len(shard)} tensors, {total_size / 1e9:.2f}GB)"

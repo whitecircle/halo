@@ -208,7 +208,7 @@ def test_a_failed_adapter_write_leaves_no_marker(tmp_path, monkeypatch):
     def full_disk(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(peft_mod, "safetensors_save_file", full_disk)
+    monkeypatch.setattr(peft_mod, "save_safetensors_file", full_disk)
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
 
     with pytest.raises(OSError, match="No space left"):
@@ -275,7 +275,7 @@ def test_a_resave_torn_before_its_adapter_leaves_the_step_unmarked(tmp_path, mon
     def full_disk(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(peft_mod, "safetensors_save_file", full_disk)
+    monkeypatch.setattr(peft_mod, "save_safetensors_file", full_disk)
     with pytest.raises(OSError, match="No space left"):
         _RunTrainer(str(tmp_path), "resumed")._save_checkpoint(model=None, trial=None)
 

@@ -13,8 +13,8 @@ from typing import Any
 import torch
 from huggingface_hub import split_torch_state_dict_into_shards
 from huggingface_hub.serialization._base import parse_size_to_int
-from safetensors.torch import save_file
 
+from src.checkpoint.atomic import save_safetensors_file
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
@@ -31,6 +31,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.hub_layout import revert_to_load_layout
 from src.checkpoint.reading import read_checkpoint_index
+from src.models.config_access import ties_word_embeddings, untie_word_embeddings
 from src.models.moe.balancing import balancing_param_keys, is_balancing_state_key
 from src.models.param_roles import fp32_pinned_names, norm_param_keys
 from src.models.unwrapping import strip_peft_adapter_segment
@@ -163,7 +164,9 @@ def save_sharded_state_dict(
     final_names: dict[str, str] = {}
     for part_index, (filename, keys) in enumerate(split.filename_to_tensors.items(), start=1):
         part = stream_part_filename(STREAM_PART_PREFIX, part_index)
-        save_file({k: state_dict[k] for k in keys}, os.path.join(output_dir, part), metadata=SAFETENSORS_METADATA)
+        save_safetensors_file(
+            {k: state_dict[k] for k in keys}, os.path.join(output_dir, part), metadata=SAFETENSORS_METADATA
+        )
         final_names[part] = filename
     publish_streamed_parts(output_dir, final_names, split.tensor_to_filename, split.metadata)
 
@@ -187,10 +190,10 @@ def is_tie_reconcile_key(name: str) -> bool:
 
 
 def reconcile_tie_word_embeddings(model, state_dict: dict) -> None:
-    """Set ``config.tie_word_embeddings`` False when the saved lm_head and embedding diverged in training
-    (FSDP2 shards the pair independently and FLCE trains lm_head directly)."""
+    """Clear ``tie_word_embeddings`` on every config level declaring it when the saved lm_head and embedding
+    diverged in training (FSDP2 shards the pair independently and FLCE trains lm_head directly)."""
     config = getattr(model, "config", None)
-    if config is None or not getattr(config, "tie_word_embeddings", False):
+    if config is None or not ties_word_embeddings(config):
         return
     lm_key = _unique_key_by_suffix(state_dict, _TIE_KEY_SUFFIXES[0])
     emb_key = _unique_key_by_suffix(state_dict, _TIE_KEY_SUFFIXES[1])
@@ -198,7 +201,7 @@ def reconcile_tie_word_embeddings(model, state_dict: dict) -> None:
         return
     lm, emb = state_dict[lm_key], state_dict[emb_key]
     if lm.shape != emb.shape or not torch.equal(lm, emb):
-        config.tie_word_embeddings = False
+        untie_word_embeddings(config)
         logger.warning(
             f"{lm_key} and {emb_key} diverged during training; "
             f"saving config with tie_word_embeddings=False for checkpoint consistency."
@@ -300,7 +303,7 @@ class StreamingShardWriter:
             return
         self._part += 1
         name = stream_part_filename(self.filename_prefix, self._part)
-        save_file(self._pending, os.path.join(self.output_dir, name), metadata=SAFETENSORS_METADATA)
+        save_safetensors_file(self._pending, os.path.join(self.output_dir, name), metadata=SAFETENSORS_METADATA)
         self._weight_map.update(dict.fromkeys(self._pending, name))
         self._part_names.append(name)
         self._total_bytes += self._pending_bytes

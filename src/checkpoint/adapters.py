@@ -13,8 +13,8 @@ from collections.abc import Mapping
 import torch
 from safetensors import safe_open
 from safetensors.torch import load_file
-from safetensors.torch import save_file as safetensors_save_file
 
+from src.checkpoint.atomic import save_safetensors_file
 from src.checkpoint.format import (
     ADAPTER_BIN_FILE,
     ADAPTER_CONFIG_FILE,
@@ -101,7 +101,7 @@ def write_adapter_file(state: dict, output_dir: str) -> None:
     # send the whole adapter to the .bin fallback.
     state = {key: tensor.contiguous() for key, tensor in state.items()}
     try:
-        safetensors_save_file(state, st_path)
+        save_safetensors_file(state, st_path)
     except Exception as e:
         logger.warning(f"safetensors adapter save failed: {e}, using pytorch format")
         # The .bin lands first, then the safetensors leftover goes: every reader prefers that name, so

@@ -50,7 +50,7 @@ def test_a_crash_mid_resave_leaves_the_previous_checkpoint_intact(tmp_path, monk
     previous = _load_through_index(out)
     assert len(set(previous)) == 3, "premise: the first save must have sharded, else there is no window"
 
-    real_save_file = checkpoint_writing.save_file
+    real_save_file = checkpoint_writing.save_safetensors_file
     written = []
 
     def crash_on_the_second_shard(tensors, path, **kwargs):
@@ -59,7 +59,7 @@ def test_a_crash_mid_resave_leaves_the_previous_checkpoint_intact(tmp_path, monk
             raise OSError(28, "No space left on device")
         return real_save_file(tensors, path, **kwargs)
 
-    monkeypatch.setattr(checkpoint_writing, "save_file", crash_on_the_second_shard)
+    monkeypatch.setattr(checkpoint_writing, "save_safetensors_file", crash_on_the_second_shard)
     with pytest.raises(OSError):
         save_sharded_state_dict(_state(2.0), out, max_shard_size=SHARD_SIZE)
     assert len(written) == 2, "premise: the crash must land after at least one shard was written"
@@ -79,7 +79,7 @@ def test_the_next_successful_save_sweeps_the_abandoned_parts(tmp_path, monkeypat
     out = str(tmp_path)
     save_sharded_state_dict(_state(1.0), out, max_shard_size=SHARD_SIZE)
 
-    real_save_file = checkpoint_writing.save_file
+    real_save_file = checkpoint_writing.save_safetensors_file
     written = []
 
     def crash_on_the_second_shard(tensors, path, **kwargs):
@@ -88,14 +88,14 @@ def test_the_next_successful_save_sweeps_the_abandoned_parts(tmp_path, monkeypat
             raise OSError(28, "No space left on device")
         return real_save_file(tensors, path, **kwargs)
 
-    monkeypatch.setattr(checkpoint_writing, "save_file", crash_on_the_second_shard)
+    monkeypatch.setattr(checkpoint_writing, "save_safetensors_file", crash_on_the_second_shard)
     with pytest.raises(OSError):
         save_sharded_state_dict(_state(2.0), out, max_shard_size=SHARD_SIZE)
     assert glob.glob(os.path.join(out, f"{STREAM_PART_PREFIX}-*.safetensors")), (
         "premise: the failed save must have left its in-flight part behind"
     )
 
-    monkeypatch.setattr(checkpoint_writing, "save_file", real_save_file)
+    monkeypatch.setattr(checkpoint_writing, "save_safetensors_file", real_save_file)
     save_sharded_state_dict(_state(3.0), out, max_shard_size=SHARD_SIZE)
 
     assert not glob.glob(os.path.join(out, f"{STREAM_PART_PREFIX}-*.safetensors"))

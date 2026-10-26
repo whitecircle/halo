@@ -104,7 +104,8 @@ claimed by two stages, since a global parameter lives on exactly one.
 On a per-node output filesystem each node's directory holds the full index but only the parts of the
 stages it ran; every tool refuses it, naming the absent parts. `scripts/after_training/merge_pp_stages.py`
 (`merge_pp_stage_parts`, `src/checkpoint/pp_stage_merge.py`) merges the node directories into one
-loadable checkpoint ([Per-node export](../parallelism/pipeline-parallelism.md#per-node-export)).
+loadable checkpoint that carries every rank's optimizer shard and RNG state, so it also resumes exactly
+on the save's topology ([Per-node export](../parallelism/pipeline-parallelism.md#per-node-export)).
 
 The exchange gathers the per-writer weight-map fragments to rank 0 and broadcasts back the merged
 map, so no other rank ever holds one fragment per rank of it. The collision verdict rides the same
@@ -166,9 +167,13 @@ checkpoints hardlink the immutable file, falling back to a copy where links are 
 adding a scored split writes a new payload. Write failures rendezvous across ranks before
 checkpoint rotation can remove the previous complete checkpoint.
 
-Staging and durable publication live in `src/checkpoint/atomic.py` (`staged_file` for one file). Fresh files use `0o666` under
-the process umask, matching ordinary checkpoint-file permissions. Export copies omit every
-unpublished file an interrupted save leaves: a staged write's stage (the reference and prefetch
+Staging and durable publication live in `src/checkpoint/atomic.py` (`staged_file` for one file). Every
+file Halo's writers create gets `0o666` under the process umask; a file copied from a source keeps that
+file's mode. safetensors creates its files `0600`, so every safetensors writer goes through
+`save_safetensors_file`, and a `save_pretrained` writer is followed by `apply_umask_mode` on the weight
+file it wrote, or on its directory where the save owns the whole directory. `apply_umask_mode` reads the
+mode off a probe file, so a default ACL applies too.
+Export copies omit every unpublished file an interrupted save leaves: a staged write's stage (the reference and prefetch
 sidecars, `optimizer_meta.pt`, the model card), the withheld `.trainer_state.json.uncommitted`, and
 the `.<name>.<uuid hex>.tmp` staging spelling.
 
@@ -231,9 +236,9 @@ pinned server refuse, on a family the run never mentioned.
 
 Gathered saves also reconcile `tie_word_embeddings`. Tied embeddings can diverge during distributed
 training (independent FSDP2 shards, FLCE training `lm_head` directly), so when the saved `lm_head`
-and `embed_tokens` tensors differ, the config is written with `tie_word_embeddings: false` and the
-trained `lm_head` is honored on reload. The pair is matched by key suffix, covering wrapped/VLM
-layouts.
+and `embed_tokens` tensors differ, the config is written with `tie_word_embeddings: false` on every
+level that declares it (a VLM's text sub-config included, `untie_word_embeddings`) and the trained
+`lm_head` is honored on reload. The pair is matched by key suffix, covering wrapped/VLM layouts.
 
 The `.bin`-then-sweep fallback belongs to `write_gathered_checkpoint`, the whole-dict writer the
 injected-LoRA embedding save uses: it needs a dict still whole after the failure, which a streamed
@@ -261,7 +266,7 @@ run loaded its base from disk; the Hub refuses a local-path `base_model`, so rep
 before uploading that adapter.
 
 On a card with malformed metadata (not a YAML mapping, or a `tags` entry that is neither a list nor a
-string), `tag_model_card` raises, naming the file to repair, and fails the adapter save or unmerged
+string), `tag_model_card` raises, naming the file to repair, and fails the adapter save or
 `convert_to_bf16 --peft` that called it. The export finalizers and `reset_sinks` call
 `tag_exported_model_card` instead, which leaves such a card verbatim and untagged with a warning
 naming the card to repair, the source card when the export copied it: no loader reads the card, and
@@ -280,7 +285,7 @@ most exports reach it only after their weights are on disk.
 
 A new writer ends in `finalize_exported_config` or `copy_checkpoint_aux_files`, or calls the tagger
 itself: `tag_exported_model_card` after copying a source tree, as `reset_sinks` does, and
-`tag_model_card` otherwise, as an unmerged `convert_to_bf16 --peft` does.
+`tag_model_card` otherwise, as `convert_to_bf16 --peft` does.
 
 Under `push_to_hub: true`, the four trainers that extend `transformers.Trainer` directly (SMPO,
 offline GRPO, classification, teacher distillation) upload no card to the repo root, the one the Hub
@@ -572,8 +577,7 @@ exact for fp32 adapters (`fp32_experts`, `fp32_non_ep_params`) too.
 output is the same run's weights (`convert_to_bf16`, `merge_ep_shards`, `unfuse_moe_experts`,
 `reset_sinks`, `quantize_to_lowp`, `reattach_vision_tower`) keeps them, and a tool whose output is a
 new base drops them with every other resume sidecar (`merge_models`, `patch_vocab.py`, and
-`merge_adapter_into_base` (`src/checkpoint/adapter_merge.py`), the shared fold behind `merge_peft_adapters.py` and `convert_to_bf16
---merge_adapter`).
+`merge_adapter_into_base` (`src/checkpoint/adapter_merge.py`), the fold behind `merge_peft_adapters.py`).
 
 Covering test: `tests/common/merged_resume_e2e.py` (exact resume against an uninterrupted run).
 

@@ -312,7 +312,7 @@ def test_a_failed_adapter_write_leaves_the_checkpoint_unmarked(run, tmp_path, mo
     def full_disk(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(embedding_module, "save_file", full_disk)
+    monkeypatch.setattr(embedding_module, "save_safetensors_file", full_disk)
 
     with pytest.raises(OSError, match="No space left"):
         EmbeddingTrainer._save_merged_checkpoint_resume_adapter(_host(_lora_model(run.base, seed=1)), checkpoint)
@@ -833,7 +833,7 @@ def test_a_save_over_a_marked_directory_leaves_no_stale_marker(run, tmp_path, mo
     def full_disk(*args, **kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(embedding_module, "save_file", full_disk)
+    monkeypatch.setattr(embedding_module, "save_safetensors_file", full_disk)
     with pytest.raises(OSError, match="No space left"):
         _trainer(_lora_model(run.base, seed=1), tmp_path / "torn", max_steps=SAVE_AT_STEP).train()
     assert resume_adapter_dir(str(torn)) is None

@@ -27,7 +27,7 @@ def _failing_save(*args, **kwargs):
 def test_bin_fallback_removes_the_stale_safetensors(tmp_path, monkeypatch):
     stale = tmp_path / ADAPTER_SAFETENSORS_FILE
     stale.write_bytes(b"previous save's adapter")
-    monkeypatch.setattr(adapters_mod, "safetensors_save_file", _failing_save)
+    monkeypatch.setattr(adapters_mod, "save_safetensors_file", _failing_save)
 
     adapters_mod.write_adapter_file({"w": torch.ones(2)}, str(tmp_path))
 
@@ -51,7 +51,7 @@ def test_a_non_contiguous_adapter_tensor_still_writes_safetensors(tmp_path):
 def test_bin_fallback_sweep_failure_is_loud_and_keeps_the_bin(tmp_path, monkeypatch, caplog):
     stale = tmp_path / ADAPTER_SAFETENSORS_FILE
     stale.write_bytes(b"previous save's adapter")
-    monkeypatch.setattr(adapters_mod, "safetensors_save_file", _failing_save)
+    monkeypatch.setattr(adapters_mod, "save_safetensors_file", _failing_save)
 
     real_remove = os.remove
 

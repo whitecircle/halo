@@ -1,18 +1,17 @@
 #!/usr/bin/env python
 """The shared PEFT merge must run its input gates in order, before anything is loaded or written.
 
-``convert_to_bf16 --peft --merge_adapter`` and ``merge_peft_adapters`` both fold a saved adapter into
-its base through ``merge_adapter_into_base``. Every gate in front of that fold answers a failure that
-is silent without it — a per-rank EP directory whose real expert keys read as MISSING and get
-randomly initialized, an ``--output_dir`` aimed at an input whose weight files the save then deletes,
-a native expert-LoRA adapter whose deltas ``merge_and_unload`` drops — and each is only worth having
-if it runs BEFORE the base model is loaded and the output directory created. The base directory is
-re-checked separately because under a merge the WEIGHTS come from the base, so the adapter-side gates alone
-would cover the wrong directory.
+``merge_peft_adapters`` folds a saved adapter into its base through ``merge_adapter_into_base``. Every
+gate in front of that fold answers a failure that is silent without it — a per-rank EP directory whose
+real expert keys read as MISSING and get randomly initialized, an ``--output_dir`` aimed at an input
+whose weight files the save then deletes, a native expert-LoRA adapter whose deltas ``merge_and_unload``
+drops — and each is only worth having if it runs BEFORE the base model is loaded and the output directory
+created. The base directory is re-checked separately because under a merge the WEIGHTS come from the
+base, so the adapter-side gates alone would cover the wrong directory.
 
-One sequence serves both tools, and its gates (``adapter_input_gates``) also front the unmerged
-``convert_to_bf16 --peft`` re-save, whose adapter a later merge reads. These assertions pin that
-single copy — its gates, their order, and the point they run at — and fail if a tool grows its own.
+Its gates (``adapter_input_gates``) also front the ``convert_to_bf16 --peft`` re-save, whose adapter a
+later merge reads. These assertions pin that single copy — its gates, their order, and the point they
+run at — and fail if a tool grows its own.
 
 Run: ``python tests/cpu/checkpoint/test_merge_adapter_gates.py`` (or ``pytest -m cpu``).
 """
@@ -249,26 +248,10 @@ def test_an_unmarked_expert_adapter_is_caught_in_either_weight_file(tmp_path, we
         assert_no_expert_lora_adapter(str(adapter))
 
 
-def _merge_via_convert_to_bf16(adapter: str, output_dir: str) -> None:
-    convert_to_bf16.convert_to_bf16(adapter, output_dir, "causal_lm", is_peft=True, merge_adapter=True)
-
-
-def _merge_via_merge_peft_adapters(adapter: str, output_dir: str) -> None:
-    merge_peft_adapters.merge_peft_adapter(adapter_dir=adapter, output_dir=output_dir, verbose=False)
-
-
-@pytest.mark.parametrize(
-    ("script", "run"),
-    [
-        (convert_to_bf16, _merge_via_convert_to_bf16),
-        (merge_peft_adapters, _merge_via_merge_peft_adapters),
-    ],
-    ids=["convert_to_bf16", "merge_peft_adapters"],
-)
-def test_both_merge_tools_fold_through_the_shared_sequence(tmp_path, monkeypatch, script, run):
-    """A tool that re-grew its own load→merge→save path would carry none of the gates above, so each
+def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch):
+    """A tool that re-grew its own load→merge→save path would carry none of the gates above, so the
     tool's own entry point is driven here and must arrive at the shared merge."""
-    assert script.merge_adapter_into_base is adapter_merge.merge_adapter_into_base
+    assert merge_peft_adapters.merge_adapter_into_base is adapter_merge.merge_adapter_into_base
 
     base = tmp_path / "base"
     base.mkdir()
@@ -279,17 +262,15 @@ def test_both_merge_tools_fold_through_the_shared_sequence(tmp_path, monkeypatch
         tools.append(tool)
         return _Merged()
 
-    monkeypatch.setattr(script, "merge_adapter_into_base", capture)
-    run(adapter, str(tmp_path / "out"))
+    monkeypatch.setattr(merge_peft_adapters, "merge_adapter_into_base", capture)
+    merge_peft_adapters.merge_peft_adapter(adapter_dir=adapter, output_dir=str(tmp_path / "out"), verbose=False)
 
-    assert tools == [script.__name__.rsplit(".", 1)[-1]], (
-        f"{script.__name__} did not reach the shared merge (reached: {tools})"
-    )
+    assert tools == ["merge_peft_adapters"], f"merge_peft_adapters did not reach the shared merge (reached: {tools})"
 
 
 @pytest.mark.parametrize("side", ["adapter", "base"])
 def test_an_unmerged_adapter_conversion_runs_the_shared_gates(tmp_path, monkeypatch, side):
-    """``convert_to_bf16 --peft`` without ``--merge_adapter`` re-saves an adapter a later merge reads,
+    """``convert_to_bf16 --peft`` re-saves an adapter a later merge reads,
     so it owes the merge's gates, taken from the one sequence rather than a copy of it."""
     assert convert_to_bf16.adapter_input_gates is adapter_merge.adapter_input_gates
 

@@ -197,18 +197,24 @@ def test_a_merged_text_only_adapter_reattaches_into_a_checkpoint_the_toolkit_loa
         torch.testing.assert_close(logits, reference, rtol=1e-5, atol=1e-5)
 
 
-def test_the_bf16_merge_writes_the_text_only_layout(tmp_path):
-    """``convert_to_bf16 --peft --merge_adapter`` shares the merge's save, so it owes the same layout."""
+def test_the_fp32_norm_merge_writes_the_text_only_layout_with_fp32_norms(tmp_path):
+    """``--fp32_norms`` changes only the norm leaves' dtype: the layout is the merge's, every norm is stored
+    fp32 and every other float tensor at ``--dtype``."""
     PartialState()
     family = _FAMILIES["qwen3_5"]
     base, adapter, out = tmp_path / "base", tmp_path / "adapter", tmp_path / "out"
     _build_multimodal_base(base, family)
     _train_text_only_adapter(base, adapter, family)
 
-    convert = load_script_module("scripts/after_training/convert_to_bf16.py", "convert_to_bf16_text_only")
-    convert.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True, merge_adapter=True)
+    _merge_script().merge_peft_adapter(str(adapter), str(out), fp32_norms=True, verbose=False)
 
     assert _on_disk_keys(out) == _declared_layout(out, tmp_path / "fresh")
+    dtypes = {
+        key: reader.get_slice(key).get_dtype() for _shard, reader, key in iter_checkpoint_shard_entries(str(out))
+    }
+    norms = {key for key in dtypes if "norm" in key}
+    assert norms and {dtypes[key] for key in norms} == {"F32"}, "a norm leaf was not written fp32"
+    assert {dtype for key, dtype in dtypes.items() if key not in norms and dtype.startswith(("F", "BF"))} == {"BF16"}
 
 
 def _build_multimodal_base_with_processor(base_dir: Path, family: _Family):
@@ -261,7 +267,7 @@ def test_the_merge_ships_the_runs_processing_class_for_the_class_it_merged_throu
 
 
 def test_an_unmerged_bf16_adapter_save_ships_what_the_merge_ships(tmp_path):
-    """``convert_to_bf16 --peft`` without ``--merge_adapter`` writes the processing class the merge
+    """``convert_to_bf16 --peft`` writes the processing class the merge
     would: for a text-only adapter, the run's tokenizer and none of the multimodal base's processor
     files, so merging the converted adapter later reaches the same artifact."""
     PartialState()

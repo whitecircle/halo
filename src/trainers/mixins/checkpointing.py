@@ -11,6 +11,7 @@ import torch.nn as nn
 from accelerate.logging import get_logger
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, rotate_checkpoints
 
+from src.checkpoint.atomic import apply_umask_mode
 from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.hub_layout import save_pretrained_layout
 from src.checkpoint.model_card import with_halo_tags
@@ -258,6 +259,7 @@ class CheckpointingMixin:
             # pinned server otherwise, with nothing wrong at train time to show for it.
             if self.args.should_save:
                 finalize_exported_config(ctx.model.config, output_dir, source=config_schema_source(ctx.model))
+                apply_umask_mode(output_dir)
 
     def _mark_model_save_collectives_done(self) -> None:
         """Record that this save's collectives are behind it: the fence in :meth:`_save_checkpoint`

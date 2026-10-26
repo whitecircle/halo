@@ -32,7 +32,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 PartialState()  # the tool's loads log through accelerate's logger
 
-import scripts.after_training.convert_to_bf16 as convert_module
 from scripts.after_training.convert_to_bf16 import (
     _BF16_VERIFY_MIN_FRACTION,
     convert_to_bf16,
@@ -149,8 +148,8 @@ def test_verify_ignores_non_float_tensors(tmp_path):
 
 
 def _lora_adapter(tmp_path, base_dir):
-    """A real unmerged PEFT save over ``base_dir`` — the artifact ``--peft`` without ``--merge_adapter``
-    produces, whose LoRA A/B PEFT deliberately restores to fp32."""
+    """A real PEFT save over ``base_dir`` — the artifact ``--peft`` produces, whose LoRA A/B PEFT
+    deliberately restores to fp32."""
     model = AutoModelForCausalLM.from_pretrained(base_dir)
     adapter_dir = tmp_path / "adapter"
     get_peft_model(model, LoraConfig(r=4, target_modules=["q_proj", "v_proj"])).save_pretrained(str(adapter_dir))
@@ -178,17 +177,6 @@ def test_an_unmerged_peft_save_verifies_its_adapter_not_a_stale_model(tmp_path):
 
     assert os.path.isfile(os.path.join(out, "adapter_model.safetensors"))
     assert set(_stored_dtype_counts(out)[0]) == {"F32"}, "premise: the stale fp32 model is still there"
-
-
-def test_verify_still_applies_to_a_merged_peft_save(tmp_path, monkeypatch):
-    """Anti-over-exemption: --merge_adapter writes a real model, so the tool's own ``verify`` GATE
-    must still judge it. Asserted by forcing the checker to fail and requiring the gate to raise —
-    calling ``verify_model_conversion`` directly would pass even if the gate exempted PEFT."""
-    adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))
-    out = tmp_path / "out"
-    monkeypatch.setattr(convert_module, "verify_model_conversion", lambda path: False)
-    with pytest.raises(RuntimeError, match="BF16 verification failed"):
-        convert_to_bf16(adapter, str(out), "causal_lm", is_peft=True, merge_adapter=True, verify=True)
 
 
 def test_verify_rejects_an_empty_adapter(tmp_path):

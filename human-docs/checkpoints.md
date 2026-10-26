@@ -97,11 +97,13 @@ instead. Dense pure TP is allowed, and adapter-only runs are exempt unless
 ## Per-node PP saves
 
 On per-node storage (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) a PP save leaves each
-node only the parts of the stages it ran, beside the full index. Each node
-resumes from its own directory as long as the topology and node ranks stay the
-same. To load, serve or upload the result, copy every node's directory onto one
-host and run `halo run merge-pp-stages --input_dir <node0 dir> <node1 dir>
---output_dir <merged dir>`; it refuses a part no directory holds
+node only the parts of the stages it ran, beside the full index, and only its
+own ranks' optimizer and RNG state. Each node resumes from its own directory as
+long as the topology and node ranks stay the same. To load, serve or upload the
+result, copy every node's directory onto one host and run `halo run
+merge-pp-stages --input_dir <node0 dir> <node1 dir> --output_dir <merged dir>`;
+it refuses a part or a rank's optimizer shard no directory holds. The merged
+directory also resumes exactly on the same topology
 ([Per-node export](../agent-docs/parallelism/pipeline-parallelism.md#per-node-export) ↗).
 
 ## Post-processing tools
@@ -128,8 +130,7 @@ flags.
 - **Resume state.** Conversions of a run's own weights (`convert-to-bf16`,
   `unfuse-moe-experts`, …) keep its resume files except the optimizer shards;
   strip those before uploading. Exports that make a new base (`merge-peft-adapters`,
-  `convert-to-bf16 --peft --merge_adapter`, `merge-models`, `patch-vocab`) drop
-  them, `trainer_state.json` included.
+  `merge-models`, `patch-vocab`) drop them, `trainer_state.json` included.
 - **Text-only merges.** Merging an adapter trained with `text_only_model: true`
   writes a text-only model with the run's tokenizer and none of the base's
   processor files. For Qwen3.5/3.6, vLLM loads it only after
@@ -198,7 +199,7 @@ Every checkpoint Halo writes, full model, adapter or tool output, holds a
 `README.md` model card tagged `halo`, so the upload lists under that Hub tag.
 Before you publish, fill in its body and replace a local-path `base_model` with
 the Hub id. A tool whose source card has malformed metadata copies that card
-untagged and warns; an unmerged `convert-to-bf16 --peft` raises instead.
+untagged and warns; `convert-to-bf16 --peft` raises instead.
 
 Shard layouts, merge flags and the full resume mechanics:
 [Checkpoints](../agent-docs/reference/checkpoints.md) ↗ ·

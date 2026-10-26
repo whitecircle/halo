@@ -188,7 +188,7 @@ def test_an_interrupted_single_file_write_leaves_the_target_and_no_stage(tmp_pat
             handle.write(b"partial")
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(reset_sinks_mod, "save_file", interrupted)
+    monkeypatch.setattr(reset_sinks_mod, "save_safetensors_file", interrupted)
     with pytest.raises(OSError, match="No space left"):
         reset_sinks(str(source), in_place=True)
 
@@ -311,14 +311,14 @@ def test_single_file_write_that_kept_live_sinks_never_replaces_the_source(tmp_pa
     source = tmp_path / "src"
     _build_source(source, sharded=False)
     before = {p.name: p.read_bytes() for p in source.iterdir() if p.is_file()}
-    real_save_file = reset_sinks_mod.save_file
+    real_save_file = reset_sinks_mod.save_safetensors_file
 
     def corrupting_save_file(state_dict, path, **kwargs):
         # A torn writer: the staged file lands with live sinks despite the in-memory reset.
         live = {key: (torch.zeros_like(t) if ".sinks" in key else t) for key, t in state_dict.items()}
         real_save_file(live, path, **kwargs)
 
-    monkeypatch.setattr(reset_sinks_mod, "save_file", corrupting_save_file)
+    monkeypatch.setattr(reset_sinks_mod, "save_safetensors_file", corrupting_save_file)
 
     with pytest.raises(RuntimeError, match="failed verification"):
         reset_sinks(str(source), in_place=True)
