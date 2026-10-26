@@ -1004,7 +1004,7 @@ def test_reshard_allowed_on_ep1_paths():
     create_config(world_size=8, fsdp_reshard_after_forward=True)
     # pure TP (dp=1: tp_size == world_size, so there is no FSDP DP axis whose re-gather would conflict)
     create_config(tp_size=8, world_size=8, fsdp_reshard_after_forward=True)
-    # CP (EP=1)
+    # CP alone (EP=1)
     create_config(cp_size=2, world_size=8, fsdp_reshard_after_forward=True)
     # ep_size==1 MoE + FSDP-sharded experts → the full ZeRO-3 combo
     create_config(world_size=8, fsdp_reshard_after_forward=True, fsdp_shard_ep1_experts=True)

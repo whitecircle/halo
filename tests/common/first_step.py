@@ -7,7 +7,8 @@ optimizer step consumed, off the trainer's own seams: each microbatch ``compute_
 loss it returned, the logged step loss, the gradients handed to the optimizer, and every backward that
 reached PyTorch's c10d autograd fallback. :func:`score_first_step` runs those microbatches through a
 reference trainer on the initial weights as the training step would; :func:`first_step_checks` and
-:func:`first_step_gradient_checks` compare the two.
+:func:`first_step_gradient_checks` compare the two. :func:`parameter_gradient_checks` grades one backward
+against a reference per parameter.
 
 Gradients are compared on the FSDP2-sharded (DTensor) parameters, which FSDP2 and the trainer's clip
 seam finalize the same way on both sides. EP experts and routers are FSDP-ignored and live in a
@@ -16,6 +17,7 @@ layout-specific form, so they are left out.
 
 import contextlib
 import math
+import re
 import warnings
 from dataclasses import dataclass, field
 
@@ -24,7 +26,7 @@ from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 
 from tests.common.distributed import world_mean
-from tests.common.numerics import max_or_nan
+from tests.common.numerics import cos_sim, max_or_nan
 from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 from tests.common.training_checks import step_losses
@@ -32,6 +34,9 @@ from tests.common.training_checks import step_losses
 # What PyTorch warns when a backward passes through a collective with no autograd kernel (an in-place
 # ``dist.all_reduce`` on a grad-carrying tensor): the gradient goes through as the identity.
 AUTOGRAD_FALLBACK_WARNING = "autograd kernel was not registered"
+# A routed MoE block's router and routed-expert parameters, whose gradients a near-tie top-k flip moves (the CP
+# gradients block of tests/common/tolerances.py).
+ROUTING_DEPENDENT_PARAM = re.compile(r"\.mlp\.(?:router|gate)\.[^.]+$|\.mlp\.experts\.")
 
 
 @dataclass
@@ -240,3 +245,61 @@ def first_step_gradient_checks(
         f"norm ratio {norm_ratio:.5f} (tol {norm_rtol})"
     )
     return checks, {"step1_grad_cosine": cosine, "step1_grad_norm_ratio": norm_ratio}
+
+
+def parameter_gradient_checks(
+    got: dict[str, torch.Tensor],
+    want: dict[str, torch.Tensor],
+    *,
+    cosine_min: float = TOL.cp_grad_cosine_min,
+    norm_rtol: float = TOL.cp_grad_norm_rtol,
+) -> tuple[bool, dict[str, float]]:
+    """Whether ``got`` matches ``want`` parameter by parameter, and the metrics behind the verdict.
+
+    The whole gradient holds its direction to ``cosine_min`` and its norm to ``norm_rtol``, and the
+    :data:`ROUTING_DEPENDENT_PARAM` parameters hold the direction as one vector. Each parameter also holds its
+    own: ``cosine_min`` in a model without routed experts; in a routed one a router or expert parameter
+    :attr:`TOL.grad_direction_cosine_min` and any other :attr:`TOL.cp_routed_grad_cosine_min`. An expert zero on
+    either side is skipped, since a flipped pick can route a token to an expert the other pass never used; a
+    router never is, so a router left without a gradient fails. ``want``'s parameters missing from ``got`` are
+    the caller's coverage check.
+    """
+    shared = [name for name in want if name in got]
+    routed = [name for name in shared if ROUTING_DEPENDENT_PARAM.search(name)]
+    finite = all(bool(torch.isfinite(got[name]).all()) for name in shared)
+    whole_cosine, norm_ratio = _gradient_agreement({n: got[n] for n in shared}, {n: want[n] for n in shared})
+    routed_cosine = (
+        _gradient_agreement({n: got[n] for n in routed}, {n: want[n] for n in routed})[0] if routed else 1.0
+    )
+    other_floor = TOL.cp_routed_grad_cosine_min if routed else cosine_min
+    each_holds, min_cosine, worst, worst_floor = finite, 1.0, "", other_floor
+    for name in shared if finite else ():
+        a, b = got[name], want[name]
+        if name not in routed:
+            cosine, floor = cos_sim(a, b, label=name), other_floor
+        elif a.any() and b.any():
+            cosine, floor = cos_sim(a, b, label=name), TOL.grad_direction_cosine_min
+        elif ".mlp.experts." in name:
+            continue
+        else:
+            cosine, floor = 0.0, TOL.grad_direction_cosine_min
+        each_holds &= cosine >= floor
+        if cosine < min_cosine:
+            min_cosine, worst, worst_floor = cosine, name, floor
+    log(
+        f"  grads: finite={finite}  whole cosine={whole_cosine:.6f}  routing-dependent cosine={routed_cosine:.6f} over "
+        f"{len(routed)}  min cosine={min_cosine:.6f} ({worst}, floor {worst_floor})  norm ratio={norm_ratio:.4f}"
+    )
+    matches = (
+        each_holds
+        and whole_cosine >= cosine_min
+        and routed_cosine >= cosine_min
+        and abs(norm_ratio - 1.0) <= norm_rtol
+    )
+    metrics = {
+        "grad_whole_cosine": whole_cosine,
+        "grad_routed_cosine": routed_cosine,
+        "grad_min_cosine": min_cosine,
+        "grad_norm_ratio": norm_ratio,
+    }
+    return matches, metrics

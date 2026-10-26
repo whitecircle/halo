@@ -246,7 +246,6 @@ def test_an_unmarked_expert_adapter_is_caught_in_either_weight_file(tmp_path, we
 def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch):
     """A tool that re-grew its own load→merge→save path would carry none of the gates above, so the
     tool's own entry point is driven here and must arrive at the shared merge."""
-
     base = tmp_path / "base"
     base.mkdir()
     adapter = _adapter_dir(tmp_path, base)

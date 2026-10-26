@@ -113,12 +113,17 @@ make train METHOD=preference/smpo CONFIG=<config>    # METHOD defaults to sft
 
 ## Code style
 
-- **ruff, line length 119.** Selected: `E, F, I, W, UP, B, C4, SIM, T20, PLC0415`. `make lint`
-  enforces the full set, and the blocking CI job runs `ruff format --check` plus the same full set.
-  See [Continuous Integration](../infrastructure/ci.md).
+- **ruff, line length 119.** Selected: `E, F, I, W, UP, B, C4, SIM, T20, PLC0415, D200, D202, D210, D300, D419, ERA001`.
+  `make lint` enforces the full set, and the blocking CI job runs `ruff format --check` plus the same
+  full set. See [Continuous Integration](../infrastructure/ci.md).
 - **No inline imports** (`PLC0415`), in `tests/` as in `halo/`. A function-level import is reserved
   for a genuinely optional or arch-specific dependency (`flash_attn`, `deep_ep`, `kernels`). A
   circular import is never that exception — fix it structurally.
+- **Docstrings keep one format** (`D200`, `D202`, `D210`, `D300`, `D419`): triple double quotes, a
+  one-line docstring on one line, no padding inside the quotes, no blank line after a function's
+  docstring, never empty.
+- **No commented-out code** (`ERA001`). Delete dead code; git keeps it. A note that merely parses as
+  Python (`# Default: n * 4`, a bare `# (a, b)` row legend) is reworded as prose.
 - **No stray `print()` in `halo/`** (`T20`). `tests/**` relaxes `E402`, `T20`, `E741`, `B007`,
   `B023`, and `SIM117`; `scripts/**` relaxes `T20`.
 - **Reuse over re-implementation.** New trainers extend `DistributedTrainerMixin`; new parallelism

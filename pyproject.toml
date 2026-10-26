@@ -143,13 +143,18 @@ extend-exclude = ["docker/vllm/parity/fixtures"]
 
 [tool.ruff.lint]
 # E,F,W,I = pycodestyle/pyflakes/isort; UP = pyupgrade; B = bugbear; C4 = comprehensions;
-# SIM = simplify; T20 = no stray print() in halo/; PLC0415 = no inline imports.
+# SIM = simplify; T20 = no stray print() in halo/; PLC0415 = no inline imports; D200/D202/D210/D300/D419 =
+# docstring format (a one-line docstring on one line, no blank line after a function's docstring, no padding
+# inside the quotes, triple double quotes, never empty); ERA001 = no commented-out code.
 # The whole set is a blocking CI gate (.github/workflows/lint.yml) — `ruff check .` must stay clean.
 # PLC0415 is a preview rule: `preview` + `explicit-preview-rules` arm it WITHOUT pulling in every
 # other preview rule (without them it is selected but silently does nothing).
 preview = true
 explicit-preview-rules = true
-select = ["E", "F", "I", "W", "UP", "B", "C4", "SIM", "T20", "PLC0415"]
+select = [
+    "E", "F", "I", "W", "UP", "B", "C4", "SIM", "T20", "PLC0415",
+    "D200", "D202", "D210", "D300", "D419", "ERA001",
+]
 ignore = [
     "E501",   # line length is enforced by the formatter, not the linter
     "UP038",  # isinstance(x, A | B) is slower than the tuple form at runtime (rule deprecated upstream)

@@ -68,7 +68,7 @@ def make_optimizers(model, lr):
     torch.manual_seed(42)
     optimizers = {}
 
-    # AdamW (fused)
+    # Fused AdamW
     m = create_model_copy(model)
     optimizers["AdamW (fused)"] = (m, torch.optim.AdamW(m.parameters(), lr=lr, fused=True))
 

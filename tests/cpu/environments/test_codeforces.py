@@ -201,7 +201,6 @@ def test_backend_outage_counts_infra_errors():
     """A sandbox backend/transport failure is infrastructure's fault, not the program's: GradeResult
     must report it as infra_errors so the reward layer can withhold every rung (an all-infra-error
     grade carries no signal about the code)."""
-
     down = StubSandbox(SandboxResult(stdout="", stderr="", returncode=None, timed_out=False, error="backend down"))
     result = run_solution_against_tests("print(1)", _ADD_TESTS, sandbox=down)
     assert result.infra_errors == result.total == 2

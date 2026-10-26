@@ -57,6 +57,7 @@ from tests.common.equivalence.cp_equivalence import (
     decoder_attention_inputs,
     tiny_model,
 )
+from tests.common.first_step import parameter_gradient_checks
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.numerics import cos_sim
@@ -122,28 +123,9 @@ def attention_checks(model: nn.Module, cp_config, ids, metrics: dict) -> dict[st
 def gradient_checks(reference: dict, cp_model: nn.Module, metrics: dict) -> dict[str, bool]:
     """The rank-averaged CP gradients against the reference ones, named as the reference model names them."""
     cp_grads = {name: param.grad for name, param in cp_model.named_parameters() if param.grad is not None}
-    min_cosine, worst, cp_sq, ref_sq, finite = 1.0, "", 0.0, 0.0, True
-    for name, ref_grad in reference.items():
-        grad = cp_grads.get(name)
-        if grad is None:
-            continue
-        finite &= bool(torch.isfinite(grad).all().item())
-        cp_sq += grad.float().pow(2).sum().item()
-        ref_sq += ref_grad.float().pow(2).sum().item()
-        if ".experts." in name and not ref_grad.any() and not grad.any():
-            continue  # a routed expert no token reached: zero on both sides, no direction to compare
-        cosine = cos_sim(grad, ref_grad, label=name)
-        if cosine < min_cosine:
-            min_cosine, worst = cosine, name
-    norm_ratio = cp_sq**0.5 / max(ref_sq**0.5, 1e-12)
-    log(f"  grads: finite={finite}  min cosine={min_cosine:.6f} ({worst})  norm ratio={norm_ratio:.4f}")
-    metrics |= {"grad_min_cosine": min_cosine, "grad_norm_ratio": norm_ratio}
-    return {
-        "cp_grads_cover_reference": cp_grads.keys() == reference.keys(),
-        "cp_grads_match_reference": finite
-        and min_cosine >= TOL.cp_grad_cosine_min
-        and abs(norm_ratio - 1.0) <= TOL.cp_grad_norm_rtol,
-    }
+    matches, grad_metrics = parameter_gradient_checks(cp_grads, reference)
+    metrics |= grad_metrics
+    return {"cp_grads_cover_reference": cp_grads.keys() == reference.keys(), "cp_grads_match_reference": matches}
 
 
 class FamilyChecks:

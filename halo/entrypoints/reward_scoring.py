@@ -431,7 +431,6 @@ def print_statistics(responses: list, rewards: list, model_name: str):
 async def run_reward_scoring(args) -> None:
     """Generate one response per pending prompt, score it with the reward model, append it to the run's
     JSONL output and print summary statistics over every scored row, resumed ones included."""
-
     client, rm_tokenizer, rm_model, rm_device = boot_scoring_run(args)
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)

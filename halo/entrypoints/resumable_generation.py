@@ -201,7 +201,6 @@ def _generation_record(
 async def run_batched_generation(args) -> None:
     """Generate every pending prompt of the S3 dataset (first turn, then any follow-up turn) and push the
     merged result; a row whose first request failed is dropped and retried by the next run."""
-
     client = build_openai_client(
         base_url=args.base_url,
         api_key_override=args.api_key,

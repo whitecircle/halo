@@ -221,7 +221,6 @@ def test_both_axes_default_to_one():
 def test_the_config_depth_fallback_carries_both_divisors(pp_size, tp_size):
     """A module tree exposing no layer list falls back to config depth — which is the FULL model's,
     so it needs the stage share (``/pp_size``) and the head share (``/tp_size``) applied to it."""
-
     bare = nn.Module()
     bare.config = _Config()
     got = _stage_attention_flops(bare, pp_size, tp_size)

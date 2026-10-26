@@ -212,7 +212,7 @@ async def test_the_pool_and_its_clock_prefer_this_node_and_spill_off_a_busy_one(
     assert spawned == [("clock", affinity), ("actor", affinity), ("actor", affinity)]
 
 
-# Test: RolloutConfig
+# Test: RolloutConfig fields and picklability
 
 
 def test_rollout_config_defaults():
@@ -1142,7 +1142,7 @@ def test_rollout_manager_max_concurrent_clamping():
     )
     assert manager.max_concurrent == 8  # Clamped to num_workers
 
-    # Default: num_workers * 4
+    # Left unset, max_concurrent defaults to num_workers * 4
     manager2 = RolloutManager(
         num_workers=4,
         env_type="react_math",

@@ -100,7 +100,13 @@ class _Tolerances:
     # attention exactly, so only bf16 all-to-all and accumulation order separate them: each parameter's
     # direction holds to 0.99 and the total norm to 10%. A wrong sequence split or RoPE offset reorients
     # the attention grads, and a CP reduction that sums instead of averaging scales the norm by cp_size.
+    # In a routed MoE model that noise also flips a few near-tied top-k picks, which moves a token's whole
+    # contribution to its router and experts and perturbs every parameter downstream (gpt-oss on the CP
+    # roster: flipped routers at 0.984, the worst downstream parameter 0.9897). There the router/expert group
+    # holds 0.99 as one vector, each router or expert parameter grad_direction_cosine_min, and every other
+    # parameter cp_routed_grad_cosine_min (first_step.parameter_gradient_checks).
     cp_grad_cosine_min: float = 0.99
+    cp_routed_grad_cosine_min: float = 0.98
     cp_grad_norm_rtol: float = 0.10
 
     # ── EP gradients vs a replicated reference, tiny random-init MoE ─────────

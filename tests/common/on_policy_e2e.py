@@ -33,6 +33,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
+from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.adapters import (
     LORA_ALPHA,
@@ -336,7 +337,6 @@ def perturbation_round(
     adapter: str | None,
     push,
     checks: dict[str, bool],
-    expert_stream: bool = True,
     check_base_untouched: bool = True,
 ) -> str:
     """Move what this row's sync must carry, push it with ``push``, and return the stream's name.
@@ -347,10 +347,12 @@ def perturbation_round(
     on the shards, the state an optimizer step ends in and the one the sync reads after its own
     reshard. Every rank runs it, since the gathers inside ``push`` are collective.
 
-    ``expert_stream`` says this policy's sync must carry expert tensors, which is where the
-    non-vacuity count goes; a dense policy has none and counts the tensors it does move.
+    A policy whose checkpoint config routes between experts must carry expert tensors in its sync, which is
+    where the non-vacuity count goes; a dense policy has none and counts the tensors it does move. The
+    config decides, never the EP layers the count guards.
     ``check_base_untouched`` adds the adapter fold's other half (:func:`frozen_base_weights`).
     """
+    expert_stream = has_routed_experts(unwrap(model).config)
     reshard_fsdp2_modules(unwrap(model))
     what, targets, stream_count = _perturbation_targets(model, adapter)
     base = frozen_base_weights(model) if adapter is not None and check_base_untouched else {}

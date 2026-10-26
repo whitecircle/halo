@@ -40,7 +40,7 @@ def test_a_shape_the_groups_cannot_tile_is_refused_at_config_time(
         )
 
 
-# (id, world, ep_size, expert_tp_size, ep_scope)
+# (id, world, ep_size, expert_tp_size, ep_scope) of a shape the config admits, on 8-GPU NVLink domains.
 _ACCEPTED = [
     ("no-ep", 8, 1, 1, "node"),
     ("node-ep2", 8, 2, 1, "node"),

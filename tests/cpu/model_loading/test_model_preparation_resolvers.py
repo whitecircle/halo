@@ -125,7 +125,7 @@ def test_explicit_dtype_wins_over_the_legacy_spelling():
 
 
 def test_pass_through_values_are_untouched():
-    """ "auto", ``None`` and real dtypes are not names to resolve."""
+    """``"auto"``, ``None`` and real dtypes are not names to resolve."""
     for value in ("auto", None, torch.bfloat16):
         kwargs = {"dtype": value}
         assert dtype_mod.normalize_model_init_dtype(kwargs)["dtype"] is value

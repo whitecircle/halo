@@ -282,7 +282,7 @@ def test_the_clique_is_read_from_the_fabric_block_only():
 
 
 def test_absent_and_unregistered_fabrics_are_told_apart():
-    """ "No fabric" and "cannot tell" are DIFFERENT answers, and the difference is load-bearing.
+    """The answers "no fabric" and "cannot tell" are DIFFERENT, and the difference is load-bearing.
 
     Only a definite negative lets the cross-check reject a domain declared wider than a node on
     hardware with no fabric to span; ``None`` has to keep meaning "a partial view is not evidence",

@@ -427,7 +427,6 @@ def test_react_math():
 
 def test_search_qa():
     """SearchQA environment with SimpleQA dataset."""
-
     log("=" * 70)
     log("TEST: SearchQA Environment + SimpleQA")
     log("=" * 70)

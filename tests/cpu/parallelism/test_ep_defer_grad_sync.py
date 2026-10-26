@@ -152,7 +152,7 @@ def _admitted(*topology) -> bool:
 
 
 _TOPOLOGIES = [
-    # (world, stage, ep_size, expert_tp_size, ep_scope, fsdp_shard_ep1_experts)
+    # (world, stage, ep_size, expert_tp_size, ep_scope, fsdp_shard_ep1_experts) of every shape the config admits.
     (world, stage, ep, etp, ep_scope, managed)
     for world, stage in ((8, 8), (16, 16), (16, 8), (32, 16))
     for ep, etp in ((1, 1), (1, 2), (2, 1), (4, 2), (8, 1))

@@ -295,7 +295,6 @@ def _perturb_and_sync(ctx, trainer, spec: _Mode, checks: dict, *, check_base_unt
         adapter=spec.adapter,
         push=trainer._distributed_sync_weights,
         checks=checks,
-        expert_stream=spec.family == "moe",
         check_base_untouched=check_base_untouched,
     )
 

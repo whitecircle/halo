@@ -44,7 +44,6 @@ _POSITIVE_ROLLOUT_KNOBS = (
 
 def test_smpo_defaults():
     """Default SMPO config should be valid."""
-
     cfg = SMPOConfig(**_CPU_OK)
     assert cfg.beta == 1.2
     assert cfg.target_margin == 0.35
@@ -68,14 +67,12 @@ def test_smpo_defaults():
 
 def test_smpo_padding_free():
     """padding_free config field should be settable."""
-
     cfg = SMPOConfig(padding_free=True, **_CPU_OK)
     assert cfg.padding_free is True
 
 
 def test_smpo_negative_target_margin():
     """target_margin < 0 should raise ValueError."""
-
     raised = False
     try:
         SMPOConfig(output_dir=OUTPUT_DIR, target_margin=-0.1)
@@ -87,7 +84,6 @@ def test_smpo_negative_target_margin():
 
 def test_smpo_margin_schedule_initial_ge_target():
     """initial_margin >= target_margin with use_margin_schedule should raise ValueError."""
-
     raised = False
     try:
         SMPOConfig(
@@ -104,7 +100,6 @@ def test_smpo_margin_schedule_initial_ge_target():
 
 def test_smpo_margin_schedule_equal():
     """initial_margin == target_margin with use_margin_schedule should raise ValueError."""
-
     # match=: without it, a weakened bound lets construction reach TrainingArguments'
     # own "no bf16 on this setup" ValueError on the GPU-less tier, which a bare except accepts.
     with pytest.raises(ValueError, match="initial_margin"):
@@ -118,7 +113,6 @@ def test_smpo_margin_schedule_equal():
 
 def test_smpo_margin_schedule_disabled_ok():
     """initial_margin >= target_margin is fine when use_margin_schedule=False."""
-
     cfg = SMPOConfig(
         use_margin_schedule=False,
         initial_margin=0.5,
@@ -130,7 +124,6 @@ def test_smpo_margin_schedule_disabled_ok():
 
 def test_smpo_lower_clip_percentile_zero():
     """lower_clip_percentile = 0 should raise ValueError (must be > 0)."""
-
     raised = False
     try:
         SMPOConfig(output_dir=OUTPUT_DIR, lower_clip_percentile=0.0)
@@ -142,21 +135,18 @@ def test_smpo_lower_clip_percentile_zero():
 
 def test_smpo_lower_clip_percentile_too_high():
     """lower_clip_percentile > 0.5 should raise ValueError."""
-
     with pytest.raises(ValueError, match="lower_clip_percentile"):
         SMPOConfig(output_dir=OUTPUT_DIR, lower_clip_percentile=0.6)
 
 
 def test_smpo_lower_clip_percentile_at_half():
     """lower_clip_percentile = 0.5 should be valid (boundary)."""
-
     cfg = SMPOConfig(lower_clip_percentile=0.5, **_CPU_OK)
     assert cfg.lower_clip_percentile == 0.5
 
 
 def test_smpo_upper_clip_percentile_below_half():
     """upper_clip_percentile < 0.5 should raise ValueError."""
-
     raised = False
     try:
         SMPOConfig(output_dir=OUTPUT_DIR, upper_clip_percentile=0.4)
@@ -168,14 +158,12 @@ def test_smpo_upper_clip_percentile_below_half():
 
 def test_smpo_upper_clip_percentile_at_one():
     """upper_clip_percentile = 1.0 should raise ValueError (must be < 1)."""
-
     with pytest.raises(ValueError, match="upper_clip_percentile"):
         SMPOConfig(output_dir=OUTPUT_DIR, upper_clip_percentile=1.0)
 
 
 def test_smpo_min_log_prob_positive():
     """min_log_prob >= 0 should raise ValueError."""
-
     raised = False
     try:
         SMPOConfig(output_dir=OUTPUT_DIR, min_log_prob=0.5)
@@ -187,14 +175,12 @@ def test_smpo_min_log_prob_positive():
 
 def test_smpo_min_log_prob_zero():
     """min_log_prob = 0 should raise ValueError."""
-
     with pytest.raises(ValueError, match="min_log_prob"):
         SMPOConfig(output_dir=OUTPUT_DIR, min_log_prob=0.0)
 
 
 def test_smpo_chosen_sft_ratio_out_of_range():
     """chosen_sft_ratio outside [0, 1] should raise ValueError."""
-
     for bad_val in [-0.1, 1.1]:
         raised = False
         try:
@@ -207,7 +193,6 @@ def test_smpo_chosen_sft_ratio_out_of_range():
 
 def test_smpo_chosen_sft_ratio_boundaries():
     """chosen_sft_ratio = 0 and 1 should be valid."""
-
     cfg0 = SMPOConfig(chosen_sft_ratio=0.0, **_CPU_OK)
     assert cfg0.chosen_sft_ratio == 0.0
     cfg1 = SMPOConfig(chosen_sft_ratio=1.0, **_CPU_OK)
@@ -216,7 +201,6 @@ def test_smpo_chosen_sft_ratio_boundaries():
 
 def test_smpo_upper_clip_percentile_valid_boundary():
     """upper_clip_percentile = 0.5 (lower boundary) and 0.99 (interior) are valid."""
-
     cfg_lo = SMPOConfig(upper_clip_percentile=0.5, **_CPU_OK)
     assert cfg_lo.upper_clip_percentile == 0.5
     cfg_hi = SMPOConfig(upper_clip_percentile=0.99, **_CPU_OK)
@@ -225,7 +209,6 @@ def test_smpo_upper_clip_percentile_valid_boundary():
 
 def test_smpo_clip_percentiles_none_disables_validation():
     """Setting both clip percentiles to None disables the range checks (no raise)."""
-
     cfg = SMPOConfig(
         lower_clip_percentile=None,
         upper_clip_percentile=None,
@@ -239,7 +222,6 @@ def test_smpo_clip_percentiles_none_disables_validation():
 
 def test_smpo_bf16_defaults_true_when_fp16_false():
     """bf16=None resolves to ``not fp16`` in __post_init__ (toolkit bf16-by-default)."""
-
     # fp16=True path: bf16 resolves to False.
     cfg = SMPOConfig(output_dir=OUTPUT_DIR, bf16=None, fp16=True)
     assert cfg.bf16 is False
@@ -261,7 +243,6 @@ def test_smpo_invalid_loss_type_value():
     ``HaloArgumentParser`` instead, and that is the gate this pins: if the parser's Literal check
     stops firing, a typo'd loss_type reaches the loss dispatch as a live config.
     """
-
     cfg = SMPOConfig(loss_type="bogus", **_CPU_OK)
     assert cfg.loss_type == "bogus"
 
@@ -274,7 +255,6 @@ def test_smpo_invalid_loss_type_value():
 
 def test_env_config_defaults():
     """EnvironmentConfig should have sensible defaults."""
-
     cfg = EnvironmentConfig()
     assert cfg.environment_type == "react_math"
     # The default reward is the environment's own all-or-nothing grade, at weight 1 and exponent 1.
@@ -289,7 +269,6 @@ def test_env_config_defaults():
 def test_env_config_refuses_per_env_reward_knobs():
     """A reward's magnitude is a term's ``weight``, not a per-environment field: such a knob must
     fail at construction rather than parse into a config that changes nothing about the run."""
-
     for knob in ("success_reward", "failure_reward", "partial_reward"):
         with pytest.raises(TypeError, match=knob):
             EnvironmentConfig(**{knob: 0.5})
@@ -297,7 +276,6 @@ def test_env_config_refuses_per_env_reward_knobs():
 
 def test_env_config_to_env_config():
     """to_env_config() should merge the reward terms and turn cap with environment_kwargs."""
-
     cfg = EnvironmentConfig(
         rewards=[{"source": "environment", "weight": 2.0}],
         max_turns=20,
@@ -312,7 +290,6 @@ def test_env_config_to_env_config():
 
 def test_env_config_to_env_config_empty_kwargs():
     """to_env_config() with empty environment_kwargs should return the reward terms and turn cap only."""
-
     cfg = EnvironmentConfig(rewards=[{"source": "environment", "weight": 1.5}], max_turns=5)
     result = cfg.to_env_config()
     # The raw term dicts travel as-is (the environment parses them); empty kwargs add nothing.
@@ -331,7 +308,6 @@ def test_env_config_kwargs_may_not_shadow_a_top_level_field(key, owner):
 def test_env_config_rejects_non_positive_max_turns():
     """``max_turns: 0`` makes the rollout loop a no-op, so every episode returns reward 0 with no
     error — a silently all-zero batch. It must fail at parse time, not after Ray and vLLM are up."""
-
     for bad in (0, -1):
         try:
             EnvironmentConfig(max_turns=bad)
@@ -353,7 +329,6 @@ def test_env_config_max_turns_guard_survives_cli_override(tmp_path):
 
 def test_env_config_custom_env_type_passthrough():
     """environment_type is not validated here; the registry resolves it later."""
-
     cfg = EnvironmentConfig(environment_type="code_contests", environment_kwargs={"timeout_per_test": 10})
     assert cfg.environment_type == "code_contests"
     # environment_type is NOT part of to_env_config() — only reward/turn settings + kwargs are.

@@ -261,7 +261,6 @@ async def join_worker_queue(queue: asyncio.Queue, worker: asyncio.Task) -> None:
 async def run_rejection_sampling(args) -> None:
     """Generate ``args.n_hypos`` hypotheses per pending prompt, score them with the reward model and append
     one ``args.output_format`` record per usable prompt to the run's JSONL output."""
-
     client, rm_tokenizer, rm_model, rm_device = boot_scoring_run(args)
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)

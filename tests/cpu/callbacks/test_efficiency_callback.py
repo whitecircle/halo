@@ -240,7 +240,6 @@ def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_pre
 def test_a_detected_gpu_without_a_peak_for_the_precision_warns(monkeypatch, caplog):
     """A detected SKU whose table entry lacks the run's precision zeroes MFU, S-MFU and TFLOP/s for
     the whole run; the INFO line naming the GPU must not be the only trace of it."""
-
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "A100")
     callback = efficiency.EfficiencyCallback(
         make_parallelism_config(world_size=1, gpus_per_node=1, lowp=LowpSpec(precision="fp8"))
