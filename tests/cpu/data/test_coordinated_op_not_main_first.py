@@ -25,12 +25,13 @@ import ast
 import contextlib
 import datetime
 import os
+import pathlib
 
 import pytest
 from accelerate import PartialState
 from datasets import Dataset
 
-from src.data.pipeline.processing import coordinated_map
+from src.data.pipeline.coordinated_map import coordinated_map
 from src.runtime import consensus, filesystem
 from tests.common.gloo import run_gloo_ranks
 from tests.common.repo import REPO_ROOT
@@ -56,8 +57,9 @@ COLLECTIVE_CALLEES = frozenset(
         "run_load_rank_first",
         "coordinated_map",
         "coordinated_filter",
-        "process_dataset_with_map_and_filter",
-        "pack_dataset_coordinated",
+        "coordinated_map_and_filter",
+        "coordinated_pack",
+        "is_sharded_dataset_across_ranks",
         "reject_across_ranks",
         "store_reject_across_ranks",
         "ensure_cache_dir",
@@ -173,6 +175,19 @@ def test_no_collective_inside_a_main_first_block():
     )
 
 
+def test_every_collective_callee_is_defined_under_src():
+    """A collective renamed in ``src/`` but still listed here under its old name drops out of the scan
+    unnoticed, so every listed name must name a function that exists."""
+    defined = {
+        node.name
+        for path in pathlib.Path(REPO_ROOT, "src").rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    missing = sorted(COLLECTIVE_CALLEES - defined)
+    assert not missing, f"listed but defined nowhere under src/: {missing}"
+
+
 def test_detector_fires_on_the_smpo_shape(tmp_path):
     """Guard the guard: the scan must catch a coordinated op reached through a helper, in this file
     or another one, and must not fire on a body that only names a manager in a string."""
@@ -190,7 +205,7 @@ def test_detector_fires_on_the_smpo_shape(tmp_path):
         encoding="utf-8",
     )
     (tmp_path / "helpers.py").write_text(
-        "from src.data.pipeline.processing import coordinated_map\n"
+        "from src.data.pipeline.coordinated_map import coordinated_map\n"
         "\n"
         "def tokenize_rows(ds):\n"
         "    return coordinated_map(ds, lambda r: r)\n"

@@ -9,7 +9,7 @@ Two silent-failure modes:
    mixed dataset (the 100%-drop guard never fires when text rows survive) and trains text-only. The
    refusal must abort the map.
 
-2. ``process_dataset_with_map_and_filter`` must not log the rejected fraction at INFO regardless of
+2. ``coordinated_map_and_filter`` must not log the rejected fraction at INFO regardless of
    magnitude — a template/config bug rejecting most of the corpus then scrolls by unnoticed. At or
    above ``_HIGH_REJECTION_WARN_FRACTION`` it must WARN (never raise — legitimately high drop rates
    exist). Same threshold for the classification trainer's over-length filter, which otherwise logs
@@ -29,16 +29,14 @@ from datasets import Dataset
 from jinja2 import TemplateError
 from PIL import Image
 
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import tokenize_vlm_dataset
-from src.data.pipeline.processing import (
-    _HIGH_REJECTION_WARN_FRACTION,
-    process_dataset_with_map_and_filter,
-)
+from src.data.pipeline.coordinated_map import coordinated_map_and_filter
+from src.data.pipeline.rejected_rows import _HIGH_REJECTION_WARN_FRACTION
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.tokenization import tokenize_vlm_dataset
 from src.trainers.reward.classification import _filter_over_length
 from tests.common.vlm_fakes import FakeVLMProcessorBase
 
-_PROCESSING_LOGGER = "src.data.pipeline.processing"
+_REJECTION_LOGGER = "src.data.pipeline.rejected_rows"
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +83,7 @@ _TEXT_ROW = {
 
 
 def _image_row(payload: str) -> dict:
-    """One image-carrying conversation; ``payload`` is whatever ``process_image`` is handed."""
+    """One image-carrying conversation; ``payload`` is whatever ``decode_image`` is handed."""
     return {
         "conversation": [
             {
@@ -166,7 +164,7 @@ def test_a_template_row_refusal_drops_the_row():
 
 
 def test_an_unreadable_image_path_drops_the_row():
-    """``process_image`` opens a path row-side, so a missing file is a property of the ROW.
+    """``decode_image`` opens a path row-side, so a missing file is a property of the ROW.
 
     Named explicitly (``FileNotFoundError``/``UnidentifiedImageError``) rather than caught via their
     shared ``OSError`` base — the base would also swallow a full disk or an I/O fault.
@@ -235,8 +233,8 @@ def _reject_fraction_process_fn(row):
 
 def _run_filter(reject: int, keep: int, caplog):
     dataset = Dataset.from_dict({"value": [0] * reject + [1] * keep})
-    with caplog.at_level(logging.INFO, logger=_PROCESSING_LOGGER):
-        result = process_dataset_with_map_and_filter(
+    with caplog.at_level(logging.INFO, logger=_REJECTION_LOGGER):
+        result = coordinated_map_and_filter(
             dataset,
             _reject_fraction_process_fn,
             remove_columns=["value"],
@@ -272,7 +270,7 @@ def test_classification_over_length_filter_logs(caplog):
     short_ids = [1, 2, 3]
     dataset = Dataset.from_dict({"input_ids": [long_ids] * 3 + [short_ids]})
 
-    with caplog.at_level(logging.INFO, logger=_PROCESSING_LOGGER):
+    with caplog.at_level(logging.INFO, logger=_REJECTION_LOGGER):
         kept = _filter_over_length(dataset, max_length=8, num_proc=None, split_name="train")
     assert len(kept) == 1
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "3/4 examples" in r.getMessage()]
@@ -280,7 +278,7 @@ def test_classification_over_length_filter_logs(caplog):
 
     caplog.clear()
     dataset_low = Dataset.from_dict({"input_ids": [long_ids] + [short_ids] * 9})
-    with caplog.at_level(logging.INFO, logger=_PROCESSING_LOGGER):
+    with caplog.at_level(logging.INFO, logger=_REJECTION_LOGGER):
         kept_low = _filter_over_length(dataset_low, max_length=8, num_proc=None, split_name="eval")
     assert len(kept_low) == 9
     infos = [r for r in caplog.records if "1/10 examples" in r.getMessage()]

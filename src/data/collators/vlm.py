@@ -1,30 +1,23 @@
-"""VLM data collators: the runtime render-and-collate path, the preprocessed-artifact padder and the
-SDPG self-distillation branch.
-
-Every VLM primitive they compose — the chat render, the processor call, the over-length refusal —
-lives in :mod:`src.data.vlm`, so a runtime batch and an offline bake of the same row
-tokenize identically.
-"""
+"""VLM data collators: the runtime render-and-collate path, the preprocessed-artifact padder and the SDPG
+self-distillation branch, all composing :mod:`src.data.vlm_render` so a runtime batch and an offline bake
+of the same row tokenize identically."""
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
 import torch
 
 from src.data.collators.self_distill import SelfDistillBranchMixin, require_aligned_responses
-from src.data.spans import (
-    COLLATOR_SPAN_POLICY,
-    build_completion_only_labels,
-    require_response_marker,
-    resolve_eos_token_ids,
-)
-from src.data.vlm import (
+from src.data.completion_spans import COLLATOR_SPAN_POLICY, build_completion_only_labels
+from src.data.turn_markers import reject_missing_response_marker, resolve_eos_token_ids
+from src.data.vlm_render import (
     SEQUENCE_ALIGNED_VISION_KEYS,
     VLM_OUTPUT_FEATURES,
-    get_image_token_ids,
-    raise_if_over_length,
+    reject_over_length_vlm_batch,
     render_vlm_text,
+    resolve_image_token_ids,
     run_vlm_processor,
     vlm_row_tools,
 )
@@ -32,12 +25,6 @@ from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.log import warn_once
 
 logger = logging.getLogger(__name__)
-
-__all__ = [
-    "VLMDataCollator",
-    "PreprocessedVLMDataCollator",
-    "SelfDistillVLMDataCollator",
-]
 
 
 class VLMDataCollator:
@@ -55,7 +42,7 @@ class VLMDataCollator:
         train_on_completions_only=False,
         model_config=None,
     ):
-        require_response_marker(response_prompt_template, train_on_completions_only, type(self).__name__)
+        reject_missing_response_marker(response_prompt_template, train_on_completions_only, type(self).__name__)
         self.processor = processor
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -64,38 +51,29 @@ class VLMDataCollator:
         self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
         # Construction-time, like the eos set: the union reads the tokenizer's full vocab dict, which
         # is a per-batch cost of the vocabulary's size for a verdict that cannot change between batches.
-        self.image_token_ids = tuple(get_image_token_ids(tokenizer, processor))
-
-    def _render(self, history: list[dict[str, Any]], example: dict[str, Any]) -> str:
-        """Chat-template one conversation with the row's tools. Shared by the student and
-        self-distill teacher branches so both render through the exact same call."""
-        return render_vlm_text(self.processor, history, tools=vlm_row_tools(example))
+        self.image_token_ids = tuple(resolve_image_token_ids(tokenizer, processor))
 
     def __call__(self, examples):
-        texts = []
-        all_images = []
-
-        for example in examples:
-            history = example.get("history", [])
-            images = example.get("images", [])
-
-            texts.append(self._render(history, example))
-
-            if images:
-                all_images.extend(images)
-
-        # NEVER truncate: cutting expanded image placeholders desyncs text from pixel_values/
-        # image_grid_thw, and a runtime batch cannot drop rows without desyncing DP ranks.
-        batch = run_vlm_processor(self.processor, texts, all_images, padding=True)
-        raise_if_over_length(batch, self.max_length, "batch")
+        batch = self._process_batch(examples, lambda example: example.get("history", []), "batch")
         batch["labels"] = self._build_labels(batch["input_ids"], batch.get("attention_mask"))
         return batch
 
+    def _process_batch(self, examples, history_of: Callable[[dict[str, Any]], list], subject: str):
+        """Render each row's ``history_of`` conversation and run the processor over the batch, refusing an
+        over-length sequence: truncating would desync expanded image placeholders from the vision tensors,
+        and a runtime batch cannot drop rows without desyncing DP ranks."""
+        texts = [self._render(history_of(example), example) for example in examples]
+        images = [image for example in examples for image in example.get("images") or ()]
+        batch = run_vlm_processor(self.processor, texts, images, padding=True)
+        reject_over_length_vlm_batch(batch, self.max_length, subject)
+        return batch
+
+    def _render(self, history: list[dict[str, Any]], example: dict[str, Any]) -> str:
+        """Chat-template one conversation with the row's tools."""
+        return render_vlm_text(self.processor, history, tools=vlm_row_tools(example))
+
     def _build_labels(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
-        """Build loss labels: mask pad + image tokens, optionally keep only assistant completions.
-        Shared by the student batch and the self-distill teacher branch so both select the SAME
-        response tokens (required for OPD row alignment).
-        """
+        """Pad and image tokens masked, and with ``train_on_completions_only`` everything outside the completions."""
         return build_completion_only_labels(
             input_ids,
             self.tokenizer,
@@ -108,16 +86,38 @@ class VLMDataCollator:
         )
 
 
+def _stacked_vision_tensors(examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+    """``pixel_values`` and ``image_grid_thw`` concatenated over every image-carrying row of a preprocessed
+    batch, in order (a mixed batch has text-only rows)."""
+    tensors = {}
+    pixel_values = [
+        torch.from_numpy(
+            np.frombuffer(ex["pixel_values"], dtype=np.float16).reshape(ex["pixel_values_shape"]).astype(np.float32)
+        )
+        for ex in examples
+        if ex.get("pixel_values") is not None
+    ]
+    if pixel_values:
+        # For Qwen-VL pixel_values are already flattened per image.
+        tensors["pixel_values"] = torch.cat(pixel_values, dim=0)
+    grids = []
+    for ex in examples:
+        grid = ex.get("image_grid_thw")
+        if grid is None:
+            continue
+        if isinstance(grid, list):
+            grids.extend(grid if isinstance(grid[0], list) else [grid])
+        else:
+            grids.append(grid.tolist() if hasattr(grid, "tolist") else grid)
+    if grids:
+        tensors["image_grid_thw"] = torch.tensor(grids, dtype=torch.long)
+    return tensors
+
+
 class PreprocessedVLMDataCollator:
-    """Pad/stack pre-tokenized VLM data (no tokenization at collation time).
+    """Pad and stack pre-tokenized VLM rows (:data:`~src.data.vlm_render.VLM_OUTPUT_FEATURES`)."""
 
-    Expects per-example: input_ids, attention_mask, labels, pixel_values
-    (float16 bytes), pixel_values_shape, and optionally image_grid_thw (Qwen-VL).
-    """
-
-    # The trainer's dataloader mixin unions these into HF's signature-column set. Without the
-    # declaration, TRL's SFT signature list drops every stored column it does not name
-    # (pixel_values_shape, attention_mask, ...) before collation, and the first batch crashes.
+    # Unioned into HF's signature columns, which would otherwise prune pixel_values_shape and the rest.
     required_dataset_columns: tuple[str, ...] = tuple(VLM_OUTPUT_FEATURES)
 
     def __init__(self, tokenizer, max_length: int = 2048):
@@ -128,13 +128,8 @@ class PreprocessedVLMDataCollator:
         self._warned: set[str] = set()
 
     def __call__(self, examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        """Collate preprocessed VLM examples into a batch."""
-        input_ids_list = [ex["input_ids"] for ex in examples]
-        attention_mask_list = [ex["attention_mask"] for ex in examples]
-        labels_list = [ex["labels"] for ex in examples]
-
         # Pad only: re-truncating without trimming pixel_values/image_grid_thw desyncs placeholders.
-        max_len = max(len(ids) for ids in input_ids_list)
+        max_len = max(len(ex["input_ids"]) for ex in examples)
         if max_len > self.max_length:
             warn_once(
                 logger,
@@ -145,63 +140,24 @@ class PreprocessedVLMDataCollator:
                 f"tokens from pixel_values); it is used at its preprocessed length. Re-run preparation "
                 f"with a smaller max_length to reduce it.",
             )
-
-        batch_input_ids = []
-        batch_attention_mask = []
-        batch_labels = []
-
-        for input_ids, attention_mask, labels in zip(input_ids_list, attention_mask_list, labels_list, strict=False):
-            padding_len = max_len - len(input_ids)
-
-            batch_input_ids.append(input_ids + [self.pad_token_id] * padding_len)
-            batch_attention_mask.append(attention_mask + [0] * padding_len)
-            batch_labels.append(labels + [LABEL_IGNORE_INDEX] * padding_len)
-
+        pads = [max_len - len(ex["input_ids"]) for ex in examples]
         batch = {
-            "input_ids": torch.tensor(batch_input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(batch_attention_mask, dtype=torch.long),
-            "labels": torch.tensor(batch_labels, dtype=torch.long),
+            key: torch.tensor(
+                [ex[key] + [fill] * pad for ex, pad in zip(examples, pads, strict=True)], dtype=torch.long
+            )
+            for key, fill in (("input_ids", self.pad_token_id), ("attention_mask", 0), ("labels", LABEL_IGNORE_INDEX))
         }
-
-        # Collect vision tensors from EVERY example in order: a mixed batch has text-only rows, and
-        # keying off examples[0] would drop or misalign the batch's vision tensors.
-        pixel_values_list = []
-        for ex in examples:
-            pv_bytes = ex.get("pixel_values")
-            if pv_bytes is None:
-                continue
-            pv_array = np.frombuffer(pv_bytes, dtype=np.float16).reshape(ex["pixel_values_shape"])
-            pixel_values_list.append(torch.from_numpy(pv_array.astype(np.float32)))
-        if pixel_values_list:
-            # For Qwen-VL pixel_values are already flattened per image.
-            batch["pixel_values"] = torch.cat(pixel_values_list, dim=0)
-
-        grid_list = []
-        for ex in examples:
-            grid = ex.get("image_grid_thw")
-            if grid is None:
-                continue
-            if isinstance(grid, list):
-                grid_list.extend(grid if isinstance(grid[0], list) else [grid])
-            else:
-                grid_list.append(grid.tolist() if hasattr(grid, "tolist") else grid)
-        if grid_list:
-            batch["image_grid_thw"] = torch.tensor(grid_list, dtype=torch.long)
-
+        batch.update(_stacked_vision_tensors(examples))
         return batch
 
 
 class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
-    """VLM collator for SDPG-style self-distillation (arXiv:2606.04036).
+    """VLM collator for SDPG-style self-distillation (arXiv:2606.04036): the student batch plus a hinted
+    ``teacher_*`` branch whose labels select the same response tokens (:func:`require_aligned_responses`).
 
-    Emits the student batch plus a teacher branch (``teacher_*``) whose last user turn carries a
-    privileged gold-answer hint. The assistant response stays byte-identical across both sequences and
-    teacher labels reuse the parent ``_build_labels``, so both branches select the SAME tokens (OPD row
-    alignment, :func:`require_aligned_responses`). The text-only hint leaves the image grid unchanged,
-    so the trainer reuses the student's image tensors. Uses the self-distill span policy
-    (``_COMPLETION_SPAN_POLICY = None``), matching :class:`SelfDistillTextCollator`.
-    ``hint_template=None`` builds no teacher branch (the OPD term is off). Optionally emits
-    ``confidence_weights``.
+    The text-only hint leaves the image grid unchanged, so the trainer reuses the student's image tensors.
+    Takes the self-distill span policy, like :class:`SelfDistillTextCollator`; ``hint_template=None``
+    builds no teacher branch. Optionally emits ``confidence_weights``.
     """
 
     _COMPLETION_SPAN_POLICY = None
@@ -223,14 +179,9 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
         )
 
     def audit_row(self, example: dict[str, Any]) -> dict[str, Any]:
-        """Refuse a row whose two branches would supervise different tokens; returns no columns.
-
-        Read off the rendered text before the processor expands the image placeholders: those sit in
-        the user turn, outside every label span. Tokenized as ``run_vlm_processor`` tokenizes the
-        collated text (no added special tokens), so the audited ids are the collated ones. Mapped at
-        prep by ``audit_self_distill_row``, where the raise is world-uniform; at collate time it would
-        be rank-local.
-        """
+        """Refuse a row whose two branches would supervise different tokens; returns no columns. Reads the
+        rendered text as the processor tokenizes it, before the image placeholders (all in the user turn)
+        expand; mapped at prep by ``audit_self_distill_row``, where the raise is world-uniform."""
         if not self.builds_teacher_branch:
             return {}
         history = example.get("history", [])
@@ -246,20 +197,13 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
         batch = super().__call__(examples)
 
         if self.builds_teacher_branch:
-            # Same template path as the student, so the assistant response tokens stay byte-identical.
-            teacher_texts = []
-            all_images = []
-            for example in examples:
-                images = example.get("images", [])
-                teacher_texts.append(self._render(self._teacher_history(example.get("history", []), example), example))
-                if images:
-                    all_images.extend(images)
-
-            # NEVER truncate the teacher: it is systematically longer than the student (the hint), so
-            # right-truncation cuts response tokens the student keeps, breaking OPD row alignment.
-            teacher_batch = run_vlm_processor(self.processor, teacher_texts, all_images, padding=True)
-            raise_if_over_length(teacher_batch, self.max_length, "teacher branch (student history + privileged hint)")
-
+            # Never truncated either: the hinted teacher is the longer branch, so truncation would cut response
+            # tokens the student keeps and break OPD row alignment.
+            teacher_batch = self._process_batch(
+                examples,
+                lambda example: self._teacher_history(example.get("history", []), example),
+                "teacher branch (student history + privileged hint)",
+            )
             batch["teacher_input_ids"] = teacher_batch["input_ids"]
             batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
             batch["teacher_labels"] = self._build_labels(

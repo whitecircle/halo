@@ -25,11 +25,11 @@ from src.config_validation import reject_unsupported_args
 from src.configs.classification import ClassificationConfig, ClassificationScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
+from src.data.pipeline.chat_render import tokenize_rendered
 from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_json, reject_image_content
-from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
-from src.data.pipeline.rendered import tokenize_rendered
-from src.data.sources.loading import reject_image_columns
+from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from src.data.sources.paths import EVAL_SPLIT_NAMES
+from src.data.vlm_routing import reject_image_columns
 from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from src.entrypoints.model_setup import (
     apply_max_length,

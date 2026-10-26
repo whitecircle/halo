@@ -25,8 +25,8 @@ import torch.distributed as dist
 from datasets import Dataset, DatasetDict
 from transformers import AutoTokenizer
 
-from src.data.pipeline.processing import process_dataset_with_map_and_filter
-from src.data.pipeline.row_processors import create_llm_processor
+from src.data.pipeline.coordinated_map import coordinated_map_and_filter
+from src.data.pipeline.text_rows import build_chat_row_processor
 from src.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
@@ -83,8 +83,8 @@ def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> None:
     """Test 1: Full sft.py pipeline creates cache files on first run."""
     ds = create_conversation_splits()
 
-    # Simulate sft.py: create_llm_processor -> process_dataset_with_map_and_filter
-    processor = create_llm_processor(
+    # Simulate sft.py: build_chat_row_processor -> coordinated_map_and_filter
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
@@ -93,7 +93,7 @@ def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> None:
 
     extra_columns = list(set(ds["train"].column_names))
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         ds,
         processor,
         remove_columns=extra_columns,
@@ -119,7 +119,7 @@ def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> None:
     """Test 2: Second run reuses cache: it writes no new cache file."""
     ds = create_conversation_splits()
 
-    processor = create_llm_processor(
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
@@ -134,7 +134,7 @@ def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> None:
     barrier()
     start = time.monotonic()
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         ds,
         processor,
         remove_columns=extra_columns,
@@ -156,7 +156,7 @@ def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> None:
     """Test 3: Both ranks produce identical results after coordination."""
     ds = create_conversation_splits()
 
-    processor = create_llm_processor(
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
@@ -164,7 +164,7 @@ def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> None:
     )
     extra_columns = list(set(ds["train"].column_names))
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         ds,
         processor,
         remove_columns=extra_columns,
@@ -199,14 +199,14 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
     ds = create_conversation_splits(num_train=20, num_test=5)
 
     # Process with primary tokenizer
-    processor_a = create_llm_processor(
+    processor_a = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
         use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
-    result_a = process_dataset_with_map_and_filter(
+    result_a = coordinated_map_and_filter(
         ds,
         processor_a,
         remove_columns=extra_columns,
@@ -214,7 +214,7 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
     )
 
     # Process with alternate tokenizer
-    processor_b = create_llm_processor(
+    processor_b = build_chat_row_processor(
         tokenizer=alt_tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
@@ -222,7 +222,7 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
     )
     ds_b = create_conversation_splits(num_train=20, num_test=5)
     extra_columns_b = list(set(ds_b["train"].column_names))
-    result_b = process_dataset_with_map_and_filter(
+    result_b = coordinated_map_and_filter(
         ds_b,
         processor_b,
         remove_columns=extra_columns_b,
@@ -243,7 +243,7 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
     ds = create_conversation_splits()
 
     # Train processor (no generation prompt)
-    train_processor = create_llm_processor(
+    train_processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
@@ -252,7 +252,7 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
     )
 
     # Generate processor (with generation prompt) — different function body
-    generate_processor = create_llm_processor(
+    generate_processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
@@ -262,7 +262,7 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
 
     extra_columns = list(set(ds["train"].column_names))
 
-    train_result = process_dataset_with_map_and_filter(
+    train_result = coordinated_map_and_filter(
         ds,
         train_processor,
         remove_columns=extra_columns,
@@ -270,7 +270,7 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
     )
 
     # Process test set separately for generation (like sft.py does)
-    gen_result = process_dataset_with_map_and_filter(
+    gen_result = coordinated_map_and_filter(
         ds["test"],
         generate_processor,
         desc="generate processing",
@@ -293,7 +293,7 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
 def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
     """Test 6: Simulate process restart — cache from prior run is picked up."""
     ds = create_conversation_splits(num_train=30, num_test=8)
-    processor = create_llm_processor(
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
@@ -302,7 +302,7 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
     extra_columns = list(set(ds["train"].column_names))
 
     # First "run"
-    result1 = process_dataset_with_map_and_filter(
+    result1 = coordinated_map_and_filter(
         ds,
         processor,
         remove_columns=extra_columns,
@@ -312,7 +312,7 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
 
     # Second "run" with fresh dataset objects (simulates restart)
     ds2 = create_conversation_splits(num_train=30, num_test=8)
-    processor2 = create_llm_processor(
+    processor2 = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
@@ -323,7 +323,7 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
     barrier()
     start = time.monotonic()
 
-    result2 = process_dataset_with_map_and_filter(
+    result2 = coordinated_map_and_filter(
         ds2,
         processor2,
         remove_columns=extra_columns2,

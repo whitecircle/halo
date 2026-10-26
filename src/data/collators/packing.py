@@ -1,16 +1,10 @@
-"""SFT batch builders over precomputed rows: packing, padding-free Flash Attention, and the padded
-(CP-route) collator.
-
-position_ids reset at document boundaries from the `seq_lengths` field TRL's `pack_dataset()`
-emits under the "bfd" and "bfd_split" strategies; "wrapped" omits it and is treated as one long sequence
-(cross-document attention — avoid with FlashAttention).
-
-TRL forces `padding_free=True` for `packing_strategy="bfd"` (rejects custom collators), so always
-set `sft_config.padding_free=False` and `dataset_kwargs={"skip_prepare_dataset": True}` with these.
-"""
+"""Flattened-row SFT collators: packed rows whose position_ids reset at each document of the ``seq_lengths``
+TRL's ``pack_dataset()`` emits ("bfd"/"bfd_split"; "wrapped" rows collate as one document), and padding-free
+batches for a varlen flash kernel. TRL forces ``padding_free`` for "bfd" and rejects custom collators, so
+these run with ``padding_free=False`` and ``skip_prepare_dataset``."""
 
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,76 +12,24 @@ import torch
 from transformers import DataCollatorForLanguageModeling, PreTrainedTokenizerBase
 from transformers.data.data_collator import DefaultDataCollator
 
-from src.data.spans import (
+from src.data.collators.padded import collate_preserving_precomputed_labels
+from src.data.completion_spans import (
     PACKED_SPAN_POLICY,
+    build_span_labels,
     mask_batch_to_completion_spans,
-    require_response_marker,
-    resolve_eos_token_ids,
     resolve_spans_or_warn,
+)
+from src.data.turn_markers import (
+    reject_missing_response_marker,
+    resolve_eos_token_ids,
     tokenize_response_template,
     warn_if_pad_equals_eos,
 )
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.models.segment_markers import SegmentMarkers, segment_marker_kwargs
 
-# transformers turns every position-0 reset into a varlen segment boundary, and the FA4 backward
-# pays a fixed per-segment cost, so an unchunked pad tail costs one segment per pad token. Laying
-# the tail out as a repeating ramp of this length bounds the segment count instead.
+# Every position-0 reset is a varlen segment the FA4 backward pays for; a ramped pad tail bounds their count.
 PAD_TAIL_SEGMENT_CHUNK = 256
-
-
-def collate_preserving_precomputed_labels(
-    super_call: Callable[[list[Any]], dict[str, Any]],
-    examples: list[Any],
-    tokenizer: PreTrainedTokenizerBase,
-) -> dict[str, Any]:
-    """Run the parent LM collator over ``examples`` while preserving precomputed ragged ``labels``.
-
-    ``tokenizer.pad`` pads only model inputs, so ragged precomputed labels (offline-baked completion
-    masks) fail the parent's tensor conversion: pop them, collate, then re-pad them to the batch
-    shape with the ignore index on the tokenizer's padding side. Rows without precomputed labels go
-    through the pad==eos restore instead; baked labels must not be touched by it. ``examples`` must
-    already be a copy, since the pop mutates the rows.
-    """
-    has_precomputed = bool(examples) and all(isinstance(ex, Mapping) and "labels" in ex for ex in examples)
-    label_rows = [ex.pop("labels") for ex in examples] if has_precomputed else None
-
-    batch = super_call(examples)
-    if label_rows is None:
-        return restore_eos_labels_when_pad_equals_eos(batch, tokenizer)
-
-    padded = torch.full_like(batch["labels"], LABEL_IGNORE_INDEX)
-    for i, row in enumerate(label_rows):
-        row_t = torch.as_tensor(row, dtype=padded.dtype)
-        if tokenizer.padding_side == "left":
-            padded[i, padded.shape[1] - len(row_t) :] = row_t
-        else:
-            padded[i, : len(row_t)] = row_t
-    batch["labels"] = padded
-    return batch
-
-
-def restore_eos_labels_when_pad_equals_eos(
-    batch: dict[str, Any], tokenizer: PreTrainedTokenizerBase
-) -> dict[str, Any]:
-    """Restore real turn-ending EOS labels masked by the parent LM collator when pad == eos.
-
-    ``DataCollatorForLanguageModeling`` masks every ``pad_token_id`` position in the labels, which
-    includes the turn-ending EOS when pad and EOS coincide (e.g. GLM-4's ``<|endoftext|>``, any
-    family on the pad=eos fallback), leaving the model with no stop signal to learn. Restore labels
-    at real-token positions (``attention_mask == 1``) from ``input_ids``; true padding
-    (``attention_mask == 0``) stays masked. No-op when pad != eos. Must not be applied over
-    precomputed labels, whose baked ``-100`` spans are authoritative.
-    """
-    if (
-        tokenizer.pad_token_id is not None
-        and tokenizer.pad_token_id == tokenizer.eos_token_id
-        and "labels" in batch
-        and "attention_mask" in batch
-    ):
-        real = batch["attention_mask"].bool()
-        batch["labels"] = torch.where(real, batch["input_ids"], batch["labels"])
-    return batch
 
 
 def pad_tail_positions(n: int, dtype: torch.dtype = torch.long) -> torch.Tensor:
@@ -98,16 +40,9 @@ def pad_tail_positions(n: int, dtype: torch.dtype = torch.long) -> torch.Tensor:
 def flatten_packed_batch(batch: dict[str, Any], real_lengths: list[int]) -> dict[str, Any]:
     """Concatenate the rows of a packed batch into one ``[1, total]`` row, dropping inter-row padding.
 
-    transformers' FA packed-sequence detection (``_is_packed_sequence``) only engages at batch
-    size 1: a ``[B>1, L]`` packed batch with no attention_mask falls through to plain dense-causal
-    attention and attends across document boundaries, so the rows must merge.
-
-    ``real_lengths`` (per-row real token counts) keeps the merge cheap. A plain reshape keeps each
-    row's pad tail, and every pad carries position_id 0, giving one length-1 attention segment per
-    pad token once transformers derives cu_seqlens; a mostly-empty row (the dataset's final partial
-    pack) co-batched with a full one contributes tens of thousands of them, and lockstep FSDP
-    collectives impose that cost on every rank. Real tokens never attend to pads and pad labels are
-    already ``-100``, so dropping them changes no trained value.
+    transformers detects a packed sequence only at batch size 1; a ``[B>1, L]`` packed batch without an
+    attention_mask attends across documents. The pads go because each would be its own length-1 segment
+    (a final partial pack contributes tens of thousands), and dropping them changes no trained value.
     """
     rows, cols = batch["input_ids"].shape
     keep = torch.cat([torch.arange(n, dtype=torch.long) + i * cols for i, n in enumerate(real_lengths)])
@@ -118,47 +53,39 @@ def flatten_packed_batch(batch: dict[str, Any], real_lengths: list[int]) -> dict
     }
 
 
-class DataCollatorForCausalLMWithPadding(DataCollatorForLanguageModeling):
-    """Padded causal-LM batches (CP route) that preserve precomputed ``labels``.
-
-    The parent builds labels from ``input_ids`` and cannot convert ragged precomputed ``labels``
-    (``tokenizer.pad`` pads only model inputs); this pads them with the ignore index instead,
-    keeping offline prompt-masking intact. On the raw-labels path the turn-ending EOS is restored
-    when pad == eos, since the parent masks every pad-valued label.
-    """
-
-    def torch_call(self, examples: list) -> dict:
-        examples = [dict(ex) for ex in examples]  # pop must not mutate the caller's rows
-        return collate_preserving_precomputed_labels(super().torch_call, examples, self.tokenizer)
+def _packed_position_ids(input_ids: torch.Tensor, examples: list[Any]) -> torch.Tensor:
+    """Position ids restarting at 0 at each document of a row's ``seq_lengths``; a row without them counts
+    as one document over its whole width."""
+    seq_len = input_ids.shape[1]
+    position_ids = torch.zeros_like(input_ids)
+    for i, example in enumerate(examples):
+        seq_lengths = example.get("seq_lengths") if isinstance(example, dict) else None
+        if not isinstance(seq_lengths, list):
+            position_ids[i] = torch.arange(seq_len)
+            continue
+        offset = 0
+        for length in seq_lengths:
+            position_ids[i, offset : offset + length] = torch.arange(length)
+            offset += length
+        # The kept-rows (PP) path ships this tail to the kernels, so it must be chunked.
+        position_ids[i, offset:] = pad_tail_positions(seq_len - offset)
+    return position_ids
 
 
 class DataCollatorWithPacking(DataCollatorForLanguageModeling):
-    """Collator for packed sequences: per-document position_ids that reset at each
-    boundary, drops the dense attention_mask so Flash Attention derives a
-    block-diagonal cu_seqlens from those position_ids (a dense all-ones mask would
-    leak attention across documents), and flattens the packed mini-batch to a single
-    ``[1, total_tokens]`` row — transformers' packed-sequence detection only engages
-    at batch size 1 (see :func:`flatten_packed_batch`).
+    """Collator for packed rows: position_ids reset at each document, no attention_mask, and the batch
+    flattened to one ``[1, total_tokens]`` row (:func:`flatten_packed_batch`).
 
-    Cross-document isolation comes from the position_ids: FA derives varlen cu_seqlens from them,
-    and transformers materializes a ``packed_sequence_mask`` from them for eager/SDPA whenever
-    ``attention_mask`` is None (``masking_utils``). Both routes require the model to plumb
-    position_ids to its attention interface (flash) or its mask construction (dense), which is
-    family-dependent; ``agent-docs/data/collators.md`` has the per-family isolation matrix. The
-    non-flash path pays a dense ``[L, L]`` mask over the flattened row, where ``L`` is the whole
-    batch's token count, so the cost grows with the batch squared;
-    :func:`src.data.collators.factory.select_data_collator` warns there and rejects ``padding_free``.
-
-    Requires right padding: position_ids are laid out from index 0 forward, so leading pads would
-    become an attended document and displace a real one out of the loss.
+    Isolation comes from the position_ids alone: flash derives varlen cu_seqlens from them, and eager/SDPA
+    build a packed-sequence mask from them, a dense ``[L, L]`` over the whole flattened batch. Both need the
+    family to plumb position_ids through (the matrix is in ``agent-docs/data/collators.md``). Requires right
+    padding, since leading pads would become an attended document.
     """
 
-    # Columns that must survive HF's signature-based column pruning; a caller pinning columns itself
-    # unions this in, since without ``seq_lengths`` every row collates as a single document.
+    # Kept through HF's signature-column pruning: without ``seq_lengths`` every row is one document.
     required_dataset_columns: tuple[str, ...] = ("seq_lengths",)
 
-    # Flatten the packed ``[B, L]`` batch to ``[1, B*L]`` (:func:`flatten_packed_batch`). PP turns
-    # this off, since its dim-0 microbatch split already performs the flatten.
+    # PP turns this off: its dim-0 microbatch split keeps the rows apart.
     flatten_to_single_row: bool = True
 
     _warned_no_seq_lengths: bool = False
@@ -182,7 +109,6 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
         self.return_flash_attn_kwargs = return_flash_attn_kwargs
 
     def torch_call(self, examples: list[list[int] | Any | dict[str, Any]]) -> dict[str, Any]:
-        """Collate examples, adding resetting position_ids for packed data."""
         # Copy mappings before popping seq_lengths/labels — the pops must not mutate the caller's rows.
         examples = [dict(ex) if isinstance(ex, Mapping) else ex for ex in examples]
         has_packing = any("seq_lengths" in ex for ex in examples if isinstance(ex, dict))
@@ -198,9 +124,7 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
                 stacklevel=2,
             )
 
-        # seq_lengths can't be tensorized (variable lengths); pop before the parent collates.
-        # One entry per example, non-dict rows included: a shorter list would misalign the zip
-        # below and re-attach a row's lengths to a different row.
+        # Popped before the parent tensorizes, one entry per example so the zip below stays row-aligned.
         seq_lengths_list = []
         if has_packing:
             for ex in examples:
@@ -212,7 +136,12 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             for ex, seq_lens in zip(examples, seq_lengths_list, strict=True):
                 if isinstance(ex, dict) and seq_lens is not None:
                     ex["seq_lengths"] = seq_lens
-            batch = self._handle_packing(batch, examples)
+            batch["position_ids"] = _packed_position_ids(batch["input_ids"], examples)
+            # Dropping the dense all-ones mask lets FA derive cu_seqlens from position_ids; keeping it leaks.
+            batch.pop("attention_mask", None)
+            # At a boundary (position_ids==0) the causal shift predicts across blocked attention — noise,
+            # not loss. Pad tails are not this line's job; every other route already ignores them.
+            batch["labels"][batch["position_ids"] == 0] = LABEL_IGNORE_INDEX
             batch = self._mask_packed_labels(batch, examples)
             if self.flatten_to_single_row:
                 batch = flatten_packed_batch(batch, self._real_row_lengths(batch, examples))
@@ -227,12 +156,8 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
 
     @staticmethod
     def _real_row_lengths(batch: dict[str, Any], examples: list[Any]) -> list[int]:
-        """Per-row real token counts: sum of the row's ``seq_lengths``, else the full padded width.
-
-        A row without ``seq_lengths`` was collated as one document over its whole width (see
-        ``_handle_packing``); its pads are indistinguishable without the lengths, so they are kept.
-        Rows are index-aligned with ``examples`` by the parent collation.
-        """
+        """Per-row real token counts: the sum of the row's ``seq_lengths``, else the full padded width (a row
+        without them is one document whose pads cannot be told apart)."""
         width = batch["input_ids"].shape[1]
         lengths = []
         for i in range(batch["input_ids"].shape[0]):
@@ -242,52 +167,13 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
         return lengths
 
     def _mask_packed_labels(self, batch: dict[str, Any], examples: list[dict[str, Any]]) -> dict[str, Any]:
-        """Per-row label hook, run on the ``[B, L]`` packed batch after ``_handle_packing`` and
-        before flattening (per-example row indexing is meaningless on the ``[1, N]`` shape).
-        Subclasses apply completion masking here; the base collator masks nothing extra."""
-        return batch
-
-    def _handle_packing(self, batch: dict[str, Any], examples: list[dict[str, Any]]) -> dict[str, Any]:
-        """Build position_ids that reset to 0 at each document start within the pack."""
-        seq_len = batch["input_ids"].shape[1]
-
-        position_ids = torch.zeros_like(batch["input_ids"])
-
-        for i, example in enumerate(examples):
-            if isinstance(example, dict) and "seq_lengths" in example:
-                seq_lengths = example["seq_lengths"]
-                if isinstance(seq_lengths, list):
-                    offset = 0
-                    for length in seq_lengths:
-                        position_ids[i, offset : offset + length] = torch.arange(length)
-                        offset += length
-                    # The kept-rows (PP) path ships this tail to the kernels, so it must be chunked.
-                    position_ids[i, offset:] = pad_tail_positions(seq_len - offset)
-                else:
-                    position_ids[i] = torch.arange(seq_len)
-            else:
-                position_ids[i] = torch.arange(seq_len)
-
-        batch["position_ids"] = position_ids
-
-        # Dropping the dense all-ones mask lets FA derive cu_seqlens from position_ids; keeping it leaks.
-        batch.pop("attention_mask", None)
-
-        # At a boundary (position_ids==0) the causal shift predicts across blocked attention — noise,
-        # not loss. Pad tails are not this line's job; every other route already ignores them.
-        batch["labels"][batch["position_ids"] == 0] = LABEL_IGNORE_INDEX
-
+        """Per-row label hook on the ``[B, L]`` batch before flattening; subclasses mask completions here."""
         return batch
 
 
 class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
-    """Packing collator (from DataCollatorWithPacking) plus completion-only masking:
-    loss is computed only on assistant-response tokens. Works with packed and
-    non-packed sequences.
-
-    response_prompt_template (str or token IDs) marks assistant response start.
-    train_on_last_assistant_only masks all but the last assistant message.
-    """
+    """:class:`DataCollatorWithPacking` plus completion-only masking, packed or not; ``response_prompt_template``
+    (text or token ids) marks the response start."""
 
     def __init__(
         self,
@@ -322,7 +208,6 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
                 batch,
                 self.response_token_ids,
                 self.eos_token_ids,
-                LABEL_IGNORE_INDEX,
                 self.train_on_last_assistant_only,
                 self.response_prompt_template,
                 tokenizer=self.tokenizer,
@@ -331,7 +216,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         return batch
 
     def _mask_packed_labels(self, batch: dict[str, Any], examples: list[dict[str, Any]]) -> dict[str, Any]:
-        """Completion-only masking for packed sequences: mask each original document separately."""
+        """Completion-only mask each packed document separately."""
         for i, example in enumerate(examples):
             labels = batch["labels"][i]
             input_ids = batch["input_ids"][i]
@@ -352,12 +237,9 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         return batch
 
     def _mask_sequence(self, labels: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
-        """Completion-only mask a single sequence: template/EOS are detected in ``input_ids``
-        (unaffected by the position_ids==0 boundary masking on labels); the mask applies to labels.
-
-        Uses :data:`~src.data.spans.PACKED_SPAN_POLICY`, the same policy the offline bake takes for
-        a packed artifact, so a terminator-less final turn trains the same tokens either way.
-        """
+        """Completion-only mask one document under :data:`~src.data.completion_spans.PACKED_SPAN_POLICY`, the
+        offline bake's policy for a packed artifact. Spans are searched in ``input_ids`` but train ``labels``,
+        so a template starting at a document boundary keeps that position's mask."""
         spans = resolve_spans_or_warn(
             input_ids.tolist(),
             self.response_token_ids,
@@ -368,42 +250,19 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
             tokenizer=self.tokenizer,
             row_label="packed document",
         )
-        if spans is None:
-            return torch.full_like(labels, LABEL_IGNORE_INDEX)
-        response_starts, eos_ends = spans
-
-        new_labels = torch.full_like(labels, LABEL_IGNORE_INDEX)
-        for start, end in zip(response_starts, eos_ends, strict=False):
-            # Copy from `labels`, not input_ids: a template starting at a doc boundary must keep its mask.
-            new_labels[start : end + 1] = labels[start : end + 1]
-            # Rescue the turn-ending EOS dropped by the copy when pad_token_id == eos_token_id.
-            if start <= end < len(input_ids):
-                new_labels[end] = input_ids[end]
-
-        return new_labels
+        return build_span_labels(labels, input_ids, spans, restore_end=True)
 
 
 @dataclass
 class DataCollatorWithFlattening(DefaultDataCollator):
-    """Padding-free Flash Attention collator (no completion masking): flattens the
-    mini-batch into a single [1, total_tokens] sequence. Requires a varlen flash implementation
-    (:data:`~src.models.attention.selection.VARLEN_ATTN_IMPLEMENTATIONS`).
-    """
+    """Padding-free collator: the mini-batch as one ``[1, total_tokens]`` sequence for a varlen flash kernel
+    (:data:`~src.models.attention.selection.VARLEN_ATTN_IMPLEMENTATIONS`)."""
 
     tokenizer: PreTrainedTokenizerBase = None
     return_flash_attn_kwargs: bool = True
     return_seq_idx: bool = False
 
-    def _sample_labels(self, labels: list[int], input_ids: list[int]) -> list[int]:
-        """Per-sample label hook (provided labels, or an input_ids copy); subclasses mask here.
-
-        ``input_ids`` is the detection source: provided labels can carry baked ``-100`` spans that
-        hide the response marker / EOS, so span search must never run on labels.
-        """
-        return labels
-
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
-        """Flatten the batch, routing each sample's labels through ``_sample_labels``."""
         is_labels_provided = "labels" in features[0]
 
         batch = {"input_ids": [], "labels": [], "position_ids": []}
@@ -435,15 +294,14 @@ class DataCollatorWithFlattening(DefaultDataCollator):
         batch.update(segment_marker_kwargs(batch["position_ids"], markers))
         return batch
 
+    def _sample_labels(self, labels: list[int], input_ids: list[int]) -> list[int]:
+        """Per-sample label hook over the provided labels or an ``input_ids`` copy; subclasses mask here."""
+        return labels
+
 
 @dataclass
 class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
-    """Padding-free flattening collator (see :class:`DataCollatorWithFlattening`) plus
-    completion-only masking via the per-sample label hook.
-
-    response_prompt_template (str or token IDs) marks assistant response start.
-    train_on_last_assistant_only masks all but the last assistant message.
-    """
+    """:class:`DataCollatorWithFlattening` plus completion-only masking through the per-sample label hook."""
 
     response_prompt_template: str | list[int] = None
     train_on_last_assistant_only: bool = False
@@ -452,7 +310,7 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
     def __post_init__(self):
         if self.tokenizer is None:
             raise ValueError("tokenizer must be provided")
-        require_response_marker(self.response_prompt_template, True, type(self).__name__)
+        reject_missing_response_marker(self.response_prompt_template, True, type(self).__name__)
         self.response_token_ids = tokenize_response_template(self.response_prompt_template, self.tokenizer)
 
         if self.eos_token_ids is None:
@@ -461,14 +319,9 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
         warn_if_pad_equals_eos(self.tokenizer)
 
     def _sample_labels(self, labels: list[int], input_ids: list[int]) -> list[int]:
-        """Completion-only mask labels (unmask only template→EOS spans). Operates on the flattened,
-        padding-free sequence, so a terminator-less turn falls back to end-of-sequence
-        (:data:`~src.data.spans.PACKED_SPAN_POLICY`, the same named policy the packing collator
-        and the offline bake for a packed artifact take).
-
-        Spans are detected in ``input_ids``, not in labels: precomputed labels with the marker or
-        EOS baked to ``-100`` would match nothing and zero the loss.
-        """
+        """Completion-only mask one flattened sample under :data:`~src.data.completion_spans.PACKED_SPAN_POLICY`
+        (a padding-free sequence has no pad for a terminator-less turn to run into). Spans are searched in
+        ``input_ids``: precomputed labels with the marker or EOS baked to ``-100`` would match nothing."""
         spans = resolve_spans_or_warn(
             input_ids,
             self.response_token_ids,
@@ -479,13 +332,4 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
             tokenizer=self.tokenizer,
             row_label="flattened sample",
         )
-        if spans is None:
-            return [LABEL_IGNORE_INDEX] * len(labels)
-        response_starts, eos_ends = spans
-
-        new_labels = [LABEL_IGNORE_INDEX] * len(labels)
-        for start, end in zip(response_starts, eos_ends, strict=False):
-            for i in range(start, min(end + 1, len(labels))):
-                new_labels[i] = labels[i]
-
-        return new_labels
+        return build_span_labels(labels, input_ids, spans)

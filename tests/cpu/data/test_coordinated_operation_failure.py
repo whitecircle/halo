@@ -24,7 +24,7 @@ import time
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline.processing import coordinated_dataset_operation
+from src.data.pipeline.coordinated_map import coordinated_dataset_operation
 from src.entrypoints import script
 from tests.common.gloo import run_gloo_ranks
 

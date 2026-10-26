@@ -42,15 +42,12 @@ from src.config_validation import reject_unsupported_args
 from src.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments, EnvironmentConfig
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD, ModelArguments
+from src.data.pipeline.chat_render import render_generation_prompt
 from src.data.pipeline.conversation import as_conversation
-from src.data.pipeline.processing import (
-    missing_render_column_splits,
-    process_dataset_with_map_and_filter,
-    require_render_column,
-)
-from src.data.pipeline.rendered import render_generation_prompt
-from src.data.pipeline.row_processors import blank_conversation
-from src.data.sources.loading import reject_image_columns
+from src.data.pipeline.coordinated_map import coordinated_map_and_filter
+from src.data.pipeline.rejected_rows import blank_conversation
+from src.data.render_columns import missing_render_column_splits, reject_missing_render_column
+from src.data.vlm_routing import reject_image_columns
 from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from src.entrypoints.model_setup import (
     apply_tokenizer_window,
@@ -214,7 +211,7 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
     # already ran the same guard over it.
     if args.answer_field:
         if args.answer_field != DEFAULT_ANSWER_FIELD:
-            require_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+            reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
         elif missing_render_column_splits(ds, args.answer_field):
             logger.warning(
                 f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
@@ -224,11 +221,11 @@ def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
             )
     for column in args.context_fields or []:
         if column:
-            require_render_column(ds, str(args.dataset), "context_fields", column)
+            reject_missing_render_column(ds, str(args.dataset), "context_fields", column)
     keep_columns = {"prompt", ANSWER_KEY} | set(args.context_fields or [])
     columns_to_remove = [col for col in original_columns if col not in keep_columns]
 
-    processed_ds = process_dataset_with_map_and_filter(
+    processed_ds = coordinated_map_and_filter(
         ds,
         process_for_grpo,
         filter_field="prompt",

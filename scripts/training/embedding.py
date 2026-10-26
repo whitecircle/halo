@@ -26,7 +26,7 @@ from src.config_validation import reject_non_default_args, reject_unsupported_ar
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
-from src.data.sources.loading import reject_image_columns
+from src.data.vlm_routing import reject_image_columns
 from src.entrypoints.data_setup import load_script_datasets
 from src.entrypoints.model_setup import load_model_and_tokenizer
 from src.entrypoints.script import (

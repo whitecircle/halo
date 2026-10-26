@@ -26,9 +26,10 @@ from datasets import Dataset
 import src.data.sources.dataset_cache as s3_mod
 import src.env as env_mod
 from scripts.before_training.s3_datasets import main as s3_cli_main
-from src.data.pipeline.preprocessed_metadata import load_preprocessed_metadata
-from src.data.shard_index import PREPROCESSING_VERSION, ShardInfo
+from src.data.preprocessed.metadata import load_preprocessed_metadata
+from src.data.preprocessed.shard_index import PREPROCESSING_VERSION, ShardInfo
 from src.data.sources import s3_client as s3_client_mod
+from src.data.sources import s3_dataset_store
 from src.data.sources.dataset_cache import (
     _read_marker_fingerprint,
     _write_download_marker,
@@ -97,12 +98,12 @@ def test_push_dataset_saves_to_a_staging_sibling():
         client = S3Client(bucket="test-bucket")
 
     client.exists = MagicMock(return_value=False)
-    client._client = MagicMock()
-    client._promote_staged_dataset = MagicMock()
-    client.push_dataset(mock_dataset, "my/dataset")
+    client.boto_client = MagicMock()
+    with patch("src.data.sources.s3_dataset_store._promote_pushed_dataset") as promote:
+        s3_dataset_store.push_dataset(client, mock_dataset, "my/dataset")
 
     mock_dataset.save_to_disk.assert_called_once()
-    client._promote_staged_dataset.assert_called_once()
+    promote.assert_called_once()
     call_args = mock_dataset.save_to_disk.call_args
     assert call_args[0][0].startswith("s3://test-bucket/my/.staging-dataset-"), (
         f"Expected a staging-sibling target, got {call_args[0][0]}"
@@ -124,19 +125,18 @@ def test_push_dataset_overwrite_never_deletes_the_destination_first():
 
     client.exists = MagicMock(return_value=True)
     client.delete = MagicMock()
-    client._client = MagicMock()
+    client.boto_client = MagicMock()
     deletes_before_save = []
     mock_dataset.save_to_disk = MagicMock(
-        side_effect=lambda *a, **k: deletes_before_save.extend(client._client.delete_object.call_args_list)
+        side_effect=lambda *a, **k: deletes_before_save.extend(client.boto_client.delete_object.call_args_list)
     )
-    client._promote_staged_dataset = MagicMock()
-
-    client.push_dataset(mock_dataset, "existing/dataset", overwrite=True)
+    with patch("src.data.sources.s3_dataset_store._promote_pushed_dataset") as promote:
+        s3_dataset_store.push_dataset(client, mock_dataset, "existing/dataset", overwrite=True)
 
     client.delete.assert_not_called()
     assert deletes_before_save == [], "no destination object may be deleted before the staging save"
     mock_dataset.save_to_disk.assert_called_once()
-    client._promote_staged_dataset.assert_called_once()
+    promote.assert_called_once()
     print("  push_dataset overwrite delete-free: PASSED")
 
 
@@ -151,7 +151,7 @@ def test_push_dataset_no_overwrite_raises_on_existing():
     client.delete = MagicMock()
 
     with pytest.raises(FileExistsError, match="(?i)already exists"):
-        client.push_dataset(mock_dataset, "existing/dataset", overwrite=False)
+        s3_dataset_store.push_dataset(client, mock_dataset, "existing/dataset", overwrite=False)
 
     client.delete.assert_not_called()
     mock_dataset.save_to_disk.assert_not_called()
@@ -167,7 +167,7 @@ def test_load_dataset_cache_hit():
     client.exists = MagicMock(return_value=True)
 
     with tempfile.TemporaryDirectory() as cache_root:
-        with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", cache_root):
+        with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
             cache_key = hashlib.md5(b"test-bucket/my/dataset").hexdigest()
             cache_dir = os.path.join(cache_root, cache_key)
             cache_path = os.path.join(cache_dir, "dataset")
@@ -182,9 +182,9 @@ def test_load_dataset_cache_hit():
             with open(os.path.join(cache_path, ".download_complete"), "w") as f:
                 f.write("s3://test-bucket/my/dataset")
 
-            with patch("src.data.sources.s3_client.load_from_disk") as mock_load:
+            with patch("src.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = ds
-                client.load_dataset("my/dataset", use_cache=True)
+                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
 
                 call_args = mock_load.call_args[0][0]
                 assert call_args == cache_path, f"Expected load from cache {cache_path}, got {call_args}"
@@ -211,11 +211,11 @@ def test_load_dataset_cache_miss():
 
         mock_ds.save_to_disk = MagicMock(side_effect=fake_save_to_disk)
 
-        with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("src.data.sources.s3_client.load_from_disk") as mock_load:
+        with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
+            with patch("src.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = mock_ds
 
-                client.load_dataset("my/dataset", use_cache=True)
+                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
 
                 assert mock_load.call_count >= 2, f"Expected >= 2 calls to load_from_disk, got {mock_load.call_count}"
 
@@ -268,8 +268,8 @@ def test_content_fingerprint_none_when_unreachable():
     """Any listing error (no creds, network outage) yields None — cache stays servable."""
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
-    client._client = MagicMock()
-    client._client.get_paginator.side_effect = RuntimeError("no credentials")
+    client.boto_client = MagicMock()
+    client.boto_client.get_paginator.side_effect = RuntimeError("no credentials")
     assert client.content_fingerprint("my/dataset") is None
 
 
@@ -277,9 +277,9 @@ def test_content_fingerprint_lists_prefix():
     """content_fingerprint aggregates (Key, ETag, Size) of every object under the prefix."""
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
-    client._client = MagicMock()
+    client.boto_client = MagicMock()
     pages = [{"Contents": [{"Key": "my/dataset/a", "ETag": '"e1"', "Size": 1}]}]
-    client._client.get_paginator.return_value.paginate.return_value = pages
+    client.boto_client.get_paginator.return_value.paginate.return_value = pages
     expected = compute_etag_fingerprint([("my/dataset/a", '"e1"', 1)])
     assert client.content_fingerprint("my/dataset") == expected
 
@@ -303,10 +303,10 @@ def test_load_dataset_stale_cache_redownloads():
 
         mock_ds.save_to_disk = MagicMock(side_effect=fake_save_to_disk)
 
-        with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("src.data.sources.s3_client.load_from_disk") as mock_load:
+        with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
+            with patch("src.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = mock_ds
-                client.load_dataset("my/dataset", use_cache=True)
+                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
 
                 first_call = mock_load.call_args_list[0]
                 assert first_call[0][0] == "s3://test-bucket/my/dataset", (
@@ -322,10 +322,10 @@ def test_load_dataset_offline_serves_cache():
     with tempfile.TemporaryDirectory() as cache_root:
         cache_path, marker = _make_cached_dataset(cache_root, fingerprint="oldfp")
 
-        with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("src.data.sources.s3_client.load_from_disk") as mock_load:
+        with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
+            with patch("src.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = Dataset.from_dict({"text": ["hello", "world"]})
-                client.load_dataset("my/dataset", use_cache=True)
+                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
 
                 mock_load.assert_called_once()
                 assert mock_load.call_args[0][0] == cache_path, "offline load must come from the local cache"
@@ -339,10 +339,10 @@ def test_load_dataset_matching_fingerprint_serves_cache():
     with tempfile.TemporaryDirectory() as cache_root:
         cache_path, _marker = _make_cached_dataset(cache_root, fingerprint="fp")
 
-        with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("src.data.sources.s3_client.load_from_disk") as mock_load:
+        with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
+            with patch("src.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = Dataset.from_dict({"text": ["hello", "world"]})
-                client.load_dataset("my/dataset", use_cache=True)
+                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
 
                 mock_load.assert_called_once()
                 assert mock_load.call_args[0][0] == cache_path
@@ -356,10 +356,10 @@ def test_load_dataset_legacy_marker_served_and_upgraded():
     with tempfile.TemporaryDirectory() as cache_root:
         cache_path, marker = _make_cached_dataset(cache_root, fingerprint=None)  # legacy marker
 
-        with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            with patch("src.data.sources.s3_client.load_from_disk") as mock_load:
+        with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
+            with patch("src.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = Dataset.from_dict({"text": ["hello", "world"]})
-                client.load_dataset("my/dataset", use_cache=True)
+                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
 
                 mock_load.assert_called_once()
                 assert mock_load.call_args[0][0] == cache_path, "legacy marker must still serve the cache"
@@ -515,8 +515,8 @@ def test_shard_fingerprint_empty_listing_does_not_latch():
 
 
 def test_load_shard_index_from_s3():
-    """_load_shard_index_from_s3 reads JSON from S3 via s3fs."""
-    print("Testing ShardedDatasetLoader._load_shard_index_from_s3...")
+    """An S3 loader's _load_shard_index reads the index JSON from S3 via s3fs."""
+    print("Testing ShardedDatasetLoader._load_shard_index (S3)...")
 
     index_data = {
         "version": "1.0",
@@ -541,15 +541,15 @@ def test_load_shard_index_from_s3():
         loader.source_type = "s3"
         loader._shard_indices = {}
 
-    with patch("src.data.sources.s3_client.s3fs.S3FileSystem", return_value=mock_fs):
-        with patch("src.data.sources.s3_client.json.load", return_value=index_data):
-            index = loader._load_shard_index_from_s3("train")
+    with patch("src.data.sources.s3_dataset_store.s3fs.S3FileSystem", return_value=mock_fs):
+        with patch("src.data.sources.s3_dataset_store.json.load", return_value=index_data):
+            index = loader._load_shard_index("train")
 
     assert index.num_shards == 2
     assert index.total_examples == 200
     assert len(index.shards) == 2
     mock_fs.open.assert_called_once()
-    print("  _load_shard_index_from_s3: PASSED")
+    print("  _load_shard_index (S3): PASSED")
 
 
 def test_load_preprocessed_metadata_from_s3():
@@ -575,8 +575,8 @@ def test_load_preprocessed_metadata_from_s3():
     mock_file.__exit__ = MagicMock(return_value=False)
     mock_fs.open.return_value = mock_file
 
-    with patch("src.data.sources.s3_client.s3fs.S3FileSystem", return_value=mock_fs):
-        with patch("src.data.sources.s3_client.json.load", return_value=metadata_dict):
+    with patch("src.data.sources.s3_dataset_store.s3fs.S3FileSystem", return_value=mock_fs):
+        with patch("src.data.sources.s3_dataset_store.json.load", return_value=metadata_dict):
             metadata = load_preprocessed_metadata("s3://test-bucket/preprocessed/dataset")
 
     assert metadata.preprocessed is True
@@ -796,11 +796,11 @@ def test_recursive_delete_reports_false_when_the_prefix_matched_nothing():
         client = S3Client(bucket="test-bucket")
     paginator = MagicMock()
     paginator.paginate.return_value = [{}]  # no Contents -> nothing matched
-    client._client = MagicMock()
-    client._client.get_paginator.return_value = paginator
+    client.boto_client = MagicMock()
+    client.boto_client.get_paginator.return_value = paginator
 
     assert client.delete("my_folder", recursive=True) is False
-    client._client.delete_objects.assert_not_called()
+    client.boto_client.delete_objects.assert_not_called()
 
 
 def test_cli_delete_declines_confirmation():

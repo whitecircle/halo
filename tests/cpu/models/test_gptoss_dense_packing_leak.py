@@ -18,16 +18,12 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers import GptOssConfig, Mistral4Config
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssForCausalLM
 
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import DataCollatorWithPacking
 from src.models.segment_markers import DENSE_PACKING_LEAK_MODEL_TYPES
-
-PartialState()  # the factory logs through accelerate's logger, which needs the state initialized
-
 
 SEED = 1234
 

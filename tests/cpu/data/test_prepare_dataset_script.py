@@ -12,13 +12,12 @@ starts unset, as in a real CLI run):
 * **An explicit masking flag in text mode still fails.** The mode-aware default must not turn the
   applicability check into a no-op — asking for something ``mode='text'`` cannot do stays loud.
 * **Chat mode with no response marker fails BEFORE the input is fetched.** The labels are baked
-  into the artifact here, so masking without a marker is unbuildable; the config that owns the pair
-  is only constructed after the whole corpus is in hand, which is minutes of S3 download to report
-  a two-flag mistake.
+  into the artifact here, so masking without a marker is unbuildable, and the config that owns the
+  pair is built from the command line before any download.
 * **A column flag naming no input column fails before tokenization**, naming the flag and the
   columns the input carries.
 
-Plus the artifact contract, unstubbed: a ``--num-shards N`` publish must be what the training-side
+Plus the artifact contract, unstubbed: a ``--num_shards N`` publish must be what the training-side
 sharded loader hands ``N`` data-parallel ranks — every row exactly once, none twice.
 
     python tests/cpu/data/test_prepare_dataset_script.py
@@ -34,7 +33,7 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
+from src.data.preprocessed.metadata import PreprocessingConfig
 from src.data.sources.loading import load_preprocessed_dataset
 from tests.common.repo import REPO_ROOT, load_script_module
 from tests.common.tiny_models import word_level_tokenizer
@@ -122,24 +121,32 @@ def _run(argv: list[str], prelude: str = "") -> str:
 # The published pre-training command (agent-docs/training-methods/pretraining.md), minus the S3 paths:
 # no masking flags, because raw text has no turns to mask.
 _DOC_TEXT_ARGV = [
-    "--model-name",
+    "--model_name_or_path",
     "dummy-model",
     "--mode",
     "text",
-    "--text-field",
+    "--text_field",
     "text",
-    "--max-length",
+    "--max_length",
     "8192",
-    "--pack-sequences",
-    "--packing-strategy",
+    "--pack_sequences",
+    "--packing_strategy",
     "bfd",
-    "--num-shards",
+    "--num_shards",
     "2",
 ]
 
 # The published SFT pre-processing command (agent-docs/training-methods/sft.md, launch-recipes.md,
 # scripts-reference.md): chat mode, no marker.
-_DOC_CHAT_ARGV = ["--model-name", "dummy-model", "--max-length", "8192", "--num-shards", "2", "--pack-sequences"]
+_DOC_CHAT_ARGV = [
+    "--model_name_or_path",
+    "dummy-model",
+    "--max_length",
+    "8192",
+    "--num_shards",
+    "2",
+    "--pack_sequences",
+]
 
 
 def test_the_documented_pretraining_invocation_runs():
@@ -159,7 +166,7 @@ def test_the_documented_pretraining_invocation_runs():
 def test_asking_for_completion_masking_in_text_mode_still_fails():
     """The mode-aware default must not silence the applicability check: raw text renders no chat
     template, so there are no user turns to mask and the request is a mistake worth naming."""
-    output = _run([*_DOC_TEXT_ARGV, "--train-on-completions-only", "--assistant-message-template", "<a>"])
+    output = _run([*_DOC_TEXT_ARGV, "--train_on_completions_only", "--assistant_message_template", "<a>"])
 
     assert "REACHED_PREPROCESS" not in output, output
     assert "not applicable to mode='text'" in output, output
@@ -170,7 +177,7 @@ def test_chat_mode_without_a_response_marker_fails_before_the_input_is_fetched()
     so the marker is required, and the run must be refused while it still costs nothing."""
     output = _run(_DOC_CHAT_ARGV)
 
-    assert "assistant-message-template" in output, output
+    assert "requires assistant_message_template" in output, output
     assert "REACHED_LOAD" not in output, f"the refusal came after the input dataset was fetched:\n{output}"
     assert "REACHED_PREPROCESS" not in output, output
 
@@ -178,33 +185,33 @@ def test_chat_mode_without_a_response_marker_fails_before_the_input_is_fetched()
 def test_the_documented_sft_invocation_runs_once_the_marker_is_supplied():
     """The other side of that refusal: with the marker, the same command runs — the guard is about
     an unbuildable pair, not about chat mode."""
-    output = _run([*_DOC_CHAT_ARGV, "--assistant-message-template", "<|im_start|>assistant\n"])
+    output = _run([*_DOC_CHAT_ARGV, "--assistant_message_template", "<|im_start|>assistant\n"])
 
     assert "REACHED_PREPROCESS" in output, output
 
 
 @pytest.mark.parametrize(
-    ("argv", "flag", "column"),
+    ("argv", "knob", "column"),
     [
         (
-            [*_DOC_CHAT_ARGV, "--assistant-message-template", "<a>", "--conversation-field", "messages"],
-            "--conversation-field",
+            [*_DOC_CHAT_ARGV, "--assistant_message_template", "<a>", "--conversation_field", "messages"],
+            "conversation_field",
             "messages",
         ),
-        ([*_DOC_TEXT_ARGV, "--text-field", "body"], "--text-field", "body"),
-        ([*_DOC_CHAT_ARGV, "--assistant-message-template", "<a>", "--tools-field", "tools"], "--tools-field", "tools"),
+        ([*_DOC_TEXT_ARGV, "--text_field", "body"], "text_field", "body"),
+        ([*_DOC_CHAT_ARGV, "--assistant_message_template", "<a>", "--tools_field", "tools"], "tools_field", "tools"),
     ],
     ids=["conversation", "text", "tools"],
 )
-def test_a_column_flag_naming_no_input_column_is_refused_before_tokenization(argv, flag, column):
-    """A ``messages`` corpus under the default ``--conversation-field prompt`` (and its text-mode and
+def test_a_column_flag_naming_no_input_column_is_refused_before_tokenization(argv, knob, column):
+    """A ``messages`` corpus under the default ``--conversation_field prompt`` (and its text-mode and
     tools twins) otherwise dies as a bare ``KeyError`` in a map worker, or bakes every row without the
-    column; the refusal names the flag, the column and what the input does carry."""
+    column; the refusal names the knob, the column and what the input does carry."""
     output = _run(argv)
 
     assert "REACHED_LOAD" in output, output
-    assert "REACHED_PREPROCESS" not in output, f"the input reached tokenization with {flag}={column}:\n{output}"
-    assert f"{flag}='{column}' names a column" in output, output
+    assert "REACHED_PREPROCESS" not in output, f"the input reached tokenization with {knob}={column}:\n{output}"
+    assert f"{knob}='{column}' names a column" in output, output
     assert "available columns: ['prompt', 'text']" in output, output
 
 
@@ -225,7 +232,7 @@ def test_the_held_out_split_the_artifact_bakes_is_checked(splits, refused):
     if not refused:
         script.require_declared_columns(dataset, config, "src")
         return
-    with pytest.raises(ValueError, match=r"--conversation-field='prompt' .*\['validation'\]"):
+    with pytest.raises(ValueError, match=r"conversation_field='prompt' .*\['validation'\]"):
         script.require_declared_columns(dataset, config, "src")
 
 
@@ -241,7 +248,7 @@ def test_a_multi_process_launch_is_refused_before_the_input_is_fetched():
 
 def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
     """An offline-packed artifact for a model whose compressor windows cut by row index trains
-    nothing the collator would accept, so ``--pack-sequences`` is refused off the model config."""
+    nothing the collator would accept, so ``--pack_sequences`` is refused off the model config."""
     prelude = (
         "from transformers.models.deepseek_v4 import DeepseekV4Config\n"
         "from tests.common.models import TINY_DSV4_CONFIG\n"
@@ -249,12 +256,12 @@ def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
     )
     output = _run(_DOC_TEXT_ARGV, prelude=prelude)
 
-    assert "--pack-sequences is refused" in output, output
+    assert "--pack_sequences is refused" in output, output
     assert "REACHED_LOAD" not in output, f"the refusal came after the input dataset was fetched:\n{output}"
 
 
 def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks():
-    """The real script, unstubbed, on a local raw-text corpus with ``--num-shards 4``: the published
+    """The real script, unstubbed, on a local raw-text corpus with ``--num_shards 4``: the published
     artifact must load through ``load_preprocessed_dataset`` for each of 4 data-parallel ranks, and
     the four slices must be a partition of the corpus — a gap silently drops data, an overlap silently
     double-trains it, and neither shows up as an error at training time."""
@@ -268,9 +275,9 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
         argv = [
             sys.executable,
             _SCRIPT,
-            *("--input", raw, "--output", out, "--model-name", tokenizer_dir),
-            *("--mode", "text", "--text-field", "text", "--max-length", "8"),
-            *("--num-shards", str(num_shards), "--test-size", "0.25"),
+            *("--input", raw, "--output", out, "--model_name_or_path", tokenizer_dir),
+            *("--mode", "text", "--text_field", "text", "--max_length", "8"),
+            *("--num_shards", str(num_shards), "--test_size", "0.25"),
         ]
         env = {**os.environ, "PYTHONPATH": str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")}
         proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=REPO_ROOT)

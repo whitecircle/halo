@@ -15,7 +15,7 @@ tokenizer's side is invisible to any collator test that builds its own right-pad
 """
 
 import inspect
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -98,15 +98,13 @@ def test_factory_propagates_the_guard(train_on_completions_only):
     tok.pad_token_id = 0
     tok.eos_token_id = 2
     tok.encode.return_value = [10, 11]
-    with patch("src.data.collators.factory.PartialState") as mock_state:
-        mock_state.return_value.is_main_process = False
-        with pytest.raises(ValueError, match="right-padding tokenizer"):
-            select_data_collator(
-                tokenizer=tok,
-                packing=True,
-                train_on_completions_only=train_on_completions_only,
-                assistant_message_template="<|assistant|>" if train_on_completions_only else None,
-            )
+    with pytest.raises(ValueError, match="right-padding tokenizer"):
+        select_data_collator(
+            tokenizer=tok,
+            packing=True,
+            train_on_completions_only=train_on_completions_only,
+            assistant_message_template="<|assistant|>" if train_on_completions_only else None,
+        )
 
 
 if __name__ == "__main__":

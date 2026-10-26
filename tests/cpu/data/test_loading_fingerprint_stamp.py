@@ -21,15 +21,13 @@ _CACHE_DIR = tempfile.mkdtemp(prefix="halo_test_hf_cache_")
 os.environ["HF_DATASETS_CACHE"] = _CACHE_DIR
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-PartialState()  # loading.py logs via the accelerate logger
-
-from src.data.pipeline.preprocessing import shard_dataset
-from src.data.pipeline.processing import _build_cache_file_name, _rank_stable_dataset_id
-from src.data.shard_index import SHARD_INDEX_FILE
-from src.data.sources.loading import alias_tools_column, load_datasets
+from src.data.pipeline.map_cache_key import CACHE_KEY_ATTR, map_cache_file_name, rank_stable_dataset_id
+from src.data.preprocessed.preparation import shard_dataset
+from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from src.data.render_columns import alias_tools_column
+from src.data.sources.loading import load_datasets
 
 
 def _make_sharded_dataset(tmp_dir: str, num_rows: int = 100, num_shards: int = 2) -> str:
@@ -38,7 +36,7 @@ def _make_sharded_dataset(tmp_dir: str, num_rows: int = 100, num_shards: int = 2
     test = Dataset.from_dict({"x": list(range(1000, 1000 + num_shards * 2))})
     for split, ds in (("train", train), ("test", test)):
         index = shard_dataset(ds, output_dir=tmp_dir, split_name=split, num_shards=num_shards)
-        index.save(os.path.join(tmp_dir, split, SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(tmp_dir, split, SHARD_INDEX_FILE), index)
     return tmp_dir
 
 
@@ -73,11 +71,11 @@ def test_presharded_ranks_get_distinct_cache_keys():
         assert ds0["train"]._fingerprint != ds1["train"]._fingerprint, (
             "per-rank shard slices must not share a forced fingerprint"
         )
-        assert ds0["train"]._toolkit_cache_key != ds1["train"]._toolkit_cache_key
+        assert getattr(ds0["train"], CACHE_KEY_ATTR) != getattr(ds1["train"], CACHE_KEY_ATTR)
 
         # End-to-end: the downstream coordinated_map cache file names must differ per rank.
-        name0 = _build_cache_file_name("map", _map_fn, ds0["train"], "tokenizing", {})
-        name1 = _build_cache_file_name("map", _map_fn, ds1["train"], "tokenizing", {})
+        name0 = map_cache_file_name("map", _map_fn, ds0["train"], "tokenizing", {})
+        name1 = map_cache_file_name("map", _map_fn, ds1["train"], "tokenizing", {})
         assert name0 != name1, "identical cache names collide: rank 1 would load rank 0's mapped shard"
 
         # Simulate the coordinated flow: each rank maps to its own deterministic cache file and
@@ -106,7 +104,7 @@ def test_replicated_load_keeps_shared_cache_key():
         ds0 = _load(path, rank=0, size=2)
         ds1 = _load(path, rank=1, size=2)
         assert ds0["train"]._fingerprint == ds1["train"]._fingerprint
-        assert ds0["train"]._toolkit_cache_key == ds1["train"]._toolkit_cache_key
+        assert getattr(ds0["train"], CACHE_KEY_ATTR) == getattr(ds1["train"], CACHE_KEY_ATTR)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -129,12 +127,12 @@ def test_same_shape_different_content_changes_cache_key():
             ).save_to_disk(path)
 
         _save(0)
-        key_a = _load(path, rank=0, size=1)["train"]._toolkit_cache_key
+        key_a = getattr(_load(path, rank=0, size=1)["train"], CACHE_KEY_ATTR)
         # Stability: reloading the SAME content keeps the key (the shared cache still hits).
-        assert _load(path, rank=0, size=1)["train"]._toolkit_cache_key == key_a
+        assert getattr(_load(path, rank=0, size=1)["train"], CACHE_KEY_ATTR) == key_a
 
         _save(1)  # same shapes, different content
-        key_b = _load(path, rank=0, size=1)["train"]._toolkit_cache_key
+        key_b = getattr(_load(path, rank=0, size=1)["train"], CACHE_KEY_ATTR)
         assert key_a != key_b, "same-shape content change must invalidate the forced cache key"
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -152,8 +150,8 @@ def test_an_aliased_split_keys_apart_from_its_source():
 
         aliased = alias_tools_column(ds, "my_tools", path)["train"]
 
-        assert _rank_stable_dataset_id(aliased) != _rank_stable_dataset_id(ds["train"])
-        assert _rank_stable_dataset_id(aliased) == _rank_stable_dataset_id(
+        assert rank_stable_dataset_id(aliased) != rank_stable_dataset_id(ds["train"])
+        assert rank_stable_dataset_id(aliased) == rank_stable_dataset_id(
             alias_tools_column(ds, "my_tools", path)["train"]
         )
     finally:

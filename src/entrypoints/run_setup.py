@@ -21,7 +21,7 @@ from transformers import set_seed
 from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 from src.checkpoint.parallel.resume_source import resolve_resume_checkpoint, resolve_resume_weights_source
 from src.configs.parser import is_true_string
-from src.data.pipeline.processing import ensure_cache_dir
+from src.data.pipeline.coordinated_map import ensure_cache_dir
 from src.kernels.jit_cache import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
 from src.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME, RUN_LOG_FILE
 from src.model_loading.dtype import configure_float32_matmul_precision

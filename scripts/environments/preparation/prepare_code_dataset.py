@@ -51,7 +51,8 @@ from datasets import Dataset, DatasetDict, disable_caching, load_dataset
 
 from scripts.environments.preparation.parquet_parts import parquet_parts
 from src.configs.script_arguments import DEFAULT_ANSWER_FIELD
-from src.data.pipeline.processing import report_rejected_rows, resolve_map_num_proc
+from src.data.pipeline.coordinated_map import resolve_map_num_proc
+from src.data.pipeline.rejected_rows import report_rejected_rows
 from src.environments.sandbox.factory import build_sandbox
 from src.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,

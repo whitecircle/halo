@@ -30,11 +30,7 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset, load_from_disk
 
-from src.data.pipeline.processing import (
-    coordinated_filter,
-    coordinated_map,
-    process_dataset_with_map_and_filter,
-)
+from src.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, coordinated_map_and_filter
 from src.runtime.collectives import barrier
 from src.runtime.filesystem import is_fs_load_rank, is_input_shared_filesystem
 from src.runtime.ranks import is_global_main_process
@@ -306,7 +302,7 @@ def test_cache_file_is_the_shared_artifact() -> None:
 
 
 def test_map_and_filter_combined() -> None:
-    """process_dataset_with_map_and_filter end-to-end: rejection sentinels dropped, ranks agree."""
+    """coordinated_map_and_filter end-to-end: rejection sentinels dropped, ranks agree."""
     with filesystem_mode(shared=True), shared_cache_dir("coord_mapfilter_") as cache_dir:
         dataset = on_disk_source(cache_dir, 30)
 
@@ -316,7 +312,7 @@ def test_map_and_filter_combined() -> None:
                 return {"input_ids": None, "processed_text": None}
             return {"input_ids": [example["value"]], "processed_text": f"processed_{example['id']}"}
 
-        result = process_dataset_with_map_and_filter(
+        result = coordinated_map_and_filter(
             dataset,
             counting("mapfilter", process),
             filter_field="input_ids",

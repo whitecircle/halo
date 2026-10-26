@@ -129,16 +129,16 @@ changes.
 
 | `src/` area | Owning doc page(s) |
 |---|---|
-| `src/data/collators/` (CompletionsOnly, packing, padding-free) | `agent-docs/data/collators.md`, `agent-docs/optimization/padding-free-collator.md` |
+| `src/data/collators/` (`padded.py`, `packing.py`: padded, packed and padding-free) | `agent-docs/data/collators.md`, `agent-docs/optimization/padding-free-collator.md` |
 | `src/data/collators/offline_grpo.py`, `src/data/collators/vlm_preference.py` + `src/data/pipeline/preferences.py` (per-method collators and their maps) | `agent-docs/training-methods/grpo/offline.md`, `agent-docs/training-methods/preference/reward-modeling.md` |
-| `src/data/collators/factory.py` | `agent-docs/data/collators.md` |
+| `src/data/collators/factory.py`, `src/data/collators/collator_rules.py` | `agent-docs/data/collators.md` |
 | tree packing (`src/data/tree_layout.py`, `src/data/pipeline/tree_rows.py`, `src/data/collators/tree_packing.py`, `src/models/attention/tree_plan.py`, `src/models/attention/tree.py`) | `agent-docs/optimization/tree-packing.md`; the `tree_*` rows of `agent-docs/reference/configuration-reference.md` |
-| `src/data/spans.py` (turn terminators, completion spans, the one completion-mask implementation) | `agent-docs/data/collators.md`, `agent-docs/data/dataset-preparation.md` |
-| `src/data/` (loading, processing, sharding, VLM) | `agent-docs/data/{dataset-formats,dataset-preparation,filesystem-handling}.md`, `agent-docs/parallelism/data-loading.md` |
-| `src/data/sources/s3_client.py`, `src/data/sources/dataset_cache.py`, `src/data/sources/paths.py`, `scripts/before_training/s3_datasets.py` (CLI) | `agent-docs/data/s3-utilities.md` |
-| `src/data/pipeline/preprocessing.py` (tokenize/pack/shard bake), `src/data/pipeline/preprocessed_metadata.py` (the `metadata.json` contract), `src/data/shard_index.py` | `agent-docs/data/dataset-preparation.md`, `agent-docs/parallelism/data-loading.md` |
-| `src/data/pipeline/rendered.py` (`tokenize_rendered` — special-token ownership on a rendered template), `src/model_loading/tokenizer_backend.py` (`tokenizer_backend`) | `agent-docs/data/dataset-formats.md`, `agent-docs/data/dataset-preparation.md` |
-| `src/data/pipeline/vlm_dataset.py` (raw-VLM map, schema, over-length filter) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
+| `src/data/turn_markers.py` (turn terminators, the response marker), `src/data/completion_spans.py` (completion spans, the one span-to-labels rule) | `agent-docs/data/collators.md`, `agent-docs/data/dataset-preparation.md` |
+| `src/data/` (loading, corpus, replica identity, coordinated maps and their cache key, row maps, sharding, `vlm_render.py`, `vlm_routing.py`) | `agent-docs/data/{dataset-formats,dataset-preparation,filesystem-handling}.md`, `agent-docs/parallelism/data-loading.md` |
+| `src/data/sources/s3_client.py`, `src/data/sources/s3_dataset_store.py`, `src/data/sources/dataset_cache.py`, `src/data/sources/paths.py`, `scripts/before_training/s3_datasets.py` (CLI) | `agent-docs/data/s3-utilities.md` |
+| `src/data/preprocessed/` (`tokenization.py` and `preparation.py`, the tokenize/pack/shard bake; `metadata.py`, the `metadata.json` contract; `shard_index.py`), `scripts/before_training/prepare_dataset.py` | `agent-docs/data/dataset-preparation.md`, `agent-docs/parallelism/data-loading.md` |
+| `src/data/pipeline/chat_render.py` (`tokenize_rendered` — special-token ownership on a rendered template), `src/model_loading/tokenizer_backend.py` (`tokenizer_backend`) | `agent-docs/data/dataset-formats.md`, `agent-docs/data/dataset-preparation.md` |
+| `src/data/pipeline/vlm_rows.py` (raw-VLM row map, schema, over-length filter) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
 | `src/data/deduplication.py` (embedding + FAISS corpus dedup) | `agent-docs/reference/scripts-reference.md` |
 
 ## Kernels & optimization
@@ -225,7 +225,7 @@ changes.
 | `docker/vllm/patches/`, `docker/vllm/parity/`, `docker/vllm/plugins/` (server build patches, config-schema parity gate, gpt-oss parser plugins) | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/infrastructure/docker.md`; plugins also `agent-docs/models/gpt-oss.md` |
 | `docker/nccl_pin.py` (the NCCL pin every image reads from `uv.lock`, the DeepEP-V2 floor) | `agent-docs/infrastructure/docker.md` |
 | `docker/efa/install_efa_userspace.sh` (the EFA userspace every image shares) | `agent-docs/infrastructure/docker.md` (RDMA networking), `agent-docs/infrastructure/rollout-servers.md` (Servers on other nodes), `agent-docs/parallelism/multi-node.md` (RDMA fabrics) |
-| AWS / S3 auth, `src/data/sources/s3_client.py` paths | `agent-docs/infrastructure/aws-auth.md`, `agent-docs/data/s3-utilities.md` |
+| AWS / S3 auth, `src/data/sources/s3_client.py` and `src/data/sources/s3_dataset_store.py` paths | `agent-docs/infrastructure/aws-auth.md`, `agent-docs/data/s3-utilities.md` |
 | DeepEP install / NVSHMEM / CDMC notes | `agent-docs/infrastructure/deepep.md` |
 | multi-node / SkyPilot / RunPod / Nomad launch | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/{skypilot,runpod,nomad}.md` |
 | `launcher-configs/**` (SkyPilot task YAMLs, Nomad job specs, accelerate configs) | `agent-docs/infrastructure/{skypilot,nomad}.md`, `human-docs/clusters.md` |

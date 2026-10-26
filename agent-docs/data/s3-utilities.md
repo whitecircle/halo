@@ -2,14 +2,15 @@
 
 Reading and writing HuggingFace `Dataset`/`DatasetDict` objects and arbitrary folders in S3, with a
 local cache for distributed training and a CLI. The default bucket comes from
-`HALO_S3_DEFAULT_BUCKET` — set it to your own bucket. Three modules plus a CLI, split so a consumer takes on only the
+`HALO_S3_DEFAULT_BUCKET` — set it to your own bucket. Four modules plus a CLI, split so a consumer takes on only the
 dependency it needs:
 
 | File | Holds |
 |---|---|
 | `src/data/sources/paths.py` | source/destination classification — pure string rules, no boto3 |
 | `src/data/sources/dataset_cache.py` | the local cache-publish protocol — `os`/`shutil`/`filelock`, the fetch injected |
-| `src/data/sources/s3_client.py` | the boto3 `S3Client`, the s3fs control-file reads, the default-bucket helpers |
+| `src/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool, the default-bucket helpers |
+| `src/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load, the mirrored control-file reads |
 | `scripts/before_training/s3_datasets.py` | the CLI |
 
 ## Dataset path formats
@@ -78,13 +79,15 @@ service or non-default bucket, pass `aws_access_key_id` / `aws_secret_access_key
 
 ## Python API
 
-Import from `src.data.sources.s3_client`. The module surface (see the package for full signatures and defaults):
+Dataset trees go through `src.data.sources.s3_dataset_store`; everything else is `src.data.sources.s3_client`
+(see the modules for full signatures and defaults):
 
 | Function | Purpose |
 |----------|---------|
 | `load_dataset_from_s3_uri(s3_uri, keep_in_memory=None, use_cache=True)` | Load HF dataset by URI; cached with file locking |
-| `push_dataset_to_s3_uri(dataset, s3_uri, overwrite=True)` | Push HF dataset by URI through the staged protocol: the tree uploads whole to a `.staging-*` sibling prefix, is sealed, then promoted by server-side copy with the load gates (`state.json`/`dataset_dict.json`) deleted first and copied last. A crash leaves either a complete copy at the destination or the sealed staging tree, which `load_dataset_from_s3_uri` falls back to; the next successful push heals and sweeps. One writer per destination at a time |
-| `build_s3_uri(key, subfolder=None)` | Full S3 URI from key (+ optional subfolder) under `HALO_S3_DEFAULT_BUCKET` (`default_bucket()`, which raises while it is unset), without constructing a client |
+| `push_dataset_to_s3_uri(dataset, s3_uri, overwrite=True)` | Push HF dataset by URI: the tree uploads whole to a `.staging-*` sibling prefix, is sealed, then promoted by server-side copy with the load gates (`state.json`/`dataset_dict.json`) deleted first and copied last. A crash leaves either a complete copy at the destination or the sealed push, which `load_dataset_from_s3_uri` falls back to; the next successful push heals and sweeps. One writer per destination at a time |
+| `push_dataset(client, dataset, key, ...)` / `load_dataset(client, key, ...)` | The same on an explicit `S3Client` (the URI functions above wrap these) |
+| `build_s3_uri(key, subfolder=None)` (`s3_client`) | Full S3 URI from key (+ optional subfolder) under `HALO_S3_DEFAULT_BUCKET` (`default_bucket()`, which raises while it is unset), without constructing a client |
 
 `subfolder` is prepended to `key`; key paths may be nested. Everything else — folder transfers, listings,
 deletes — is an `S3Client` method, called on a client built for the bucket in question.
@@ -95,9 +98,10 @@ For a non-default bucket or an S3-compatible service:
 
 ```python
 from src.data.sources.s3_client import S3Client
+from src.data.sources.s3_dataset_store import push_dataset
 
 client = S3Client(bucket="<bucket>")
-client.push_dataset(dataset, "data")
+push_dataset(client, dataset, "data")
 
 # MinIO / S3-compatible
 client = S3Client(
@@ -108,8 +112,8 @@ client = S3Client(
 )
 ```
 
-`S3Client` carries the full surface: `push_dataset` / `load_dataset` (the URI functions above wrap
-these), `exists` / `object_exists`, `list_objects`, `delete`, and the folder transfers:
+`S3Client` carries the transport surface: `exists` / `object_exists`, `list_objects`, `delete`, and the
+folder transfers:
 
 | Method | Purpose |
 |--------|---------|

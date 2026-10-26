@@ -37,7 +37,7 @@ corpus test split comes from the sources that ship one, and only a corpus where 
 to a placeholder cut from its own train rows (set `test_size` to carve a held-out split from every
 source instead).
 
-`_normalize_dataset_schema` (`src/data/sources/loading.py`) keeps the intersection over train and
+`_normalize_dataset_schema` (`src/data/sources/corpus.py`) keeps the intersection over train and
 test together: a column missing from any dataset, or whose feature type differs across them, is
 dropped, with no fixed allowlist.
 
@@ -127,7 +127,7 @@ The `image` field accepts: base64 data URI (`data:image/png;base64,...`), file p
 
 Hub datasets that store images in a separate column instead train via `images_field` (the column is injected into the first user turn), and the paired `{user, assistant}` turn shape used by the HuggingFaceM4 `texts` column is normalized to role/content messages — see [SFT — Vision-language models](../training-methods/sft.md#vision-language-models).
 
-A run takes the VLM data path only when **both** halves agree (`is_vlm_run`, `src/data/vlm.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
+A run takes the VLM data path only when **both** halves agree (`is_vlm_run`, `src/data/vlm_routing.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
 
 A run declares images three ways, any one of which is enough: `images_field` names the column; the dataset carries an `images`, `image` or `pixel_values` column; or the `conversation_field` column embeds `{"type": "image"}` content parts. The preference scripts have no `conversation_field`, so DPO declares by column only.
 
@@ -141,9 +141,9 @@ The name-substring heuristic (`-vl`, `vl-`, `vl2`, `llava`, `vision`, `pixtral`,
 
 For a JSON-string conversation column, the first-row fallback cannot see a mixed dataset whose probed rows are text-only: that run resolves to the text path and then **fails loud at the first image row**.
 
-Every text renderer — SFT, preference prep (DPO/SMPO), Bradley-Terry reward prep, the GRPO generation-prompt renderer, generation eval, offline GRPO's templater and classification — refuses a conversation carrying an image part (`reject_image_content`) rather than expanding it into placeholder tokens with no pixels behind them, which would train vision placeholders as text in silence. The escape is an image column on the dataset, or offline `--vlm` preprocessing.
+Every text renderer — SFT, preference prep (DPO/SMPO), Bradley-Terry reward prep, the GRPO generation-prompt renderer, generation eval, offline GRPO's templater and classification — refuses a conversation carrying an image part (`reject_image_content`) rather than expanding it into placeholder tokens with no pixels behind them, which would train vision placeholders as text in silence. The escape is an image column on the dataset, or offline `--is_vlm` preprocessing.
 
-Limitations: packing and padding-free training are **NOT supported** on the VLM path (images cannot be packed). Offline pre-processing uses `--vlm`, see [SFT pre-processing](dataset-preparation.md).
+Limitations: packing and padding-free training are **NOT supported** on the VLM path (images cannot be packed). Offline pre-processing uses `--is_vlm`, see [SFT pre-processing](dataset-preparation.md).
 
 ## Preference (DPO/SMPO)
 
@@ -227,6 +227,11 @@ DeepEP/NCCL process groups (unpicklable, so the map dies mid-pass).
 tunables through `fn_kwargs` also puts them in the cache key, which values read off `self` never
 reach.
 
+The key (`src/data/pipeline/map_cache_key.py`) hashes the callable's source plus the source of every
+first-party module-level function it calls by bare name, so editing such a helper re-maps. A helper
+reached as a module attribute or a method stays out of the key, and editing it reuses stale rows: call
+helpers by bare name from a mapped function, a `functools.partial` of one, or a builder closure.
+
 Those two helpers carry their own rank ordering and must never be nested in a main-first block — see
 [Filesystem Handling](filesystem-handling.md#coordination-primitives).
 
@@ -255,12 +260,12 @@ render must match serving byte-for-byte.
 The template lands on the tokenizer and, for a VLM run, on its processor as well
 (`adopt_tokenizer_chat_template`): a processor renders and saves with a `chat_template` of its own,
 so the processor is what decides both the VLM rows and the exported `chat_template.jinja`. The same
-holds for `prepare_dataset.py --vlm` and `patch_vocab.py --chat_template`.
+holds for `prepare_dataset.py --is_vlm` and `patch_vocab.py --chat_template`.
 
 ### Special-token ownership
 
 Rendered chat-template text tokenizes through `tokenize_rendered`
-(`src/data/pipeline/rendered.py`), which probes each tokenizer once — tokenizing `""` with
+(`src/data/pipeline/chat_render.py`), which probes each tokenizer once — tokenizing `""` with
 `add_special_tokens=True` — to learn what its post-processor actually adds. `bos_token` alone is
 unreliable: gpt-oss and Bailing declare a nominal BOS their post-processor never emits, and Zaya
 appends a trailing `<|im_end|>` instead of prepending BOS.

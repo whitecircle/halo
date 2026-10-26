@@ -2,8 +2,9 @@
 
 Collators turn tokenized samples into batches: padding, sequence packing, completion-only label
 masking, and per-sequence position IDs. They live in `src/data/collators/`. `factory.py` selects
-among the SFT collators of `completions_only.py` and `packing.py`, which share the span resolver in
-`src/data/spans.py`.
+among the SFT collators of `padded.py` and `packing.py` after `collator_rules.py` refuses the option
+combinations none can serve; all of them share the span resolver and label rule in
+`src/data/completion_spans.py` and the turn terminators in `src/data/turn_markers.py`.
 
 The per-method leaves (`smpo.py`, `vlm.py`, `self_distill.py`, `classification.py`,
 `offline_grpo.py`, `vlm_preference.py`) are built by their own trainers and scripts.
@@ -109,7 +110,7 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 |---------------|----------|
 | CP + packing | **rejected** — the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other |
 | CP + completion masking | `DataCollatorForCompletionOnlyLM` (CP mode) |
-| CP | `DataCollatorForCausalLMWithPadding` (a label-preserving `DataCollatorForLanguageModeling` subclass in `packing.py`) |
+| CP | `DataCollatorForCausalLMWithPadding` (a label-preserving `DataCollatorForLanguageModeling` subclass in `padded.py`) |
 | padding_free + completion masking | `DataCollatorWithFlatteningAndCompletionMask` |
 | padding_free | `DataCollatorWithFlattening` |
 | packing + completion masking | `DataCollatorForCompletionOnlyLMWithPacking` |
@@ -164,7 +165,7 @@ too, so a composite (VLM) wrapper is covered:
   (`reject_compressed_kv_rows`). Positions restart per document but the compressor windows are cut
   at row indices, so a later document reads another document's compressed KV as its own context.
   Train with padded batches. The SFT script runs the same check before the model load,
-  `prepare_dataset.py` before an offline `--pack-sequences` pass, and the SFT trainer for a
+  `prepare_dataset.py` before an offline `--pack_sequences` pass, and the SFT trainer for a
   packing / padding-free collator handed to it directly (`_reject_compressed_kv_collator`, keyed on
   the same two collator roots as the CP gate), as does SMPO for its `padding_free` forward.
 
@@ -220,7 +221,7 @@ they score packed rows under the same masks the student does.
 **The turn terminator is the resolved terminator set, not just `tokenizer.eos_token_id`.** A turn
 ends at the first token in the union of the model config's `eos_token_id` (scalar or list;
 `text_config.eos_token_id` for VLM/composite configs) and the tokenizer's EOS
-(`resolve_eos_token_ids`, `src/data/spans.py`). This is required for templates that delimit
+(`resolve_eos_token_ids`, `src/data/turn_markers.py`). This is required for templates that delimit
 turns with role markers instead of a per-turn `<|endoftext|>` — GLM-4 ends an assistant turn with
 `<|user|>` or `<|observation|>` and lists both in `config.eos_token_id`.
 
@@ -243,7 +244,7 @@ substitutes only when the sequence has **no** terminator at all. The padded rout
 a padded row the last position is pad, so a terminator-less turn is masked out entirely.
 
 **One span resolver, three named policies.** Every completion mask locates its spans with
-`resolve_completion_spans` in `src/data/spans.py`, under one of three declared policies:
+`resolve_completion_spans` in `src/data/completion_spans.py`, under one of three declared policies:
 `COLLATOR_SPAN_POLICY` (the padded route, described above), `PACKED_SPAN_POLICY` (the same plus the
 global end-of-sequence fallback the packed and padding-free routes take) and
 `SELF_DISTILL_SPAN_POLICY` (the span starts after the marker and runs to the first terminator
@@ -251,9 +252,9 @@ anywhere after it, falling back per span to the row end).
 
 All three enter it through one preamble, `resolve_spans_or_warn`: it applies the policy and — when
 the marker never matched, or every span closed at `-1` — warns that the sequence trains zero tokens
-and returns the no-span verdict its caller turns into a fully-masked row. Only the refill afterwards
-differs (the container, whether it copies from `input_ids` or `labels`, and the packed routes' EOS
-rescue).
+and returns the no-span verdict, a fully-masked row. One label rule then refills the spans,
+`build_span_labels`: it copies each span from `input_ids` or from `labels` already masked, and
+optionally restores each span's closing token from `input_ids` (the packed route's EOS rescue).
 
 The padded collator, the offline label bake (`prepare_dataset.py`) and the self-distill / VLM label
 builder (`build_completion_only_labels`) share one batch masker on top of it,
@@ -273,5 +274,5 @@ YAML on a raw dataset train the same tokens for a turn whose terminator is missi
 unaffected: the completion-only collators detect turn boundaries in `input_ids`, not `labels`. The
 full-label collators (`DataCollatorWithPacking`, `DataCollatorForCausalLMWithPadding`) restore the
 real EOS from `input_ids` at every real position after the parent collator's value-based masking
-(`restore_eos_labels_when_pad_equals_eos`); offline-precomputed `labels` pass through untouched —
+(`collate_preserving_precomputed_labels`); offline-precomputed `labels` pass through untouched —
 their baked `-100` spans are authoritative.

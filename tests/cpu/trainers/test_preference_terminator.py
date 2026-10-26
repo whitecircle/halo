@@ -13,7 +13,7 @@ Run: pytest tests/cpu/trainers/test_preference_terminator.py
 
 import pytest
 
-from src.data.spans import ends_with_terminator
+from src.data.turn_markers import ends_with_terminator
 
 TERMINATOR = 100
 NEWLINE = 7

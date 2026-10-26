@@ -7,7 +7,7 @@ max_length) Arrow infers that worker's columns as ``null``, and aligning them wi
 workers' real ``list<int64>`` shards raises
 ``TypeError: Couldn't cast array of type list<item: int64> to null`` — crashing the whole map. An
 all-``[]`` sentinel is equally broken (infers ``list<null>``): the sentinel must carry REAL typed
-values, which :func:`create_tokenizer_none_example` guarantees (one-element typed lists,
+values, which :func:`build_rejection_row` guarantees (one-element typed lists,
 ``attention_mask=[0]``), with :func:`is_valid_example` as the shared drop-predicate. A message-list
 column rejects with :func:`blank_conversation` for the same reason, in every column a rejected row
 carries (RLVR's ``conversation`` beside its string ``prompt``). The VLM preprocessing map instead pins
@@ -23,15 +23,11 @@ from datasets import Dataset
 
 from scripts.training.online_grpo.rlvr import build_rlvr_row_fn
 from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import tokenize_dataset, tokenize_vlm_dataset
-from src.data.pipeline.processing import process_dataset_with_map_and_filter
-from src.data.pipeline.row_processors import (
-    blank_conversation,
-    create_llm_processor,
-    create_tokenizer_none_example,
-    is_valid_example,
-)
+from src.data.pipeline.coordinated_map import coordinated_map_and_filter
+from src.data.pipeline.rejected_rows import blank_conversation, build_rejection_row, is_valid_example
+from src.data.pipeline.text_rows import build_chat_row_processor
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.tokenization import tokenize_dataset, tokenize_vlm_dataset
 from tests.common.vlm_fakes import FakeVLMProcessorBase
 
 
@@ -89,7 +85,7 @@ def _chat_dataset(num_over_length: int, num_valid: int, over_words: int, valid_w
 def test_sentinel_is_one_element_typed_row():
     """The sentinel must carry one-element lists of the REAL element type for every tokenizer output
     key — with attention_mask exactly [0] (the drop marker) — never None and never []."""
-    sentinel = create_tokenizer_none_example(_WordTokenizer(), truncation=True, padding=False, max_length=8)
+    sentinel = build_rejection_row(_WordTokenizer(), truncation=True, padding=False, max_length=8)
     assert set(sentinel) == {"input_ids", "attention_mask"}
     assert sentinel["attention_mask"] == [0]
     assert sentinel["input_ids"] == [2]  # first token of the tokenized sample text
@@ -102,7 +98,7 @@ def test_sentinel_batch_infers_real_arrow_types():
     """An ENTIRE writer batch of sentinels must still infer real integer-list Arrow columns — the
     type-stability contract. All-None infers ``null`` and all-[] infers ``list<null>``; both crash
     the cast against real ``list<int64>`` batches from other workers."""
-    sentinel = create_tokenizer_none_example(_WordTokenizer())
+    sentinel = build_rejection_row(_WordTokenizer())
     ds = Dataset.from_list([dict(sentinel) for _ in range(4)])
     for column in ("input_ids", "attention_mask"):
         arrow_type = ds.data.schema.field(column).type
@@ -119,7 +115,7 @@ def test_is_valid_example_predicate():
     the typed all-zero-attention_mask row and the legacy/VLM None row."""
     assert is_valid_example({"input_ids": [1, 2], "attention_mask": [1, 1]})
     assert is_valid_example({"input_ids": [1, 2, 0], "attention_mask": [1, 1, 0]})  # padded real row
-    assert not is_valid_example(create_tokenizer_none_example(_WordTokenizer()))
+    assert not is_valid_example(build_rejection_row(_WordTokenizer()))
     assert not is_valid_example({"input_ids": None, "attention_mask": None})
     # Non-sequence filter fields (prompt-style maps) are judged by content alone.
     assert is_valid_example({"prompt": "hello", "answer": "42"}, filter_field="prompt")
@@ -171,10 +167,10 @@ def test_map_and_filter_survives_all_rejected_writer_batch():
     null`` when the same worker later writes real rows. The typed sentinel keeps every batch's
     schema identical; only the valid rows survive."""
     tokenizer = _WordTokenizer()
-    processor = create_llm_processor(tokenizer, max_length=8, conversation_field="messages")
+    processor = build_chat_row_processor(tokenizer, max_length=8, conversation_field="messages")
     dataset = _chat_dataset(num_over_length=_NUM_REJECTED, num_valid=_NUM_VALID, over_words=32, valid_words=4)
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         dataset,
         processor,
         remove_columns=["messages"],
@@ -189,7 +185,7 @@ def test_map_and_filter_survives_all_rejected_writer_batch():
 
 
 def test_tokenize_dataset_text_mode_survives_all_rejected_writer_batch():
-    """Same writer-batch shape through the preprocessing text path (create_text_processor rejects
+    """Same writer-batch shape through the preprocessing text path (build_text_row_processor rejects
     empty documents): the first worker's first writer batch is entirely rejected, the map must not
     crash and the filter must keep only the real documents."""
     dataset = Dataset.from_dict({"text": [""] * _NUM_REJECTED + ["a few real words here"] * _NUM_VALID})
@@ -225,7 +221,7 @@ def test_map_and_filter_survives_all_rejected_string_writer_batch():
 
     dataset = Dataset.from_dict({"text": [" ".join(["w"] * 32)] * _NUM_REJECTED + ["short prompt"] * _NUM_VALID})
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         dataset,
         process_prompt_row,
         filter_field="prompt",
@@ -259,7 +255,7 @@ def test_map_and_filter_survives_all_rejected_conversation_writer_batch():
         }
     )
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         dataset,
         process_conversation_row,
         filter_field="prompt",
@@ -305,7 +301,7 @@ def test_rlvr_rows_survive_an_all_rejected_writer_batch(content):
         }
     )
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         dataset,
         build_rlvr_row_fn(args, _WordTokenizer()),
         filter_field="prompt",

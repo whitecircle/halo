@@ -28,17 +28,13 @@ from src.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
 from src.data.collators.factory import select_data_collator
 from src.data.collators.tree_packing import DataCollatorWithTreePacking
 from src.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
-from src.data.pipeline.preprocessed_metadata import load_preprocessed_metadata, validate_preprocessing_compatibility
-from src.data.pipeline.processing import (
-    pack_dataset_coordinated,
-    process_dataset_with_map_and_filter,
-    resolve_map_num_proc,
-)
-from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
+from src.data.pipeline.coordinated_map import coordinated_map_and_filter, coordinated_pack, resolve_map_num_proc
+from src.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from src.data.pipeline.tree_rows import prepare_tree_dataset
-from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
+from src.data.pipeline.vlm_rows import prepare_vlm_dataset
+from src.data.preprocessed.metadata import load_preprocessed_metadata, verify_preprocessed_dataset
 from src.data.sources.loading import load_datasets_auto
-from src.data.spans import require_rendered_response_marker, resolve_eos_token_ids
+from src.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
 from src.entrypoints.data_setup import (
     disable_trl_dataset_prep,
     load_script_datasets,
@@ -124,7 +120,7 @@ def _reject_unsupported_tree_packing(args, sft_config, dist_args) -> None:
 
 def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_kwargs):
     """Raw splits to tree rows; ``processor_kwargs`` are the render and map arguments of the flat path."""
-    require_rendered_response_marker(
+    reject_unusable_response_marker(
         tokenizer, args.assistant_message_template, args.train_on_completions_only, "tree packing"
     )
     return prepare_tree_dataset(
@@ -147,7 +143,7 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
     tree_packing = args.tree_packing
     if is_preprocessed:
         metadata = load_preprocessed_metadata(args.dataset)
-        validate_preprocessing_compatibility(
+        verify_preprocessed_dataset(
             metadata,
             required_max_length=sft_config.max_length,
             required_model=model_config.model_name_or_path,
@@ -163,10 +159,10 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
         collator_packing = sft_config.packing
         cache_extras = text_render_kwargs(args)
         common = {"tokenizer": tokenizer, "max_length": sft_config.max_length, **cache_extras}
-        generate_processor = create_llm_processor(**common, add_generation_prompt=True, use_padding=True)
+        generate_processor = build_chat_row_processor(**common, add_generation_prompt=True, use_padding=True)
         map_kwargs = {"num_proc": resolve_map_num_proc(sft_config.dataset_num_proc)}
         # Build the generation set from the raw test split before the train map remaps `ds`.
-        generate_dataset = process_dataset_with_map_and_filter(
+        generate_dataset = coordinated_map_and_filter(
             ds["test"],
             generate_processor,
             desc="Processing generate dataset",
@@ -176,10 +172,10 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
         if tree_packing:
             ds = _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **cache_extras, **map_kwargs)
         else:
-            train_processor = create_llm_processor(
+            train_processor = build_chat_row_processor(
                 **common, add_generation_prompt=False, use_padding=not sft_config.padding_free
             )
-            ds = process_dataset_with_map_and_filter(
+            ds = coordinated_map_and_filter(
                 ds,
                 train_processor,
                 # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
@@ -192,12 +188,12 @@ def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, toke
         _reject_empty_split(train_dataset, "training", sft_config.max_length)
         if sft_config.packing:
             eval_packing = sft_config.eval_packing if sft_config.eval_packing is not None else sft_config.packing
-            train_dataset = pack_dataset_coordinated(
+            train_dataset = coordinated_pack(
                 train_dataset, seq_length=sft_config.max_length, strategy=sft_config.packing_strategy, split="train"
             )
             if eval_packing:
                 _reject_empty_split(eval_dataset, "evaluation", sft_config.max_length)
-                eval_dataset = pack_dataset_coordinated(
+                eval_dataset = coordinated_pack(
                     eval_dataset, seq_length=sft_config.max_length, strategy=sft_config.packing_strategy, split="eval"
                 )
 
@@ -230,7 +226,7 @@ def _prepare_vlm_data(ds, is_preprocessed, args, sft_config, model_config, proce
     (train, eval, generate, collator)."""
     if is_preprocessed:
         metadata = load_preprocessed_metadata(args.dataset)
-        validate_preprocessing_compatibility(
+        verify_preprocessed_dataset(
             metadata,
             required_max_length=sft_config.max_length,
             required_model=model_config.model_name_or_path,

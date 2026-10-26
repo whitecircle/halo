@@ -1,8 +1,5 @@
-"""Dataset-time preparation of preference corpora (DPO, SMPO, reward): row normalization, the
-chat-template map for both sides of a pair, the vision pair's render, and SMPO's row tokenizers.
-
-Batch-time collation of the vision pair is :mod:`src.data.collators.vlm_preference`.
-"""
+"""Dataset-time preparation of preference corpora (DPO, SMPO, reward): row normalization, the chat-template map
+for both sides of a pair, the vision pair's render, and SMPO's row tokenizers."""
 
 from functools import partial
 from typing import Any
@@ -11,28 +8,15 @@ from datasets import Dataset, Features, Sequence, Value
 from datasets import Image as ImageFeature
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
+from src.data.pipeline.chat_render import lacks_emitted_bos
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, reject_image_content
-from src.data.pipeline.processing import DATASET_NUM_PROC, coordinated_map
-from src.data.pipeline.rendered import lacks_emitted_bos
-from src.data.pipeline.row_processors import normalize_vlm_conversation, prepare_generative_row
-from src.data.spans import lacks_terminator
-from src.data.vlm import VLM_RAW_IMAGE_COLUMNS, process_vlm_conversation, render_vlm_text
+from src.data.pipeline.coordinated_map import DATASET_NUM_PROC, coordinated_map
+from src.data.pipeline.text_rows import prepare_generative_row
+from src.data.pipeline.vlm_rows import normalize_vlm_conversation
+from src.data.turn_markers import lacks_terminator
+from src.data.vlm_render import extract_conversation_images, render_vlm_text
+from src.data.vlm_routing import VLM_RAW_IMAGE_COLUMNS
 from src.model_loading.tokenizer_setup import resolve_tokenizer
-
-__all__ = [
-    "MARGIN_COLUMN",
-    "VLM_PREFERENCE_COLUMNS",
-    "apply_chat_template_to_preference_data",
-    "normalize_preference_row",
-    "prepare_preference_datasets",
-    "prepare_generative_dataset",
-    "render_vlm_preference_row",
-    "split_rendered_completion",
-    "split_vlm_preference_row",
-    "tokenize_preference_row",
-    "tokenize_vlm_preference_row",
-    "vlm_preference_features",
-]
 
 # The columns :func:`render_vlm_preference_row` writes and the VLM preference collator consumes.
 VLM_PREFERENCE_COLUMNS = ("chosen_text", "rejected_text", "images")
@@ -42,7 +26,7 @@ MARGIN_COLUMN = "margin"
 
 
 def _shared_message_prefix_len(a: list[dict[str, Any]], b: list[dict[str, Any]]) -> int:
-    """Length of the longest leading span where ``a`` and ``b`` agree on role + content."""
+    """Length of the longest leading span where ``a`` and ``b`` agree on role and content."""
     n = 0
     for x, y in zip(a, b, strict=False):
         if x.get("role") != y.get("role") or x.get("content") != y.get("content"):
@@ -52,12 +36,9 @@ def _shared_message_prefix_len(a: list[dict[str, Any]], b: list[dict[str, Any]])
 
 
 def split_rendered_completion(prompt_text: str, full_text: str, field: str) -> str:
-    """Return ``full_text`` (= template(prompt + completion)) minus its ``prompt_text`` prefix.
-
-    Completions are never rendered standalone: strict templates (Qwen3.5) raise on assistant-only
-    message lists, and the prefix strip guarantees ``prompt_text + completion_text`` reconstructs the
-    full rendered conversation exactly. Raises on templates that break the prefix invariant.
-    """
+    """``full_text`` (``template(prompt + completion)``) minus its ``prompt_text`` prefix, raising on a template
+    that breaks the prefix invariant. A completion never renders alone: strict templates (Qwen3.5) refuse
+    assistant-only message lists."""
     if not full_text.startswith(prompt_text):
         raise ValueError(
             f"Chat template broke the prefix invariant: template(prompt + {field}) does not start "
@@ -68,15 +49,10 @@ def split_rendered_completion(prompt_text: str, full_text: str, field: str) -> s
 
 
 def normalize_preference_row(row: dict[str, Any]) -> dict[str, Any]:
-    """Normalize hub preference shapes to the pipeline contract (prompt = message list,
-    chosen/rejected = continuation-only message lists).
-
-    The three hub shapes: a plain-string ``prompt`` becomes a user turn; chosen/rejected that repeat
-    the prompt turns have that prefix stripped; a missing prompt column (Skywork-Reward style) is
-    extracted as the longest shared leading span of chosen and rejected. Contract-shaped rows pass
-    through. A continuation that ends up empty or not on an assistant turn raises, since that
-    indicates a mis-mapped dataset rather than a shape to infer.
-    """
+    """A hub preference row in the pipeline contract: ``prompt`` a message list, ``chosen``/``rejected``
+    continuation-only message lists. A string prompt becomes a user turn, a repeated prompt prefix is stripped,
+    and a missing prompt (Skywork-Reward style) is the shared leading span; a continuation that is empty or does
+    not end on an assistant turn raises as a mis-mapped dataset."""
     chosen, rejected = row["chosen"], row["rejected"]
     prompt = as_conversation(row.get("prompt"))
 
@@ -105,22 +81,17 @@ def normalize_preference_row(row: dict[str, Any]) -> dict[str, Any]:
 def split_vlm_preference_row(
     features: dict[str, Any], subject: str
 ) -> tuple[list[dict[str, Any]], list, dict[str, list[dict[str, Any]]]]:
-    """One raw VLM ``(prompt, chosen, rejected[, images])`` row to prompt history, images, completions.
-
-    The pre-render step every VLM preference route shares: normalize to the preference contract,
-    merge a raw image column into the prompt conversation, then extract the images back out, leaving
-    the placeholders the processor expands at collation. ``subject`` names the route in the
-    images-in-completion refusal, which confines images to the shared prompt prefix, the only region
-    both sides of a pair render identically.
-    """
+    """One raw VLM ``(prompt, chosen, rejected[, images])`` row to prompt history, images and completions, the
+    pre-render step every VLM preference route shares. Images may sit only in the prompt, the one region both
+    sides render identically; ``subject`` names the route in that refusal."""
     row = normalize_preference_row({key: features[key] for key in ("prompt", "chosen", "rejected") if key in features})
 
     images = next((features[column] for column in VLM_RAW_IMAGE_COLUMNS if features.get(column) is not None), None)
-    prompt_history, pil_images = process_vlm_conversation(normalize_vlm_conversation(row["prompt"], images))
+    prompt_history, pil_images = extract_conversation_images(normalize_vlm_conversation(row["prompt"], images))
 
     completions = {}
     for field in ("chosen", "rejected"):
-        completion_history, completion_images = process_vlm_conversation(row[field])
+        completion_history, completion_images = extract_conversation_images(row[field])
         if completion_images:
             raise ValueError(
                 f"{subject} carries images inside the '{field}' completion — completions must be "
@@ -131,17 +102,9 @@ def split_vlm_preference_row(
 
 
 def vlm_preference_features(dataset: Dataset) -> Features:
-    """Arrow schema for the :func:`render_vlm_preference_row` map output.
-
-    Pinned rather than inferred, for the same reason the SFT VLM map pins its own: shard-wise
-    inference diverges on a mixed dataset (an all-text shard infers ``images`` as ``List(null)``
-    while an image-bearing one infers ``List(Image)``), and a multiprocess map then fails to align
-    the shards. Declaring ``images`` as an ``Image`` sequence is also what makes a mapped row hand
-    back PIL objects instead of the encoded bytes.
-
-    ``margin`` is the only source column the map keeps, so it belongs in the schema exactly when the
-    dataset carries it: a pinned schema must name every column of the mapped table.
-    """
+    """The Arrow schema of :func:`render_vlm_preference_row` rows, pinned like :func:`vlm_map_features` (an
+    all-text shard infers ``images`` as ``List(null)``); the ``Image`` sequence also hands back PIL objects.
+    ``margin``, the one source column the map keeps, is declared exactly when the dataset carries it."""
     chosen, rejected, images = VLM_PREFERENCE_COLUMNS
     features = {chosen: Value("string"), rejected: Value("string"), images: Sequence(ImageFeature())}
     if MARGIN_COLUMN in dataset.column_names:
@@ -150,21 +113,34 @@ def vlm_preference_features(dataset: Dataset) -> Features:
 
 
 def render_vlm_preference_row(features: dict[str, Any], processing_class: ProcessorMixin) -> dict[str, Any]:
-    """Render one raw VLM ``(prompt, chosen, rejected[, images])`` preference row.
-
-    The pre-render step is :func:`split_vlm_preference_row`, shared with the SMPO vision route. Each
-    side is then chat-templated whole: the reward head scores the full sequence, so there is no
-    prompt/completion split to preserve and no prefix-strip invariant to rely on. The render goes
-    through :func:`~src.data.vlm.render_vlm_text`, shared by every VLM path, so a conversation
-    tokenizes identically here and on the SFT path. Pixels never reach the Arrow cache: the images
-    travel as PIL objects and the patch geometry is a property of the processor call.
-    """
+    """Render one raw VLM preference row for the reward head, each side chat-templated whole through
+    :func:`render_vlm_text`; the images travel as PIL objects, so no pixels reach the Arrow cache."""
     prompt_history, pil_images, completions = split_vlm_preference_row(features, "VLM preference row")
     rendered = {
         f"{field}_text": render_vlm_text(processing_class, prompt_history + history)
         for field, history in completions.items()
     }
     return {**rendered, "images": pil_images}
+
+
+def _aligned_prompt_split(prompt_ids: list[int], full_chosen_ids: list[int], full_rejected_ids: list[int]) -> int:
+    """Where the prompt ends in both full sequences: one token earlier when a boundary merge shifted it on either
+    side, so the trainer's verbatim ``prompt ⧺ completion`` never duplicates the merged token and both sides
+    condition on one prompt."""
+    split = len(prompt_ids)
+    if full_chosen_ids[:split] != prompt_ids or full_rejected_ids[:split] != prompt_ids:
+        # Exact on the non-merging side too: its first split - 1 tokens still match the prompt.
+        split -= 1
+    return split
+
+
+def _truncate_keep_eos(ids: list[int], max_length: int, eos_id: int | None) -> list[int]:
+    """``ids`` capped at ``max_length``, keeping their final EOS so the model still learns to stop."""
+    if len(ids) <= max_length:
+        return ids
+    if eos_id is None:
+        return ids[:max_length]
+    return ids[: max_length - 1] + [eos_id]
 
 
 def tokenize_preference_row(
@@ -176,37 +152,17 @@ def tokenize_preference_row(
     truncation_mode: str,
     eos_token_ids: frozenset[int] = frozenset(),
 ) -> dict[str, list[int]]:
-    """Tokenize one (prompt, chosen, rejected) example.
-
-    Tokenizes full prompt+completion sequences to handle boundary token-merging correctly.
-    """
+    """Tokenize one rendered (prompt, chosen, rejected) example from its full prompt+completion sequences, so a
+    token merged across the boundary splits the same way on both sides."""
     prompt = features["prompt"]
-    chosen = features["chosen"]
-    rejected = features["rejected"]
+    prompt_ids = processing_class(prompt, add_special_tokens=False)["input_ids"]
+    full_chosen = processing_class(prompt + features["chosen"], add_special_tokens=False)["input_ids"]
+    full_rejected = processing_class(prompt + features["rejected"], add_special_tokens=False)["input_ids"]
+    split = _aligned_prompt_split(prompt_ids, full_chosen, full_rejected)
+    prompt_ids, chosen_input_ids, rejected_input_ids = prompt_ids[:split], full_chosen[split:], full_rejected[split:]
 
-    prompt_tokens = processing_class(prompt, add_special_tokens=False)["input_ids"]
-
-    full_chosen = processing_class(prompt + chosen, add_special_tokens=False)
-    full_rejected = processing_class(prompt + rejected, add_special_tokens=False)
-
-    # Token merging at the prompt/completion boundary shifts the split point by one. The prompt must
-    # move with it: the trainer concatenates prompt_input_ids ⧺ completion_input_ids verbatim, so
-    # keeping the full prompt while the completion starts one token earlier duplicates the boundary
-    # token. The split must be the same for both completions — they share one prompt field, and a
-    # per-side split would condition chosen and rejected on different contexts, making the margin a
-    # comparison between two different prompts.
-    split = len(prompt_tokens)
-    if full_chosen["input_ids"][:split] != prompt_tokens or full_rejected["input_ids"][:split] != prompt_tokens:
-        # full_*[: split - 1] == prompt_tokens[: split - 1] holds on the non-merging side too, so
-        # rolling both back stays exact there.
-        split -= 1
-        prompt_tokens = prompt_tokens[:split]
-
-    chosen_input_ids = full_chosen["input_ids"][split:]
-    rejected_input_ids = full_rejected["input_ids"][split:]
-
-    if lacks_emitted_bos(prompt_tokens, processing_class):
-        prompt_tokens = [processing_class.bos_token_id] + prompt_tokens
+    if lacks_emitted_bos(prompt_ids, processing_class):
+        prompt_ids = [processing_class.bos_token_id] + prompt_ids
 
     # A spurious ender would sit inside the mean log-prob the SMPO margin is computed from.
     eos_id = processing_class.eos_token_id
@@ -215,26 +171,16 @@ def tokenize_preference_row(
     if lacks_terminator(rejected_input_ids, processing_class, eos_token_ids):
         rejected_input_ids = rejected_input_ids + [eos_id]
 
-    if max_prompt_length and len(prompt_tokens) > max_prompt_length:
-        if truncation_mode == "keep_start":
-            prompt_tokens = prompt_tokens[:max_prompt_length]
-        else:  # keep_end
-            prompt_tokens = prompt_tokens[-max_prompt_length:]
+    if max_prompt_length and len(prompt_ids) > max_prompt_length:
+        keep_start = truncation_mode == "keep_start"
+        prompt_ids = prompt_ids[:max_prompt_length] if keep_start else prompt_ids[-max_prompt_length:]
 
     if max_completion_length:
-        # A plain tail slice would cut the EOS appended above, so the model never learns to stop there.
-        def _truncate_keep_eos(ids: list[int]) -> list[int]:
-            if len(ids) <= max_completion_length:
-                return ids
-            if eos_id is None:
-                return ids[:max_completion_length]
-            return ids[: max_completion_length - 1] + [eos_id]
-
-        chosen_input_ids = _truncate_keep_eos(chosen_input_ids)
-        rejected_input_ids = _truncate_keep_eos(rejected_input_ids)
+        chosen_input_ids = _truncate_keep_eos(chosen_input_ids, max_completion_length, eos_id)
+        rejected_input_ids = _truncate_keep_eos(rejected_input_ids, max_completion_length, eos_id)
 
     return {
-        "prompt_input_ids": prompt_tokens,
+        "prompt_input_ids": prompt_ids,
         "chosen_input_ids": chosen_input_ids,
         "rejected_input_ids": rejected_input_ids,
     }
@@ -249,15 +195,9 @@ def tokenize_vlm_preference_row(
     truncation_mode: str,
     eos_token_ids: frozenset[int] = frozenset(),
 ) -> dict[str, Any]:
-    """Prepare one raw VLM (prompt, chosen, rejected [, images]) example.
-
-    The pre-render half is :func:`split_vlm_preference_row`, shared with the VLM reward map.
-    Completions are then rendered by the same prefix-strip invariant as the text pipeline
-    (``template(prompt + completion)`` minus ``template(prompt)``) and tokenized through
-    :func:`tokenize_preference_row`, so boundary merges, EOS appending and truncation stay
-    byte-identical to it. The prompt stays text + PIL images; the collator expands placeholders per
-    batch.
-    """
+    """Prepare one raw VLM (prompt, chosen, rejected[, images]) example for SMPO: completions split off by the
+    text pipeline's prefix strip and tokenized through :func:`tokenize_preference_row`; the prompt stays text plus
+    PIL images for the collator to expand."""
     tokenizer = resolve_tokenizer(processing_class)
     prompt_history, pil_images, completions = split_vlm_preference_row(features, "VLM SMPO row")
 
@@ -283,24 +223,17 @@ def tokenize_vlm_preference_row(
     }
 
 
-def apply_chat_template_to_preference_data(
+def render_preference_row(
     row: dict[str, Any],
     tokenizer: PreTrainedTokenizer,
     tools_field: str | None = None,
 ) -> dict[str, str]:
-    """Apply the chat template to the prompt/chosen/rejected fields.
-
-    Rows are normalized first (:func:`normalize_preference_row`). Completions render as
-    ``template(prompt + completion)`` minus the rendered-prompt prefix, never standalone: strict
-    templates raise on assistant-only message lists, and the prefix strip is what makes
-    ``prompt_text + completion_text`` reconstruct the conversation the trainers tokenize.
-    ``tools_field`` (list of dicts or JSON string) is forwarded into apply_chat_template.
-    """
+    """Chat-template a normalized preference row's prompt, then each completion as ``template(prompt +
+    completion)`` minus the rendered prompt (:func:`split_rendered_completion`); ``tools_field`` reaches the
+    template."""
     row = normalize_preference_row(row)
 
-    # An image-carrying preference dataset belongs on TRL's vision path. DPO declares no
-    # conversation_field, so its run-intent dispatch reads the image columns only and an
-    # embedded-image row reaches here undetected.
+    # DPO's run-intent dispatch reads image columns only, so an embedded-image row reaches here undetected.
     for field in ("prompt", "chosen", "rejected"):
         reject_image_content(row[field], f"preference field '{field}'")
 
@@ -323,37 +256,19 @@ def prepare_preference_datasets(
     tools_field: str | None = None,
 ):
     """Apply chat templates to train and eval preference datasets; returns (train, eval)."""
-    process_fn = partial(
-        apply_chat_template_to_preference_data,
-        tokenizer=tokenizer,
-        tools_field=tools_field,
-    )
-
+    process_fn = partial(render_preference_row, tokenizer=tokenizer, tools_field=tools_field)
     train_dataset = coordinated_map(
-        train_dataset,
-        process_fn,
-        desc="Applying chat template to train dataset",
-        num_proc=num_proc,
+        train_dataset, process_fn, desc="Applying chat template to train dataset", num_proc=num_proc
     )
-
     eval_dataset = coordinated_map(
-        eval_dataset,
-        process_fn,
-        desc="Applying chat template to eval dataset",
-        num_proc=num_proc,
+        eval_dataset, process_fn, desc="Applying chat template to eval dataset", num_proc=num_proc
     )
-
     return train_dataset, eval_dataset
 
 
 def _normalized_generative_row(row, tokenizer, max_length, tools_field=None):
-    """A raw preference row to a tokenized generation prompt, through the contract normalizer.
-
-    ``prepare_generative_row`` templates ``row["prompt"]`` as a message list, but the raw test split
-    still carries the hub shapes, so a string prompt would fail inside the chat template. The
-    normalization is applied here rather than inside that helper, which is family-generic (offline
-    GRPO maps it over rows with no chosen/rejected). Module-level so ``num_proc`` maps can pickle it.
-    """
+    """A raw preference row to a tokenized generation prompt: normalized first, since the raw test split still
+    carries hub shapes :func:`prepare_generative_row` (also offline GRPO's) cannot template."""
     return prepare_generative_row(
         normalize_preference_row(row), tokenizer=tokenizer, max_length=max_length, tools_field=tools_field
     )

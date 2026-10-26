@@ -149,7 +149,7 @@ parallelism mistakes in a minute.
 ## Pre-training and from-scratch
 
 Continued pre-training on raw text uses the same trainer. Prepare the corpus once with
-`halo run prepare-dataset --mode text --text-field text --pack-sequences ...`, which tokenizes documents
+`halo run prepare-dataset --mode text --text_field text --pack_sequences ...`, which tokenizes documents
 without a chat template and appends an EOS to each. Then point `dataset` at the result. The config must
 set `train_on_completions_only: false` and the exact `max_length` the preparation used, or startup
 raises.

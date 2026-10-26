@@ -1,26 +1,14 @@
 #!/usr/bin/env python
-"""Offline SFT dataset preparation: tokenize, optionally pack, optionally shard, then publish.
+"""Offline SFT dataset preparation: tokenize, optionally pack, optionally shard, then publish to S3, the Hub or a
+local path, so training skips tokenization at startup. The flags are :class:`PreprocessingConfig`'s fields plus
+:class:`PrepareDatasetArguments`'s, and a YAML file of them works as the first argument."""
 
-Reads from S3 / HuggingFace Hub / a local path and writes back to S3 or the Hub, so training skips
-tokenization at startup (``sft.py`` loads the result directly). ``--vlm`` runs the processor path
-(pixel_values + image_grid_thw); packing is text-only. Other methods (DPO, SMPO, GRPO) use different
-data formats and are not handled here.
-
-Usage:
-    python scripts/before_training/prepare_dataset.py \\
-        --input "s3://bucket/raw/my_dataset" --output "s3://bucket/preprocessed/my_dataset" \\
-        --model-name "Qwen/Qwen3-8B" --max-length 8192 \\
-        --assistant-message-template $'<|im_start|>assistant\\n' \\
-        [--pack-sequences | --vlm] [--test-size 0.01] [--num-shards 64]
-"""
-
-import argparse
 import contextlib
-import dataclasses
 import os
 import shutil
 import sys
 import tempfile
+from dataclasses import dataclass, field
 
 from accelerate import PartialState
 from accelerate.logging import get_logger
@@ -31,14 +19,15 @@ from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTok
 
 from scripts.cli_arguments import add_trust_remote_code_arg
 from src.checkpoint.atomic import DISPLACED_SUFFIX, clear_staging_path
-from src.data.pipeline.preprocessed_metadata import PACKING_STRATEGIES, PREPROCESSING_MODES, PreprocessingConfig
-from src.data.pipeline.preprocessing import preprocess_dataset
-from src.data.pipeline.processing import require_render_column, resolve_map_num_proc
+from src.configs.parser import HaloArgumentParser
+from src.data.pipeline.coordinated_map import resolve_map_num_proc
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.preparation import preprocess_dataset
+from src.data.render_columns import reject_missing_render_column
 from src.data.sources.loading import load_dataset_from_source
 from src.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_dataset_destination, parse_s3_uri
 from src.data.sources.s3_client import S3Client
 from src.log import configure_cli_logging
-from src.model_loading.tokenizer_backend import TOKENIZER_BACKENDS
 from src.model_loading.tokenizer_setup import (
     adopt_tokenizer_chat_template,
     load_chat_template,
@@ -51,311 +40,65 @@ from src.models.segment_markers import reject_compressed_kv_rows
 # and ``configure_cli_logging`` in main() attaches the handler those records reach.
 logger = get_logger(__name__, log_level="INFO")
 
-# Fixed so --test-size cuts the same split on every re-run: the assignment is baked into the
+# Fixed so --test_size cuts the same split on every re-run: the assignment is baked into the
 # published artifact, and a re-preparation that reshuffled it would no longer match.
 _SPLIT_SEED = 42
 
-# A flag recorded one-to-one into a PreprocessingConfig field takes a set default from the field.
-_CONFIG_DEFAULTS = {field.name: field.default for field in dataclasses.fields(PreprocessingConfig)}
+
+@dataclass
+class PrepareDatasetArguments:
+    """The tool's own flags; the bake's are :class:`PreprocessingConfig`'s."""
+
+    input: str = field(metadata={"help": "Input dataset: an S3 URI, a Hub ID or a local path."})
+    output: str = field(metadata={"help": "Destination: an S3 URI, hf://org/name or a local path."})
+    test_size: float | None = field(
+        default=None, metadata={"help": "Fraction of a single-split input held out as the test split."}
+    )
+    private: bool = field(default=False, metadata={"help": "Make a Hub dataset private."})
+    hf_token: str | None = field(
+        default=None, metadata={"help": "Token for the hf:// upload; the loads use the ambient login."}
+    )
+    overwrite: bool = field(default=False, metadata={"help": "Replace an existing output."})
+    dry_run: bool = field(default=False, metadata={"help": "Show what would be done without processing."})
+    verbose: bool = field(default=False, metadata={"help": "Log at DEBUG."})
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Preprocess dataset for efficient training",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-
-    parser.add_argument(
-        "--input",
-        "-i",
-        required=True,
-        help="Input dataset path (S3 URI, HF Hub ID, or local path)",
-    )
-    parser.add_argument(
-        "--output",
-        "-o",
-        required=True,
-        help="Output path (S3 URI 's3://...', HF Hub 'hf://org/name', or local path)",
-    )
-
-    parser.add_argument(
-        "--model-name",
-        "-m",
-        required=True,
-        help="Model checkpoint (name or path): its tokenizer, and its config.json for the "
-        "completion-only mask's turn terminators",
-    )
-    parser.add_argument(
-        "--max-length",
-        type=int,
-        default=_CONFIG_DEFAULTS["max_length"],
-        help="Maximum tokenized sequence length; over-length conversations are dropped, not "
-        "truncated (default: %(default)s). Stamped into the dataset metadata and re-checked against "
-        "the training config's max_length at load. No model is loaded here, so it cannot resolve to a "
-        "context window — pass it explicitly.",
-    )
-    add_trust_remote_code_arg(parser)
-
-    parser.add_argument(
-        "--mode",
-        default=_CONFIG_DEFAULTS["mode"],
-        choices=PREPROCESSING_MODES,
-        help="Tokenization mode: 'chat' (apply chat template to the conversation "
-        "field, for SFT) or 'text' (raw-text causal-LM for (continued) "
-        "pretraining — tokenize --text-field directly, append EOS per document). "
-        "Default: %(default)s.",
-    )
-    parser.add_argument(
-        "--text-field",
-        default=_CONFIG_DEFAULTS["text_field"],
-        help="(mode=text) dataset column holding the raw text (default: %(default)s).",
-    )
-    parser.add_argument(
-        "--no-append-eos",
-        action="store_true",
-        help="(mode=text) do NOT append EOS to each document before packing "
-        "(by default an EOS is appended to preserve document boundaries).",
-    )
-    parser.add_argument(
-        "--conversation-field",
-        default=_CONFIG_DEFAULTS["conversation_field"],
-        help="Name of conversation field in dataset (default: %(default)s — the documented SFT shape "
-        "and the training-side default; a value disagreeing with the training config is rejected at "
-        "training startup)",
-    )
-    parser.add_argument(
-        "--system-prompt",
-        default=None,
-        help="System prompt to prepend to conversations",
-    )
-    parser.add_argument(
-        "--tools-field",
-        default=None,
-        help="Dataset field holding a tool list (list of dicts or JSON string) forwarded into "
-        "apply_chat_template — must match the tools_field used at training time",
-    )
-    parser.add_argument(
-        "--interleaved-thinking",
-        action="store_true",
-        help="Keep thinking blocks in non-final assistant turns (clear_thinking=False), matching the "
-        "live training path's interleaved_thinking flag. Only meaningful for templates with a "
-        "clear_thinking switch (GLM family); rejected with --vlm",
-    )
-    parser.add_argument(
-        "--no-system-role",
-        action="store_true",
-        help="Model doesn't support system role (merge with first user message)",
-    )
-
-    parser.add_argument(
-        "--train-on-completions-only",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Mask user turns, training only on assistant responses. Unset resolves per --mode: on "
-        "for chat (matching the training-side default — the labels are baked here and training "
-        "refuses a dataset whose masking disagrees with its config), off for text, which renders no "
-        "chat template and rejects the setting outright. On requires --assistant-message-template; "
-        "pass --no-train-on-completions-only to bake full-sequence labels instead",
-    )
-    parser.add_argument(
-        "--assistant-message-template",
-        default=None,
-        help="Template marking start of assistant response (e.g., '<|im_start|>assistant\\n')",
-    )
-
-    parser.add_argument(
-        "--pack-sequences",
-        action="store_true",
-        help="Pack sequences together for efficient training (text SFT only, not VLM)",
-    )
-    parser.add_argument(
-        "--packing-strategy",
-        default=_CONFIG_DEFAULTS["packing_strategy"],
-        choices=PACKING_STRATEGIES,
-        help="TRL packing strategy: 'bfd' (best-fit-decreasing, keeps document boundaries but "
-        "DISCARDS the overflow past --max-length), 'bfd_split' (same packing, overflow split into "
-        "later examples — the lossless choice for pre-training), or 'wrapped' (concatenate-and-chunk "
-        "across boundaries). Default: %(default)s.",
-    )
-
-    parser.add_argument(
-        "--vlm",
-        action="store_true",
-        help="Enable VLM (Vision-Language Model) preprocessing mode",
-    )
-    parser.add_argument(
-        "--images-field",
-        default=None,
-        help="(--vlm) dataset column holding the row's image(s), for datasets that keep them OUTSIDE "
-        "the conversation (the hub VLM shape: FineVision / the_cauldron / Docmatix). Merged into the "
-        "message content exactly as the runtime VLM path does — filling the conversation's image "
-        "placeholders in order, else prepended to the first user turn. Omit for datasets that embed "
-        "their images in the conversation; an image column named by nothing is refused",
-    )
-    parser.add_argument(
-        "--min-pixels",
-        type=int,
-        default=None,
-        help="Minimum pixels for VLM image processing",
-    )
-    parser.add_argument(
-        "--max-pixels",
-        type=int,
-        default=None,
-        help="Maximum pixels for VLM image processing",
-    )
-
-    parser.add_argument(
-        "--num-shards",
-        type=int,
-        default=_CONFIG_DEFAULTS["num_shards"],
-        help="Number of shards to create (default: %(default)s = unsharded: every rank loads the dataset whole "
-        "and the DataLoader splits it, at any data-parallel size). Above 1 each rank loads only its own "
-        "shards, which needs >= data_parallel_size shards and a test split",
-    )
-
-    parser.add_argument(
-        "--num-proc",
-        type=int,
-        default=None,
-        help="Processes for dataset processing (default: HALO_DATASET_NUM_PROC).",
-    )
-    parser.add_argument(
-        "--tokenizer-backend",
-        default=_CONFIG_DEFAULTS["tokenizer_backend"],
-        choices=list(TOKENIZER_BACKENDS),
-        help="Text→ids backend: 'hf' or 'gigatoken' (optional extra; token IDs verified identical at "
-        "startup). Default: %(default)s.",
-    )
-    parser.add_argument(
-        "--test-size",
-        type=float,
-        default=None,
-        help="Create test split with this fraction (e.g., 0.01)",
-    )
-
-    # Recorded into metadata.json: each of these changes the ids that get baked, so the training-side
-    # compatibility check needs them.
-    parser.add_argument(
-        "--pad-token",
-        default=None,
-        help="Override pad token (recorded in metadata.json and re-checked at training time)",
-    )
-    parser.add_argument(
-        "--eos-token",
-        default=None,
-        help="Override EOS token — moves the completion-mask boundaries, so it is recorded in "
-        "metadata.json and re-checked at training time",
-    )
-    parser.add_argument(
-        "--bos-token",
-        default=None,
-        help="Override BOS token (recorded in metadata.json and re-checked at training time)",
-    )
-    parser.add_argument(
-        "--chat-template",
-        default=None,
-        help="Override chat template: a Jinja2 string, or a path to a .jinja/.jinja2/.j2 file. The "
-        "RESOLVED template text is recorded in metadata.json and re-checked at training time",
-    )
-
-    parser.add_argument(
-        "--private",
-        action="store_true",
-        help="Make HuggingFace Hub dataset private",
-    )
-    parser.add_argument(
-        "--hf-token",
-        default=None,
-        help="HuggingFace token for the hf:// upload (default: the ambient login). The input and "
-        "tokenizer loads always use the ambient credentials (HF_TOKEN / huggingface-cli login)",
-    )
-
-    parser.add_argument(
-        "--overwrite",
-        action="store_true",
-        help="Overwrite existing output",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be done without processing",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Verbose output",
-    )
-
-    args = parser.parse_args()
-    args.train_on_completions_only = resolve_train_on_completions_only(args)
-    return args
+def parse_args() -> tuple[PrepareDatasetArguments, PreprocessingConfig]:
+    """The tool's arguments and the bake's config, built before anything is fetched. Where the tool's defaults
+    differ from the config's: completion masking follows the mode as training does (on for chat, while text
+    refuses it), the model's own code is trusted, and the worker count and chat template are recorded resolved."""
+    parser = add_trust_remote_code_arg(HaloArgumentParser((PrepareDatasetArguments, PreprocessingConfig)))
+    # The field's dashed alias outlives the canonical flag's takeover of its name, so it takes the default too.
+    parser.set_defaults(trust_remote_code=True, train_on_completions_only=None)
+    values = parser.load_values()
+    values.setdefault("trust_remote_code", parser.get_default("trust_remote_code"))
+    values.setdefault("train_on_completions_only", values.get("mode", PreprocessingConfig.mode) == "chat")
+    values["num_proc"] = resolve_map_num_proc(values.get("num_proc"))
+    if values.get("chat_template"):
+        values["chat_template"] = load_chat_template(values["chat_template"])
+    return parser.parse_dict(values)
 
 
-def resolve_train_on_completions_only(args) -> bool:
-    """Whether to bake completion-only labels, resolving an untouched flag against ``--mode``.
-
-    Chat mode masks by default, matching the training side, which refuses a dataset whose baked
-    masking disagrees with its config. Text mode does not: it renders no chat template, so
-    ``PreprocessingConfig`` rejects the setting as inapplicable, and a flat default-on would make
-    every documented raw-text pre-training invocation exit on a flag its user never passed. An
-    explicit flag is honored as given, so asking for masking in text mode still raises.
-    """
-    if args.train_on_completions_only is not None:
-        return args.train_on_completions_only
-    return args.mode == "chat"
-
-
-def reject_unbuildable_masking(args) -> None:
-    """Refuse completion-only masking with no response marker, before anything is loaded.
-
-    ``PreprocessingConfig`` enforces the same pair, but only once the input dataset is in hand, which
-    can be minutes of S3 download before a two-flag mistake is reported. The labels are baked into the
-    artifact here, so no later stage could supply the marker.
-    """
-    if args.train_on_completions_only and not args.assistant_message_template:
-        raise ValueError(
-            "--train-on-completions-only (on by default in --mode chat, matching the training-side "
-            "default) requires --assistant-message-template: the response marker your model's chat "
-            "template renders, e.g. '<|im_start|>assistant\\n'. The completion-only labels are baked "
-            "into the dataset here, so the marker cannot be supplied later. Pass it, or pass "
-            "--no-train-on-completions-only to bake full-sequence labels instead."
-        )
-
-
-def apply_tokenizer_overrides(tokenizer, args) -> None:
-    """Apply the CLI's pad/eos/bos/chat-template overrides, then guarantee a pad token.
-
-    Shared by the plain-tokenizer and VLM-processor paths so a tokenized dataset carries the same
-    special tokens either way; a pad/eos mismatch changes what the collator masks. The same overrides
-    are recorded in the ``PreprocessingConfig`` that ``main`` builds, which lets training verify the
-    run's tokenizer matches the one that baked the rows.
-    """
-    if args.pad_token:
-        tokenizer.pad_token = args.pad_token
-    if args.eos_token:
-        tokenizer.eos_token = args.eos_token
-    if args.bos_token:
-        tokenizer.bos_token = args.bos_token
-    if args.chat_template:
-        set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
+def apply_tokenizer_overrides(tokenizer, config: PreprocessingConfig) -> None:
+    """Apply the config's recorded pad/eos/bos/chat-template overrides, then guarantee a pad token; the tokenizer
+    and processor paths share it, so an artifact carries the same special tokens either way."""
+    if config.pad_token:
+        tokenizer.pad_token = config.pad_token
+    if config.eos_token:
+        tokenizer.eos_token = config.eos_token
+    if config.bos_token:
+        tokenizer.bos_token = config.bos_token
+    if config.chat_template:
+        set_run_chat_template(tokenizer, config.chat_template)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
 
-def setup_tokenizer(args) -> PreTrainedTokenizer:
-    """Load and configure tokenizer."""
-    logger.info(f"Loading tokenizer from {args.model_name}")
-
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name,
-        trust_remote_code=args.trust_remote_code,
-    )
-
-    apply_tokenizer_overrides(tokenizer, args)
+def setup_tokenizer(config: PreprocessingConfig) -> PreTrainedTokenizer:
+    logger.info(f"Loading tokenizer from {config.model_name_or_path}")
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
+    apply_tokenizer_overrides(tokenizer, config)
 
     logger.info(f"Tokenizer vocab size: {len(tokenizer)}")
     logger.info(f"Pad token: {tokenizer.pad_token}")
@@ -364,22 +107,16 @@ def setup_tokenizer(args) -> PreTrainedTokenizer:
     return tokenizer
 
 
-def setup_vlm_processor(args):
-    """Load and configure VLM processor."""
-    logger.info(f"Loading VLM processor from {args.model_name}")
-
-    processor_kwargs = {"trust_remote_code": args.trust_remote_code}
-
-    if args.min_pixels is not None:
-        processor_kwargs["min_pixels"] = args.min_pixels
-    if args.max_pixels is not None:
-        processor_kwargs["max_pixels"] = args.max_pixels
-
-    processor = AutoProcessor.from_pretrained(args.model_name, **processor_kwargs)
-
+def setup_vlm_processor(config: PreprocessingConfig):
+    logger.info(f"Loading VLM processor from {config.model_name_or_path}")
+    processor_kwargs = {"trust_remote_code": config.trust_remote_code}
+    if config.min_pixels is not None:
+        processor_kwargs["min_pixels"] = config.min_pixels
+    if config.max_pixels is not None:
+        processor_kwargs["max_pixels"] = config.max_pixels
+    processor = AutoProcessor.from_pretrained(config.model_name_or_path, **processor_kwargs)
     tokenizer = resolve_tokenizer(processor)
-
-    apply_tokenizer_overrides(tokenizer, args)
+    apply_tokenizer_overrides(tokenizer, config)
     adopt_tokenizer_chat_template(processor)
 
     logger.info(f"VLM processor type: {type(processor).__name__}")
@@ -388,8 +125,8 @@ def setup_vlm_processor(args):
     return processor
 
 
-def load_input_dataset(args) -> DatasetDict:
-    """Load input dataset from any source."""
+def load_input_dataset(args: PrepareDatasetArguments) -> DatasetDict:
+    """The input as a DatasetDict with a ``train`` split, its test split cut by ``test_size`` when set."""
     logger.info(f"Loading dataset from {args.input}")
 
     dataset = load_dataset_from_source(args.input)
@@ -410,11 +147,11 @@ def load_input_dataset(args) -> DatasetDict:
         )
     elif args.test_size:
         # A local file, a save_to_disk dir or a split-less Hub id loads as a DatasetDict, the most
-        # common input form. Splitting only the bare-Dataset case would drop --test-size.
+        # common input form. Splitting only the bare-Dataset case would drop --test_size.
         held_out = [name for name in EVAL_SPLIT_NAMES if name in dataset]
         if held_out:
             raise ValueError(
-                f"--test-size was given but {args.input} already carries an eval split ({held_out}). "
+                f"--test_size was given but {args.input} already carries an eval split ({held_out}). "
                 "Drop the flag, or point --input at the train split alone."
             )
         logger.info(f"Creating train/test split with test_size={args.test_size}")
@@ -429,21 +166,13 @@ def load_input_dataset(args) -> DatasetDict:
 
 
 def require_declared_columns(dataset: DatasetDict, config: PreprocessingConfig, source: str) -> None:
-    """Refuse a column flag naming no column of the splits the artifact bakes, before the tokenization
-    map reads it.
-
-    Takes the built ``config``, which has already refused a flag its mode does not read, so only the
-    columns this run consumes are checked. Unchecked, a missing conversation or text column dies as a
-    bare ``KeyError`` in a map worker, and a missing tools or images column bakes every row without it.
-    """
-    rendered = (
-        ("--text-field", config.text_field)
-        if config.mode == "text"
-        else ("--conversation-field", config.conversation_field)
-    )
-    for flag, column in (rendered, ("--tools-field", config.tools_field), ("--images-field", config.images_field)):
+    """Refuse a column knob of this mode naming no column of the splits the artifact bakes, before a map worker
+    dies on it with a bare ``KeyError`` or a tools or images column is silently left out."""
+    rendered = "text_field" if config.mode == "text" else "conversation_field"
+    for knob in (rendered, "tools_field", "images_field"):
+        column = getattr(config, knob)
         if column:
-            require_render_column(dataset, source, flag, column)
+            reject_missing_render_column(dataset, source, knob, column)
 
 
 def save_to_s3(output_dir: str, s3_uri: str, overwrite: bool = False):
@@ -463,14 +192,8 @@ def save_to_s3(output_dir: str, s3_uri: str, overwrite: bool = False):
 
 
 def save_to_local(output_dir: str, dest: str, overwrite: bool = False):
-    """Publish the staged dataset to a local path, replacing an existing one only on a complete copy.
-
-    Copy into a sibling staging directory first, then swap (:func:`clear_staging_path`, the shared
-    staged-publish contract). An ``--overwrite`` run that removed the old directory up front and died
-    mid-copy would destroy the only copy, leaving a partial tree whose ``metadata.json`` still makes
-    ``is_preprocessed_dataset`` accept it, so training would run on a truncated dataset. Recovery is
-    from the rotated previous dataset, so the staging copy is the one discarded on failure.
-    """
+    """Publish the staged dataset to a local path through a sibling copy swapped in whole: removing the old one
+    first, a run dying mid-copy would leave a partial tree whose ``metadata.json`` still reads as preprocessed."""
     dest = os.path.abspath(dest)
     if os.path.exists(dest) and not overwrite:
         raise FileExistsError(f"Output path already exists: {dest}. Use --overwrite to replace.")
@@ -485,8 +208,7 @@ def save_to_local(output_dir: str, dest: str, overwrite: bool = False):
         try:
             os.rename(staged, dest)
         except OSError:
-            # Both renames are within one directory, so this is unlikely, but leaving the destination
-            # missing while the old dataset sits under a scratch name is the outcome this guards.
+            # Never leave the destination missing while the old dataset sits under a scratch name.
             if rotated:
                 os.rename(previous, dest)
             raise
@@ -503,25 +225,18 @@ def save_to_hf_hub(
     token: str | None = None,
     overwrite: bool = False,
 ):
-    """Upload preprocessed dataset to HuggingFace Hub."""
+    """Upload the staged dataset to the Hub, ``metadata.json`` (the completion marker) cleared first and uploaded
+    last, so an interrupted upload reads as raw rather than as a truncated preprocessed dataset."""
     logger.info(f"Uploading to HuggingFace Hub: {repo_id}")
 
     api = HfApi(token=token)
 
-    # Same refusal the s3 and local writers make: upload_folder overwrites unconditionally, so without
-    # this an existing Hub dataset would be replaced by a run that never asked to replace it.
+    # upload_folder overwrites unconditionally.
     if not overwrite and api.repo_exists(repo_id, repo_type="dataset"):
         raise FileExistsError(f"Dataset already exists at hf://{repo_id}. Use --overwrite to replace.")
 
-    # No blanket catch: ``exist_ok=True`` already absorbs the benign failure (the repo already
-    # exists), so anything else (a bad token, no write scope, an invalid repo id) is a failure the
-    # upload below cannot recover from, and catching it here would obscure the cause.
     api.create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True)
 
-    # metadata.json is the completion marker `is_preprocessed_dataset` keys on, so it is cleared first
-    # and re-uploaded last: the repo never carries a metadata.json beside a payload mixing the old
-    # dataset with a partly-uploaded new one. A run that dies mid-upload leaves a repo that reads as
-    # raw rather than as a truncated preprocessed one.
     with contextlib.suppress(EntryNotFoundError, RepositoryNotFoundError):
         api.delete_file(METADATA_FILE, repo_id=repo_id, repo_type="dataset")
 
@@ -542,7 +257,7 @@ def save_to_hf_hub(
 
 
 def main():
-    args = parse_args()
+    args, config = parse_args()
     configure_cli_logging(verbose=args.verbose)
 
     # The shared data-loading helpers log through the accelerate logger, which raises unless the
@@ -559,71 +274,28 @@ def main():
     # Output-side classification: a bare "org/name" stays local; only an explicit hf:// uploads.
     output_type, _, output_key = parse_dataset_destination(args.output)
 
-    if args.vlm and args.pack_sequences:
-        logger.error("Packing is not supported for VLM datasets. Remove --pack-sequences.")
-        sys.exit(1)
+    if config.pack_sequences:
+        hf_config = AutoConfig.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
+        reject_compressed_kv_rows(hf_config, "--pack_sequences")
 
-    # PreprocessingConfig enforces this pair too, but only once the input dataset is downloaded.
-    if args.images_field and not args.vlm:
-        logger.error("--images-field only applies to VLM preprocessing. Add --vlm, or drop the flag.")
-        sys.exit(1)
-
-    # Before the input dataset is fetched: the config that owns this pair is only built afterwards.
-    reject_unbuildable_masking(args)
-    if args.pack_sequences:
-        hf_config = AutoConfig.from_pretrained(args.model_name, trust_remote_code=args.trust_remote_code)
-        reject_compressed_kv_rows(hf_config, "--pack-sequences")
-
-    mode_str = "VLM" if args.vlm else "Text SFT"
     logger.info("=" * 60)
-    logger.info(f"Dataset Preprocessing ({mode_str})")
+    logger.info(f"Dataset Preprocessing ({'VLM' if config.is_vlm else 'Text SFT'})")
     logger.info("=" * 60)
     logger.info(f"Input: {args.input}")
     logger.info(f"Output: {args.output} (type: {output_type})")
-    logger.info(f"Model: {args.model_name}")
-    logger.info(f"Max length: {args.max_length}")
-    if not args.vlm:
-        logger.info(f"Pack sequences: {args.pack_sequences}")
-    logger.info(f"Num shards: {args.num_shards}")
+    logger.info(f"Model: {config.model_name_or_path}")
+    logger.info(f"Max length: {config.max_length}")
+    if not config.is_vlm:
+        logger.info(f"Pack sequences: {config.pack_sequences}")
+    logger.info(f"Num shards: {config.num_shards}")
     logger.info("=" * 60)
 
     if args.dry_run:
         logger.info("DRY RUN - no changes will be made")
         return
 
-    tokenizer_or_processor = setup_vlm_processor(args) if args.vlm else setup_tokenizer(args)
-
+    tokenizer_or_processor = setup_vlm_processor(config) if config.is_vlm else setup_tokenizer(config)
     dataset = load_input_dataset(args)
-
-    config = PreprocessingConfig(
-        model_name_or_path=args.model_name,
-        max_length=args.max_length,
-        mode=args.mode,
-        text_field=args.text_field,
-        append_eos=not args.no_append_eos,
-        conversation_field=args.conversation_field,
-        system_prompt=args.system_prompt,
-        model_supports_system_role=not args.no_system_role,
-        tools_field=args.tools_field,
-        interleaved_thinking=args.interleaved_thinking,
-        images_field=args.images_field,
-        train_on_completions_only=args.train_on_completions_only,
-        assistant_message_template=args.assistant_message_template,
-        pad_token=args.pad_token,
-        eos_token=args.eos_token,
-        bos_token=args.bos_token,
-        # Resolved, not the path: the training side compares against its own resolved template.
-        chat_template=load_chat_template(args.chat_template) if args.chat_template else None,
-        pack_sequences=args.pack_sequences,
-        packing_strategy=args.packing_strategy,
-        num_shards=args.num_shards,
-        num_proc=resolve_map_num_proc(args.num_proc),
-        tokenizer_backend=args.tokenizer_backend,
-        trust_remote_code=args.trust_remote_code,
-        is_vlm=args.vlm,
-        min_pixels=args.min_pixels,
-        max_pixels=args.max_pixels,
-    )
     require_declared_columns(dataset, config, args.input)
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -643,7 +315,7 @@ def main():
         logger.info(f"Train examples: {metadata.total_train_examples}")
         logger.info(f"Test examples: {metadata.total_test_examples}")
         logger.info(f"Num shards: {metadata.num_shards}")
-        if args.vlm:
+        if config.is_vlm:
             logger.info(f"VLM mode: {metadata.is_vlm}")
             logger.info(f"Has pixel_values: {metadata.has_pixel_values}")
         else:

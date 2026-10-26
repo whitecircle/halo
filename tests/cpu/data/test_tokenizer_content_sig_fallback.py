@@ -15,10 +15,10 @@ import pytest
 from tokenizers import Tokenizer, pre_tokenizers
 from tokenizers.models import WordLevel
 
-from src.data.pipeline import processing
-from src.data.pipeline.processing import _get_kwargs_fingerprint, _tokenizer_content_sig
+from src.data.pipeline import map_cache_key
+from src.data.pipeline.map_cache_key import _tokenizer_content_sig, kwargs_fingerprint
 
-_LOGGER = "src.data.pipeline.processing"
+_LOGGER = "src.data.pipeline.map_cache_key"
 _WARNING_TEXT = "cannot hash the content of tokenizer"
 
 
@@ -57,7 +57,7 @@ class _ContentlessTokenizer:
 
 @pytest.fixture(autouse=True)
 def _rearm_warning(monkeypatch):
-    monkeypatch.setattr(processing, "_CONTENT_SIG_FAILED_WARNED", set())
+    monkeypatch.setattr(map_cache_key, "_content_sig_failed_warned", set())
 
 
 def _content_warnings(caplog):
@@ -76,9 +76,9 @@ def test_unserializable_backend_warns_once_and_keys_on_path(caplog):
     assert "cannot be serialized" in message, "the warning must carry the cause"
     assert "org/custom" in message, "the warning must name the path the key fell back to"
 
-    same = _get_kwargs_fingerprint({"tokenizer": _CustomComponentTokenizer("org/custom")})
-    moved = _get_kwargs_fingerprint({"tokenizer": _CustomComponentTokenizer("checkpoints/run/checkpoint-10")})
-    assert same == _get_kwargs_fingerprint({"tokenizer": _CustomComponentTokenizer("org/custom")})
+    same = kwargs_fingerprint({"tokenizer": _CustomComponentTokenizer("org/custom")})
+    moved = kwargs_fingerprint({"tokenizer": _CustomComponentTokenizer("checkpoints/run/checkpoint-10")})
+    assert same == kwargs_fingerprint({"tokenizer": _CustomComponentTokenizer("org/custom")})
     assert same != moved, "without a content hash the path is the only term that separates tokenizers"
 
 

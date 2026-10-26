@@ -28,7 +28,7 @@ from src.config_validation import reject_unsupported_args
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.preference import DPOScriptArguments
 from src.configs.script_arguments import ModelArguments
-from src.data.sources.loading import alias_images_column
+from src.data.render_columns import alias_images_column
 from src.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
 from src.entrypoints.model_setup import (
     apply_max_length,

@@ -6,9 +6,9 @@ Pins:
   leading system turn when the model lacks a system role — including parts-list content;
 - the VLM policy (demote_existing_system=False): only the config system_prompt is folded
   (prefixed onto a leading system/user turn), dataset-borne system turns stay untouched;
-- apply_chat_template_to_conversations render equality for both add_generation_prompt values,
+- render_row_conversation render equality for both add_generation_prompt values,
   including the generation-eval slice;
-- process_vlm_conversation's fold behavior through the shared helper.
+- extract_conversation_images's fold behavior through the shared helper.
 
 Usage:
     python tests/cpu/data/test_conversation_fold.py
@@ -17,15 +17,15 @@ Usage:
 import pytest
 
 from src.data.pipeline.conversation import fold_system_into_conversation
-from src.data.pipeline.row_processors import apply_chat_template_to_conversations
-from src.data.vlm import process_vlm_conversation
+from src.data.pipeline.text_rows import render_row_conversation
+from src.data.vlm_render import extract_conversation_images
 
 
 def _msgs(*pairs):
     return [{"role": r, "content": c} for r, c in pairs]
 
 
-# Text policy: demote_existing_system=True (the apply_chat_template_to_conversations path).
+# Text policy: demote_existing_system=True (the render_row_conversation path).
 
 
 def test_text_supported_prepends_only_when_missing():
@@ -59,7 +59,7 @@ def test_text_unsupported_parts_list_user_content():
     assert out == _msgs(("user", [{"type": "text", "text": "rules\n"}, {"type": "text", "text": "hi"}]))
 
 
-# VLM policy: demote_existing_system=False (process_vlm_conversation / offline VLM tokenization).
+# VLM policy: demote_existing_system=False (extract_conversation_images / offline VLM tokenization).
 
 
 def test_vlm_no_prompt_leaves_conversation_untouched():
@@ -98,7 +98,7 @@ def test_vlm_unsupported_parts_list_prepends_text_part():
 
 def test_process_vlm_conversation_fold_unchanged():
     """End-to-end: system prompt folded into the first user turn, parts-form output."""
-    history, images = process_vlm_conversation(
+    history, images = extract_conversation_images(
         _msgs(("user", "hi"), ("assistant", "hello")),
         system_prompt="sys",
         model_supports_system_role=False,
@@ -120,7 +120,7 @@ class RenderTokenizer:
 
 def test_render_full_conversation_without_generation_prompt():
     row = {"messages": _msgs(("user", "q"), ("assistant", "a"))}
-    out = apply_chat_template_to_conversations(row, RenderTokenizer(), conversation_field="messages")
+    out = render_row_conversation(row, RenderTokenizer(), conversation_field="messages")
     assert out == "<user>q</user><assistant>a</assistant>"
 
 
@@ -128,15 +128,13 @@ def test_render_generation_drops_last_turn_and_adds_generation_prompt():
     """On the generation branch the trailing assistant turn (the reference answer) is dropped and
     the generation prompt appended."""
     row = {"messages": _msgs(("user", "q"), ("assistant", "a"))}
-    out = apply_chat_template_to_conversations(
-        row, RenderTokenizer(), conversation_field="messages", add_generation_prompt=True
-    )
+    out = render_row_conversation(row, RenderTokenizer(), conversation_field="messages", add_generation_prompt=True)
     assert out == "<user>q</user><assistant>"
 
 
 def test_render_system_prompt_folded_when_unsupported():
     row = {"messages": _msgs(("user", "q"))}
-    out = apply_chat_template_to_conversations(
+    out = render_row_conversation(
         row,
         RenderTokenizer(),
         conversation_field="messages",

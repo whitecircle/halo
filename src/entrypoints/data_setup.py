@@ -1,18 +1,26 @@
 """Script-side dataset loading, the run's VLM verdict, and the switches for TRL's own dataset prep."""
 
+import logging
+import os
 from collections.abc import Callable
 from typing import Any
 
+from datasets import Dataset, DatasetDict
 from transformers import PreTrainedTokenizer
 
 from src.callbacks.generate_examples import GenerateExamplesCallback
 from src.config_validation import reject_non_default_args, reject_unsupported_args
+from src.data.pipeline.coordinated_map import resolve_map_num_proc
 from src.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
-from src.data.pipeline.processing import log_dataset_examples, resolve_map_num_proc
-from src.data.sources.loading import is_presharded_dataset_load, load_datasets, reject_image_columns
-from src.data.vlm import dataset_declares_images, is_vlm_run
+from src.data.sources.loading import is_presharded_dataset_load, load_datasets
+from src.data.vlm_routing import dataset_declares_images, is_vlm_run, reject_image_columns
 from src.distributed.parallelism_config import ParallelismConfig
+from src.log import RUN_LOG_DIR_NAME
 from src.model_loading.parallel.model_source import probe_checkpoint
+from src.runtime.filesystem import is_fs_save_rank
+from src.runtime.ranks import is_global_main_process
+
+logger = logging.getLogger(__name__)
 
 
 def reject_trl_dataset_prep_args(
@@ -113,6 +121,77 @@ def resolve_vlm_run(
             trust_remote_code=model_config.trust_remote_code,
         )
     return is_vlm_run(args, model_config.model_name_or_path, datasets, vlm_checkpoint=vlm_checkpoint)
+
+
+def _write_decoded_samples(
+    dataset: Dataset,
+    *,
+    name: str,
+    num_examples: int,
+    tokenizer: PreTrainedTokenizer,
+    output_dir: str,
+) -> None:
+    """Decode ``dataset``'s first rows into ``<output_dir>/log/<name>_sample.txt`` (the test split's as ``eval``)."""
+    if "input_ids" not in dataset.column_names:
+        return
+
+    log_dir = os.path.join(output_dir, RUN_LOG_DIR_NAME)
+    os.makedirs(log_dir, exist_ok=True)
+    out_path = os.path.join(log_dir, "eval_sample.txt" if name == "test" else f"{name}_sample.txt")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        for i in range(num_examples):
+            input_ids = dataset[i]["input_ids"]
+            decoded = tokenizer.decode(input_ids, skip_special_tokens=False)
+            f.write(f"=== Sample {i + 1} ({len(input_ids)} tokens) ===\n")
+            f.write(decoded)
+            f.write("\n\n")
+    logger.info(f"Wrote {num_examples} decoded sample(s) to {out_path}")
+
+
+def log_dataset_examples(
+    datasets: dict[str, Dataset],
+    num_examples: int = 1,
+    *,
+    tokenizer: PreTrainedTokenizer | None = None,
+    output_dir: str | None = None,
+    write_decoded_samples: bool = False,
+) -> None:
+    """Log each dataset's first rows on the global main process, and with ``write_decoded_samples`` decode the
+    tokenized ones beside ``run.log`` on the filesystem save rank, which writes once per node on a non-shared
+    filesystem."""
+    log_examples = is_global_main_process()
+    write_samples = write_decoded_samples and is_fs_save_rank()
+    if not (log_examples or write_samples):
+        return
+
+    for name, dataset in datasets.items():
+        if dataset is None:
+            continue
+
+        if isinstance(dataset, DatasetDict):
+            if len(dataset) == 0:
+                continue
+            split_name = next(iter(dataset))
+            split_dataset = dataset[split_name]
+            header = f"Example(s) from {name} dataset (split: {split_name}):"
+        else:
+            split_dataset = dataset
+            header = f"Example(s) from {name} dataset:"
+
+        if len(split_dataset) == 0:
+            continue
+
+        n = min(num_examples, len(split_dataset))
+        if log_examples:
+            logger.info(header)
+            for i in range(n):
+                logger.info(split_dataset[i])
+
+        if write_samples and tokenizer is not None and output_dir is not None:
+            _write_decoded_samples(
+                split_dataset, name=name, num_examples=n, tokenizer=tokenizer, output_dir=output_dir
+            )
 
 
 def log_script_dataset_examples(datasets: dict, tokenizer: PreTrainedTokenizer, args, training_config) -> None:

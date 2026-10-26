@@ -15,20 +15,19 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from src.data.collators.completions_only import DataCollatorForCompletionOnlyLM
 from src.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlattening,
     DataCollatorWithFlatteningAndCompletionMask,
     DataCollatorWithPacking,
 )
-from src.data.spans import (
+from src.data.collators.padded import DataCollatorForCompletionOnlyLM
+from src.data.completion_spans import (
     build_completion_only_labels,
     filter_eos_after_responses,
     find_terminator_positions,
-    resolve_eos_token_ids,
-    tokenize_response_template,
 )
+from src.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
 
 PAD = 0
 EOS = 1
@@ -430,7 +429,7 @@ def test_packing_nonpacked_no_position_ids():
 def test_base_packing_collator_restores_eos_labels_when_pad_equals_eos():
     """Base DataCollatorWithPacking, NON-packed raw-labels batch, pad == eos: the parent LM collator
     masks every pad-valued label — including the real turn-ending EOS — so the torch_call wiring
-    through restore_eos_labels_when_pad_equals_eos must bring it back at real-token positions while
+    through collate_preserving_precomputed_labels must bring it back at real-token positions while
     true padding stays masked. Drop-the-branch regression, distinct from the completion-masking and
     CP-collator pad==eos tests."""
     tok = make_tokenizer(pad_token_id=EOS, eos_token_id=EOS)
@@ -769,7 +768,7 @@ def test_packing_completion_template_at_boundary():
     """Packed doc starting with response template: assistant tokens must still be unmasked.
 
     _mask_sequence detects the response template in input_ids, not in
-    boundary-masked labels. _handle_packing sets labels=-100 at
+    boundary-masked labels. The packing collator sets labels=-100 at
     position_ids==0, so a template starting at a document boundary is invisible
     in labels, silently dropping the entire document's response from training.
     """

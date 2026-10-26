@@ -16,15 +16,12 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers import Mistral4Config
 from transformers.models.qwen3_next import Qwen3NextConfig
 
 from src.data.collators.factory import select_data_collator
 from src.models import segment_markers
 from src.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS
-
-PartialState()  # the factory logs through accelerate's logger, which needs the state initialized
 
 
 def make_tokenizer() -> MagicMock:

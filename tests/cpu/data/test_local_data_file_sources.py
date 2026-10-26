@@ -12,14 +12,10 @@ still loads through ``load_from_disk``. Deleting the file-builder branch fails t
 import json
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset
 
 from src.data.sources.loading import load_dataset_from_source
 from src.data.sources.paths import parse_dataset_source
-
-PartialState()  # the loader logs through accelerate, which refuses to log without it
-
 
 ROWS = [{"prompt": "a", "label": 0}, {"prompt": "b", "label": 1}, {"prompt": "c", "label": 2}]
 

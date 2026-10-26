@@ -22,7 +22,7 @@ import pytest
 import torch
 
 from src.data.collators.vlm import VLMDataCollator
-from src.data.spans import build_completion_only_labels, resolve_completion_spans
+from src.data.completion_spans import build_completion_only_labels, resolve_completion_spans
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 
 MARKER_IDS = [7, 7]

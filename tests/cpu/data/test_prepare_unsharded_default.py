@@ -1,4 +1,4 @@
-"""The default ``--num-shards 1`` artifact trains at any data-parallel size.
+"""The default ``--num_shards 1`` artifact trains at any data-parallel size.
 
 A single-shard dataset written in the sharded layout loads through ``ShardedDatasetLoader``, which
 refuses fewer shards than the DP size, so the default output of ``prepare_dataset`` would train only
@@ -8,16 +8,13 @@ on one GPU. At ``num_shards <= 1`` the splits are saved unsharded and every rank
 import os
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from src.data.shard_index import SHARD_INDEX_FILE
+from src.data.preprocessed.shard_index import SHARD_INDEX_FILE
 from src.data.sources.loading import load_preprocessed_dataset
 from tests.common.datasets import write_prepared_text_dataset
 
 _DOCS = [f"Document number {i} of the raw corpus." for i in range(12)]
-
-PartialState()  # the loaders log through accelerate's rank-aware logger
 
 
 def _prepare(output_dir, *, num_shards: int, with_test: bool) -> None:

@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.data.collators.offline_grpo import (
     REF_PER_TOKEN_LOGPS_COLUMN,
@@ -69,7 +68,6 @@ def test_cp_rows_keep_completion_targets_and_reference_in_full_row_positions():
 
 @pytest.mark.parametrize("cp", [False, True], ids=["local", "cp"])
 def test_empty_completion_is_inert_and_mixed_reference_rows_fail(cp):
-    PartialState()  # the substituted-completion warning logs through accelerate's logger
     collator = (
         OfflineGRPOCPDataCollatorWithPadding(pad_token_id=7, cp_size=2)
         if cp

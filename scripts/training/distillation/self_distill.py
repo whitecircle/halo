@@ -42,9 +42,10 @@ from src.data.collators.self_distill import (
     teacher_history,
 )
 from src.data.collators.vlm import SelfDistillVLMDataCollator
-from src.data.pipeline.processing import coordinated_map, require_render_column, resolve_map_num_proc
-from src.data.pipeline.row_processors import text_render_kwargs
-from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
+from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
+from src.data.pipeline.text_rows import text_render_kwargs
+from src.data.pipeline.vlm_rows import prepare_vlm_dataset
+from src.data.render_columns import reject_missing_render_column
 from src.entrypoints.data_setup import (
     disable_trl_dataset_prep,
     load_script_datasets,
@@ -88,14 +89,14 @@ def _require_privileged_columns(ds, args) -> None:
     once here.
     """
     if args.confidence_field:
-        require_render_column(ds, str(args.dataset), "confidence_field", args.confidence_field)
+        reject_missing_render_column(ds, str(args.dataset), "confidence_field", args.confidence_field)
     if args.sdpg_beta_base == 0.0:
         return
     fields = SelfDistillScriptArguments.HINT_SLOT_FIELDS
     named = format_field_names(args.sdpg_hint_template)
     columns = {slot: getattr(args, field) for slot, field in fields.items() if slot in named and getattr(args, field)}
     for slot, column in columns.items():
-        require_render_column(ds, str(args.dataset), fields[slot], column)
+        reject_missing_render_column(ds, str(args.dataset), fields[slot], column)
     train = ds["train"]
     values = [train[column] for column in columns.values()]
     hintless = sum(

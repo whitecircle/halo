@@ -20,15 +20,11 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from accelerate import PartialState
 from transformers.models.lfm2_moe import Lfm2MoeConfig
 from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeForCausalLM
 from transformers.models.qwen3 import Qwen3Config
 
 from src.data.collators.factory import select_data_collator
-
-PartialState()  # the factory logs through accelerate's logger, which needs the state initialized
-
 
 SEED = 1234
 

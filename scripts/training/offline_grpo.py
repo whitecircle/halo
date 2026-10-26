@@ -15,10 +15,10 @@ from src.configs.grpo_offline import OfflineGRPOConfig, OfflineGRPOScriptArgumen
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
 from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content
+from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.preferences import split_rendered_completion
-from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
-from src.data.pipeline.row_processors import prepare_generative_row
-from src.data.sources.loading import reject_image_columns
+from src.data.pipeline.text_rows import prepare_generative_row
+from src.data.vlm_routing import reject_image_columns
 from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from src.entrypoints.model_setup import (
     apply_prompt_completion_window,

@@ -27,30 +27,23 @@ from datasets import Image as ImageFeature
 from PIL import Image as PILImage
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.data import vlm as vlm_module
+from src.data import vlm_render as vlm_render_module
+from src.data import vlm_routing as vlm_routing_module
 from src.data.collators.self_distill import SelfDistillTextCollator
 from src.data.pipeline import conversation as conversation_module
-from src.data.pipeline import preprocessing as preprocessing_module
-from src.data.pipeline import row_processors as row_processors_module
+from src.data.pipeline import vlm_rows as vlm_rows_module
+from src.data.pipeline.chat_render import render_generation_prompt
 from src.data.pipeline.conversation import (
     IMAGE_PART_PAYLOAD_KEY,
     IMAGE_PART_TYPE,
     conversation_carries_images,
 )
-from src.data.pipeline.preferences import apply_chat_template_to_preference_data
-from src.data.pipeline.rendered import render_generation_prompt
-from src.data.pipeline.row_processors import (
-    apply_chat_template_to_conversations,
-    normalize_vlm_conversation,
-    prepare_generative_row,
-)
-from src.data.vlm import (
-    VLM_IMAGE_COLUMNS,
-    dataset_declares_images,
-    dataset_image_evidence,
-    is_vlm_run,
-    process_vlm_conversation,
-)
+from src.data.pipeline.preferences import render_preference_row
+from src.data.pipeline.text_rows import prepare_generative_row, render_row_conversation
+from src.data.pipeline.vlm_rows import normalize_vlm_conversation
+from src.data.preprocessed import tokenization as tokenization_module
+from src.data.vlm_render import extract_conversation_images
+from src.data.vlm_routing import VLM_IMAGE_COLUMNS, dataset_declares_images, dataset_image_evidence, is_vlm_run
 from src.entrypoints import data_setup
 from src.entrypoints.data_setup import resolve_vlm_run
 from src.entrypoints.model_setup import apply_text_path_padding_side
@@ -318,7 +311,7 @@ def test_text_renderer_refuses_an_image_content_part():
     struct to read and only its first row probed — must not become placeholder tokens with no pixels
     behind them."""
     with pytest.raises(ValueError, match="image content part"):
-        apply_chat_template_to_conversations({"prompt": IMAGE_TURNS}, tokenizer=None, conversation_field="prompt")
+        render_row_conversation({"prompt": IMAGE_TURNS}, tokenizer=None, conversation_field="prompt")
 
 
 def test_self_distill_text_collator_refuses_an_image_content_part():
@@ -350,7 +343,7 @@ def test_preference_renderer_refuses_an_image_content_part(field):
     }
     row[field] = [{"role": row[field][0]["role"], "content": image_content}]
     with pytest.raises(ValueError, match="image content part"):
-        apply_chat_template_to_preference_data(row, _UnreachableTokenizer())
+        render_preference_row(row, _UnreachableTokenizer())
 
 
 def test_generation_prompt_renderer_refuses_an_image_content_part():
@@ -403,13 +396,14 @@ def test_every_image_part_site_reads_the_shared_constants(monkeypatch):
     images", which is exactly the silent placeholder-training the guard exists to prevent.
     """
     alt_type, alt_key = "picture", "picture_payload"
-    for module in (conversation_module, vlm_module, row_processors_module):
+    for module in (conversation_module, vlm_render_module, vlm_rows_module):
         monkeypatch.setattr(module, "IMAGE_PART_TYPE", alt_type)
         monkeypatch.setattr(module, "IMAGE_PART_PAYLOAD_KEY", alt_key)
-    # The offline preprocessor extracts through process_vlm_conversation rather than walking the
+    monkeypatch.setattr(vlm_routing_module, "IMAGE_PART_PAYLOAD_KEY", alt_key)
+    # The offline preprocessor extracts through extract_conversation_images rather than walking the
     # parts itself, so it has no spelling of its own; a re-inlined extractor would re-import these.
-    assert not hasattr(preprocessing_module, "IMAGE_PART_TYPE"), (
-        "preprocessing re-imported the image-part constants — it must extract via process_vlm_conversation"
+    assert not hasattr(tokenization_module, "IMAGE_PART_TYPE"), (
+        "tokenization re-imported the image-part constants — it must extract via extract_conversation_images"
     )
 
     image = PILImage.fromarray(np.zeros((4, 4, 3), dtype=np.uint8))
@@ -418,11 +412,11 @@ def test_every_image_part_site_reads_the_shared_constants(monkeypatch):
     assert conversation_carries_images(respelled), "the guard predicate ignored the constants"
     assert not conversation_carries_images(IMAGE_TURNS), "the guard predicate hardcodes the old spelling"
 
-    history, images = process_vlm_conversation([dict(m) for m in respelled])
+    history, images = extract_conversation_images([dict(m) for m in respelled])
     assert len(images) == 1, "the extractor ignored the constants"
     assert history[0]["content"] == [{"type": alt_type}], "the placeholder hardcodes the old spelling"
     shipped = [{"role": "user", "content": [{"type": IMAGE_PART_TYPE, IMAGE_PART_PAYLOAD_KEY: image}]}]
-    assert process_vlm_conversation(shipped)[1] == [], "the extractor hardcodes the old spelling"
+    assert extract_conversation_images(shipped)[1] == [], "the extractor hardcodes the old spelling"
 
     merged = normalize_vlm_conversation([{"role": "user", "content": [{"type": alt_type}]}], images=[image])
     assert merged[0]["content"][0][alt_key] is image, "the images-column merge ignored the constants"

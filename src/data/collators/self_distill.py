@@ -1,9 +1,6 @@
-"""Text collator for SDPG self-distillation: the student batch plus a ``teacher_*`` branch whose last
-user turn carries the privileged hint; the response tokens are byte-identical across the two.
-
-It also owns the hint template's slot names, the hint's rendering and injection, the response-alignment
-contract and the confidence weighting.
-"""
+"""Text collator for SDPG self-distillation: the student batch plus a ``teacher_*`` branch whose last user
+turn carries the privileged hint, with the hint's rendering and injection, the response-alignment contract
+and the confidence weighting both SDPG collators share."""
 
 import math
 import string
@@ -12,8 +9,9 @@ from typing import Any
 
 import torch
 
-from src.data.pipeline.rendered import render_conversation, tokenize_rendered
-from src.data.spans import build_completion_only_labels, require_rendered_response_marker, resolve_eos_token_ids
+from src.data.completion_spans import build_completion_only_labels
+from src.data.pipeline.chat_render import render_conversation, tokenize_rendered
+from src.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 
 
@@ -28,12 +26,8 @@ def format_field_names(template: str) -> set[str]:
 
 
 def privileged_hint(template: str, **slots: Any) -> str | None:
-    """The hint ``template`` renders from one row's ``slots``, or ``None`` when a slot it names is blank.
-
-    The template states its slots as fact, so a missing answer or solution would mislead the teacher
-    rather than privilege it; no hint leaves it on the plain prompt. Slots the template does not name
-    are never read; a named slot the arm does not supply raises ``KeyError``. Shared by both SDPG arms.
-    """
+    """The hint ``template`` renders from one row's ``slots``, or ``None`` when a slot it names is blank (the
+    template states its slots as fact); a named slot the caller does not supply raises ``KeyError``."""
     named = {name: slots[name] for name in format_field_names(template)}
     if any(value is None or not str(value).strip() for value in named.values()):
         return None
@@ -78,12 +72,8 @@ def teacher_history(
 
 
 def require_aligned_responses(batch: Mapping[str, torch.Tensor]) -> None:
-    """Raise unless each row's student and teacher branches supervise the same tokens, in order.
-
-    OPD pairs the k-th supervised position of one branch with the k-th of the other. The hint only
-    lengthens the prompt, so a label span reaching into the prompt, or a chat template that renders a
-    response token differently once hinted, pairs different tokens.
-    """
+    """Raise unless each row's student and teacher branches supervise the same tokens in order, as OPD pairs
+    the k-th supervised position of one with the k-th of the other."""
     student, teacher = batch["labels"][:, 1:], batch["teacher_labels"][:, 1:]
     for row in range(student.size(0)):
         student_tokens = student[row][student[row] != LABEL_IGNORE_INDEX]
@@ -113,27 +103,14 @@ def _checked_confidences(split, field: str) -> torch.Tensor:
 
 
 def confidence_normalizer(train, test, field: str, power: float) -> float:
-    """The mean of ``conf ** power`` over the train split: the one divisor every batch's weights share.
-
-    A per-batch mean is 1.0 at batch size 1, which would leave the weighting a no-op; dividing by the
-    dataset mean keeps the effective learning rate at any batch size. ``test`` (or ``None``) is checked
-    too, since eval rows are weighted by the same divisor.
-    """
+    """The train split's mean of ``conf ** power``, the one divisor every batch's weights share (a per-batch
+    mean is 1.0 at batch size 1); ``test`` (or ``None``) is range-checked too, being weighted alike."""
     if test is not None:
         _checked_confidences(test, field)
     normalizer = float(_checked_confidences(train, field).pow(power).mean())
     if normalizer <= 0:
         raise ValueError(f"Every train confidence in {field!r} is 0, so every row would carry zero weight.")
     return normalizer
-
-
-def require_confidence_normalizer(confidence_field: str | None, normalizer: float | None) -> None:
-    """Refuse a confidence column without its dataset normalizer (:func:`confidence_normalizer`)."""
-    if confidence_field is not None and normalizer is None:
-        raise ValueError(
-            f"confidence_field={confidence_field!r} needs confidence_normalizer, the train split's mean of "
-            f"conf ** confidence_power (confidence_normalizer()); a per-batch mean is 1.0 at batch size 1."
-        )
 
 
 def confidence_weights(
@@ -157,7 +134,11 @@ class SelfDistillBranchMixin:
         confidence_power: float,
         confidence_normalizer: float | None,
     ) -> None:
-        require_confidence_normalizer(confidence_field, confidence_normalizer)
+        if confidence_field is not None and confidence_normalizer is None:
+            raise ValueError(
+                f"confidence_field={confidence_field!r} needs confidence_normalizer, the train split's mean of "
+                f"conf ** confidence_power (confidence_normalizer()); a per-batch mean is 1.0 at batch size 1."
+            )
         self.hint_template = hint_template
         self.answer_field = answer_field
         self.solution_field = solution_field
@@ -171,14 +152,8 @@ class SelfDistillBranchMixin:
         return self.hint_template is not None
 
     def cache_signature(self) -> dict[str, Any]:
-        """Every knob this collator renders with, to thread through the audit map's cache key.
-
-        The collator rides ``fn_kwargs`` (see :func:`audit_self_distill_row`), and a dataset-map
-        fingerprint reads an object that is neither tokenizer nor processor as its class name alone
-        — so without this the audit's verdict outlives a change to any knob below and a stale cache
-        skips it entirely. Read off ``__dict__``, not a hand-listed subset: a field added to
-        ``__init__`` enters the key with it.
-        """
+        """Every knob this collator renders with, for the audit map's cache key: a map fingerprint reads the
+        collator riding ``fn_kwargs`` by its class name alone, so a changed knob would serve a stale audit."""
         return dict(vars(self))
 
     def _teacher_history(self, history: list[dict[str, Any]], example: dict[str, Any]) -> list[dict[str, Any]]:
@@ -199,13 +174,10 @@ class SelfDistillBranchMixin:
 
 
 class SelfDistillTextCollator(SelfDistillBranchMixin):
-    """Text collator for SDPG-style self-distillation (arXiv:2606.04036).
-
-    Reads raw conversation rows + privileged answer/solution fields, emitting the student batch and a
-    teacher branch (``teacher_*``) whose last user turn carries the gold-answer hint. The assistant
-    response is byte-identical across both sequences (:func:`require_aligned_responses`), so the
-    teacher can supervise the student on the shared tokens. ``hint_template=None`` builds no teacher
-    branch (the OPD term is off). Optionally emits ``confidence_weights``.
+    """Text collator for SDPG-style self-distillation (arXiv:2606.04036): raw conversation rows to the student
+    batch and a ``teacher_*`` branch carrying the gold-answer hint, whose response tokens match
+    (:func:`require_aligned_responses`); ``hint_template=None`` builds no teacher branch. Optionally emits
+    ``confidence_weights``.
     """
 
     def __init__(
@@ -228,7 +200,7 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         interleaved_thinking: bool = False,
         model_config=None,
     ):
-        require_rendered_response_marker(
+        reject_unusable_response_marker(
             tokenizer, response_prompt_template, train_on_completions_only, "Self-distillation"
         )
         self._init_self_distill_fields(
@@ -245,19 +217,28 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         self.train_on_completions_only = train_on_completions_only
         self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
 
-    def _render(self, history: list[dict[str, Any]], row: dict[str, Any]) -> str:
-        """Chat-template one conversation through the shared text renderer, so the student and
-        teacher branches honor exactly the knobs the SFT text pipeline does."""
-        return render_conversation(
-            self.tokenizer,
-            history,
-            row,
-            conversation_field=self.conversation_field,
-            system_prompt=self.system_prompt,
-            model_supports_system_role=self.model_supports_system_role,
-            interleaved_thinking=self.interleaved_thinking,
-            tools_field=self.tools_field,
-        )
+    def audit_row(self, example: dict[str, Any]) -> dict[str, Any]:
+        """Collate one raw row through the whole collate-time contract; returns no columns. Mapped at prep
+        (:func:`audit_self_distill_row`), where a raise is world-uniform; at collate time it is rank-local."""
+        self([example])
+        return {}
+
+    def __call__(self, examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        student = self._tokenize([ex[self.conversation_field] for ex in examples], examples, branch="student")
+        batch = {
+            "input_ids": student["input_ids"],
+            "attention_mask": student["attention_mask"],
+            "labels": self._build_labels(student["input_ids"], student["attention_mask"]),
+        }
+        if self.builds_teacher_branch:
+            histories = [self._teacher_history(ex[self.conversation_field], ex) for ex in examples]
+            teacher = self._tokenize(histories, examples, branch="teacher")
+            batch["teacher_input_ids"] = teacher["input_ids"]
+            batch["teacher_attention_mask"] = teacher["attention_mask"]
+            batch["teacher_labels"] = self._build_labels(teacher["input_ids"], teacher["attention_mask"])
+            require_aligned_responses(batch)
+        self._add_confidence_weights(batch, examples)
+        return batch
 
     def _tokenize(
         self, histories: list[list[dict[str, Any]]], rows: list[dict[str, Any]], branch: str
@@ -278,11 +259,21 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
             )
         return encoded
 
-    def _build_labels(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-        """Mask pad tokens, and (optionally) everything outside assistant completions.
+    def _render(self, history: list[dict[str, Any]], row: dict[str, Any]) -> str:
+        """Chat-template one conversation through the SFT text pipeline's renderer."""
+        return render_conversation(
+            self.tokenizer,
+            history,
+            row,
+            conversation_field=self.conversation_field,
+            system_prompt=self.system_prompt,
+            model_supports_system_role=self.model_supports_system_role,
+            interleaved_thinking=self.interleaved_thinking,
+            tools_field=self.tools_field,
+        )
 
-        Shared by the student batch and the teacher branch so both select the SAME response tokens.
-        """
+    def _build_labels(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        """Pad masked, and with ``train_on_completions_only`` everything outside the completions."""
         return build_completion_only_labels(
             input_ids,
             self.tokenizer,
@@ -291,36 +282,6 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
             attention_mask=attention_mask,
             eos_token_ids=self.eos_token_ids,
         )
-
-    def audit_row(self, example: dict[str, Any]) -> dict[str, Any]:
-        """Collate one raw row through the whole collate-time contract (length, response alignment,
-        confidence); returns no columns.
-
-        Mapped over the dataset at prep via :func:`audit_self_distill_row` (``num_proc`` maps
-        reject bound methods), where the coordinated map machinery turns a raise into a
-        world-uniform failure. The same raise at collate time is rank-local: only the rank whose
-        batch drew the bad row reads the error while its peers sit in the step's collectives until
-        the NCCL watchdog.
-        """
-        self([example])
-        return {}
-
-    def __call__(self, examples: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-        student = self._tokenize([ex[self.conversation_field] for ex in examples], examples, branch="student")
-        batch = {
-            "input_ids": student["input_ids"],
-            "attention_mask": student["attention_mask"],
-            "labels": self._build_labels(student["input_ids"], student["attention_mask"]),
-        }
-        if self.builds_teacher_branch:
-            histories = [self._teacher_history(ex[self.conversation_field], ex) for ex in examples]
-            teacher = self._tokenize(histories, examples, branch="teacher")
-            batch["teacher_input_ids"] = teacher["input_ids"]
-            batch["teacher_attention_mask"] = teacher["attention_mask"]
-            batch["teacher_labels"] = self._build_labels(teacher["input_ids"], teacher["attention_mask"])
-            require_aligned_responses(batch)
-        self._add_confidence_weights(batch, examples)
-        return batch
 
 
 def audit_self_distill_row(example: dict[str, Any], collator) -> dict[str, Any]:

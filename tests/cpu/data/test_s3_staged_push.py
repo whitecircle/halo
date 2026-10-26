@@ -16,13 +16,16 @@ and a completed push sweeps stale objects and every staging tree.
     python tests/cpu/data/test_s3_staged_push.py
 """
 
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 from datasets import Dataset
 
-from src.data.sources.s3_client import _PUSH_COMPLETE_MARKER, _STAGING_INFIX, S3Client
+from src.data.sources import s3_dataset_store
+from src.data.sources.s3_client import S3Client
+from src.data.sources.s3_dataset_store import _PUSH_COMPLETE_MARKER, _PUSH_INFIX
 
 BUCKET = "test-bucket"
 KEY = "datasets/results"
@@ -112,12 +115,17 @@ class FakeBoto:
         return {"KeyCount": len(matching)}
 
 
+def _new_push_key(full_key: str) -> str:
+    """A fresh push prefix for ``full_key``, spelled as ``push_dataset`` spells one."""
+    return f"{s3_dataset_store._push_scan_prefix(full_key)}{uuid.uuid4().hex[:8]}"
+
+
 def _client() -> tuple[S3Client, FakeBoto]:
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket=BUCKET)
     fake = FakeBoto()
-    client._client = fake
-    client._transfer_config = None
+    client.boto_client = fake
+    client.transfer_config = None
     return client, fake
 
 
@@ -166,13 +174,13 @@ def _dest_keys(fake: FakeBoto) -> set[str]:
 
 
 def _staging_keys(fake: FakeBoto) -> set[str]:
-    return {k for k in fake.objects if _STAGING_INFIX in k}
+    return {k for k in fake.objects if _PUSH_INFIX in k}
 
 
 def test_successful_push_replaces_the_tree_and_sweeps_stale_and_staging():
     client, fake = _client()
     _seed_old_copy(fake)
-    client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
 
     assert _dest_keys(fake) == {
         "train/data-00000-of-00001.arrow",
@@ -192,7 +200,7 @@ def test_successful_push_replaces_the_tree_and_sweeps_stale_and_staging():
 def test_promote_ordering_gates_last_and_sweep_after_gates():
     client, fake = _client()
     _seed_old_copy(fake)
-    client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
 
     dest_ops = [(op, key[len(KEY) + 1 :]) for op, key in fake.ops if key.startswith(f"{KEY}/")]
     gate_deletes = [
@@ -226,7 +234,7 @@ def test_crash_during_staging_upload_leaves_the_destination_untouched():
         raise OSError("connection reset mid-upload")
 
     with pytest.raises(OSError, match="mid-upload"):
-        client.push_dataset(_mock_dataset(_boom), KEY)
+        s3_dataset_store.push_dataset(client, _mock_dataset(_boom), KEY)
 
     assert {k: v for k, v in fake.objects.items() if k.startswith(f"{KEY}/")} == before, (
         "the old copy must survive a staging-upload crash byte-for-byte"
@@ -251,7 +259,7 @@ def test_crash_mid_promote_keeps_a_sealed_staging_tree_and_a_loud_destination():
 
     fake.copy = _failing_copy
     with pytest.raises(OSError, match="mid-promote"):
-        client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+        s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
 
     assert "dataset_dict.json" not in _dest_keys(fake), (
         "an interrupted promote must leave the destination UNREADABLE (gate missing), not old-mixed-new"
@@ -278,10 +286,10 @@ def test_next_push_after_a_crash_heals_and_clears_orphans():
 
     fake.copy = _failing_copy
     with pytest.raises(OSError):
-        client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+        s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
     fake.copy = original_copy
 
-    client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake, b"new2")), KEY)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake, b"new2")), KEY)
     assert not _staging_keys(fake), "the healing push must clear the crashed push's staging orphan too"
     assert all(body.startswith(b"new2:") for k, body in fake.objects.items() if k.startswith(f"{KEY}/"))
 
@@ -291,7 +299,7 @@ def test_no_overwrite_raises_before_any_write():
     _seed_old_copy(fake)
     ds = _mock_dataset(_fake_dataset_dict_save(fake))
     with pytest.raises(FileExistsError, match="(?i)already exists"):
-        client.push_dataset(ds, KEY, overwrite=False)
+        s3_dataset_store.push_dataset(client, ds, KEY, overwrite=False)
     ds.save_to_disk.assert_not_called()
     assert not _staging_keys(fake)
 
@@ -303,13 +311,13 @@ def test_staging_sibling_never_pollutes_the_destination_namespace():
     _seed_old_copy(fake)
     fingerprint_before = client.content_fingerprint(KEY)
 
-    staging_key = client._new_staging_key(KEY)
+    staging_key = _new_push_key(KEY)
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{staging_key}")
     fake.put_object(Bucket=BUCKET, Key=f"{staging_key}/{_PUSH_COMPLETE_MARKER}", Body=KEY.encode())
 
     assert client.content_fingerprint(KEY) == fingerprint_before
     listed = {obj["FullKey"] for obj in client.list_objects(KEY)}
-    assert listed and not any(_STAGING_INFIX in key for key in listed), (
+    assert listed and not any(_PUSH_INFIX in key for key in listed), (
         f"an anchored listing of {KEY} surfaced staging objects: {sorted(listed)}"
     )
     client.delete(KEY, recursive=True)
@@ -325,37 +333,37 @@ def test_sibling_dataset_staging_is_never_swept_or_recovered_across():
     client, fake = _client()
     _seed_old_copy(fake)
     sibling_key = f"{KEY}-2"
-    sibling_staging = client._new_staging_key(sibling_key)
+    sibling_staging = _new_push_key(sibling_key)
     _fake_dataset_dict_save(fake, b"sib")(f"s3://{BUCKET}/{sibling_staging}")
     fake.put_object(Bucket=BUCKET, Key=f"{sibling_staging}/{_PUSH_COMPLETE_MARKER}", Body=sibling_key.encode())
 
     # The sibling's sealed tree is the ONLY sealed staging around — recovery for KEY must not take it.
-    assert client._latest_complete_staging(KEY) is None
-    assert client._latest_complete_staging(sibling_key) == sibling_staging
+    assert s3_dataset_store._latest_complete_push(client, KEY) is None
+    assert s3_dataset_store._latest_complete_push(client, sibling_key) == sibling_staging
 
-    client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
     assert f"{sibling_staging}/{_PUSH_COMPLETE_MARKER}" in fake.objects, (
         "a push of one dataset must never sweep a hyphen-sibling dataset's staging trees"
     )
 
 
-def test_latest_complete_staging_picks_the_newest_sealed_tree():
+def test_latest_complete_push_picks_the_newest_sealed_tree():
     client, fake = _client()
-    older = client._new_staging_key(KEY)
+    older = _new_push_key(KEY)
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{older}")
     fake.put_object(Bucket=BUCKET, Key=f"{older}/{_PUSH_COMPLETE_MARKER}", Body=b"")
-    unsealed = client._new_staging_key(KEY)
+    unsealed = _new_push_key(KEY)
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{unsealed}")
-    newer = client._new_staging_key(KEY)
+    newer = _new_push_key(KEY)
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{newer}")
     fake.put_object(Bucket=BUCKET, Key=f"{newer}/{_PUSH_COMPLETE_MARKER}", Body=b"")
 
-    assert client._latest_complete_staging(KEY) == newer
+    assert s3_dataset_store._latest_complete_push(client, KEY) == newer
 
 
-def test_recover_from_staging_loads_the_sealed_tree_and_guards_recursion():
+def test_recover_from_pending_push_loads_the_sealed_tree_and_guards_recursion(monkeypatch):
     client, fake = _client()
-    sealed = client._new_staging_key(KEY)
+    sealed = _new_push_key(KEY)
     fake._write(f"{KEY}/train/data-00000-of-00001.arrow", b"torn")  # destination torn: data, no gates
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{sealed}")
     fake.put_object(Bucket=BUCKET, Key=f"{sealed}/{_PUSH_COMPLETE_MARKER}", Body=b"")
@@ -363,41 +371,41 @@ def test_recover_from_staging_loads_the_sealed_tree_and_guards_recursion():
     recovered = MagicMock(spec=Dataset)
     loaded_keys: list[str] = []
 
-    def _spy_load(key, subfolder=None, keep_in_memory=None, use_cache=True):
+    def _spy_load(client, key, subfolder=None, keep_in_memory=None, use_cache=True):
         loaded_keys.append(key)
         return recovered
 
-    client.load_dataset = _spy_load
+    monkeypatch.setattr(s3_dataset_store, "load_dataset", _spy_load)
     cause = FileNotFoundError("no state.json")
-    assert client._recover_from_staging(KEY, None, True, cause=cause) is recovered
+    assert s3_dataset_store._recover_from_pending_push(client, KEY, None, True, cause=cause) is recovered
     assert loaded_keys == [sealed], "recovery must load exactly the sealed staging tree"
 
     # A load already targeting a staging tree must not recover into another — one level only.
-    assert client._recover_from_staging(sealed, None, True, cause=cause) is None
+    assert s3_dataset_store._recover_from_pending_push(client, sealed, None, True, cause=cause) is None
     # No sealed tree → nothing to recover.
     fake.delete_object(Bucket=BUCKET, Key=f"{sealed}/{_PUSH_COMPLETE_MARKER}")
-    assert client._recover_from_staging(KEY, None, True, cause=cause) is None
+    assert s3_dataset_store._recover_from_pending_push(client, KEY, None, True, cause=cause) is None
 
 
 def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
     client, fake = _client()
     fake._write(f"{KEY}/train/data-00000-of-00001.arrow", b"torn")
     recovered = MagicMock(spec=Dataset)
-    client._recover_from_staging = MagicMock(return_value=recovered)
+    torn = FileNotFoundError("no state.json")
+    with (
+        patch("src.data.sources.s3_dataset_store._recover_from_pending_push", return_value=recovered),
+        patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
+        patch("src.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
+    ):
+        assert s3_dataset_store.load_dataset(client, KEY) is recovered
 
-    with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-        with patch(
-            "src.data.sources.s3_client.publish_cached_download", side_effect=FileNotFoundError("no state.json")
-        ):
-            assert client.load_dataset(KEY) is recovered
-
-    client._recover_from_staging = MagicMock(return_value=None)
-    with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-        with patch(
-            "src.data.sources.s3_client.publish_cached_download", side_effect=FileNotFoundError("no state.json")
-        ):
-            with pytest.raises(FileNotFoundError, match="state.json"):
-                client.load_dataset(KEY)
+    with (
+        patch("src.data.sources.s3_dataset_store._recover_from_pending_push", return_value=None),
+        patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
+        patch("src.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
+    ):
+        with pytest.raises(FileNotFoundError, match="state.json"):
+            s3_dataset_store.load_dataset(client, KEY)
 
 
 if __name__ == "__main__":

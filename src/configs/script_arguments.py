@@ -346,7 +346,7 @@ class GenerationEvalArguments(ValidatedConfig):
 @dataclass
 class DatasetNumProcArguments(ValidatedConfig):
     """Dataset-preprocessing worker count of the trainer configs that map their own data, read through
-    :func:`~src.data.pipeline.processing.resolve_map_num_proc`."""
+    :func:`~src.data.pipeline.coordinated_map.resolve_map_num_proc`."""
 
     dataset_num_proc: int | None = field(
         default=None,

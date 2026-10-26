@@ -6,7 +6,7 @@ test exercises the parts that only a multi-process / multi-node run actually exe
 code path a multi-node training job hits when it loads a pre-sharded dataset (one disjoint slice
 per data-parallel rank):
 
-1. ``is_sharded_dataset_coordinated`` — all ranks agree the dataset is sharded, AND the
+1. ``is_sharded_dataset_across_ranks`` — all ranks agree the dataset is sharded, AND the
    ``all_reduce(MAX)`` recovers the agreed "sharded" answer when ONE rank's probe flakes to
    False (mimics a per-rank S3 credential/throttling error that would otherwise split ranks
    onto sharded vs full-dataset paths and hang).
@@ -29,9 +29,9 @@ from collections import Counter
 import torch.distributed as dist
 from datasets import Dataset
 
-from src.data.pipeline.preprocessing import shard_dataset
-from src.data.shard_index import SHARD_INDEX_FILE
-from src.data.sources.loading import is_sharded_dataset_coordinated
+from src.data.preprocessed.preparation import shard_dataset
+from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from src.data.sources.loading import is_sharded_dataset_across_ranks
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 from tests.common.distributed import shared_scratch_dir
@@ -51,7 +51,7 @@ def _broadcast_path(rank: int, world_size: int, path: str | None) -> str:
 
 def test_coordinated_probe(rank: int, world_size: int, path: str) -> bool:
     """All ranks agree 'sharded'; all_reduce(MAX) recovers it when rank 0's probe flakes."""
-    if not is_sharded_dataset_coordinated(path):
+    if not is_sharded_dataset_across_ranks(path):
         log(f"FAIL: rank {rank} did not detect a sharded dataset at {path}", rank=rank)
         return False
 
@@ -61,7 +61,7 @@ def test_coordinated_probe(rank: int, world_size: int, path: str) -> bool:
     try:
         if rank == 0:
             ShardedDatasetLoader.is_sharded_dataset = staticmethod(lambda p: False)
-        recovered = is_sharded_dataset_coordinated(path)
+        recovered = is_sharded_dataset_across_ranks(path)
     finally:
         ShardedDatasetLoader.is_sharded_dataset = orig
     if not recovered:
@@ -73,7 +73,7 @@ def test_coordinated_probe(rank: int, world_size: int, path: str) -> bool:
 
 def test_exact_partition(rank: int, world_size: int, path: str) -> bool:
     """Union of all ranks' loaded example ids == every id exactly once (no gap, no overlap)."""
-    loader = ShardedDatasetLoader(dataset_path=path, global_rank=rank, world_size=world_size)
+    loader = ShardedDatasetLoader(dataset_path=path, dp_rank=rank, dp_size=world_size)
     ds = loader.load_split("train")
     my_ids = sorted(int(x) for x in ds["example_id"]) if len(ds) else []
 
@@ -132,7 +132,7 @@ def run(ctx) -> dict:
         shutil.rmtree(base, ignore_errors=True)
         synth = Dataset.from_dict({"example_id": list(range(N_EXAMPLES)), "v": list(range(N_EXAMPLES))})
         index = shard_dataset(synth, output_dir=path, split_name="train", num_shards=N_SHARDS)
-        index.save(os.path.join(path, "train", SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(path, "train", SHARD_INDEX_FILE), index)
     ctx.barrier()
 
     checks = {

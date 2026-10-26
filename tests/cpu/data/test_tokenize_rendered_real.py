@@ -19,8 +19,8 @@ Usage:
 
 import pytest
 
-from src.data.pipeline.rendered import probe_tokenizer_specials, tokenize_rendered
-from src.data.pipeline.row_processors import create_llm_processor
+from src.data.pipeline.chat_render import probe_tokenizer_specials, tokenize_rendered
+from src.data.pipeline.text_rows import build_chat_row_processor
 from tests.common.models import GEMMA3_4B_IT, GEMMA4_31B_QAT, GLM4_FLASH, GPT_OSS_20B_OPENAI, QWEN3_0_6B, ZAYA_8B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -117,7 +117,7 @@ def test_zaya_training_keeps_terminator_generation_drops_it():
 def test_zaya_max_length_boundary_never_doubles_the_terminator():
     """Boundary regression on the real Zaya tokenizer, through the production SFT map fn.
 
-    ``create_llm_processor`` drops rows longer than ``max_length``, so a surviving row is never cut
+    ``build_chat_row_processor`` drops rows longer than ``max_length``, so a surviving row is never cut
     by more than the render's trailing whitespace — so a dedup guard keyed on length-vs-budget would
     read those rows as "truncated" and let the appended ``<|im_end|>`` double the template's own.
     """
@@ -129,7 +129,7 @@ def test_zaya_max_length_boundary_never_doubles_the_terminator():
 
     row = {"messages": MESSAGES}
     for max_length in range(len(baseline) - 1, len(baseline) + 4):
-        ids = create_llm_processor(tok, max_length=max_length, conversation_field="messages")(row)["input_ids"]
+        ids = build_chat_row_processor(tok, max_length=max_length, conversation_field="messages")(row)["input_ids"]
         if len(ids) <= 1:
             continue  # rejection sentinel: the row does not fit this budget at all
         assert ids.count(eos_id) == baseline.count(eos_id), (

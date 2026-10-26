@@ -1,10 +1,6 @@
-"""Local cache-publish protocol for downloaded dataset trees.
-
-Dependency-light (``os``/``shutil``/``filelock``) with the fetch injected, so the S3 dataset cache
-and the per-shard cache of a sharded dataset share the same crash and staleness semantics. The
-fingerprint is what an S3 listing can produce (key/ETag/size), so a cached tree can be validated
-against a live prefix without downloading it.
-"""
+"""Local cache-publish protocol for downloaded dataset trees, with the fetch injected so the S3 dataset
+cache and a sharded dataset's per-shard cache share its crash and staleness semantics. The fingerprint is
+what an S3 listing produces (key/ETag/size), so a cached tree validates against a live prefix unread."""
 
 import hashlib
 import os
@@ -21,22 +17,17 @@ from src.log import info_logger
 
 logger = info_logger(__name__)
 
-# Explicit env override wins, else the toolkit scratch root (<root>/s3_datasets). ``or``-chained
-# because a set-but-empty override would resolve every cache path against the CWD, scattering
-# multi-GB downloads into the repo.
+# ``or``-chained: a set-but-empty override would resolve every cache path against the CWD.
 HALO_S3_DATASET_CACHE_DIR = env_str("HALO_S3_DATASET_CACHE_DIR") or data_path("s3_datasets")
 
 _MARKER_FINGERPRINT_PREFIX = "etag_fingerprint="
 
-# How long a rank waits for the peer downloading the same entry, sized off the c10d store budget
-# that bounds the peers on the other side of that download. Positive-int because ``filelock`` reads
-# the extremes as modes (0 fails immediately, negative waits forever).
+# The wait for a peer downloading the same entry; positive because filelock reads 0 and negatives as modes.
 _CACHE_LOCK_TIMEOUT_SECONDS = env_positive_int(
     "HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS", int(store_timeout().total_seconds())
 )
 
-# Written inside a published cache dir; its presence is what makes the cache servable. Shared with
-# the sharded-dataset shard cache, which follows the same publish protocol.
+# Written inside a published cache dir; its presence is what makes the cache servable.
 DOWNLOAD_COMPLETE_MARKER = ".download_complete"
 
 # Older publish-temp dirs are orphans from crashed writers; anything younger may belong to a live writer.
@@ -44,19 +35,13 @@ _STALE_PUBLISH_TMP_MAX_AGE_SECONDS = 24 * 60 * 60
 
 
 def s3_cache_key(bucket: str, key: str) -> str:
-    """The cache-directory name for an S3 object: ``md5("<bucket>/<key>")``.
-
-    Shared by every cache on this volume: dataset trees, per-shard caches, control-file mirrors. A
-    second spelling would not fail outright; it would miss the cache a prior run pre-populated, so
-    the run would need live AWS where it was meant to survive an outage.
-    """
+    """The cache-directory name of an S3 object, ``md5("<bucket>/<key>")``, for every cache on this volume:
+    another spelling would miss a pre-populated cache and need live AWS."""
     return hashlib.md5(f"{bucket}/{key}".encode()).hexdigest()
 
 
 def compute_etag_fingerprint(entries: list[tuple[str, str, int]]) -> str | None:
-    """Order-insensitive md5 over (key, etag, size) triples from an S3 listing, so a cached download
-    can be validated against live S3 (an in-place overwrite changes the ETags). None for an empty
-    listing."""
+    """Order-insensitive md5 over an S3 listing's ``(key, etag, size)`` triples; None for an empty listing."""
     lines = sorted(f"{key}\t{etag}\t{size}" for key, etag, size in entries)
     if not lines:
         return None
@@ -84,86 +69,11 @@ def _read_marker_fingerprint(marker_path: str) -> str | None:
     return None
 
 
-def publish_cached_download(
-    cache_path: str,
-    lock_path: str,
-    source_uri: str,
-    fetch: Callable[[str], None],
-    live_fingerprint: str | None,
-    fresh_fingerprint: Callable[[], str | None],
-    *,
-    use_cache: bool = True,
-    stale_message: str | None = None,
-) -> bool:
-    """Serve ``cache_path`` from cache or (re)download into it, publishing atomically. Returns cache-hit.
-
-    Shared by the S3 dataset cache and the sharded-dataset shard cache so their staleness and crash
-    semantics cannot drift:
-
-    * a ``FileLock`` serializes same-node writers; the completion marker is re-checked under it;
-    * ``live_fingerprint`` (probed by the caller outside the lock, since it is network I/O) is
-      compared with the marker's stored one, so an in-place re-push to the same URI invalidates the
-      cache. ``None`` means the cache cannot be validated and is served as-is; a fingerprint-less
-      marker is upgraded in place;
-    * ``fetch(tmp_path)`` writes a unique temp dir published by ``os.rename``: flock does not reliably
-      exclude across NFS clients, so cross-node writers race the rename rather than the bytes.
-    """
-    complete_marker = os.path.join(cache_path, DOWNLOAD_COMPLETE_MARKER)
-    lock = filelock.FileLock(lock_path, timeout=_CACHE_LOCK_TIMEOUT_SECONDS)
-    with lock:
-        # Under the lock same-node writers are excluded; the age threshold covers cross-node ones.
-        _cleanup_stale_publish_tmp_dirs(cache_path)
-
-        cache_valid = use_cache and os.path.exists(complete_marker)
-        if cache_valid and live_fingerprint is not None:
-            stored_fingerprint = _read_marker_fingerprint(complete_marker)
-            if stored_fingerprint is None:
-                # Fingerprint-less marker (the source could not be identified when it was written):
-                # serve the cache, and stamp the live identity so the next probe can validate it.
-                _write_download_marker(complete_marker, source_uri, live_fingerprint)
-            elif stored_fingerprint != live_fingerprint:
-                logger.warning(
-                    stale_message
-                    or f"{source_uri} changed since it was cached (content fingerprint mismatch); re-downloading."
-                )
-                cache_valid = False
-
-        if cache_valid:
-            return True
-
-        tmp_path = f"{cache_path}.tmp-{uuid.uuid4().hex}"
-        fetch(tmp_path)
-        _write_download_marker(os.path.join(tmp_path, DOWNLOAD_COMPLETE_MARKER), source_uri, fresh_fingerprint())
-        # The old tree is renamed aside rather than deleted in place: another node may be loading it
-        # (loads run outside the lock, and flock does not exclude across NFS clients), and deleting
-        # it under that reader raises FileNotFoundError mid-load. A crash between the two renames
-        # leaves cache_path absent (re-downloaded next run), never a half-written tree behind a
-        # completion marker. The superseded tree reuses the `.tmp-<uuid>` name, so one reaper covers both.
-        superseded = f"{cache_path}.tmp-{uuid.uuid4().hex}"
-        try:
-            os.rename(cache_path, superseded)
-        except FileNotFoundError:  # nothing to replace
-            superseded = None
-        except OSError:
-            shutil.rmtree(tmp_path, ignore_errors=True)
-            raise
-        try:
-            os.rename(tmp_path, cache_path)
-        except OSError:  # another writer (possibly another node) published first; keep theirs
-            shutil.rmtree(tmp_path, ignore_errors=True)
-        if superseded is not None:
-            shutil.rmtree(superseded, ignore_errors=True)
-        return False
-
-
 def _cleanup_stale_publish_tmp_dirs(
     cache_path: str, max_age_seconds: float = _STALE_PUBLISH_TMP_MAX_AGE_SECONDS
 ) -> list[str]:
-    """Best-effort removal of orphaned ``<cache_path>.tmp-<uuid>`` dirs left by crashed writers.
-
-    Sibling dirs matching the exact temp pattern and older than ``max_age_seconds`` are removed; a
-    live writer's dir is always fresh, so there is no race. Returns the removed paths.
-    """
+    """Remove the ``<cache_path>.tmp-<uuid>`` siblings older than ``max_age_seconds`` (crashed writers'; a
+    live writer's is always fresh), returning the removed paths."""
     pattern = re.compile(re.escape(os.path.basename(cache_path)) + r"\.tmp-[0-9a-f]{32}$")
     cutoff = time.time() - max_age_seconds
     removed: list[str] = []
@@ -184,3 +94,93 @@ def _cleanup_stale_publish_tmp_dirs(
     if removed:
         logger.info(f"Removed {len(removed)} stale cache publish temp dir(s) from crashed writers: {removed}")
     return removed
+
+
+def _publish_tree(tmp_path: str, cache_path: str) -> None:
+    """Swap the fetched ``tmp_path`` in as ``cache_path``, keeping another writer's tree if it published first.
+
+    The old tree is renamed aside, not deleted in place, since another node may be loading it; a crash
+    between the renames leaves ``cache_path`` absent, and the aside name is a ``.tmp-<uuid>`` the reaper takes.
+    """
+    superseded = f"{cache_path}.tmp-{uuid.uuid4().hex}"
+    try:
+        os.rename(cache_path, superseded)
+    except FileNotFoundError:  # nothing to replace
+        superseded = None
+    except OSError:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+        raise
+    try:
+        os.rename(tmp_path, cache_path)
+    except OSError:  # another writer (possibly another node) published first; keep theirs
+        shutil.rmtree(tmp_path, ignore_errors=True)
+    if superseded is not None:
+        shutil.rmtree(superseded, ignore_errors=True)
+
+
+def publish_cached_download(
+    cache_path: str,
+    lock_path: str,
+    source_uri: str,
+    fetch: Callable[[str], None],
+    live_fingerprint: str | None,
+    fresh_fingerprint: Callable[[], str | None],
+    *,
+    use_cache: bool = True,
+    stale_message: str | None = None,
+) -> bool:
+    """Serve ``cache_path`` from cache or (re)download it with ``fetch(tmp_path)`` and publish it atomically;
+    returns cache-hit. Writers serialize on ``lock_path``; ``live_fingerprint`` (``None`` serves the cache
+    unvalidated) invalidates a cache whose source changed and upgrades a fingerprint-less marker in place.
+    """
+    complete_marker = os.path.join(cache_path, DOWNLOAD_COMPLETE_MARKER)
+    with filelock.FileLock(lock_path, timeout=_CACHE_LOCK_TIMEOUT_SECONDS):
+        # Under the lock same-node writers are excluded; the age threshold covers cross-node ones.
+        _cleanup_stale_publish_tmp_dirs(cache_path)
+
+        cache_valid = use_cache and os.path.exists(complete_marker)
+        if cache_valid and live_fingerprint is not None:
+            stored_fingerprint = _read_marker_fingerprint(complete_marker)
+            if stored_fingerprint is None:
+                _write_download_marker(complete_marker, source_uri, live_fingerprint)
+            elif stored_fingerprint != live_fingerprint:
+                logger.warning(
+                    stale_message
+                    or f"{source_uri} changed since it was cached (content fingerprint mismatch); re-downloading."
+                )
+                cache_valid = False
+        if cache_valid:
+            return True
+
+        tmp_path = f"{cache_path}.tmp-{uuid.uuid4().hex}"
+        fetch(tmp_path)
+        _write_download_marker(os.path.join(tmp_path, DOWNLOAD_COMPLETE_MARKER), source_uri, fresh_fingerprint())
+        _publish_tree(tmp_path, cache_path)
+        return False
+
+
+def serve_cached_tree(
+    cache_path: str,
+    source_uri: str,
+    fetch: Callable[[str], None],
+    fingerprint: Callable[[], str | None],
+    *,
+    stale_message: str,
+    use_cache: bool = True,
+) -> bool:
+    """:func:`publish_cached_download` of ``source_uri`` at ``cache_path`` (``<cache dir>/<tree>``, locked
+    by ``<cache dir>/.lock``), validating a complete cache against ``fingerprint()``. Returns cache-hit."""
+    cache_dir = os.path.dirname(cache_path)
+    os.makedirs(cache_dir, exist_ok=True)
+    # Probed outside the lock (network I/O), and only for a cache that could be served.
+    complete = use_cache and os.path.exists(os.path.join(cache_path, DOWNLOAD_COMPLETE_MARKER))
+    return publish_cached_download(
+        cache_path,
+        os.path.join(cache_dir, ".lock"),
+        source_uri,
+        fetch,
+        fingerprint() if complete else None,
+        fingerprint,
+        use_cache=use_cache,
+        stale_message=stale_message,
+    )

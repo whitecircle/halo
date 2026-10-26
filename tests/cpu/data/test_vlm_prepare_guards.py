@@ -14,8 +14,8 @@ import types
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline import vlm_dataset
-from src.data.pipeline.vlm_dataset import prepare_vlm_dataset, vlm_map_features
+from src.data.pipeline import vlm_rows
+from src.data.pipeline.vlm_rows import prepare_vlm_dataset, vlm_map_features
 from src.entrypoints import model_setup
 
 
@@ -53,7 +53,7 @@ def test_matching_images_field_passes_the_guard(monkeypatch):
     def _boom(**_kwargs):
         raise _ReachedProcessing
 
-    monkeypatch.setattr(vlm_dataset, "create_vlm_processor", _boom)
+    monkeypatch.setattr(vlm_rows, "build_vlm_row_processor", _boom)
     with pytest.raises(_ReachedProcessing):
         prepare_vlm_dataset(_dataset(), _args(images_field="images"), None, None, 128, 1)
 

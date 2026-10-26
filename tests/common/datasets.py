@@ -11,8 +11,8 @@ from datasets import Dataset, DatasetDict, Sequence
 from datasets import Image as HFImage
 from PIL import Image, ImageDraw
 
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import preprocess_dataset
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.preparation import preprocess_dataset
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 

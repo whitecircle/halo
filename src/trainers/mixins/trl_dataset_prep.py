@@ -13,7 +13,7 @@ import json
 from accelerate import PartialState
 from datasets import Dataset
 
-from src.data.pipeline.processing import coordinated_dataset_transform
+from src.data.pipeline.coordinated_map import coordinated_dataset_transform
 
 # TrainingArguments fields naming the process or the launch, not the data: ``local_rank`` differs per
 # rank and the rest per launch, so keying them would publish one prepared copy per rank or per run.

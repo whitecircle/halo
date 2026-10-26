@@ -18,7 +18,8 @@ import pytest
 from datasets import Dataset, load_from_disk
 from datasets import fingerprint as hf_fingerprint
 
-from src.data.pipeline.processing import coordinated_dataset_transform
+from src.data.pipeline.coordinated_map import coordinated_dataset_transform
+from src.data.pipeline.map_cache_key import CACHE_KEY_ATTR
 
 ROWS = 8
 MAPS = 3
@@ -78,7 +79,7 @@ def test_a_transform_stages_its_maps_in_the_datasets_cache_and_keeps_only_the_pu
 
     assert prepared["x"] == [x + MAPS for x in range(ROWS)]
     _assert_staged_and_removed(written, tmpdir, cache)
-    assert _unlocked_entries(cache) == [prepared._toolkit_cache_key], os.listdir(cache)
+    assert _unlocked_entries(cache) == [getattr(prepared, CACHE_KEY_ATTR)], os.listdir(cache)
 
 
 def test_a_failing_transform_leaves_no_staged_maps_behind(dirs):

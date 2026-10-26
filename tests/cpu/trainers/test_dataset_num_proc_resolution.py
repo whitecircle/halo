@@ -20,14 +20,14 @@ import pytest
 from datasets import Dataset
 
 import src.trainers.preference.smpo as smpo_module
-from src.data.pipeline.preferences import tokenize_preference_row
-from src.data.pipeline.processing import (
+from src.data.pipeline.coordinated_map import (
     DATASET_NUM_PROC,
     coordinated_filter,
     coordinated_map,
     reject_self_capturing_fn,
     resolve_map_num_proc,
 )
+from src.data.pipeline.preferences import tokenize_preference_row
 from src.trainers.grpo.offline import tokenize_offline_grpo_rows
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 

@@ -74,31 +74,31 @@ The tool tokenizes, optionally packs, and shards the corpus, and can push the
 result to the Hub or S3. These flags decide whether the output is usable:
 
 - **`--mode`.** `chat` (the default) renders the conversation field through the
-  chat template. `text` tokenizes `--text-field` as raw text, for pretraining.
-- **`--num-shards`.** The default `1` writes one unsharded dataset that trains at
+  chat template. `text` tokenizes `--text_field` as raw text, for pretraining.
+- **`--num_shards`.** The default `1` writes one unsharded dataset that trains at
   any data-parallel size. Above 1, the shard count must be at least your
   data-parallel size.
-- **`--pack-sequences`.** Turns packing on. Without it each row holds one
+- **`--pack_sequences`.** Turns packing on. Without it each row holds one
   document.
-- **`--packing-strategy`.** How packing fills rows:
+- **`--packing_strategy`.** How packing fills rows:
   - `bfd` (default): best-fit-decreasing; a document longer than
-    `--max-length` loses its overflow.
+    `--max_length` loses its overflow.
   - `bfd_split`: the same packing, with the overflow carried into later
     examples. Use it for lossless pretraining.
   - `wrapped`: concatenates and chunks across documents. It keeps every token
     but loses the document boundaries the collator uses to reset attention.
 
-  In chat mode a conversation longer than `--max-length` is dropped before
+  In chat mode a conversation longer than `--max_length` is dropped before
   packing, whatever the strategy.
-- **`--max-length`.** Stored in the dataset metadata. It must equal the training
+- **`--max_length`.** Stored in the dataset metadata. It must equal the training
   config's `max_length`, or the load raises, since rows are never re-truncated.
-- **`--test-size`.** Without it, a single-split input is written train-only. The
+- **`--test_size`.** Without it, a single-split input is written train-only. The
   run then warns and uses the first 100 train rows as a placeholder test split,
-  and `--num-shards` above 1 is refused. The output keeps only `train` and
+  and `--num_shards` above 1 is refused. The output keeps only `train` and
   `test`: with no `test` split, the input's `validation` split becomes `test`,
   and any other split is dropped with a warning.
 
-`--tokenizer-backend gigatoken` replaces the HF tokenizer with a Rust bulk
+`--tokenizer_backend gigatoken` replaces the HF tokenizer with a Rust bulk
 encoder, about 6× faster on UltraChat 200K with the Qwen3-0.6B tokenizer. It
 checks its IDs against the HF tokenizer at startup and raises on any mismatch.
 It ships in the training image; elsewhere, install it from a checkout with

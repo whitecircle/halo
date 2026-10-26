@@ -10,7 +10,6 @@ import logging
 import os
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
 from src.data.sources.loading import load_preprocessed_dataset
@@ -21,9 +20,7 @@ from tests.common.tokenizers import load_cached_tokenizer
 _TRAIN = Dataset.from_dict({"text": [f"Training document number {i}." for i in range(12)]})
 _HELD_OUT = Dataset.from_dict({"text": [f"Held-out document number {i}." for i in range(3)]})
 _EXTRA = Dataset.from_dict({"text": [f"Extra document number {i}." for i in range(2)]})
-_PREPROCESSING_LOGGER = "src.data.pipeline.preprocessing"
-
-PartialState()  # the loaders log through accelerate's rank-aware logger
+_PREPARATION_LOGGER = "src.data.preprocessed.preparation"
 
 
 def _decoded_test_rows(output_dir) -> list[str]:
@@ -56,7 +53,7 @@ def _unbaked_warnings(caplog) -> list[str]:
     ],
 )
 def test_a_split_outside_the_baked_pair_is_named_in_a_warning(tmp_path, caplog, splits, unbaked):
-    with caplog.at_level(logging.WARNING, logger=_PREPROCESSING_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_PREPARATION_LOGGER):
         write_prepared_text_dataset(tmp_path, DatasetDict(splits))
     warned = _unbaked_warnings(caplog)
     assert len(warned) == 1 and unbaked in warned[0], warned
@@ -65,7 +62,7 @@ def test_a_split_outside_the_baked_pair_is_named_in_a_warning(tmp_path, caplog, 
 
 @pytest.mark.parametrize("held_out", ["test", "validation"])
 def test_no_warning_when_every_split_is_baked(tmp_path, caplog, held_out):
-    with caplog.at_level(logging.WARNING, logger=_PREPROCESSING_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_PREPARATION_LOGGER):
         write_prepared_text_dataset(tmp_path, DatasetDict({"train": _TRAIN, held_out: _HELD_OUT}))
     assert _unbaked_warnings(caplog) == []
 

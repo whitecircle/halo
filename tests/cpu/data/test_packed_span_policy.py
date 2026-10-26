@@ -22,10 +22,10 @@ from src.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlatteningAndCompletionMask,
 )
-from src.data.pipeline import preprocessing as preprocessing_mod
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import _completion_only_labels, tokenize_dataset
-from src.data.spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, mask_batch_to_completion_spans
+from src.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, mask_batch_to_completion_spans
+from src.data.preprocessed import tokenization as tokenization_mod
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.tokenization import _completion_only_labels, tokenize_dataset
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -107,7 +107,6 @@ def _padded_route_labels(input_ids: list[int]) -> list[int]:
         {"input_ids": ids, "labels": ids.clone()},
         TEMPLATE_IDS,
         frozenset({EOS}),
-        ignore_index=IGNORE,
         train_on_last_assistant_only=False,
         response_prompt_template="<resp>",
         tokenizer=None,
@@ -158,13 +157,13 @@ def test_the_bake_selects_the_policy_its_artifact_will_be_collated_under(
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
 
     seen = []
-    real_bake = preprocessing_mod._completion_only_labels
+    real_bake = tokenization_mod._completion_only_labels
 
     def recording(*args, span_policy=None, **kwargs):
         seen.append(span_policy)
         return real_bake(*args, span_policy=span_policy, **kwargs)
 
-    monkeypatch.setattr(preprocessing_mod, "_completion_only_labels", recording)
+    monkeypatch.setattr(tokenization_mod, "_completion_only_labels", recording)
 
     dataset = Dataset.from_dict(
         {

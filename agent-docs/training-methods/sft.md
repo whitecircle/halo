@@ -93,7 +93,7 @@ Pair with `lr_scheduler_type: cosine` and a warmup of ~3–5% of the run. There 
 
 Two verdicts decide a vision-language run. The **model class follows the checkpoint**: a multimodal config loads through `AutoModelForImageTextToText`, still via `load_distributed_model`, so a MoE VLM gets the same EP/TP/CP wrapping. `text_only_model: true` overrides that — the checkpoint loads through its text-only CausalLM sibling, the vision tower is dropped, and image columns are refused.
 
-The **data path follows the run** (`is_vlm_run`, `src/data/vlm.py`): the VLM path only when the checkpoint is multimodal **and** the run declares image data. A natively-multimodal checkpoint (Gemma 4, Qwen3.5/3.6, Inkling) on text-only rows is a text run, so packing, padding-free and `train_on_last_assistant_only` stay available.
+The **data path follows the run** (`is_vlm_run`, `src/data/vlm_routing.py`): the VLM path only when the checkpoint is multimodal **and** the run declares image data. A natively-multimodal checkpoint (Gemma 4, Qwen3.5/3.6, Inkling) on text-only rows is a text run, so packing, padding-free and `train_on_last_assistant_only` stay available.
 
 The processing class is the checkpoint's processor wherever it ships a processor config (`processor_config.json` / `preprocessor_config.json`), text runs included: the export saves it, and vLLM builds the multimodal class's processor from it at startup. A multimodal checkpoint shipping none ([Step-3.7 Flash](../models/step3p7.md#model-loading)) trains text runs through its tokenizer and refuses an image run at the processor load (`src/entrypoints/model_setup.py`).
 
@@ -127,9 +127,9 @@ See [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compati
 ```bash
 python scripts/before_training/prepare_dataset.py \
     --input "s3://bucket/raw/dataset" --output "s3://bucket/preprocessed/dataset" \
-    --model-name "Qwen/Qwen3-8B" --max-length 4096 --test-size 0.01 \
-    --num-shards 64 --pack-sequences \
-    --assistant-message-template $'<|im_start|>assistant\n'
+    --model_name_or_path "Qwen/Qwen3-8B" --max_length 4096 --test_size 0.01 \
+    --num_shards 64 --pack_sequences \
+    --assistant_message_template $'<|im_start|>assistant\n'
 ```
 
 The training script detects the artifact from its `metadata.json`, skips tokenization, and holds the run to what was baked: `max_length` and `train_on_completions_only` must agree or startup raises, as must any render knob the YAML states. `ShardedDatasetLoader` then assigns shards by DP rank ([Pre-Processing](../data/dataset-preparation.md)).

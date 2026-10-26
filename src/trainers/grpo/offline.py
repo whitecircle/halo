@@ -62,9 +62,10 @@ from src.data.collators.offline_grpo import (
     OfflineGRPOCPDataCollatorWithPadding,
     OfflineGRPODataCollatorWithPadding,
 )
-from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
-from src.data.pipeline.rendered import lacks_emitted_bos
-from src.data.spans import completion_labels, lacks_terminator, resolve_eos_token_ids
+from src.data.completion_spans import completion_labels
+from src.data.pipeline.chat_render import lacks_emitted_bos
+from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
+from src.data.turn_markers import lacks_terminator, resolve_eos_token_ids
 from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds, cp_sum_rows
 from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import current_device

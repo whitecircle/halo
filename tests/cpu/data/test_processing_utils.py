@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Tests for dataset processing fingerprinting utilities:
-get_function_identifier(), _get_kwargs_fingerprint(), maybe_parse_json(),
+function_cache_id(), kwargs_fingerprint(), maybe_parse_json(),
 tools_field threading, and cache-key invalidation.
 
 Run: python tests/cpu/data/test_processing_utils.py
@@ -12,18 +12,14 @@ import json
 
 import pytest
 
-from src.data.pipeline import row_processors
+from src.data.pipeline import vlm_rows
 from src.data.pipeline.conversation import maybe_parse_json
-from src.data.pipeline.preferences import apply_chat_template_to_preference_data
-from src.data.pipeline.processing import _build_cache_file_name, _get_kwargs_fingerprint, get_function_identifier
-from src.data.pipeline.row_processors import (
-    apply_chat_template_to_conversations,
-    create_llm_processor,
-    create_vlm_processor,
-    prepare_generative_row,
-)
+from src.data.pipeline.map_cache_key import function_cache_id, kwargs_fingerprint, map_cache_file_name
+from src.data.pipeline.preferences import render_preference_row
+from src.data.pipeline.text_rows import build_chat_row_processor, prepare_generative_row, render_row_conversation
+from src.data.pipeline.vlm_rows import build_vlm_row_processor
 
-# get_function_identifier tests
+# function_cache_id tests
 
 
 def _helper_func_a(x):
@@ -36,28 +32,28 @@ def _helper_func_b(x):
 
 def test_function_id_deterministic():
     """Same function should always produce the same identifier."""
-    id1 = get_function_identifier(_helper_func_a)
-    id2 = get_function_identifier(_helper_func_a)
+    id1 = function_cache_id(_helper_func_a)
+    id2 = function_cache_id(_helper_func_a)
     assert id1 == id2, f"Expected same ID, got '{id1}' and '{id2}'"
 
 
 def test_function_id_different_functions():
     """Different functions should produce different identifiers."""
-    id_a = get_function_identifier(_helper_func_a)
-    id_b = get_function_identifier(_helper_func_b)
+    id_a = function_cache_id(_helper_func_a)
+    id_b = function_cache_id(_helper_func_b)
     assert id_a != id_b, f"Expected different IDs, both got '{id_a}'"
 
 
 def test_function_id_contains_name():
     """Identifier should contain the function name."""
-    fid = get_function_identifier(_helper_func_a)
+    fid = function_cache_id(_helper_func_a)
     assert "_helper_func_a" in fid, f"Expected '_helper_func_a' in '{fid}'"
 
 
 def test_function_id_with_lambda():
     """Lambda identifiers carry the '<lambda>' name and a code hash."""
     # A raw lambda's __name__ is "<lambda>" (a `def`, by contrast, is named after its identifier).
-    fid = get_function_identifier(lambda x: x + 10)
+    fid = function_cache_id(lambda x: x + 10)
     assert isinstance(fid, str)
     # Source-hash path yields "<name>_<hash>"; the lambda's __name__ is "<lambda>".
     assert fid.startswith("<lambda>_"), f"Expected '<lambda>_...' prefix, got '{fid}'"
@@ -70,7 +66,7 @@ def test_function_id_nested_function():
     def inner_func(y):
         return y**2
 
-    fid = get_function_identifier(inner_func)
+    fid = function_cache_id(inner_func)
     assert isinstance(fid, str)
     assert "inner_func" in fid
 
@@ -84,8 +80,8 @@ def test_function_id_partial_distinguishes_bound_tokenizer():
     """
     p_a = functools.partial(prepare_generative_row, tokenizer=_StubTokenizer("modelA", 201088), max_length=4096)
     p_b = functools.partial(prepare_generative_row, tokenizer=_StubTokenizer("modelB", 262155), max_length=4096)
-    id_a = get_function_identifier(p_a)
-    id_b = get_function_identifier(p_b)
+    id_a = function_cache_id(p_a)
+    id_b = function_cache_id(p_b)
     assert id_a != id_b, f"partials binding different tokenizers collided on '{id_a}'"
     assert "prepare_generative_row" in id_a, f"expected wrapped func name in '{id_a}'"
 
@@ -95,7 +91,7 @@ def test_function_id_partial_distinguishes_bound_scalar():
     tok = _StubTokenizer("modelA", 201088)
     p_short = functools.partial(prepare_generative_row, tokenizer=tok, max_length=4096)
     p_long = functools.partial(prepare_generative_row, tokenizer=tok, max_length=36000)
-    assert get_function_identifier(p_short) != get_function_identifier(p_long)
+    assert function_cache_id(p_short) != function_cache_id(p_long)
 
 
 def test_function_id_partial_deterministic():
@@ -104,15 +100,15 @@ def test_function_id_partial_deterministic():
     def mk():
         return functools.partial(prepare_generative_row, tokenizer=_StubTokenizer("modelA", 201088), max_length=4096)
 
-    assert get_function_identifier(mk()) == get_function_identifier(mk())
+    assert function_cache_id(mk()) == function_cache_id(mk())
 
 
-# _get_kwargs_fingerprint tests
+# kwargs_fingerprint tests
 
 
 def test_kwargs_fingerprint_empty():
     """Empty kwargs should return empty string."""
-    result = _get_kwargs_fingerprint({})
+    result = kwargs_fingerprint({})
     assert result == "", f"Expected '', got '{result}'"
 
 
@@ -127,8 +123,8 @@ def test_kwargs_fingerprint_distinguishes_name_or_path():
         def __init__(self, nop):
             self.name_or_path = nop
 
-    fp_a = _get_kwargs_fingerprint({"tokenizer": _Tok("Qwen/Qwen3-4B")})
-    fp_b = _get_kwargs_fingerprint({"tokenizer": _Tok("meta-llama/Llama-3-8B")})
+    fp_a = kwargs_fingerprint({"tokenizer": _Tok("Qwen/Qwen3-4B")})
+    fp_b = kwargs_fingerprint({"tokenizer": _Tok("meta-llama/Llama-3-8B")})
     assert fp_a != fp_b, "Different tokenizers must produce different fingerprints"
 
 
@@ -139,8 +135,8 @@ def test_kwargs_fingerprint_distinguishes_vocab_size():
         def __init__(self, vs):
             self.vocab_size = vs
 
-    fp_a = _get_kwargs_fingerprint({"config": _Cfg(32000)})
-    fp_b = _get_kwargs_fingerprint({"config": _Cfg(151936)})
+    fp_a = kwargs_fingerprint({"config": _Cfg(32000)})
+    fp_b = kwargs_fingerprint({"config": _Cfg(151936)})
     assert fp_a != fp_b
 
 
@@ -158,16 +154,16 @@ def test_kwargs_fingerprint_distinguishes_chat_template():
             self.vocab_size = 1000
             self.chat_template = template
 
-    fp_a = _get_kwargs_fingerprint({"tokenizer": _Tok("{{ messages }}")})
-    fp_b = _get_kwargs_fingerprint({"tokenizer": _Tok("{{ messages }}<eot>")})
-    fp_a2 = _get_kwargs_fingerprint({"tokenizer": _Tok("{{ messages }}")})
+    fp_a = kwargs_fingerprint({"tokenizer": _Tok("{{ messages }}")})
+    fp_b = kwargs_fingerprint({"tokenizer": _Tok("{{ messages }}<eot>")})
+    fp_a2 = kwargs_fingerprint({"tokenizer": _Tok("{{ messages }}")})
     assert fp_a != fp_b, "Different chat_template must produce different fingerprints"
     assert fp_a == fp_a2, "Same chat_template must be stable"
 
 
 def test_kwargs_fingerprint_distinguishes_primitive_values():
     """Different primitive values for the same key change the fingerprint."""
-    assert _get_kwargs_fingerprint({"max_length": 1024}) != _get_kwargs_fingerprint({"max_length": 4096})
+    assert kwargs_fingerprint({"max_length": 1024}) != kwargs_fingerprint({"max_length": 4096})
 
 
 def test_kwargs_fingerprint_opaque_object_uses_type_name():
@@ -183,17 +179,17 @@ def test_kwargs_fingerprint_opaque_object_uses_type_name():
     class _OpaqueB:
         pass
 
-    fp_a1 = _get_kwargs_fingerprint({"obj": _OpaqueA()})
-    fp_a2 = _get_kwargs_fingerprint({"obj": _OpaqueA()})
-    fp_b = _get_kwargs_fingerprint({"obj": _OpaqueB()})
+    fp_a1 = kwargs_fingerprint({"obj": _OpaqueA()})
+    fp_a2 = kwargs_fingerprint({"obj": _OpaqueA()})
+    fp_b = kwargs_fingerprint({"obj": _OpaqueB()})
     assert fp_a1 == fp_a2, "Same opaque type → same fingerprint (only type name captured)"
     assert fp_a1 != fp_b, "Different opaque type → different fingerprint"
 
 
 def test_kwargs_fingerprint_sorted_keys():
     """Key order should not affect fingerprint (keys are sorted internally)."""
-    fp1 = _get_kwargs_fingerprint({"a": 1, "b": 2, "c": 3})
-    fp2 = _get_kwargs_fingerprint({"c": 3, "a": 1, "b": 2})
+    fp1 = kwargs_fingerprint({"a": 1, "b": 2, "c": 3})
+    fp2 = kwargs_fingerprint({"c": 3, "a": 1, "b": 2})
     assert fp1 == fp2, f"Different key orders should produce same fingerprint: '{fp1}' vs '{fp2}'"
 
 
@@ -220,7 +216,7 @@ def test_maybe_parse_json_passes_through_invalid_string():
     assert maybe_parse_json([{"role": "user"}]) == [{"role": "user"}]
 
 
-# tools_field threading tests (apply_chat_template_to_conversations + processor)
+# tools_field threading tests (render_row_conversation + processor)
 
 
 class _RecordingTokenizer:
@@ -259,14 +255,14 @@ def test_apply_chat_template_forwards_tools_when_present():
         "messages": [{"role": "user", "content": "hi"}],
         "tools": tools,
     }
-    apply_chat_template_to_conversations(row, tokenizer, tools_field="tools")
+    render_row_conversation(row, tokenizer, tools_field="tools")
     assert tokenizer.calls and tokenizer.calls[-1].get("tools") == tools
 
 
 def test_apply_chat_template_omits_tools_when_field_missing():
     tokenizer = _RecordingTokenizer()
     row = {"messages": [{"role": "user", "content": "hi"}]}
-    apply_chat_template_to_conversations(row, tokenizer, tools_field="tools")
+    render_row_conversation(row, tokenizer, tools_field="tools")
     assert tokenizer.calls and "tools" not in tokenizer.calls[-1]
 
 
@@ -277,7 +273,7 @@ def test_apply_chat_template_parses_json_tools():
         "messages": [{"role": "user", "content": "hi"}],
         "tools": json.dumps(tools),
     }
-    apply_chat_template_to_conversations(row, tokenizer, tools_field="tools")
+    render_row_conversation(row, tokenizer, tools_field="tools")
     assert tokenizer.calls[-1].get("tools") == tools
 
 
@@ -287,15 +283,15 @@ def test_apply_chat_template_parses_json_messages():
     row = {
         "messages": json.dumps([{"role": "user", "content": "hi"}]),
     }
-    apply_chat_template_to_conversations(row, tokenizer)
+    render_row_conversation(row, tokenizer)
     assert tokenizer.calls[-1]["messages"] == [{"role": "user", "content": "hi"}]
 
 
-def test_create_llm_processor_threads_tools():
-    """create_llm_processor must propagate tools_field into the closure."""
+def test_build_chat_row_processor_threads_tools():
+    """build_chat_row_processor must propagate tools_field into the closure."""
     tokenizer = _RecordingTokenizer()
     tools = [{"type": "function", "function": {"name": "calc"}}]
-    processor = create_llm_processor(
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=128,
         tools_field="tools",
@@ -310,7 +306,7 @@ def test_create_llm_processor_threads_tools():
 
 
 def test_preference_helper_threads_tools():
-    """apply_chat_template_to_preference_data forwards tools to all 3 fields."""
+    """render_preference_row forwards tools to all 3 fields."""
     tokenizer = _RecordingTokenizer()
     tools = [{"type": "function", "function": {"name": "calc"}}]
     row = {
@@ -319,7 +315,7 @@ def test_preference_helper_threads_tools():
         "rejected": [{"role": "assistant", "content": "a2"}],
         "tools": tools,
     }
-    apply_chat_template_to_preference_data(row, tokenizer, tools_field="tools")
+    render_preference_row(row, tokenizer, tools_field="tools")
     # Three apply_chat_template calls (prompt/chosen/rejected) — all must carry tools.
     tools_calls = [c for c in tokenizer.calls if c.get("tools") == tools]
     assert len(tools_calls) == 3, f"Expected 3 calls with tools, got {len(tools_calls)} of {len(tokenizer.calls)}"
@@ -333,7 +329,7 @@ def test_preference_helper_omits_tools_when_field_unset():
         "chosen": [{"role": "assistant", "content": "a1"}],
         "rejected": [{"role": "assistant", "content": "a2"}],
     }
-    apply_chat_template_to_preference_data(row, tokenizer)
+    render_preference_row(row, tokenizer)
     assert all("tools" not in c for c in tokenizer.calls)
 
 
@@ -347,7 +343,7 @@ def test_preference_helper_parses_json_tools():
         "rejected": [{"role": "assistant", "content": "a2"}],
         "tool_specs": json.dumps(tools),
     }
-    apply_chat_template_to_preference_data(
+    render_preference_row(
         row,
         tokenizer,
         tools_field="tool_specs",
@@ -379,13 +375,13 @@ def _stub_process_vlm(conversation, system_prompt=None, model_supports_system_ro
 def _passthrough_vlm_conversation(monkeypatch):
     """Swap the module-global image extractor for a passthrough, so these row-shape tests do not
     need real PIL payloads."""
-    monkeypatch.setattr(row_processors, "process_vlm_conversation", _stub_process_vlm)
+    monkeypatch.setattr(vlm_rows, "extract_conversation_images", _stub_process_vlm)
 
 
 def test_vlm_processor_emits_tools_json_when_field_set(_passthrough_vlm_conversation):
     """tools list at row[tools_field] should land as a JSON string on the example."""
     tools = [{"type": "function", "function": {"name": "calc"}}]
-    processor = create_vlm_processor(tools_field="tools")
+    processor = build_vlm_row_processor(tools_field="tools")
     row = {
         "messages": [{"role": "user", "content": "hi"}],
         "tools": tools,
@@ -398,7 +394,7 @@ def test_vlm_processor_emits_tools_json_when_field_set(_passthrough_vlm_conversa
 def test_vlm_processor_passes_through_json_string_tools(_passthrough_vlm_conversation):
     """Pre-serialized JSON tool strings should be stored as-is, not double-encoded."""
     tools_str = json.dumps([{"type": "function", "function": {"name": "calc"}}])
-    processor = create_vlm_processor(tools_field="tools")
+    processor = build_vlm_row_processor(tools_field="tools")
     row = {
         "messages": [{"role": "user", "content": "hi"}],
         "tools": tools_str,
@@ -411,7 +407,7 @@ def test_vlm_processor_passes_through_json_string_tools(_passthrough_vlm_convers
 
 def test_vlm_processor_omits_tools_json_when_field_unset(_passthrough_vlm_conversation):
     """tools_json must always be present (schema stable) and None when no tools."""
-    processor = create_vlm_processor()
+    processor = build_vlm_row_processor()
     row = {"messages": [{"role": "user", "content": "hi"}]}
     example = processor(row)
     assert "tools_json" in example
@@ -420,7 +416,7 @@ def test_vlm_processor_omits_tools_json_when_field_unset(_passthrough_vlm_conver
 
 def test_vlm_processor_handles_missing_tools_column(_passthrough_vlm_conversation):
     """Setting tools_field on rows that lack the column should not raise."""
-    processor = create_vlm_processor(tools_field="tools")
+    processor = build_vlm_row_processor(tools_field="tools")
     row = {"messages": [{"role": "user", "content": "hi"}]}
     example = processor(row)
     assert example["tools_json"] is None
@@ -430,7 +426,7 @@ def test_vlm_processor_handles_missing_tools_column(_passthrough_vlm_conversatio
 
 
 class _StubDataset:
-    """Stand-in that satisfies _build_cache_file_name's fingerprinting needs."""
+    """Stand-in that satisfies map_cache_file_name's fingerprinting needs."""
 
     _fingerprint = "abc123"
 
@@ -445,7 +441,7 @@ def test_cache_key_extras_change_filename():
         return row
 
     ds = _StubDataset()
-    name_a = _build_cache_file_name(
+    name_a = map_cache_file_name(
         "map",
         fn,
         ds,
@@ -453,7 +449,7 @@ def test_cache_key_extras_change_filename():
         {},
         cache_key_extras={"tools_field": None},
     )
-    name_b = _build_cache_file_name(
+    name_b = map_cache_file_name(
         "map",
         fn,
         ds,
@@ -472,8 +468,8 @@ def test_cache_key_extras_stable_for_same_inputs():
 
     ds = _StubDataset()
     extras = {"tools_field": "tools", "system_prompt": "hello"}
-    name_1 = _build_cache_file_name("map", fn, ds, "desc", {}, cache_key_extras=extras)
-    name_2 = _build_cache_file_name("map", fn, ds, "desc", {}, cache_key_extras=extras)
+    name_1 = map_cache_file_name("map", fn, ds, "desc", {}, cache_key_extras=extras)
+    name_2 = map_cache_file_name("map", fn, ds, "desc", {}, cache_key_extras=extras)
     assert name_1 == name_2
 
 
@@ -484,8 +480,8 @@ def test_cache_key_extras_none_matches_empty_dict():
         return row
 
     ds = _StubDataset()
-    name_none = _build_cache_file_name("map", fn, ds, "desc", {}, cache_key_extras=None)
-    name_empty = _build_cache_file_name("map", fn, ds, "desc", {}, cache_key_extras={})
+    name_none = map_cache_file_name("map", fn, ds, "desc", {}, cache_key_extras=None)
+    name_empty = map_cache_file_name("map", fn, ds, "desc", {}, cache_key_extras={})
     assert name_none == name_empty
 
 
@@ -516,20 +512,20 @@ def test_closure_tokenizer_changes_cache_filename():
     201k-vocab model, gathering out of bounds at the first step.
     """
     ds = _StubDataset()
-    proc_a = create_llm_processor(
+    proc_a = build_chat_row_processor(
         tokenizer=_StubTokenizer("modelA", 201088),
         max_length=4096,
         conversation_field="conversation",
         use_padding=False,
     )
-    proc_b = create_llm_processor(
+    proc_b = build_chat_row_processor(
         tokenizer=_StubTokenizer("modelB", 262155),
         max_length=4096,
         conversation_field="conversation",
         use_padding=False,
     )
-    name_a = _build_cache_file_name("map", proc_a, ds, "Processing dataset", {})
-    name_b = _build_cache_file_name("map", proc_b, ds, "Processing dataset", {})
+    name_a = map_cache_file_name("map", proc_a, ds, "Processing dataset", {})
+    name_b = map_cache_file_name("map", proc_b, ds, "Processing dataset", {})
     assert name_a != name_b, f"Different tokenizers collided on '{name_a}'"
 
 
@@ -537,20 +533,20 @@ def test_closure_max_length_changes_cache_filename():
     """Same tokenizer but a different max_length must change the cache file."""
     ds = _StubDataset()
     tok = _StubTokenizer("modelA", 201088)
-    proc_short = create_llm_processor(
+    proc_short = build_chat_row_processor(
         tokenizer=tok,
         max_length=4096,
         conversation_field="conversation",
         use_padding=False,
     )
-    proc_long = create_llm_processor(
+    proc_long = build_chat_row_processor(
         tokenizer=tok,
         max_length=36000,
         conversation_field="conversation",
         use_padding=False,
     )
-    name_short = _build_cache_file_name("map", proc_short, ds, "Processing dataset", {})
-    name_long = _build_cache_file_name("map", proc_long, ds, "Processing dataset", {})
+    name_short = map_cache_file_name("map", proc_short, ds, "Processing dataset", {})
+    name_long = map_cache_file_name("map", proc_long, ds, "Processing dataset", {})
     assert name_short != name_long, f"max_length change collided on '{name_short}'"
 
 
@@ -566,14 +562,14 @@ def test_closure_chat_template_changes_cache_filename():
     tok_a.chat_template = "{{ messages }}"
     tok_b = _StubTokenizer("modelA", 201088)
     tok_b.chat_template = "{{ messages }}<|eot|>"
-    proc_a = create_llm_processor(
+    proc_a = build_chat_row_processor(
         tokenizer=tok_a, max_length=4096, conversation_field="conversation", use_padding=False
     )
-    proc_b = create_llm_processor(
+    proc_b = build_chat_row_processor(
         tokenizer=tok_b, max_length=4096, conversation_field="conversation", use_padding=False
     )
-    name_a = _build_cache_file_name("map", proc_a, ds, "Processing dataset", {})
-    name_b = _build_cache_file_name("map", proc_b, ds, "Processing dataset", {})
+    name_a = map_cache_file_name("map", proc_a, ds, "Processing dataset", {})
+    name_b = map_cache_file_name("map", proc_b, ds, "Processing dataset", {})
     assert name_a != name_b, f"chat_template change collided on '{name_a}'"
 
 
@@ -582,15 +578,15 @@ def test_closure_fingerprint_deterministic():
     ds = _StubDataset()
 
     def mk():
-        return create_llm_processor(
+        return build_chat_row_processor(
             tokenizer=_StubTokenizer("modelA", 201088),
             max_length=4096,
             conversation_field="conversation",
             use_padding=False,
         )
 
-    name_1 = _build_cache_file_name("map", mk(), ds, "Processing dataset", {})
-    name_2 = _build_cache_file_name("map", mk(), ds, "Processing dataset", {})
+    name_1 = map_cache_file_name("map", mk(), ds, "Processing dataset", {})
+    name_2 = map_cache_file_name("map", mk(), ds, "Processing dataset", {})
     assert name_1 == name_2
 
 

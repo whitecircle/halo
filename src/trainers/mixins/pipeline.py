@@ -18,7 +18,7 @@ from src.callbacks.moe_metrics import MoELoadMetricsCallback
 from src.checkpoint.writing import save_dtype_caster
 from src.data.collators.fixed_shape import FixedShapeCollator
 from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking, pad_tail_positions
-from src.data.vlm import VLM_IMAGE_COLUMNS, dataset_image_evidence
+from src.data.vlm_routing import VLM_IMAGE_COLUMNS, dataset_image_evidence
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.groups import (
@@ -79,7 +79,7 @@ def wrapper_state_outside_stages(model) -> dict[str, torch.Tensor]:
 
 def collator_image_evidence(collator) -> str | None:
     """Why ``collator`` counts as an image consumer, or ``None``: it declares a column of
-    :data:`~src.data.vlm.VLM_IMAGE_COLUMNS` among those it needs."""
+    :data:`~src.data.vlm_routing.VLM_IMAGE_COLUMNS` among those it needs."""
     consumed = set(getattr(collator, "required_dataset_columns", ()) or ()) & set(VLM_IMAGE_COLUMNS)
     return f"the data collator consuming {sorted(consumed)}" if consumed else None
 

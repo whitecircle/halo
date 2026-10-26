@@ -12,7 +12,7 @@ the *same* batch.
 | Expert TP | Ranks in an expert-TP group get the **same** data | Expert FFN is sharded across the group |
 
 Every rank reads its own copy of the source — a per-node S3 cache, a pre-staged directory, a cached
-hub revision — so the load agrees the rows before any rank trains on them (`src/data/sources/loading.py`).
+hub revision — so the load agrees the rows before any rank trains on them (`src/data/sources/replica_identity.py`).
 A replicated load compares each split's row count, schema and a digest of 16 evenly spaced rows across
 the world (media columns excluded, decoded or not and at any depth: their stored paths can name a
 node's own cache). A sharded load

@@ -16,8 +16,8 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset
 
-from src.data.pipeline.preprocessing import shard_dataset
-from src.data.shard_index import SHARD_INDEX_FILE
+from src.data.preprocessed.preparation import shard_dataset
+from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from src.data.sources.loading import load_datasets
 from tests.common.gloo import run_gloo_ranks
 
@@ -36,7 +36,7 @@ def _rows(num_rows: int) -> Dataset:
 def _save_sharded(directory: str, *, train_shards: int, test_shards: int) -> str:
     for split, num_shards in (("train", train_shards), ("test", test_shards)):
         index = shard_dataset(_rows(4), output_dir=directory, split_name=split, num_shards=num_shards)
-        index.save(os.path.join(directory, split, SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(directory, split, SHARD_INDEX_FILE), index)
     return directory
 
 

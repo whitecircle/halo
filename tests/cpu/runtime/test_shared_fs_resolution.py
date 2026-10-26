@@ -16,7 +16,7 @@ import os
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline import processing
+from src.data.pipeline import coordinated_map as coordinated_map_module
 from src.entrypoints import run_setup as run_logger
 from src.runtime import filesystem
 
@@ -160,10 +160,12 @@ def test_coordinated_dataset_map_elects_on_the_input_side(monkeypatch):
     where every node re-maps the whole corpus or reads a peer's half-written cache.
     """
     consulted: list[str] = []
-    monkeypatch.setattr(processing, "is_fs_load_rank", lambda: consulted.append("load") or True)
-    monkeypatch.setattr(processing, "is_fs_save_rank", lambda: consulted.append("save") or True)
+    monkeypatch.setattr(coordinated_map_module, "is_fs_load_rank", lambda: consulted.append("load") or True)
+    monkeypatch.setattr(
+        coordinated_map_module, "is_fs_save_rank", lambda: consulted.append("save") or True, raising=False
+    )
 
-    processing.coordinated_map(Dataset.from_list([{"x": 1}, {"x": 2}]), lambda row: row, desc="probe")
+    coordinated_map_module.coordinated_map(Dataset.from_list([{"x": 1}, {"x": 2}]), lambda row: row, desc="probe")
 
     assert "load" in consulted, "the coordinated map did not elect its writer with is_fs_load_rank"
     assert "save" not in consulted, "the coordinated map elected on the OUTPUT side — read-side work"

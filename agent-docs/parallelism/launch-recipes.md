@@ -136,13 +136,13 @@ For large-scale multi-node training, pre-process and shard SFT datasets offline 
 python scripts/before_training/prepare_dataset.py \
     --input "s3://my-bucket/raw/my_sft_data" \
     --output "s3://my-bucket/preprocessed/my_sft_data" \
-    --model-name "Qwen/Qwen3-8B" \
-    --max-length 8192 \
-    --test-size 0.01 \
-    --num-shards 64 \
-    --pack-sequences \
-    --conversation-field conversation \
-    --assistant-message-template $'<|im_start|>assistant\n'
+    --model_name_or_path "Qwen/Qwen3-8B" \
+    --max_length 8192 \
+    --test_size 0.01 \
+    --num_shards 64 \
+    --pack_sequences \
+    --conversation_field conversation \
+    --assistant_message_template $'<|im_start|>assistant\n'
 ```
 
 The SFT trainer auto-detects the sharded layout and loads each rank's shards via `ShardedDatasetLoader` keyed on the **data-parallel** rank/size, not global world, and refuses `num_shards < data_parallel_size`. Layout and shard assignment: [Data Loading → Pre-processed (sharded) datasets](data-loading.md#pre-processed-sharded-datasets).

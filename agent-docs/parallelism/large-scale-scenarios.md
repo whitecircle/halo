@@ -376,7 +376,7 @@ Values that differ from it or are load-bearing at 397B:
 | `unfreeze_layers_patterns` | required at 2 nodes | see [Recommended cell](#recommended-cell) |
 | `save_total_limit: 1` + `save_only_model: true` | as shipped | a bf16 checkpoint is ~800 GB per save |
 
-Pre-shard the corpus with `scripts/before_training/prepare_dataset.py --num-shards N`,
+Pre-shard the corpus with `scripts/before_training/prepare_dataset.py --num_shards N`,
 `N >= data_parallel_size` — at 64 ranks the on-the-fly path materializes the dataset per rank.
 
 ## Other 300B-class checkpoints

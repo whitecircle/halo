@@ -20,27 +20,27 @@ import subprocess
 import sys
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset
 
-# The module logs through the accelerate logger, which requires an initialized state.
-PartialState()
-
 import src.data.sources.dataset_cache
+import src.data.sources.loading
 import src.data.sources.s3_client
+import src.data.sources.s3_dataset_store
 import src.data.sources.sharded_dataset  # noqa: F401  each module sets its logger level at import
-from src.data.sources.loading import _normalize_dataset_schema
+from src.data.sources.corpus import _normalize_dataset_schema
 from tests.common.repo import REPO_ROOT
 
-_LOADING_LOGGER = "src.data.sources.loading"
+_CORPUS_LOGGER = "src.data.sources.corpus"
 
 
 @pytest.mark.parametrize(
     "name",
     [
-        _LOADING_LOGGER,
+        "src.data.sources.loading",
+        _CORPUS_LOGGER,
         "src.data.sources.dataset_cache",
         "src.data.sources.s3_client",
+        "src.data.sources.s3_dataset_store",
         "src.data.sources.sharded_dataset",
     ],
 )
@@ -61,7 +61,7 @@ def test_schema_warning_names_only_columns_actually_lost(caplog):
     ds_with_labels = Dataset.from_dict({"conversation": ["a", "b"], "labels": ["x", "y"]})
     ds_without = Dataset.from_dict({"conversation": ["c"]})
 
-    with caplog.at_level(logging.WARNING, logger=_LOADING_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_CORPUS_LOGGER):
         normalized = _normalize_dataset_schema([ds_with_labels, ds_without])
 
     assert all(ds.column_names == ["conversation"] for ds in normalized)
@@ -83,7 +83,7 @@ def test_schema_warning_names_the_runs_own_declared_column(caplog):
     ds_a = Dataset.from_dict({"dialogue": [[{"role": "user", "content": "hi"}]], "row_id": [0]})
     ds_b = Dataset.from_dict({"dialogue": ["hi"], "row_id": [1]})
 
-    with caplog.at_level(logging.WARNING, logger=_LOADING_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_CORPUS_LOGGER):
         normalized = _normalize_dataset_schema([ds_a, ds_b], declared_columns=("dialogue",))
 
     assert all(ds.column_names == ["row_id"] for ds in normalized)
@@ -98,7 +98,7 @@ def test_declared_column_absent_from_one_dataset_is_pinned_not_dropped(caplog):
     ds_with = Dataset.from_dict({"conversation": ["a"], "tools": [[{"name": "f"}]]})
     ds_without = Dataset.from_dict({"conversation": ["b"]})
 
-    with caplog.at_level(logging.WARNING, logger=_LOADING_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_CORPUS_LOGGER):
         normalized = _normalize_dataset_schema([ds_with, ds_without], declared_columns=("tools",))
 
     assert all("tools" in ds.column_names for ds in normalized)
@@ -112,7 +112,7 @@ def test_no_schema_warning_when_nothing_is_lost(caplog):
     ds_a = Dataset.from_dict({"conversation": ["a"]})
     ds_b = Dataset.from_dict({"conversation": ["b"]})
 
-    with caplog.at_level(logging.WARNING, logger=_LOADING_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_CORPUS_LOGGER):
         _normalize_dataset_schema([ds_a, ds_b])
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [r.getMessage() for r in caplog.records]
@@ -120,10 +120,8 @@ def test_no_schema_warning_when_nothing_is_lost(caplog):
 
 _COLUMN_ORDER_PROBE = """
 import json
-from accelerate import PartialState
-PartialState()
 from datasets import Dataset
-from src.data.sources.loading import _normalize_dataset_schema
+from src.data.sources.corpus import _normalize_dataset_schema
 columns = ["prompt", "messages", "source", "id", "tools", "label", "score"]
 first = Dataset.from_dict({c: ["x"] for c in columns})
 second = Dataset.from_dict({c: ["y"] for c in reversed(columns)} | {"extra": ["z"]})

@@ -19,7 +19,7 @@ import pytest
 from PIL import Image
 
 from src.data.pipeline.preferences import render_vlm_preference_row, tokenize_vlm_preference_row
-from src.data.vlm import render_vlm_text
+from src.data.vlm_render import render_vlm_text
 
 IMAGE_TOKEN = "<image>"
 

@@ -23,11 +23,11 @@ from src.configs.distillation import DistillationConfig, TeacherDistillScriptArg
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
 from src.data.collators.factory import select_data_collator
-from src.data.collators.packing import DataCollatorForCausalLMWithPadding
+from src.data.collators.padded import DataCollatorForCausalLMWithPadding
 from src.data.collators.vlm import VLMDataCollator
-from src.data.pipeline.processing import process_dataset_with_map_and_filter, resolve_map_num_proc
-from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
-from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
+from src.data.pipeline.coordinated_map import coordinated_map_and_filter, resolve_map_num_proc
+from src.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
+from src.data.pipeline.vlm_rows import prepare_vlm_dataset
 from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
 from src.entrypoints.model_setup import (
     apply_max_length,
@@ -122,9 +122,9 @@ def _prepare_text_distill_data(ds, args, training_config, tokenizer, model_confi
     ``max_length`` is dropped rather than truncated mid-turn, measured on the ids it trains on. The
     collator derives the labels the losses mask on."""
     render_kwargs = text_render_kwargs(args)
-    ds = process_dataset_with_map_and_filter(
+    ds = coordinated_map_and_filter(
         ds,
-        create_llm_processor(
+        build_chat_row_processor(
             tokenizer=tokenizer, max_length=training_config.max_length, use_padding=False, **render_kwargs
         ),
         # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.

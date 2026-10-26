@@ -15,7 +15,7 @@ import os
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline.processing import coordinated_map
+from src.data.pipeline.coordinated_map import coordinated_map
 from src.trainers.grpo.offline import tokenize_offline_grpo_rows
 from tests.common.gloo import run_gloo_ranks
 

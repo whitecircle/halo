@@ -9,17 +9,17 @@ Three contracts pinned here:
   ``is_preprocessed_dataset`` accept it — training then runs on a silently truncated dataset.
   ``metadata.json`` is the completion marker, so the local path stages-then-swaps and the Hub path
   clears it first and uploads it last.
-* **Defaults contradicting training.** ``--conversation-field`` must default to ``prompt`` — the
+* **Defaults contradicting training.** ``--conversation_field`` must default to ``prompt`` — the
   training side and the documented SFT shape — not ``conversation``, and
-  ``--train-on-completions-only`` must default on as training does; otherwise preparing with
-  defaults produces a dataset the training defaults reject.
-* **Unrecorded tokenizer mutations.** ``--pad/--eos/--bos/--chat-template`` change the ids that get
-  baked, so they must reach ``PreprocessingConfig`` or the compatibility check cannot see them.
+  ``--train_on_completions_only`` must default on in chat mode as training does; otherwise preparing
+  with defaults produces a dataset the training defaults reject.
+* **Unrecorded tokenizer mutations.** ``--pad_token/--eos_token/--bos_token/--chat_template`` change
+  the ids that get baked, so they must reach ``PreprocessingConfig`` or the compatibility check cannot
+  see them.
 
 Run: pytest tests/cpu/data/test_prepare_dataset_publish.py
 """
 
-import ast
 import os
 import sys
 import types
@@ -33,9 +33,6 @@ PartialState()
 from scripts.before_training import prepare_dataset as mod
 from src.checkpoint import atomic
 from src.model_loading import tokenizer_setup
-from tests.common.repo import REPO_ROOT
-
-_SCRIPT = REPO_ROOT / "scripts/before_training/prepare_dataset.py"
 
 
 def _staged(tmp_path, name="staged"):
@@ -165,11 +162,12 @@ def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, mo
 
 
 def _parse(argv_extra):
-    argv = ["prepare_dataset.py", "-i", "in", "-o", "out", "-m", "model", *argv_extra]
+    """The PreprocessingConfig the command line builds."""
+    argv = ["prepare_dataset.py", "--input", "in", "--output", "out", "--model_name_or_path", "model", *argv_extra]
     old = sys.argv
     sys.argv = argv
     try:
-        return mod.parse_args()
+        return mod.parse_args()[1]
     finally:
         sys.argv = old
 
@@ -177,20 +175,21 @@ def _parse(argv_extra):
 def test_conversation_field_default_matches_the_training_side():
     """Preparing with defaults must render the field training reads, 'prompt' — the documented SFT
     shape. Rendering 'conversation' instead makes the default pairing KeyError or (post-check) raise."""
-    assert _parse([]).conversation_field == "prompt"
+    assert _parse(["--assistant_message_template", "<a>"]).conversation_field == "prompt"
 
 
 def test_train_on_completions_only_defaults_on_and_is_still_switchable():
     """Training defaults masking ON and refuses a dataset whose baked labels disagree, so preparing
     with masking defaulted off produces an artifact the training defaults reject."""
-    assert _parse([]).train_on_completions_only is True
-    assert _parse(["--no-train-on-completions-only"]).train_on_completions_only is False
+    assert _parse(["--assistant_message_template", "<a>"]).train_on_completions_only is True
+    assert _parse(["--train_on_completions_only", "false"]).train_on_completions_only is False
+    assert _parse(["--mode", "text"]).train_on_completions_only is False
 
 
 def test_bos_token_override_exists():
     """bos must be overridable alongside pad/eos; without it one tokenizer mutation stays outside
     anything the recorded config can describe."""
-    assert _parse(["--bos-token", "<s>"]).bos_token == "<s>"
+    assert _parse(["--train_on_completions_only", "false", "--bos_token", "<s>"]).bos_token == "<s>"
 
 
 def test_apply_tokenizer_overrides_sets_every_recorded_knob():
@@ -200,20 +199,26 @@ def test_apply_tokenizer_overrides_sets_every_recorded_knob():
     assert (tokenizer.pad_token, tokenizer.eos_token, tokenizer.bos_token) == ("<pad>", "<eos>", "<s>")
 
 
-def test_tokenizer_overrides_reach_the_recorded_config():
+def test_tokenizer_overrides_reach_the_recorded_config(tmp_path):
     """The knobs mutate the tokenizer that bakes the ids; if they do not reach PreprocessingConfig
     the artifact is byte-indistinguishable from an unmutated one and the training-time
-    compatibility check passes on a dataset tokenized by a different tokenizer."""
-    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
-    config_calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "PreprocessingConfig"
+    compatibility check passes on a dataset tokenized by a different tokenizer. A template file is
+    recorded as its resolved text, which is what the training side compares."""
+    template = tmp_path / "chat.jinja"
+    template.write_text("{{ messages }}")
+    overrides = [
+        "--pad_token",
+        "<pad>",
+        "--eos_token",
+        "<eos>",
+        "--bos_token",
+        "<s>",
+        "--chat_template",
+        str(template),
     ]
-    assert len(config_calls) == 1, f"expected one PreprocessingConfig construction, found {len(config_calls)}"
-    passed = {kw.arg for kw in config_calls[0].keywords}
-    for knob in ("pad_token", "eos_token", "bos_token", "chat_template"):
-        assert knob in passed, f"{knob} mutates the tokenizer but is not recorded in the metadata config"
+    config = _parse(["--train_on_completions_only", "false", *overrides])
+    assert (config.pad_token, config.eos_token, config.bos_token) == ("<pad>", "<eos>", "<s>")
+    assert config.chat_template == "{{ messages }}"
 
 
 def test_script_uses_the_shared_chat_template_resolver():

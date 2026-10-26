@@ -24,8 +24,8 @@ from accelerate import PartialState
 from datasets import Dataset
 from transformers import ProcessorMixin
 
+from src.data.pipeline.map_cache_key import kwargs_fingerprint
 from src.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
-from src.data.pipeline.processing import _get_kwargs_fingerprint
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from tests.cpu.trainers.test_smpo_vlm import EOS_ID, StubProcessor, StubTokenizer, make_features, make_trainer
 
@@ -155,10 +155,8 @@ def test_text_checkpoint_cache_key_unchanged():
     captured = _capture_map(trainer, Dataset.from_dict({k: [v] for k, v in TEXT_ROW.items()}), tokenizer)
 
     assert captured["fn_kwargs"]["processing_class"] is tokenizer
-    text_fingerprint = _get_kwargs_fingerprint(captured["fn_kwargs"])
-    processor_fingerprint = _get_kwargs_fingerprint(
-        {**captured["fn_kwargs"], "processing_class": ProcessorStub(tokenizer)}
-    )
+    text_fingerprint = kwargs_fingerprint(captured["fn_kwargs"])
+    processor_fingerprint = kwargs_fingerprint({**captured["fn_kwargs"], "processing_class": ProcessorStub(tokenizer)})
     assert text_fingerprint != processor_fingerprint
 
 

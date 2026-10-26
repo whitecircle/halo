@@ -54,7 +54,7 @@ from scripts.cli_arguments import (
     add_max_shard_size_arg,
 )
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from src.data.pipeline import preprocessing
+from src.data.preprocessed import tokenization
 from tests.common.repo import REPO_ROOT, load_script_module
 
 # (tool, the default its input source earns). Every standalone tool that executes a checkpoint's own
@@ -398,14 +398,14 @@ def test_prepare_dataset_threads_the_flag_into_the_label_bake_config_read(tmp_pa
         raise _ConfigRead
 
     def _bake(*, dataset, tokenizer_or_processor, config, output_dir):
-        preprocessing._resolve_config_eos_token_ids(config, tokenizer_or_processor)
+        tokenization.resolve_label_eos_token_ids(config, tokenizer_or_processor)
 
-    monkeypatch.setattr(preprocessing.AutoConfig, "from_pretrained", _record)
+    monkeypatch.setattr(tokenization.AutoConfig, "from_pretrained", _record)
     monkeypatch.setattr(module, "setup_tokenizer", lambda args: object())
     monkeypatch.setattr(module, "load_input_dataset", lambda args: DatasetDict())
     monkeypatch.setattr(module, "preprocess_dataset", _bake)
-    argv = ["--input", "org/raw", "--output", str(tmp_path / "out"), "--model-name", "org/model"]
-    argv += ["--assistant-message-template", "<|im_start|>assistant\n"]
+    argv = ["--input", "org/raw", "--output", str(tmp_path / "out"), "--model_name_or_path", "org/model"]
+    argv += ["--assistant_message_template", "<|im_start|>assistant\n"]
 
     for extra, expected in (([], True), (["--trust_remote_code"], True), (["--no-trust_remote_code"], False)):
         seen.clear()

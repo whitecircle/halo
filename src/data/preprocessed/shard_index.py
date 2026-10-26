@@ -1,44 +1,31 @@
-"""Shard-index contract of a preprocessed dataset directory (``<split>/shard_index.json``).
-
-Torch-free: the sharded loader reads the index of an artifact it never produces, and reaching it
-through the writer (:mod:`src.data.pipeline.preprocessing`) would pull torch, transformers and the
-collators into a plain JSON read.
-"""
+"""The ``<split>/shard_index.json`` contract of a sharded preprocessed dataset, and the stamp both halves of an
+artifact carry."""
 
 import json
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
 from typing import Any
 
-# Stamped into both halves of a preprocessed artifact (this index and the ``metadata.json`` stamp)
-# and compared on load, so the two cannot claim different format versions for one directory.
+# The format version both halves of an artifact (this index and ``metadata.json``) stamp and are read against.
 PREPROCESSING_VERSION = "1.0"
 
 SHARD_INDEX_FILE = "shard_index.json"
 
 
 class IncompatiblePreprocessedDataset(ValueError):
-    """A preprocessed-dataset payload this build cannot read (stamp version or schema).
-
-    Raised for both halves of the artifact: the index decides which rows each rank loads, and a
-    mis-read metadata stamp re-tokenizes already-tokenized rows. The remedy for both is to re-prepare
-    the dataset.
-    """
+    """A preprocessed-dataset payload (index or metadata stamp) this build cannot read; the remedy is to
+    re-prepare the dataset."""
 
 
-def write_stamped_sidecar(path: str, payload: dict[str, Any]) -> None:
-    """Write one half of a preprocessed artifact's stamped sidecar (this index, the metadata stamp)."""
+def write_stamped_sidecar(path: str, stamp: Any) -> None:
+    """Write one stamped half of a preprocessed artifact, a :class:`ShardIndex` or the metadata stamp."""
     with open(path, "w") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(asdict(stamp), f, indent=2)
 
 
 def reject_incompatible_stamp(cls, data: dict[str, Any], artifact: str) -> None:
-    """Refuse a stamped payload this build cannot read: a bumped version, or a field ``cls`` does not
-    declare (a retired spelling, or a diverged build at the same stamp).
-
-    ``artifact`` names the half of the dataset in the message. Every rank reads its own copy and
-    reaches the same verdict, so the refusal cannot skew a collective.
-    """
+    """Refuse a stamped payload this build cannot read: another version, or a field ``cls`` does not declare;
+    ``artifact`` names the half in the message."""
     version = data.get("version")
     if version != PREPROCESSING_VERSION:
         raise IncompatiblePreprocessedDataset(
@@ -56,7 +43,7 @@ def reject_incompatible_stamp(cls, data: dict[str, Any], artifact: str) -> None:
 
 @dataclass
 class ShardInfo:
-    """Information about a single shard."""
+    """One shard of a split."""
 
     id: int
     path: str
@@ -66,7 +53,7 @@ class ShardInfo:
 
 @dataclass
 class ShardIndex:
-    """Index for sharded dataset."""
+    """The index of a sharded split."""
 
     version: str = PREPROCESSING_VERSION
     split: str = "train"
@@ -75,12 +62,11 @@ class ShardIndex:
     shards: list[ShardInfo] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary (``asdict``, so a newly added field is always included)."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ShardIndex":
-        """Create from a ``shard_index.json`` payload, refusing a stamp this build cannot read."""
+        """Read a ``shard_index.json`` payload, refusing a stamp this build cannot read."""
         reject_incompatible_stamp(cls, data, "Shard index")
         return cls(
             version=data["version"],
@@ -90,13 +76,8 @@ class ShardIndex:
             shards=[ShardInfo(**s) for s in data.get("shards", [])],
         )
 
-    def save(self, path: str) -> None:
-        """Save shard index to JSON file."""
-        write_stamped_sidecar(path, self.to_dict())
-
     @classmethod
     def load(cls, path: str) -> "ShardIndex":
-        """Load shard index from JSON file."""
         with open(path) as f:
             data = json.load(f)
         return cls.from_dict(data)

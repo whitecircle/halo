@@ -3,8 +3,8 @@
 Test dataset cache isolation: different tokenizers produce different cache files.
 
 Validates:
-1. get_function_identifier() is deterministic (no memory addresses)
-2. _get_kwargs_fingerprint() differs for different tokenizers
+1. function_cache_id() is deterministic (no memory addresses)
+2. kwargs_fingerprint() differs for different tokenizers
 3. HF_DATASETS_CACHE env var is respected by ensure_cache_dir()
 4. Two parallel processes with different tokenizers don't share stale cache
 5. coordinated_map produces distinct cache files when fn_kwargs differ
@@ -22,13 +22,8 @@ import torch
 from datasets import Dataset
 from transformers import AutoTokenizer
 
-from src.data.pipeline.processing import (
-    _build_cache_file_name,
-    _get_kwargs_fingerprint,
-    coordinated_map,
-    ensure_cache_dir,
-    get_function_identifier,
-)
+from src.data.pipeline.coordinated_map import coordinated_map, ensure_cache_dir
+from src.data.pipeline.map_cache_key import function_cache_id, kwargs_fingerprint, map_cache_file_name
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
 from tests.common.utils import log
@@ -76,8 +71,8 @@ def test_function_identifier_determinism() -> None:
 
     # Both alive at once: a temporary freed before the second is built hands it the same address.
     first, second = make_transform(), make_transform()
-    id1 = get_function_identifier(first)
-    id2 = get_function_identifier(second)
+    id1 = function_cache_id(first)
+    id2 = function_cache_id(second)
 
     assert id1 == id2, f"Identifiers differ across two objects of one function: {id1!r} vs {id2!r}"
     assert "0x" not in id1, f"Memory address found in identifier: {id1!r}"
@@ -93,8 +88,8 @@ def test_function_identifier_uniqueness() -> None:
     def transform_b(example):
         return {"processed": example["text"].lower()}
 
-    id_a = get_function_identifier(transform_a)
-    id_b = get_function_identifier(transform_b)
+    id_a = function_cache_id(transform_a)
+    id_b = function_cache_id(transform_b)
 
     assert id_a != id_b, f"Different functions produced same identifier: {id_a!r}"
     log(f"    transform_a={id_a!r}, transform_b={id_b!r}")
@@ -105,13 +100,13 @@ def test_kwargs_fingerprint_differs_for_tokenizers() -> None:
     tokenizer_a = AutoTokenizer.from_pretrained(TOKENIZER_A_NAME, trust_remote_code=True)
     tokenizer_b = AutoTokenizer.from_pretrained(TOKENIZER_B_NAME, trust_remote_code=True)
 
-    fp_a = _get_kwargs_fingerprint({"tokenizer": tokenizer_a, "max_length": 512})
-    fp_b = _get_kwargs_fingerprint({"tokenizer": tokenizer_b, "max_length": 512})
+    fp_a = kwargs_fingerprint({"tokenizer": tokenizer_a, "max_length": 512})
+    fp_b = kwargs_fingerprint({"tokenizer": tokenizer_b, "max_length": 512})
     assert fp_a != fp_b, f"Same fingerprint for different tokenizers: {fp_a!r}"
 
     # A separately loaded instance, as every rank and every restart holds its own.
     tokenizer_a_reloaded = AutoTokenizer.from_pretrained(TOKENIZER_A_NAME, trust_remote_code=True)
-    fp_a2 = _get_kwargs_fingerprint({"tokenizer": tokenizer_a_reloaded, "max_length": 512})
+    fp_a2 = kwargs_fingerprint({"tokenizer": tokenizer_a_reloaded, "max_length": 512})
     assert fp_a == fp_a2, f"Two loads of one tokenizer produced different fingerprints: {fp_a!r} vs {fp_a2!r}"
 
     log(f"    fp_a={fp_a!r}, fp_b={fp_b!r}")
@@ -119,8 +114,8 @@ def test_kwargs_fingerprint_differs_for_tokenizers() -> None:
 
 def test_kwargs_fingerprint_empty() -> None:
     """Empty and None kwargs produce an empty fingerprint."""
-    fp_empty = _get_kwargs_fingerprint({})
-    fp_none = _get_kwargs_fingerprint(None)
+    fp_empty = kwargs_fingerprint({})
+    fp_none = kwargs_fingerprint(None)
 
     assert fp_empty == "", f"Empty kwargs should produce empty string, got {fp_empty!r}"
     assert fp_none == "", f"None kwargs should produce empty string, got {fp_none!r}"
@@ -182,10 +177,10 @@ def test_coordinated_map_cache_isolation() -> None:
 
         # Same desc for both: the cache name may only diverge on the tokenizer.
         shared_desc = "tokenize"
-        name_a = _build_cache_file_name(
+        name_a = map_cache_file_name(
             "map", tokenize_fn, dataset, shared_desc, {"fn_kwargs": {"tokenizer": tokenizer_a}}
         )
-        name_b = _build_cache_file_name(
+        name_b = map_cache_file_name(
             "map", tokenize_fn, dataset, shared_desc, {"fn_kwargs": {"tokenizer": tokenizer_b}}
         )
         assert name_a != name_b, f"both tokenizers key the SAME cache file {name_a!r}: cross-model token reuse"
@@ -235,9 +230,7 @@ def test_same_class_tokenizers_key_distinct_caches() -> None:
         return tokenizer(example["text"], truncation=True, max_length=32)
 
     def key(tokenizer) -> str:
-        return _build_cache_file_name(
-            "map", tokenize_fn, dataset, "same_class", {"fn_kwargs": {"tokenizer": tokenizer}}
-        )
+        return map_cache_file_name("map", tokenize_fn, dataset, "same_class", {"fn_kwargs": {"tokenizer": tokenizer}})
 
     base = AutoTokenizer.from_pretrained(TOKENIZER_A_NAME, trust_remote_code=True)
     base_key = key(base)
@@ -256,9 +249,9 @@ def test_same_class_tokenizers_key_distinct_caches() -> None:
 
 def test_kwargs_fingerprint_with_scalars() -> None:
     """Test that scalar kwargs are included in the fingerprint."""
-    fp1 = _get_kwargs_fingerprint({"max_length": 512, "truncation": True})
-    fp2 = _get_kwargs_fingerprint({"max_length": 1024, "truncation": True})
-    fp3 = _get_kwargs_fingerprint({"max_length": 512, "truncation": True})
+    fp1 = kwargs_fingerprint({"max_length": 512, "truncation": True})
+    fp2 = kwargs_fingerprint({"max_length": 1024, "truncation": True})
+    fp3 = kwargs_fingerprint({"max_length": 512, "truncation": True})
 
     assert fp1 == fp3, f"Same kwargs gave different fingerprints: {fp1!r} vs {fp3!r}"
     assert fp1 != fp2, f"Different kwargs gave same fingerprint: {fp1!r}"

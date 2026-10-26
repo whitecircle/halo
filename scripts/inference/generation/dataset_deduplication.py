@@ -28,7 +28,7 @@ from datasets import Dataset, load_dataset
 from transformers import AutoModel, AutoTokenizer
 
 from scripts.cli_arguments import add_trust_remote_code_arg
-from src.data.deduplication import faiss_deduplicate_mr, faiss_deduplicate_mr_multistep, process_texts
+from src.data import deduplication
 from src.data.sources.paths import DATA_FILE_BUILDERS, data_file_builder, parse_dataset_source
 from src.log import configure_cli_logging
 from src.model_loading.buffer_repair import finalize_loaded_model
@@ -227,7 +227,7 @@ def compute_embeddings(
     tokenizer.model_max_length = max_length
 
     start_time = time.time()
-    embeddings = process_texts(
+    embeddings = deduplication.embed_texts(
         texts=texts, batch_size=batch_size, model=model, tokenizer=tokenizer, device=device, normalize=True
     )
 
@@ -257,7 +257,7 @@ def deduplicate_embeddings(
 
     if steps > 1:
         logger.info(f"Using multi-step deduplication with {steps} steps")
-        unique_indices, sizes_history = faiss_deduplicate_mr_multistep(
+        unique_indices, sizes_history = deduplication.deduplicate_embeddings(
             embeddings=embeddings.astype(np.float32),
             steps_count=steps,
             max_workers=max_workers or os.cpu_count(),
@@ -275,7 +275,7 @@ def deduplicate_embeddings(
                 logger.info(f"  Step {i}: {size} examples (removed {reduction}, -{reduction_pct:.1f}%)")
     else:
         logger.info("Using single-step deduplication")
-        unique_indices = faiss_deduplicate_mr(
+        unique_indices = deduplication.deduplicate_blocks(
             embeddings=embeddings.astype(np.float32),
             max_workers=max_workers or os.cpu_count(),
             batch_size=batch_size,

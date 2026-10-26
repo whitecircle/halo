@@ -1,7 +1,5 @@
-"""Semantic deduplication of a corpus: mean-pooled sentence embeddings + FAISS similarity search.
-
-Driver behind ``scripts/inference/generation/dataset_deduplication.py``.
-"""
+"""Semantic deduplication of a corpus: mean-pooled sentence embeddings + FAISS similarity search, the driver
+behind ``scripts/inference/generation/dataset_deduplication.py``."""
 
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count
@@ -11,13 +9,6 @@ import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-__all__ = [
-    "process_texts",
-    "faiss_deduplicate_mr",
-    "faiss_deduplicate_mr_multistep",
-]
-
-
 # Fixed default seed: the shuffle decides WHICH member of a near-duplicate group survives dedup, so
 # an unseeded global RNG would make two runs over identical data keep different rows.
 DEDUP_SHUFFLE_SEED = 42
@@ -26,7 +17,7 @@ DEDUP_SHUFFLE_SEED = 42
 def _shuffle_matrix_with_mapping(matrix: np.ndarray, rng: np.random.Generator | None = None):
     """Row-shuffle ``matrix``, returning it alongside the permutation that produced it.
 
-    ``rng`` threads a caller's generator through — :func:`faiss_deduplicate_mr_multistep` advances
+    ``rng`` threads a caller's generator through — :func:`deduplicate_embeddings` advances
     ONE generator across its steps, so each step shuffles differently while the whole run stays
     reproducible. ``None`` builds a generator seeded with :data:`DEDUP_SHUFFLE_SEED`.
     """
@@ -42,12 +33,8 @@ def _normalize_embeddings(embeddings: np.array):
     return embeddings / np.maximum(norms, 1e-12)
 
 
-def _average_pool(last_hidden_states: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    last_hidden = last_hidden_states.masked_fill(~attention_mask[..., None].bool(), 0.0)
-    return last_hidden.sum(dim=1) / attention_mask.sum(dim=1)[..., None]
-
-
-def process_texts(texts, batch_size, model, tokenizer, device, normalize=True):
+def embed_texts(texts, batch_size, model, tokenizer, device, normalize=True):
+    """Mean-pooled (over the attention mask) last hidden states of ``texts``, row-normalized by default."""
     embeddings = []
     texts = list(texts)
 
@@ -55,9 +42,10 @@ def process_texts(texts, batch_size, model, tokenizer, device, normalize=True):
         batch_texts = texts[i : i + batch_size]
         batch = tokenizer(batch_texts, return_tensors="pt", padding=True, truncation=True)
         batch = {k: v.to(device) for k, v in batch.items()}
+        mask = batch["attention_mask"]
         with torch.inference_mode():
-            output = model(**batch).last_hidden_state
-            pooled_output = _average_pool(output, batch["attention_mask"])
+            hidden = model(**batch).last_hidden_state.masked_fill(~mask[..., None].bool(), 0.0)
+            pooled_output = hidden.sum(dim=1) / mask.sum(dim=1)[..., None]
         embeddings.append(pooled_output.detach().cpu())
 
     embeddings = torch.cat(embeddings, dim=0).numpy()
@@ -66,7 +54,7 @@ def process_texts(texts, batch_size, model, tokenizer, device, normalize=True):
     return embeddings
 
 
-def _faiss_deduplicate_single(embeddings: np.ndarray, similarity_threshold=0.9) -> np.ndarray:
+def _deduplicate_block(embeddings: np.ndarray, similarity_threshold=0.9) -> np.ndarray:
     """Indices of the rows of ``embeddings`` that survive: each kept row drops every neighbor above
     ``similarity_threshold``."""
     index = faiss.IndexFlatIP(embeddings.shape[1])
@@ -94,7 +82,7 @@ def _faiss_deduplicate_single(embeddings: np.ndarray, similarity_threshold=0.9) 
     return np.where(keep)[0]
 
 
-def faiss_deduplicate_mr(
+def deduplicate_blocks(
     embeddings: np.ndarray,
     max_workers=cpu_count(),  # noqa: B008  intentional import-time default
     batch_size=100_000,
@@ -110,7 +98,7 @@ def faiss_deduplicate_mr(
     starts = range(0, embeddings.shape[0], batch_size)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
-            executor.submit(_faiss_deduplicate_single, embeddings[start : start + batch_size], similarity_threshold)
+            executor.submit(_deduplicate_block, embeddings[start : start + batch_size], similarity_threshold)
             for start in starts
         ]
         return np.concatenate(
@@ -121,7 +109,7 @@ def faiss_deduplicate_mr(
         )
 
 
-def faiss_deduplicate_mr_multistep(
+def deduplicate_embeddings(
     embeddings: np.ndarray,
     steps_count=3,
     max_workers=cpu_count(),  # noqa: B008  intentional import-time default
@@ -130,19 +118,19 @@ def faiss_deduplicate_mr_multistep(
     seed: int = DEDUP_SHUFFLE_SEED,
 ) -> tuple[np.ndarray, list[int]]:
     """Indices of the surviving rows of ``embeddings`` after ``steps_count`` reshuffled passes of
-    :func:`faiss_deduplicate_mr`, and the row count before and after each pass."""
+    :func:`deduplicate_blocks`, and the row count before and after each pass."""
     # One generator for the whole run: the steps must shuffle differently (that is what re-batches
     # near-duplicates across batch boundaries) while the run as a whole stays reproducible.
     rng = np.random.default_rng(seed)
-    progress_indicies_mapping = np.arange(len(embeddings))
+    surviving_indices = np.arange(len(embeddings))
     progress_embeddings = embeddings
     sizes_history = [len(embeddings)]
 
     for _ in tqdm(range(steps_count), desc="Running global dedup step", total=steps_count):
         shuffled_embeddings, shuffled_indices = _shuffle_matrix_with_mapping(progress_embeddings, rng)
-        progress_indicies_mapping = progress_indicies_mapping[shuffled_indices]
+        surviving_indices = surviving_indices[shuffled_indices]
         shuffled_embeddings = shuffled_embeddings.astype(np.float32)
-        unique_indices = faiss_deduplicate_mr(
+        unique_indices = deduplicate_blocks(
             shuffled_embeddings,
             max_workers=max_workers,
             batch_size=batch_size,
@@ -150,6 +138,6 @@ def faiss_deduplicate_mr_multistep(
         )
         progress_embeddings = shuffled_embeddings[unique_indices]
         sizes_history.append(len(progress_embeddings))
-        progress_indicies_mapping = progress_indicies_mapping[unique_indices]
+        surviving_indices = surviving_indices[unique_indices]
 
-    return progress_indicies_mapping, sizes_history
+    return surviving_indices, sizes_history

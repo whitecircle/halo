@@ -20,7 +20,7 @@ import torch
 from trl import KTOTrainer
 
 from src.data.collators.fixed_shape import pad_to_fixed_length
-from src.data.spans import completion_labels
+from src.data.completion_spans import completion_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin

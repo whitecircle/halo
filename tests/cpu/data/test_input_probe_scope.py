@@ -18,13 +18,14 @@ offline, a cache without the file is the absence it reads as.
 import datetime
 import json
 import os
+from dataclasses import asdict
 
 import pytest
 from accelerate import PartialState
 from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
 
-from src.data.pipeline import preprocessed_metadata
-from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata, is_preprocessed_dataset
+from src.data.preprocessed import metadata as preprocessed_metadata
+from src.data.preprocessed.metadata import PreprocessedDatasetMetadata, is_preprocessed_dataset
 from src.data.sources.loading import load_datasets_auto
 from src.runtime.filesystem import agree_input_probe_across_ranks
 from tests.common.gloo import run_gloo_ranks
@@ -103,7 +104,7 @@ def _uncached_hub_worker(rank: int, tmp_dir: str, offline: bool) -> None:
 
 
 def _run(tmp_path, *, shared: bool, ranks_per_node: int, stamped: bool) -> list[dict]:
-    (tmp_path / "metadata.json").write_text(json.dumps(PreprocessedDatasetMetadata().to_dict()))
+    (tmp_path / "metadata.json").write_text(json.dumps(asdict(PreprocessedDatasetMetadata())))
     run_gloo_ranks(
         _worker,
         WORLD_SIZE,

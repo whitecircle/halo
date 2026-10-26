@@ -20,9 +20,9 @@ def _client_raising(code: str) -> S3Client:
     """S3Client whose head_object 404s (so the prefix listing is reached) and whose listing fails."""
     client = S3Client.__new__(S3Client)
     client.bucket = "test-bucket"
-    client._client = MagicMock()
-    client._client.head_object.side_effect = ClientError({"Error": {"Code": "404"}}, "HeadObject")
-    client._client.list_objects_v2.side_effect = ClientError({"Error": {"Code": code}}, "ListObjectsV2")
+    client.boto_client = MagicMock()
+    client.boto_client.head_object.side_effect = ClientError({"Error": {"Code": "404"}}, "HeadObject")
+    client.boto_client.list_objects_v2.side_effect = ClientError({"Error": {"Code": code}}, "ListObjectsV2")
     return client
 
 

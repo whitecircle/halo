@@ -16,7 +16,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from datasets import Dataset
 
-from src.data.shard_index import ShardInfo
+from src.data.preprocessed.shard_index import ShardInfo
+from src.data.sources import s3_dataset_store
 from src.data.sources.dataset_cache import _cleanup_stale_publish_tmp_dirs, _write_download_marker
 from src.data.sources.s3_client import S3Client
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
@@ -94,7 +95,7 @@ def test_custom_age_threshold(tmp_path):
 
 
 def test_s3_load_dataset_reclaims_stale_temp(tmp_path):
-    """S3Client.load_dataset removes a crashed writer's stale temp sibling even on a cache hit."""
+    """``s3_dataset_store.load_dataset`` removes a crashed writer's stale temp sibling even on a cache hit."""
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
     client.exists = MagicMock(return_value=True)
@@ -108,9 +109,9 @@ def test_s3_load_dataset_reclaims_stale_temp(tmp_path):
     stale = _make_tmp_dir(cache_path, age_seconds=2 * _DAY)
     fresh = _make_tmp_dir(cache_path, age_seconds=60)
 
-    with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-        with patch("src.data.sources.s3_client.load_from_disk", return_value=ds):
-            client.load_dataset("my/dataset")
+    with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
+        with patch("src.data.sources.s3_dataset_store.load_from_disk", return_value=ds):
+            s3_dataset_store.load_dataset(client, "my/dataset")
 
     assert not os.path.exists(stale)
     assert os.path.exists(fresh)
@@ -118,7 +119,7 @@ def test_s3_load_dataset_reclaims_stale_temp(tmp_path):
 
 def test_sharded_shard_load_reclaims_stale_temp(tmp_path, monkeypatch):
     """ShardedDatasetLoader._load_shard_from_s3 removes a crashed writer's stale temp sibling."""
-    loader = ShardedDatasetLoader("s3://test-bucket/prepped", global_rank=0, world_size=1)
+    loader = ShardedDatasetLoader("s3://test-bucket/prepped", dp_rank=0, dp_size=1)
     monkeypatch.setattr(ShardedDatasetLoader, "_shard_fingerprint", lambda self, uri: None)
 
     shard = ShardInfo(id=0, path="train/shard_00000", num_examples=1)

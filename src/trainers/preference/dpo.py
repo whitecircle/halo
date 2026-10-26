@@ -22,7 +22,7 @@ import torch
 import torch.nn.functional as F
 from trl import DPOTrainer
 
-from src.data.spans import completion_labels
+from src.data.completion_spans import completion_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin

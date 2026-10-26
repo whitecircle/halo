@@ -27,9 +27,9 @@ from src.config_validation import reject_unsupported_args
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.preference import KTOScriptArguments
 from src.configs.script_arguments import ModelArguments
-from src.data.pipeline.processing import carry_cache_key, require_render_column
-from src.data.sources.loading import alias_images_column
-from src.data.vlm import dataset_declares_images
+from src.data.pipeline.map_cache_key import carry_cache_key
+from src.data.render_columns import alias_images_column, reject_missing_render_column
+from src.data.vlm_routing import dataset_declares_images
 from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
 from src.entrypoints.model_setup import (
     apply_max_length,
@@ -91,7 +91,7 @@ def _require_kto_columns(ds, args) -> None:
     for knob, target in _KTO_RENAMED_FIELDS:
         column = getattr(args, knob)
         if column != target:
-            require_render_column(ds, str(args.dataset), knob, column)
+            reject_missing_render_column(ds, str(args.dataset), knob, column)
 
 
 def _rename_kto_columns(dataset, args):

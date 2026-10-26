@@ -17,8 +17,12 @@ import pytest
 import torch
 
 from src.data.collators.packing import DataCollatorWithFlatteningAndCompletionMask
-from src.data.pipeline.preprocessing import _completion_only_labels
-from src.data.spans import COLLATOR_SPAN_POLICY, build_completion_only_labels, mask_batch_to_completion_spans
+from src.data.completion_spans import (
+    COLLATOR_SPAN_POLICY,
+    build_completion_only_labels,
+    mask_batch_to_completion_spans,
+)
+from src.data.preprocessed.tokenization import _completion_only_labels
 
 PAD = 0
 EOS = 1
@@ -80,7 +84,6 @@ def _runtime_collator_labels(input_ids: list[int]) -> list[int]:
         {"input_ids": ids, "labels": ids.clone()},
         TEMPLATE_IDS,
         frozenset({EOS}),
-        ignore_index=IGNORE,
         train_on_last_assistant_only=False,
         response_prompt_template="<resp>",
         tokenizer=None,

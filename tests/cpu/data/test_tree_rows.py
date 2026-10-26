@@ -32,18 +32,17 @@ from scripts.training import sft as sft_script
 from scripts.training.sft import _prepare_text_data, _reject_unsupported_tree_packing
 from src.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking
 from src.data.collators.tree_packing import DataCollatorWithTreePacking
-from src.data.pipeline.row_processors import create_llm_processor
+from src.data.pipeline.text_rows import build_chat_row_processor
 from src.data.pipeline.tree_rows import (
     SHARE_KEY_COLUMN,
     TREE_ROW_FEATURES,
     _trained_tokens,
-    create_share_key_map,
-    create_tree_processor,
+    build_share_key_map,
+    build_tree_row_processor,
     is_kept_tree,
     prepare_tree_dataset,
     share_key,
 )
-from src.data.spans import resolve_eos_token_ids, tokenize_response_template
 from src.data.tree_layout import (
     DEPTH_COLUMN,
     POSITION_COLUMN,
@@ -52,6 +51,7 @@ from src.data.tree_layout import (
     serialize_tree,
     share_limit,
 )
+from src.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.models.attention import selection
 from src.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table
@@ -102,7 +102,7 @@ def tokenizer():
 
 def _process(tokenizer, conversations, *, max_length=MAX_LENGTH, min_shared_tokens=16, last_only=True) -> list[dict]:
     """Processed tree rows, read back from a dataset of the declared column types as the trainer reads them."""
-    processor = create_tree_processor(
+    processor = build_tree_row_processor(
         tokenizer,
         max_length,
         conversation_field="conversation",
@@ -118,7 +118,7 @@ def _process(tokenizer, conversations, *, max_length=MAX_LENGTH, min_shared_toke
 
 def _flat_examples(tokenizer, conversations, *, last_only=True) -> list[tuple[list[int], list[int]]]:
     """(tokens, labels) of every row by the flat packed pipeline."""
-    tokenize = create_llm_processor(tokenizer, MAX_LENGTH, conversation_field="conversation", use_padding=False)
+    tokenize = build_chat_row_processor(tokenizer, MAX_LENGTH, conversation_field="conversation", use_padding=False)
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE,
         tokenizer=tokenizer,
@@ -165,7 +165,7 @@ def test_rows_key_on_what_they_share_up_to_the_marker():
 
 def test_the_key_map_keys_every_row_of_a_batch_as_share_key_does():
     rows = _conversations()
-    keys = create_share_key_map("conversation", MARKERS, REQUIRES)({"conversation": rows})[SHARE_KEY_COLUMN]
+    keys = build_share_key_map("conversation", MARKERS, REQUIRES)({"conversation": rows})[SHARE_KEY_COLUMN]
     assert keys == [share_key(row, MARKERS, REQUIRES) for row in rows]
 
 

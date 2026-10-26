@@ -1,25 +1,17 @@
-"""Conversation shaping shared by the text and VLM pipelines (system-prompt folding, template kwargs).
-
-Torch-free, so both the text renderers (:mod:`src.data.pipeline.rendered`) and :mod:`src.data.vlm`
-can import it without an import cycle.
-"""
+"""Conversation shaping shared by the text and VLM pipelines: JSON columns, image parts, system-prompt folding
+and template kwargs."""
 
 import json
 from typing import Any
 
-# The image content part shape used across the pipeline:
-# ``{"type": IMAGE_PART_TYPE, IMAGE_PART_PAYLOAD_KEY: <image>}``. Re-inlining the spelling lets the
-# detector and the extractor drift apart, which then reads as a row with no images.
+# The image content part ``{"type": IMAGE_PART_TYPE, IMAGE_PART_PAYLOAD_KEY: <image>}`` every reader matches.
 IMAGE_PART_TYPE = "image"
 IMAGE_PART_PAYLOAD_KEY = "image"
 
 
 def maybe_parse_json(value):
-    """Parse a JSON-encoded string into Python objects; pass any other value through unchanged.
-
-    A string that isn't valid JSON is returned as-is, so a mis-specified ``conversation_field`` surfaces
-    as a chat-template error downstream rather than an opaque ``JSONDecodeError`` in a ``map`` worker.
-    """
+    """A JSON-encoded string parsed, any other value (an invalid JSON string included) unchanged: a mis-specified
+    column then fails in the chat template, not as an opaque ``JSONDecodeError`` in a map worker."""
     if isinstance(value, str):
         try:
             return json.loads(value)
@@ -37,13 +29,8 @@ def as_conversation(prompt: Any) -> Any:
 
 
 def conversation_carries_images(conversation: Any) -> bool:
-    """Whether a conversation embeds images in its message content.
-
-    Reads the same part shape the VLM pipeline extracts images from, so the verdict holds whatever
-    column the conversation arrived in; the JSON-string form is accepted for parity with the
-    renderers. Anything that is not a message list reads as text, leaving a mis-specified
-    conversation field to surface at the renderer.
-    """
+    """Whether a conversation (or its JSON string) embeds image parts in its message content; anything that is not
+    a message list reads as text, left for the renderer to refuse."""
     conversation = maybe_parse_json(conversation)
     if not isinstance(conversation, list):
         return False
@@ -56,24 +43,20 @@ def conversation_carries_images(conversation: Any) -> bool:
 
 
 def reject_image_content(conversation: Any, source: str) -> None:
-    """Raise when a text renderer is handed a conversation carrying image parts.
-
-    Chat templates expand an image part into placeholder tokens the text pipeline never backs with
-    pixels, so the row would train them as text. Per-row backstop for what the run-intent dispatch
-    (:func:`src.data.vlm.is_vlm_run`) cannot see; every text renderer goes through it.
-    """
+    """Refuse a conversation carrying image parts on a text renderer, which would train their placeholder tokens
+    with no pixels behind them: the per-row backstop for what the run-intent dispatch cannot see."""
     if not conversation_carries_images(conversation):
         return
     raise ValueError(
         f"{source} carries an image content part, but this row is on the TEXT pipeline, which "
         f"renders images as placeholder tokens with no pixels behind them. Train it on the VLM "
         f"path: a multimodal checkpoint plus image data (an 'images'/'image' column, or "
-        f"images_field naming one) routes there, and offline VLM preprocessing takes --vlm."
+        f"images_field naming one) routes there, and offline VLM preprocessing takes --is_vlm."
     )
 
 
 def chat_template_kwargs(row: dict[str, Any], interleaved_thinking: bool, tools_field: str | None) -> dict:
-    """Build the shared ``apply_chat_template`` kwargs (interleaved-thinking flag + parsed tools)."""
+    """The ``apply_chat_template`` kwargs every text render shares: the interleaved-thinking flag and parsed tools."""
     template_kwargs = {"clear_thinking": False} if interleaved_thinking else {}
     if tools_field and tools_field in row:
         tools = maybe_parse_json(row[tools_field])
@@ -104,16 +87,12 @@ def fold_system_into_conversation(
     model_supports_system_role: bool,
     demote_existing_system: bool = True,
 ) -> list[dict[str, Any]]:
-    """Apply ``system_prompt`` to a conversation, folding it away when the model has no system role.
+    """Apply ``system_prompt``, folding it into the conversation when the model has no system role; folded-into
+    messages are mutated in place (rows here are per-map copies).
 
-    Content is handled in both str and parts-list form; folded-into messages are mutated in place
-    (rows reaching here are per-map copies). The two policies are per caller:
-
-    - ``demote_existing_system=True`` (text): prepend the system turn unless one is already leading;
-      without system-role support the leading system turn is merged into the following user turn
-      (system text first), or demoted to ``user`` when no user turn follows.
-    - ``demote_existing_system=False`` (VLM): only the configured ``system_prompt`` folds, prefixed
-      onto a leading system/user turn; a dataset-borne system turn is left untouched.
+    Text (``demote_existing_system``) prepends a system turn unless one leads, and without system-role support
+    merges the leading one into the next user turn or demotes it to ``user``. VLM folds only the configured
+    prompt, onto a leading system or user turn, and leaves a dataset-borne system turn alone.
     """
     if demote_existing_system:
         if system_prompt and (not messages or messages[0]["role"] != "system"):
@@ -136,25 +115,9 @@ def fold_system_into_conversation(
     return [{"role": "system", "content": system_prompt}, *messages]
 
 
-def resolve_system_prompt(row, local_field: str, global_prompt: str | None) -> str | None:
-    """Resolve a row's system prompt: a row-local field wins over the run-wide one.
-
-    ``row`` may be a pandas Series or a plain dict (both support ``.get``); a missing value in the
-    local column reads as absent, which is what an unset cell deserializes to.
-    """
-    value = row.get(local_field)
-    if not _is_missing(value):
-        return value
-    return global_prompt
-
-
 def _is_missing(value: Any) -> bool:
-    """Whether ``value`` is a null/NA sentinel, without importing pandas (leaf-module rule).
-
-    Covers ``None``, float/numpy ``NaN``, ``pd.NaT`` (all unequal to themselves) and ``pd.NA``
-    (whose comparison yields ``pd.NA``, which raises on ``bool()``). Without this, a
-    nullable/pyarrow-backed column renders its sentinel into a chat message as a real prompt.
-    """
+    """Whether ``value`` is a null sentinel: ``None``, ``NaN`` and ``pd.NaT`` are unequal to themselves, and
+    ``pd.NA``'s comparison raises on ``bool()``."""
     if value is None:
         return True
     try:
@@ -163,11 +126,17 @@ def _is_missing(value: Any) -> bool:
         return True
 
 
-def build_base_prompt(row, prompt_field: str, system_prompt: str | None) -> list[dict]:
-    """The row's prompt messages with ``system_prompt`` prepended when set.
+def resolve_system_prompt(row, local_field: str, global_prompt: str | None) -> str | None:
+    """A row's system prompt (``row`` a pandas Series or a dict): its own non-null ``local_field`` value, else
+    the run-wide one."""
+    value = row.get(local_field)
+    if not _is_missing(value):
+        return value
+    return global_prompt
 
-    ``row`` may be a pandas Series or a plain dict.
-    """
+
+def build_base_prompt(row, prompt_field: str, system_prompt: str | None) -> list[dict]:
+    """The row's prompt messages (``row`` a pandas Series or a dict) with ``system_prompt`` prepended when set."""
     messages = list(row[prompt_field])
     if system_prompt:
         messages = [{"role": "system", "content": system_prompt}, *messages]

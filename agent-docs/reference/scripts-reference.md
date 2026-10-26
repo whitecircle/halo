@@ -20,7 +20,7 @@ Those helpers are the shared flag surfaces:
 | `scripts/environments/eval_arguments.py` | The env-eval dataset/endpoint/trajectory flags, their `Namespace` readers, and the output writer |
 | `scripts/environments/training_contract.py` | `TrainingContract`: the `--training_config` YAML read with the training script's config classes |
 
-Flag spelling is per script and stable: `scripts/profiling/**`, `before_training/prepare_dataset.py` and `before_training/s3_datasets.py` spell their own multi-word flags with dashes (`--server-url`); every other script uses underscores (`--base_url`), matching the YAML field names a training flag overrides. The shared `--trust_remote_code` keeps its one spelling everywhere, `prepare_dataset.py` included.
+Flag spelling is per script and stable: `scripts/profiling/**` and `before_training/s3_datasets.py` spell their own multi-word flags with dashes (`--server-url`); every other script uses underscores (`--base_url`), matching the YAML field names a training flag overrides. The shared `--trust_remote_code` keeps its one spelling everywhere.
 
 The checkpoint tools under `after_training/` and `before_training/` take one source/destination pair: `--input_dir` → `--output_dir` for a local checkpoint directory, `--model_id` → `--output_dir` where the source may also be a Hub repo (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`, `reset_sinks.py`). `reattach_vision_tower.py` takes both: `--input_dir` for the text-only export, `--model_id` for the multimodal base.
 
@@ -291,7 +291,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 
 | Script | Description |
 |--------|-------------|
-| `scripts/before_training/prepare_dataset.py` | Pre-process SFT or raw-text datasets: tokenization, packing, sharding. `--mode chat` (default) applies the chat template; `--mode text` tokenizes `--text-field` directly and appends EOS per document — the (continued) pre-training path. The output holds `train` and `test` (an input with no `test` bakes its `validation` split as `test`); any other input split is left out with a warning. A `--conversation-field` / `--text-field` / `--tools-field` / `--images-field` the run reads but a baked split does not carry is refused before tokenization |
+| `scripts/before_training/prepare_dataset.py` | Pre-process SFT or raw-text datasets: tokenization, packing, sharding. `--mode chat` (default) applies the chat template; `--mode text` tokenizes `--text_field` directly and appends EOS per document — the (continued) pre-training path. The output holds `train` and `test` (an input with no `test` bakes its `validation` split as `test`); any other input split is left out with a warning. A `--conversation_field` / `--text_field` / `--tools_field` / `--images_field` the run reads but a baked split does not carry is refused before tokenization |
 | `scripts/before_training/s3_datasets.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`). `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
 | `scripts/before_training/patch_vocab.py` | Patch vocabulary with new tokens, reset attention sinks |
 | `scripts/before_training/convert_deepseek_v4_bf16.py` | Dequantize a FineGrained-FP8 DeepSeek-V4 checkpoint to uniform bf16 for training; `--max_shard_size` sizes the output shards (default `5GB`; see [DeepSeek-V4](../models/deepseek-v4.md)) |
@@ -303,8 +303,8 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 ```bash
 python scripts/before_training/prepare_dataset.py \
     --input "s3://bucket/raw/dataset" --output "s3://bucket/preprocessed/dataset" \
-    --model-name "Qwen/Qwen3-8B" --max-length 8192 --test-size 0.01 --num-shards 64 \
-    --pack-sequences --assistant-message-template $'<|im_start|>assistant\n'
+    --model_name_or_path "Qwen/Qwen3-8B" --max_length 8192 --test_size 0.01 --num_shards 64 \
+    --pack_sequences --assistant_message_template $'<|im_start|>assistant\n'
 
 python scripts/before_training/patch_vocab.py \
     --model_id Zyphra/ZAYA1-8B --output_dir /mnt/models/ZAYA1-8B-patched \

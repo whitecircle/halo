@@ -33,8 +33,8 @@ from datasets import (
     load_from_disk,
 )
 
-from src.data.sources import loading
-from src.data.sources.loading import _split_identity
+from src.data.sources import replica_identity
+from src.data.sources.replica_identity import _split_identity
 
 ROWS = 20
 # Each media feature with how one stored file sits in its column.
@@ -135,7 +135,7 @@ def test_large_binary_values_reach_the_hash_one_value_at_a_time(monkeypatch):
 
         return Recording()
 
-    monkeypatch.setattr(loading, "hashlib", types.SimpleNamespace(blake2b=recording_blake2b))
+    monkeypatch.setattr(replica_identity, "hashlib", types.SimpleNamespace(blake2b=recording_blake2b))
 
     identity = _split_identity(split)
 

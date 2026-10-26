@@ -30,7 +30,7 @@ Required columns and types per method: `agent-docs/data/dataset-formats.md#requi
 reads its columns positionally (`agent-docs/training-methods/embedding.md#dataset-formats`).
 
 The default `conversation_field` is **method-dependent** — `"prompt"` (sft.py, self-distillation and
-`prepare_dataset.py --conversation-field`), `"messages"` (teacher distillation). Don't assume one value;
+`prepare_dataset.py --conversation_field`), `"messages"` (teacher distillation). Don't assume one value;
 check the script/config. Every config declares `max_length`
 natively; the YAML parser migrates no spelling, so TRL's retired `max_seq_length` raises the
 unknown-key error.
@@ -43,10 +43,10 @@ carries `metadata.json` (`preprocessed: true`); a training config sets `dataset:
 path — **no flag needed**, `load_datasets_auto()` auto-detects and skips tokenization. A Hub-published
 output is refused as `dataset:`; download it and point at the directory. Sharded output also
 carries `shard_index.json`; the trainer computes `dataset_presharded` so the DataLoader does **not**
-re-shard. Key flags (read the argparse for the rest): `--mode {chat,text}`, `--pack-sequences`
-`--packing-strategy {bfd,bfd_split,wrapped}` (text SFT only, not VLM), `--num-shards N` (above 1:
-**must be ≥ data_parallel_size**, and needs a `test` split — `--test-size`),
-`--vlm`. Non-SFT methods are not supported by this script. Full flag list + the two distinct mechanisms
+re-shard. Key flags (the `PreprocessingConfig` fields; see `reference.md` for the rest): `--mode {chat,text}`, `--pack_sequences`
+`--packing_strategy {bfd,bfd_split,wrapped}` (text SFT only, not VLM), `--num_shards N` (above 1:
+**must be ≥ data_parallel_size**, and needs a `test` split — `--test_size`),
+`--is_vlm`. Non-SFT methods are not supported by this script. Full flag list + the two distinct mechanisms
 (preprocessed vs presharded) in `reference.md`.
 
 ## Loading & collators (selected for you)
@@ -66,7 +66,7 @@ re-shard. Key flags (read the argparse for the rest): `--mode {chat,text}`, `--p
 
 The `agent-docs/data/` pages document the intended behavior — check them first. The code is the **ultimate**
 authority: when a doc, this skill, `reference.md`, or memory disagrees — or you are unsure — read the
-actual file (`src/data/sources/loading.py`, `src/data/pipeline/processing.py`,
+actual file (`src/data/sources/loading.py`, `src/data/pipeline/coordinated_map.py`, `src/data/pipeline/map_cache_key.py`,
 `src/data/sources/sharded_dataset.py`, `src/data/collators/factory.py`, `src/data/collators/`,
 `scripts/before_training/prepare_dataset.py`) before you assert or act. (`CLAUDE.md`: docs-first, but the
 code wins.)

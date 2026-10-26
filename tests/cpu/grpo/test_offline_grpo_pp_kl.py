@@ -16,14 +16,11 @@ from collections import defaultdict
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPODataCollatorWithPadding
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, token_logprobs
 from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-
-PartialState()  # the collator's accelerate logger requires an initialized state
 
 BATCH, PROMPT, COMPLETION, VOCAB, MAX_LENGTH = 4, 3, 4, 16, 10
 PAD = 0

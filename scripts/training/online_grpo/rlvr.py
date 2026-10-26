@@ -19,11 +19,12 @@ from src.configs.grpo import RLRRArguments
 from src.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
+from src.data.pipeline.chat_render import render_generation_prompt
 from src.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
-from src.data.pipeline.processing import process_dataset_with_map_and_filter, require_render_column
-from src.data.pipeline.rendered import render_generation_prompt
-from src.data.pipeline.row_processors import blank_conversation
-from src.data.sources.loading import reject_image_columns
+from src.data.pipeline.coordinated_map import coordinated_map_and_filter
+from src.data.pipeline.rejected_rows import blank_conversation
+from src.data.render_columns import reject_missing_render_column
+from src.data.vlm_routing import reject_image_columns
 from src.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from src.entrypoints.model_setup import (
     apply_prompt_completion_window,
@@ -155,10 +156,10 @@ def main():
     original_columns = list(ds["train"].column_names)
     # Read with .get, so a mistyped answer_field would yield empty answers and all-zero verifiable rewards.
     if args.answer_field:
-        require_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+        reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
     columns_to_remove = [col for col in original_columns if col not in ["prompt", "conversation", "answer"]]
 
-    processed_ds = process_dataset_with_map_and_filter(
+    processed_ds = coordinated_map_and_filter(
         ds,
         build_rlvr_row_fn(args, tokenizer),
         filter_field="prompt",

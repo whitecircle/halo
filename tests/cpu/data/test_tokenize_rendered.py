@@ -23,7 +23,7 @@ from unittest import mock
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline.rendered import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
+from src.data.pipeline.chat_render import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
 from tests.common.repo import load_script_module
 
 BOS_ID = 1

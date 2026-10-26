@@ -323,7 +323,7 @@ def run(
 
     Flags after the tool name pass through to the underlying script, except the launcher's own
     (--nproc/-n, --port/-p, --list, --dry-run, --root), which the CLI consumes first. Put ``--``
-    before a tool flag that collides (``halo run prepare-dataset -- --dry-run``).
+    before a tool flag that collides (``halo run prepare-dataset -- --help``).
 
     The tool runs in the caller's cwd (unlike ``halo launch``), so a relative path flag means what it
     would mean had the script been invoked directly.

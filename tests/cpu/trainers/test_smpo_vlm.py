@@ -519,7 +519,7 @@ def test_dataset_map_arrow_roundtrip():
                     "prompt": [{"role": "user", "content": "Describe the picture"}],
                     "chosen": [{"role": "assistant", "content": "A red square"}],
                     "rejected": [{"role": "assistant", "content": "A blue circle"}],
-                    "images": [image_path],  # file-path form; process_image loads it
+                    "images": [image_path],  # file-path form; decode_image loads it
                 }
             ]
         )

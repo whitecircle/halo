@@ -23,8 +23,8 @@ from scripts.inference.inference_arguments import (
     follow_up_messages,
 )
 from src.checkpoint.reading import reject_partial_checkpoint
+from src.data.pipeline.chat_render import tokenize_rendered
 from src.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
-from src.data.pipeline.rendered import tokenize_rendered
 from src.inference.openai_client import build_openai_client, chat_completion
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason
 from src.model_loading.buffer_repair import finalize_loaded_model

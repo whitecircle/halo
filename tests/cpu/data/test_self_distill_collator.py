@@ -26,7 +26,7 @@ from src.data.collators.self_distill import (
     teacher_history,
 )
 from src.data.collators.vlm import SelfDistillVLMDataCollator
-from src.data.pipeline.vlm_dataset import _filter_vlm_over_length
+from src.data.pipeline.vlm_rows import _filter_vlm_over_length
 from tests.common.models import QWEN3_0_6B
 from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_tokenizer

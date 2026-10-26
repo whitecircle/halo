@@ -13,10 +13,7 @@ import copy
 import pytest
 
 from src.data.pipeline import preferences as prefs
-from src.data.pipeline.preferences import (
-    apply_chat_template_to_preference_data,
-    normalize_preference_row,
-)
+from src.data.pipeline.preferences import normalize_preference_row, render_preference_row
 
 
 class StubTokenizer:
@@ -115,7 +112,7 @@ def test_continuation_not_ending_on_assistant_raises():
 
 
 def test_apply_chat_template_renders_prompt_once():
-    row = apply_chat_template_to_preference_data(_tulu3_row(), StubTokenizer())
+    row = render_preference_row(_tulu3_row(), StubTokenizer())
     assert row["prompt"] == "<user>what is 2+2?</user>"
     assert row["chosen"] == "<assistant>4</assistant>", "the user turn must not be rendered into chosen"
     assert (row["prompt"] + row["chosen"]).count("<user>") == 1

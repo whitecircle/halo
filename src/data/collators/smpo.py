@@ -1,11 +1,5 @@
-"""SMPO preference collators: the text pair-padder and its VLM subclass.
-
-Both emit the same batch keys, so the trainer's chosen|rejected concat is written once. Prompts are
-left-padded so the completion boundary aligns across a batch; completions are right-padded. The VLM
-subclass processes images at collation (per-row pixel tensors are orders of magnitude larger than
-the encoded image, so they never enter the Arrow cache) and concatenates the resulting vision
-tensors row-major over that same layout.
-"""
+"""SMPO preference collators: the text pair-padder and its VLM subclass, emitting the same batch keys.
+Prompts are left-padded so the completion boundary aligns across a batch; completions are right-padded."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -15,14 +9,12 @@ from transformers import ProcessorMixin
 from transformers.data.data_collator import DataCollatorMixin
 from trl.trainer.utils import pad
 
-from src.data.pipeline.rendered import lacks_emitted_bos
-from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS, run_vlm_processor
+from src.data.pipeline.chat_render import lacks_emitted_bos
+from src.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS, run_vlm_processor
 
-_TEXT_SIDES = ("prompt", "chosen", "rejected")
-
-# Text keys the SMPO collators emit; anything else is a VLM vision tensor. Derived from the sides the collator pads.
+# Text keys the SMPO collators emit; anything else is a VLM vision tensor.
 PREFERENCE_BATCH_KEYS = frozenset(
-    {f"{side}_{suffix}" for side in _TEXT_SIDES for suffix in ("input_ids", "attention_mask")}
+    {f"{side}_{suffix}" for side in ("prompt", "chosen", "rejected") for suffix in ("input_ids", "attention_mask")}
 )
 
 
@@ -55,15 +47,9 @@ class DataCollatorForSMPO(DataCollatorMixin):
 
 @dataclass
 class DataCollatorForVLMSMPO(DataCollatorForSMPO):
-    """SMPO collator for VLM rows: templated ``prompt_text`` + ``images``, pre-tokenized completions.
-
-    Image placeholder expansion and pixel-tensor extraction happen here, not in the dataset map:
-    per-row pixel tensors would bloat the Arrow cache by orders of magnitude. Emits the standard
-    SMPO keys plus every extra processor tensor concatenated row-major over the batch.
-
-    Prompts are never truncated, since cutting expanded image placeholder tokens while the vision
-    tensors keep every patch desyncs text from vision; an over-``max_prompt_length`` prompt raises.
-    Completions are text-only and already length-budgeted by ``tokenize_vlm_preference_row``.
+    """SMPO collator for VLM rows (templated ``prompt_text`` + ``images``, pre-tokenized completions): the
+    images expand here rather than in the Arrow cache, and every extra processor tensor is concatenated
+    row-major. Prompts are never truncated (that desyncs placeholders from pixels): an over-length one raises.
     """
 
     processor: ProcessorMixin | None = None

@@ -76,7 +76,7 @@ Three templates under `jinja-templates/glm/`. The first two render the native no
   when the training render must match native serving byte-for-byte (tool data, RL); tool-call
   `arguments` must be a parsed mapping, not the OpenAI JSON-string form.
 
-Neither injects a per-turn `<|endoftext|>` mid-conversation, matching native serving where an assistant turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in `config.eos_token_id`). Completion masking stops each turn at that terminator (`src/data/spans.py`). The final assistant turn ends with an explicit `<|endoftext|>` so it carries an in-document terminator under packing.
+Neither injects a per-turn `<|endoftext|>` mid-conversation, matching native serving where an assistant turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in `config.eos_token_id`). Completion masking stops each turn at that terminator (`src/data/turn_markers.py`). The final assistant turn ends with an explicit `<|endoftext|>` so it carries an in-document terminator under packing.
 
 Pair them with `assistant_message_template: "<|assistant|>"` — the role token alone marks every assistant turn and matches both the thinking and non-thinking renders, where `<|assistant|></think>` would silently miss a thinking turn. See [Collators](../data/collators.md).
 

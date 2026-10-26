@@ -12,8 +12,8 @@ import pytest
 from datasets import Dataset
 from PIL import Image
 
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import tokenize_dataset
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.tokenization import tokenize_dataset
 from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading import tokenizer_backend as tb
 from src.model_loading.tokenizer_backend import (

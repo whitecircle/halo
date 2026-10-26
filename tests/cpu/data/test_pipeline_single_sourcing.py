@@ -23,23 +23,25 @@ from PIL import Image
 
 from src.data.collators.self_distill import SelfDistillTextCollator
 from src.data.collators.vlm import VLMDataCollator
-from src.data.pipeline import preferences, preprocessing, rendered, row_processors
+from src.data.pipeline import chat_render as rendered
+from src.data.pipeline import preferences, rejected_rows
+from src.data.pipeline.chat_render import render_conversation
 from src.data.pipeline.preferences import (
     render_vlm_preference_row,
     split_vlm_preference_row,
     tokenize_vlm_preference_row,
 )
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import tokenize_vlm_dataset
-from src.data.pipeline.rendered import render_conversation
-from src.data.pipeline.row_processors import (
-    apply_chat_template_to_conversations,
+from src.data.pipeline.text_rows import build_chat_row_processor, render_row_conversation
+from src.data.pipeline.vlm_rows import (
+    _VLM_SIGNATURE_COLUMNS,
     build_vlm_history,
-    create_llm_processor,
-    create_vlm_processor,
+    build_vlm_row_processor,
+    vlm_map_features,
 )
-from src.data.pipeline.vlm_dataset import _VLM_SIGNATURE_COLUMNS, vlm_map_features
-from src.data.vlm import VLM_OUTPUT_FEATURES
+from src.data.preprocessed import tokenization
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.tokenization import tokenize_vlm_dataset
+from src.data.vlm_render import VLM_OUTPUT_FEATURES
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer
 
 
@@ -95,7 +97,7 @@ class _RenderTokenizer:
 def test_both_vlm_preference_routes_go_through_the_shared_prologue(monkeypatch):
     """Break the ONE image-extraction call the shared splitter makes; both routes must fail on it.
 
-    A route that kept its own prologue would import ``process_vlm_conversation`` from the VLM leaf
+    A route that kept its own prologue would import ``extract_conversation_images`` from the VLM leaf
     itself and sail past this patch.
     """
 
@@ -105,7 +107,7 @@ def test_both_vlm_preference_routes_go_through_the_shared_prologue(monkeypatch):
     def _boom(*_args, **_kwargs):
         raise _SharedPrologueReached
 
-    monkeypatch.setattr(preferences, "process_vlm_conversation", _boom)
+    monkeypatch.setattr(preferences, "extract_conversation_images", _boom)
     row = {"prompt": _PROMPT, "chosen": _CHOSEN, "rejected": _REJECTED}
     processor = FakeVLMProcessorBase()
 
@@ -164,7 +166,7 @@ def test_both_text_renderers_go_through_the_shared_render(monkeypatch):
     row = {"messages": _PROMPT}
 
     with pytest.raises(_SharedRenderReached):
-        apply_chat_template_to_conversations(row, tokenizer, conversation_field="messages")
+        render_row_conversation(row, tokenizer, conversation_field="messages")
     collator = SelfDistillTextCollator(
         tokenizer=tokenizer,
         max_length=256,
@@ -202,7 +204,7 @@ def test_the_shared_render_keeps_a_template_emitted_bos():
     tokenizer = _RenderTokenizer()
     text = render_conversation(tokenizer, list(_PROMPT), {}, conversation_field="messages")
     assert text.startswith("<bos>"), text
-    assert apply_chat_template_to_conversations({"messages": _PROMPT}, tokenizer).startswith("<bos>")
+    assert render_row_conversation({"messages": _PROMPT}, tokenizer).startswith("<bos>")
 
 
 # --- one declaration per schema ------------------------------------------------------------------
@@ -215,7 +217,7 @@ def test_the_vlm_map_output_is_one_declaration():
     more or the map would strip it before collation.
     """
     row = {"messages": [{"role": "user", "content": "hi"}]}
-    emitted = set(create_vlm_processor()(row))
+    emitted = set(build_vlm_row_processor()(row))
     assert emitted == set(vlm_map_features()), "the row processor and the pinned schema disagree"
     assert emitted <= set(_VLM_SIGNATURE_COLUMNS), "the map writes a column the signature list strips"
     assert "text" not in emitted, "the dead 'text' payload is back"
@@ -274,7 +276,7 @@ def test_the_non_completions_vlm_bake_routes_through_the_shared_label_builder(mo
     def _sentinel_labels(input_ids, *_args, **_kwargs):
         return torch.full_like(input_ids, -7)
 
-    monkeypatch.setattr(preprocessing, "build_completion_only_labels", _sentinel_labels)
+    monkeypatch.setattr(tokenization, "build_completion_only_labels", _sentinel_labels)
     config = PreprocessingConfig(
         model_name_or_path="fake/vlm",
         max_length=64,
@@ -326,21 +328,21 @@ def test_the_vlm_bake_masks_image_tokens_without_erasing_a_real_eos():
 # --- the row-shape leaf ---------------------------------------------------------------------------
 
 
-def test_row_processors_imports_nothing_from_the_coordinated_map_module():
-    """The row-shape module is a leaf under the coordinated-map module, not a peer of it: the
-    sentinel it emits and the predicate that drops it live with the rows, so ``processing`` can
-    import the predicate without either module reaching back."""
-    tree = ast.parse(pathlib.Path(row_processors.__file__).read_text())
+def test_rejected_rows_imports_nothing_from_the_coordinated_map_module():
+    """The rejection-row module is a leaf under the coordinated-map module, not a peer of it: the
+    sentinel a row map emits and the predicate that drops it live with the rows, so
+    ``coordinated_map`` can import the predicate without either module reaching back."""
+    tree = ast.parse(pathlib.Path(rejected_rows.__file__).read_text())
     imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
-    assert "src.data.pipeline.processing" not in imported, sorted(imported)
+    assert "src.data.pipeline.coordinated_map" not in imported, sorted(imported)
 
 
 def test_the_row_map_factories_expose_no_dead_injection_knobs():
     """``none_example`` and ``process_vlm_conversation_fn`` would be caller-supplied overrides no
     production caller sets — one handing back the factory's own default, the other a stub only tests
     pass. A knob nothing sets cannot be verified by a run, so it must not exist."""
-    assert "none_example" not in inspect.signature(create_llm_processor).parameters
-    for fn in (create_vlm_processor, build_vlm_history):
+    assert "none_example" not in inspect.signature(build_chat_row_processor).parameters
+    for fn in (build_vlm_row_processor, build_vlm_history):
         assert "process_vlm_conversation_fn" not in inspect.signature(fn).parameters
 
 

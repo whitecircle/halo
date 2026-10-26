@@ -20,8 +20,8 @@ import pytest
 from datasets import Dataset, DatasetDict
 
 from src.configs.script_arguments import CommonScriptArguments
-from src.data.pipeline import processing
-from src.data.pipeline.processing import log_dataset_examples
+from src.entrypoints import data_setup
+from src.entrypoints.data_setup import log_dataset_examples
 
 
 class FakeTokenizer:
@@ -108,8 +108,8 @@ def test_datasetdict_uses_first_split():
 
 def test_off_the_fs_save_rank_no_write():
     """A rank that is not the FS-aware save rank writes nothing — else N ranks stampede one path."""
-    original = processing.is_fs_save_rank
-    processing.is_fs_save_rank = lambda: False
+    original = data_setup.is_fs_save_rank
+    data_setup.is_fs_save_rank = lambda: False
     try:
         with tempfile.TemporaryDirectory() as d:
             log_dataset_examples(
@@ -117,7 +117,7 @@ def test_off_the_fs_save_rank_no_write():
             )
             assert not os.path.exists(os.path.join(d, "log"))
     finally:
-        processing.is_fs_save_rank = original
+        data_setup.is_fs_save_rank = original
 
 
 def test_non_main_fs_save_rank_still_writes():
@@ -127,9 +127,9 @@ def test_non_main_fs_save_rank_still_writes():
     ``<output_dir>/log/`` (where ``run.log`` is also teed). Gating the sample dump on global rank 0
     instead leaves every other node's log dir without the samples it is supposed to sit beside.
     """
-    original_main, original_save = processing.is_global_main_process, processing.is_fs_save_rank
-    processing.is_global_main_process = lambda: False
-    processing.is_fs_save_rank = lambda: True
+    original_main, original_save = data_setup.is_global_main_process, data_setup.is_fs_save_rank
+    data_setup.is_global_main_process = lambda: False
+    data_setup.is_fs_save_rank = lambda: True
     try:
         with tempfile.TemporaryDirectory() as d:
             log_dataset_examples(
@@ -139,8 +139,8 @@ def test_non_main_fs_save_rank_still_writes():
                 "a non-rank-0 FS save rank must still write its node's decoded samples"
             )
     finally:
-        processing.is_global_main_process = original_main
-        processing.is_fs_save_rank = original_save
+        data_setup.is_global_main_process = original_main
+        data_setup.is_fs_save_rank = original_save
 
 
 def test_config_field_defaults_off():

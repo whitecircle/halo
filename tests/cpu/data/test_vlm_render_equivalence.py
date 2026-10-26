@@ -4,7 +4,7 @@
 The two paths exist so a run can skip tokenization at startup — the artifact is an OPTIMIZATION of
 the runtime render, so a row prepared offline must train on exactly the ids the untouched runtime
 path would produce from the same row with the same processor. Both sides here are the production
-entry points (``tokenize_vlm_dataset`` offline; ``create_vlm_processor`` + ``VLMDataCollator`` at
+entry points (``tokenize_vlm_dataset`` offline; ``build_vlm_row_processor`` + ``VLMDataCollator`` at
 runtime) driven over the same Arrow dataset: re-implementing either side would certify nothing, and
 the Arrow round-trip is load-bearing — it unions the content-parts struct over the split, so a text
 part gains a null ``image`` key as soon as any row anywhere carries an image.
@@ -26,10 +26,9 @@ from datasets import Dataset, Features, Value
 from PIL import Image
 
 from src.data.collators.vlm import VLMDataCollator
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import tokenize_vlm_dataset
-from src.data.pipeline.row_processors import create_vlm_processor
-from src.data.pipeline.vlm_dataset import _vlm_extra_columns, vlm_map_features
+from src.data.pipeline.vlm_rows import _VLM_SIGNATURE_COLUMNS, build_vlm_row_processor, vlm_map_features
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.tokenization import tokenize_vlm_dataset
 from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_VL_2B
 from tests.common.tokenizers import load_cached_processor
 
@@ -192,8 +191,8 @@ def _preprocessing_config(images_field: str | None) -> PreprocessingConfig:
 def _runtime_batch(processor, dataset: Dataset, images_field: str | None) -> dict:
     """The batch an untouched runtime VLM SFT run builds from this dataset's single row."""
     mapped = dataset.map(
-        create_vlm_processor(conversation_field="conversation", images_field=images_field),
-        remove_columns=_vlm_extra_columns(dataset),
+        build_vlm_row_processor(conversation_field="conversation", images_field=images_field),
+        remove_columns=sorted(set(dataset.column_names) - set(_VLM_SIGNATURE_COLUMNS)),
         features=vlm_map_features(),
         load_from_cache_file=False,
     )

@@ -19,12 +19,13 @@ Requires the model tokenizers/configs in the HF cache (offline-friendly).
 
 import pytest
 
-from src.data.collators.completions_only import DataCollatorForCompletionOnlyLM
 from src.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlatteningAndCompletionMask,
 )
-from src.data.spans import build_completion_only_labels, resolve_eos_token_ids
+from src.data.collators.padded import DataCollatorForCompletionOnlyLM
+from src.data.completion_spans import build_completion_only_labels
+from src.data.turn_markers import resolve_eos_token_ids
 from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, QWEN3_0_6B, QWEN3_5_2B
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer

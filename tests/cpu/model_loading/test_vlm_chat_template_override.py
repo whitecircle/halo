@@ -7,7 +7,7 @@ wrote. The toolkit applies ``chat_template`` / ``force_chat_template`` to the to
 processor adopts it a VLM run renders its rows on the checkpoint's original template and ships that
 template too. Each entry point that sets the override is driven here on a cached Qwen3.5 processor:
 the training seam (``configure_run_tokenizer`` + ``install_resolved_tokenizer``) through the FSDP2
-saver, ``prepare_dataset --vlm``'s processor setup, and ``patch_vocab.py``'s export.
+saver, ``prepare_dataset --is_vlm``'s processor setup, and ``patch_vocab.py``'s export.
 
     python tests/cpu/model_loading/test_vlm_chat_template_override.py
 """
@@ -85,7 +85,7 @@ def test_prepare_dataset_renders_vlm_rows_with_the_override():
     prepare_dataset = load_script_module("scripts/before_training/prepare_dataset.py")
     load_cached_processor(QWEN3_5_9B)  # skips where the processor is not cached
     args = SimpleNamespace(
-        model_name=QWEN3_5_9B,
+        model_name_or_path=QWEN3_5_9B,
         trust_remote_code=False,
         min_pixels=None,
         max_pixels=None,

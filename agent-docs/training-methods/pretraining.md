@@ -57,18 +57,18 @@ Raw text is tokenized with document packing and no chat template:
 python scripts/before_training/prepare_dataset.py \
     --input  "s3://my-bucket/raw/my_corpus" \
     --output "s3://my-bucket/preprocessed/my_corpus_packed" \
-    --model-name "Qwen/Qwen3-4B" \
-    --mode text --text-field text \
-    --max-length 8192 --test-size 0.005 \
-    --pack-sequences --packing-strategy bfd_split \
-    --num-shards 256
+    --model_name_or_path "Qwen/Qwen3-4B" \
+    --mode text --text_field text \
+    --max_length 8192 --test_size 0.005 \
+    --pack_sequences --packing_strategy bfd_split \
+    --num_shards 256
 ```
 
-`--mode text` tokenizes `--text-field` and appends an EOS per document (`--no-append-eos` when the corpus already delimits them). Whole documents reach the packer, so the strategy decides the overflow: **`bfd_split`** carries it into later packs, `bfd` discards every token past `--max-length`, and `wrapped` concatenates across boundaries, emitting none at all. Flags: [Pre-Processing](../data/dataset-preparation.md#parameters).
+`--mode text` tokenizes `--text_field` and appends an EOS per document (`--append_eos false` when the corpus already delimits them). Whole documents reach the packer, so the strategy decides the overflow: **`bfd_split`** carries it into later packs, `bfd` discards every token past `--max_length`, and `wrapped` concatenates across boundaries, emitting none at all. Flags: [Pre-Processing](../data/dataset-preparation.md#parameters).
 
-`--num-shards` must be at least the data-parallel size, or the train split raises; a non-multiple truncates every rank to the smallest shard. `ShardedDatasetLoader` assigns them by **DP rank**, not global rank ([Data Loading](../parallelism/data-loading.md#pre-processed-sharded-datasets)).
+`--num_shards` must be at least the data-parallel size, or the train split raises; a non-multiple truncates every rank to the smallest shard. `ShardedDatasetLoader` assigns them by **DP rank**, not global rank ([Data Loading](../parallelism/data-loading.md#pre-processed-sharded-datasets)).
 
-The SFT trainer auto-detects the artifact and holds the run to it. Text mode bakes `train_on_completions_only: false` while the training-side default is `true`, so the YAML must state it or startup raises. `max_length` must equal the prep `--max-length` exactly; both directions raise.
+The SFT trainer auto-detects the artifact and holds the run to it. Text mode bakes `train_on_completions_only: false` while the training-side default is `true`, so the YAML must state it or startup raises. `max_length` must equal the prep `--max_length` exactly; both directions raise.
 
 ## Step-based training
 
@@ -92,7 +92,7 @@ For MoE pre-training, router balancing matters from step 0: [`BalancingBiasCallb
 
 There is no streaming path: `datasets` loads at `keep_in_memory=False`, so a corpus is memory-mapped from Arrow — disk bounds it, not RAM, but the whole dataset must land on disk. Split a multi-terabyte corpus at the source, tokenize each batch to its own prefix with the command above, and train the phases in sequence, each resuming the previous checkpoint.
 
-Keep `--max-length` and `--model-name` identical across batches so shards stay interchangeable, and point `TMPDIR` / `HF_DATASETS_CACHE` at the large volume. A `dataset:` **list** is not the way to mix prepared prefixes: only a single string path is probed for the pre-processed stamp, and list entries load whole, with no per-rank sharding. `dataset_ratio` (a keep fraction, broadcast or one per entry) applies to raw sources, single or mixed.
+Keep `--max_length` and `--model_name_or_path` identical across batches so shards stay interchangeable, and point `TMPDIR` / `HF_DATASETS_CACHE` at the large volume. A `dataset:` **list** is not the way to mix prepared prefixes: only a single string path is probed for the pre-processed stamp, and list entries load whole, with no per-rank sharding. `dataset_ratio` (a keep fraction, broadcast or one per entry) applies to raw sources, single or mixed.
 
 Set `DIST_SHARED_FILESYSTEM=0` for per-node local storage (default `1` = shared NFS/Lustre) ([Filesystem](../data/filesystem-handling.md)).
 

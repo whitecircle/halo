@@ -57,10 +57,10 @@ class _FakeBoto:
 def _client_with(existing_keys):
     client = object.__new__(S3Client)
     client.bucket = "b"
-    client._client = _FakeBoto(existing_keys)
-    client._transfer_config = None
+    client.boto_client = _FakeBoto(existing_keys)
+    client.transfer_config = None
     client.exists = lambda key, subfolder=None: bool(existing_keys)
-    client._get_full_key = lambda key, subfolder=None: key
+    client.full_key = lambda key, subfolder=None: key
     return client
 
 
@@ -77,7 +77,7 @@ def test_overwrite_deletes_marker_first_and_uploads_it_last(tmp_path):
 
     client.push_folder(_local_dataset(tmp_path), "ds")
 
-    ops = client._client.ops
+    ops = client.boto_client.ops
     assert ops[0] == ("delete", "ds/metadata.json"), "the marker must be invalidated before any byte uploads"
     uploads = [key for op, key in ops if op == "upload"]
     assert uploads[-1] == "ds/metadata.json", "the marker must be re-written only after the bulk completed"
@@ -91,7 +91,7 @@ def test_fresh_destination_uploads_without_deletes(tmp_path):
 
     client.push_folder(_local_dataset(tmp_path), "ds")
 
-    ops = client._client.ops
+    ops = client.boto_client.ops
     assert all(op == "upload" for op, _ in ops), ops
     assert [key for _, key in ops][-1] == "ds/metadata.json"
 
@@ -100,7 +100,7 @@ def test_existing_destination_without_overwrite_refuses(tmp_path):
     client = _client_with({"ds/metadata.json"})
     with pytest.raises(FileExistsError):
         client.push_folder(_local_dataset(tmp_path), "ds", overwrite=False)
-    assert client._client.ops == [], "a refusal must not have touched the destination"
+    assert client.boto_client.ops == [], "a refusal must not have touched the destination"
 
 
 if __name__ == "__main__":

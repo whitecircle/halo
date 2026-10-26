@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.vlm import VLM_IMAGE_COLUMNS
+from src.data.vlm_routing import VLM_IMAGE_COLUMNS
 from tests.common.repo import load_script_module
 
 _MODEL_ID = "stub/qwen3-4b"
@@ -99,7 +99,7 @@ def _run_rlvr(tmp_path, dataset: DatasetDict) -> None:
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
-        mock.patch.object(module, "process_dataset_with_map_and_filter", side_effect=_PastTheGuard),
+        mock.patch.object(module, "coordinated_map_and_filter", side_effect=_PastTheGuard),
     ]
     _run(module, tmp_path, "max_completion_length: 64\n", patches)
 

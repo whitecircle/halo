@@ -4,7 +4,7 @@
 Four guards pinned here:
 
 * a **declared** render column (``conversation_field``) the dataset does not carry must not be
-  accepted silently: ``_filter_empty_conversations`` no-ops on a missing column, so a typo surfaces
+  accepted silently: ``filter_empty_conversations`` no-ops on a missing column, so a typo surfaces
   much later as a bare ``KeyError`` inside an HF ``map`` worker — after the (possibly multi-node)
   model load and naming neither the knob nor the offending dataset. It fails loud at load, and *only*
   where the column is consumed: the callers that declare nothing (DPO/SMPO/KTO/reward/classification)
@@ -34,10 +34,11 @@ from datasets import Dataset, DatasetDict
 # The module logs through the accelerate logger, which requires an initialized state.
 PartialState()
 
-from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata
-from src.data.pipeline.preprocessing import shard_dataset
-from src.data.shard_index import SHARD_INDEX_FILE
-from src.data.sources.loading import alias_tools_column, load_datasets, load_datasets_auto
+from src.data.preprocessed.metadata import PreprocessedDatasetMetadata
+from src.data.preprocessed.preparation import shard_dataset
+from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
+from src.data.render_columns import alias_tools_column
+from src.data.sources.loading import load_datasets, load_datasets_auto
 from src.data.sources.paths import METADATA_FILE
 
 _LOADING_LOGGER = "src.data.sources.loading"
@@ -81,7 +82,7 @@ def _save_sharded_dataset(directory: str, train_rows: int = 20, test_rows: int =
             }
         )
         index = shard_dataset(dataset, output_dir=directory, split_name=split, num_shards=2)
-        index.save(os.path.join(directory, split, SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(directory, split, SHARD_INDEX_FILE), index)
     return directory
 
 
@@ -98,11 +99,10 @@ def _save_preprocessed_dataset(directory: str, train_rows: int = 8, test_rows: i
         for name, num_rows in (("train", train_rows), ("test", test_rows))
     }
     DatasetDict(splits).save_to_disk(directory)
-    PreprocessedDatasetMetadata(
-        max_length=2,
-        total_train_examples=train_rows,
-        total_test_examples=test_rows,
-    ).save(os.path.join(directory, METADATA_FILE))
+    write_stamped_sidecar(
+        os.path.join(directory, METADATA_FILE),
+        PreprocessedDatasetMetadata(max_length=2, total_train_examples=train_rows, total_test_examples=test_rows),
+    )
     return directory
 
 
@@ -370,7 +370,7 @@ def test_test_size_warns_once_for_a_sharded_load(caplog):
 
         warnings = _test_size_warnings(caplog)
         assert len(warnings) == 1, warnings
-        assert "prepare_dataset.py --test-size" in warnings[0], warnings[0]
+        assert "prepare_dataset.py --test_size" in warnings[0], warnings[0]
         # And the reason the warning exists: the prepared split is what actually loaded.
         assert (len(ds["train"]), len(ds["test"])) == (20, 6)
     finally:

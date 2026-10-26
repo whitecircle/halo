@@ -18,23 +18,20 @@ step 0:
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-PartialState()  # sources.loading warns through accelerate's logger
-
-from src.data.pipeline.preprocessed_metadata import (
+from src.data.preprocessed.metadata import (
     PreprocessedDatasetMetadata,
     PreprocessingConfig,
-    _validate_render_compatibility,
+    _verify_render_knobs,
     is_preprocessed_dataset,
     load_preprocessed_metadata,
 )
-from src.data.shard_index import IncompatiblePreprocessedDataset
-from src.data.sources.loading import _require_tools_field_somewhere
+from src.data.preprocessed.shard_index import IncompatiblePreprocessedDataset
+from src.data.sources.corpus import _reject_tools_field_nowhere
 from src.data.sources.paths import METADATA_FILE
 
 
@@ -78,7 +75,7 @@ def test_our_stamp_at_a_wrong_version_still_reports_preprocessed(tmp_path):
 
 
 def test_our_current_stamp_is_detected(tmp_path):
-    path = _write_metadata(tmp_path / "prepared", PreprocessedDatasetMetadata().to_dict())
+    path = _write_metadata(tmp_path / "prepared", asdict(PreprocessedDatasetMetadata()))
     assert is_preprocessed_dataset(path) is True
     assert load_preprocessed_metadata(path).preprocessed is True
 
@@ -106,7 +103,7 @@ def test_an_artifact_baked_under_another_default_is_not_rejected(caplog):
     the run's value is inert and the prepared value is what trained."""
     metadata = _artifact(conversation_field="conversation")
     with caplog.at_level("WARNING"):
-        _validate_render_compatibility(metadata, _RenderArgs())
+        _verify_render_knobs(metadata, _RenderArgs())
     assert any("does not state" in record.message for record in caplog.records), (
         "the unstated mismatch must still be reported, just not fatally"
     )
@@ -117,18 +114,18 @@ def test_a_stated_render_knob_that_contradicts_the_artifact_still_raises():
     baked from 'conversation' is a config that does not do what it says."""
     metadata = _artifact(conversation_field="conversation")
     with pytest.raises(ValueError, match="do not match the training config"):
-        _validate_render_compatibility(metadata, _RenderArgs(conversation_field="messages"))
+        _verify_render_knobs(metadata, _RenderArgs(conversation_field="messages"))
 
 
 def test_a_matching_stated_knob_passes():
     metadata = _artifact(conversation_field="messages")
-    _validate_render_compatibility(metadata, _RenderArgs(conversation_field="messages"))
+    _verify_render_knobs(metadata, _RenderArgs(conversation_field="messages"))
 
 
 def test_a_stated_system_prompt_against_a_prompt_less_artifact_raises():
     metadata = _artifact(conversation_field="prompt", system_prompt=None)
     with pytest.raises(ValueError, match="system_prompt"):
-        _validate_render_compatibility(metadata, _RenderArgs(system_prompt="You are helpful."))
+        _verify_render_knobs(metadata, _RenderArgs(system_prompt="You are helpful."))
 
 
 # --- tools_field is a claim about the dataset LIST, not about each source ---
@@ -145,7 +142,7 @@ def test_tools_field_present_in_only_some_sources_is_allowed(caplog):
     with_tools = _split_dict({"prompt": [{"role": "user", "content": "hi"}], "tools": ["[]"]})
     without = _split_dict({"prompt": [{"role": "user", "content": "hi"}]})
     with caplog.at_level("WARNING"):
-        _require_tools_field_somewhere(["a", "b"], [with_tools, without], "tools")
+        _reject_tools_field_nowhere(["a", "b"], [with_tools, without], "tools")
     assert any("render without tools" in record.message for record in caplog.records)
 
 
@@ -154,13 +151,13 @@ def test_tools_field_absent_everywhere_raises():
     (every row renders toolless), so it has to be loud here."""
     without = _split_dict({"prompt": [{"role": "user", "content": "hi"}]})
     with pytest.raises(ValueError, match="NONE of the 2 configured dataset"):
-        _require_tools_field_somewhere(["a", "b"], [without, without], "tools")
+        _reject_tools_field_nowhere(["a", "b"], [without, without], "tools")
 
 
 def test_tools_field_present_everywhere_is_silent(caplog):
     with_tools = _split_dict({"prompt": [{"role": "user", "content": "hi"}], "tools": ["[]"]})
     with caplog.at_level("WARNING"):
-        _require_tools_field_somewhere(["a", "b"], [with_tools, with_tools], "tools")
+        _reject_tools_field_nowhere(["a", "b"], [with_tools, with_tools], "tools")
     assert not [r for r in caplog.records if "tools" in r.message]
 
 

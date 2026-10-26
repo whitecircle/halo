@@ -18,16 +18,16 @@ from collections import Counter
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline.preprocessing import shard_dataset
-from src.data.shard_index import SHARD_INDEX_FILE
+from src.data.preprocessed.preparation import shard_dataset
+from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 
 
 def _assignment(num_shards: int, world_size: int, rank: int) -> tuple[int, int]:
     """(start, end-exclusive) shard range for a rank, via the pure assignment math."""
     loader = ShardedDatasetLoader.__new__(ShardedDatasetLoader)
-    loader.global_rank = rank
-    loader.world_size = world_size
+    loader.dp_rank = rank
+    loader.dp_size = world_size
     return loader._compute_shard_assignment(num_shards)
 
 
@@ -67,7 +67,7 @@ def _build_sharded(num_examples: int, num_shards: int, temp_dir: str, split: str
         }
     )
     index = shard_dataset(dataset, output_dir=temp_dir, split_name=split, num_shards=num_shards)
-    index.save(os.path.join(temp_dir, split, SHARD_INDEX_FILE))
+    write_stamped_sidecar(os.path.join(temp_dir, split, SHARD_INDEX_FILE), index)
 
 
 def test_writer_loader_roundtrip_exact_multiset():
@@ -80,7 +80,7 @@ def test_writer_loader_roundtrip_exact_multiset():
         world_size = 4
         all_ids = Counter()
         for rank in range(world_size):
-            loader = ShardedDatasetLoader(dataset_path=temp_dir, global_rank=rank, world_size=world_size)
+            loader = ShardedDatasetLoader(dataset_path=temp_dir, dp_rank=rank, dp_size=world_size)
             ds = loader.load_split("train")
             for ex in ds:
                 all_ids[ex["example_id"]] += 1
@@ -100,7 +100,7 @@ def test_num_shards_equals_world_size_load_does_not_raise():
         _build_sharded(40, num_shards=4, temp_dir=temp_dir)
         # Every rank loads its single shard cleanly.
         for rank in range(4):
-            loader = ShardedDatasetLoader(dataset_path=temp_dir, global_rank=rank, world_size=4)
+            loader = ShardedDatasetLoader(dataset_path=temp_dir, dp_rank=rank, dp_size=4)
             ds = loader.load_split("train")  # must not raise
             assert len(ds) > 0, f"rank {rank} got an empty assignment at num_shards==world_size"
     finally:

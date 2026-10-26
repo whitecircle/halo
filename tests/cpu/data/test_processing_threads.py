@@ -14,7 +14,7 @@ import multiprocessing
 
 import pytest
 
-from src.data.pipeline.processing import _resolve_dataset_num_proc
+from src.data.pipeline.coordinated_map import _resolve_dataset_num_proc
 
 
 @pytest.fixture(autouse=True)

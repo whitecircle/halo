@@ -503,7 +503,7 @@ class DataParallelDataLoaderMixin:
             if split == "train":
                 raise ValueError(
                     "Pre-sharded dataset: at least one data-parallel rank holds zero examples "
-                    "(num_shards < data_parallel_size). Re-preprocess with --num-shards >= the "
+                    "(num_shards < data_parallel_size). Re-preprocess with --num_shards >= the "
                     "data-parallel degree, or use a non-sharded dataset."
                 )
             raise ValueError(

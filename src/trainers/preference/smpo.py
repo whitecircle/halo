@@ -48,10 +48,11 @@ from src.data.collators.smpo import (
     DataCollatorForVLMSMPO,
     flush_rows_left,
 )
+from src.data.completion_spans import completion_labels
+from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from src.data.pipeline.preferences import tokenize_preference_row, tokenize_vlm_preference_row
-from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
-from src.data.spans import completion_labels, resolve_eos_token_ids
-from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS
+from src.data.turn_markers import resolve_eos_token_ids
+from src.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from src.distributed.context_parallel.sequence_chunks import cp_chunk_bounds, cp_sum_rows
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row, next_token_logprobs, token_logprobs

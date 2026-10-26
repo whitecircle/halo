@@ -1,33 +1,30 @@
-"""Offline GRPO batch collation: pad a tokenized prompt/completion group to the batch's shape.
-
-The padding sides and the substituted-completion mask below are the batch layout
-``OfflineGRPOTrainer.compute_loss`` expects.
-"""
+"""Offline GRPO batch collation: a tokenized prompt/completion group padded to the batch layout
+``OfflineGRPOTrainer.compute_loss`` expects."""
 
 from dataclasses import dataclass
 from typing import Any
 
 import torch
-from accelerate.logging import get_logger
 from trl.trainer.utils import pad
 
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
+from src.log import info_logger
+from src.runtime.ranks import is_global_main_process
 
-logger = get_logger(__name__, log_level="INFO")
+logger = info_logger(__name__)
 
 # Raw reference scores align with completion tokens, independent of the scoring parallelism.
 REF_PER_TOKEN_LOGPS_COLUMN = "ref_per_token_logps"
 
-# Per-row group metadata the GRPO loss reads, carried into the batch unchanged by both layouts.
-_GROUP_COLUMNS = ("group_id", "group_size", "advantage")
-
 
 def _group_tensors(features: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
-    """The batch's :data:`_GROUP_COLUMNS`, one tensor entry per row."""
-    return {column: torch.tensor([row[column] for row in features]) for column in _GROUP_COLUMNS}
+    """The per-row group metadata the GRPO loss reads, carried into the batch unchanged by both layouts."""
+    return {
+        column: torch.tensor([row[column] for row in features]) for column in ("group_id", "group_size", "advantage")
+    }
 
 
-def _validate_reference_rows(features: list[dict[str, Any]]) -> bool:
+def _has_reference_rows(features: list[dict[str, Any]]) -> bool:
     """Both layouts require references to match the same raw completion tokens."""
     if not features:
         raise ValueError("Offline GRPO needs at least one row per batch")
@@ -57,7 +54,7 @@ class OfflineGRPODataCollatorWithPadding:
         completion_input_ids = []
         substituted_completion: list[bool] = []
         ref_logps: list[torch.Tensor] = []
-        has_ref_logps = _validate_reference_rows(features)
+        has_ref_logps = _has_reference_rows(features)
 
         for example in features:
             # Never empty: the trainer's tokenize map refuses a prompt with no tokens.
@@ -69,7 +66,8 @@ class OfflineGRPODataCollatorWithPadding:
                 values = example[REF_PER_TOKEN_LOGPS_COLUMN]
                 ref_logps.append(torch.tensor(values or [0.0], dtype=torch.float32))
             if not comp_ids:
-                logger.warning("Empty completion_input_ids found, using pad token")
+                if is_global_main_process():
+                    logger.warning("Empty completion_input_ids found, using pad token")
                 comp_ids = [self.pad_token_id]
             completion_input_ids.append(torch.tensor(comp_ids, dtype=torch.long))
 
@@ -96,11 +94,8 @@ class OfflineGRPODataCollatorWithPadding:
 
 @dataclass
 class OfflineGRPOCPDataCollatorWithPadding:
-    """Right-pad whole rows so CP attention never sees a pad before a real token.
-
-    The supervision and optional raw reference grid are indexed by the target token's position
-    in ``input_ids``. The CP scorer shifts both grids at shard boundaries after its hidden forward.
-    """
+    """Right-pad whole rows so CP attention never sees a pad before a real token; the labels and the optional
+    reference grid are indexed by the target token's position in ``input_ids``."""
 
     pad_token_id: int = 0
     cp_size: int = 1
@@ -110,7 +105,7 @@ class OfflineGRPOCPDataCollatorWithPadding:
             raise ValueError(f"cp_size must be positive, got {self.cp_size}")
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
-        has_reference = _validate_reference_rows(features)
+        has_reference = _has_reference_rows(features)
 
         rows: list[list[int]] = []
         labels: list[list[int]] = []

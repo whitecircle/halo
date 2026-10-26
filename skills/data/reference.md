@@ -53,32 +53,33 @@ Authoritative: `agent-docs/data/dataset-formats.md`. Messages are OpenAI ChatML
 Pipeline: load → tokenize (chat-template or raw text) → optional pack → optional shard → save
 (`s3://` / `hf://org/name` / local). Other methods unsupported (`src/data/sources/loading.py`).
 
-Flags (`scripts/before_training/prepare_dataset.py`): `--input/-i`, `--output/-o`, `--model-name/-m`,
-`--max-length` (8192); `--mode {chat,text}` (`chat`=SFT chat template, `text`=raw causal-LM for
-continued pretraining), `--text-field`, `--no-append-eos`; `--conversation-field` (default
-`prompt`), `--system-prompt`, `--no-system-role`, `--tools-field`, `--interleaved-thinking` (keep
-thinking blocks in non-final assistant turns; rejected with `--vlm`); `--train-on-completions-only`
-(`BooleanOptionalAction`; unset = on for `chat`, off for `text`), `--assistant-message-template`;
-`--pack-sequences`, `--packing-strategy {bfd,bfd_split,wrapped}` (text SFT only, not VLM;
+Flags (`scripts/before_training/prepare_dataset.py`) are the `PreprocessingConfig` fields plus the tool's
+`PrepareDatasetArguments`, spelled like YAML keys (a YAML file of them works too): `--input`, `--output`,
+`--model_name_or_path`, `--max_length` (8192); `--mode {chat,text}` (`chat`=SFT chat template, `text`=raw causal-LM for
+continued pretraining), `--text_field`, `--append_eos` (`false` skips the EOS); `--conversation_field` (default
+`prompt`), `--system_prompt`, `--model_supports_system_role` (`false` folds the system turn), `--tools_field`, `--interleaved_thinking` (keep
+thinking blocks in non-final assistant turns; rejected with `--is_vlm`); `--train_on_completions_only`
+(unset = on for `chat`, off for `text`; `false` bakes full-sequence labels), `--assistant_message_template`;
+`--pack_sequences`, `--packing_strategy {bfd,bfd_split,wrapped}` (text SFT only, not VLM;
 `bfd`=best-fit-decreasing, keeps document boundaries but **discards** the overflow past
-`--max-length`; `bfd_split` splits the overflow into later examples — the lossless choice for
-pre-training; `wrapped`=concatenate-and-chunk; VLM+packing rejected); `--vlm`, `--images-field`
-(VLM only), `--min-pixels`, `--max-pixels`;
-`--num-shards` (1=none, Megatron-style); `--num-proc` (default `None` → `HALO_DATASET_NUM_PROC`,
-else `max(1, min(cpu_count//4, 4))`); `--tokenizer-backend {hf,gigatoken}`, `--test-size`; the tokenizer
-overrides recorded in `metadata.json` and re-checked at training time — `--bos-token`, `--eos-token`,
-`--pad-token`, `--chat-template` (Jinja2 string or a `.jinja`/`.jinja2`/`.j2` path); `--private`,
-`--hf-token`, `--overwrite`, `--dry-run`, `--verbose/-v`, `--trust_remote_code` (default **on** here).
-`--tools-field` and `--interleaved-thinking` are both rejected with `--vlm`.
+`--max_length`; `bfd_split` splits the overflow into later examples — the lossless choice for
+pre-training; `wrapped`=concatenate-and-chunk; VLM+packing rejected); `--is_vlm`, `--images_field`
+(VLM only), `--min_pixels`, `--max_pixels`;
+`--num_shards` (1=none, Megatron-style); `--num_proc` (default `None` → `HALO_DATASET_NUM_PROC`,
+else `max(1, min(cpu_count//4, 4))`); `--tokenizer_backend {hf,gigatoken}`, `--test_size`; the tokenizer
+overrides recorded in `metadata.json` and re-checked at training time — `--bos_token`, `--eos_token`,
+`--pad_token`, `--chat_template` (Jinja2 string or a `.jinja`/`.jinja2`/`.j2` path); `--private`,
+`--hf_token`, `--overwrite`, `--dry_run`, `--verbose`, `--trust_remote_code` (default **on** here).
+`--tools_field` and `--interleaved_thinking` are both rejected with `--is_vlm`.
 
 **Two distinct mechanisms** (don't conflate):
 
 - **preprocessed** — output `metadata.json` has `preprocessed: true`; `load_datasets_auto()`
   (`src/data/sources/loading.py`) auto-detects via `is_preprocessed_dataset()`
-  (`src/data/pipeline/preprocessed_metadata.py`) and **skips tokenization**. No config flag needed — point `dataset:` at the output.
+  (`src/data/preprocessed/metadata.py`) and **skips tokenization**. No config flag needed — point `dataset:` at the output.
 - **presharded** — sharded output has `shard_index.json`; the trainer computes
   `dataset_presharded = is_presharded_dataset_load(...)` and passes it so the DataLoader does **not**
-  re-shard already-split data. `--num-shards` above 1 **must be ≥ data_parallel_size**: a short train split
+  re-shard already-split data. `--num_shards` above 1 **must be ≥ data_parallel_size**: a short train split
   raises at load (`src/data/sources/sharded_dataset.py`), any other split warns — without the check
   a rank past the last shard would train on zero examples.
 
@@ -89,14 +90,15 @@ JSON or a JSON file path).
 ## Loading internals (`src/data/sources/loading.py`)
 
 - `load_dataset_from_source(path)` dispatches `s3` / `hf_hub` / `local` via `parse_dataset_source()`.
-- `load_datasets(...)` handles a list + `dataset_ratio`, filters empty conversations, normalizes schema,
-  and stamps deterministic `_fingerprint` / `_toolkit_cache_key` for cross-rank cache stability — the
+- `load_datasets(...)` handles a list + `dataset_ratio` (the corpus, `src/data/sources/corpus.py`: ratios,
+  per-entry subsets, schema normalization), filters empty conversations, agrees the rows across ranks
+  (`src/data/sources/replica_identity.py`), and stamps deterministic `_fingerprint` / `stamp_cache_key` keys for cross-rank cache stability — the
   stamp folds in the DP identity on the sharded single-path branch, so equal-length shards do not
   collide.
 - `load_datasets_auto(...)` is the SFT entry; returns `(DatasetDict, is_preprocessed)`.
 - `ShardedDatasetLoader` (`src/data/sources/sharded_dataset.py`): rank-specific shards; S3 shards
   cached per-shard under a FileLock keyed by `md5("<bucket>/<key>/<shard.path>")`.
-- `is_sharded_dataset_coordinated()` all-reduces the per-rank probe (MAX) so a transient per-rank S3
+- `is_sharded_dataset_across_ranks()` all-reduces the per-rank probe (MAX) so a transient per-rank S3
   flake can't split ranks onto sharded-vs-full paths (→ divergent sizes / NCCL hang).
 - `fs_aware_main_first(tag)` / `is_input_shared_filesystem()`
   (`src/runtime/filesystem.py`): shared input FS
@@ -143,12 +145,12 @@ must call it. A non-default `dataset_kwargs` (or `dataset_text_field`) is refuse
 
 ## Footguns (source-cited)
 
-- **Cache tokenizer-collision** (`src/data/pipeline/processing.py`, `_get_closure_fingerprint` /
-  `get_function_identifier`): `.map` processors capture tokenizer + `max_length` as closure free vars or
+- **Cache tokenizer-collision** (`src/data/pipeline/map_cache_key.py`, `_closure_fingerprint` /
+  `function_cache_id`): `.map` processors capture tokenizer + `max_length` as closure free vars or
   as `functools.partial` bound args, both invisible to the source hash. Without folding them into the
   cache-file name, two runs sharing processor source but differing in tokenizer collide on one cache file
   → wrong token IDs → embedding OOB crash at step 0. The closure fingerprint covers closures;
-  `get_function_identifier` covers partials (the wrapped func id + bound args/keywords), such as the
+  `function_cache_id` covers partials (the wrapped func id + bound args/keywords), such as the
   eval path's `partial(prepare_generative_row, tokenizer=…, max_length=…)`.
   The tokenizer term is keyed on **content**, not on `name_or_path`: the fast backend's serialized
   state (else the sorted vocab), plus the chat-template hash and the special-token ids and sides. A
@@ -159,24 +161,24 @@ must call it. A non-default `dataset_kwargs` (or `dataset_text_field`) is refuse
   one-time `Dataset-map cache fingerprint … skips a value of type …` warning — thread that value
   through `cache_key_extras`.
 - **Rank-unstable HF fingerprints** — HF `_fingerprint`/`cache_files` diverge across ranks → each rank
-  writes its own packed copy. The deterministic `_toolkit_cache_key` stamp is what keeps the
-  key rank-stable; `pack_dataset_coordinated` packs once per filesystem scope under `run_load_rank_first`, store-joined.
+  writes its own packed copy. The deterministic `stamp_cache_key` stamp is what keeps the
+  key rank-stable; `coordinated_pack` packs once per filesystem scope under `run_load_rank_first`, store-joined.
 - **Presharded re-shard trap** — a sharded dataset already gives each DP rank a disjoint slice; if
   `dataset_presharded` isn't passed, the DataLoader re-shards and drops ~(N-1)/N of each slice.
-- **Offline completion masking is baked at preprocess time** (`src/data/pipeline/preprocessing.py`):
-  `--train-on-completions-only` writes labels via `mask_batch_to_completion_spans` (`src/data/spans.py`
-  — the one implementation the live collators and the runtime label builder also call; VLM ignores image
-  tokens on top, masked after the span refill), since the preprocessed-dataset collators only pad
+- **Offline completion masking is baked at preprocess time** (`src/data/preprocessed/tokenization.py`):
+  `--train_on_completions_only` writes labels via `mask_batch_to_completion_spans`
+  (`src/data/completion_spans.py`; every live collator labels its spans through the same
+  `build_span_labels` rule; VLM ignores image tokens on top, masked after the span refill), since the preprocessed-dataset collators only pad
   the stored labels and cannot re-derive masking. The **chat template decides what the mask can
   reach**: gpt-oss's bundled harmony template closes a non-final assistant turn with `<|end|>`, which
   is not a completion-span terminator, so only the last turn of a multi-turn row would train — the
   SFT recipes pin `chat_template: jinja-templates/gpt-oss/gpt-oss-multiturn.jinja` with
   `force_chat_template: true` and `assistant_message_template: <|start|>assistant<|channel|>final<|message|>`
   instead. It fails fast before tokenization when the flag is set
-  without `--assistant-message-template`, or set **explicitly** with `--mode text` (raw documents have
+  without `--assistant_message_template`, or set **explicitly** with `--mode text` (raw documents have
   no assistant turns; text mode otherwise defaults the flag off).
-- **S3 pre-cache** (`src/data/sources/s3_client.py`; keys, markers and the cache root in
-  `src/data/sources/dataset_cache.py`): `S3Client.load_dataset` caches under
+- **S3 pre-cache** (`src/data/sources/s3_dataset_store.py`; keys, markers and the cache root in
+  `src/data/sources/dataset_cache.py`): `load_dataset(client, key)` caches under
   `<cache>/md5("<bucket>/<key>")/dataset` with a FileLock + `.download_complete` marker; a complete cache
   lets a relaunch survive an S3/SSO blip with no network, but is still validated against the object's
   live ETag and re-downloaded when an in-place re-preprocess moved it. The cache dir is `$HALO_DATA_ROOT/s3_datasets`

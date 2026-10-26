@@ -1,17 +1,14 @@
 #!/usr/bin/env python
-"""CLI over the toolkit's S3 dataset transport: push, download, list and delete S3 folders.
+"""CLI over the toolkit's S3 transport: push, download, list and delete S3 folders, each through an
+:class:`~src.data.sources.s3_client.S3Client` built for ``--bucket``.
 
-Every handler acts through an :class:`~src.data.sources.s3_client.S3Client` built for the
-invocation's ``--bucket``.
-
-Usage:
-    python scripts/before_training/s3_datasets.py <push|download|list|exists|delete> ...
+Usage: python scripts/before_training/s3_datasets.py <push|download|list|exists|delete> ...
 """
 
 import argparse
 import logging
 
-from src.data.sources import dataset_cache, s3_client
+from src.data.sources import dataset_cache, s3_client, s3_dataset_store
 from src.data.sources.s3_client import DEFAULT_BUCKET, S3Client
 from src.log import configure_cli_logging
 
@@ -62,9 +59,7 @@ def _cli_list(args, client: S3Client):
 def _cli_delete(args, client: S3Client):
     s3_uri = client.s3_uri(args.s3_key, args.subfolder)
 
-    # Both no-op deletes report success at the API: DeleteObject on a prefix is idempotent (204), and
-    # the recursive path returns True when zero objects matched. Resolve what is actually there first
-    # so the reported result matches what was removed.
+    # A no-op delete reports success at the API, so resolve what is actually there first.
     if not client.exists(args.s3_key, args.subfolder):
         print(f"✗ Nothing to delete at {s3_uri}")
         return
@@ -180,7 +175,7 @@ Examples:
     # Undo the library modules' INFO pins so ``-v`` widens the S3 code that emits the transfer
     # records, not only its dependencies.
     level = logging.DEBUG if args.verbose else logging.INFO
-    for module_logger in (s3_client.logger, dataset_cache.logger):
+    for module_logger in (s3_client.logger, s3_dataset_store.logger, dataset_cache.logger):
         module_logger.setLevel(level)
 
     args.func(args, S3Client(bucket=args.bucket))

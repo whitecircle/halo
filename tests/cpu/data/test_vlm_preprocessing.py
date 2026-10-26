@@ -26,9 +26,11 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import preprocess_dataset, tokenize_vlm_dataset
-from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_OUTPUT_FEATURES
+from src.data.preprocessed.metadata import PreprocessingConfig
+from src.data.preprocessed.preparation import preprocess_dataset
+from src.data.preprocessed.tokenization import tokenize_vlm_dataset
+from src.data.vlm_render import VLM_OUTPUT_FEATURES
+from src.data.vlm_routing import VLM_IMAGE_COLUMNS
 from src.model_loading.parallel import model_source
 from src.model_loading.parallel.model_source import probe_checkpoint
 from src.models.modality import is_vlm_model
@@ -310,7 +312,7 @@ def test_self_distill_vlm_teacher_overflow_raises():
 
 
 def test_vlm_preprocessing_drops_over_length_rows_instead_of_truncating():
-    """process_vlm_example must DROP an over-length row, never truncate it: input_ids cut to
+    """tokenize_vlm_row must DROP an over-length row, never truncate it: input_ids cut to
     max_length beside FULL pixel_values/image_grid_thw writes desynced rows to disk. Dropping
     mirrors the text path's none-example filtering."""
     tok = FakeVLMTokenizer()
@@ -413,7 +415,7 @@ class _ImageCountingVLMProcessor(_FakeVLMProcessor):
 
 
 def _tiny_image_data_uri() -> str:
-    """A 64x64 PNG as a base64 data URI — an image spelling ``process_image`` accepts and Arrow can
+    """A 64x64 PNG as a base64 data URI — an image spelling ``decode_image`` accepts and Arrow can
     store (a bare path could not survive the Arrow round trip)."""
     buffer = io.BytesIO()
     Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(buffer, format="PNG")
@@ -446,7 +448,7 @@ class _VocabCountingVLMTokenizer(FakeVLMTokenizer):
 
 
 def test_image_token_ids_are_resolved_once_per_collator_not_per_batch():
-    """``get_image_token_ids`` unions the tokenizer's WHOLE vocab dict. Resolved per batch it is a
+    """``resolve_image_token_ids`` unions the tokenizer's WHOLE vocab dict. Resolved per batch it is a
     per-step cost of the vocabulary's size (~150k entries) for a verdict fixed at construction."""
     tok = _VocabCountingVLMTokenizer()
     collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=32)
@@ -471,8 +473,8 @@ def test_image_token_ids_are_resolved_once_per_bake_not_per_row(tmp_path, monkey
 
 
 def test_vlm_preprocessing_merges_a_separate_images_column():
-    """Offline ``--vlm`` must read the images column, not conversation_field alone: a dataset keeping
-    its images in their own column — the hub VLM shape the runtime twin (``create_vlm_processor`` →
+    """Offline ``--is_vlm`` must read the images column, not conversation_field alone: a dataset keeping
+    its images in their own column — the hub VLM shape the runtime twin (``build_vlm_row_processor`` →
     ``normalize_vlm_conversation``) supports — otherwise reaches the processor with ZERO images,
     baking text rows into an artifact stamped is_vlm=True that the training side accepts as
     multimodal.

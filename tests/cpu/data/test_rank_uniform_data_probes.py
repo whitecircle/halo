@@ -26,10 +26,10 @@ import pytest
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.data.pipeline.preprocessing import shard_dataset
-from src.data.shard_index import SHARD_INDEX_FILE
+from src.data.preprocessed.preparation import shard_dataset
+from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
-from src.data.vlm import dataset_declares_images, is_vlm_run
+from src.data.vlm_routing import dataset_declares_images, is_vlm_run
 from src.runtime import consensus
 from src.runtime.consensus import RankConsensus
 from tests.common.repo import load_script_module
@@ -118,7 +118,7 @@ def test_the_image_column_guard_probe_is_agreed_too(monkeypatch):
 
 def test_an_empty_split_on_one_rank_raises_on_all_of_them(monkeypatch):
     """SFT's post-tokenization emptiness gate is a per-rank length on a pre-sharded corpus, and it
-    sits directly in front of ``pack_dataset_coordinated``. A rank-local raise there strands its
+    sits directly in front of ``coordinated_pack``. A rank-local raise there strands its
     peers in the pack's barrier and store phases; the verdict must be world-agreed."""
     sft = load_script_module("scripts/training/sft.py")
     _FakeWorld(monkeypatch, peer=True)
@@ -136,10 +136,10 @@ def test_a_starved_rank_gets_the_splits_schema_not_a_column_less_dataset():
     try:
         dataset = Dataset.from_dict({"prompt": [[{"role": "user", "content": "a"}]] * 4, "example_id": [0, 1, 2, 3]})
         index = shard_dataset(dataset, output_dir=temp_dir, split_name="test", num_shards=2)
-        index.save(os.path.join(temp_dir, "test", SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(temp_dir, "test", SHARD_INDEX_FILE), index)
 
-        fed = ShardedDatasetLoader(temp_dir, global_rank=0, world_size=4).load_split("test")
-        starved = ShardedDatasetLoader(temp_dir, global_rank=3, world_size=4).load_split("test")
+        fed = ShardedDatasetLoader(temp_dir, dp_rank=0, dp_size=4).load_split("test")
+        starved = ShardedDatasetLoader(temp_dir, dp_rank=3, dp_size=4).load_split("test")
 
         assert len(starved) == 0, "the starved rank holds no rows"
         assert starved.column_names == fed.column_names, (

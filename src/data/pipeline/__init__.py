@@ -1,3 +1,2 @@
-"""Dataset-time row transforms (chat render, tokenization, packing, sharding, preference and VLM row
-maps) plus the render/tokenize helpers the collators and trainers reuse at batch time. Batching is
-:mod:`src.data.collators`."""
+"""Dataset-time row maps (chat render, tokenization, preference, VLM and tree rows) and the rank-coordinated
+operations that run them over a corpus."""

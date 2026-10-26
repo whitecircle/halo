@@ -9,8 +9,8 @@ import torch
 from accelerate.logging import get_logger
 
 from src.configs.distillation import SelfDistillScriptArguments
-from src.data.spans import resolve_eos_token_ids
-from src.data.vlm import SEQUENCE_ALIGNED_VISION_KEYS
+from src.data.turn_markers import resolve_eos_token_ids
+from src.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.model_loading.parallel.frozen_models import (
     ReferenceAlternatives,

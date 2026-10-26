@@ -22,13 +22,13 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from src.data.collators.completions_only import DataCollatorForCompletionOnlyLM
 from src.data.collators.factory import select_data_collator
 from src.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlatteningAndCompletionMask,
     DataCollatorWithPacking,
 )
+from src.data.collators.padded import DataCollatorForCompletionOnlyLM
 
 # Token vocabulary (mirrors test_collators.py)
 PAD = 0
@@ -229,7 +229,7 @@ def test_completion_marker_probe_skips_unrenderable_template(caplog):
         raise RuntimeError("template requires tools")
 
     tok.apply_chat_template = _boom
-    with caplog.at_level(logging.WARNING, logger="src.data.collators.factory"):
+    with caplog.at_level(logging.WARNING, logger="src.data.turn_markers"):
         collator = select_data_collator(
             tok,
             train_on_completions_only=True,

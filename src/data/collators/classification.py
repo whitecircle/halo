@@ -15,8 +15,6 @@ class ClassificationDataCollatorWithPadding(DataCollatorWithPadding):
     the keep-set is derived from the tokenizer rather than hardcoded.
     """
 
-    _LABEL_KEYS = ("label", "labels")
-
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
-        keep = set(self.tokenizer.model_input_names).union(self._LABEL_KEYS)
+        keep = set(self.tokenizer.model_input_names).union(("label", "labels"))
         return super().__call__([{k: v for k, v in feature.items() if k in keep} for feature in features])

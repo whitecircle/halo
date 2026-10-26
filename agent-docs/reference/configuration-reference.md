@@ -340,7 +340,7 @@ Five knobs are implemented inside the mixin's own FSDP2 wrap and are therefore *
 
 EP is always orthogonal to data parallelism; PP, TP, CP, and ETP reduce it ([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)).
 
-> **Pre-sharded datasets:** a per-DP-rank pre-split dataset must have `num_shards >= data_parallel_size`, else a DP rank holds zero examples and training raises `ValueError`. Re-preprocess with a larger `--num-shards`, or use a non-sharded dataset.
+> **Pre-sharded datasets:** a per-DP-rank pre-split dataset must have `num_shards >= data_parallel_size`, else a DP rank holds zero examples and training raises `ValueError`. Re-preprocess with a larger `--num_shards`, or use a non-sharded dataset.
 
 ```bash
 torchrun --nproc_per_node=8 scripts/training/sft.py \

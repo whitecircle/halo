@@ -30,8 +30,8 @@ from unittest import mock
 import pytest
 
 from src.cli import training_methods
-from src.data.collators import completions_only
-from src.data.pipeline.preprocessed_metadata import PreprocessedDatasetMetadata, validate_preprocessing_compatibility
+from src.data.collators import padded
+from src.data.preprocessed.metadata import PreprocessedDatasetMetadata, verify_preprocessed_dataset
 from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
@@ -227,9 +227,7 @@ def metadata_cls():
 def _validate_masking(metadata_cls, baked: bool | None, runtime: bool):
     config = {} if baked is None else {"train_on_completions_only": baked}
     metadata = metadata_cls(max_length=4096, train_on_completions_only=bool(baked), config=config)
-    validate_preprocessing_compatibility(
-        metadata, required_max_length=4096, required_train_on_completions_only=runtime
-    )
+    verify_preprocessed_dataset(metadata, required_max_length=4096, required_train_on_completions_only=runtime)
 
 
 def test_preprocessed_completion_masking_mismatch_raises(metadata_cls):
@@ -259,7 +257,7 @@ def test_sft_forwards_the_runtime_masking_flag_to_the_preprocessed_check():
     — and none of the helper-level cases above would notice.
     """
     tree = ast.parse((_TRAINING_DIR / "sft.py").read_text(encoding="utf-8"))
-    calls = _named_calls(tree, "validate_preprocessing_compatibility")
+    calls = _named_calls(tree, "verify_preprocessed_dataset")
     assert len(calls) == 2, f"sft.py makes {len(calls)} preprocessed-metadata checks; expected the text + VLM paths"
     for call in calls:
         value = {kw.arg: kw.value for kw in call.keywords}.get("required_train_on_completions_only")
@@ -274,7 +272,7 @@ def test_sft_forwards_render_args_and_packing_to_the_preprocessed_check():
     either kwarg from a call site silently reverts render-knob verification (baked rows vs YAML)
     and the unpacked-artifact-with-packing warning."""
     tree = ast.parse((_TRAINING_DIR / "sft.py").read_text(encoding="utf-8"))
-    calls = _named_calls(tree, "validate_preprocessing_compatibility")
+    calls = _named_calls(tree, "verify_preprocessed_dataset")
     assert len(calls) == 2, f"sft.py makes {len(calls)} preprocessed-metadata checks; expected the text + VLM paths"
     for call in calls:
         kwargs = {kw.arg: kw.value for kw in call.keywords}
@@ -512,8 +510,8 @@ def test_vlm_capable_scripts_install_the_resolved_tokenizer(rel_path: str):
 
 _COMPLETION_COLLATORS = sorted(
     name
-    for name, obj in vars(completions_only).items()
-    if isinstance(obj, type) and obj.__module__ == completions_only.__name__
+    for name, obj in vars(padded).items()
+    if isinstance(obj, type) and obj.__module__ == padded.__name__ and "CompletionOnly" in name
 )
 
 

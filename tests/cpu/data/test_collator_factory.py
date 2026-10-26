@@ -10,10 +10,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from accelerate import PartialState
 
 from src.data.collators.factory import select_data_collator
-from src.data.collators.packing import DataCollatorForCausalLMWithPadding
+from src.data.collators.padded import DataCollatorForCausalLMWithPadding
 from src.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
@@ -38,10 +37,7 @@ def _mock_model_config(model_type: str = "qwen3") -> MagicMock:
 
 
 def _select(**kwargs):
-    """Call select_data_collator with mocked PartialState (no accelerate init)."""
-    with patch("src.data.collators.factory.PartialState") as MockPS:
-        MockPS.return_value.is_main_process = False  # suppress logging
-        return select_data_collator(tokenizer=_make_tokenizer(), **kwargs)
+    return select_data_collator(tokenizer=_make_tokenizer(), **kwargs)
 
 
 def test_packing_and_padding_free_conflict():
@@ -339,11 +335,7 @@ def test_varlen_gate_covers_every_declared_flash_impl():
 
 def _warnings_for(**kwargs) -> str:
     """The main-process warnings select_data_collator emits, as one lowercased blob."""
-    with (
-        patch("src.data.collators.factory.PartialState") as MockPS,
-        patch("src.data.collators.factory.logger") as mock_logger,
-    ):
-        MockPS.return_value.is_main_process = True
+    with patch("src.data.collators.collator_rules.logger") as mock_logger:
         select_data_collator(tokenizer=_make_tokenizer(), **kwargs)
         rendered = []
         for call in mock_logger.warning.call_args_list:
@@ -391,7 +383,7 @@ def test_pipeline_parallelism_is_not_warned():
 # The chat-template probe
 
 
-_FACTORY_LOGGER = "src.data.collators.factory"
+_MARKER_LOGGER = "src.data.turn_markers"
 
 
 def _probe_tokenizer(*, renders: bool):
@@ -410,9 +402,6 @@ def _probe_tokenizer(*, renders: bool):
 
 
 def _select_with_probe(tokenizer):
-    # The real state, not a mock: accelerate's logger refuses to emit before it exists, and this
-    # single-process one reports is_main_process — which is the gate the warning sits behind.
-    PartialState()
     return select_data_collator(
         tokenizer=tokenizer,
         train_on_completions_only=True,
@@ -425,7 +414,7 @@ def test_unrenderable_chat_template_probe_warns(caplog):
     template. When no probe conversation renders, the check does not run at all — indistinguishable
     from a pass, while the defect it exists to catch (a marker the template never emits) trains the
     run at loss ~0. It must say so out loud."""
-    with caplog.at_level(logging.WARNING, logger=_FACTORY_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_MARKER_LOGGER):
         assert _select_with_probe(_probe_tokenizer(renders=False)) is not None
     records = [r for r in caplog.records if "Could not verify assistant_message_template" in r.getMessage()]
     assert records, "an unverifiable probe must warn, not pass silently"
@@ -434,7 +423,7 @@ def test_unrenderable_chat_template_probe_warns(caplog):
 
 def test_renderable_template_carrying_the_marker_stays_quiet(caplog):
     """The verified case must not warn — a warning on every good run trains operators to ignore it."""
-    with caplog.at_level(logging.WARNING, logger=_FACTORY_LOGGER):
+    with caplog.at_level(logging.WARNING, logger=_MARKER_LOGGER):
         assert _select_with_probe(_probe_tokenizer(renders=True)) is not None
     assert not [r for r in caplog.records if "Could not verify assistant_message_template" in r.getMessage()]
 

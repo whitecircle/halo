@@ -24,8 +24,14 @@ from datasets import Dataset, DatasetDict, load_from_disk
 PartialState()
 
 import src.data.sources.loading as loading
-from src.data.pipeline.preprocessing import shard_dataset
-from src.data.shard_index import SHARD_INDEX_FILE, IncompatiblePreprocessedDataset, ShardIndex, ShardInfo
+from src.data.preprocessed.preparation import shard_dataset
+from src.data.preprocessed.shard_index import (
+    SHARD_INDEX_FILE,
+    IncompatiblePreprocessedDataset,
+    ShardIndex,
+    ShardInfo,
+    write_stamped_sidecar,
+)
 from src.data.sources.loading import load_datasets, load_preprocessed_dataset
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
 
@@ -43,7 +49,7 @@ def create_test_sharded_dataset(num_examples: int, num_shards: int, temp_dir: st
     index = shard_dataset(dataset, output_dir=temp_dir, split_name="train", num_shards=num_shards)
 
     index_path = os.path.join(temp_dir, "train", SHARD_INDEX_FILE)
-    index.save(index_path)
+    write_stamped_sidecar(index_path, index)
 
     return temp_dir
 
@@ -62,8 +68,8 @@ def test_shard_assignment_multi_rank():
         for rank in range(4):
             loader = ShardedDatasetLoader(
                 dataset_path=temp_dir,
-                global_rank=rank,
-                world_size=4,
+                dp_rank=rank,
+                dp_size=4,
             )
 
             assigned = loader.get_assigned_shards("train")
@@ -92,8 +98,8 @@ def test_shard_assignment_remainder():
         for rank in range(3):
             loader = ShardedDatasetLoader(
                 dataset_path=temp_dir,
-                global_rank=rank,
-                world_size=3,
+                dp_rank=rank,
+                dp_size=3,
             )
             assigned = [s.id for s in loader.get_assigned_shards("train")]
             assert assigned == expected_ids[rank], f"Rank {rank}: {assigned} != {expected_ids[rank]}"
@@ -118,8 +124,8 @@ def test_load_split():
 
         loader = ShardedDatasetLoader(
             dataset_path=temp_dir,
-            global_rank=0,
-            world_size=1,
+            dp_rank=0,
+            dp_size=1,
         )
 
         dataset = loader.load_split("train")
@@ -148,8 +154,8 @@ def test_load_split_distributed():
         for rank in range(2):
             loader = ShardedDatasetLoader(
                 dataset_path=temp_dir,
-                global_rank=rank,
-                world_size=2,
+                dp_rank=rank,
+                dp_size=2,
             )
 
             dataset = loader.load_split("train")
@@ -172,9 +178,9 @@ def test_load_split_distributed():
     print("  load_split (distributed): PASSED")
 
 
-def test_get_total_examples():
+def test_total_examples():
     """Test getting total example count."""
-    print("Testing get_total_examples...")
+    print("Testing total_examples...")
 
     temp_dir = tempfile.mkdtemp()
 
@@ -183,17 +189,17 @@ def test_get_total_examples():
 
         loader = ShardedDatasetLoader(
             dataset_path=temp_dir,
-            global_rank=0,
-            world_size=1,
+            dp_rank=0,
+            dp_size=1,
         )
 
-        total = loader.get_total_examples("train")
+        total = loader.total_examples("train")
         assert total == 150, f"Expected 150 total examples, got {total}"
 
     finally:
         shutil.rmtree(temp_dir)
 
-    print("  get_total_examples: PASSED")
+    print("  total_examples: PASSED")
 
 
 def test_is_sharded_dataset():
@@ -231,8 +237,8 @@ def test_is_sharded_dataset_s3_probe_failure_returns_false(tmp_path):
         ClientError({"Error": {"Code": "SlowDown", "Message": "throttled"}}, "HeadObject"),
         OSError("connection reset"),
     ):
-        with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-            with patch("src.data.sources.s3_client.read_json_from_s3", side_effect=error):
+        with patch("src.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
+            with patch("src.data.sources.s3_dataset_store.read_json_from_s3", side_effect=error):
                 assert ShardedDatasetLoader.is_sharded_dataset("s3://bucket/dataset") is False, (
                     f"probe must err toward non-sharded on {type(error).__name__}, not raise"
                 )
@@ -251,8 +257,8 @@ def test_load_single_shard():
 
         loader = ShardedDatasetLoader(
             dataset_path=temp_dir,
-            global_rank=0,
-            world_size=1,
+            dp_rank=0,
+            dp_size=1,
         )
 
         assigned = loader.get_assigned_shards("train")
@@ -273,7 +279,7 @@ def test_empty_shard_assignment_for_high_rank():
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)
-        loader = ShardedDatasetLoader(dataset_path=temp_dir, global_rank=3, world_size=4)
+        loader = ShardedDatasetLoader(dataset_path=temp_dir, dp_rank=3, dp_size=4)
         assert loader.get_assigned_shards("train") == []
     finally:
         shutil.rmtree(temp_dir)
@@ -290,7 +296,7 @@ def test_undersharded_train_split_fails_fast():
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)
-        loader = ShardedDatasetLoader(dataset_path=temp_dir, global_rank=0, world_size=4)
+        loader = ShardedDatasetLoader(dataset_path=temp_dir, dp_rank=0, dp_size=4)
         with pytest.raises(ValueError, match="(?i)num.?shards|data_parallel"):
             loader.load_split("train")
     finally:
@@ -332,10 +338,11 @@ def test_zero_shard_train_index_raises(tmp_path):
     rank would train on an empty split behind a per-rank warning.
     """
     (tmp_path / "train").mkdir()
-    ShardIndex(split="train", num_shards=0, total_examples=0, shards=[]).save(
-        str(tmp_path / "train" / SHARD_INDEX_FILE)
+    write_stamped_sidecar(
+        str(tmp_path / "train" / SHARD_INDEX_FILE),
+        ShardIndex(split="train", num_shards=0, total_examples=0, shards=[]),
     )
-    loader = ShardedDatasetLoader(dataset_path=str(tmp_path), global_rank=0, world_size=1)
+    loader = ShardedDatasetLoader(dataset_path=str(tmp_path), dp_rank=0, dp_size=1)
     with pytest.raises(ValueError, match="(?i)no shards"):
         loader.load_split("train")
 
@@ -370,7 +377,7 @@ def test_load_preprocessed_dataset_empty_test_split_raises():
         empty = Dataset.from_dict({"input_ids": [], "attention_mask": [], "example_id": []})
         index = shard_dataset(empty, output_dir=temp_dir, split_name="test", num_shards=2)
         assert index.total_examples == 0
-        index.save(os.path.join(temp_dir, "test", SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(temp_dir, "test", SHARD_INDEX_FILE), index)
 
         with pytest.raises(ValueError, match="(?i)no test data|empty"):
             load_preprocessed_dataset(temp_dir, data_parallel_rank=0, data_parallel_size=1)
@@ -395,7 +402,7 @@ def test_load_preprocessed_dataset_empty_train_split_raises(monkeypatch):
         }
     )
     monkeypatch.setattr(loading, "_load_replicated", lambda path, test_size, placeholder_test: ds)
-    monkeypatch.setattr(loading, "is_sharded_dataset_coordinated", lambda path: False)
+    monkeypatch.setattr(loading, "is_sharded_dataset_across_ranks", lambda path: False)
 
     with pytest.raises(ValueError, match="(?i)train"):
         loading.load_preprocessed_dataset("unused", data_parallel_rank=0, data_parallel_size=1)
@@ -427,7 +434,7 @@ def test_load_preprocessed_dataset_nonempty_test_split_loads():
             }
         )
         index = shard_dataset(test_ds, output_dir=temp_dir, split_name="test", num_shards=2)
-        index.save(os.path.join(temp_dir, "test", SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(temp_dir, "test", SHARD_INDEX_FILE), index)
 
         ds = load_preprocessed_dataset(temp_dir, data_parallel_rank=0, data_parallel_size=1)
         assert len(ds["train"]) == 20
@@ -452,13 +459,13 @@ def test_undersharded_test_split_warns_not_fails():
             }
         )
         index = shard_dataset(dataset, output_dir=temp_dir, split_name="test", num_shards=2)
-        index.save(os.path.join(temp_dir, "test", SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(temp_dir, "test", SHARD_INDEX_FILE), index)
 
-        loader0 = ShardedDatasetLoader(dataset_path=temp_dir, global_rank=0, world_size=4)
+        loader0 = ShardedDatasetLoader(dataset_path=temp_dir, dp_rank=0, dp_size=4)
         ds0 = loader0.load_split("test")
         assert len(ds0) > 0
 
-        loader3 = ShardedDatasetLoader(dataset_path=temp_dir, global_rank=3, world_size=4)
+        loader3 = ShardedDatasetLoader(dataset_path=temp_dir, dp_rank=3, dp_size=4)
         ds3 = loader3.load_split("test")  # warns, does not raise
         assert len(ds3) == 0
     finally:
@@ -499,9 +506,9 @@ def test_warm_shard_cache_serves_without_aws_credentials(tmp_path):
         patch("src.data.sources.sharded_dataset.load_from_disk", side_effect=_load),
         patch("src.data.sources.sharded_dataset.S3Client", side_effect=NoCredentialsError()),
     ):
-        ShardedDatasetLoader("s3://bucket/dataset", global_rank=0, world_size=1)._load_shard_from_s3(shard)
+        ShardedDatasetLoader("s3://bucket/dataset", dp_rank=0, dp_size=1)._load_shard_from_s3(shard)
         # A fresh loader is the relaunch: the first one has already latched the probe off.
-        relaunched = ShardedDatasetLoader("s3://bucket/dataset", global_rank=0, world_size=1)
+        relaunched = ShardedDatasetLoader("s3://bucket/dataset", dp_rank=0, dp_size=1)
         served = relaunched._load_shard_from_s3(shard)
 
     assert len(served) == 4
@@ -514,7 +521,7 @@ def test_load_raises_on_a_shard_its_index_lists_but_the_source_lacks(tmp_path):
     index = ShardIndex.load(os.path.join(tmp_path, "train", SHARD_INDEX_FILE))
     shutil.rmtree(os.path.join(tmp_path, index.shards[1].path))
 
-    loader = ShardedDatasetLoader(dataset_path=str(tmp_path), global_rank=0, world_size=1)
+    loader = ShardedDatasetLoader(dataset_path=str(tmp_path), dp_rank=0, dp_size=1)
     with pytest.raises(FileNotFoundError):
         loader.load()
 
@@ -522,7 +529,7 @@ def test_load_raises_on_a_shard_its_index_lists_but_the_source_lacks(tmp_path):
 def test_load_skips_a_split_without_an_index(tmp_path):
     create_test_sharded_dataset(40, 2, str(tmp_path))
 
-    loaded = ShardedDatasetLoader(dataset_path=str(tmp_path), global_rank=0, world_size=1).load()
+    loaded = ShardedDatasetLoader(dataset_path=str(tmp_path), dp_rank=0, dp_size=1).load()
 
     assert list(loaded) == ["train"]
     assert len(loaded["train"]) == 40

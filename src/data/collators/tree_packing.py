@@ -20,19 +20,12 @@ from src.models.attention.tree_plan import (
 
 
 class DataCollatorWithTreePacking(DataCollatorWithPacking):
-    """Collate rows packed from trees (:mod:`src.data.pipeline.tree_rows`).
+    """Collate rows packed from trees (:mod:`src.data.pipeline.tree_rows`) into one ``[1, total]`` row whose
+    labels are the trained tokens, plus the :func:`~src.models.attention.tree_plan.build_tree_attention_plan`
+    under ``tree_attention`` (skipped for plain documents unless ``conv_kernel`` layers read its segments).
 
-    The rows carry their trained tokens and the two layout columns, so nothing is searched or padded
-    here: the rows are concatenated into one ``[1, total]`` row, labels are the trained tokens'
-    ``input_ids``, the nodes are recovered from the layout columns, and the batch gets
-    :func:`~src.models.attention.tree_plan.build_tree_attention_plan` under ``tree_attention``. A batch of plain
-    documents carries none where attention is the only mixer: the stock packed path isolates it by
-    the same position resets. A family with stateful linear-attention layers (``conv_kernel``) reads
-    its segments off the plan on every batch.
-
-    A packing collator by class: the trainer gates that match on one (context parallelism,
-    compressed-KV layers, the pipeline's row-keeping switch) and its right-padding check apply.
-    ``sliding_window``, ``full_form`` and ``conv_kernel`` are the plan's.
+    A packing collator by class, so every trainer gate that matches one applies; ``sliding_window``,
+    ``full_form`` and ``conv_kernel`` are the plan's.
     """
 
     required_dataset_columns: tuple[str, ...] = (TRAINED_COLUMN, POSITION_COLUMN, DEPTH_COLUMN)

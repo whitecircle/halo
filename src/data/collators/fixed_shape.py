@@ -1,9 +1,6 @@
-"""Fixed-sequence-length padding, and the collator wrapper built on it.
-
-A consumer whose buffer shapes freeze on the first batch (the pipeline schedule's P2P buffers) needs
-every later batch at the same width, so an over-length tensor raises rather than truncating loss
-tokens.
-"""
+"""Fixed-sequence-length padding and the collator wrapper built on it, for a consumer whose buffer shapes
+freeze on the first batch (the pipeline schedule's P2P buffers); an over-length tensor raises rather than
+truncating loss tokens."""
 
 from __future__ import annotations
 
@@ -22,13 +19,9 @@ def pad_to_fixed_length(
     *,
     limit: str = ", over the pipeline's fixed shape",
 ) -> dict[str, torch.Tensor]:
-    """Right-pad each ``{key: (tensor, fill)}`` along its last axis to ``max_length``.
-
-    A tensor with no sequence axis (``dim < 2``, a per-example scalar) passes through, since padding
-    it would corrupt its values. ``position_ids`` pads with the :func:`pad_tail_positions` ramp: a
-    constant-0 pad would make every pad token its own varlen segment. An over-length tensor raises,
-    worded with the caller's ``limit`` phrase and ``hint`` remedy.
-    """
+    """Right-pad each ``{key: (tensor, fill)}`` along its last axis to ``max_length``; a per-example scalar
+    passes through, ``position_ids`` pads with the :func:`pad_tail_positions` ramp, and an over-length tensor
+    raises, worded with the caller's ``limit`` phrase and ``hint`` remedy."""
     out = {}
     for key, (tensor, fill) in tensors.items():
         if tensor.dim() < 2 or tensor.shape[-1] == max_length:
@@ -60,13 +53,8 @@ class FixedShapeCollator:
 
     @property
     def required_dataset_columns(self) -> tuple[str, ...]:
-        """The wrapped collator's own column requirement, forwarded.
-
-        A caller that pins HF's signature columns unions these in. Without the forward the wrapper
-        answers the empty tuple, a packing collator's ``seq_lengths`` is pruned from the dataset,
-        ``DataCollatorWithPacking`` sees no packing metadata, and every packed row collates as a
-        single document that attends across all of them. No error is raised: the loss stays finite.
-        """
+        """The wrapped collator's column requirement, without which a packing collator's ``seq_lengths`` would be
+        pruned and every packed row collate silently as one document."""
         return getattr(self.inner, "required_dataset_columns", ())
 
     def __call__(self, features):

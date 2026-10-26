@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Unit tests for :func:`src.data.pipeline.processing.pack_dataset_coordinated`
+"""Unit tests for :func:`src.data.pipeline.coordinated_map.coordinated_pack`
 and the rank-stable cache identifier it uses.
 
 Pins the behavior the helper exists for: even when HF's ``Dataset._fingerprint``
@@ -20,7 +20,7 @@ import tempfile
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline.processing import _rank_stable_dataset_id
+from src.data.pipeline.map_cache_key import rank_stable_dataset_id, stamp_cache_key
 
 
 def _on_disk_dataset(dirpath: str, data: dict, fingerprint: str) -> Dataset:
@@ -43,8 +43,8 @@ def test_same_cache_files_same_id_across_fingerprints() -> None:
         rank1 = _on_disk_dataset(tmp, {"x": list(range(16))}, fingerprint="rank1-fp")
         # Sanity: the empirical condition we are guarding against.
         assert rank0._fingerprint != rank1._fingerprint, f"{rank0._fingerprint!r} vs {rank1._fingerprint!r}"
-        assert _rank_stable_dataset_id(rank0) == _rank_stable_dataset_id(rank1), (
-            f"{_rank_stable_dataset_id(rank0)!r} vs {_rank_stable_dataset_id(rank1)!r}"
+        assert rank_stable_dataset_id(rank0) == rank_stable_dataset_id(rank1), (
+            f"{rank_stable_dataset_id(rank0)!r} vs {rank_stable_dataset_id(rank1)!r}"
         )
 
 
@@ -54,7 +54,7 @@ def test_different_cache_files_different_id() -> None:
     with tempfile.TemporaryDirectory() as tmp_a, tempfile.TemporaryDirectory() as tmp_b:
         ds_a = _on_disk_dataset(tmp_a, {"x": list(range(16))}, fingerprint="fp")
         ds_b = _on_disk_dataset(tmp_b, {"x": list(range(32))}, fingerprint="fp")
-        assert _rank_stable_dataset_id(ds_a) != _rank_stable_dataset_id(ds_b), "different shards → different ids"
+        assert rank_stable_dataset_id(ds_a) != rank_stable_dataset_id(ds_b), "different shards → different ids"
 
 
 def test_in_memory_fallback() -> None:
@@ -62,7 +62,7 @@ def test_in_memory_fallback() -> None:
     fall back to ``_fingerprint``."""
     ds = Dataset.from_dict({"x": [1, 2, 3]})
     ds._fingerprint = "manual-fp"
-    assert _rank_stable_dataset_id(ds) == "manual-fp", "in-memory fallback uses _fingerprint"
+    assert rank_stable_dataset_id(ds) == "manual-fp", "in-memory fallback uses _fingerprint"
 
 
 def test_in_memory_fallback_default() -> None:
@@ -71,11 +71,11 @@ def test_in_memory_fallback_default() -> None:
     class _Bare:
         cache_files = []
 
-    assert _rank_stable_dataset_id(_Bare()) == "nofp", "missing _fingerprint → 'nofp'"
+    assert rank_stable_dataset_id(_Bare()) == "nofp", "missing _fingerprint → 'nofp'"
 
 
 def test_toolkit_stamp_wins_over_cache_files() -> None:
-    """When the toolkit has stamped ``_toolkit_cache_key`` on the dataset, it
+    """When the toolkit has stamped its cache key on the dataset, it
     must override both ``cache_files`` and ``_fingerprint``. This is the case
     that matters in production: HF's ``cache_files`` representation differs
     between the rank that *wrote* a ``.map(num_proc=64)`` cache (sharded paths)
@@ -88,17 +88,17 @@ def test_toolkit_stamp_wins_over_cache_files() -> None:
         # but with the SAME explicit toolkit cache key — the stamp must win.
         rank_writer = _on_disk_dataset(tmp_a, {"x": list(range(16))}, fingerprint="writer-fp")
         rank_loader = _on_disk_dataset(tmp_b, {"x": list(range(16))}, fingerprint="loader-fp")
-        rank_writer._toolkit_cache_key = "cache-deadbeefcafebabe.arrow"
-        rank_loader._toolkit_cache_key = "cache-deadbeefcafebabe.arrow"
+        stamp_cache_key(rank_writer, "cache-deadbeefcafebabe.arrow")
+        stamp_cache_key(rank_loader, "cache-deadbeefcafebabe.arrow")
         # Sanity: divergent inferred ids (would mean different cache files in the
         # absence of the stamp).
         writer_files = sorted(cf["filename"] for cf in rank_writer.cache_files)
         loader_files = sorted(cf["filename"] for cf in rank_loader.cache_files)
         assert writer_files != loader_files, "test setup: cache_files diverge between simulated writer/loader"
-        assert _rank_stable_dataset_id(rank_writer) == _rank_stable_dataset_id(rank_loader), (
+        assert rank_stable_dataset_id(rank_writer) == rank_stable_dataset_id(rank_loader), (
             "toolkit stamp overrides cache_files + _fingerprint"
         )
-        assert _rank_stable_dataset_id(rank_writer) == "cache-deadbeefcafebabe.arrow", (
+        assert rank_stable_dataset_id(rank_writer) == "cache-deadbeefcafebabe.arrow", (
             "stamp value is the cache_file_name itself"
         )
 
@@ -108,9 +108,9 @@ def test_toolkit_stamp_different_keys_different_ids() -> None:
     upstream operation legitimately produced different caches)."""
     ds_a = Dataset.from_dict({"x": [1, 2, 3]})
     ds_b = Dataset.from_dict({"x": [1, 2, 3]})
-    ds_a._toolkit_cache_key = "cache-aaaa.arrow"
-    ds_b._toolkit_cache_key = "cache-bbbb.arrow"
-    assert _rank_stable_dataset_id(ds_a) != _rank_stable_dataset_id(ds_b), "different stamps → different ids"
+    stamp_cache_key(ds_a, "cache-aaaa.arrow")
+    stamp_cache_key(ds_b, "cache-bbbb.arrow")
+    assert rank_stable_dataset_id(ds_a) != rank_stable_dataset_id(ds_b), "different stamps → different ids"
 
 
 if __name__ == "__main__":

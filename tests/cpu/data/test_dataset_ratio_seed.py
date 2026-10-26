@@ -15,11 +15,7 @@ Run: pytest tests/cpu/data/test_dataset_ratio_seed.py
 
 import numpy as np
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
-
-# The module logs through the accelerate logger, which requires an initialized state.
-PartialState()
 
 from src.data.sources.loading import _DEFAULT_DATA_SEED, load_datasets
 

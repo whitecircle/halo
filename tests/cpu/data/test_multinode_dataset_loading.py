@@ -23,9 +23,9 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline import processing
-from src.data.pipeline.preprocessing import shard_dataset
-from src.data.shard_index import SHARD_INDEX_FILE
+from src.data.pipeline import coordinated_map as coordinated_map_module
+from src.data.preprocessed.preparation import shard_dataset
+from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from src.data.sources import loading
 from tests.common.gloo import run_gloo_ranks
 
@@ -55,7 +55,7 @@ def _save_sharded(node: str, rows: list[str], num_shards: int) -> None:
     for split in ("train", "test"):
         directory = os.path.join(node, "ds")
         index = shard_dataset(Dataset.from_dict({"text": rows}), num_shards, directory, split_name=split)
-        index.save(os.path.join(directory, split, SHARD_INDEX_FILE))
+        write_stamped_sidecar(os.path.join(directory, split, SHARD_INDEX_FILE), index)
 
 
 def _record(tmp_dir: str, rank: int, outcome: str) -> None:
@@ -106,9 +106,9 @@ def _pack_worker(rank: int, tmp_dir: str) -> None:
             raise OSError("No space left on device")
         return dataset
 
-    processing._trl_pack_dataset = pack_failing_on_main
+    coordinated_map_module._trl_pack_dataset = pack_failing_on_main
     try:
-        processing.pack_dataset_coordinated(Dataset.from_dict({"input_ids": [[1, 2], [3]]}), seq_length=4)
+        coordinated_map_module.coordinated_pack(Dataset.from_dict({"input_ids": [[1, 2], [3]]}), seq_length=4)
         outcome = "NO RAISE"
     except BaseException as exc:
         outcome = f"{type(exc).__name__}: {exc}"

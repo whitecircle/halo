@@ -24,18 +24,14 @@ from transformers import ProcessorMixin
 from trl import RewardTrainer
 
 from src.data.collators.vlm_preference import DataCollatorForVLMPreference
+from src.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, resolve_map_num_proc
 from src.data.pipeline.preferences import (
     MARGIN_COLUMN,
     VLM_PREFERENCE_COLUMNS,
     render_vlm_preference_row,
     vlm_preference_features,
 )
-from src.data.pipeline.processing import (
-    coordinated_filter,
-    coordinated_map,
-    report_rejected_rows,
-    resolve_map_num_proc,
-)
+from src.data.pipeline.rejected_rows import report_rejected_rows
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.runtime.consensus import agree_probe_across_ranks
 from src.trainers.mixins.base import DistributedTrainerMixin
