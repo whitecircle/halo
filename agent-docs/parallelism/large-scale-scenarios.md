@@ -14,8 +14,8 @@ only ever sharded by `X = ep_size × expert_tp_size`, so they need `X ≥ 16` at
 all.
 
 On an 8-GPU domain `X ≥ 16` forces the EP group across the domain boundary.
-[Pipeline parallelism](pipeline-parallelism.md) is not available in this release, so no layout here
-uses it.
+No layout here uses [pipeline parallelism](pipeline-parallelism.md), the other way across the
+boundary.
 
 ## First question: how wide is the NVLink domain?
 

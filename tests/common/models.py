@@ -462,6 +462,9 @@ TINY_INKLING_CONFIG = {
     "sliding_window_size": 32,
     "max_position_embeddings": 256,
 }
+# Its sliding layers come every second layer, so a pipeline split in two needs four layers to cut on a
+# period boundary.
+TINY_INKLING_PP_OVERRIDES = {"num_hidden_layers": 4, "local_layer_ids": [0, 2]}
 
 # Tiny Zaya (Zyphra ZAYA1) for the native-support + load-time patch tests. num_hidden_layers=4 spans
 # both mixer variants (layer 0 carries no EDA state, later layers do) and the CCA convolution whose

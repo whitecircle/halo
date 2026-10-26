@@ -103,7 +103,7 @@ be served from this repo's image. Setup, ports, weight sync and
 | EP+CP, EP+TP | supported for selected families | MoE plus long context or attention sharding |
 | EP+ETP | experimental | expert memory pressure; each ETP group stays inside one NVLink domain, and cross-node EP+ETP forms one ETP group per domain |
 | TP+CP, TP+ETP, ETP+CP, any three axes | unsupported | rejected at config validation |
-| Pipeline parallelism | not yet available | `pipeline_parallel_size > 1` is rejected at config time |
+| PP, PP+EP, PP+ETP | supported for selected families | depth across NVLink domains; each stage is a whole number of domains |
 
 Layout rules and the shapes rejected before a run starts:
 [Parallelism](parallelism.md).
@@ -171,7 +171,6 @@ What each mode writes, and which resumes are exact:
 - No hosted training UI and no hyperparameter search.
 - No tested end-to-end Hub upload. Upload the final checkpoint yourself
   ([Checkpoints](checkpoints.md#uploading-to-the-huggingface-hub)).
-- Pipeline parallelism is not yet available in this release.
 - Advanced parallelism support is per family, not automatic.
 - vLLM and SGLang run in their own containers, outside the training
   environment.

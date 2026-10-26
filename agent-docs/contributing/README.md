@@ -304,7 +304,7 @@ manifest.
   and peak memory; a `benchmark_*` script's `emit_benchmark(key, callback)` writes the line the
   committed throughput baselines are compared against.
 - **Cover the matrix and the rejections.** Markers select the tier (`core` or `full`), the world size
-  every entry declares (`1gpu 2gpu 4gpu 8gpu`) and capabilities (`ep cp tp etp hsdp vlm lora moe` +
+  every entry declares (`1gpu 2gpu 4gpu 8gpu`) and capabilities (`ep cp tp etp pp hsdp vlm lora moe` +
   model family).
 
     `vllm_server`/`sglang_server` mark a test needing the live vLLM/SGLang container; those are always
@@ -739,12 +739,15 @@ documents, so every figure is a function of the code. At tiny scale the setup su
 and FLOPs figures to zero, so a FLOPs change shows in the per-step figures and the snapshot.
 
 The cases cover every family on one rank and under EP with FSDP2, three families on every parallel shape (EP,
-ETP, TP, CP and their supported pairs, FSDP2 with DTensor or plain experts) built with the real EP, TP and
-FSDP2 wraps on torch's fake process group, and every scenario: an unknown GPU or peak, fp8, fp32 and tf32, a
-model handed over only at train begin, uncounted or implausible tokens, the config attention term, a frozen
-LoRA base, full-model params, an estimate that raises, one expert, no top-k, no layer list and no parameters.
-The verdict also fails on any raise. The negative control moves one step's clock by a tick. The seeded
-changes it catches are in `tests/cpu/callbacks/test_efficiency_harness.py`.
+ETP, TP, CP and their supported pairs, FSDP2 with DTensor or plain experts, and the first and last stage of a
+two-stage pipeline alone, with EP and with ETP) built with the real EP, TP and FSDP2 wraps and pipeline stage
+cut on torch's fake process group, and every scenario: an unknown GPU or peak, fp8, fp32 and tf32, a model
+handed over only at train begin, uncounted or implausible tokens, the config attention term, a frozen LoRA
+base, full-model params, an estimate that raises, one expert, no top-k, no layer list (also on a pipeline
+stage, which owns its share of the config's depth) and no parameters. Each tree runs its own roster, so a
+case only one of them has is listed under `new` or `dropped` in the evidence rather than compared. The
+verdict also fails on any raise. The negative control moves one step's clock by a tick. The seeded changes it
+catches are in `tests/cpu/callbacks/test_efficiency_harness.py`.
 
 ## Docs
 

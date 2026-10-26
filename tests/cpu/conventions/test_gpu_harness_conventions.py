@@ -2,7 +2,7 @@
 """Conventions a GPU test script must honour, pinned so a new script cannot quietly break them.
 
 Every manifest script runs under ``gpu_test_main`` unless its lifecycle is one the harness cannot
-express, named in ``_OWN_LIFECYCLE`` with the reason.
+express, named in ``_OWN_LIFECYCLE`` with the reason, and carries only markers from ``ALL_MARKERS``.
 
 The rest are about scratch: a GPU test allocates its dirs through the launcher and hands them back.
 
@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 from tests.common.repo import REPO_ROOT
-from tests.gpu.manifest import MANIFEST, script_path
+from tests.gpu.manifest import ALL_MARKERS, MANIFEST, script_path
 
 _GPU_ROOT = Path(REPO_ROOT) / "tests" / "gpu"
 
@@ -176,6 +176,18 @@ def test_every_manifest_script_runs_under_the_harness():
     assert not offenders, (
         "move these onto tests.common.harness.gpu_test_main (or, for a lifecycle the harness cannot "
         "express, add an _OWN_LIFECYCLE entry naming why):\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_every_manifest_marker_is_registered():
+    """``tests/conftest.py`` registers ``ALL_MARKERS`` and nothing else, and pytest only warns on an
+    unregistered mark, so a typo would silently drop its row from every selection by that marker."""
+    assert MANIFEST, "the manifest is empty, so the marker scan checks nothing"
+    unregistered = sorted(
+        f"{rel}: {marker}" for rel, spec in MANIFEST.items() for marker in spec.markers if marker not in ALL_MARKERS
+    )
+    assert not unregistered, (
+        "add these markers to ALL_MARKERS in tests/gpu/manifest.py, or fix the typo:\n  " + "\n  ".join(unregistered)
     )
 
 

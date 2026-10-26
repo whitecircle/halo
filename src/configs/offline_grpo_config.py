@@ -38,13 +38,12 @@ class OfflineGRPOConfig(
     max_length: int | None = field(
         default=None,
         metadata={
-            "help": "PP-only, and PP is not yet available in this release, so every value is rejected "
-            "today. Fixed total (prompt + completion) sequence length under pipeline parallelism; every "
+            "help": "Fixed total (prompt + completion) sequence length under pipeline parallelism; every "
             "batch is padded to it because the pipeline's P2P buffer shapes freeze on the first step. "
-            "None defaults to max_prompt_length + max_completion_length. PP-ONLY: nothing reads it "
-            "off PP (the budget there is max_prompt_length + max_completion_length), so setting it "
-            "without pipeline_parallel_size > 1 is rejected at trainer construction rather than "
-            "silently ignored."
+            "None defaults to max_prompt_length + max_completion_length. Nothing reads it off PP (the "
+            "budget there is max_prompt_length + max_completion_length), so setting it without "
+            "pipeline_parallel_size > 1 is rejected at trainer construction rather than silently "
+            "ignored."
         },
     )
 

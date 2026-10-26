@@ -326,6 +326,32 @@ def test_sft_refuses_packing_without_a_length_before_touching_the_checkpoint(tmp
         _run_main_with_yaml(module, f"packing: true\nmax_length: {max_length}\n", tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("axis_flag", "axis_name"),
+    [("context_parallel_size", "Context Parallelism"), ("pipeline_parallel_size", "Pipeline Parallelism")],
+)
+def test_smpo_refuses_a_vlm_run_under_cp_or_pp_before_the_model_load(tmp_path, axis_flag, axis_name):
+    """The trainer refuses both axes for a VLM run too, but only after the weights load. A text run
+    of the same shape reaches the load, so the refusal is the VLM verdict's, not the flag's."""
+    module = _load_script_module("preference/smpo.py")
+    yaml_body = f"{axis_flag}: 2\n"
+    with (
+        mock.patch.object(module, "init_training_script"),
+        mock.patch.object(module, "load_script_datasets", return_value=({}, False)),
+        mock.patch.object(module, "load_model_for_training", side_effect=AssertionError("the model load ran")),
+    ):
+        with (
+            mock.patch.object(module, "resolve_vlm_run", return_value=True),
+            pytest.raises(ValueError, match=f"SMPO VLM mode does not support {axis_name}"),
+        ):
+            _run_main_with_yaml(module, yaml_body, tmp_path)
+        with (
+            mock.patch.object(module, "resolve_vlm_run", return_value=False),
+            pytest.raises(AssertionError, match="the model load ran"),
+        ):
+            _run_main_with_yaml(module, yaml_body, tmp_path)
+
+
 # PEFT wrapping: scripts must route through prepare_peft_model (k-bit prep)
 
 

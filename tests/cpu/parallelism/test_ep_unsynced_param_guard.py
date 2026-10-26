@@ -38,7 +38,8 @@ _RANK_UNIFORM_ENV = "src.trainers.mixins.base.verify_rank_uniform_env"
 
 # Every axis set whose wrap leaves EP layers out of FSDP2, paired with the mode setup
 # _setup_distributed_modes dispatches it to: ep_group_size > 1, or plain DP with fsdp_shard_ep1_experts
-# off. CP and TP refuse that flag at config time, so their wraps shard every ep1 expert.
+# off. CP and TP refuse that flag at config time, so their wraps shard every ep1 expert. The PP rows
+# span two nodes, one pipeline stage each.
 _EP_WRAPPER_MODES = {
     "dp": ({"fsdp_shard_ep1_experts": False}, "_setup_ep_only"),
     "ep": ({"ep_size": 8}, "_setup_ep_only"),
@@ -46,6 +47,8 @@ _EP_WRAPPER_MODES = {
     "ep_etp": ({"ep_size": 4, "expert_tp_size": 2}, "_setup_ep_only"),
     "ep_cp": ({"ep_size": 8, "cp_size": 2}, "_setup_ep_cp"),
     "ep_tp": ({"ep_size": 8, "tp_size": 2}, "_setup_ep_tp"),
+    "pp_ep": ({"world_size": 16, "pp_size": 2, "ep_size": 8}, "_setup_pipeline_parallel"),
+    "pp_etp": ({"world_size": 16, "pp_size": 2, "expert_tp_size": 2}, "_setup_pipeline_parallel"),
 }
 _MODE_SETUPS = (
     "_setup_pipeline_parallel",
@@ -147,9 +150,9 @@ for _name in _MODE_SETUPS:
     setattr(_ModeHost, _name, lambda self, _setup=_name: self.ran_setups.append(_setup))
 
 
-def _config(**kwargs):
+def _config(world_size: int = 8, **kwargs):
     with patch(_FABRIC_PROBE):
-        return make_parallelism_config(world_size=8, gpus_per_node=8, **kwargs)
+        return make_parallelism_config(world_size=world_size, gpus_per_node=8, **kwargs)
 
 
 def test_guard_raises_on_undeclared_trainable_param_without_peft():

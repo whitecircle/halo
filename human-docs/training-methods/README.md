@@ -32,7 +32,8 @@ have to the trainer that reads it.
   field, and a list mixes them ([Datasets](../data.md)). The columns each method reads differ.
 - **One parallelism stack.** Expert, tensor and expert-tensor parallelism work on every trainer.
   Context parallelism covers SFT, SMPO and offline GRPO (full fine-tuning only for offline GRPO).
-  Pipeline parallelism is not available in this release ([Parallelism](../parallelism.md)).
+  Pipeline parallelism covers SFT, SMPO, DPO and KTO (precompute-only), offline GRPO, reward and
+  classification ([Parallelism](../parallelism.md)).
 - **HuggingFace in, HuggingFace out.** Checkpoints load with `from_pretrained` and upload to the Hub
   as written. Some MoE families need a conversion before vLLM or SGLang can serve them. A LoRA run
   writes an adapter you merge with one command; expert LoRA under EP folds into the weights at save

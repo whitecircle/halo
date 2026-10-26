@@ -23,6 +23,11 @@ Usage:
     torchrun --nproc_per_node=8 \
         tests/gpu/profiling/benchmark_sft_ep.py --ep 8 --seq 4096 --steps 10
 
+    # PP2 x EP4 on 8 GPUs (stage-wide dispatch group), activation checkpointing off
+    torchrun --nproc_per_node=8 \
+        tests/gpu/profiling/benchmark_sft_ep.py --ep 4 --pp 2 --pp_microbatches 8 \
+        --batch_size 16 --no_gc --seq 8192
+
     # Custom model path
     torchrun --nproc_per_node=2 \
         tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --model_path /path/to/moe/model --seq 4096

@@ -368,7 +368,8 @@ class DistributedTrainerMixin(
                     "Expert/Context Parallelism and MoE routing use use_reentrant=True for gradient "
                     "checkpointing; overriding the configured use_reentrant=False. CP's sequence "
                     "all-to-alls do not survive non-reentrant recompute, and a recomputed router may "
-                    "route differently, which non-reentrant checkpointing rejects."
+                    "route differently, which non-reentrant checkpointing rejects; non-reentrant is "
+                    "validated only under pipeline parallelism, which requires it."
                 )
             gc_kwargs["use_reentrant"] = True
             training_args.gradient_checkpointing_kwargs = gc_kwargs

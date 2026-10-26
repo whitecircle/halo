@@ -89,8 +89,11 @@ sequence length to fit.
 
 ## Pipeline parallelism
 
-Not yet available in this release. `pipeline_parallel_size` parses, but any
-value above 1 is rejected at config time.
+`pipeline_parallel_size` splits the decoder layers into stages, each a whole
+number of NVLink domains, so only point-to-point activations cross nodes. It
+composes with EP or pure ETP and covers SFT, SMPO, DPO and KTO
+(precompute-only), offline GRPO, reward and classification
+([Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md) ↗).
 
 ## Picking a shape
 

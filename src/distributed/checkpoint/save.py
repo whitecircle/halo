@@ -9,7 +9,7 @@ adapters are dispatched separately via :class:`~src.distributed.checkpoint.peft.
 
 FSDP2, CP and TP differ only in where their chunks come from: all three stream through
 :func:`~src.distributed.checkpoint.write.stream_gathered_checkpoint`. EP and PP own genuinely
-different artifacts — a family-specific expert gather, and one shard per stage under global names.
+different artifacts — a family-specific expert gather, and one shard per stage under the hub's names.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from src.checkpoint.format import (
     OPTIMIZER_META_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
+    revert_conversions,
     save_dtype_caster,
     write_merged_index,
     write_resume_adapter_marker,
@@ -44,7 +45,6 @@ from src.distributed.checkpoint.tp_save import save_tp_model
 from src.distributed.checkpoint.write import (
     chunked_saveable_tensors,
     exchange_shard_index,
-    resolve_retained,
     stream_gathered_checkpoint,
 )
 from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
@@ -56,7 +56,6 @@ from src.distributed.runtime import (
     is_local_main_process,
     is_output_shared_filesystem,
 )
-from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from src.models.structure import lora_fold_targets, unwrap_model
 
 logger = logging.getLogger(__name__)
@@ -327,7 +326,7 @@ def reject_unhandled_pp_axes(config, phase: str) -> None:
     if unhandled:
         raise NotImplementedError(
             f"Pipeline-parallel checkpoint {phase} does not handle {'+'.join(unhandled).upper()} "
-            f"sharding: the stage shards carry COMPLETE tensors under global names, and only FSDP2's "
+            f"sharding: the stage shards carry COMPLETE tensors of the unsplit model, and only FSDP2's "
             f"dp DTensors are reconstructed. PP+TP / PP+CP are rejected by SUPPORTED_AXIS_SETS; if "
             f"that changes, this path needs the matching inverse (a TP-dimension unfold / a CP key "
             f"remap) before it can be trusted."
@@ -347,15 +346,31 @@ def is_pp_shard_writer(config, shared_fs: bool) -> bool:
     return is_local_main_process() or config.stage_local_rank == 0
 
 
+def _write_hub_group(writer: StageShardWriter, stage: nn.Module, tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
+    """Write one group of the stage's tensors, named in the unsplit model, under the hub's names.
+
+    transformers' save-side revert of the conversions the stage snapshotted from the unsplit model
+    (``gathered_export_conversions``: what the load recorded, the per-expert merges excepted), as the
+    EP-gathered save applies it. A group carries every source a reverse needs: a conversion-closed
+    chunk of :func:`~src.distributed.checkpoint.write.chunked_saveable_tensors` (a decoder layer, or
+    the tensors outside the layer list), an EP layer's gather, the wrapper's own. ``tensors`` is
+    consumed here, so a cast it carries runs inside the caller's failure guard.
+    """
+    for key, tensor in revert_conversions(stage, dict(tensors), list(stage.export_conversions)).items():
+        writer.add(key, tensor)
+
+
 def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
-    """Pipeline parallelism: one safetensors shard per stage under GLOBAL names + a merged index.
+    """Pipeline parallelism: one safetensors shard per stage in the hub's namespace + a merged index.
 
     ``ctx.model`` is this rank's ``PipelineStageModule``; its ``global_parameter_name`` maps stage-local
-    FQNs back to the unsplit model's names, so the merged checkpoint loads via plain ``from_pretrained``.
-    EP MoE layers export through each family's ``gather_ep_layer_weights`` instead of their
-    internal-shard state_dict entries. Every stage rank enters the DTensor and EP gathers; the writers
-    (see :func:`is_pp_shard_writer`) retain the result and write their stage's shard, and the
-    index/config/tokenizer follow a world-wide exchange of per-stage key maps.
+    FQNs back to the unsplit model's names, and each group of those is written under the names the
+    hub uses (:func:`_write_hub_group`), so the merged checkpoint loads via plain ``from_pretrained``
+    and serves as the EP-gathered save does. EP MoE layers export through each family's
+    ``gather_ep_layer_weights`` instead of their internal-shard state_dict entries. Every stage rank
+    enters the DTensor and EP gathers; the writers (see :func:`is_pp_shard_writer`) retain the
+    result and write their stage's shard, and the index/config/tokenizer follow a world-wide
+    exchange of per-stage key maps.
 
     The index carries standard HF metadata only, deliberately NOT a repo "format" marker: that means
     per-rank PARTIAL tensors (ep_sharded), while these shards hold complete tensors.
@@ -391,29 +406,26 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     name_map = stage.checkpoint_name_map()
     # Same artifact contract as every other writer: save-dtype cast with the norm / balancing /
     # fp32-pin keep-sets held at trained dtype (nothing cast in a training checkpoint). Keyed by the
-    # live (stage-local / gather) spelling, which is what the caster's tree-derived keep-sets use.
+    # live (stage-local / gather) spelling, which is what the caster's tree-derived keep-sets use, so
+    # it runs before the hub respell.
     cast = save_dtype_caster(stage, keep_live_dtype=ctx.training_checkpoint)
     state_dict = stage.state_dict()
-    for key, local_name in name_map.items():
-        # Collective on every stage rank; only the writer pays the host copy, as in the EP gather below.
-        for full in resolve_retained(((local_name, state_dict[local_name]),), retain=is_writer).values():
-            guard.run(partial(writer.add, key, cast(local_name, full)))
-    del state_dict
+    # Collective on every stage rank; only the writer pays the host copy, a decoder layer at a time,
+    # as in the EP gather below. Chunk keys are stage-local, the GptOss sinks FA2 dropped included.
+    chunks = chunked_saveable_tensors(
+        stage, retain=is_writer, items=((local, state_dict[local]) for local in name_map.values())
+    )
+    for chunk in chunks:
+        hub = ((stage.global_parameter_name(local), cast(local, tensor)) for local, tensor in chunk.items())
+        guard.run(partial(_write_hub_group, writer, stage, hub))
     for layer_name, module in stage.ep_moe_layers():
         # Collective on every stage rank; only the writer retains (and pays the host copy). The
         # per-layer loop is the flush unit that bounds the writer's peak: one gathered layer,
         # not the whole stage.
         ep_weights = gather_ep_layer_weights(layer_name, module, merge_lora=False, retain=is_writer)
-        for key, tensor in ep_weights.items():
-            guard.run(partial(writer.add, stage.global_parameter_name(key), cast(key, tensor)))
+        hub = ((stage.global_parameter_name(key), cast(key, tensor)) for key, tensor in ep_weights.items())
+        guard.run(partial(_write_hub_group, writer, stage, hub))
         del ep_weights
-    if is_writer:
-        # GptOss FA2 sets sinks to None (leaves state_dict); re-emit neutralized. The helper names
-        # them by position in the SLICED layer list, so raw names would collide between stages.
-        for sink_name, sink_tensor in neutralized_gpt_oss_sinks(stage).items():
-            global_sink = stage.global_parameter_name(sink_name)
-            if global_sink not in name_map:
-                guard.run(partial(writer.add, global_sink, cast(sink_name, sink_tensor)))
 
     # Closing writes the last part; it MUST precede the exchange below, which is the sync
     # guaranteeing the index never names a file that is not on disk yet.
@@ -426,8 +438,7 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     # directory carries them.
     if ctx.is_save_rank and ctx.pp_wrapper_state:
         wrapper_writer = StageShardWriter(output_dir, "model-wrapper", ctx.max_shard_size, enabled=True)
-        for key, tensor in ctx.pp_wrapper_state.items():
-            guard.run(partial(wrapper_writer.add, key, tensor))
+        guard.run(partial(_write_hub_group, wrapper_writer, stage, ctx.pp_wrapper_state.items()))
         wrapper_map, wrapper_bytes = guard.run(wrapper_writer.close) or ({}, 0)
         stage_weight_map = {**stage_weight_map, **wrapper_map}
         shard_bytes += wrapper_bytes

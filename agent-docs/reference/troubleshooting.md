@@ -202,8 +202,8 @@ DeepEP is required for EP — there is no NCCL fallback. The recurring failure m
 Which axis combinations may run is an **allowlist** (`SUPPORTED_AXIS_SETS` in
 `src/distributed/parallelism_config.py`), checked before any rank math — anything unlisted is
 rejected at startup with the reason rather than deadlocking later. The permitted sets: plain data
-parallelism, each axis alone (EP, ETP, TP, CP), and **EP+TP**, **EP+CP**, **EP+ETP**. Pipeline
-parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+parallelism, each axis alone (EP, ETP, TP, CP, PP), and **EP+TP**, **EP+CP**, **EP+ETP**, **PP+EP**,
+**PP+ETP**.
 
 | Combo | Status | Use instead |
 |---|---|---|
@@ -211,7 +211,9 @@ parallelism is [not yet available in this release](../parallelism/pipeline-paral
 | `ETP + CP` | Not supported | Expert-TP partners sum their outputs element-wise in token space, while CP hands each rank a different sequence chunk — drop one |
 | `TP + ETP` (`ep_size=1`) | Not supported | Pure ETP, or EP+TP |
 | `EP + TP + ETP` | Not supported | EP+TP, or pure ETP — not both |
-| Any `pipeline_parallel_size > 1` | Rejected at config time: pipeline parallelism is not yet available in this release. A trainer without `_supports_pp` reports `<Trainer> does not support Pipeline Parallelism (PP)` first | Leave `pipeline_parallel_size` at 1 and shard with EP/TP/CP |
+| `PP + TP`, `PP + CP`, `PP + EP + ETP` | Not supported | PP composes with the expert axes only — PP+EP, or PP with pure ETP |
+| `pipeline_parallel_size > 1` with a trainer that does not support PP (online / async GRPO, SDPG, distillation, embedding) | Rejected at config time: `<Trainer> does not support Pipeline Parallelism (PP)` | Shard with EP/TP/ETP, or use a [PP-capable trainer](../parallelism/pipeline-parallelism.md#launching) |
+| `world_size / pipeline_parallel_size` not a multiple of the NVLink domain | Rejected at config time | Pick a `pipeline_parallel_size` dividing the NVLink-domain count, so every stage is a whole number of domains |
 | Racy single-domain multi-group EP (`ep_size > 2` with `ep_group_size` below the NVLink domain) | Rejected at config time | `ep_size=2` or `ep_size = domain`. Raising `ep_size × expert_tp_size` to the domain (`ep4 + etp2` on 8) passes the gate — the only 4-way expert split left on one node |
 | `fsdp_defer_grad_sync: true` with TP at `data_parallel_size == 1`, or with `fsdp_reshard_after_forward: true` (ZeRO-3) | Rejected at config time | TP at DP=1 applies no FSDP2 wrap — drop the flag. Under ZeRO-3 the deferred reduce holds the full unsharded gradient FULL_SHARD exists to shard: keep the flag on ZeRO-2 (`fsdp_reshard_after_forward: false`), or drop it |
 | `moe_balancing: aux_loss` on a model whose `forward` omits `output_router_logits`, with `router_aux_loss_coef > 0` | Rejected when the perf callbacks build | HF's config fallback lives on that parameter, so the flag never reaches the aux term while still switching router-logit recording on — a `[tokens, num_experts]` plane per MoE layer, every forward. Multimodal wrappers (`Qwen3_5MoeForConditionalGeneration`) are the case; use `bias_update_transient` (those architectures have no exportable bias slot, so `auto` resolves to `none` there) |

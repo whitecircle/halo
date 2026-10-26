@@ -1,8 +1,7 @@
 """Root pytest configuration shared by the CPU and GPU tiers.
 
 - Registers every marker the GPU manifest uses (single source of truth:
-  ``tests.gpu.manifest.ALL_MARKERS``) so ``--strict-markers`` rejects typos without the
-  list being duplicated in ``pyproject.toml``.
+  ``tests.gpu.manifest.ALL_MARKERS``) without the list being duplicated in ``pyproject.toml``.
 - Ensures the project root is importable (CPU tests do ``from src. ...``).
 - Sweeps stale scratch dirs left by crashed test runs out of the launcher's ``TMPDIR``
   (they sit on the volume the training data does, so leaks eat it).

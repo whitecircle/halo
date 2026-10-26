@@ -12,7 +12,7 @@ rank 0** writes its own copy.
 
 | Mode | Saver | Which rank saves | Collective |
 |------|-------|------------------|------------|
-| **PP / PP+EP** ([not yet available](../parallelism/pipeline-parallelism.md)) | `save_pp_checkpoint` — each stage writes its own complete tensors | one writer per stage (`stage_local_rank == 0`; per node on a non-shared FS) | world-wide index exchange |
+| **[PP / PP+EP](../parallelism/pipeline-parallelism.md)** | `save_pp_checkpoint` — each stage writes its own complete tensors | one writer per stage (`stage_local_rank == 0`; per node on a non-shared FS) | world-wide index exchange |
 | **EP** (incl. ETP, EP+CP, EP+TP) | `save_ep_checkpoint` → `save_ep_model()` | Save rank | EP all-gather (+ `full_tensor()` under TP) |
 | **EP sharded** | each rank writes its expert shard | All ranks | `exchange_shard_index` (gather to rank 0, broadcast back) |
 | **TP** (HF-native or selective) | `save_tp_checkpoint` — reconstruct DTensors, then all-gather the hand-sliced GptOss `sinks` (which the parameter walk skips: it would emit this rank's slice under the same key) | Save rank | `DTensor.full_tensor()` |
@@ -67,7 +67,7 @@ safetensors *file* header is the container format, not this marker.
 |---|---|---|---|---|
 | **Single file** | `model.safetensors` | any gathered save under the shard threshold | *(no index)* | Yes |
 | **Gathered HF-sharded** | `model-00001-of-000NN.safetensors` + index | any gathered save over the threshold — the default for production-size models | none | Yes |
-| **PP per-stage** | `model-pp00000-of-00004-00001.safetensors` — one or more parts per stage + merged index | `pp_size > 1` — [not yet available in this release](../parallelism/pipeline-parallelism.md), so no run produces it | none | Yes — **no merge step** |
+| **PP per-stage** | `model-pp00000-of-00004-00001.safetensors` — one or more parts per stage + merged index | `pp_size > 1` | none | Yes — **no merge step** |
 | **EP per-rank sharded** | `model-00000-of-000NN.safetensors` (`.shard_{rank}` keys) + index | `save_sharded_ep: true` | `format: "ep_sharded"` | No — `merge_ep_shards.py` first |
 
 Shard size defaults to 5 GB (`save_max_shard_size` overrides it). It bounds the **gathered** writers
@@ -82,11 +82,12 @@ A directory of per-rank shards whose index never landed (a run killed between th
 the index write) is refused by every after-training tool. The shards carry `.shard_N` keys, which a
 header-only peek detects without an index.
 
-The **PP layout** — the `save_pp_checkpoint` seam, which no run reaches in this release — **is not a
-per-rank format**. Each stage writes *complete* tensors under global
-parameter names (`stage.global_parameter_name`, with EP experts re-exported through their family
-gather), and rank 0 merges the index into HF's native multi-shard layout. That is why it
-deliberately carries no marker.
+The **PP layout** (`save_pp_checkpoint`) **is not a
+per-rank format**. Each stage writes *complete* tensors under the hub's names: the unsplit model's
+names (`stage.global_parameter_name`, with EP experts re-exported through their family gather),
+reverted through the load conversions the stage snapshotted from the unsplit model at its build, as
+the EP-gathered save reverts them ([Serving](#serving-on-vllm--sglang)). Rank 0 merges the index
+into HF's native multi-shard layout. That is why it deliberately carries no marker.
 
 Each stage owns a filename prefix derived from its own `pp_rank` and never coordinates with the
 other writers, so they stream concurrently into one directory. Merging the index refuses a key
@@ -652,7 +653,7 @@ WandB does **not** auto-continue the same run — export `WANDB_RUN_ID` (see [Mu
 | **TP** | B | Weights load at construction and `_load_streamed` skips the re-read. Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the checkpoint's full tensors and `distribute_tensor`s them into its own DTensor placements; TP+DP instead raises for a model not constructed from the checkpoint | Per-rank shards | Exact resume, same world size |
 | **CP** | B | Skipped — weights via `load_distributed_model()` | Per-rank shards (matching fingerprint) | Checkpoint has HF keys, model has CP wrapper keys |
 | **EP / ETP / EP+CP / EP+TP** | B | Skipped in the loader — the trained weights load at construction because the model source points at the checkpoint | Per-rank shards (matching fingerprint) | Checkpoint holds the hub-spelled full expert tensors, not the renamed rank-local slices the EP model registers |
-| **PP / PP+EP** ([not yet available](../parallelism/pipeline-parallelism.md)) | B at the default `use_grouped_gemm`, else stage-aware A | Path B: the stage loader read the trained tensors at construction and the reload is skipped. Path A (and a best-model load): each rank reads only its stage's global-named tensors from the merged index and remaps them through `global_parameter_name`; a missing stage-retained tensor raises, and so does a stage shard absent from this node's copy, naming the per-node placement. On per-node output storage the locally-absent cross-stage tensors are skipped — the stage build drops them anyway | Per-rank shards, gated on the fingerprint **and** `pp_stage_partition` | Any topology drift **raises** (no warm-restart fallback). PP+EP expert weights load at construction only, so a stage not built from the resume directory raises, on every rank at once |
+| **[PP / PP+EP](../parallelism/pipeline-parallelism.md)** | B at the default `use_grouped_gemm`, else stage-aware A | Path B: the stage loader read the trained tensors at construction and the reload is skipped. Path A (and a best-model load): each rank maps the merged index's hub names onto the unsplit model's (`ModuleLayoutView`, with the conversions the stage snapshotted at its build), then onto its stage's through `global_parameter_name`, and reads only those; a missing stage-retained tensor raises, and so does a stage shard absent from this node's copy, naming the per-node placement. On per-node output storage the locally-absent cross-stage tensors are skipped — the stage build drops them anyway | Per-rank shards, gated on the fingerprint **and** `pp_stage_partition` | Any topology drift **raises** (no warm-restart fallback). PP+EP expert weights load at construction only, so a stage not built from the resume directory raises, on every rank at once |
 
 Path B modes transform the model at init (EP fuses experts into 3D tensors; CP wraps attention), so
 the gathered HF-format checkpoint cannot load back through the Trainer. Instead the model source is

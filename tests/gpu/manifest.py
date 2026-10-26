@@ -23,7 +23,7 @@ Markers (selection):
                                  entries that exceed it. ``full`` = large model or many-GPU.
                                  CI runs ``-m "gpu and core"``; ``-m gpu`` is hand-run.
     1gpu | 2gpu | 4gpu | 8gpu  — required GPU count, matches ``nproc``.
-    ep cp tp etp hsdp          — parallelism axis under test.
+    ep cp tp etp pp hsdp       — parallelism axis under test.
     vlm lora moe               — capability under test. ``vlm`` is a vision-language model;
                                  a test needing a live vLLM server is ``vllm_server``, and a
                                  live SGLang server ``sglang_server``.
@@ -509,6 +509,134 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/ep/test_zaya_ep_discard_dispatch.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "zaya"), timeout=600
+    ),
+    "parallelism/pp/test_pp_sft_trainer_e2e.py": TestSpec(
+        nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3"), timeout=1200
+    ),
+    "parallelism/pp/test_pp_packing_pad_tail.py": TestSpec(
+        nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3"), timeout=1200
+    ),
+    "parallelism/pp/test_pp_vs_single_gpu.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "pp", "qwen3"),
+        timeout=900,
+        args_matrix=("", "--gc", "--schedule gpipe", "--pp_split 5,3"),
+    ),
+    "parallelism/pp/test_pp_forward_only.py": TestSpec(
+        nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3"), timeout=900
+    ),
+    "parallelism/pp/test_pp_fused_head_loss.py": TestSpec(
+        nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3"), timeout=1200, args_matrix=("", "--gc")
+    ),
+    # The two ranks are one stage's ranks (the EP group under --ep 2); each walks both pp_ranks of a
+    # virtual pp2 pipeline.
+    "parallelism/pp/test_pp_lazy_load_equivalence.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "pp", "ep", "moe", "qwen3", "gptoss"),
+        timeout=1200,
+        args_matrix=(
+            "",
+            "--pp_split 5,3",
+            "--ep 2",
+            "--head seq_cls",
+            "--ep 2 --moe_family qwen3_moe",
+            "--ep 2 --fp32_masters",
+            "--ep 2 --moe_family qwen3_moe --fp32_masters",
+        ),
+    ),
+    # Each node drives a different mask path (eager / SDPA / position_ids / FA4 varlen / Qwen3.5),
+    # so the matrix must run whole. The FA4 row skips off Blackwell.
+    "parallelism/pp/test_pp_ragged_mask_vs_single_gpu.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "pp", "qwen3"),
+        timeout=900,
+        args_matrix=("", "--attn sdpa", "--positions", "--attn flash_attention_4", "--family qwen3_5"),
+    ),
+    "parallelism/pp/test_pp_ep_vs_unsplit.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss"),
+        timeout=1500,
+        args_matrix=("", "--gc"),
+    ),
+    # pp2 × etp2 at world 8 (two ETP groups per stage, dp2 — the deferred replica sweep engages); the
+    # file also runs at 4 ranks (dp1) but the manifest gates the harder shape. fp32 throughout: a
+    # bf16 twin is not a valid ETP gate.
+    "parallelism/pp/test_pp_etp_vs_unsplit.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "pp", "etp", "moe", "gptoss"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_ep_gc_equivalence.py": TestSpec(
+        nproc=4, markers=("gpu", "core", "4gpu", "pp", "ep", "moe", "gptoss"), timeout=1800
+    ),
+    "parallelism/pp/test_pp_ep1_gmm_vs_unsplit.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_ep_sft_trainer_e2e.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_smpo.py": TestSpec(nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500),
+    "parallelism/pp/test_pp_reward_bt.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1200
+    ),
+    "parallelism/pp/test_pp_classification.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_eval_metrics.py": TestSpec(
+        nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3"), timeout=900
+    ),
+    "parallelism/pp/test_pp_gptoss_fa2_sinks_save.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "moe", "gptoss"), timeout=1200
+    ),
+    "parallelism/pp/test_pp_resume.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_ep_resume.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_offline_grpo.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_offline_grpo_kl.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
+    ),
+    # A text-only run of a multimodal wrapper (tiny GLM-5 Next and Step-3.7 composites) through the
+    # real SFT trainer: the image-bearing refusal, the vision tower dropped from every stage, and the
+    # save reloading as the complete wrapper class.
+    "parallelism/pp/test_pp_text_only_vlm.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "pp", "moe", "glm5", "step3p7", "vlm"),
+        timeout=1200,
+        args_matrix=("--family glm5_next", "--family step3p7"),
+    ),
+    "parallelism/pp/test_pp_dpo_precompute.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_kto_apo.py": TestSpec(
+        nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500
+    ),
+    "parallelism/pp/test_pp_combos_8gpu.py": TestSpec(
+        nproc=8,
+        # Markers are the union across the matrix (they are per spec, not per row).
+        markers=("gpu", "full", "8gpu", "pp", "ep", "moe", "gptoss", "qwen3"),
+        args_matrix=(
+            "--mode dense_pp2_dp4",
+            "--mode ep4",
+            "--mode pp4_ep2",
+            "--mode ep2_dp2",
+            "--mode ep1_dp4",
+        ),
+        timeout=1500,
+    ),
+    "parallelism/pp/test_pp_inkling_text_only.py": TestSpec(
+        nproc=2, markers=("gpu", "full", "2gpu", "pp", "ep", "moe", "inkling"), timeout=900
+    ),
+    # Hyper-connection boundary families: the [B, S, hc_mult, D] stream crosses the real P2P
+    # schedule (pp2 x dp2) and both must reproduce single-GPU gradients. Markers are the union across
+    # the matrix.
+    "parallelism/pp/test_pp_hc_vs_single_gpu.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "pp", "moe", "deepseek_v4", "glm5"),
+        timeout=900,
+        args_matrix=("--family deepseek_v4", "--family glm5_next"),
     ),
     "parallelism/test_fsdp_tied_embeddings.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
@@ -1436,7 +1564,8 @@ MANIFEST: dict[str, TestSpec] = {
     ),
 }
 
-# Registered by `tests/conftest.py::pytest_configure` so `--strict-markers` rejects typos.
+# Registered by `tests/conftest.py::pytest_configure`; every spec marker must be one of these
+# (`tests/cpu/conventions/test_gpu_harness_conventions.py`), so a typo cannot drop a row from a selection.
 ALL_MARKERS = (
     "gpu",
     "core",
@@ -1449,6 +1578,7 @@ ALL_MARKERS = (
     "cp",
     "tp",
     "etp",
+    "pp",
     "hsdp",
     "vlm",
     "vllm_server",

@@ -235,6 +235,7 @@
  "pp backbone claims": {
   "Glm5NextTextModel": "Glm5NextPPSpec",
   "Gemma4TextModel": "Gemma4PPSpec",
+  "InklingTextModel": "InklingPPSpec",
   "DeepseekV4Model": "DeepSeekV4PPSpec",
   "ZayaModel": "ZayaPPSpec"
  },

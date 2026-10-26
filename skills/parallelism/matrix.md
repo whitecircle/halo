@@ -10,14 +10,6 @@ method name. `domain` = `nvlink_domain_size` (auto = `NVLINK_DOMAIN_SIZE`, else 
 only differs on NVL72/MNNVL).
 `ep_group_size = ep_size * expert_tp_size`.
 
-**PP is not available in this release.** The seams ship — the config surface, the rank math, every
-validator below, the trainer gates — but not the schedule engine:
-`parallelism_config_from_args` (`src/training/parallelism_args.py`) rejects
-`pipeline_parallel_size > 1` before any rank math (a trainer without `_supports_pp` one check
-earlier, by its own gate), and `PipelineRuntime` raises on construction.
-Read every PP row as the shape a validator enforces, never as a launchable topology
-(`agent-docs/parallelism/pipeline-parallelism.md`).
-
 ## data_parallel_size formula
 
 ```text
@@ -45,7 +37,7 @@ Source: `parallelism_config.py` `__post_init__`.
 | **EP + CP** | `ep_size>1`, `cp_size>1` | `world_size / cp_size` (only CP reduces DP) | EP must be **node-local** (`ep_scope="node"`) AND `ep_group_size == domain`. `ep_scope="global"` rejected | `_validate_ep_cp` |
 | **EP + TP** | `ep_size>1`, `tp_size>1` | `world_size / tp_size` (only TP reduces DP) | `ep_size` multiple of `tp_size`; TP node-local & divides domain. On **>1 NVLink domain** the EP group must be a **single** one (`ep_size == world`, `ep_scope="global"`) — multi-domain multi-group EP+TP is rejected (cross-replica average incompatible with the `(dp, tp)` FSDP mesh). Within **one** domain TP leaves `ep_group_size` at `ep_size`, so the single-domain multi-group gate below applies unchanged: `ep_size` is 2 or fills the domain — `ep2+tp2` on 8 GPUs = 4 EP groups, DP 4; `ep4+tp2` is rejected | `_validate_tp`; `_validate_single_domain_multigroup_ep` |
 | **EP + ETP** (`ep_size>1` AND `expert_tp_size>1`) | both >1 | `world_size / expert_tp_size` | **Experimental, supported.** `expert_tp_size` divides the domain and the ETP groups stay node-local — exactly one per domain under `ep_scope="global"`; EP itself may be node-local or cross-node, so `ep_group_size` may exceed the domain. Expert-TP reduce runs in token space (outside DeepEP dispatch→combine), so no combine deadlock. The single-domain multi-group guard exempts only `ep_group_size == domain` (or `ep_size <= 2`); sub-domain multi-group EP+ETP with `ep_size > 2` is rejected at config time | `_validate_expert_tp`; CLAUDE.md EP+ETP note |
-| **PP**, **PP + EP**, **PP + ETP** — *in the allowlist, not runnable* | `pp_size>1` | `stage_world_size / max(1, expert_tp_size)` | **Rejected by the release gate before any of this is reached.** PP is outermost: the world splits into `pp_size` contiguous blocks of whole NVLink domains and every inner axis runs unchanged inside one block. Composes with the expert axes only — EP, **or** pure ETP (`ep_size==1`), never both, and never TP/CP. All EP/ETP gradient sync runs in one deferred post-backward sweep; the ETP divisor drops the `expert_tp_size` factor (partners share a batch) | `_validate_pipeline_parallel`; `grad_sync.py` `_sync_deferred_expert_grads` |
+| **PP**, **PP + EP**, **PP + ETP** | `pp_size>1` | `stage_world_size / max(1, expert_tp_size)` | PP is outermost: the world splits into `pp_size` contiguous blocks of whole NVLink domains and every inner axis runs unchanged inside one block. Composes with the expert axes only — EP, **or** pure ETP (`ep_size==1`), never both, and never TP/CP. All EP/ETP gradient sync runs in one deferred post-backward sweep; the ETP divisor drops the `expert_tp_size` factor (partners share a batch) | `_validate_pipeline_parallel`; `grad_sync.py` `_sync_deferred_expert_grads` |
 
 Notes:
 
@@ -60,7 +52,6 @@ Notes:
 
 | Combo | Condition | Reason | Source |
 |-------|-----------|--------|--------|
-| **Any `pipeline_parallel_size > 1`** | `pp_size>1` | the schedule engine is not shipped in this release; rejected at the single production entry point, ahead of the axis-set check and every row below. A trainer whose `_supports_pp` is `False` is refused one check earlier (trainer table) | `parallelism_config_from_args` (`src/training/parallelism_args.py`, raises); `PipelineRuntime.__init__` |
 | **Anything outside `SUPPORTED_AXIS_SETS`** | active axis set not one of: `()`, `ep`, `etp`, `tp`, `cp`, `pp`, `ep+tp`, `ep+cp`, `ep+etp`, `pp+ep`, `pp+etp` | checked **first**, before any rank math. The message comes from `AXIS_SET_MECHANISMS` when the set has an entry, else "no validated composition — no equivalence gate has ever compared its gradients against an unsplit reference" | `_validate_capability_matrix` (raises) |
 | **TP + CP** | `tp_size>1 and cp_size>1` | both groups are contiguous rank blocks, so a rank's TP partners ARE its CP partners; Ulysses also redistributes over heads TP already split, and `data_parallel_size` counts only one of the two axes | `_validate_capability_matrix` + `AXIS_SET_MECHANISMS[{tp,cp}]` |
 | **TP + ETP** | `tp_size>1 and expert_tp_size>1`, `ep_size==1` | attention TP and expert TP would shard the same ranks along two axes | `_validate_capability_matrix` + `AXIS_SET_MECHANISMS[{tp,etp}]` |
@@ -69,7 +60,7 @@ Notes:
 | **PP + TP** | `pp_size>1 and tp_size>1` | needs ≥2 nodes to launch and is untested on real multi-node hardware; transformers' `replicated_with_grad_allreduce` hook re-reduces accumulated history when the schedule disables it on non-final microbatches | `_validate_capability_matrix` + `AXIS_SET_MECHANISMS[{pp,tp}]` |
 | **PP + CP** | `pp_size>1 and cp_size>1` | the pipeline loss normalizer is stage-wide and carries no cancelling `× cp_size`, so every gradient comes out `cp_size` too small with **no error raised** | `_validate_capability_matrix` + `AXIS_SET_MECHANISMS[{pp,cp}]` |
 | **PP + EP + TP** | all three >1 | the deferred cross-replica expert sweep needs FSDP to shard non-expert params over the EP group, while EP+TP shards them over the `(dp, tp)` mesh | `_validate_capability_matrix` + `AXIS_SET_MECHANISMS[{pp,ep,tp}]` |
-| **PP + EP + ETP** | all three >1 | `ReduceFromExpertTP.backward` is model math, so it cannot be deferred like the DP sweep — at `ep_size>1` its strided all-reduce interleaves with the DeepEP combine the same backward is inside. `ep_size==1` (PP+ETP) is admitted by the allowlist (no combine to interleave with), still rejected by the release gate | `_validate_capability_matrix` + `AXIS_SET_MECHANISMS[{pp,ep,etp}]` |
+| **PP + EP + ETP** | all three >1 | `ReduceFromExpertTP.backward` is model math, so it cannot be deferred like the DP sweep — at `ep_size>1` its strided all-reduce interleaves with the DeepEP combine the same backward is inside. `ep_size==1` (PP+ETP) is supported: no combine to interleave with | `_validate_capability_matrix` + `AXIS_SET_MECHANISMS[{pp,ep,etp}]` |
 | **PP config-time raises** | `pp_split` len ≠ `pp_size` (its **sum** ≠ layer count raises at model-split time — `split.py` — since config never sees the model); a stage that is not a whole NVLink domain; 1-rank stages; `fsdp_shard_ep1_experts=False`; `use_hsdp=True`; `fsdp_reshard_after_forward=True`; `lowp_precision != "bf16"`; expert LoRA; a PP-only knob (`pp_split`/`pp_microbatches`/`pp_schedule`) set at `pp_size=1`, where nothing reads it | each raises with its own mechanism | `_validate_pipeline_parallel` (`fsdp_reshard_after_backward=False` / `fsdp_defer_grad_sync=True` under PP: `_validate_fsdp_settings`) |
 | **PP trainer-construction raises** | PEFT/LoRA; a live `ref_model`; missing precomputed ref-logprob columns; `compute_metrics`; `activation_offloading`; reentrant gradient checkpointing; `torch_compile`; `save_sharded_ep`; a missing `max_length`; an image-bearing VLM run; `per_device_eval_batch_size != per_device_train_batch_size`; positional `model`/`args` | the adapter save/resume path is not stage-aware (stage-local layer indices from one rank, no adapter restore on PP resume), and TRL's `training_step` wrap never engages under the PP schedule | `src/trainers/mixins/pp_gates.py` (PEFT, offloading) + `src/trainers/mixins/pipeline.py` (reentrant GC, torch_compile, VLM, collator contracts) |
 | **Multi-group >2-rank EP on one NVLink domain** | `num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size` (e.g. ep4 on an 8-GPU domain) | concurrent DeepEP intra-node combine barriers race FSDP2's DP-wide NCCL, GC on or off; CDMC=1 doesn't fix it. Measured on 8xB300 against a clean `ep8` control: the `legacy` (V1) buffer deadlocks around step 2, the `elastic` default faults with `Invalid access of peer GPU memory over nvlink`. **Rejected at config time**, hand-built configs included. `ep4 + tp2` lands here too (TP leaves `ep_group_size` untouched). `ep4 + etp2` **passes** the predicate — `ep_group_size = 4*2 = 8` fills the domain — and is the one way to get 4-way expert distribution across 8 GPUs; it is not in the GPU test matrix, whose 8-GPU EP+ETP rows run `ep2 + etp4`. Use `ep_size=2`, `ep_size = nvlink_domain_size`, or `ep4 + etp2`. (Multi-DOMAIN multi-group EP is supported — see the deferred-sync row above.) | `is_racy_single_domain_multigroup_ep`; `_validate_single_domain_multigroup_ep` (raises) |
@@ -95,7 +86,7 @@ Notes:
 
 From `CLAUDE.md` "Distributed Trainers" table. All extend `DistributedTrainerMixin`.
 
-| Trainer | EP | CP | TP | ETP | PP (declared) |
+| Trainer | EP | CP | TP | ETP | PP |
 |---------|:--:|:--:|:--:|:--:|:--:|
 | `DistributedSFTTrainer` (SFT) | Yes | Yes | Yes | Yes | Yes |
 | `SmoothMarginPOTrainer` (SMPO) | Yes | Yes | Yes | Yes | Yes |
@@ -112,12 +103,11 @@ From `CLAUDE.md` "Distributed Trainers" table. All extend `DistributedTrainerMix
 | `EmbeddingTrainer` | Yes | No | Yes | Yes | No |
 
 EP, ETP and TP run under every trainer. **SFT, SMPO and offline GRPO full fine-tuning support CP**.
-The PP column is each trainer's declared `_supports_pp`. A **No** cell rejects `pp_size > 1` first,
-ahead of the release gate; a **Yes** cell is inert, since the release gate then rejects it. The authoritative gate is the per-class `_supports_cp` / `_supports_pp` attribute
+The authoritative gate is the per-class `_supports_cp` / `_supports_pp` attribute
 (`src/trainers/mixins/base.py`, checked in
 `src/trainers/mixins/validation.py`), so a hand-built config is rejected too. Each training
 script additionally passes its trainer class to `parallelism_config_from_args(..., trainer_cls=...)`
-(`src/training/parallelism_args.py`), which reads the same flags and rejects a CLI-requested `context_parallel_size > 1` with a clear
+(`src/training/parallelism_args.py`), which reads the same flags and rejects a CLI-requested `context_parallel_size > 1` or `pipeline_parallel_size > 1` with a clear
 error — passing CP there is a config error, not a silent no-op.
 
 ### CP incompatibility list

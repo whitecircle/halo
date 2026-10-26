@@ -25,23 +25,12 @@ and **reject** unsupported combos before the user burns GPU hours. Be exact — 
 full reference matrix with per-row source citations is in **[matrix.md](matrix.md)**.
 Read it before giving a verdict on any non-trivial combo.
 
-## PP is not available in this release
-
-The verdict on any `pipeline_parallel_size > 1` request is **not runnable — shard with EP/TP/CP**.
-The schedule engine is not shipped: `parallelism_config_from_args` (`src/training/parallelism_args.py`)
-rejects `pipeline_parallel_size > 1` at config time, before any rank math, and `PipelineRuntime`
-raises `NotImplementedError` on construction. A trainer without `_supports_pp` is refused one
-check earlier, by its own gate (below). What ships is the seam — the config surface, the rank math,
-the validators, the trainer gates, the stage/loss/checkpoint contracts — so every PP row below
-describes a validator or contract, never a launchable topology
-(`agent-docs/parallelism/pipeline-parallelism.md`).
-
 ## Source of truth
 
 - `src/distributed/parallelism_config.py` — the dataclass + `__post_init__` →
   `_validate()` sub-validators. Every config-time `raise` lives here or in
   `parallelism_config_from_args` (`src/training/parallelism_args.py`): `lowp_*` knobs or
-  `init_from_scratch` outside SFT, a trainer's `_supports_cp` / `_supports_pp`, the PP release gate.
+  `init_from_scratch` outside SFT, a trainer's `_supports_cp` / `_supports_pp`.
 - `CLAUDE.md` "## Parallelism" table + DeepEP / trainer-support notes.
 - User docs to cross-link: `agent-docs/parallelism/{expert,context,tensor,expert-tensor}-parallelism.md`,
   `agent-docs/parallelism/{data-parallelism,multi-node,data-loading}.md`.
@@ -51,18 +40,19 @@ describes a validator or contract, never a launchable topology
 - **The allowlist decides.** `SUPPORTED_AXIS_SETS` is checked first, before any rank
   math: plain DP, each axis alone (**EP, ETP, TP, CP, PP**), and **EP+TP, EP+CP,
   EP+ETP, PP+EP, PP+ETP**. Anything else is rejected with the mechanism from
-  `AXIS_SET_MECHANISMS`, or a generic "no validated composition" when unlisted. The three
-  PP entries are admitted by the allowlist but unreachable — the release gate above rejects
-  `pp_size > 1` first.
+  `AXIS_SET_MECHANISMS`, or a generic "no validated composition" when unlisted.
 - `ep_group_size = ep_size * expert_tp_size` (the full EP process group).
-- `data_parallel_size = world_size // max(tp_size, cp_size, expert_tp_size)`;
-  if that max is 1, `dp_size = world_size`. **EP alone never reduces DP** (EP is
-  orthogonal to DP). Only TP, CP and ETP reduce distinct-batch count.
+- `stage_world_size = world_size // pp_size`, then
+  `data_parallel_size = stage_world_size // max(tp_size, cp_size, expert_tp_size)`;
+  if that max is 1, `dp_size = stage_world_size`. **EP alone never reduces DP** (EP is
+  orthogonal to DP). Only TP, CP, ETP and PP reduce distinct-batch count.
 - Locality unit is `nvlink_domain_size` (auto = `NVLINK_DOMAIN_SIZE`, else `gpus_per_node`; set
   it only on NVL72/MNNVL). "Node-local" below means "within one NVLink domain".
 - `ep_scope` defaults to `"auto"` in both the dataclass and on the CLI/YAML
   (`src/args/distributed_args.py`). `"auto"` resolves to `node` if
   `ep_group_size <= nvlink_domain_size`, else `global`.
+- PP flags: `--pipeline_parallel_size`, `--pipeline_microbatches`,
+  `--pipeline_schedule` (`1f1b` | `gpipe`), `--pipeline_split`.
 
 ## How to pick a mode
 
@@ -75,10 +65,11 @@ describes a validator or contract, never a launchable topology
    reduces DP by `cp_size`.
 4. **Weights/attention too big for one GPU?** **TP** (node-local DTensor). TP
    reduces DP by `tp_size`.
-5. **Model too deep for one rank, across nodes?** **PP** is the axis for it — the
-   outermost one, the only one meant to cross NVLink domains — but it is **not
-   available in this release** (above). Shard the depth with **EP** (MoE) or **TP**,
-   widen the job, or cut `max_length`; never advise a `pipeline_parallel_size > 1` run.
+5. **Model too deep for one rank, across nodes?** **PP** — the outermost axis, the
+   only one meant to cross NVLink domains. Stage-aware loading streams only this
+   stage's layers, so the load ceiling falls with `pp_size`. Composes with the expert
+   axes only — **EP, or pure ETP (`ep_size=1`)** — never both, never TP/CP.
+   Needs at least two NVLink domains: every stage must be a whole number of them.
 6. Compute `dp_size` with the formula above and sanity-check it's >= 1 and the
    global batch is what you intend.
 
@@ -87,8 +78,8 @@ describes a validator or contract, never a launchable topology
 - TP, CP, ETP must be **NVLink-local**: each must divide `nvlink_domain_size` and
   be `<= nvlink_domain_size`.
 - `ep_group_size` must divide its scope and not exceed it: `nvlink_domain_size` for
-  `node`; for `global`, `world_size`, which it must also tile as equal contiguous
-  per-domain blocks.
+  `node`; for `global`, `stage_world_size` (`world_size // pp_size`), which it must
+  also tile as equal contiguous per-domain blocks.
 - EP+TP: `ep_size` must be a multiple of `tp_size`, so each EP group spans whole TP groups. On one
   NVLink domain that means `ep_size=2` (`ep2+tp2` on 8 = four 2-rank EP groups) or an EP group that
   fills the domain (`ep8+tp2` on 8); `ep4+tp2` on 8 is the racy topology and is rejected. Above one
@@ -124,17 +115,27 @@ describes a validator or contract, never a launchable topology
   attention; `validate_against_model_config` raises from `config.json` before any weight is read.
   The same gate rejects `num_experts % ep_size != 0`, an `expert_tp_size` not dividing the expert
   FFN width, and a declared per-rank token budget past DeepEP's dispatch ceiling (matrix.md).
-- **HSDP with TP / ETP / EP** — `_validate_hsdp` rejects all three. HSDP wraps the standard
-  DP path only: **pure DP or CP**. (EP already shards over the EP group.)
-- **Any PP** (`pp_size > 1`) — the trainer gate, then the release gate (above), refuse it
-  before `ParallelismConfig` validates. The allowlist's PP rules and the PP-specific validators
-  fire only on a directly constructed config; matrix.md lists them.
+- **HSDP with TP / ETP / EP** — `_validate_hsdp` rejects all three; **PP+HSDP** is
+  refused by `_validate_pipeline_parallel`. HSDP wraps the standard DP path only:
+  **pure DP or CP**. (EP already shards over the EP group; PP cannot restrict a 2-D mesh
+  to a stage's rank block.)
+- **Every PP pairing outside the expert axes** — `PP+TP`, `PP+CP`, `PP+EP+TP`, `PP+EP+CP`, `PP+EP+ETP`
+  (`PP+EP` and pure `PP+ETP` are supported, both together are not). Plus
+  these PP-specific config-time raises: `pp_split` length mismatch or an entry < 1 (the
+  sum-vs-layer-count check runs later, at model split); a stage that is
+  not a whole NVLink domain; a 1-rank stage; `fsdp_shard_ep1_experts=False`; `use_hsdp=True`;
+  `fsdp_reshard_after_forward=True`; `fsdp_reshard_after_backward=False`; `fsdp_defer_grad_sync=True`;
+  `lowp_precision != "bf16"`; expert LoRA; and a PP-only knob (`pp_split`/`pp_microbatches`/`pp_schedule`) set at `pp_size=1`.
+  At trainer construction PP also rejects `save_sharded_ep`, PEFT/LoRA, a live
+  `ref_model`, `activation_offloading`, reentrant gradient checkpointing, `torch_compile`, a
+  missing `max_length`, an image-bearing VLM run, and `per_device_eval_batch_size !=
+  per_device_train_batch_size`. Full list: `matrix.md`.
 - **`fsdp_shard_ep1_experts=False` with TP or CP**, and **`fsdp_reshard_after_forward=True`
   wherever an expert-distribution group exists** — the gate is `is_ep_mode`
   (`ep_group_size > 1`), so pure ETP (`ep_size=1`, `expert_tp_size>1`) is rejected alongside EP —
-  **or with TP at `dp_size>1`**; **`fsdp_defer_grad_sync=True` with TP at `dp_size==1`** (no FSDP2
-  wrap to defer) **or with `fsdp_reshard_after_forward=True`** (the held unsharded gradient is the
-  state ZeRO-3 shards — defer under ZeRO-2). `_validate_fsdp_settings` raises; QLoRA refuses
+  **or with TP at `dp_size>1`**; **`fsdp_defer_grad_sync=True` under PP, with TP at `dp_size==1`**
+  (no FSDP2 wrap to defer) **or with `fsdp_reshard_after_forward=True`** (the held unsharded gradient
+  is the state ZeRO-3 shards — defer under ZeRO-2). `_validate_fsdp_settings` raises; QLoRA refuses
   every FSDP shaping knob at trainer construction.
 - **Expert LoRA with ETP** (`expert_tp_size > 1` + `expert_lora`) — `_validate_expert_tp` raises:
   the replicated adapter half would take a partial, never-synced gradient.
@@ -149,9 +150,8 @@ describes a validator or contract, never a launchable topology
 - **CP with a trainer that doesn't support it** (DPO, KTO, GRPO online/env/SDPG,
   reward, classification, distillation, embedding) — see matrix.md trainer table.
 - **PP with a trainer that doesn't support it** (online/env GRPO, SDPG, both distillation
-  trainers, embedding) — `_supports_pp`. This gate runs first, ahead of the release gate, so
-  these trainers report `<Trainer> does not support Pipeline Parallelism (PP)` rather than "not
-  yet available".
+  trainers, embedding) — `_supports_pp`, refused at config time with
+  `<Trainer> does not support Pipeline Parallelism (PP)`.
 
 When rejecting, cite the exact reason and offer the nearest valid alternative
 (e.g. "ep_size=4 on 8 GPUs is rejected at config time → use ep_size=2, ep_size=8 (the whole domain), or

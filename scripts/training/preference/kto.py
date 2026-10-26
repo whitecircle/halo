@@ -13,8 +13,8 @@ image parts embedded in the messages of a column-less dataset are refused here, 
 the text path would render them with pixels behind them.
 
 CP is not supported (full-sequence log-prob pooling + KL reference term). Under EP/TP use PEFT
-(``ref_model=None``) or ``precompute_ref_log_probs``. PP is declared but not yet available in this
-release.
+(``ref_model=None``) or ``precompute_ref_log_probs``; PP runs text-only ``apo_zero_unpaired`` full
+fine-tuning with ``precompute_ref_log_probs`` only.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/kto.py \\

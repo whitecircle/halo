@@ -337,10 +337,11 @@ def _cross_stage_droppable_prefixes(model: nn.Module, pp_rank: int, pp_size: int
     """Module paths this stage materializes only to DROP at the stage build.
 
     Mirrors :func:`~src.distributed.pipeline_parallel.stage.build_pipeline_stage`: a non-first stage
-    drops the input embedding, a non-last stage replaces the final norm with ``Identity`` and sheds
-    the task head. Their checkpoint values are never consumed on this stage, so a per-node pipeline
-    checkpoint that does not carry them locally is still complete for this stage. Resolved by the
-    same identity/spec probes the stage build uses — never by hardcoded attribute names.
+    drops the input embedding and the spec's input modules, a non-last stage replaces the final norm
+    with ``Identity`` and sheds the task head. Their checkpoint values are never consumed on this
+    stage, so a per-node pipeline checkpoint that does not carry them locally is still complete for
+    this stage. Resolved by the same identity/spec probes the stage build uses — never by hardcoded
+    attribute names.
     """
     prefixes: list[str] = []
     backbone = backbone_with_layers(model)
@@ -348,6 +349,9 @@ def _cross_stage_droppable_prefixes(model: nn.Module, pp_rank: int, pp_size: int
     backbone_prefix = module_path(model, backbone)
     if pp_rank > 0:
         prefixes.append(module_path(model, input_embedding_module(model)))
+        for input_attr in spec.INPUT_MODULE_ATTRS:
+            resolved = resolve_module_attr(backbone, (input_attr,), "input module")
+            prefixes.append(f"{backbone_prefix}.{resolved}" if backbone_prefix else resolved)
     if pp_rank < pp_size - 1:
         norm_attr = resolve_module_attr(backbone, spec.FINAL_NORM_ATTRS, "final norm")
         prefixes.append(f"{backbone_prefix}.{norm_attr}" if backbone_prefix else norm_attr)

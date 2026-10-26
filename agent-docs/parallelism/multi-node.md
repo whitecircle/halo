@@ -15,8 +15,8 @@ Runnable launches, SLURM, and troubleshooting live in [Launch Recipes](launch-re
 | TP | always NVLink-local | `tp_size <= nvlink_domain_size`, divides it evenly |
 | ETP | always NVLink-local | `expert_tp_size` divides the domain |
 | CP | always NVLink-local | `cp_size <= nvlink_domain_size` and divides it (Ulysses all-to-all is bandwidth-bound) |
-| PP | — | not yet available in this release ([Pipeline Parallelism](pipeline-parallelism.md)) |
-| DP | automatic | `world_size / max(tp_size, cp_size, expert_tp_size)` |
+| PP | cross-domain (the only axis meant to be) | stage boundaries fall on domain boundaries, so `pp_size` divides the domain count ([Pipeline Parallelism](pipeline-parallelism.md)) |
+| DP | automatic | `(world_size / pp_size) / max(tp_size, cp_size, expert_tp_size)` |
 
 EP is **orthogonal** to DP — it routes tokens to experts and returns them to their originating
 ranks, so EP never reduces DP.
@@ -234,7 +234,7 @@ config = ParallelismConfig(ep_size=8, tp_size=8, ep_scope="node")
 | `cp_size` | Context parallel size | 1 |
 | `tp_size` | Tensor parallel size (attention) | 1 |
 | `expert_tp_size` | Expert FFN TP size (MoE-only) | 1 |
-| `pp_size` | Pipeline stages — the entry scripts reject `> 1` in this release ([Pipeline Parallelism](pipeline-parallelism.md)) | 1 |
+| `pp_size` | Pipeline stages, each a whole number of NVLink domains ([Pipeline Parallelism](pipeline-parallelism.md)) | 1 |
 | `ep_scope` | `"node"`, `"global"`, or `"auto"` (node-local when the EP group fits one domain) | `"auto"` |
 | `world_size` / `gpus_per_node` / `nvlink_domain_size` | Override the detected topology | 0 (auto) |
 
@@ -461,4 +461,4 @@ keep a job in one rack.
 | Large MoE | Wide node-scope EP at a divisor of the declared domain — `ep_size=72` at `NVLINK_DOMAIN_SIZE=72`, or `ep_size=64` at `NVLINK_DOMAIN_SIZE=64` when the expert count is a power of two |
 | Long sequences | CP up to the domain width, at a divisor of it |
 | Dense / attention-heavy | TP at a divisor of the domain — 8, 9, 12, 18, 24 or 36 at domain 72; `tp_size=16` is rejected |
-| Multi-rack | TP/EP inside each rack, DP across racks ([PP](pipeline-parallelism.md), the axis designed to cross racks, is not yet available) |
+| Multi-rack | TP/EP inside each rack, DP across racks; [PP](pipeline-parallelism.md) is the one axis meant to cross racks |

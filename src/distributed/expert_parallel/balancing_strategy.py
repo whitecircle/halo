@@ -286,7 +286,7 @@ def apply_balancing_strategy(
             # acceptor it raises in turn, so name the knobs that create one instead.
             if accepts_bias_balancing(model) or has_balancing_routers(model):
                 remedy = (
-                    "Use moe_balancing=bias_update (aux-loss-free, works under EP), or "
+                    "Use moe_balancing=bias_update (aux-loss-free, works under EP and PP), or "
                     "moe_balancing=none to train unbalanced deliberately."
                 )
             else:
@@ -317,8 +317,8 @@ def apply_balancing_strategy(
                 "materialize the router-logit plane and inflate its eval loss."
             )
             set_config_field_run_scoped(cfg, "output_router_logits", True)
-        # MoE gradient checkpointing is reentrant, whose no_grad first pass would leave every
-        # checkpointed layer's aux term without a router gradient.
+        # MoE gradient checkpointing is reentrant (outside pipeline parallelism), whose no_grad first
+        # pass would leave every checkpointed layer's aux term without a router gradient.
         if not install_router_aux_gradient(model):
             logger.warning(
                 f"moe_balancing=aux_loss: {type(model).__name__} declares no transformers "

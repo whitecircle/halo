@@ -1,8 +1,8 @@
 """Efficiency harness: what the ``EfficiencyCallback`` reports, compared between two commits (``make
 verify-efficiency BASE=<sha>``) into ``evidence/efficiency_callback-<head sha>.json``. Each tree drives its own
-callback through the same scripted steps on a scripted B300 and clock, per tiny family, parallel shape (real EP,
-TP and FSDP2 wraps on torch's fake process group) and scenario, and the logs dicts, the records logged under the
-package and the snapshot row are compared by value.
+callback over its own roster of tiny family, parallel shape (real EP, TP and FSDP2 wraps and pipeline stage cuts
+on torch's fake process group) and scenario, through the same scripted steps on a scripted B300 and clock; the
+logs dicts, package records and snapshot row of the cases both trees run are compared by value.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create_mixed_precision_policy_v2
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
+from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from tests.common.distributed import fake_process_group
 from tests.common.equivalence.revisions import (
@@ -89,12 +90,14 @@ ModelEdit = Literal["family", "lora", "unreadable_top_k", "single_expert", "no_t
 
 @dataclass(frozen=True)
 class Shape:
-    """A parallel layout as rank 0 of ``world_size``: the ``ParallelismConfig`` fields and whether FSDP2 shards
-    the parameters the EP layers leave to it."""
+    """A parallel layout as ``rank`` of ``world_size`` on nodes of ``gpus_per_node`` ranks (one node when unset):
+    the ``ParallelismConfig`` fields and whether FSDP2 shards the parameters the EP layers leave to it."""
 
     world_size: int
     fields: dict = field(default_factory=dict)
     fsdp: bool = False
+    gpus_per_node: int | None = None
+    rank: int = 0
 
 
 SHAPES = {
@@ -112,8 +115,16 @@ SHAPES = {
     "fsdp2": Shape(2, fsdp=True),
     # The EP layers stay plain rank-local tensors beside DTensor peers.
     "ep2_fsdp2": Shape(2, {"ep_size": 2}, fsdp=True),
+    # A stage must be a whole NVLink domain of two ranks or more, so two stages take two two-rank nodes, and
+    # rank 2 is the first rank of the last stage.
+    "pp2_first": Shape(4, {"pp_size": 2}, gpus_per_node=2),
+    "pp2_last": Shape(4, {"pp_size": 2}, gpus_per_node=2, rank=2),
+    "ep2_pp2_first": Shape(4, {"ep_size": 2, "pp_size": 2}, gpus_per_node=2),
+    "ep2_pp2_last": Shape(4, {"ep_size": 2, "pp_size": 2}, gpus_per_node=2, rank=2),
+    "etp2_pp2_first": Shape(4, {"expert_tp_size": 2, "pp_size": 2}, gpus_per_node=2),
+    "etp2_pp2_last": Shape(4, {"expert_tp_size": 2, "pp_size": 2}, gpus_per_node=2, rank=2),
 }
-DENSE_SHAPES = ("single", "tp2", "cp2", "fsdp2")
+DENSE_SHAPES = ("single", "tp2", "cp2", "fsdp2", "pp2_first", "pp2_last")
 
 
 @dataclass(frozen=True)
@@ -182,6 +193,8 @@ def _cases() -> tuple[EfficiencyCase, ...]:
         shapes = DENSE_SHAPES if family in DENSE_FAMILIES else tuple(SHAPES)
         cases += [EfficiencyCase(family, shape, "default") for shape in shapes if shape not in ("single", "ep2_fsdp2")]
     cases += [EfficiencyCase(SCENARIO_FAMILY, "single", scenario) for scenario in SCENARIOS if scenario != "default"]
+    # A stage computes only its share of the config's full depth.
+    cases.append(EfficiencyCase(SCENARIO_FAMILY, "pp2_first", "layerless"))
     return tuple(cases)
 
 
@@ -285,6 +298,8 @@ def _model(case: EfficiencyCase, scenario: Scenario, parallelism) -> torch.nn.Mo
         _apply_tensor_parallelism(model, case.family, parallelism)
     if case.family in MOE_FAMILIES and parallelism.needs_ep_wrappers:
         patch_moe_model_for_ep(model, parallelism.create_ep_config())
+    if parallelism.pp_size > 1:
+        model = build_pipeline_stage(model, parallelism.pp_rank, parallelism.pp_size, moe_balancing="none")
     if scenario.model == "lora":
         targets = list(family.attention_targets or ("q_proj", "v_proj"))
         model = get_peft_model(model, LoraConfig(r=8, lora_alpha=16, target_modules=targets))
@@ -335,10 +350,11 @@ def _step_tokens(scenario: Scenario, step: int, world_size: int) -> int:
 def run_case(case: EfficiencyCase, scratch: str, *, perturb: bool = False) -> dict:
     """Drive the callback through one case and return what it reported."""
     shape, scenario = SHAPES[case.shape], SCENARIOS[case.scenario]
-    with fake_process_group(0, shape.world_size):
+    with fake_process_group(shape.rank, shape.world_size):
         parallelism = make_parallelism_config(
             world_size=shape.world_size,
-            gpus_per_node=shape.world_size,
+            gpus_per_node=shape.gpus_per_node or shape.world_size,
+            rank=shape.rank,
             lowp_precision=scenario.lowp_precision,
             **shape.fields,
         )
@@ -406,14 +422,20 @@ def raised_reports(reports: dict[str, dict]) -> dict[str, dict]:
 
 
 def assess(reports: dict[str, dict[str, dict]], accept=()) -> tuple[str, dict]:
-    """The verdict on the ``base``, ``head`` and ``control`` reports and its findings: it fails on a delta
-    outside the cases ``accept`` names, on any head raise, and on a control report that matches its base one
-    or raised."""
-    deltas, accepted = split_accepted(compare_outputs(reports["base"], reports["head"]), accept)
-    raised = raised_reports(reports["head"])
-    control = reports["control"]
-    unseen = unseen_controls(compare_outputs(reports["base"], control), control, raised_reports(control))
+    """The verdict on the ``base``, ``head`` and ``control`` reports and its findings. Only the cases both trees
+    ran are compared; one only the head ran is listed as new and one only the base ran as dropped. It fails on a
+    delta outside the cases ``accept`` names, on any head raise, and on a control report that matches its base
+    one or raised."""
+    base, head, control = reports["base"], reports["head"], reports["control"]
+    shared = base.keys() & head.keys()
+    compared = compare_outputs({path: base[path] for path in shared}, {path: head[path] for path in shared})
+    deltas, accepted = split_accepted(compared, accept)
+    raised = raised_reports(head)
+    unseen = unseen_controls(compare_outputs(base, control), control, raised_reports(control))
     findings = {
+        "cases": len(shared),
+        "new": sorted(head.keys() - shared),
+        "dropped": sorted(base.keys() - shared),
         "raised": raised,
         "negative_control": {"cases": sorted(control), "unseen": unseen},
         "accepted": accepted,
@@ -422,9 +444,12 @@ def assess(reports: dict[str, dict[str, dict]], accept=()) -> tuple[str, dict]:
     return "fail" if deltas or raised or unseen else "pass", findings
 
 
-def _produce_in(tree: Path, output: Path, cases, *, perturb: bool = False) -> None:
-    args = ["--produce", str(output), "--cases", *(case.path for case in cases)]
+def _produce_in(tree: Path, output: Path, case_paths: list[str] | None, *, perturb: bool = False) -> dict[str, dict]:
+    """Run ``tree``'s own producer over ``case_paths`` (that tree's whole roster when ``None``) and read back
+    its reports."""
+    args = ["--produce", str(output), *(["--cases", *case_paths] if case_paths else [])]
     run_in_tree(tree, __spec__.name, *args, *(["--perturb"] if perturb else []))
+    return read_reports(output)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -434,16 +459,17 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--produce", type=Path, help="write this tree's case reports under the directory")
     parser.add_argument("--head-ref", default="HEAD", help="the commit under test (default: HEAD)")
     by_path = {case.path: case for case in CASES}
-    parser.add_argument("--cases", nargs="+", choices=list(by_path), default=list(by_path), metavar="CASE")
+    parser.add_argument(
+        "--cases", nargs="+", choices=list(by_path), metavar="CASE", help="run only these (default: every case)"
+    )
     parser.add_argument(
         "--accept", nargs="+", default=[], metavar="CASE", help="cases whose deltas a flagged change declares"
     )
     parser.add_argument("--perturb", action="store_true", help="move one step's clock (the negative control)")
     parser.add_argument("--image", help="the image the run used, recorded in the evidence")
     args = parser.parse_args(argv)
-    cases = [by_path[path] for path in args.cases]
     if args.produce is not None:
-        produce(args.produce, cases, perturb=args.perturb)
+        produce(args.produce, [by_path[path] for path in args.cases or by_path], perturb=args.perturb)
         return 0
 
     base, head = resolve_commit(REPO_ROOT, args.base_ref), resolve_commit(REPO_ROOT, args.head_ref)
@@ -452,20 +478,23 @@ def main(argv: list[str] | None = None) -> int:
             label: export_tree(REPO_ROOT, commit, Path(scratch, label))
             for label, commit in (("base", base), ("head", head))
         }
-        outputs = {label: Path(scratch, f"{label}-reports") for label in ("base", "head", "control")}
-        for label in ("base", "head"):
-            _produce_in(trees[label], outputs[label], cases)
-        _produce_in(trees["head"], outputs["control"], cases[:1], perturb=True)
-        reports = {label: read_reports(output) for label, output in outputs.items()}
-    verdict, assessed = assess(reports, args.accept)
-    findings = {"cases": len(cases), **assessed}
+        reports = {
+            label: _produce_in(trees[label], Path(scratch, f"{label}-reports"), args.cases)
+            for label in ("base", "head")
+        }
+        shared = sorted(reports["base"].keys() & reports["head"].keys())
+        if not shared:
+            raise SystemExit("efficiency callback: the base and head rosters share no case to compare")
+        reports["control"] = _produce_in(trees["head"], Path(scratch, "control-reports"), shared[:1], perturb=True)
+    verdict, findings = assess(reports, args.accept)
     path = write_evidence(
         "efficiency_callback", base=base, head=head, image=args.image, verdict=verdict, findings=findings
     )
     print(  # noqa: T201 — the CLI's report
-        f"efficiency callback: {verdict}, {len(cases)} cases, {len(assessed['deltas'])} deltas, "
-        f"{len(assessed['accepted'])} accepted, {len(assessed['raised'])} raising, negative control unseen in "
-        f"{len(assessed['negative_control']['unseen'])} ({path})"
+        f"efficiency callback: {verdict}, {findings['cases']} cases compared ({len(findings['new'])} new, "
+        f"{len(findings['dropped'])} dropped), {len(findings['deltas'])} deltas, {len(findings['accepted'])} "
+        f"accepted, {len(findings['raised'])} raising, negative control unseen in "
+        f"{len(findings['negative_control']['unseen'])} ({path})"
     )
     return 0 if verdict == "pass" else 1
 

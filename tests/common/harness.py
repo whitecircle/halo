@@ -39,6 +39,7 @@ trainer-scoped — none reachable from a plain ``with`` block, all handled here 
 
 import functools
 import os
+import random
 import sys
 import traceback
 from collections.abc import Callable
@@ -48,6 +49,7 @@ import torch.distributed as dist
 from accelerate import PartialState
 
 from src.callbacks.efficiency import EfficiencyCallback
+from src.hardware import is_blackwell_gpu
 from tests.common.distributed import (
     cleanup_dirs,
     init_distributed,
@@ -94,6 +96,21 @@ class Ctx:
     def barrier(self) -> None:
         if dist.is_initialized():
             dist.barrier()
+
+    def broadcast_seed(self, seed: int = 42) -> int:
+        """Seed torch/random identically on all ranks (rank-0 value wins).
+
+        Use when every rank must generate the same data (a parallel-mode run
+        compared against a single-GPU reference). Returns the shared seed.
+        """
+        t = torch.tensor([seed], device=self.device)
+        if dist.is_initialized():
+            dist.broadcast(t, src=0)
+        shared = int(t.item())
+        torch.manual_seed(shared)
+        torch.cuda.manual_seed_all(shared)
+        random.seed(shared)
+        return shared
 
     def broadcast_checks(self, checks: dict[str, bool]) -> dict[str, bool]:
         """Share rank 0's verdict with every rank, without masking another rank's own failure.
@@ -164,6 +181,17 @@ def skip_unless_local_checkpoint(path: str, env_var: str) -> None:
     """
     if not os.path.isdir(path):
         log(f"SKIP: local model path missing: {path} (set {env_var} to a present checkpoint)")
+        sys.exit(0)
+
+
+def skip_unless_blackwell(what: str) -> None:
+    """Decline to run, before the harness starts, on a GPU older than Blackwell.
+
+    For a suite that runs FlashAttention 4, which only the Blackwell image ships. The launcher reads an
+    exit-0 run that printed a ``SKIP:`` line and no result line as a skip.
+    """
+    if not is_blackwell_gpu():
+        log(f"SKIP: {what} runs FlashAttention 4, which needs a Blackwell GPU")
         sys.exit(0)
 
 

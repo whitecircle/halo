@@ -15,8 +15,10 @@ two more itself in src/models/seq_cls_heads.py — Gemma 4 and MoE Qwen3.5/3.6, 
 spellings a checkpoint can carry (composite and text tower). Any other multimodal checkpoint is
 refused up front, before the model load.
 
-CP is not supported (the score head pools the complete sequence). PP is declared but not yet
-available in this release.
+CP is not supported (the score head pools the complete sequence). PP admits a multimodal
+checkpoint only for a run that feeds no images: the split keeps the text tower and score head, the
+untouched vision tensors ride every checkpoint under the wrapper layout, and an image-feeding run is
+refused by the pipeline gate.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/rewards.py \\

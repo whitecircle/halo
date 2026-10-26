@@ -104,7 +104,7 @@ python scripts/after_training/merge_peft_adapters.py \
 | [TP](../parallelism/tensor-parallelism.md) | Weight matrices | Large dense, or any model with `tp_plan` |
 | [CP](../parallelism/context-parallelism.md) | Input sequences | 32K+ tokens |
 | [ETP](../parallelism/expert-tensor-parallelism.md) | Expert FFN weights | MoE expert memory (experimental) |
-| [PP](../parallelism/pipeline-parallelism.md) | The layer stack, into stages | Not yet available in this release |
+| [PP](../parallelism/pipeline-parallelism.md) | The layer stack, into stages | Depth across NVLink domains |
 
 ```bash
 # EP (MoE only); every other axis is the same line with its own flag
@@ -121,7 +121,7 @@ Before you burn a run:
     For 4-way expert sharding on 8 GPUs use `ep4 + expert_tp2`; attention TP does not widen the dispatch group.
 
 - **CP** needs a real Flash Attention impl, `seq_len` and both head counts divisible by `cp_size`, and stays node-local.
-- **Combinations are an allowlist.** Each axis alone, plus EP+TP, EP+CP, and EP+ETP. Everything else — TP+CP, ETP+CP, TP+ETP, EP+TP+ETP — is rejected by `ParallelismConfig` before any model loads, with the mechanism; `pipeline_parallel_size > 1` ([not yet available](../parallelism/pipeline-parallelism.md)) is rejected one step earlier, where the CLI arguments are turned into that config. See [Parallelism](../parallelism/README.md).
+- **Combinations are an allowlist.** Each axis alone, plus EP+TP, EP+CP, EP+ETP, PP+EP and PP+ETP. Everything else — TP+CP, ETP+CP, TP+ETP, EP+TP+ETP, and PP with TP or CP — is rejected by `ParallelismConfig` before any model loads, with the mechanism. See [Parallelism](../parallelism/README.md).
 
 ### Multi-node
 

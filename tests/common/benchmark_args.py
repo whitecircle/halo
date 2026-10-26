@@ -89,14 +89,16 @@ def create_benchmark_parser(
         "--grad_accum",
         type=int,
         default=1,
-        help="Gradient accumulation steps",
+        help="Gradient accumulation steps. Under PP leave at 1 and set --pp_microbatches instead "
+        "(the pipeline's microbatches are the accumulation); >1 matches a baseline's global batch "
+        "to a PP run's.",
     )
     parser.add_argument(
         "--pp",
         type=int,
         default=1,
-        help="Pipeline parallel size. Pipeline parallelism is not yet available in this release; "
-        "a benchmark that reads this rejects a value above 1 before the model loads.",
+        help="Pipeline parallel size (stages). Splits decoder layers into pp contiguous stages; "
+        "data_parallel_size divides by pp (a whole pipeline chain consumes one batch).",
     )
     parser.add_argument(
         "--pp_microbatches",
@@ -121,19 +123,19 @@ def axis_tags(**sizes: int) -> list[str]:
 
 
 def pp_topology_kwargs(pp_size: int, world_size: int) -> dict:
-    """ParallelismConfig topology kwargs for a benchmark's ``--pp``: none at ``--pp 1``.
+    """ParallelismConfig topology kwargs for benchmarking PP on a single physical NVLink domain.
 
-    Pipeline parallelism is not yet available in this release. The benchmarks build
-    ``ParallelismConfig`` directly, bypassing the config-time rejection in
-    ``parallelism_config_from_args``, so this helper rejects ``--pp > 1`` up front rather than
-    failing after model load.
+    PP requires stage boundaries on NVLink-domain boundaries (``stage_world_size %
+    nvlink_domain_size == 0``), which one 8-GPU domain cannot satisfy for pp > 1. Mirror the
+    correctness matrix (tests/gpu/parallelism/pp/): simulate one NVLink domain per stage, so each
+    stage owns a whole (simulated) domain and every intra-stage EP/FSDP group stays NVLink-local.
+    Groups, transports and schedules match a real multi-domain placement, except that the P2P
+    boundary activations ride NVLink instead of RDMA (an upper bound on cross-node PP throughput).
     """
     if pp_size <= 1:
         return {}
-    raise NotImplementedError(
-        "Pipeline parallelism is not yet available in this release — run the benchmark with "
-        "--pp 1 (see agent-docs/parallelism/pipeline-parallelism.md)."
-    )
+    stage_world = world_size // pp_size
+    return {"gpus_per_node": stage_world, "nvlink_domain_size": stage_world}
 
 
 def resolve_benchmark_attn(

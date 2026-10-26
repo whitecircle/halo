@@ -4,15 +4,14 @@
 Smooth Margin Preference Optimization — reference-model-free preference training. One script serves
 both text and vision-language models. The model class follows the checkpoint
 (``load_model_for_training`` auto-detects it); the data path follows the run (``is_vlm_run``), so a
-natively-multimodal checkpoint trained on text-only pairs takes the text path and keeps CP and
-padding_free. A VLM run passes its raw rows through: the trainer normalizes and
+natively-multimodal checkpoint trained on text-only pairs takes the text path and keeps CP,
+padding_free and PP. A VLM run passes its raw rows through: the trainer normalizes and
 chat-templates them itself and auto-selects ``DataCollatorForVLMSMPO`` (image processing at
 collation, vision tensors threaded through the chosen/rejected concat). A text run templates the
 pairs here and runs generation-eval examples.
 
-Supported Parallelism Modes: EP, CP, TP, ETP and their allowlisted combinations
-(``SUPPORTED_AXIS_SETS``; TP+CP unsupported; a VLM run supports neither CP nor padding_free).
-PP is declared but not yet available in this release.
+Supported Parallelism Modes: EP, CP, TP, ETP, PP and their allowlisted combinations
+(``SUPPORTED_AXIS_SETS``; TP+CP unsupported; a VLM run supports none of CP, PP or padding_free).
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \\
@@ -63,12 +62,14 @@ def main():
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
 
     # The run's data path, not the checkpoint's modality: a multimodal checkpoint carrying text-only
-    # pairs is a text run, and CP / padding_free stay legal for it. Decided here so the VLM
-    # guards (the trainer enforces the same ones) raise before the model load, which also requires
-    # the checkpoint's processor for a VLM run.
+    # pairs is a text run, and CP / padding_free / PP stay legal for it. Decided before the model
+    # load, which needs the checkpoint's processor for a VLM run, so the CP and PP refusals below
+    # raise before any weight is read (the trainer repeats them and adds padding_free).
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=dist_args.text_only_model)
     if dist_args.context_parallel_size > 1 and is_vlm:
         raise ValueError("SMPO VLM mode does not support Context Parallelism — drop --context_parallel_size.")
+    if dist_args.pipeline_parallel_size > 1 and is_vlm:
+        raise ValueError("SMPO VLM mode does not support Pipeline Parallelism — drop --pipeline_parallel_size.")
     if is_vlm:
         # The trainer's VLM row render (tokenize_vlm_preference_row) templates the prompt without
         # `tools=`, so a declared tools column would render toolless.

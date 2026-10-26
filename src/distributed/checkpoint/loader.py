@@ -14,6 +14,7 @@ from __future__ import annotations
 import itertools
 import logging
 import os
+from collections.abc import Iterable
 from functools import partial
 
 import torch
@@ -23,6 +24,7 @@ from transformers import PreTrainedModel
 
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
 from src.checkpoint.format import (
+    CheckpointWeights,
     ModuleLayoutView,
     has_adapter_weight_file,
     has_whole_model_weight_file,
@@ -161,29 +163,26 @@ def resume_numel_coverage(model, checkpoint_keys: set[str]) -> tuple[bool, set[s
     return covered, unmatched, matched_numel, total_numel
 
 
-def _absent_stage_shards_reason(checkpoint: str, stage_keys, pp_rank: int) -> str | None:
-    """Why this filesystem's copy of ``checkpoint`` lacks shard files holding this stage's tensors.
+def _absent_stage_shards_reason(layout: CheckpointWeights, sources: Iterable[str], pp_rank: int) -> str | None:
+    """Why this filesystem's copy of a checkpoint lacks shard files holding ``sources``, the checkpoint
+    keys this stage reads.
 
-    Read off the merged index alone, the only layout a PP save writes. ``None`` when every such file
-    is present or the index itself cannot be read, which the joined reader reports as a torn save.
+    Read off the merged index alone, the only layout a PP save writes; ``None`` when every such file
+    is present or the checkpoint has no index.
     """
-    try:
-        layout = resolve_checkpoint_weights(checkpoint)
-    except (OSError, ValueError):
-        return None
     if layout.index is None:
         return None
     absent = sorted(
         {
             shard
             for key, shard in layout.weight_map.items()
-            if key in stage_keys and not os.path.isfile(layout.path(shard))
+            if key in sources and not os.path.isfile(layout.path(shard))
         }
     )
     if not absent:
         return None
     return (
-        f"PP stage {pp_rank}: {checkpoint} indexes this stage's tensors in shard file(s) absent from this "
+        f"PP stage {pp_rank}: {layout.directory} indexes this stage's tensors in shard file(s) absent from this "
         f"node's copy ({absent[:KEY_PREVIEW_COUNT]}). {PER_NODE_PLACEMENT_REMEDY}"
     )
 
@@ -194,7 +193,7 @@ def _rank0_module_layout(model, state_dict: dict, checkpoint: str, mode: str) ->
     converted: dict = {}
     raise_rank0_failure(
         lambda: converted.update(
-            ModuleLayoutView(unwrap_framework_wrappers(model), list(state_dict), state_dict.pop).items()
+            ModuleLayoutView(unwrap_framework_wrappers(model), list(state_dict)).items(state_dict.pop)
         ),
         lambda e: f"{mode} resume from {checkpoint}: mapping the checkpoint onto the live model's names failed: {e}",
     )
@@ -242,8 +241,8 @@ class CheckpointLoader:
           :meth:`_load_streamed`).
         - Single process / DDP with whole weights: each rank streams them into its own copy, through
           the same seam.
-        - PP: skipped for a stage constructed from the checkpoint, else this rank's global-named
-          tensors from the merged index into the stage (see :meth:`_load_pp_stage`).
+        - PP: skipped for a stage constructed from the checkpoint, else this rank's tensors from the
+          merged index into the stage (see :meth:`_load_pp_stage`).
         - Other (accelerate FSDP, adapter-only, non-transformers models): falls through to base Trainer.
 
         Every whole-weight read maps the checkpoint onto the live names through
@@ -458,7 +457,7 @@ class CheckpointLoader:
         hand_sliced = dict(getattr(unwrap_model(model), "_tp_sharded_non_dtensor", None) or ())
 
         with joined_streaming_reader(checkpoint, None, what=f"{mode} checkpoint") as reader:
-            view = ModuleLayoutView(unwrapped, reader.available, reader.get)
+            view = ModuleLayoutView(unwrapped, reader.available)
             # Coverage gate: the load below writes only the keys that match, so a checkpoint written
             # for another wrapper layout would resume BASE weights for most of the model. Verdict
             # joined, and the key counts agreed with rank 0's — on disk too, since one fused tensor
@@ -481,7 +480,7 @@ class CheckpointLoader:
                     )
 
             guard = DeferredRankFailure(f"{mode} checkpoint reload from {checkpoint}")
-            guard.run(partial(self._copy_into_live, view, live, hand_sliced))
+            guard.run(partial(self._copy_into_live, view.items(reader.get), live, hand_sliced))
             guard.reject()
 
         if is_global_main_process():
@@ -489,11 +488,11 @@ class CheckpointLoader:
             logger.info(f"✓ {mode} checkpoint loaded from {checkpoint} ({len(live)} live tensors{tp})")
         barrier()
 
-    def _copy_into_live(self, view: ModuleLayoutView, live: dict, hand_sliced: dict) -> None:
-        """Write every tensor ``view`` supplies into this rank's live tensor: DTensors take their own
+    def _copy_into_live(self, tensors: Iterable[tuple[str, torch.Tensor]], live: dict, hand_sliced: dict) -> None:
+        """Write every ``(live name, tensor)`` into this rank's live tensor: DTensors take their own
         placements' shard, hand-sliced TP params this ``tp_rank``'s chunk, everything else the whole."""
         with torch.no_grad():
-            for name, value in view.items():
+            for name, value in tensors:
                 target = live[name]
                 data = target.data if isinstance(target, torch.nn.Parameter) else target
                 value = value.to(data.dtype)
@@ -507,7 +506,7 @@ class CheckpointLoader:
                 del value
 
     def _load_pp_stage(self, checkpoint: str, model=None, *, for_best_model: bool = False) -> None:
-        """Load a PP checkpoint's global-named tensors into this rank's pipeline stage.
+        """Load a PP checkpoint's tensors into this rank's pipeline stage.
 
         A stage ``load_distributed_model`` constructed FROM this checkpoint on every rank already holds
         exactly these tensors: the stage-aware loader read them, configured FP32 masters at FP32, and
@@ -515,13 +514,14 @@ class CheckpointLoader:
         then, as on the FSDP2 and TP paths; a best-model load always reads, since the live weights
         trained past it.
 
-        The PP save wrote one complete-tensor shard per stage under the UNSPLIT model's global
-        names (merged standard HF index); the stage's ``global_parameter_name`` supplies the
-        inverse map back to its local names, and only this rank's keys are read. Tensors are
-        copied into the live (possibly FSDP2-sharded) params via ``distribute_tensor`` + ``copy_``
-        — the proven adapter-restore pattern — so every collective stays inside this stage's own
-        DP mesh; a ``broadcast_from_rank0`` ``set_model_state_dict`` would cross stages holding
-        different layers.
+        The PP save wrote one complete-tensor shard per stage in the hub's namespace (merged standard HF
+        index). :class:`ModuleLayoutView`, with the conversions the stage snapshotted from the unsplit
+        model, maps those keys onto the unsplit model's global names, the stage's
+        ``global_parameter_name`` maps those back to its local names, and only this rank's keys are
+        read. Tensors are copied into the live (possibly FSDP2-sharded) params via
+        ``distribute_tensor`` + ``copy_`` — the proven adapter-restore pattern — so every collective
+        stays inside this stage's own DP mesh; a ``broadcast_from_rank0`` ``set_model_state_dict``
+        would cross stages holding different layers.
 
         Because the shards are keyed globally, the WEIGHTS are topology-independent: the same
         directory resumes onto a different ``pp_size``. The optimizer shards are not — they are
@@ -567,19 +567,32 @@ class CheckpointLoader:
         # modules unsharded; the copies below must land in the sharded DTensors.
         reshard_fsdp2_modules(stage)
 
-        # The stage's own map, identical to the one the save walked, so resume reads exactly what was written.
+        # The stage's own map, identical to the one the save walked.
         local_by_global = stage.checkpoint_name_map()
+        # The save writes the hub's names, so the checkpoint is mapped onto the stage's global names the
+        # way from_pretrained reads it, from the key names alone, before any shard opens. Joined: the
+        # index is read per rank, and a torn one on a single node must not strand its peers.
+        layout, checkpoint_keys, reason = None, set(), None
+        try:
+            layout = resolve_checkpoint_weights(checkpoint)
+            checkpoint_keys = layout.key_set()
+        except Exception as e:
+            reason = f"unreadable checkpoint index at {checkpoint} ({type(e).__name__}: {e}), a torn save"
+        reject_across_ranks(reason, "PP resume checkpoint index")
+        view = ModuleLayoutView(
+            stage, checkpoint_keys, live_names=local_by_global.keys(), namespace=stage.checkpoint_namespace
+        )
         reject_across_ranks(
-            _absent_stage_shards_reason(checkpoint, local_by_global, ctx.parallelism_config.pp_rank),
+            _absent_stage_shards_reason(layout, view.sources, ctx.parallelism_config.pp_rank),
             "PP resume shard placement",
         )
 
         # Consensus first: a torn shard must raise rank-uniformly, not strand peers mid-collective.
         # Opening the shards is what validates them, so the reader is built here, ahead of both
-        # joins, and only serves tensors afterwards — one at a time, never the whole stage at once.
-        with joined_streaming_reader(checkpoint, local_by_global, what="PP checkpoint") as reader:
-            # Coverage gate: a requested key absent from the checkpoint would silently keep BASE weights.
-            missing = sorted(set(local_by_global) - reader.available)
+        # joins, and only serves tensors afterwards — one group at a time, never the whole stage.
+        with joined_streaming_reader(checkpoint, view.sources, what="PP checkpoint") as reader:
+            # Coverage gate: a stage tensor the checkpoint does not supply would silently keep BASE weights.
+            missing = sorted(set(local_by_global) - view.keys)
             if not all_ranks_ok(not missing):
                 raise RuntimeError(
                     f"PP resume from {checkpoint}: {len(missing)} of this stage's tensors are absent "
@@ -591,8 +604,9 @@ class CheckpointLoader:
             live: dict[str, torch.Tensor] = dict(stage.named_parameters())
             live.update(dict(stage.named_buffers()))
             with torch.no_grad():
-                # Sorted: distribute_tensor issues mesh collectives — same key order on every stage rank.
-                for global_name in sorted(local_by_global):
+                # The view walks the checkpoint's keys in natural order, so every stage rank issues the
+                # distribute_tensor mesh collectives below in the same order.
+                for global_name, value in view.items(reader.get):
                     local_name = local_by_global[global_name]
                     target = live.get(local_name)
                     if target is None:
@@ -602,7 +616,7 @@ class CheckpointLoader:
                             f"not understand."
                         )
                     # A DTensor target is a collective inside this stage's own mesh.
-                    copy_full_tensor(target, reader.get(global_name))
+                    copy_full_tensor(target, value)
 
         if is_global_main_process():
             logger.info(f"✓ PP stage checkpoint loaded from {checkpoint} ({len(local_by_global)} tensors)")

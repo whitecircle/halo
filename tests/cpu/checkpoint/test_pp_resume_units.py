@@ -1,7 +1,8 @@
 """CPU tests for PP checkpoint resume: the global↔local name remap and the loader's resume gates.
 
-A PP checkpoint stores complete tensors under the UNSPLIT model's global names; resume maps them
-back through each stage's ``global_parameter_name``. The gates under test:
+A PP checkpoint stores the UNSPLIT model's complete tensors under the hub's names; resume maps them
+onto the unsplit model's names through ``ModuleLayoutView`` and back to the stage's own through its
+``global_parameter_name``. The gates under test:
 
 - a stage constructed from the checkpoint on every rank skips the reload (a best-model load never does);
 - weight coverage: a stage tensor absent from the checkpoint raises (a silent miss = base weights), and

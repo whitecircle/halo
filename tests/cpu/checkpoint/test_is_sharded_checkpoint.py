@@ -44,7 +44,7 @@ def test_sharded_format_marker_detected(tmp_path):
 
 
 def test_pp_stage_index_is_not_per_rank_sharded(tmp_path):
-    """A PP save writes one shard per stage under GLOBAL names and deliberately stamps no format
+    """A PP save writes one shard per stage under the hub's names and deliberately stamps no format
     marker — its tensors are complete, so it must stay directly loadable."""
     payload = json.dumps(
         {"metadata": {"total_size": 8}, "weight_map": {"w": "model-pp00000-of-00002-00001.safetensors"}}

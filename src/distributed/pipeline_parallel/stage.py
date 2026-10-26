@@ -24,8 +24,10 @@ from torch.utils.checkpoint import checkpoint
 from transformers import PretrainedConfig
 
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR, hf_architecture_name
+from src.checkpoint.format import CheckpointNamespace
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.dispatcher import register_forward_generation_hook
+from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.pipeline_parallel.split import (
     decoder_layers_attr,
     layer_types_shift_invariant,
@@ -100,6 +102,11 @@ class PipelineStageModule(nn.Module):
     config: PretrainedConfig
     generation_config = None
     _remote_code_model_class: type | None = None
+    # The unsplit model's checkpoint namespace, taken at the build because transformers resolves it off
+    # the whole model: the conversions the save reverts each tensor group through, and the mapping a
+    # reload replays. Empty, the identity, on a stage built by hand.
+    export_conversions: tuple = ()
+    checkpoint_namespace: CheckpointNamespace = CheckpointNamespace()
 
     def __init__(
         self,
@@ -447,6 +454,10 @@ def build_pipeline_stage(
         ValueError: the model cannot be split (see :mod:`.split`), or has fewer layers than stages.
     """
     validate_model_supports_pp(model, moe_balancing)
+    # Off the whole model, not the stage: transformers resolves the mapping off a PreTrainedModel's
+    # tree, and the stage's names are stage-local.
+    export_conversions = tuple(gathered_export_conversions(model))
+    checkpoint_namespace = CheckpointNamespace.of(model)
     backbone = backbone_with_layers(model)
     spec = resolve_pp_spec(backbone)
 
@@ -500,6 +511,8 @@ def build_pipeline_stage(
     if not is_first:
         # Never used (non-first stages run on inputs_embeds); dropped so it cannot reach this stage's state_dict.
         _drop_input_embeddings(model)
+        for input_attr in spec.INPUT_MODULE_ATTRS:
+            setattr(backbone, resolve_module_attr(backbone, (input_attr,), "input module"), None)
 
     head_attr = resolve_module_attr(model, spec.HEAD_ATTRS, "task head")
     head = getattr(model, head_attr) if is_last else None
@@ -524,6 +537,8 @@ def build_pipeline_stage(
     )
     # HF Trainer and the checkpoint writers read ``model.config``; it is what a reassembled ckpt ships.
     stage.config = model.config
+    stage.export_conversions = export_conversions
+    stage.checkpoint_namespace = checkpoint_namespace
     # Where load_distributed_model read the weights: the resume's construction-identity verdict.
     if hasattr(model, LOADED_WEIGHTS_FROM_ATTR):
         setattr(stage, LOADED_WEIGHTS_FROM_ATTR, getattr(model, LOADED_WEIGHTS_FROM_ATTR))

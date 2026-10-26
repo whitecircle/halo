@@ -8,9 +8,9 @@ pre-processed datasets, QLoRA and ``init_from_scratch``; the VLM path loads an
 ``AutoModelForImageTextToText`` plus processor and uses the VLM collators (packing/padding-free do
 not apply to images).
 
-Parallelism: every axis set ``ParallelismConfig`` admits (``SUPPORTED_AXIS_SETS``), CP included;
-PP is declared but not yet available in this release. CP is incompatible with padding-free, and CP
-is text-only: the CP wrapper raises on a batch carrying ``pixel_values``.
+Parallelism: every axis set ``ParallelismConfig`` admits (``SUPPORTED_AXIS_SETS``), CP and PP
+included. CP and PP are incompatible with padding-free and text-only: the CP wrapper raises on a
+batch carrying ``pixel_values``, and the pipeline gate refuses an image-feeding run.
 
 Usage:
     torchrun --nproc_per_node=8 scripts/training/sft.py \\

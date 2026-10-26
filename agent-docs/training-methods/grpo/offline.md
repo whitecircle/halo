@@ -58,7 +58,7 @@ learning_rate: 5.0e-06
 | `use_chunked_grpo_logprobs` | `false` | Vocab-chunked log-probs, not full logits |
 | `max_prompt_length` | `512` | Prompt budget, left-truncated; `null` = no cap |
 | `max_completion_length` | `null` | Completion budget, cut from the end; `null` = no cap |
-| `max_length` | `null` | Any value is rejected at construction: only [pipeline parallelism](../../parallelism/pipeline-parallelism.md), not yet available, reads it |
+| `max_length` | `null` | Fixed padded row length under [pipeline parallelism](../../parallelism/pipeline-parallelism.md) (`null` = prompt + completion budgets); rejected at construction off PP |
 
 - The shipped recipes run `learning_rate: 5.0e-06`, the top of the SFT full-FT band; a wider batch helps ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 - Both length knobs truncate, and the tokenizer's window is pinned only when both are bounded. A completion cut at its cap gets no EOS, so it is never taught to stop there.

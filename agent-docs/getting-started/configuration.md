@@ -109,7 +109,7 @@ EP/CP/TP/ETP/PP under `accelerate launch` **raise** at startup for any `distribu
 | TP | `torchrun --nproc_per_node=8 script.py config.yaml --tensor_parallel_size=8` |
 | CP | `torchrun --nproc_per_node=4 script.py config.yaml --context_parallel_size=4` |
 | ETP | `torchrun --nproc_per_node=8 script.py config.yaml --expert_tensor_parallel_size=8` |
-| PP | — not yet available in this release ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)) |
+| PP | `torchrun --nproc_per_node=8 script.py config.yaml --pipeline_parallel_size=2` plus the multi-node flags below, one stage per 8-GPU node ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)) |
 | EP+CP / EP+TP | add both flags |
 | Multi-node | add `--nnodes`, `--node_rank`, `--master_addr`, `--master_port` |
 
@@ -219,7 +219,7 @@ CLI flags under `torchrun` (also settable in YAML):
 | `--context_parallel_size` | GPUs for sequence splitting (Ulysses attention) |
 | `--tensor_parallel_size` | GPUs for DTensor weight sharding |
 | `--expert_tensor_parallel_size` | GPUs for expert FFN sharding (experimental) |
-| `--pipeline_parallel_size` | Pipeline stages over the decoder layers. Only `1` (the default) is accepted in this release — larger values are rejected at config time, and the other `--pipeline_*` knobs are rejected at `pipeline_parallel_size == 1` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)) |
+| `--pipeline_parallel_size` | Pipeline stages over the decoder layers; each stage must be a whole number of NVLink domains. The other `--pipeline_*` knobs are rejected at `pipeline_parallel_size == 1` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)) |
 | `--pipeline_microbatches` / `--pipeline_schedule` / `--pipeline_split` | PP-only knobs (microbatch count; `1f1b`/`gpipe`; per-stage layer counts) — see above |
 | `--nvlink_domain_size` | GPUs reachable over NVLink — the locality unit for node-local EP/CP/TP/ETP grouping (default `0` = auto: the `NVLINK_DOMAIN_SIZE` env var, else `gpus_per_node`) |
 | `--ep_lazy_loading` | Lazy safetensors loading for EP paths (default `true`); each rank reads only its expert slice |

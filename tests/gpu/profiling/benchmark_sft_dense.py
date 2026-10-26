@@ -5,7 +5,7 @@ Dense model SFT MFU/TFLOPS benchmark.
 Measures Model FLOPS Utilization (MFU), achieved TFLOPS, and tokens/sec
 for dense (non-MoE) models using DistributedSFTTrainer with EfficiencyCallback.
 
-Supports modes: FSDP (default), CP, TP, LoRA, QLoRA.
+Supports modes: FSDP (default), CP, TP, PP, LoRA, QLoRA.
 
 ``--model`` and ``--seq`` default to the shared benchmark parser's values
 (``tests/common/benchmark_args.py``), whose default model is a MoE, so every example names a dense one.
@@ -22,6 +22,10 @@ Usage:
     # Ulysses CP mode (cp=2) with Qwen3-8B
     torchrun --nproc_per_node=2 \
         tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 4096 --steps 10 --cp 2
+
+    # PP mode (pp2 x dp4 on 8 GPUs, 8 microbatches; batch_size must be divisible by microbatches)
+    torchrun --nproc_per_node=8 \
+        tests/gpu/profiling/benchmark_sft_dense.py --model qwen3-8b --seq 8192 --pp 2 --pp_microbatches 8 --batch_size 16
 
     # LoRA r=64, attention-only targets
     torchrun --nproc_per_node=1 \

@@ -86,11 +86,9 @@ vocabulary, below).
 | `DistributedSelfDistillationTrainer` | `DistributedSFTTrainer` | No | No |
 | `EmbeddingTrainer` | `SentenceTransformerTrainer` | No | No |
 
-EP, ETP and TP run under every trainer. The PP axis itself is **not yet available in this release**
-([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)); the PP column records each
-trainer's `_supports_pp` declaration. At config time a **No** trainer is refused by that gate first
-(`<Trainer> does not support Pipeline Parallelism (PP)`), and a **Yes** trainer by the release gate
-right after it.
+EP, ETP and TP run under every trainer. A **No** PP trainer is refused at config time
+(`<Trainer> does not support Pipeline Parallelism (PP)`); see
+[Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 
 CP and PP support is declared per class as `_supports_cp` /
 `_supports_pp` and enforced in `ParallelismValidationMixin`; `_pp_unsupported_reason` carries the
@@ -252,7 +250,7 @@ each rank clips by its own coefficient) and backstopped by a step-pre-hook for `
 | EP+CP | `world / cp_size` | EP hooks for experts + FSDP2 for non-experts | `load_model_for_ep_cp()` |
 | EP+TP | `world / tp_size` | DTensor (TP) + EP hooks (experts) + FSDP2 per-TP-position DP groups | `load_distributed_model()` |
 | ETP (pure, `ep_size=1`) | `world / expert_tp_size` | EP hooks with expert-TP sub-group aggregation + FSDP2 | `load_distributed_model()` |
-| PP ([not yet available](../parallelism/pipeline-parallelism.md)) | `world / pp_size` | stage-scoped FSDP2 (EP-aware) inside each stage; P2P for boundary activations | `load_distributed_model()`, split per stage |
+| [PP](../parallelism/pipeline-parallelism.md) | `world / pp_size` | stage-scoped FSDP2 (EP-aware) inside each stage; P2P for boundary activations | `load_distributed_model()`, split per stage |
 
 Which combinations may run, and the domain-locality rules each one carries, are the
 `ParallelismConfig` allowlist's business — see

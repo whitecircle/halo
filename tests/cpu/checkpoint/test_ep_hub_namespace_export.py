@@ -341,7 +341,7 @@ def test_resume_reads_the_gathered_save_back(name, tmp_path):
     shell = tiny_family_model(loaded.family).to(torch.bfloat16)
     tied = {key for key, _ in shell.named_parameters(remove_duplicate=False)} - dict(shell.named_parameters()).keys()
 
-    read = dict(ModuleLayoutView(shell, list(loaded.saved), loaded.saved.__getitem__).items())
+    read = dict(ModuleLayoutView(shell, list(loaded.saved)).items(loaded.saved.__getitem__))
 
     assert set(shell.state_dict()) - tied - set(read) == set(), f"{name}: the resume reads nothing for them"
     differing = [

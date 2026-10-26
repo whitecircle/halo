@@ -8,8 +8,9 @@ auto-selects ``DataCollatorForVisionPreference`` for an images-bearing dataset; 
 the repo tokenizes the pairs and runs generation-eval examples.
 
 CP is not supported (``concatenated_forward`` needs full sequences). Under EP/TP use PEFT
-(``ref_model=None``) or ``precompute_ref_log_probs`` — the reference is not parallelized. PP is
-declared but not yet available in this release.
+(``ref_model=None``) or ``precompute_ref_log_probs`` — the reference is not parallelized; PP runs
+text-only full fine-tuning of the per-pair loss types (sigmoid, hinge, ipo) with
+``precompute_ref_log_probs`` only.
 
 Usage:
     # Text or VLM (auto-detected) — EP / TP via torchrun

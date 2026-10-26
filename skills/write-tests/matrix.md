@@ -3,19 +3,13 @@
 Tick these off when a change touches a trainer, parallelism mode, or model family. A
 support-matrix addition is not done until its **rejection counterpart** exists.
 
-**PP is not available in this release** — the schedule engine is not shipped, and
-`parallelism_config_from_args` rejects `pipeline_parallel_size > 1` at config time. Never write a
-PP **correctness** suite: no PP run is launchable, so it could only pass by not running. The PP
-coverage that belongs here is the rejection kind — the release gate, the validator raises, and the
-`_supports_pp` gate — all of it CPU-side.
-
 ## Trainer × parallelism support matrix
 
 From the trainer table in `CLAUDE.md`. For each cell marked **Yes**, there should be a
 correctness test (loss finite + decreasing over ≥2 steps + cross-rank invariants). For each
 **No / NOT SUPPORTED**, there should be a rejection test (must raise).
 
-| Trainer | EP | CP | TP | ETP | PP (declared, inert) |
+| Trainer | EP | CP | TP | ETP | PP |
 |---|:--:|:--:|:--:|:--:|:--:|
 | `DistributedSFTTrainer` | Yes | Yes | Yes | Yes | Yes |
 | `SmoothMarginPOTrainer` (SMPO) | Yes | Yes | Yes | Yes | Yes |
@@ -34,19 +28,16 @@ correctness test (loss finite + decreasing over ≥2 steps + cross-rank invarian
 `_supports_cp` / `_supports_pp` (`src/trainers/mixins/base.py`, both default `False`) are the class
 attributes that drive the rejections. CP is incompatible with any trainer using `logits_to_keep`,
 global log-prob sums, full-sequence pooling, dual models, or a separate-length teacher or rollout
-sequence. The PP trainer gates (PEFT/LoRA, a live `ref_model`, `activation_offloading`, reentrant
-GC) fire only on a hand-built PP config. The PP column records each class's declared
-`_supports_pp`; while PP is unavailable it drives no runnable cell, so its **Yes** entries carry no
-correctness-test obligation.
+sequence; PP additionally rejects PEFT/LoRA, a live `ref_model`, `activation_offloading` and
+reentrant GC at trainer construction, so a PP-supporting trainer still needs those rejection tests.
+Each PP **Yes** cell's suite lives under `tests/gpu/parallelism/pp/`.
 
 ## Parallelism-mode matrix (from `CLAUDE.md`)
 
 The allowlist is `SUPPORTED_AXIS_SETS` (`src/distributed/parallelism_config.py`) — anything not in
 it is rejected before any rank math. Supported (need a correctness test): plain DP, EP-only,
-TP-only, CP-only, pure ETP (`ep_size=1`), EP+CP (node-local EP), EP+TP (node-local TP),
-EP+ETP (experimental, node-local ETP only). The allowlist also admits PP-only, PP+EP and
-PP+ETP, but the release gate rejects `pp_size > 1` ahead of it, so those three take a rejection
-test and no correctness suite.
+TP-only, CP-only, PP-only, pure ETP (`ep_size=1`), EP+CP (node-local EP), EP+TP (node-local TP),
+EP+ETP (experimental, node-local ETP only), PP+EP, PP+ETP (`ep_size=1`).
 
 Pure-EP topology caveat — `ep_size=2` (2-rank groups) or `ep_size = nvlink_domain_size` (a single
 group filling the domain) is supported. Multiple >2-rank dispatch groups in one domain
@@ -65,13 +56,12 @@ as a **rejection** test (CPU config test is enough), not a correctness test.
 | TP + ETP (`tp_size>1` AND `expert_tp_size>1`, `ep_size==1`) | raises — two shardings of the same ranks |
 | TP + CP (`tp_size>1` AND `cp_size>1`) | raises — both partition the same contiguous rank blocks, and Ulysses redistributes heads TP already split |
 | ETP + CP (`expert_tp_size>1` AND `cp_size>1`) | raises — expert-TP partners sum their outputs in token space while CP hands each rank a different chunk |
-| Any `pipeline_parallel_size > 1` | raises at config time in `parallelism_config_from_args`: a `_supports_pp=False` trainer's gate first, then the release gate (the schedule engine is not shipped); constructing `PipelineRuntime` raises `NotImplementedError` |
-| PP + TP, PP + CP (`pp_size>1` with either), on a directly constructed `ParallelismConfig` | raises at the allowlist — untested on real multi-node hardware (TP); CP-scaled gradients with no error (CP) |
-| PP + EP + TP, PP + EP + CP, PP + EP + ETP (all three `>1`), on a directly constructed `ParallelismConfig` | raises — outside the allowlist; FSDP mesh conflict (TP), CP-scaled expert gradients (CP), the expert-TP reduce cannot be deferred past the combine (ETP) |
+| PP + TP, PP + CP (`pp_size>1` with either) | raises at the allowlist — untested on real multi-node hardware (TP); CP-scaled gradients with no error (CP) |
+| PP + EP + TP, PP + EP + CP, PP + EP + ETP (all three `>1`) | raises — outside the allowlist; FSDP mesh conflict (TP), CP-scaled expert gradients (CP), the expert-TP reduce cannot be deferred past the combine (ETP) |
 | QLoRA + EP | raises |
 | LoRA/PEFT + TP (`tp_size>1`), native EP expert LoRA included | raises at trainer construction — `_validate_lora_tp_compatibility` |
 | Multi-group >2-rank EP on one NVLink domain (`ep_size>2` with `nvlink_domain_size > ep_group_size`) | fails fast (DeepEP combine race) |
-| `_supports_cp=False` trainer with `cp_size>1`, `_supports_pp=False` with `pp_size>1` | rejects in `parallelism_config_from_args` (for PP ahead of the release gate), and at trainer `__init__` for a hand-built config |
+| `_supports_cp=False` trainer with `cp_size>1`, `_supports_pp=False` with `pp_size>1` | rejects in `parallelism_config_from_args`, and at trainer `__init__` for a hand-built config |
 
 A rejection test asserts the *reason*, not just that something raised:
 
@@ -111,8 +101,7 @@ Every MoE family on the roster (`agent-docs/models/README.md`) needs one. New fa
       composition lives in `agent-docs/contributing/README.md` ("Tests"). Do not add to the drift — when in
       doubt, mark `full`.
 - [ ] A `Ngpu` tag matching `nproc` (`1gpu`/`2gpu`/`4gpu`/`8gpu`).
-- [ ] Capability tags as applicable: `ep cp tp etp hsdp vlm lora moe vllm_server sglang_server`.
-      There is **no `pp` marker** — PP coverage is CPU-side, so nothing in `tests/gpu/` carries one.
+- [ ] Capability tags as applicable: `ep cp tp etp pp hsdp vlm lora moe vllm_server sglang_server`.
 - [ ] A model-family tag — the family half of `ALL_MARKERS` in `tests/gpu/manifest.py`.
 - [ ] World-size strictness goes in the **script**, not the manifest:
       `gpu_test_main(exact_world_size=N)` when the body only makes sense at exactly `N` ranks.

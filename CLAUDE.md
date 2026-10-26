@@ -96,7 +96,7 @@ bootstrap, and `test_gpu_harness_conventions.py` over a GPU script off the harne
 `HALO_TEST_*` knobs override the model, parallel axes, attention impl and step counts of a GPU suite
 without editing it (catalog: `agent-docs/contributing/README.md`).
 
-`tests/cpu/` is grouped by subsystem (`callbacks/ checkpoint/ config/ conventions/ data/ diagnostics/ environments/ grpo/ inference/ kernels/ models/ optimizers/ parallelism/ peft/ rewards/ trainers/`). `tests/gpu/` splits into `trainers/{sft,preference,grpo,lora,other}/`, `parallelism/{ep,cp,tp,combined}/`, plus `data/ kernels/ optimizers/ profiling/`. Shared helpers in `tests/common/`.
+`tests/cpu/` is grouped by subsystem (`callbacks/ checkpoint/ config/ conventions/ data/ diagnostics/ environments/ grpo/ inference/ kernels/ models/ optimizers/ parallelism/ peft/ rewards/ trainers/`). `tests/gpu/` splits into `trainers/{sft,preference,grpo,lora,other}/`, `parallelism/{ep,cp,tp,pp,combined}/`, plus `data/ kernels/ optimizers/ profiling/`. Shared helpers in `tests/common/`.
 
 ## Architecture
 
@@ -152,8 +152,8 @@ src/
 │                        #     lazy-load core — index, key alignment, plans, conversion ops, meta shell —
 │                        #     shared by the EP + PP loaders)
 ├── distributed/
-│   ├── parallelism_config.py  # ParallelismConfig — central shape/axis validation gate (the per-trainer CP/PP,
-│   │                    #   lowp and PP-release gates are in src/training/parallelism_args.py)
+│   ├── parallelism_config.py  # ParallelismConfig — central shape/axis validation gate (the per-trainer CP/PP
+│   │                    #   and lowp gates are in src/training/parallelism_args.py)
 │   ├── group_layout.py mesh.py  # EP/CP rank math; DeviceMesh construction + the typed ParallelDims view
 │   ├── runtime.py filesystem.py fsdp.py nvlink.py  # rank/world + barriers + consensus, FS coordination
 │   │                    #   (joined_node_load = the per-node load throttle, joined over the c10d store), FSDP2
@@ -224,25 +224,25 @@ src/
 ```
 `scripts/` uses pipeline-stage folders: `training/ inference/ before_training/ after_training/ profiling/ environments/` (plus `diagrams/`, the docs-figure generators, and `docs/`, the link checker). Entry scripts share their flag surface per subtree — `scripts/inference/_common.py`, `scripts/inference/reward_model/_common.py`, `scripts/environments/_common.py` — or above them where the tools chain across subtrees (`scripts/_common.py`: the checkpoint tools' source, shard-size and `--trust_remote_code` flags, the `--dtype`/`--device_map` pair, and the OpenAI-compatible endpoint block the generation, eval and playground CLIs share) — while the driver stays in `src/`. Configs in `examples/` split per method then per model family; the async GRPO recipes further split per rollout backend (`vllm/`, plus `sglang/` for gpt-oss, Qwen3.5/3.6 and Gemma 4 — ep1 variants only) with one file per adapter (`-lora-`/`-full-`) × expert distribution (`-ep1`/`-ep4`), while the Qwen3.6 vLLM full-ep1 recipe exists only as its three curriculum stages (`-stage1-codeforces`/`-stage2-hard`/`-stage3-extra-hard`). Layer map and leaf-module contracts: `agent-docs/reference/architecture.md`; per-topic depth via the doc index below.
 
-**Distributed trainers** (all extend `DistributedTrainerMixin`; EP/TP/ETP on all, CP where noted):
+**Distributed trainers** (all extend `DistributedTrainerMixin`; EP/TP/ETP on all, CP and PP where noted):
 
-| Trainer | Purpose | CP |
-|---|---|:--:|
-| `DistributedSFTTrainer` | Supervised fine-tuning | ✅ |
-| `SmoothMarginPOTrainer` | Reference-free preference (SMPO) | ✅ |
-| `OfflineGRPOTrainer` | Offline GRPO | ✅ (full fine-tuning) |
-| `DistributedGRPOTrainer` | Online GRPO | ❌ |
-| `DistributedAsyncEnvironmentalGRPOTrainer` | Async GRPO with environments: multi-turn RL (Ray + vLLM/SGLang) | ❌ |
-| `DistributedDPOTrainer` / `DistributedKTOTrainer` | DPO / KTO | ❌ |
-| `DistributedRewardTrainer` / `ClassificationTrainer` | BT reward / sequence classification | ❌ |
-| `DistributedDistillationTrainer` / `DistributedSelfDistillationTrainer` / `DistributedSDPGTrainer` | Knowledge / self- / online (SDPG) distillation | ❌ |
-| `EmbeddingTrainer` | Embedding fine-tuning (SBERT losses) | ❌ |
+| Trainer | Purpose | CP | PP |
+|---|---|:--:|:--:|
+| `DistributedSFTTrainer` | Supervised fine-tuning | ✅ | ✅ |
+| `SmoothMarginPOTrainer` | Reference-free preference (SMPO) | ✅ | ✅ |
+| `OfflineGRPOTrainer` | Offline GRPO | ✅ (full fine-tuning) | ✅ |
+| `DistributedGRPOTrainer` | Online GRPO | ❌ | ❌ |
+| `DistributedAsyncEnvironmentalGRPOTrainer` | Async GRPO with environments: multi-turn RL (Ray + vLLM/SGLang) | ❌ | ❌ |
+| `DistributedDPOTrainer` / `DistributedKTOTrainer` | DPO / KTO | ❌ | ✅ |
+| `DistributedRewardTrainer` / `ClassificationTrainer` | BT reward / sequence classification | ❌ | ✅ |
+| `DistributedDistillationTrainer` / `DistributedSelfDistillationTrainer` / `DistributedSDPGTrainer` | Knowledge / self- / online (SDPG) distillation | ❌ | ❌ |
+| `EmbeddingTrainer` | Embedding fine-tuning (SBERT losses) | ❌ | ❌ |
 
-CP is declare-to-enable per trainer (`_supports_cp`, default off) — the CP column above **is** the gate; nothing inspects a trainer's loss for CP-safety, so a new trainer must verify its own objective before flipping the flag. Config classes: `ParallelismConfig`, `OfflineGRPOConfig`, `SmoothMarginPOConfig`, `DistillationConfig`, `ClassificationConfig`, `EmbeddingConfig`, `EnvironmentConfig`, `AsyncTrainingConfig` (+ `RolloutConfig`, the pickle-safe leaf mirror of its rollout fields that `get_rollout_config()` hands the Ray actors). Full field reference: `agent-docs/reference/configuration-reference.md`.
+CP and PP are declare-to-enable per trainer (`_supports_cp` / `_supports_pp`, default off) — the CP and PP columns above **are** the gates; nothing inspects a trainer's loss for CP- or PP-safety, so a new trainer must verify its own objective before flipping a flag. Config classes: `ParallelismConfig`, `OfflineGRPOConfig`, `SmoothMarginPOConfig`, `DistillationConfig`, `ClassificationConfig`, `EmbeddingConfig`, `EnvironmentConfig`, `AsyncTrainingConfig` (+ `RolloutConfig`, the pickle-safe leaf mirror of its rollout fields that `get_rollout_config()` hands the Ray actors). Full field reference: `agent-docs/reference/configuration-reference.md`.
 
 ## Parallelism
 
-`data_parallel_size = world_size / max(cp_size, tp_size, expert_tp_size)` (EP is orthogonal to DP; the divisor is a **max**, not a product — no two of those axes may exceed 1 at once, so they never compound). `ParallelismConfig` validates and **rejects** invalid shapes at config time — which axis combinations may run at all is an **allowlist** (`SUPPORTED_AXIS_SETS` in `parallelism_config.py`) checked before any rank math, so an unlisted combination is rejected by default rather than running unvalidated.
+`data_parallel_size = world_size / pp_size / max(cp_size, tp_size, expert_tp_size)` (PP first splits the world into `pp_size` stages; EP is orthogonal to DP; the divisor is a **max**, not a product — no two of those axes may exceed 1 at once, so they never compound). `ParallelismConfig` validates and **rejects** invalid shapes at config time — which axis combinations may run at all is an **allowlist** (`SUPPORTED_AXIS_SETS` in `parallelism_config.py`) checked before any rank math, so an unlisted combination is rejected by default rather than running unvalidated.
 
 | Mode | Notes |
 |---|---|
@@ -254,7 +254,7 @@ CP is declare-to-enable per trainer (`_supports_cp`, default off) — the CP col
 | EP+TP | TP node-local. On **>1 NVLink domain** the EP group must be a **single** global one (`ep_size==world`, `ep_scope=global`); within one domain multiple EP groups pass only at `ep_size == 2` (`ep2+tp2` on 8 = 4 EP groups; `ep4+tp2` is rejected) |
 | EP+ETP (`ep_size>1` & `expert_tp_size>1`) | experimental; expert-TP reduce runs in **token space** (outside DeepEP dispatch→combine). Cross-node: exactly one ETP group per NVLink domain |
 | TP+ETP (EP+TP+ETP included) · TP+CP · ETP+CP | **NOT SUPPORTED** |
-| PP | **not yet available in this release** — the config surface (`pipeline_parallel_size`/`pipeline_schedule`/`pipeline_microbatches`/`pipeline_split`), rank math, trainer gates (`src/trainers/mixins/pp_gates.py`) and stage/loss seams (`src/distributed/pipeline_parallel/`) ship, but the schedule engine behind `PipelineRuntime` does not: `pipeline_parallel_size > 1` is rejected at config time. See `agent-docs/parallelism/pipeline-parallelism.md` |
+| PP | outermost axis and the only one meant to cross NVLink domains: contiguous decoder-layer stages, each a whole number of NVLink domains of at least 2 ranks, FSDP2 inside each stage; `PipelineRuntime` (`src/distributed/pipeline_parallel/runtime.py`) runs `1f1b` or `gpipe`. Composes with EP or pure ETP only (PP+TP, PP+CP, PP+EP+ETP refused) and only on trainers with `_supports_pp`; refuses PEFT, expert LoRA, HSDP, ZeRO-3 and non-`bf16` low precision. See `agent-docs/parallelism/pipeline-parallelism.md` |
 
 **Single-domain pure EP topology (prevents wasted 8-GPU EP runs):** one dispatch group per NVLink domain — `ep_group_size == nvlink_domain_size` (shrink the job, or size `ep_size` to the domain), or `ep_size == 2`. **`ep_size > 2` with `ep_group_size < nvlink_domain_size`** (e.g. ep4 on 8 → two 4-rank groups) is **rejected at config time** — the DeepEP combine barriers race FSDP2's DP-wide NCCL: the `elastic` default faults with `Invalid access of peer GPU memory over nvlink`, `legacy` deadlocks (`is_racy_single_domain_multigroup_ep`, enforced in `ParallelismConfig.__post_init__`, so a hand-built config is refused too). The unit is the NVLink domain, not the OS node — on NVL72 with `NVLINK_DOMAIN_SIZE=72` that rejects `ep8` too. For 4-way+ sharding across all 8 GPUs, combine EP with **ETP** (EP+TP does not help — attention TP leaves `ep_group_size` at 4, so `ep4+tp2` trips the same rejection). **Multi-node multi-group EP is supported** (EP groups are DP replicas; cross-replica average deferred to a post-backward sweep). `CUDA_DEVICE_MAX_CONNECTIONS=1` is baked into the images (latched at `deep_ep` import's `cuInit` — a Python write is too late): the setting EP is validated with, at no measurable throughput cost. See `agent-docs/infrastructure/deepep.md`, `agent-docs/parallelism/multi-node.md`; multi-node launch recipes in `agent-docs/parallelism/launch-recipes.md` (+ `agent-docs/infrastructure/runpod.md`, `agent-docs/infrastructure/skypilot.md`).
 

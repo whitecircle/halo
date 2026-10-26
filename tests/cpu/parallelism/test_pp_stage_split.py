@@ -26,6 +26,7 @@ from transformers import (
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 
 from src.distributed.pipeline_parallel import split
+from src.distributed.pipeline_parallel.lazy_loader import _cross_stage_droppable_prefixes
 from src.distributed.pipeline_parallel.split import (
     MTP_LAYER_COUNT_FIELDS,
     PP_SPEC_MAP,
@@ -40,7 +41,8 @@ from src.distributed.pipeline_parallel.stage import build_pipeline_stage, module
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from src.models.moe_balancing import ROUTER_TOPK_FIELDS
 from src.models.structure import persistent_buffers
-from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
+from tests.common.models import TINY_GPTOSS_CONFIG, TINY_INKLING_PP_OVERRIDES, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 # Qwen3 MoE balances through the HF router aux loss (auto → aux_loss) — the path a stage severs, so
 # this file needs the coefficient LIVE at its transformers default. Deliberately NOT tests/common's
@@ -104,6 +106,10 @@ def _model(**overrides):
 def _moe_model(**overrides):
     torch.manual_seed(0)
     return Qwen3MoeForCausalLM(Qwen3MoeConfig(**{**_PP_SPLIT_MOE_CONFIG, **overrides}))
+
+
+def _inkling_model():
+    return tiny_family_model(TINY_MOE_FAMILIES["inkling_text"], overrides=TINY_INKLING_PP_OVERRIDES)
 
 
 def test_partition_is_contiguous_and_covers_every_layer():
@@ -379,6 +385,17 @@ def test_stage_zero_owns_embedding_and_last_owns_head():
     assert any("embed_tokens" in k for k in first) and not any("embed_tokens" in k for k in last)
     assert any(k.startswith("lm_head") for k in last) and not any(k.startswith("lm_head") for k in first)
     assert "model.norm.weight" in last and "model.norm.weight" not in first
+
+
+def test_input_modules_stay_on_stage_zero_with_the_embedding():
+    """Inkling's ``embed_norm`` normalizes the token embedding only stage 0 computes: a later stage
+    drops it at the build (else every stage writes it), and its loader counts the module droppable,
+    so a per-node checkpoint without stage 0's shard still loads there."""
+    s0, s1 = (build_pipeline_stage(_inkling_model(), rank, 2, moe_balancing="none") for rank in (0, 1))
+    assert "model.embed_norm.weight" in s0.checkpoint_name_map()
+    assert not any("embed_norm" in name for name in s1.checkpoint_name_map())
+    assert "model.embed_norm" in _cross_stage_droppable_prefixes(_inkling_model(), 1, 2)
+    assert "model.embed_norm" not in _cross_stage_droppable_prefixes(_inkling_model(), 0, 2)
 
 
 def test_persistent_buffers_survive_the_split():

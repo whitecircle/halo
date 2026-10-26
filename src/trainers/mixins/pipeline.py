@@ -252,7 +252,7 @@ class PipelineTrainerMixin:
                 "format (index.metadata.format ep_sharded) and merge_ep_shards.py key tensors by "
                 "unsplit-model names with no pipeline-stage layer offset, so shards from different "
                 "stages would collide or merge under wrong names. The PP save already writes one "
-                "complete-tensor shard per stage under global names."
+                "complete-tensor shard per stage under the unsplit model's names."
             )
         if getattr(training_args, "push_to_hub", False) and not is_output_shared_filesystem() and get_num_nodes() > 1:
             raise ValueError(

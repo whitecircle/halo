@@ -74,8 +74,8 @@ the rest.
 Thirteen trainers share this shape: SFT, SMPO, DPO, KTO, offline/online/async environmental GRPO,
 online SDPG, teacher and self distillation, reward, classification, and
 embedding. All support EP, TP, and ETP. CP supports SFT, SMPO, and offline GRPO full fine-tuning.
-PP is [not yet available in this release](../parallelism/pipeline-parallelism.md); `_supports_pp` marks
-SFT, SMPO, DPO, KTO, reward, classification, and offline GRPO. The per-trainer
+[PP](../parallelism/pipeline-parallelism.md) supports SFT, SMPO, DPO, KTO, reward, classification, and
+offline GRPO. The per-trainer
 matrix and the reason behind each exclusion are in
 [Trainer Architecture](trainer-architecture.md#trainer-compatibility).
 

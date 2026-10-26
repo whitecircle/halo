@@ -42,6 +42,7 @@ It wraps a `def run(ctx) -> dict` body and owns the full lifecycle so the body i
 | `ctx.output_dir`, `ctx.cache_dir` | per-rank isolated dirs (auto-cleaned) |
 | `ctx.on_teardown(fn)` | register a finalizer (e.g. `trainer.cleanup_ep`); run LIFO before teardown |
 | `ctx.barrier()` | `dist.barrier()` if initialized |
+| `ctx.broadcast_seed(seed=42)` | seed torch/cuda/random identically on all ranks (rank-0 value wins); returns the shared seed. Use when every rank must generate the same data. |
 | `ctx.broadcast_checks(checks)` | AND rank 0's verdict into this rank's dict, for a check only rank 0 can make (a served model's response, an HTTP probe). Merges rather than replaces, so a check that failed only on rank 1 survives — the harness exits per rank, and a rank-0-only failure would otherwise read as a teardown race. |
 | `ctx.metrics(trainer_or_cb)` | snapshot headline metrics from a trainer (or an `EfficiencyCallback`); returns `{}` if none attached |
 
@@ -77,8 +78,11 @@ Build checks from these rather than re-deriving them per file:
 | `run_sft_suite(ctx, SFTSuite(...), {key: SFTMode(...)}, default_mode=)` | `tests/common/sft_modes.py` | the whole SFT smoke body: one `--mode` per manifest row, load → train → the checks above |
 | `train_recording_first_step` / `score_first_step` / `first_step_checks` / `first_step_gradient_checks` | `tests/common/first_step.py` | a parallel run's first optimizer step (microbatch losses, logged loss, sharded gradients, c10d autograd fallbacks) scored against a reference trainer on the same microbatches, for an objective a parallel axis could miscount |
 | `skip_unless_local_checkpoint(path, env_var)` | `tests/common/harness.py` | the `SKIP:` exit for a suite whose local checkpoint is absent, called under `__main__` before `run()` |
+| `skip_unless_blackwell(what)` | `tests/common/harness.py` | the same `SKIP:` exit for a suite or row that runs FlashAttention 4, on a pre-Blackwell GPU |
 | `max_or_nan(values, *, default=)` | `tests/common/utils.py` | the largest value, NaN when any is NaN; the builtin `max` drops a NaN anywhere but first, so a bound on it would pass |
 | `run_gloo_ranks(worker, nprocs, *args, pg_timeout=, env=)` | `tests/common/gloo.py` | `nprocs` spawned ranks sharing one gloo group, for a CPU test that needs a real process group; a rank that raises, dies or hangs fails the call. The rendezvous store is served from the calling process, and no worker starts before every rank has initialized the group: a rank that finishes first tears down neither the store nor a pair a peer is still connecting |
+| `UnsplitReference` / `build_pp_sft_trainer` / `compare_stage_grads_vs_reference` / `check_expert_grads_vs_reference` | `tests/common/pp_equivalence.py` | the PP gradient-equivalence blocks: an unsplit reference's loss and gradients, a real trainer on a hand-built PP config, and each stage's parameter and expert gradients scored against that reference |
+| `hf_eval_loss_reference` / `eval_loss_over_examples` | `tests/common/distributed.py` | two independent oracles for a run's `eval_loss` from per-rank reference losses: HF's gather with the DP-scoped dedup and accelerate's tail trim, and an example-by-example walk of the eval set (collective) |
 | `tiny_family_model` / `build_tiny_family_checkpoint` / `shared_tiny_family_checkpoint` | `tests/common/tiny_models.py` | one seeded random-init tiny model per EP MoE family, and a synthetic checkpoint of it the production loaders read (`shared_…` builds it once on rank 0 into a rank-shared scratch dir) |
 
 ## Minimal copy-pasteable skeleton
@@ -154,7 +158,7 @@ MANIFEST: dict[str, TestSpec] = {
 
 `TestSpec` fields: `nproc` (required), `markers` (by convention `'gpu'` + a tier
 `core` or `full` + a `Ngpu` tag + capability/model tags; only membership in `ALL_MARKERS` is
-enforced, by `--strict-markers`),
+enforced, by `tests/cpu/conventions/test_gpu_harness_conventions.py`),
 `args_matrix` (default `("",)`; a multi-mode script like `('--mode fsdp', '--mode ep')`
 becomes several nodes), `timeout` (default 1200) and `flaky` (default `False`). World-size
 strictness is **not** a manifest field:
@@ -170,8 +174,9 @@ python -c "from tests.gpu.manifest import unregistered_scripts, stale_entries; \
 ```
 
 If you add a brand-new marker, add it to `ALL_MARKERS` — `tests/conftest.py` registers every
-`ALL_MARKERS` entry with pytest, so `--strict-markers` (set in `pyproject.toml`) rejects typos
-without a second list.
+`ALL_MARKERS` entry with pytest without a second list. Pytest only warns on an unregistered mark, so
+the CPU conventions test is what fails a manifest marker missing from `ALL_MARKERS`; a typo would
+otherwise drop its row from every selection by that marker.
 
 ## Live-server e2e tests reuse a shared body
 
@@ -239,7 +244,8 @@ SIGTERMs would overwrite the real cause. It then classifies:
 - **SKIP** — fewer GPUs than `nproc` available; an OOM on the 8-GPU `full` tier (an OOM on
   a 2-GPU `core` smoke is a real ERROR — that config must fit); an unreachable
   `vllm_server`/`sglang_server` engine, unless `HALO_TEST_REQUIRE_SERVER` names it (then a
-  `UsageError`); or an exit-0 run that printed a `SKIP:` line (`skip_unless_local_checkpoint`).
+  `UsageError`); or an exit-0 run that printed a `SKIP:` line (`skip_unless_local_checkpoint`,
+  `skip_unless_blackwell`).
   **Zero** visible GPUs is a `UsageError`, never a skip.
 
 All of this runs inside the Docker image; selection is by marker, e.g. `pytest -m "gpu and

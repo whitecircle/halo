@@ -68,6 +68,20 @@ class _Tolerances:
     # independently and combined in top-k slot order whatever order DeepEP receives them in. bf16
     # round-trip noise; an unrestored or mis-gathered weight set moves it by more than 1.
     resume_fixed_batch_loss_abs: float = 1e-2
+    # Norm achieved after clipping vs the max_norm asked for. The coefficient multiply and the
+    # re-measured norm differ from the target only by float rounding, while a wrong coefficient or a
+    # missed plain-vs-DTensor scale misses by a factor.
+    clip_achieved_norm_rel: float = 1e-4
+
+    # ── Re-derived quantities (recompute / independent recount) ─────────────
+    # Same step, activation checkpointing on vs off. The recompute replays the forward with a
+    # different reduction order only, so the losses agree to bf16 accumulation noise; the bug this
+    # bounds (a corrupted checkpoint frame, such as a replayed DeepEP dispatch) moves them further.
+    gc_recompute_loss_rel: float = 1e-3
+    # A trainer-computed loss normalizer vs the same quantity recounted from the collective. Both
+    # are fp32 divisions of the same integers, so only float rounding separates them; the failure
+    # mode is a normalizer off by a whole factor (per-rank instead of stage-global, or /dp twice).
+    recomputed_normalizer_abs: float = 1e-4
 
     # ── Gradients through a sharded axis ────────────────────────────────────
     # Two independent bug classes a collapsed relative-L2 bound cannot separate. SCALE: a

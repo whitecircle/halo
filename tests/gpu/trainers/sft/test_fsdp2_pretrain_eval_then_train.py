@@ -17,7 +17,7 @@ Run: torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_fsdp2_pretrain_eval
 
 import torch
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
+from transformers import AutoConfig, AutoTokenizer
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
@@ -25,28 +25,13 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import world_all, world_min
 from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.models import QWEN3_0_6B
+from tests.common.pp_equivalence import build_dense_model
 from tests.common.utils import log, step_losses
 
 STEPS = 8
 LEARNING_RATE = 5e-3
 MIN_LOSS_DROP = 0.05
-
-
-def build_dense_model(tokenizer) -> Qwen3ForCausalLM:
-    """Tiny dense Qwen3 over ``tokenizer``'s checkpoint vocabulary, identical on every rank (fixed seed).
-
-    pad/eos ids must live inside the model's vocab: TRL copies the tokenizer's ids into the model
-    config, and the saved config would otherwise fail ``from_pretrained``'s padding_idx assert.
-    """
-    torch.manual_seed(1234)
-    return Qwen3ForCausalLM(
-        Qwen3Config(
-            **{**TINY_QWEN3_CONFIG, "vocab_size": AutoConfig.from_pretrained(QWEN3_0_6B).vocab_size},
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-    )
 
 
 def _shards(model) -> dict[str, torch.Tensor]:
@@ -79,7 +64,7 @@ def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
         seed=42,
     )
     trainer = DistributedSFTTrainer(
-        model=build_dense_model(tokenizer),
+        model=build_dense_model(tokenizer, vocab_size=AutoConfig.from_pretrained(QWEN3_0_6B).vocab_size),
         args=args,
         train_dataset=create_sft_dataset(64, tokenizer, seed=0),
         eval_dataset=create_sft_dataset(16, tokenizer, seed=1),

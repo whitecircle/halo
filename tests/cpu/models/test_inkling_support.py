@@ -54,10 +54,12 @@ def test_capability_contracts():
     assert EPInklingMoELayer._HUB_CONVERSION_KEYS == ("inkling_mm_model",)
     assert EPInklingMoELayer._supports_lazy_loading is True
     assert EPInklingMoELayer._supports_weight_sync is False
-    # PP: the text backbone takes the generic split path (no spec); the composite class goes through
-    # the generic multimodal admission in the trainer mixin (text-only admitted, image-feeding
-    # refused), not a family spec.
-    assert "InklingTextModel" not in PP_SPEC_MAP
+    # PP: the text backbone's spec keeps ``embed_norm`` on stage 0 with the embedding it normalizes and
+    # is otherwise the generic split; the composite class goes through the generic multimodal
+    # admission in the trainer mixin (text-only admitted, image-feeding refused).
+    spec = PP_SPEC_MAP["InklingTextModel"]
+    assert spec.INPUT_MODULE_ATTRS == ("embed_norm",)
+    assert spec.SUPPORTS_PP and spec.STREAM_FORWARD is None and not spec.LAYER_TYPES_REBASE_SAFE
     # CP: the short convolutions run over the sequence axis; the veto fires before the
     # attention-class scan so the refusal names the mechanism.
     assert "InklingShortConvolution" in _UNSUPPORTED_SEQUENCE_AXIS_LAYERS

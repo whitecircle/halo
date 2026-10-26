@@ -12,7 +12,7 @@ filename (`agent-docs/reference/checkpoints.md`):
 |---|---|---|---|---|
 | Single file | `model.safetensors` | *(no index)* | yes | none |
 | Gathered HF-sharded | `model-0000N-of-…` + index | *absent* | yes | none |
-| PP per-stage *(not producible — PP is not yet available in this release)* | `model-pp0000N-of-…` + merged index | *absent* | yes | none |
+| PP per-stage | `model-pp0000N-of-…` + merged index | *absent* | yes | none |
 | EP per-rank sharded | `model-…` + `.shard_{rank}` keys + index | `ep_sharded` | no | `merge_ep_shards.py` |
 
 Gathered is the default for every mode; the sharded EP save is an opt-in write-bandwidth option
@@ -49,8 +49,7 @@ additionally needs `ep_size` in the index metadata, not just the marker.
   (GptOss sinks sliced by `tp_rank`). `load_best_model_at_end` raises for a full fine-tune under CP,
   on a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1` included), and under TP+DP; dense
   FSDP2 and pure TP re-read for it.
-- **Path C — PP** (`_load_pp_stage`, dispatched first): stage-local restore. Unreachable while PP is
-  unavailable in this release.
+- **Path C — PP** (`_load_pp_stage`, dispatched first): stage-local restore.
 
 All three restore `trainer_state.json`, the LR scheduler from `scheduler.pt` (written even under
 `save_only_model`), LoRA adapters (`restore_adapters`, `src/distributed/checkpoint/peft.py`),

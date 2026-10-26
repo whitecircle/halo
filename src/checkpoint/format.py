@@ -417,6 +417,28 @@ def revert_load_conversions(model: torch.nn.Module, state_dict: dict) -> dict:
         return state_dict
 
 
+@dataclass(frozen=True)
+class CheckpointNamespace:
+    """How a model's checkpoint keys reach its live names: the family's whole conversion mapping, as
+    ``from_pretrained`` replays it, and the base-model prefix a key may carry or lack.
+
+    transformers resolves the mapping off a whole model's module tree, scoping each sub-model's entries
+    by its path, so a module holding only part of a model (a pipeline stage, named stage-locally) takes
+    this snapshot of the whole one and reads its checkpoint through :class:`ModuleLayoutView` as that
+    model would.
+    """
+
+    conversions: tuple[WeightRenaming | WeightConverter, ...] = ()
+    base_model_prefix: str | None = None
+
+    @classmethod
+    def of(cls, model: torch.nn.Module) -> CheckpointNamespace:
+        return cls(
+            conversions=tuple(_family_conversions(model, add_legacy=True)),
+            base_model_prefix=getattr(model, "base_model_prefix", None) or None,
+        )
+
+
 class ModuleLayoutView:
     """A checkpoint's tensors under the live model's own names: the read side of
     :func:`revert_load_conversions`.
@@ -429,24 +451,35 @@ class ModuleLayoutView:
     as is. So it reads whichever layout a save wrote — the hub's, the module's (an EP-gathered save, a
     load that converted nothing), a per-expert spelling the load itself never met.
 
-    ``read`` serves one checkpoint tensor by key, called only when :meth:`items` reaches the group
-    that needs it, so a streaming reader holds one converted group (a layer's experts) at a time.
+    Planned from the checkpoint's key names alone, so :attr:`keys` (the names it supplies) and
+    :attr:`sources` (the checkpoint keys the live names among them read) are known before any shard
+    is opened.
+    ``live_names`` and ``namespace`` stand in for the model's own when it holds only part of the model
+    the checkpoint belongs to (a pipeline stage, named in the unsplit model's names).
     """
 
-    def __init__(self, model: torch.nn.Module, checkpoint_keys: Iterable[str], read: Callable[[str], torch.Tensor]):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        checkpoint_keys: Iterable[str],
+        *,
+        live_names: Iterable[str] | None = None,
+        namespace: CheckpointNamespace | None = None,
+    ):
         self._model = model
-        self._read = read
+        if live_names is None:
+            live_names = (name for name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model)))
         # A mapping, not a set: ``rename_source_key`` probes its ``meta_state_dict`` with ``.get``.
-        self._live = dict.fromkeys(
-            (name for name, _ in itertools.chain(model.named_parameters(), persistent_buffers(model))), True
-        )
-        conversions = _family_conversions(model, add_legacy=True)
-        renamings = [c for c in conversions if isinstance(c, WeightRenaming)]
-        converters = [c for c in conversions if isinstance(c, WeightConverter)]
+        self._live = dict.fromkeys(live_names, True)
+        if namespace is None:
+            namespace = CheckpointNamespace.of(model)
+        renamings = [c for c in namespace.conversions if isinstance(c, WeightRenaming)]
+        converters = [c for c in namespace.conversions if isinstance(c, WeightConverter)]
         by_source = {pattern: converter for converter in converters for pattern in converter.source_patterns}
-        prefix = getattr(model, "base_model_prefix", None) or None
+        prefix = namespace.base_model_prefix
         self._renamed: dict[str, str] = {}
-        self._converted: dict[str, WeightConverter] = {}
+        # First target → (the converter its group runs, its ``(checkpoint key, source pattern)`` in arrival order).
+        self._converted: dict[str, tuple[WeightConverter, list[tuple[str, str]]]] = {}
         # Natural order, as from_pretrained collects: a converter stacks experts in arrival order.
         for key in sorted(checkpoint_keys, key=dot_natural_key):
             target, pattern = rename_source_key(key, renamings, converters, prefix, self._live)
@@ -455,27 +488,43 @@ class ModuleLayoutView:
             if pattern is None:
                 self._renamed.setdefault(target, key)
             else:
-                group = self._converted.setdefault(target, deepcopy(by_source[pattern]))
-                group.add_tensor(target, key, pattern, partial(read, key))
+                self._converted.setdefault(target, (by_source[pattern], []))[1].append((key, pattern))
         self.keys = frozenset(self._renamed).union(
-            *(self._targets(first, group) for first, group in self._converted.items())
+            *(self._targets(first, converter) for first, (converter, _) in self._converted.items())
+        )
+        self.sources = frozenset(
+            itertools.chain(
+                (key for target, key in self._renamed.items() if target in self._live),
+                (key for _, _, parts in self._live_groups() for key, _ in parts),
+            )
         )
 
     @staticmethod
-    def _targets(first: str, group: WeightConverter) -> tuple[str, ...]:
+    def _targets(first: str, converter: WeightConverter) -> tuple[str, ...]:
         """The live names a converter group produces, spelled off its first target as transformers does."""
-        return tuple(first.replace(group.target_patterns[0], target, 1) for target in group.target_patterns)
+        return tuple(first.replace(converter.target_patterns[0], target, 1) for target in converter.target_patterns)
 
-    def items(self) -> Iterator[tuple[str, torch.Tensor]]:
-        """``(live name, tensor)`` for every live tensor the checkpoint supplies, one group at a time."""
+    def _live_groups(self) -> Iterator[tuple[str, WeightConverter, list[tuple[str, str]]]]:
+        """The converter groups that produce at least one live name."""
+        for first, (converter, parts) in self._converted.items():
+            if any(target in self._live for target in self._targets(first, converter)):
+                yield first, converter, parts
+
+    def items(self, read: Callable[[str], torch.Tensor]) -> Iterator[tuple[str, torch.Tensor]]:
+        """``(live name, tensor)`` for every live tensor the checkpoint supplies, one group at a time.
+
+        ``read`` serves one checkpoint tensor by key, called only when the walk reaches the group that
+        needs it, so a streaming reader holds one converted group (a layer's experts) at a time.
+        """
         for target, key in self._renamed.items():
             if target in self._live:
-                yield target, self._read(key)
+                yield target, read(key)
         config = getattr(self._model, "config", None)
-        for first, group in self._converted.items():
-            expected = self._targets(first, group)
-            if not any(target in self._live for target in expected):
-                continue
+        for first, converter, parts in self._live_groups():
+            expected = self._targets(first, converter)
+            group = deepcopy(converter)
+            for key, pattern in parts:
+                group.add_tensor(first, key, pattern, partial(read, key))
             for target, tensor in group.convert(first, model=self._model, config=config).items():
                 if target not in expected:
                     raise RuntimeError(
@@ -807,6 +856,13 @@ class CheckpointWeights:
         with safe_open(self.path(single), framework="pt") as f:
             return dict.fromkeys(f.keys(), single)
 
+    def key_set(self) -> set[str]:
+        """Every tensor key the checkpoint holds, without materializing tensor data: a legacy bin is
+        read onto the meta device. Empty when the directory holds no weight file."""
+        if self.legacy_bin is not None:
+            return set(torch.load(self.path(self.legacy_bin), map_location="meta", weights_only=True))
+        return set(self.weight_map)
+
 
 def resolve_checkpoint_weights(checkpoint_dir: str) -> CheckpointWeights:
     """Where a checkpoint directory's tensors live — the one statement of the layout cascade.
@@ -961,10 +1017,7 @@ def read_checkpoint_key_set(checkpoint: str) -> set[str]:
     """Tensor-key set of a checkpoint dir (sharded/single safetensors or ``pytorch_model.bin``)
     without materializing any tensor data. Empty set when no weight file is present.
     """
-    layout = resolve_checkpoint_weights(checkpoint)
-    if layout.legacy_bin is not None:
-        return set(torch.load(layout.path(layout.legacy_bin), map_location="meta", weights_only=True))
-    return set(layout.weight_map)
+    return resolve_checkpoint_weights(checkpoint).key_set()
 
 
 class StreamingCheckpointReader:

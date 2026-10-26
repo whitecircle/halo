@@ -1,22 +1,25 @@
 # Pipeline Parallelism
 
-**Status: not yet available in this release.** The pipeline-parallel seams ship — the config
-surface, the rank math, the trainer gates, and the stage/split/loss/checkpoint contracts — but the
-schedule engine that would drive microbatches through the stages does not.
-`pipeline_parallel_size > 1` is rejected at config time, with a pointer to this page.
+PP splits a model's decoder layers into contiguous **stages**, each owning a rank block. It is the
+outermost parallelism dimension and the only one designed to cross NVLink domains: the only traffic
+leaving a domain is the pipeline's point-to-point boundary activations. It composes with the expert
+axes only — EP, or pure ETP, never both — and FSDP2 data parallelism runs inside each stage. The
+bandwidth argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline-parallelism-the-bubble-and-the-boundary).
 
-PP would split a model's decoder layers into contiguous **stages**, each owning a rank block, as
-the outermost parallelism dimension and the only one designed to cross NVLink domains — the only
-traffic leaving a domain being the pipeline's point-to-point boundary activations. The bandwidth
-argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline-parallelism-the-bubble-and-the-boundary).
+## Launching
 
-## What ships today
+Set `pipeline_parallel_size` on a script whose trainer declares `_supports_pp`: SFT, SMPO, DPO,
+KTO, offline GRPO, Bradley-Terry reward and classification. Any other script refuses it at config
+time with `<Trainer> does not support Pipeline Parallelism (PP)`, before a model loads. Every stage
+must be a whole number of NVLink domains holding at least two ranks, so a run spans at least two
+domains.
+
+## Components
 
 - **Config surface.** `ParallelismConfig` declares `pp_size`, `pp_schedule` (`1f1b` / `gpipe`),
   `pp_microbatches`, and `pp_split`, mirrored from the CLI as `pipeline_parallel_size`,
-  `pipeline_schedule`, `pipeline_microbatches`, `pipeline_split`. At `pp_size == 1` (the default
-  and the only value a production run accepts) setting any PP-only knob is rejected, so a config
-  cannot carry silently ignored fields.
+  `pipeline_schedule`, `pipeline_microbatches`, `pipeline_split`. At `pp_size == 1` (the default)
+  setting any PP-only knob is rejected, so a config cannot carry silently ignored fields.
 - **Rank math and topology rules.** The stage-scoped coordinates (`stage_world_size`, `pp_rank`,
   `stage_base_rank`, `stage_local_rank`) are the base every other axis (EP/CP/TP/ETP) computes its
   groups from; at `pp_size == 1` they equal the world values. Validation pins stage boundaries to
@@ -24,9 +27,7 @@ argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline
   [capability-matrix allowlist](README.md#supported-combinations) admits PP alone, PP+EP and PP+ETP;
   every other axis combination (PP+TP, PP+CP, PP+EP+ETP, …) is refused with the breaking mechanism
   named in the error. `_validate_pipeline_parallel` separately refuses the PP-incompatible knobs
-  (HSDP, expert LoRA, ZeRO-3, non-`bf16` low precision). These validators fire only on a directly
-  constructed `ParallelismConfig`: the production entry rejects every `pp_size > 1` before they run
-  ([below](#what-does-not-ship)).
+  (HSDP, expert LoRA, ZeRO-3, non-`bf16` low precision).
 - **Trainer gates.** `_supports_pp` is declare-to-enable per trainer (like `_supports_cp`), and
   `src/trainers/mixins/pp_gates.py` is the shared rejection vocabulary (PEFT, live reference
   models, `compute_metrics`, activation offloading, precomputed-reference-column requirements);
@@ -42,30 +43,25 @@ argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline
   constructors (`groups.py`), and the stage-aware safetensors lazy loader (`lazy_loader.py`). The
   batch contract (`PP_BATCH_PAD_VALUES` in `runtime.py`) pins the keys and pad values a pipeline
   consumes.
+- **Schedule engine.** `PipelineRuntime` (`src/distributed/pipeline_parallel/runtime.py`) drives one
+  optimizer step's microbatches through the FSDP2-wrapped stage with torch's `Schedule1F1B` or
+  `ScheduleGPipe`. Each microbatch loss is divided by the step's token count, so the microbatch
+  losses sum to the unsplit loss; per-example side tensors reach the last stage's loss split with
+  their rows; loss-only and forward-only drives skip the schedule's trailing gradient reduction.
+  Construction verifies the private torch members the engine relies on.
 - **Head transform.** The last stage applies what the family's `*ForCausalLM.forward` does around
   `lm_head` — Cohere's `logit_scale`, Gemma's softcap, Inkling's μP division and vocabulary cut — to
   the logits it returns and inside the fused head loss. It is the transform the chunked GRPO
   log-probs apply, verified against the family's forward (`src/models/head_transform.py`); a family
   whose forward it does not reproduce is refused by the split gate on every rank.
 - **Checkpoint seam.** `save_pp_checkpoint` (`src/distributed/checkpoint/save.py`) defines the PP
-  checkpoint layout: one complete-tensor safetensors shard per stage under the unsplit model's
-  global names plus a merged standard HF index, loadable via plain `from_pretrained`; the
-  writer-set and axis guards (`is_pp_shard_writer`, `reject_unhandled_pp_axes`) ship with it.
-
-## What does not ship
-
-`PipelineRuntime` (`src/distributed/pipeline_parallel/runtime.py`) — the seam over
-`torch.distributed.pipelining` that would own the schedule, the microbatched step, and the
-forward-only pass — raises `NotImplementedError` on construction. Because
-`parallelism_config_from_args` (`src/training/parallelism_args.py`) rejects
-`pipeline_parallel_size > 1` at the single production entry point, before any rank math or model
-loading, no production path reaches it. A trainer without `_supports_pp` is refused there first, by
-its own gate (`<Trainer> does not support Pipeline Parallelism (PP)`); every other trainer by the
-release gate. No PP run is launchable.
-
-## Sharding large models today
-
-Shard with the available axes: [Expert Parallelism](expert-parallelism.md) (orthogonal to DP, the workhorse for
-MoE), [Tensor Parallelism](tensor-parallelism.md), [Context Parallelism](context-parallelism.md)
-for long sequences, and their supported combinations — see the [Parallelism overview](README.md) and
-[Multi-Node](multi-node.md) for topology guidance.
+  checkpoint layout: one complete-tensor safetensors shard per stage under the hub's names plus a
+  merged standard HF index, loadable via plain `from_pretrained`. A stage is no `PreTrainedModel`
+  and names its tensors stage-locally, so `build_pipeline_stage` snapshots the unsplit model's load
+  conversions; the save reverts each decoder layer, EP layer gather and wrapper stash through them,
+  writing the namespace the EP-gathered save writes
+  ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)), and the stage reload maps
+  those names back through `ModuleLayoutView`. A module the backbone applies to the token embedding
+  alone (Inkling's `embed_norm`, the spec's `INPUT_MODULE_ATTRS`) stays on stage 0 with the
+  embedding, so no two stages write it. The writer-set and axis guards (`is_pp_shard_writer`,
+  `reject_unhandled_pp_axes`) ship with it.

@@ -45,6 +45,7 @@ CORRECTNESS_GATES: dict[frozenset[str], tuple[str, ...]] = {
         "parallelism/cp/test_cp_train_correctness.py",
         "parallelism/cp/test_qwen3_5_cp_correctness.py",
     ),
+    frozenset({"pp"}): ("parallelism/pp/test_pp_vs_single_gpu.py",),
     frozenset({"ep", "tp"}): (
         "parallelism/combined/test_ep_tp_correctness.py",
         "parallelism/combined/test_combined_ref_correctness.py",
@@ -57,23 +58,19 @@ CORRECTNESS_GATES: dict[frozenset[str], tuple[str, ...]] = {
         "parallelism/combined/test_ep_etp_correctness.py",
         "parallelism/combined/test_combined_ref_correctness.py",
     ),
+    frozenset({"pp", "ep"}): ("parallelism/pp/test_pp_ep_vs_unsplit.py",),
+    frozenset({"pp", "etp"}): ("parallelism/pp/test_pp_etp_vs_unsplit.py",),
 }
-
-# PP's schedule engine is not in this release: the pp axis sets stay allowlisted for the config
-# surface (rank math, gates, seams), and the runtime raise in PipelineRuntime keeps them unrunnable,
-# so no equivalence gate can exist for them yet.
-_ENGINE_PENDING_AXIS_SETS = frozenset(axes for axes in SUPPORTED_AXIS_SETS if "pp" in axes)
 
 
 def test_every_supported_combination_has_a_correctness_gate():
     """An allowlisted combination with no reference-equivalence test is an unproven combination."""
-    gated = SUPPORTED_AXIS_SETS - _ENGINE_PENDING_AXIS_SETS
-    missing = sorted(_render_axis_set(axes) for axes in gated if not CORRECTNESS_GATES.get(axes))
+    missing = sorted(_render_axis_set(axes) for axes in SUPPORTED_AXIS_SETS if not CORRECTNESS_GATES.get(axes))
     assert not missing, (
         f"These parallelism combinations are in SUPPORTED_AXIS_SETS but no test compares them to an "
         f"undistributed reference: {missing}. Add the combination's equivalence test and register it "
-        f"here, or drop the combination from the allowlist — shipping it unproven is how PP+ETP "
-        f"trained at 0.32x the reference gradient."
+        f"here, or drop the combination from the allowlist — an unproven combination can train with "
+        f"mis-scaled gradients while every CPU test passes."
     )
 
 

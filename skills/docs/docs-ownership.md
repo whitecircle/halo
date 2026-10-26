@@ -39,7 +39,7 @@ changes.
 | `src/distributed/expert_parallel/` (DeepEP, all-to-all, per-family layers, expert compute) | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md` |
 | `src/distributed/context_parallel/` (Ulysses) | `agent-docs/parallelism/context-parallelism.md` |
 | `src/distributed/tensor_parallel/` (DTensor) | `agent-docs/parallelism/tensor-parallelism.md` |
-| `src/distributed/pipeline_parallel/` (stage split + stage module, losses, P2P groups, stage loader, the `PipelineRuntime` stub) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` (stage shards) |
+| `src/distributed/pipeline_parallel/` (stage split + stage module, losses, P2P groups, stage loader, the `PipelineRuntime` schedule engine) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` (stage shards) |
 | `src/models/loading/lazy_safetensors/` (safetensors lazy-load core shared by the EP + PP loaders) | `agent-docs/parallelism/expert-parallelism.md` (lazy loading), `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `src/distributed/group_layout.py`, `mesh.py` (rank math, DeviceMesh + the typed group view) | `agent-docs/parallelism/multi-node.md`, `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/architecture.md` |
 | `src/distributed/module_registry.py` (HF-class → wrapper registries) | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |

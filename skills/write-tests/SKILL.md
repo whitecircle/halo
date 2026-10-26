@@ -129,11 +129,7 @@ is `SUPPORTED_AXIS_SETS` — plain DP, each axis alone (EP/ETP/TP/CP/PP), EP+TP,
 PP+ETP; everything else must raise, including TP+CP, TP+ETP, EP+TP+ETP, ETP+CP, and every PP pairing
 outside the expert axes (PP+TP, PP+CP, PP+EP+TP, PP+EP+CP, PP+EP+ETP). Also: QLoRA+EP/TP, LoRA+TP, and `_supports_cp=False` / `_supports_pp=False` trainers
 rejecting `cp_size>1` / `pp_size>1` at init. A support-matrix change isn't done until its rejection
-counterpart exists. **PP is not available in this release** — `parallelism_config_from_args`
-rejects `pipeline_parallel_size > 1` at config time (a `_supports_pp=False` trainer's gate first,
-then the release gate) and `PipelineRuntime` raises, so the PP allowlist rows above hold only for a
-directly constructed `ParallelismConfig`; every PP cell takes a rejection test and none takes a
-correctness suite (`matrix.md`).
+counterpart exists.
 
 ## Verify before finishing
 

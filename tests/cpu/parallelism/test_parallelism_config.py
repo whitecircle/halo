@@ -14,7 +14,6 @@ import torch.distributed as dist
 from src.args.distributed_args import DistributedArguments
 from src.distributed.expert_parallel.config import EPConfig, ExpertLoraSpec
 from src.distributed.group_layout import cross_node_rank_and_group, node_local_rank_and_group
-from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.sft import DistributedSFTTrainer
@@ -746,17 +745,29 @@ def test_parallelism_config_from_args_basic():
         assert cfg.max_concurrent_loading == 3
 
 
-def test_parallelism_config_from_args_rejects_pp_when_unsupported():
-    """A trainer class declaring ``_supports_pp = False`` rejects a requested pipeline_parallel_size>1
-    at config time — BEFORE the model (or a teacher/reference/vLLM probe) loads; the trainer's own
-    gate fires far later."""
-    args = _DistArgs()
-    args.pipeline_parallel_size = 2
-    try:
-        parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin)
-        raise AssertionError("a _supports_pp=False trainer must reject pipeline_parallel_size=2")
-    except ValueError as e:
-        assert "DistributedTrainerMixin does not support Pipeline Parallelism" in str(e)
+def test_parallelism_config_from_args_builds_pp_only_for_trainers_that_support_it():
+    """The builder admits ``pipeline_parallel_size > 1`` exactly where the trainer declares ``_supports_pp``.
+
+    A trainer without the flag is refused at config time, before the model (or a teacher, reference
+    or vLLM probe) loads; SFT gets a two-stage config on a two-node world, one NVLink domain per
+    stage. PP+TP stays refused by the axis allowlist, so the acceptance is not the builder passing
+    every shape through.
+    """
+    args = DistributedArguments(pipeline_parallel_size=2, nvlink_domain_size=8)
+    with simulated_world(world_size=16, gpus_per_node=8):
+        with pytest.raises(ValueError, match="DistributedTrainerMixin does not support Pipeline Parallelism"):
+            parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin)
+
+        cfg = parallelism_config_from_args(args, trainer_cls=DistributedSFTTrainer)
+        assert cfg.pp_size == 2
+        assert cfg.stage_world_size == 8
+        assert cfg.data_parallel_size == 8
+
+        pp_tp = DistributedArguments(pipeline_parallel_size=2, tensor_parallel_size=2, nvlink_domain_size=8)
+        with pytest.raises(ValueError, match="is not a supported parallelism combination") as excinfo:
+            parallelism_config_from_args(pp_tp, trainer_cls=DistributedSFTTrainer)
+        assert "pipeline_parallel_size=2" in str(excinfo.value)
+        assert "tensor_parallel_size=2" in str(excinfo.value)
 
 
 def test_parallelism_config_from_args_rejects_cp_when_unsupported():
@@ -1227,14 +1238,6 @@ def test_expert_lora_reaches_validation_through_the_builder():
         args = _DistArgs()
         cfg = parallelism_config_from_args(args, trainer_cls=DistributedTrainerMixin, expert_lora=spec)
         assert cfg.expert_lora is spec, "the builder must forward expert_lora into the constructor"
-        # The same spec under PP must be REJECTED, which only happens if it reached __post_init__.
-        # Built directly: the from_args builder refuses pipeline_parallel_size > 1 outright in this
-        # release (the schedule engine is not shipped), before the constructor's validators run.
-        try:
-            ParallelismConfig(ep_size=4, pp_size=2, expert_lora=spec)
-            raise AssertionError("PP + expert LoRA must be rejected at config time, but was accepted")
-        except ValueError as e:
-            assert "Expert LoRA" in str(e), f"wrong validator fired: {e}"
 
         # Anti-vacuity: the field is not populated by some default, and expert LoRA under expert TP
         # is refused at CONFIG time — before any checkpoint download. (EPConfig repeats the check as
@@ -1250,6 +1253,17 @@ def test_expert_lora_reaches_validation_through_the_builder():
             assert "Expert LoRA is not supported with expert_tensor_parallel_size" in str(e), (
                 f"wrong validator fired: {e}"
             )
+
+    # The same spec under PP must be REJECTED, which only happens if it reached __post_init__. The
+    # shape (pp2 x ep8, one 8-GPU domain per stage) builds without the spec, so expert LoRA is the
+    # only reason left for the refusal.
+    with simulated_world(world_size=16, gpus_per_node=8):
+        args_pp = _DistArgs()
+        args_pp.pipeline_parallel_size = 2
+        args_pp.nvlink_domain_size = 8
+        assert parallelism_config_from_args(args_pp, trainer_cls=DistributedSFTTrainer).pp_size == 2
+        with pytest.raises(ValueError, match="Expert LoRA"):
+            parallelism_config_from_args(args_pp, trainer_cls=DistributedSFTTrainer, expert_lora=spec)
 
 
 def test_epconfig_second_timing_rejects_expert_lora_with_etp():

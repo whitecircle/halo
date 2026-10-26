@@ -418,7 +418,7 @@ Adding a GPU adds compute but also adds communication that does no FLOPs. **Stro
 
 ### Pipeline parallelism: the bubble and the boundary
 
-The schedule engine behind PP is **not yet available in this release** — `pipeline_parallel_size > 1` is rejected at config time, so what follows is the design argument rather than a runbook ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
+The runbook is [Pipeline Parallelism](../parallelism/pipeline-parallelism.md); this section is the design argument.
 
 PP cuts the layer stack into `p` contiguous **stages**, one rank block each, and streams `m` **microbatches** through them. It carves the world first. Every other mode then runs unchanged inside one stage, on `stage_world_size = world_size / p` ranks.
 

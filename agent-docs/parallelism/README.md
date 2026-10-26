@@ -1,10 +1,8 @@
 # Parallelism
 
-On top of data parallelism, three strategies address different bottlenecks: model size (TP), sequence
-length (CP), expert distribution (EP). They combine within the supported set below. A fourth,
-pipeline parallelism (depth across NVLink domains), is
-[not yet available in this release](pipeline-parallelism.md). Each mode is a communication pattern
-with a price:
+On top of data parallelism, four strategies address different bottlenecks: model size (TP), sequence
+length (CP), expert distribution (EP), or depth across NVLink domains (PP). They combine within the
+supported set below. Each mode is a communication pattern with a price:
 [GPU Training Theory §9](../reference/gpu-training-theory.md#9-distributed-training-the-communication-wall).
 
 Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and single-GPU skip it);
@@ -16,7 +14,7 @@ Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and single-GP
 - **Expert parallelism (EP)** — distributes MoE expert layers across GPUs via DeepEP all-to-all (the router stays replicated on every rank). Each GPU holds a subset of experts and routes tokens to the owning GPU. For MoE models; see [Expert Parallelism Guide](expert-parallelism.md).
 - **Tensor parallelism (TP)** — shards dense attention and MLP weights across GPUs via DTensor with all-reduce. For large dense models (Llama 70B+, Mistral Large) that exceed single-GPU memory; see [Tensor Parallelism Guide](tensor-parallelism.md).
 - **Context parallelism (CP)** — splits long sequences across GPUs via Ulysses-style attention with all-to-all. For long-context training (32K+ tokens); see [Context Parallelism Guide](context-parallelism.md).
-- **Pipeline parallelism (PP)** — would split decoder layers into stages, one contiguous rank block each, as the only axis meant to cross NVLink domains. **Not yet available in this release**: the config surface and seams ship, the schedule engine does not, and `pipeline_parallel_size > 1` is rejected at config time. See [Pipeline Parallelism](pipeline-parallelism.md) and [the rationale](#when-pipeline-parallelism-is-worth-it).
+- **Pipeline parallelism (PP)** — splits decoder layers into stages, one contiguous rank block each, and is the only axis meant to cross NVLink domains. Off by default ([why](#when-pipeline-parallelism-is-worth-it)). See [Pipeline Parallelism](pipeline-parallelism.md).
 
 Wrapped MoE families: [Qwen3 MoE](../models/qwen3.md#qwen3-moe), [Qwen3.5/3.6 MoE](../models/qwen3_5.md), [GPT-OSS](../models/gpt-oss.md), [GLM-4 MoE Lite](../models/glm4.md), [Laguna](../models/laguna.md), [Inkling](../models/inkling.md), [Gemma 4](../models/gemma4.md), [Bailing / Ling](../models/bailing.md), [LFM-2](../models/lfm2.md), [Mistral4](../models/mistral4.md), [DeepSeek-V4](../models/deepseek-v4.md), [Zaya](../models/zaya.md), [Cohere2 MoE](../models/cohere2-moe.md), [GLM-5 Next](../models/glm5-next.md), [Step-3.7 Flash](../models/step3p7.md). Full list and per-family quirks: [Supported Models](../models/README.md).
 
@@ -34,9 +32,9 @@ All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignore
 | EP+TP | `world_size / tp_size` | Attention sharded (node-local TP), experts distributed; TP leaves `ep_group_size` at `ep_size`, so it adds no expert sharding. `ep_size` must be a multiple of `tp_size`. Within one domain the single-domain EP rule still applies (`ep2+tp2` and `ep8+tp2` on 8 pass, `ep4+tp2` is rejected); across domains the EP group must be a **single global** one (`ep_size == world_size`, `ep_scope=global`). Rules: [Multi-Node → EP+TP](multi-node.md#eptp-mode) |
 | ETP (pure, `ep_size=1`) | `world_size / expert_tp_size` | Expert FFN sharded `expert_tp_size`-way; experts replicated. MoE only — a dense model raises. See [ETP guide](expert-tensor-parallelism.md) |
 | EP+ETP | `world_size / expert_tp_size` | Experts distributed `ep_size`-way **and** each expert's FFN sharded `expert_tp_size`-way (`ep_group_size = ep_size × expert_tp_size`). Experimental. The expert-TP reduce stays node-local (token space, outside the DeepEP dispatch→combine span) while EP may be node-local **or cross-node** (one ETP group per NVLink domain) |
-| PP | `world_size / pp_size` | In the allowlist, but the schedule engine is not shipped in this release — `pipeline_parallel_size > 1` is rejected at config time; seams only. See [Pipeline Parallelism](pipeline-parallelism.md) |
-| PP+EP | `world_size / pp_size` | Same rejection — not yet available in this release |
-| PP+ETP | `world_size / (pp_size × expert_tp_size)` | Same rejection — not yet available in this release |
+| PP | `world_size / pp_size` | Stages are contiguous rank blocks of whole NVLink domains; every other axis runs unchanged inside one stage. See [Pipeline Parallelism](pipeline-parallelism.md) |
+| PP+EP | `world_size / pp_size` | EP inside each stage; the cross-replica expert average is deferred to a post-backward sweep |
+| PP+ETP | `world_size / (pp_size × expert_tp_size)` | Pure ETP (`ep_size=1`) inside each stage: experts replicated, each expert's FFN sharded `expert_tp_size`-way. The deferred sweep divides the expert leg by `stage_world_size / expert_tp_size` — ETP partners share a batch and are not DP replicas |
 | **Anything else** | **Not supported** | Rejected at config time with the mechanism named — see below |
 
 The supported set is an **allowlist** (`SUPPORTED_AXIS_SETS` in
@@ -48,7 +46,7 @@ mechanism that would break, for example:
 - **TP+CP** — TP shards attention over a DTensor `(dp, tp)` mesh while CP's Ulysses groups partition the same ranks a second, incompatible way.
 - **TP+ETP**, with or without EP — attention TP and expert TP would shard the same ranks along two different axes. Use EP+TP or pure ETP.
 - **ETP+CP** — expert-TP partners hold shards of one expert and must see the **same** tokens (`ReduceFromExpertTP` sums their outputs element-wise in token space), but CP hands each rank a different sequence chunk, so that sum would add unrelated tokens.
-- **Any `pipeline_parallel_size > 1`** — pipeline parallelism is [not yet available in this release](pipeline-parallelism.md).
+- **PP+TP / PP+CP / PP+EP+ETP** — PP composes with the expert axes only (EP, or pure ETP, not both); see [Pipeline Parallelism](pipeline-parallelism.md).
 
 ## Communication and data flow
 
@@ -143,7 +141,7 @@ traced to the code that raises. This table is the index into them, not a second 
 | [ETP](expert-tensor-parallelism.md#limitations) | all | every EP-capable MoE family | expert LoRA, `save_sharded_ep` — plus every EP rule |
 | [TP](tensor-parallelism.md#limitations) | all | the attention classes in `TP_SHARDABLE_ATTENTION_CLASSES`; zero sharded layers raises | LoRA/PEFT, QLoRA, `fsdp_reshard_after_forward` at DP > 1, `use_hsdp` |
 | [CP](context-parallelism.md#limitations) | SFT, SMPO, offline GRPO (full fine-tuning) | the Ulysses attention wrappers | packing, padding-free, left padding, non-Flash attention, `label_smoothing_factor`, `loss_type: dft`, eval metrics, multimodal; offline GRPO adapters |
-| [PP](pipeline-parallelism.md) | — (not yet available in this release; `pipeline_parallel_size > 1` is rejected at config time) | — | — |
+| [PP](pipeline-parallelism.md) | SFT, SMPO, reward, classification, DPO/KTO (precompute-only), offline GRPO | text families without tied embeddings, live MTP layers, or per-layer embeddings; image-bearing runs are rejected | PEFT, `torch_compile`, `lowp_precision`, `use_hsdp`, `fsdp_reshard_after_forward`, reentrant GC, `save_sharded_ep`, padding-free, `compute_metrics` on DPO/KTO/offline GRPO |
 | [DP](data-parallelism.md#limitations) | all | all | MoE grouped GEMM under `accelerate launch`, multi-device `device_map` |
 
 EP, ETP and TP run under every trainer. CP and PP support is declared per class (`_supports_cp` /
@@ -198,8 +196,6 @@ Per-family configs and EP wrapper internals: [Supported Models](../models/README
 
 ## When pipeline parallelism is worth it
 
-PP is [not yet available in this release](pipeline-parallelism.md); `pipeline_parallel_size > 1` is rejected at config time.
+Inside one NVLink domain PP earns nothing: FSDP2 + EP/TP/ETP/CP already run every collective on the fabric, and PP only adds bubbles. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), while PP keeps EP node-local and sends `2 × (pp_size − 1)` point-to-point activations per microbatch. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright.
 
-Inside one NVLink domain PP earns nothing: FSDP2 + EP/TP/ETP/CP already run every collective on the fabric, and PP only adds bubbles. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), where a pipeline would send `2 × (pp_size − 1)` point-to-point activations. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright.
-
-Take a large MoE across nodes with global-scope EP, node-local EP+CP/EP+TP/EP+ETP, or multi-group EP — see [Large-Scale Scenarios](large-scale-scenarios.md) and [Capabilities & Limitations at Scale](../reference/scale-and-limitations.md).
+PP is not a drop-in: it composes with the expert axes only, rejects tied-embedding checkpoints, and is unavailable to online and async GRPO. Layouts without it: [Large-Scale Scenarios](large-scale-scenarios.md) and [Capabilities & Limitations at Scale](../reference/scale-and-limitations.md).

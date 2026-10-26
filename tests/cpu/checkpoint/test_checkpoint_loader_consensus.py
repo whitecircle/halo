@@ -257,7 +257,7 @@ def test_a_node_copy_short_of_an_expert_is_refused_before_any_write(tmp_path, mo
     save_file({key: tensor for key, tensor in state.items() if key != lost}, str(short / "model.safetensors"))
     shutil.copy(full / "config.json", short)
     # Rank 0 reads the whole copy: every disk key, and the same live names the short copy maps to.
-    rank0_counts = (len(state), len(ModuleLayoutView(model, state, state.get).keys))
+    rank0_counts = (len(state), len(ModuleLayoutView(model, state).keys))
     _simulate_non_rank0(monkeypatch, decisions=[False, True, False, rank0_counts])
 
     with pytest.raises(RuntimeError, match="per-node copy is incomplete"):

@@ -1,18 +1,24 @@
 """The efficiency harness finds nothing between two runs of today's ``EfficiencyCallback``, each scenario reaches
-the path it names, each seeded change to the FLOPs model, the token accounting, the rounding or the setup
-summary shows up as a delta, and the verdict fails when its negative control raises.
+the path it names, a pipeline stage counts its own layers and its chain's batch once, each seeded change to the
+FLOPs model, a stage's attention share, the token accounting, the rounding or the setup summary shows up as a
+delta, a case one tree lacks is listed rather than compared, and the verdict fails when its negative control raises.
 
 Run: python tests/cpu/callbacks/test_efficiency_harness.py
 """
 
+from dataclasses import replace
+
 import pytest
 
 from src.callbacks import efficiency, model_flops
+from src.models.attention_layout import attention_layout_from_config
 from tests.common.equivalence import efficiency_callback
 from tests.common.equivalence.efficiency_callback import (
     CASES,
+    DENSE_FAMILIES,
     FAMILIES,
     OUTLIER_TOKENS,
+    REPRESENTATIVE_FAMILIES,
     SCENARIO_FAMILY,
     SCENARIOS,
     SHAPES,
@@ -32,6 +38,12 @@ DEFAULT = EfficiencyCase(SCENARIO_FAMILY, "single", "default")
 CP = EfficiencyCase(SCENARIO_FAMILY, "cp2", "default")
 OUTLIER = EfficiencyCase(SCENARIO_FAMILY, "single", "token_outlier")
 SAMPLE = (DEFAULT, CP, OUTLIER, EfficiencyCase("qwen3", "single", "default"))
+STAGED = tuple(case for case in CASES if SHAPES[case.shape].fields.get("pp_size", 1) > 1)
+LAYERLESS_STAGE = EfficiencyCase(SCENARIO_FAMILY, "pp2_first", "layerless")
+# Each pipeline shape and the unsplit shape whose model its two stages share between them.
+UNSPLIT_SHAPE = {"pp2": "single", "ep2_pp2": "ep2", "etp2_pp2": "etp2"}
+# The step figures are rounded to two decimals, so a sum of two stages may sit a few hundredths off.
+ROUNDING = 0.02
 
 
 def _reports(output, cases, *, perturb: bool = False) -> dict[str, dict]:
@@ -41,6 +53,10 @@ def _reports(output, cases, *, perturb: bool = False) -> dict[str, dict]:
 
 def _scenario(reports: dict, scenario: str) -> dict:
     return reports[f"{SCENARIO_FAMILY}/single/{scenario}"]
+
+
+def _last_step(reports: dict, family: str, shape: str) -> dict:
+    return reports[f"{family}/{shape}/default"]["steps"][-1]
 
 
 def _messages(report: dict, level: str) -> str:
@@ -112,6 +128,30 @@ def test_the_sharded_shapes_report_rank_local_figures(roster):
     assert dense["tp2"] == pytest.approx(dense["single"] / 2, rel=0.05)
 
 
+def test_a_pipeline_stage_reports_the_layers_it_holds(roster):
+    """The two stages' MFU and S-MFU add up to the unsplit model's on the same expert layout (a dense model
+    reports no S-MFU on either side)."""
+    for family in REPRESENTATIVE_FAMILIES:
+        pipelines = ("pp2",) if family in DENSE_FAMILIES else tuple(UNSPLIT_SHAPE)
+        for pipeline in pipelines:
+            whole = _last_step(roster, family, UNSPLIT_SHAPE[pipeline])
+            stages = [_last_step(roster, family, f"{pipeline}_{stage}") for stage in ("first", "last")]
+            for metric in ("step_mfu_percent", "step_smfu_percent"):
+                split = sum(stage.get(metric, 0.0) for stage in stages)
+                assert split == pytest.approx(whole.get(metric, 0.0), abs=ROUNDING), (family, pipeline, metric)
+
+
+def test_a_pipeline_chain_counts_its_batch_once(roster):
+    """Four ranks in two-stage chains are two data-parallel replicas, and one under expert TP, whose pair shares a
+    batch: the cluster figure is the rank's times that, not times four."""
+    replicas = {"pp2": 2, "ep2_pp2": 2, "etp2_pp2": 1}
+    for pipeline, count in replicas.items():
+        for stage in ("first", "last"):
+            snapshot = roster[f"{SCENARIO_FAMILY}/{pipeline}_{stage}/default"]["snapshot"]
+            expected = count * snapshot["tokens_per_second"]
+            assert snapshot["cluster_tokens_per_second"] == pytest.approx(expected, rel=1e-9), (pipeline, stage)
+
+
 def test_two_producer_processes_match(tmp_path):
     """Base against base, each tree's producer in its own process as ``make verify-efficiency`` runs them."""
     outputs = [tmp_path / "first", tmp_path / "second"]
@@ -141,6 +181,34 @@ def test_a_changed_flops_rule_is_a_delta_in_every_case(monkeypatch, tmp_path):
     deltas = compare_outputs(baseline, _reports(tmp_path / "mutated", SAMPLE))
 
     assert {delta["path"] for delta in deltas} == {case.path for case in SAMPLE}
+
+
+def test_a_pipeline_blind_attention_share_is_a_delta_in_the_staged_config_term_only(monkeypatch, tmp_path):
+    """A stage whose layers are not reachable owns 1 / pp_size of the config's full depth; read off its own layers,
+    the share is whole, so dropping pp_size moves only the layerless stage."""
+    baseline = _reports(tmp_path / "baseline", STAGED)
+    resolve = efficiency.resolve_attention_layout
+    monkeypatch.setattr(efficiency, "resolve_attention_layout", lambda model, pp_size=1: resolve(model))
+
+    deltas = compare_outputs(baseline, _reports(tmp_path / "mutated", STAGED))
+
+    assert [delta["path"] for delta in deltas] == [LAYERLESS_STAGE.path]
+
+
+def test_a_full_depth_layout_on_a_stage_is_a_delta_in_every_staged_case_only(monkeypatch, tmp_path):
+    """Costing every layer the config declares as the rank's own leaves an unsplit model's figures alone and moves
+    every stage's."""
+    cases = SAMPLE + STAGED
+    baseline = _reports(tmp_path / "baseline", cases)
+    monkeypatch.setattr(
+        model_flops,
+        "attention_layout",
+        lambda model: replace(attention_layout_from_config(model.config), source="layers"),
+    )
+
+    deltas = compare_outputs(baseline, _reports(tmp_path / "mutated", cases))
+
+    assert {delta["path"] for delta in deltas} == {case.path for case in STAGED}
 
 
 def test_a_looser_token_bound_is_a_delta_in_the_outlier_case_only(monkeypatch, tmp_path):
@@ -187,6 +255,21 @@ def test_an_accepted_case_keeps_its_delta_out_of_the_verdict(tmp_path):
     assert assess({"base": base, "head": head, "control": control})[0] == "fail"
     verdict, findings = assess({"base": base, "head": head, "control": control}, accept=[CP.path])
     assert (verdict, [delta["path"] for delta in findings["accepted"]]) == ("pass", [CP.path])
+
+
+def test_a_case_only_one_tree_runs_is_listed_not_compared():
+    reports = {
+        "base": {DEFAULT.path: {"steps": [1]}, CP.path: {"steps": [1]}},
+        "head": {DEFAULT.path: {"steps": [2]}, OUTLIER.path: {"steps": [1]}},
+        "control": {DEFAULT.path: {"steps": [3]}},
+    }
+
+    verdict, findings = assess(reports)
+
+    assert verdict == "fail"
+    assert [delta["path"] for delta in findings["deltas"]] == [DEFAULT.path]
+    assert (findings["cases"], findings["new"], findings["dropped"]) == (1, [OUTLIER.path], [CP.path])
+    assert assess(reports, accept=[DEFAULT.path])[0] == "pass"
 
 
 def test_a_negative_control_that_raises_or_matches_fails_the_verdict(monkeypatch, tmp_path):

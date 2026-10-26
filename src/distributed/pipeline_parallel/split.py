@@ -67,6 +67,13 @@ class PPModelSpec:
     # loader's droppable-prefix filter.
     TAIL_MODULE_ATTRS: tuple[str, ...] = ()
 
+    # Pre-layers modules the backbone applies to the token embedding alone (Inkling's ``embed_norm``),
+    # which a non-first stage, driven through ``inputs_embeds``, never runs. Exact attribute names:
+    # each must exist, is dropped with the input embedding off stage 0 (else every stage would write
+    # the same tensor), and counts as first-stage state for the stage-aware loader's
+    # droppable-prefix filter.
+    INPUT_MODULE_ATTRS: tuple[str, ...] = ()
+
     # True only where a sliced stage selects every per-layer input by the layer's own attributes
     # (``layer_idx``/``block_type``, set at construction from the global index) rather than by list
     # position — either in the upstream forward, or in the mid-chain forward this spec's
@@ -157,6 +164,13 @@ class DeepSeekV4PPSpec(PPModelSpec):
                 f"[0, {stage0_hi})). Their tid2eid routers consume input_ids, which only stage 0 "
                 f"receives. Use pipeline_split to give stage 0 at least {max(hash_layers) + 1} layers."
             )
+
+
+class InklingPPSpec(PPModelSpec):
+    """Inkling normalizes the token embedding (``embed_norm``) before the first layer."""
+
+    HF_MODULE_NAMES = ("InklingTextModel",)
+    INPUT_MODULE_ATTRS = ("embed_norm",)
 
 
 class Gemma4PPSpec(PPModelSpec):

@@ -65,7 +65,7 @@ def parallelism_config_from_args(
     supports_init_from_scratch: bool = False,
     expert_lora: "ExpertLoraSpec | None" = None,
 ) -> ParallelismConfig:
-    """Build a :class:`ParallelismConfig` from parsed ``DistributedArguments`` — shared EP/CP/TP/ETP
+    """Build a :class:`ParallelismConfig` from parsed ``DistributedArguments`` — shared EP/CP/TP/ETP/PP
     wiring for every training entry script.
 
     Args:
@@ -122,16 +122,6 @@ def parallelism_config_from_args(
         raise ValueError(
             f"{trainer_cls.__name__} does not support Pipeline Parallelism (PP). Use Expert Parallelism "
             "(EP) and/or Tensor Parallelism (TP) instead, or remove --pipeline_parallel_size."
-        )
-
-    # The PP seams (config validation, rank math, stage/loss contracts) ship, but the schedule engine
-    # behind PipelineRuntime does not yet, so PP is rejected here, at the production entry point,
-    # before any rank math or model loading.
-    if dist_args.pipeline_parallel_size > 1:
-        raise ValueError(
-            "Pipeline parallelism is not yet available in this release. Set "
-            "--pipeline_parallel_size=1 (the default) and shard with EP/TP/CP instead; see "
-            "agent-docs/parallelism/pipeline-parallelism.md."
         )
 
     # Fields the two dataclasses spell identically forward themselves; only the renames, the
